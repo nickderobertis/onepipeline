@@ -126,6 +126,16 @@ pub const WRITEBACK_ITEM_BUDGET_ENV: &str = "ONEPIPELINE_WRITEBACK_ITEM_BUDGET";
 /// has begun, and both rungs refuse it.
 pub const DEFAULT_HOOK_TIMEOUT_SECONDS: NonZeroU64 = NonZeroU64::new(600).unwrap();
 
+/// How long the dispatch-env hook is awaited before each node launch, in
+/// seconds, when a launch names no timeout.
+///
+/// The bottom rung of two: `--dispatch-env-hook-timeout` beats the launch
+/// config's own `dispatch_env_hook_timeout`. Shorter than a run-end hook's,
+/// because this one runs on the critical path of every dispatch and a launch
+/// waits on it. A [`NonZeroU64`] for the run-end timeout's reason: zero ends the
+/// hook before it has begun, and both rungs refuse it.
+pub const DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS: NonZeroU64 = NonZeroU64::new(60).unwrap();
+
 /// Execute a task DAG over oneagentgraph and onevcs, merging their event
 /// streams into one.
 #[derive(Debug, Clone, PartialEq, Eq, Parser)]
@@ -371,6 +381,37 @@ pub struct StartArgs {
     /// takes the shipped six hundred seconds.
     #[arg(long, value_name = "SECONDS")]
     pub hook_timeout: Option<NonZeroU64>,
+    /// The command run immediately before **every** node-scope dispatch — a
+    /// first dispatch, a re-asked one, a retry, a requeue and a lifecycle node's
+    /// worker launch alike, and never the dag-scope observer — whose stdout adds
+    /// environment to that one child launch.
+    ///
+    /// Spawned the way a run-end hook is: the command itself, no shell and no
+    /// arguments, in the launch directory, with `ONEPIPELINE_HOOK=dispatch-env`,
+    /// `ONEPIPELINE_RUN_ID`, `ONEPIPELINE_RUN_ROOT` and `ONEPIPELINE_NODE_ID` in
+    /// its environment. It prints exactly one JSON document,
+    /// `{"version": 1, "env": {"NAME": "value", ...}}`, whose `env` is overlaid on
+    /// the driver's environment for that child launch only; the driver's own
+    /// environment is unchanged. After the overlay every `env_from` source the
+    /// launch's oneharness configs name is checked for, and a hook that exits
+    /// non-zero, cannot start, times out or prints anything else — or a source
+    /// still missing — refuses the launch: nothing is dispatched and the node
+    /// settles `infrastructure-failure` with a detail naming why. Its stderr is
+    /// kept in `hooks/dispatch-env.log` under the run, and no value it prints is
+    /// ever written anywhere the run keeps. Naming none is the shipped default
+    /// and is exactly what a launch did before this flag existed. Given here it
+    /// beats the launch config's own field — including when what it names is
+    /// blank, which is this launch saying it has none.
+    #[arg(long, value_name = "COMMAND")]
+    pub dispatch_env_hook: Option<String>,
+    /// How long the dispatch-env hook is awaited, in seconds, before its process
+    /// tree is ended and the launch is refused.
+    ///
+    /// A positive whole number: zero is refused where the flag is parsed, before a
+    /// run exists. Given here it beats the launch config's own field; naming none
+    /// takes the shipped sixty seconds.
+    #[arg(long, value_name = "SECONDS")]
+    pub dispatch_env_hook_timeout: Option<NonZeroU64>,
     /// Override one dag-scope graph config field. Passed opaquely to
     /// `oneagentgraph run`, in command-line order.
     #[arg(long = "set", value_name = "PATH=VALUE")]

@@ -972,7 +972,11 @@ impl World {
             // graphs' `oneharness.toml`, because a journey that writes its own
             // config would otherwise reach for a `claude` nobody in this suite
             // chose; the environment beats a config-file `bin`, so one value
-            // covers every member of every graph a journey writes.
+            // covers every member of every graph a journey writes — **unless the
+            // config selects a variant** (`claude-code:<name>`): oneharness reads
+            // this override by the composed id, so a variant is not covered and
+            // a config naming one must name `[harness.claude-code] bin` itself,
+            // as `dispatch_env_hook.rs` does, or it runs the real `claude`.
             .env("ONEHARNESS_BIN_CLAUDE_CODE", double("fake-claude"))
             // The candidate this suite's identity chains are written to fall
             // *through*, named at the same seam so that it is a fact of the

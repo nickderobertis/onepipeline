@@ -387,6 +387,10 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         // one to produce *nothing* is a scenario this suite needs, so the
         // announcement belongs to the launched graph rather than to every run.
         announce(args, &graph);
+        // What this observer's own environment holds, where a journey asks: the
+        // dispatch-env hook's additions are a node dispatch's alone, and this
+        // launch is the one process the engine starts that is not one.
+        fake::report_env(dir, "dispatch", "observer");
         // A member of the observer dying — the pacemaker, every interval, on an
         // identity that ran and produced nothing usable — said the way the real
         // graph says it: a `member-died` on this stream, and the graph going on
@@ -435,6 +439,10 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // dispatch itself takes it: out of its own environment, and before any
     // scripted behaviour, so a dispatch scripted to produce nothing uses it too.
     use_the_scratch_dir(&key);
+    // What this dispatch's own environment holds, where a journey asks
+    // (`dispatch.report-env`), under the key its scripts go by — so a journey
+    // about the dispatch-env hook reads the child's environment off the child.
+    fake::report_env(dir, "dispatch", &key);
 
     // A dispatch scripted to produce *nothing* produces nothing at all — not
     // even the announcement a turn opens with. That is the whole case boundary

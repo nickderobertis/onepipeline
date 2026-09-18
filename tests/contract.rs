@@ -18,7 +18,8 @@ use oneagentgraph::config::{ConfigRef, GraphConfig, JudgeSide, Member};
 use oneagentgraph::persona::{merge, Persona};
 use onepipeline::channel::{allows, Author, Command as Edit, Dependents, Reply, SurfaceKind};
 use onepipeline::cli::{
-    Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_HOOK_TIMEOUT_SECONDS,
+    Cli, Command, DAG_GRAPH_OFF, DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS,
+    DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_HOOK_TIMEOUT_SECONDS,
     DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_CLASSIFIED_COMMANDS,
     WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_FAILURE_CLASS_MEMBER, WRITEBACK_FAILURE_EXIT,
     WRITEBACK_ITEM_BUDGET_ENV, WRITEBACK_MEMBERS_FROM, WRITEBACK_MEMBER_READ,
@@ -2472,6 +2473,240 @@ fn the_run_end_hooks_surface_is_what_the_contract_names() {
         assert!(
             prose.contains(promise),
             "the README states the epoch rule differently from the contract: {promise}"
+        );
+    }
+}
+
+/// The dispatch-env hook, as the contract's own block names it, is what this
+/// build takes and reads.
+///
+/// The block is the source, on the run-end hooks' terms: the flags are asked of
+/// the parser, the keys of the launch config at the version the block states and
+/// at none before it, the default of the constant a launch resolves to, the
+/// document of the reader that reads a hook's stdout — driven through the real
+/// binary by `tests/e2e/dispatch_env_hook.rs`, where every environment name, the
+/// log, each ending and the refusal outcome are read out of this same block —
+/// and the README's copy of the operator-facing half to every spelling here.
+#[test]
+fn the_dispatch_env_hook_surface_is_what_the_contract_names() {
+    let block: Value = serde_json::from_str(&fenced_block_naming("json", "dispatch_env_hook"))
+        .expect("the dispatch-env hook block is JSON");
+    let hook = &block["dispatch_env_hook"];
+    let spelled = |group: &str, which: &str| -> String {
+        hook[group][which]
+            .as_str()
+            .unwrap_or_else(|| panic!("the block names no {group}.{which}"))
+            .to_string()
+    };
+
+    assert!(
+        CONTRACT.contains("[--dispatch-env-hook COMMAND] [--dispatch-env-hook-timeout SECONDS]"),
+        "the driver invocation no longer names the dispatch-env hook flags"
+    );
+    let parsed = Cli::try_parse_from([
+        "onepipeline".to_string(),
+        "start".to_string(),
+        "plans:demo".to_string(),
+        spelled("flags", "command"),
+        "./dispatch-env.sh".to_string(),
+        spelled("flags", "timeout"),
+        "30".to_string(),
+    ])
+    .expect("the flags the block names are ones `start` takes");
+    let Command::Start(started) = parsed.command else {
+        panic!("that is not a start")
+    };
+    assert_eq!(
+        started.dispatch_env_hook.as_deref(),
+        Some("./dispatch-env.sh")
+    );
+    assert_eq!(started.dispatch_env_hook_timeout, NonZeroU64::new(30));
+    let Command::Start(unset) = Cli::try_parse_from(["onepipeline", "start", "plans:demo"])
+        .expect("it parses")
+        .command
+    else {
+        panic!("that is not a start")
+    };
+    assert_eq!(
+        (unset.dispatch_env_hook, unset.dispatch_env_hook_timeout),
+        (None, None),
+        "a launch naming no hook named one"
+    );
+    // `adopt` takes neither flag.
+    for flag in ["command", "timeout"] {
+        let refused = Cli::try_parse_from([
+            "onepipeline".to_string(),
+            "adopt".to_string(),
+            "demo".to_string(),
+            spelled("flags", flag),
+            "x".to_string(),
+        ])
+        .expect_err("adopt takes no dispatch-env hook flag");
+        assert!(
+            refused.to_string().contains(&spelled("flags", flag)),
+            "{refused}"
+        );
+    }
+
+    // The keys, at the version the block states and refused by name before it.
+    let at = hook["config_schema_version"]
+        .as_u64()
+        .expect("the block states the version the keys arrived at");
+    let arrived = u32::try_from(at).expect("a version fits");
+    assert!(
+        LAUNCH_CONFIG_SCHEMA_VERSIONS_READ.contains(&arrived)
+            && arrived <= LAUNCH_CONFIG_SCHEMA_VERSION,
+        "the block states the hook keys arrived at schema {arrived}, which this build does not read"
+    );
+    let keys = [
+        (
+            spelled("config_keys", "command"),
+            json!("./dispatch-env.sh"),
+        ),
+        (spelled("config_keys", "timeout"), json!(45)),
+    ];
+    let mut document = serde_json::Map::new();
+    document.insert("schema_version".into(), json!(at));
+    for (key, value) in &keys {
+        document.insert(key.clone(), value.clone());
+    }
+    let named: LaunchConfig =
+        serde_json::from_value(Value::Object(document)).expect("a config naming the hook parses");
+    assert_eq!(
+        named.dispatch_env_hook.as_deref(),
+        Some("./dispatch-env.sh")
+    );
+    assert_eq!(named.dispatch_env_hook_timeout, NonZeroU64::new(45));
+    let dir = std::env::temp_dir().join(format!(
+        "onepipeline-contract-dispatch-env-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    for version in LAUNCH_CONFIG_SCHEMA_VERSIONS_READ
+        .into_iter()
+        .filter(|version| *version < arrived)
+    {
+        for (key, value) in &keys {
+            let path = dir.join(format!("{version}-{key}.yaml"));
+            std::fs::write(
+                &path,
+                format!("schema_version: {version}\n{key}: {value}\n"),
+            )
+            .expect("the config is written");
+            let refused = LaunchConfig::load(&path)
+                .expect_err("a version that never had the key refuses it")
+                .to_string();
+            assert!(
+                refused.contains(&format!("`{key}`"))
+                    && refused.contains(&format!("schema {arrived} key")),
+                "schema {version} did not refuse `{key}` by its name: {refused}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut zero = serde_json::Map::new();
+    zero.insert("schema_version".into(), json!(at));
+    zero.insert(spelled("config_keys", "timeout"), json!(0));
+    let refused = serde_json::from_value::<LaunchConfig>(Value::Object(zero))
+        .expect_err("a timeout of zero is refused")
+        .to_string();
+    assert!(refused.contains("zero"), "{refused}");
+    assert_eq!(
+        hook["default_timeout_seconds"].as_u64(),
+        Some(DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS.get()),
+        "the block states a different shipped timeout than the code carries"
+    );
+
+    // The block agrees with itself and with the prose: the document it shows is
+    // the one the prose states, the hook's name is what `ONEPIPELINE_HOOK` says
+    // and the stem of its log, and the outcome a refusal settles under is one
+    // the contract already names.
+    let stdout = &hook["stdout"];
+    assert_eq!(stdout["version"], json!(1));
+    let fields: BTreeSet<&str> = stdout
+        .as_object()
+        .expect("the document is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(fields, BTreeSet::from(["version", "env"]));
+    for (name, value) in stdout["env"].as_object().expect("`env` is an object") {
+        assert!(
+            value.is_string(),
+            "`env.{name}` is not a string in the block"
+        );
+    }
+    let name = hook["hook"].as_str().expect("the block names the hook");
+    assert_eq!(
+        hook["log"].as_str(),
+        Some(format!("hooks/{name}.log").as_str())
+    );
+    assert!(
+        CONTRACT.contains(&format!("`ONEPIPELINE_HOOK={name}`")),
+        "the prose does not say what ONEPIPELINE_HOOK says"
+    );
+    let environment: Vec<String> = serde_json::from_value(hook["environment"].clone())
+        .expect("the block names the hook's environment");
+    let tokens = backticked();
+    for variable in &environment {
+        assert!(
+            tokens.contains(variable),
+            "the contract's prose does not name `{variable}`, which the block says a hook is given"
+        );
+    }
+    let endings: Vec<String> =
+        serde_json::from_value(hook["endings"].clone()).expect("the block names the endings");
+    assert_eq!(endings, ["exit", "timeout", "could-not-start", "malformed"]);
+    // The outcome word is the engine's own and private, so it is held to the
+    // contract's own closed list of them rather than imported: the prose that
+    // names every outcome a node settles under names this one already.
+    let outcome = hook["refusal_outcome"]
+        .as_str()
+        .expect("the block names the outcome a refused launch settles under");
+    assert_eq!(outcome, "infrastructure-failure");
+    assert!(
+        tokens.contains(outcome),
+        "a refused launch settles under a word the contract does not already name"
+    );
+
+    // The README is a **second copy** of the operator-facing half, held to the
+    // block as the run-end hooks' is.
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+    let prose = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+    for group in ["flags", "config_keys"] {
+        for which in ["command", "timeout"] {
+            let named = spelled(group, which);
+            assert!(
+                prose.contains(&named),
+                "the README does not name the dispatch-env hook's {group} `{named}`"
+            );
+        }
+    }
+    for variable in &environment {
+        assert!(
+            prose.contains(variable.as_str()),
+            "the README does not name `{variable}`, which the hook is given"
+        );
+    }
+    let log = hook["log"].as_str().expect("the block names the log");
+    assert!(
+        prose.contains(log),
+        "the README does not say the hook's stderr is kept in `{log}`"
+    );
+    assert_eq!(
+        DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS.get(),
+        60,
+        "the README's shipped timeout is written in words; move them with the constant"
+    );
+    for promise in [
+        "sixty seconds when unnamed, zero refused",
+        "for that one child launch only",
+        "no value it prints is written anywhere the run keeps",
+        "Naming no hook dispatches exactly as before",
+    ] {
+        assert!(
+            prose.contains(promise),
+            "the README no longer states that {promise}"
         );
     }
 }

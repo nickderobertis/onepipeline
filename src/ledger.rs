@@ -796,6 +796,28 @@ pub struct LaunchRecord {
     /// shipped default and never a timeout that ends a hook before it begins.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub hook_timeout: u64,
+    /// The command this run runs immediately before every node-scope dispatch,
+    /// whose stdout adds environment to that one child launch, when the launch
+    /// named one.
+    ///
+    /// **Resolved once, at the launch**, out of the flag and the launch config in
+    /// that order, and replayed by every driver that adopts the run — `adopt`
+    /// takes none of its own. Read it through
+    /// [`dispatch_env_hook`](Self::dispatch_env_hook). Omitted when empty, like
+    /// every other field added to this record after it shipped, so a record
+    /// written by a build that predates it reads as naming no hook, and runs none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dispatch_env_hook: String,
+    /// How long the dispatch-env hook is awaited, in seconds, or `0` on a record
+    /// that names no such hook.
+    ///
+    /// Retained only beside the hook it bounds, as
+    /// [`hook_timeout`](Self::hook_timeout) is. Read through
+    /// [`dispatch_env_hook_timeout`](Self::dispatch_env_hook_timeout), which is
+    /// where `0` becomes the shipped default and never a timeout that ends the
+    /// hook before it begins.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dispatch_env_hook_timeout: u64,
     /// Opaque overrides replayed on the dag-scope graph launch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dag_sets: Vec<String>,
@@ -1037,6 +1059,24 @@ impl LaunchRecord {
     /// [`cli::DEFAULT_HOOK_TIMEOUT_SECONDS`]: crate::cli::DEFAULT_HOOK_TIMEOUT_SECONDS
     pub fn hook_timeout(&self) -> NonZeroU64 {
         NonZeroU64::new(self.hook_timeout).unwrap_or(crate::cli::DEFAULT_HOOK_TIMEOUT_SECONDS)
+    }
+
+    /// The dispatch-env hook this run was launched with, when it was launched
+    /// with one. Read as [`success_hook`](Self::success_hook) is.
+    pub fn dispatch_env_hook(&self) -> Option<&str> {
+        (!self.dispatch_env_hook.is_empty()).then_some(self.dispatch_env_hook.as_str())
+    }
+
+    /// How long this run's dispatch-env hook is awaited.
+    ///
+    /// The shipped default, [`cli::DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS`],
+    /// for the `0` a record naming no timeout defaults to — and a
+    /// [`NonZeroU64`], so no later reader can put a timeout of zero back.
+    ///
+    /// [`cli::DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS`]: crate::cli::DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS
+    pub fn dispatch_env_hook_timeout(&self) -> NonZeroU64 {
+        NonZeroU64::new(self.dispatch_env_hook_timeout)
+            .unwrap_or(crate::cli::DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS)
     }
 }
 
@@ -2852,6 +2892,8 @@ mod tests {
             success_hook: "./scripts/follow-up.sh".into(),
             failure_hook: "./scripts/report-failure.sh".into(),
             hook_timeout: 45,
+            dispatch_env_hook: "./scripts/dispatch-env.sh".into(),
+            dispatch_env_hook_timeout: 20,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,
@@ -2940,13 +2982,13 @@ mod tests {
     /// so. Each assertion here fails if the value were invented — a session that
     /// named somebody, a pid a reader would probe, a host a reader would claim,
     /// an instant nobody measured, a pacemaker that fires every zero seconds, a
-    /// write-back budget of zero seconds per item, a run-end hook nobody named,
-    /// or a hook timeout of zero.
+    /// write-back budget of zero seconds per item, a run-end or dispatch-env
+    /// hook nobody named, or a hook timeout of zero.
     #[test]
-    fn a_launch_record_written_before_any_of_these_nine_keys_still_reads() {
+    fn a_launch_record_written_before_any_of_these_eleven_keys_still_reads() {
         /// Every key added to this record after it shipped whose absence this
         /// reader has to answer for.
-        const HISTORICAL: [&str; 9] = [
+        const HISTORICAL: [&str; 11] = [
             "session",
             "pid",
             "host",
@@ -2956,6 +2998,8 @@ mod tests {
             "success_hook",
             "failure_hook",
             "hook_timeout",
+            "dispatch_env_hook",
+            "dispatch_env_hook_timeout",
         ];
         let root = scratch("historical-launch");
         let whole = serde_json::to_value(a_record()).expect("a record this build writes");
@@ -3059,17 +3103,39 @@ mod tests {
                         "a record naming no timeout was not given the shipped one"
                     );
                 }
-                other => unreachable!("{other} is not one of the nine"),
+                "dispatch_env_hook" => {
+                    assert_eq!(
+                        read.dispatch_env_hook(),
+                        None,
+                        "a dispatch-env hook was invented"
+                    );
+                    assert_eq!(read.success_hook(), Some("./scripts/follow-up.sh"));
+                }
+                "dispatch_env_hook_timeout" => {
+                    assert_eq!(read.dispatch_env_hook_timeout, 0);
+                    assert_eq!(
+                        read.dispatch_env_hook_timeout(),
+                        crate::cli::DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS,
+                        "a record naming no dispatch-env timeout was not given the shipped one"
+                    );
+                }
+                other => unreachable!("{other} is not one of the eleven"),
             }
         }
 
-        // And the record 141 roots on that host actually hold: none of the nine.
-        let oldest = read_one("all-nine", &HISTORICAL);
+        // And the record 141 roots on that host actually hold: none of the
+        // eleven.
+        let oldest = read_one("all-eleven", &HISTORICAL);
         assert_eq!(oldest.success_hook(), None);
         assert_eq!(oldest.failure_hook(), None);
         assert_eq!(
             oldest.hook_timeout(),
             crate::cli::DEFAULT_HOOK_TIMEOUT_SECONDS
+        );
+        assert_eq!(oldest.dispatch_env_hook(), None);
+        assert_eq!(
+            oldest.dispatch_env_hook_timeout(),
+            crate::cli::DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS
         );
         assert!(oldest.session.is_empty());
         assert_eq!(oldest.owner_label("a-session"), "[unknown]");
@@ -3085,12 +3151,17 @@ mod tests {
         assert_eq!(oldest.launcher, "claude-code");
         assert_eq!(oldest.node_graph, "graphs/node-scope.yaml");
 
-        // A record that carries the nine reads them, so none of the defaults
+        // A record that carries the eleven reads them, so none of the defaults
         // above is standing in front of a value somebody wrote.
         let whole = read_one("whole", &[]);
         assert_eq!(whole.success_hook(), Some("./scripts/follow-up.sh"));
         assert_eq!(whole.failure_hook(), Some("./scripts/report-failure.sh"));
         assert_eq!(whole.hook_timeout(), NonZeroU64::new(45).expect("nonzero"));
+        assert_eq!(whole.dispatch_env_hook(), Some("./scripts/dispatch-env.sh"));
+        assert_eq!(
+            whole.dispatch_env_hook_timeout(),
+            NonZeroU64::new(20).expect("nonzero")
+        );
         assert_eq!(whole.session, "a-session");
         assert_eq!(whole.driver_pid(), NonZeroU32::new(1));
         assert_eq!(whole.recorded_host(), Some("h"));
@@ -3584,6 +3655,8 @@ mod tests {
             success_hook: String::new(),
             failure_hook: String::new(),
             hook_timeout: 0,
+            dispatch_env_hook: String::new(),
+            dispatch_env_hook_timeout: 0,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,
@@ -3620,6 +3693,8 @@ mod tests {
             success_hook: String::new(),
             failure_hook: String::new(),
             hook_timeout: 0,
+            dispatch_env_hook: String::new(),
+            dispatch_env_hook_timeout: 0,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,

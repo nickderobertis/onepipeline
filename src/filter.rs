@@ -40,12 +40,15 @@ pub const MONITOR_PROFILE: &str = "monitor";
 
 /// The launch-config schema version this build **writes**.
 ///
-/// **7** since a launch names the `onemessagebus` configuration its channel is
-/// kept under and the bar its envelope reviewer judges against: `bus_config` and
-/// `envelope_reviewer_bar` are keys versions 1 to 6 never had, so a document
-/// carrying one is a different document and says so. **6** declared the commands
-/// a run fires when it ends — `success_hook`, `failure_hook` and `hook_timeout`.
-pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 7;
+/// **8** since a launch names the command run before every node dispatch to
+/// refresh that child's environment: `dispatch_env_hook` and
+/// `dispatch_env_hook_timeout` are keys versions 1 to 7 never had, so a document
+/// carrying one is a different document and says so. **7** declared the
+/// `onemessagebus` configuration a run's channel is kept under and the bar its
+/// envelope reviewer judges against — `bus_config` and `envelope_reviewer_bar` —
+/// and **6** the commands a run fires when it ends — `success_hook`,
+/// `failure_hook` and `hook_timeout`.
+pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 8;
 
 /// Every launch-config version this build **reads**, newest first.
 ///
@@ -55,12 +58,13 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 7;
 /// document — a version-1 one says nothing about drafting, a version-2 one says
 /// nothing about validating a node, a version-3 one says nothing about
 /// reviewing an envelope, a version-4 one says nothing about the write-back's
-/// budget, a version-5 one says nothing about a run-end hook, and a version-6 one
-/// says nothing about the bus or a reviewer's bar, which is what a launch naming
-/// none of them means — and naming a later key there is refused by that field's
-/// name**, exactly as a key no version ever had is.
-pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 7] =
-    [LAUNCH_CONFIG_SCHEMA_VERSION, 6, 5, 4, 3, 2, 1];
+/// budget, a version-5 one says nothing about a run-end hook, a version-6 one
+/// says nothing about the bus or a reviewer's bar, and a version-7 one says
+/// nothing about a dispatch-env hook, which is what a launch naming none of them
+/// means — and naming a later key there is refused by that field's name**,
+/// exactly as a key no version ever had is.
+pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 8] =
+    [LAUNCH_CONFIG_SCHEMA_VERSION, 7, 6, 5, 4, 3, 2, 1];
 
 /// Each key younger than the schema itself: the version it arrived at, and
 /// whether a blank value is refused.
@@ -85,7 +89,8 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 7] =
 /// at, deliberately unlike the validator and the reviewer: the contract states a
 /// blank hook as this launch saying it has none, so `driver::start` reads it the
 /// way it reads a blank drafting graph. Their timeout is a number, and a blank
-/// number is the half-written decision the budget's is.
+/// number is the half-written decision the budget's is. The dispatch-env hook
+/// and its timeout are read on exactly those two terms.
 const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
     ("pr_author_graph", 2, BlankValue::Kept),
     ("node_validator", 3, BlankValue::Refused),
@@ -96,6 +101,8 @@ const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
     (HOOK_TIMEOUT_KEY, 6, BlankValue::Refused),
     ("envelope_reviewer_bar", 7, BlankValue::Refused),
     ("bus_config", 7, BlankValue::Refused),
+    ("dispatch_env_hook", 8, BlankValue::Kept),
+    (DISPATCH_ENV_HOOK_TIMEOUT_KEY, 8, BlankValue::Refused),
 ];
 
 /// The launch-config key naming the write-back's per-item budget, spelled once
@@ -105,6 +112,10 @@ const WRITEBACK_ITEM_BUDGET_KEY: &str = "writeback_item_budget";
 /// The launch-config key naming how long a run-end hook is awaited, spelled
 /// once for the two readers that refuse by it.
 const HOOK_TIMEOUT_KEY: &str = "hook_timeout";
+
+/// The launch-config key naming how long the dispatch-env hook is awaited,
+/// spelled once for the two readers that refuse by it.
+const DISPATCH_ENV_HOOK_TIMEOUT_KEY: &str = "dispatch_env_hook_timeout";
 
 /// How a document carries one of the keys [`KEYS_BY_VERSION`] names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +179,19 @@ fn hook_timeout<'de, D: Deserializer<'de>>(
         unit: "seconds",
         default: crate::cli::DEFAULT_HOOK_TIMEOUT_SECONDS,
         zero: crate::hooks::refused_zero_timeout,
+    })
+}
+
+/// Read `dispatch_env_hook_timeout` as the positive whole number of seconds it
+/// is, on [`hook_timeout`]'s terms and for its reasons.
+fn dispatch_env_hook_timeout<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<NonZeroU64>, D::Error> {
+    deserializer.deserialize_any(PositiveSeconds {
+        key: DISPATCH_ENV_HOOK_TIMEOUT_KEY,
+        unit: "seconds",
+        default: crate::cli::DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS,
+        zero: crate::dispatchenv::refused_zero_timeout,
     })
 }
 
@@ -409,6 +433,33 @@ pub struct LaunchConfig {
     // llmlint: ignore[invalid_states_unrepresentable] a path spelled as the launch config document wrote it, resolved against that document's own directory at the launch and read there, where a path that names no configuration is refused naming this key; a blank one is refused by this key's name where the document is read. It is a public field of the type `docs/contract.md`'s launch config names, beside the other keys written as strings, and a path newtype would be a public item that contract never promised.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bus_config: Option<String>,
+    /// The command this launch runs immediately before every node-scope
+    /// dispatch, whose stdout adds environment to that one child launch, if any.
+    ///
+    /// The seventh launch-level decision, written down beside a plan for the
+    /// reason the others are: which command produces the environment a host's
+    /// harness routing indirects through is a property of that host rather than
+    /// of one launch. `--dispatch-env-hook` spells the same thing inline and
+    /// overrides this.
+    ///
+    /// A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may
+    /// not carry one. Blank is kept as written and read at the launch as naming
+    /// none, as the run-end hooks are. Omitted when absent, so a config that
+    /// names no hook round-trips as the file wrote it.
+    // llmlint: ignore[invalid_states_unrepresentable] a command line spelled as the launch config document wrote it, exactly as `success_hook` and `failure_hook` beside it are: this is a public field of the type `docs/contract.md`'s launch config names, a blank one is read at the launch as naming none — which the contract states a blank hook to be — and a command newtype would be a public item that contract never promised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_env_hook: Option<String>,
+    /// How long the dispatch-env hook is awaited, in seconds, if the launch says.
+    ///
+    /// The lower of the two rungs `--dispatch-env-hook-timeout` heads. A key
+    /// [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, refused blank and refused zero by
+    /// its own name, and omitted when absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "dispatch_env_hook_timeout"
+    )]
+    pub dispatch_env_hook_timeout: Option<NonZeroU64>,
 }
 
 impl Default for LaunchConfig {
@@ -425,6 +476,8 @@ impl Default for LaunchConfig {
             failure_hook: None,
             hook_timeout: None,
             bus_config: None,
+            dispatch_env_hook: None,
+            dispatch_env_hook_timeout: None,
         }
     }
 }
@@ -468,7 +521,7 @@ impl LaunchConfig {
         // request nobody drafted a body for, one who wrote a validator would
         // find it out from a node nothing checked, and one who wrote a budget
         // would find it out from a settlement that never reached the board.
-        let carried: [(&str, Carried); 9] = [
+        let carried: [(&str, Carried); 11] = [
             (
                 "pr_author_graph",
                 Carried::text(config.pr_author_graph.as_deref()),
@@ -510,6 +563,17 @@ impl LaunchConfig {
                 Carried::text(config.envelope_reviewer_bar.as_deref()),
             ),
             ("bus_config", Carried::text(config.bus_config.as_deref())),
+            (
+                "dispatch_env_hook",
+                Carried::text(config.dispatch_env_hook.as_deref()),
+            ),
+            // Never `Blank`, for the hook timeout's reason.
+            (
+                DISPATCH_ENV_HOOK_TIMEOUT_KEY,
+                config
+                    .dispatch_env_hook_timeout
+                    .map_or(Carried::Absent, |_| Carried::Named),
+            ),
         ];
         for (key, value) in carried {
             let Some((arrived, blank)) = KEYS_BY_VERSION
@@ -691,11 +755,12 @@ mod tests {
     /// without anyone deciding to move it. The earlier ones stay checked in for
     /// the half a single golden cannot pin — that a config written before the
     /// current version is still a document this build reads.
-    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v7.json");
+    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v8.json");
 
     /// The same document as each earlier version wrote it: the block it had, and
     /// no key that version never had, newest first.
-    const GOLDEN_EARLIER: [(u32, &str); 6] = [
+    const GOLDEN_EARLIER: [(u32, &str); 7] = [
+        (7, include_str!("../tests/golden/launch-config-v7.json")),
         (6, include_str!("../tests/golden/launch-config-v6.json")),
         (5, include_str!("../tests/golden/launch-config-v5.json")),
         (4, include_str!("../tests/golden/launch-config-v4.json")),
@@ -755,6 +820,8 @@ mod tests {
             failure_hook: Some("./scripts/report-failure.sh".to_string()),
             hook_timeout: NonZeroU64::new(600),
             bus_config: Some("./onemessagebus.yaml".to_string()),
+            dispatch_env_hook: Some("./scripts/dispatch-env.sh".to_string()),
+            dispatch_env_hook_timeout: NonZeroU64::new(60),
         }
     }
 
@@ -803,13 +870,17 @@ mod tests {
                     envelope_reviewer: (version >= 4)
                         .then(|| "./scripts/review-envelope.sh".to_string()),
                     // Version 5 declared the write-back's budget, version 6 the
-                    // run-end hooks, and none of them the bus or a reviewer's bar.
+                    // run-end hooks, version 7 the bus and a reviewer's bar, and
+                    // none of them the dispatch-env hook.
                     writeback_item_budget: NonZeroU64::new(10).filter(|_| version >= 5),
                     success_hook: (version >= 6).then(|| "./scripts/follow-up.sh".to_string()),
                     failure_hook: (version >= 6).then(|| "./scripts/report-failure.sh".to_string()),
                     hook_timeout: NonZeroU64::new(600).filter(|_| version >= 6),
-                    envelope_reviewer_bar: None,
-                    bus_config: None,
+                    envelope_reviewer_bar: (version >= 7)
+                        .then(|| "./scripts/reviewer-bar.sh".to_string()),
+                    bus_config: (version >= 7).then(|| "./onemessagebus.yaml".to_string()),
+                    dispatch_env_hook: None,
+                    dispatch_env_hook_timeout: None,
                 }
             );
             assert!(
@@ -839,13 +910,15 @@ mod tests {
             success_hook: Some("./scripts/follow-up.sh".to_string()),
             failure_hook: Some("./scripts/report-failure.sh".to_string()),
             hook_timeout: NonZeroU64::new(30),
+            dispatch_env_hook: Some("./scripts/dispatch-env.sh".to_string()),
+            dispatch_env_hook_timeout: NonZeroU64::new(20),
             ..LaunchConfig::default()
         };
         let rendered = serde_json::to_string(&named).expect("it serialises");
         assert_eq!(
             rendered,
             format!(
-                r#"{{"schema_version":{LAUNCH_CONFIG_SCHEMA_VERSION},"pr_author_graph":"./graphs/pr-author.yaml","node_validator":"./scripts/check-node.sh","envelope_reviewer":"./scripts/review-envelope.sh","writeback_item_budget":15,"success_hook":"./scripts/follow-up.sh","failure_hook":"./scripts/report-failure.sh","hook_timeout":30}}"#
+                r#"{{"schema_version":{LAUNCH_CONFIG_SCHEMA_VERSION},"pr_author_graph":"./graphs/pr-author.yaml","node_validator":"./scripts/check-node.sh","envelope_reviewer":"./scripts/review-envelope.sh","writeback_item_budget":15,"success_hook":"./scripts/follow-up.sh","failure_hook":"./scripts/report-failure.sh","hook_timeout":30,"dispatch_env_hook":"./scripts/dispatch-env.sh","dispatch_env_hook_timeout":20}}"#
             )
         );
         assert_eq!(
@@ -863,6 +936,8 @@ mod tests {
             "success_hook",
             "failure_hook",
             HOOK_TIMEOUT_KEY,
+            "dispatch_env_hook",
+            DISPATCH_ENV_HOOK_TIMEOUT_KEY,
         ] {
             assert!(
                 !rendered.contains(key),
@@ -912,6 +987,8 @@ mod tests {
             assert_eq!(minimal.success_hook, None);
             assert_eq!(minimal.failure_hook, None);
             assert_eq!(minimal.hook_timeout, None);
+            assert_eq!(minimal.dispatch_env_hook, None);
+            assert_eq!(minimal.dispatch_env_hook_timeout, None);
         }
     }
 
@@ -1042,10 +1119,14 @@ mod tests {
         };
 
         // A number this build has never written, told the versions it reads.
-        let later = LaunchConfig::load(&written("later.yaml", "schema_version: 8\n"))
-            .expect_err("a version this build does not read is refused");
+        let unread = LAUNCH_CONFIG_SCHEMA_VERSION + 1;
+        let later = LaunchConfig::load(&written(
+            "later.yaml",
+            &format!("schema_version: {unread}\n"),
+        ))
+        .expect_err("a version this build does not read is refused");
         let said = later.to_string();
-        assert!(said.contains("schema_version 8"), "{said}");
+        assert!(said.contains(&format!("schema_version {unread}")), "{said}");
         for version in LAUNCH_CONFIG_SCHEMA_VERSIONS_READ {
             assert!(
                 said.contains(&version.to_string()),
@@ -1071,6 +1152,8 @@ mod tests {
             ("success_hook", 6, "./scripts/follow-up.sh"),
             ("failure_hook", 6, "./scripts/report-failure.sh"),
             (HOOK_TIMEOUT_KEY, 6, "45"),
+            ("dispatch_env_hook", 8, "./scripts/dispatch-env.sh"),
+            (DISPATCH_ENV_HOOK_TIMEOUT_KEY, 8, "20"),
         ] {
             let early = LaunchConfig::load(&written(
                 &format!("early-{key}.yaml"),
@@ -1091,13 +1174,18 @@ mod tests {
                 .writeback_item_budget
                 .map(|seconds| seconds.to_string());
             let timeout = read.hook_timeout.map(|seconds| seconds.to_string());
+            let dispatch_timeout = read
+                .dispatch_env_hook_timeout
+                .map(|seconds| seconds.to_string());
             let named = match key {
                 "pr_author_graph" => read.pr_author_graph.as_deref(),
                 "node_validator" => read.node_validator.as_deref(),
                 "envelope_reviewer" => read.envelope_reviewer.as_deref(),
                 "success_hook" => read.success_hook.as_deref(),
                 "failure_hook" => read.failure_hook.as_deref(),
+                "dispatch_env_hook" => read.dispatch_env_hook.as_deref(),
                 HOOK_TIMEOUT_KEY => timeout.as_deref(),
+                DISPATCH_ENV_HOOK_TIMEOUT_KEY => dispatch_timeout.as_deref(),
                 _ => budget.as_deref(),
             };
             assert_eq!(named, Some(value));
@@ -1173,27 +1261,30 @@ mod tests {
             );
         }
 
-        // A hook timeout is refused on the budget's terms, by its own name: blank
-        // in each spelling, zero, and anything that is not a whole number.
-        for (spelled, written_as) in [
-            ("bare", format!("{HOOK_TIMEOUT_KEY}:")),
-            ("empty", format!("{HOOK_TIMEOUT_KEY}: \"\"")),
-            ("zero", format!("{HOOK_TIMEOUT_KEY}: 0")),
-            ("negative", format!("{HOOK_TIMEOUT_KEY}: -5")),
-            ("fractional", format!("{HOOK_TIMEOUT_KEY}: 2.5")),
-        ] {
-            let refused = LaunchConfig::load(&written(
-                &format!("timeout-{spelled}.yaml"),
-                &format!("schema_version: {LAUNCH_CONFIG_SCHEMA_VERSION}\n{written_as}\n"),
-            ))
-            .expect_err("a timeout that is not a positive whole number is refused");
-            let said = refused.to_string();
-            assert!(
-                said.contains(&format!("`{HOOK_TIMEOUT_KEY}`")),
-                "a {spelled} timeout was not refused by the key's name: {said}"
-            );
-            if spelled == "zero" {
-                assert!(said.contains("zero"), "{said}");
+        // A hook timeout — either hook's — is refused on the budget's terms, by
+        // its own name: blank in each spelling, zero, and anything that is not a
+        // whole number.
+        for key in [HOOK_TIMEOUT_KEY, DISPATCH_ENV_HOOK_TIMEOUT_KEY] {
+            for (spelled, written_as) in [
+                ("bare", format!("{key}:")),
+                ("empty", format!("{key}: \"\"")),
+                ("zero", format!("{key}: 0")),
+                ("negative", format!("{key}: -5")),
+                ("fractional", format!("{key}: 2.5")),
+            ] {
+                let refused = LaunchConfig::load(&written(
+                    &format!("{key}-{spelled}.yaml"),
+                    &format!("schema_version: {LAUNCH_CONFIG_SCHEMA_VERSION}\n{written_as}\n"),
+                ))
+                .expect_err("a timeout that is not a positive whole number is refused");
+                let said = refused.to_string();
+                assert!(
+                    said.contains(&format!("`{key}`")),
+                    "a {spelled} timeout was not refused by the key's name: {said}"
+                );
+                if spelled == "zero" {
+                    assert!(said.contains("zero"), "{said}");
+                }
             }
         }
 

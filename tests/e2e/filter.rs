@@ -916,10 +916,12 @@ fn a_launch_config_may_declare_nothing_and_is_refused_when_it_cannot_be_read() {
         std::fs::write(&path, body).expect("the launch config is written");
         path.to_string_lossy().to_string()
     };
+    // A number this build has never written: one past the newest it reads.
+    let unread = onepipeline::filter::LAUNCH_CONFIG_SCHEMA_VERSION + 1;
     for (config, named) in [
         (
-            written("later.yaml", "schema_version: 8\n"),
-            "schema_version 8",
+            written("later.yaml", &format!("schema_version: {unread}\n")),
+            format!("schema_version {unread}"),
         ),
         // A key the version this document declares never had, refused by that
         // key's name: an operator who wrote a drafting graph at the earlier
@@ -929,7 +931,7 @@ fn a_launch_config_may_declare_nothing_and_is_refused_when_it_cannot_be_read() {
                 "earlykey.yaml",
                 "schema_version: 1\npr_author_graph: ./graphs/pr-author.yaml\n",
             ),
-            "`pr_author_graph` is a schema 2 key",
+            "`pr_author_graph` is a schema 2 key".to_string(),
         ),
         // The same rule for the newest key, at its own arrival version — and for
         // a key that is there and names nothing, which is a decision
@@ -939,35 +941,35 @@ fn a_launch_config_may_declare_nothing_and_is_refused_when_it_cannot_be_read() {
                 "earlyreviewer.yaml",
                 "schema_version: 3\nenvelope_reviewer: ./scripts/review-envelope.sh\n",
             ),
-            "`envelope_reviewer` is a schema 4 key",
+            "`envelope_reviewer` is a schema 4 key".to_string(),
         ),
         (
             written(
                 "blankreviewer.yaml",
                 "schema_version: 4\nenvelope_reviewer: \"   \"\n",
             ),
-            "`envelope_reviewer` is present and names nothing",
+            "`envelope_reviewer` is present and names nothing".to_string(),
         ),
         (
             written("stray.yaml", "schema_version: 1\nfilterz: {}\n"),
-            "filterz",
+            "filterz".to_string(),
         ),
         (
             written(
                 "unusable.yaml",
                 "schema_version: 1\nfilters:\n  vcs:\n    include:\n      - role: agent\n",
             ),
-            "role",
+            "role".to_string(),
         ),
         (
             world.root.join("absent.yaml").to_string_lossy().to_string(),
-            "absent.yaml",
+            "absent.yaml".to_string(),
         ),
     ] {
         let refused = world.run(&["start", &plan, "--attach", "--launch-config", &config]);
         refused.exited(REFUSED);
         assert!(
-            refused.stderr.contains(named),
+            refused.stderr.contains(&named),
             "the refusal for {config} does not name {named:?}:\n{}",
             refused.stderr
         );

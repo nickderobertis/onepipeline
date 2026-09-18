@@ -53,6 +53,13 @@ Rules:
   `compile`, so an accepted edit is offered twice — once at submission and once
   at reconcile — and the envelope reviewer fires once, at the submission check
   only, which is the one place a refusal can still turn a whole envelope away.
+- `dispatchenv.rs` is the dispatch-env hook: run by `executor.rs` before
+  anything of a node-scope launch begins — the session included, so a refused
+  launch cuts nothing — and never by the observer's launch, which never goes
+  through the executor. Its check reads each oneharness config through
+  `oneharness_core`'s own parser, and its refusal is an `Error` the engine's
+  `attempt` settles as `infrastructure-failure`; nothing in it journals, and no
+  value a hook prints may reach a log, an event or a detail.
 - `projection.rs` folds the journal into the plan of record. The run's
   `plan.json` is its launch record and is never rewritten, and the store the
   plan was read from is never re-read to decide what the run is doing.

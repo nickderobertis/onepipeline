@@ -68,6 +68,7 @@ mod concurrency;
 mod criteria;
 mod crossdag;
 mod destination;
+mod dispatchenv;
 mod driver;
 mod edits;
 mod engine;
