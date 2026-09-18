@@ -1509,6 +1509,65 @@ fn a_run_paused_on_a_decision_withholds_its_hook_and_the_adopting_driver_fires_t
     );
 }
 
+/// A `run-hook-withheld` belongs to an epoch as a firing does: once a recovery
+/// edit reopens the run, the let-go that paused it on a decision describes an
+/// ending the run has left, and `results` says it is superseded by that edit.
+#[test]
+fn a_withheld_hook_from_an_earlier_epoch_reads_as_superseded_by_the_edit_that_ended_it() {
+    let world = hooked_world("hooks-withheld-epoch");
+    let hook = hook(&world);
+    world.script("build.fail", "1");
+    let run = "rewithheld";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[]), human("approve", &[])],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(0)
+    .out_has("\"settlement\":\"awaiting-planner\"");
+    world.run(&["attest", run, "approve"]).exited(0);
+    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"], "{}", world.dump());
+    world
+        .run(&["results", run])
+        .exited(0)
+        .out_has("run-end hook withheld — the run is paused on a decision")
+        .out_lacks("superseded:");
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "retry", "id": "build", "node": agent("build-2", &[])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    let retry = format!(
+        "the retry edit committed at {}: build retried as build-2",
+        world
+            .events_of(run, "edit-committed")
+            .last()
+            .expect("the retry was committed")["ts"]
+            .as_str()
+            .expect("an edit records when it was committed")
+    );
+    world
+        .run(&["results", run])
+        .exited(0)
+        .out_has(&format!(
+            "run-end hook withheld — superseded: {retry} reopened the run after it — the run is \
+             paused on a decision (awaiting-planner)"
+        ))
+        .out_has(&format!(
+            "failure hook fired — superseded: {retry} reopened the run after it"
+        ))
+        .out_has(&format!(
+            "no run-end hook has fired since {retry} reopened the run"
+        ));
+}
+
 /// Once a run carries a firing, only an accepted edit that makes the run **live
 /// again** lets another fire: a later adoption fires nothing, an accepted note and
 /// an accepted finding fire nothing, and the requeue that puts work back into the
@@ -1586,6 +1645,26 @@ fn once_a_hook_has_fired_only_an_edit_that_reopens_the_run_lets_another_fire() {
             &json!({"version": 2, "commands": [{"op": "requeue", "id": "later"}]}).to_string(),
         )
         .exited(0);
+    // And `results` says so, naming an edit that retried nothing by its command
+    // alone: the failure belongs to the epoch the requeue ended.
+    let requeue = format!(
+        "the requeue edit committed at {}",
+        world
+            .events_of(run, "edit-committed")
+            .last()
+            .expect("the requeue was committed")["ts"]
+            .as_str()
+            .expect("an edit records when it was committed")
+    );
+    world
+        .run(&["results", run])
+        .exited(0)
+        .out_has(&format!(
+            "failure hook fired — superseded: {requeue} reopened the run after it — reason:"
+        ))
+        .out_has(&format!(
+            "no run-end hook has fired since {requeue} reopened the run"
+        ));
     world
         .run(&["adopt", run])
         .exited(0)
