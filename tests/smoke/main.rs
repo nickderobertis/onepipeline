@@ -302,12 +302,16 @@ fn why(world: &World, run: &str) -> String {
 /// path proves the branch level with `origin/main`, and the node settles
 /// `empty-branch` on a lifecycle this crate ran correctly. The workflow run and
 /// attempt are what no other runner shares; off GitHub, the clock is.
+///
+/// Both are read as the numbers GitHub issues and nothing else: what is taken
+/// from the environment goes into a branch name, so a value that is not all
+/// digits is treated as unset rather than spelled into a ref.
 fn run_stamp() -> String {
     let github = |name: &str| {
         std::env::var(name)
             .ok()
             .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
+            .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
     };
     match (github("GITHUB_RUN_ID"), github("GITHUB_RUN_ATTEMPT")) {
         (Some(run), Some(attempt)) => format!("run-{run}-{attempt}"),
