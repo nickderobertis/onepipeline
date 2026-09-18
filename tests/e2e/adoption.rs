@@ -1083,27 +1083,24 @@ fn status_names_the_release_a_held_node_awaits_rather_than_calling_it_queued() {
         "adoption-held-status",
         vec![engine(), consumer(Some("published"))],
     );
-    world.until("the probe's answer to reach the wait", |world| {
-        answered(world, &run, "consumer") == Some("not-released".to_owned())
+    // Read through `status` alone, as a supervisor reads it: the hold opens once
+    // the engine's work lands, so the view is polled until it reports the node.
+    let consumer_line = |world: &World| {
+        let status = world.run(&["status", &run]);
+        status.exited(0);
+        status
+            .stdout
+            .lines()
+            .find(|line| line.trim_start().starts_with("consumer:"))
+            .map(str::to_owned)
+    };
+    world.until("status to report the held node as held", |world| {
+        consumer_line(world).is_some_and(|line| line.contains("consumer: held"))
     });
-
-    let status = world.run(&["status", &run]);
-    status.exited(0);
-    let line = status
-        .stdout
-        .lines()
-        .find(|line| line.trim_start().starts_with("consumer:"))
-        .unwrap_or_else(|| {
-            panic!(
-                "status says nothing about the held node:\n{}",
-                status.stdout
-            )
-        })
-        .to_owned();
+    let line = consumer_line(&world).expect("status reported the held node");
     assert!(
         line.contains("consumer: held — awaiting the published release of engine, waited "),
-        "the held node does not read as held on the engine's release: {line:?}\n{}",
-        status.stdout
+        "the held node does not read as held on the engine's release: {line:?}"
     );
     assert!(
         !line.contains("queued for dispatch") && !line.contains("workspace"),
@@ -1112,13 +1109,9 @@ fn status_names_the_release_a_held_node_awaits_rather_than_calling_it_queued() {
 
     // The release lets it go, and the view stops saying it is held.
     releases_at(&answer, "0.2.0");
-    world.until("the release to start the held node", |world| {
-        dispatched(world, &run, "consumer")
+    world.until("status to stop reporting the node as held", |world| {
+        !consumer_line(world).is_some_and(|line| line.contains("consumer: held"))
     });
-    world
-        .run(&["status", &run])
-        .exited(0)
-        .out_lacks("consumer: held");
 }
 
 /// An answer this host **cannot read** is never read as a release that has not
