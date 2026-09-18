@@ -291,6 +291,39 @@ fn why(world: &World, run: &str) -> String {
     )
 }
 
+/// What tells this run's branch apart from every other run's on the scratch
+/// repository, beside the pid.
+///
+/// A hosted runner is a fresh machine whose process numbering starts over, so
+/// two runs an hour apart on two runners handed this process the same pid: 30863
+/// opened `onepipeline-smoke` PR #170 from run 35282039766's smoke and then, in
+/// run 35286719909's, named the same branch again — and with it, because the
+/// worker's body is derived from the branch, the same `work.md` the scratch
+/// repository's `main` already carried from the first. The worker's write left
+/// a clean tree, the merge path proved the branch level with `origin/main`, and
+/// the node settled `empty-branch` on a lifecycle this crate had run correctly.
+/// The workflow run and attempt are what no other runner shares; off GitHub, the
+/// clock is.
+fn run_stamp() -> String {
+    let github = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    };
+    match (github("GITHUB_RUN_ID"), github("GITHUB_RUN_ATTEMPT")) {
+        (Some(run), Some(attempt)) => format!("run-{run}-{attempt}"),
+        (Some(run), None) => format!("run-{run}"),
+        (None, _) => format!(
+            "at-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_millis())
+                .unwrap_or_default()
+        ),
+    }
+}
+
 /// One lifecycle, end to end, against the real world.
 ///
 /// Open a session, do work in it, verify it, open a pull request on GitHub,
@@ -331,15 +364,16 @@ fn a_lifecycle_node_opens_a_real_pull_request_merges_it_and_the_base_advances() 
 
     // A branch per run: several pull requests may be in flight on one scratch
     // repository at once, and two runs sharing a branch name would each publish
-    // the other's work.
+    // the other's work. The pid alone does not make one — see [`run_stamp`].
     let branch = format!(
-        "onepipeline-smoke/{}-{}",
+        "onepipeline-smoke/{}-{}-{}",
         std::process::id(),
         world
             .root
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        run_stamp()
     );
     let title = format!("feat: smoke {branch}");
     let _scratch = Scratch {
