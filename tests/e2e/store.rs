@@ -3392,6 +3392,40 @@ fn onetaskgraph_resolves_by_executable_name_when_the_override_is_empty() {
     assert!(world.runs.join("path-binary").is_dir());
 }
 
+/// The override selects the store executable without becoming store configuration.
+#[test]
+fn a_store_command_does_not_inherit_the_parent_binary_override() {
+    let binary = onetaskgraph_binary();
+    let original = std::env::var_os(STORE_BINARY_ENV);
+    std::env::set_var(STORE_BINARY_ENV, &binary);
+
+    let world = World::new("store-parent-binary-override");
+    let project = world.plan(
+        "parent-binary-override",
+        &plan_of(
+            "parent-binary-override",
+            vec![crate::harness::agent("build", &[])],
+        ),
+    );
+    let output = world
+        .store_cmd(&["project", "show", &project, "--json"])
+        .output()
+        .expect("the selected store runs");
+
+    match original {
+        Some(value) => std::env::set_var(STORE_BINARY_ENV, value),
+        None => std::env::remove_var(STORE_BINARY_ENV),
+    }
+    assert!(
+        output.status.success(),
+        "the selected store refused the inherited override: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let shown: Value =
+        serde_json::from_slice(&output.stdout).expect("project show answers in JSON");
+    assert_eq!(shown["items"][0]["item"]["title"], "parent-binary-override");
+}
+
 /// An executable path is an OS path, not necessarily Unicode.
 #[cfg(unix)]
 #[test]
