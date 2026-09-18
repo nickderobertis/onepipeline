@@ -1431,6 +1431,15 @@ fn compile_retry(
         // so there is nothing of its own here to overwrite.
         replacement.consumes.clone_from(&target.consumes);
     }
+    // Its own condition rather than a rider on the one above: a replacement that
+    // restates its dependencies and says nothing about the tickets still
+    // delivers what the node it supersedes delivered. The board item the lineage
+    // keeps — see `writeback` — then keeps its `delivers`, and the ticket the
+    // store resolves over it stays claimed across the retry instead of falling
+    // back to `todo` for want of a deliverer.
+    if replacement.delivers.is_empty() {
+        replacement.delivers.clone_from(&target.delivers);
+    }
 
     let direct = graph.dependents_of(id);
     let mut reset: BTreeSet<String> = direct.iter().cloned().collect();
@@ -4705,6 +4714,60 @@ mod tests {
             stated_its_own.consumes,
             BTreeMap::from([("packager".to_string(), target("crate"))]),
             "the replacement was given the superseded node's targets over its own"
+        );
+    }
+
+    /// A replacement that names no `delivers` of its own inherits the superseded
+    /// node's, on a condition of its own: one that restates its dependencies and
+    /// says nothing about the tickets still delivers them. One that names its own
+    /// tickets is answered with what it named.
+    #[test]
+    fn a_replacement_inherits_delivers_on_its_own_condition() {
+        let delivering = |id: &str, deps: &[&str], tickets: &[&str]| {
+            let mut node = agent(id, deps);
+            node.delivers = tickets.iter().map(|t| (*t).to_string()).collect();
+            node
+        };
+        let base = || {
+            graph_of(vec![
+                agent("engine", &[]),
+                delivering("build", &["engine"], &["tickets:board/build"]),
+            ])
+        };
+        let failed = frontier(&[("build", NodeStatus::Failed)]);
+
+        // Restating `deps` does not switch the inheritance off.
+        let mut graph = base();
+        compile(
+            &mut graph,
+            &failed,
+            &Command::Retry {
+                id: "build".into(),
+                node: agent("build-2", &["engine"]),
+            },
+        )
+        .expect("a replacement stating no delivers inherits them");
+        assert_eq!(
+            graph.get("build-2").expect("the replacement").delivers,
+            vec!["tickets:board/build".to_string()],
+            "a replacement restating its deps lost the superseded node's delivers"
+        );
+
+        // One that names its own is answered with what it named.
+        let mut graph = base();
+        compile(
+            &mut graph,
+            &failed,
+            &Command::Retry {
+                id: "build".into(),
+                node: delivering("build-2", &[], &["tickets:board/other"]),
+            },
+        )
+        .expect("a replacement stating its own delivers keeps them");
+        assert_eq!(
+            graph.get("build-2").expect("the replacement").delivers,
+            vec!["tickets:board/other".to_string()],
+            "the replacement was given the superseded node's delivers over its own"
         );
     }
 
