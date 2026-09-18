@@ -49,6 +49,13 @@ mod crossdag;
 mod delivers;
 mod destination;
 mod dispatch;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] about 55 seconds, and what
+// the journeys exercise is the executor's every dispatch — `executor`, `dispatchenv`,
+// `driver`, `filter` and `ledger` together, one through the real `oneagentgraph` and one
+// through the linked `onevcs` — so the narrowest edge they can honestly sit behind is the
+// crate itself, which is this target's; a project edged narrower would drop them out of
+// `nx affected` for the very changes they exist to catch. Same grounds as `mod dispatch`
+// above and `mod run_end_hooks` below.
 mod dispatch_env_hook;
 mod driver;
 mod envelope_reviewer;

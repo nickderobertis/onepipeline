@@ -235,7 +235,7 @@ impl Executor for LocalExecutor {
         ) {
             (Some(record), Some(run), Some(node)) => {
                 let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
-                crate::dispatchenv::additions(&crate::dispatchenv::Launching {
+                crate::dispatchenv::run_and_check(&crate::dispatchenv::Launching {
                     paths: &paths,
                     record,
                     node,

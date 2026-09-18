@@ -38,10 +38,12 @@
 # `dispatch_env_hook.bat` is the Windows half and answers the same way.
 set -u
 
-# A record this fixture could not write, or a scripted value it could not use.
+# A record this fixture could not write, or a scripted value it could not use:
+# the first line names the file and what is wrong with it, and the second says
+# where the shape of every scripted file is written down.
 broke() {
   echo "dispatch_env_hook: $1" >&2
-  echo "dispatch_env_hook: point ONEPIPELINE_E2E_HOOK_RECORD at a writable directory the journey owns, as dispatch_env_hook.rs does, and write <run>.exit as a whole number" >&2
+  echo "dispatch_env_hook: point ONEPIPELINE_E2E_HOOK_RECORD at a writable directory the journey owns, as dispatch_env_hook.rs does, and write each <run>.* file in the shape the header of this script describes" >&2
   exit 70
 }
 
@@ -83,10 +85,12 @@ pwd >"$here/cwd" || broke "cannot write $here/cwd"
 } >"$here/env" || broke "cannot write $here/env"
 env >"$here/environment" || broke "cannot write $here/environment"
 cat >"$here/stdin" || broke "cannot write $here/stdin"
-# llmlint: ignore[tool_output_is_signal] this line is the fixture's evidence: the
-# journeys read it back out of the log the engine kept, and read that the engine kept
-# nothing of what stdout said there.
+# llmlint: ignore-block[tool_output_is_signal] this line is the fixture's evidence rather
+# than narration: the journeys read it back out of the log the engine kept, and read that
+# the engine kept nothing of what stdout said there, so a hook that said nothing on stderr
+# would leave both claims unproven.
 printf 'dispatch-env hook ran for %s\n' "$node" >&2
+# llmlint: ignore-end[tool_output_is_signal]
 : >"$here/started" || broke "cannot write $here/started"
 
 if [ -f "$record/$run.hold" ]; then

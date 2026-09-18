@@ -628,6 +628,127 @@ fn a_hook_that_fails_times_out_cannot_start_or_prints_a_malformed_document_refus
     );
 }
 
+/// A node parked and **requeued**, and the replacement node a **retry** puts in
+/// a held node's place, each run the hook again before their dispatch — and are
+/// handed what the hook prints then, which is not what the earlier dispatches
+/// were handed.
+#[test]
+fn a_requeued_node_and_a_retrys_replacement_each_run_the_hook_again_before_their_dispatch() {
+    let world = hooked_world("dispatch-env-edits");
+    let hook = hook(&world);
+    let run = "reedited";
+    let variable = "ONEPIPELINE_E2E_EDITED";
+    prints(&world, run, &adding(variable, "before-the-edits"));
+    world.script("dispatch.report-env", &format!("{variable}\n"));
+    // Two held dispatches: `slow` holds `sweep` back so it can be parked and
+    // requeued before it ever runs, and `retried` is held so a retry replaces it
+    // while it is in flight.
+    for held in ["slow", "retried"] {
+        world.script(&format!("{held}.wait"), "");
+    }
+    let path = world.plan(
+        run,
+        &plan_of(
+            run,
+            vec![
+                agent("slow", &[]),
+                agent("sweep", &["slow"]),
+                agent("retried", &[]),
+            ],
+        ),
+    );
+    world
+        .run_from(
+            &world.project,
+            &["start", &path, "--detach", "--dispatch-env-hook", &hook],
+        )
+        .exited(0);
+    world.until("both held dispatches to be inside their holds", |world| {
+        let reported = dispatch_env(world);
+        ["slow", "retried"]
+            .iter()
+            .all(|who| reported.iter().any(|(reported, _, _, _)| reported == who))
+    });
+    assert_eq!(
+        invocations(&world, run).len(),
+        2,
+        "{:?}",
+        invocations(&world, run)
+    );
+
+    // What the hook prints from here on is what the dispatches the edits cause
+    // are handed — changed before the edits, because a replacement is dispatched
+    // on the very pass that commits its retry.
+    prints(&world, run, &adding(variable, "after-the-edits"));
+    let envelope = |commands: Value| json!({"version": 2, "commands": commands}).to_string();
+    for command in [
+        json!({"op": "cancel", "id": "sweep"}),
+        json!({"op": "requeue", "id": "sweep"}),
+        json!({"op": "retry", "id": "retried", "node": {
+            "id": "replacement", "persona": "engineer", "task": "## What\nRetry it.",
+        }}),
+    ] {
+        world
+            .run_with_stdin(&["reply", run], &envelope(json!([command])))
+            .exited(0);
+    }
+    world.until("the edits to commit", |world| {
+        let committed: Vec<String> = world
+            .events_of(run, "edit-committed")
+            .iter()
+            .filter_map(|event| {
+                event["payload"]["command"]["op"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .collect();
+        committed.iter().any(|op| op == "requeue") && committed.iter().any(|op| op == "retry")
+    });
+    // Both holds released: `slow` so `sweep` is dispatched, and the superseded
+    // `retried` so its cancelled dispatch ends rather than being waited out.
+    world.release("slow.go");
+    world.release("retried.go");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+
+    let ran = invocations(&world, run);
+    for node in ["slow", "retried", "sweep", "replacement"] {
+        assert!(
+            ran.iter().any(|invoked| invoked == node),
+            "the hook never ran for {node}: {ran:?}\n{}",
+            world.dump()
+        );
+    }
+    let reported = dispatch_env(&world);
+    let of = |who: &str| -> String {
+        reported
+            .iter()
+            .find(|(reported, name, state, _)| {
+                reported == who && name == variable && state == "set"
+            })
+            .map(|(_, _, _, value)| value.clone())
+            .unwrap_or_else(|| {
+                panic!(
+                    "{who} was not handed {variable}: {reported:?}\n{}",
+                    world.dump()
+                )
+            })
+    };
+    assert_eq!(of("slow"), "before-the-edits");
+    assert_eq!(of("retried"), "before-the-edits");
+    assert_eq!(of("sweep"), "after-the-edits");
+    assert_eq!(of("replacement"), "after-the-edits");
+    for node in ["sweep", "replacement"] {
+        assert_eq!(
+            settlement(&world, run, node)["payload"]["status"],
+            "done",
+            "{}",
+            world.dump()
+        );
+    }
+}
+
 /// After the hook's additions, every `env_from` source the launch's configs
 /// name — the config after `--node-set` overrides, as it is on disk now — has to
 /// be there: one missing refuses the launch with a detail naming the config

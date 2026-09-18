@@ -107,5 +107,5 @@ exit /b 70
 rem A record this fixture could not write, or a scripted value it could not use.
 :broke
 echo dispatch_env_hook: %~1 1>&2
-echo dispatch_env_hook: point ONEPIPELINE_E2E_HOOK_RECORD at a writable directory the journey owns, as dispatch_env_hook.rs does, and write ^<run^>.exit as a whole number 1>&2
+echo dispatch_env_hook: point ONEPIPELINE_E2E_HOOK_RECORD at a writable directory the journey owns, as dispatch_env_hook.rs does, and write each ^<run^>.* file in the shape the header of dispatch_env_hook.sh describes 1>&2
 goto :eof

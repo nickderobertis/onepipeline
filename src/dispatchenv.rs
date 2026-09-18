@@ -2,23 +2,14 @@
 //! every node-scope dispatch, whose stdout adds environment to that one child
 //! launch.
 //!
-//! `docs/contract.md`'s dispatch-env hook paragraph is the whole rule. A live
-//! driver re-reads harness configuration from the checkout at dispatch time but
-//! keeps only the environment it started with, so a routing change that adds an
-//! `env_from` indirection while a run is live makes its next dispatch fail
-//! before its first turn. This hook is the seam a host refreshes that environment
-//! through: it is the host's own command — this crate never sources or names any
-//! host variable — and what it prints is overlaid on the driver's environment
-//! **for the child launch only**.
-//!
-//! What this file adds is the three halves of the rule: [`additions`] is the
-//! spawn and the bounded wait, [`Document`] is the one document the hook prints
-//! and every way it is malformed, and [`validate`] reads the oneharness configs
-//! the launch is about to read and checks that every `env_from` source they name
-//! is in the refreshed environment. Every ending but success is a refusal of the
-//! launch, which its caller settles under the existing `infrastructure-failure`
-//! word; nothing here emits an event, and no value the hook prints is written
-//! anywhere the run keeps.
+//! `docs/contract.md`'s dispatch-env hook paragraph is the whole rule. What this
+//! file adds is where each half of it lives: [`run_and_check`] is the spawn, the
+//! bounded wait and the check, called by the executor before anything of a
+//! launch begins; [`Document`] reads the hook's stdout in two steps so that no
+//! refusal can quote a value it printed; and [`validate`] reads the oneharness
+//! configs through the sibling's own parser, resolved against the graph exactly
+//! as the sibling resolves them. Nothing here emits an event or writes a
+//! settlement: a refusal is an error the executor's caller settles.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
@@ -79,10 +70,12 @@ pub(crate) struct Launching<'a> {
     pub sets: &'a [String],
 }
 
-/// The environment the hook adds to one child launch — the hook run, its
-/// document read, and every `env_from` source the launch's configs name checked
-/// against the refreshed environment — or nothing at all where the launch names
-/// no hook.
+/// Run the hook the launch names — spawned in the launch directory, its stderr
+/// kept in the run's log, awaited for up to its timeout and its process tree
+/// ended past it — read the document it printed, and check every `env_from`
+/// source the launch's configs name against the environment refreshed with it;
+/// answer what the hook added. A launch naming no hook runs nothing, reads
+/// nothing and adds nothing.
 ///
 /// # Errors
 ///
@@ -90,7 +83,7 @@ pub(crate) struct Launching<'a> {
 /// code, `timeout`, `could-not-start` or `malformed` with what was malformed —
 /// or the config file, the harness variant and the `env_from` source that is
 /// still missing. Nothing has been dispatched when it does.
-pub(crate) fn additions(launching: &Launching<'_>) -> Result<Vec<(String, String)>> {
+pub(crate) fn run_and_check(launching: &Launching<'_>) -> Result<Vec<(String, String)>> {
     let Some(command) = launching.record.dispatch_env_hook() else {
         return Ok(Vec::new());
     };
@@ -264,6 +257,11 @@ fn run(
 struct Document;
 
 impl Document {
+    // llmlint: ignore[invalid_states_unrepresentable] the pairs answered here go straight
+    // into the `env: &[(String, String)]` the sibling seam's `Launch` already types as
+    // strings, one line after this returns in the executor; every name has passed
+    // oneharness's own `valid_env_name` and every value is NUL-free by the time it is
+    // pushed, and a name newtype would be unwrapped at that next line for nothing.
     fn read(printed: &[u8]) -> std::result::Result<Vec<(String, String)>, String> {
         let document: serde_json::Value = serde_json::from_slice(printed).map_err(|error| {
             // serde_json's syntax errors name a line and a column and never the
@@ -364,6 +362,14 @@ fn validate(
 
 /// Every `env_from` source the launch's configs name, each once, in a stable
 /// order.
+// llmlint: ignore-block[code_lands_in_the_domain_that_owns_it] the harness model is
+// consumed, never restated: each config is read through `oneharness_core`'s own parser
+// into its own typed `FileConfig`, and what is walked below is that public type's
+// `harness` → `variant` → `env_from` fields — the same three the sibling's identity
+// resolver walks. oneharness publishes no query for "every env_from source a config
+// names", so the walk lives with the one caller that asks it; the day it publishes one,
+// this becomes that call, and a field the sibling renames fails here at compile time
+// rather than in a string.
 fn env_from_sources(
     graph: &ConfigRef,
     sets: &[String],
@@ -410,7 +416,7 @@ fn env_from_sources(
         }
     }
     Ok(named)
-}
+} // llmlint: ignore-end[code_lands_in_the_domain_that_owns_it]
 
 /// The graph document, with the launch's overrides applied the way the sibling
 /// applies them, as the graph the sibling will run.
@@ -685,7 +691,7 @@ mod tests {
         }))
         .expect("a record naming no hook, as an earlier build wrote one");
         assert_eq!(record.dispatch_env_hook(), None);
-        let added = additions(&Launching {
+        let added = run_and_check(&Launching {
             paths: &paths,
             record: &record,
             node: "build",

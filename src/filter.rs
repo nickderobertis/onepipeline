@@ -446,6 +446,7 @@ pub struct LaunchConfig {
     /// not carry one. Blank is kept as written and read at the launch as naming
     /// none, as the run-end hooks are. Omitted when absent, so a config that
     /// names no hook round-trips as the file wrote it.
+    // llmlint: ignore[invalid_states_unrepresentable] a command line spelled as the launch config document wrote it, exactly as `success_hook` and `failure_hook` beside it are: this is a public field of the type `docs/contract.md`'s launch config names, a blank one is read at the launch as naming none — which the contract states a blank hook to be — and a command newtype would be a public item that contract never promised.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_env_hook: Option<String>,
     /// How long the dispatch-env hook is awaited, in seconds, if the launch says.
