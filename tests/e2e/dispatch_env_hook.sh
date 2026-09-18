@@ -54,6 +54,15 @@ broke() {
   exit 70
 }
 
+# A document this fixture could not print. Nothing scripted is at fault: the
+# engine reads this hook's stdout, so a write that failed means the engine has
+# stopped reading — it has already refused this launch, or ended this hook's tree
+# past its timeout — and the journey that scripted the launch is what to read.
+cannot_print() {
+  echo "dispatch_env_hook: cannot print $1: the engine has stopped reading this hook's stdout, so the launch is already refused or the hook already ended; read the journey's own failure rather than this fixture's scripts" >&2
+  exit 70
+}
+
 record=${ONEPIPELINE_E2E_HOOK_RECORD:?ONEPIPELINE_E2E_HOOK_RECORD names no directory to record into; set it to the world scratch dispatch_env_hook.rs creates}
 run=${ONEPIPELINE_RUN_ID:?the engine named no run in ONEPIPELINE_RUN_ID, which every dispatch-env hook is given; run this only as the command a launch names with --dispatch-env-hook}
 node=${ONEPIPELINE_NODE_ID:?the engine named no node in ONEPIPELINE_NODE_ID, which every dispatch-env hook is given; run this only as the command a launch names with --dispatch-env-hook}
@@ -140,9 +149,10 @@ if [ -f "$record/$run.linger" ]; then
   case "$seconds" in
     '' | *[!0-9]*) broke "$record/$run.linger holds '$seconds', which is not a number of seconds" ;;
   esac
-  # A background start answers nothing about how it went, so what can be checked
-  # is checked before it: that there is a `sleep` to linger with.
-  command -v sleep >/dev/null 2>&1 || broke "no sleep on PATH to linger with, so $record/$run.linger cannot be honoured"
+  # A background start answers nothing about how it went — and may not, since a
+  # child this hook waited on would not outlive it — so what can be checked is
+  # checked before it: that there is a `sleep` to linger with.
+  command -v sleep >/dev/null 2>&1 || broke "no sleep on PATH to linger with; put one on the PATH the journey runs under, or remove $record/$run.linger"
   sleep "$seconds" &
 fi
 
@@ -151,13 +161,14 @@ fi
 if [ -f "$record/$run.oversize" ]; then
   # A well-formed document around one value of over a mebibyte: the size, and
   # nothing else about it, is what makes it no environment.
-  printf '{"version":1,"env":{"OVERSIZE":"' || broke "cannot print the oversized document's head"
-  dd if=/dev/zero bs=1024 count=1100 2>/dev/null | tr '\0' 'x' || broke "cannot print the oversized document's value; dd and tr are what print it"
-  printf '"}}\n' || broke "cannot print the oversized document's tail"
+  # One command for the value rather than a pipeline, so a failure is its own
+  # rather than the last command's.
+  awk 'BEGIN { value = sprintf("%1126400s", ""); gsub(/ /, "x", value); printf "{\"version\":1,\"env\":{\"OVERSIZE\":\"%s\"}}\n", value }' \
+    || cannot_print "the oversized document"
 elif [ -f "$record/$run.stdout" ]; then
-  cat "$record/$run.stdout" || broke "cannot read $record/$run.stdout"
+  cat "$record/$run.stdout" || cannot_print "$record/$run.stdout"
 else
-  printf '{"version":1,"env":{}}\n' || broke "cannot print the default document; the engine reads this hook's stdout"
+  printf '{"version":1,"env":{}}\n' || cannot_print "the default document"
 fi
 if [ "$status" -ne 0 ]; then
   echo "dispatch_env_hook: exiting $status, as $record/$run.exit scripts for invocation $nth; remove that file, or raise $record/$run.exit-from-nth, for this hook to admit the launch" >&2

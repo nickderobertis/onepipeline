@@ -331,6 +331,12 @@ impl Document {
 }
 
 /// One `env_from` source a launch's configs name, and where.
+// llmlint: ignore[invalid_states_unrepresentable] three names read off the sibling's own
+// typed `FileConfig` exactly as it spells them — a path it resolved, a variant id it
+// composes as `<harness>:<variant>`, and a variable name its parser validated — held here
+// only to be printed in one refusal sentence and, for the source, looked up in an
+// environment map keyed by `String`. Each is already validated by the type it was read
+// from; a newtype apiece would be unwrapped at the `format!` and the `contains_key`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct EnvFromSource {
     /// The oneharness config file, as the launch reads it.
