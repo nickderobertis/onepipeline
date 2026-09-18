@@ -2363,6 +2363,13 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
     }
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this asks
+// for does not exist here, for the reason `driver.rs` and `views.rs` give: the one
+// separately edged test project's input begins at `{workspaceRoot}/src/**/*`, so a journey
+// behind it is invalidated by the same unrelated source changes. These two journeys are of
+// the release hold in `src/release.rs`, driven through the reconcile loop, which any change
+// under `src/` can move, and they live beside the forty-odd adoption journeys in this file,
+// which is where a reader looks for one and what `just test-e2e` already runs on its own.
 /// A `published` node whose dependency **cannot be described** on the pass it
 /// becomes ready is held on that pass — not launched as if it had no
 /// out-of-repository dependency — and its hold names the dependency it could not
@@ -2721,7 +2728,7 @@ fn a_published_node_depending_on_a_retried_node_is_held_and_probed_on_the_replac
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
     });
-}
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The release hold on one node was recorded **before** its dispatch was.
 ///

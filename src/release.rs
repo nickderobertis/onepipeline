@@ -347,11 +347,9 @@ impl Dependency {
 #[derive(Debug)]
 struct Repositories {
     known: BTreeMap<String, std::result::Result<RepositoryReleases, UnreadRepository>>,
-    /// How long a failed read stands before it is asked again.
     retry_every: Duration,
 }
 
-/// A read of what a repository releases that did not go through, and when.
 #[derive(Debug, Clone)]
 struct UnreadRepository {
     reason: String,
@@ -372,7 +370,6 @@ impl Repositories {
         }
     }
 
-    /// What one repository releases, or why the sibling could not say.
     fn of(&mut self, repo: &str) -> std::result::Result<&RepositoryReleases, String> {
         let stale = self.known.get(repo).is_some_and(|known| match known {
             Ok(_) => false,
@@ -590,12 +587,9 @@ pub(crate) struct Watch {
     asker: Asker,
 }
 
-/// One dependency a node names that the run could not describe on its last pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Unresolved {
-    /// The dependency, as the plan names it.
     dep: String,
-    /// Why it could not be described.
     reason: String,
     /// When it was first found unreadable, in epoch milliseconds.
     since: u64,
@@ -810,7 +804,6 @@ impl Watch {
             .collect()
     }
 
-    /// The dependencies of one node the last pass could not describe.
     fn unresolved_of(&self, node: &str) -> &[Unresolved] {
         self.unresolved
             .get(node)
@@ -891,7 +884,6 @@ impl Watch {
             .collect()
     }
 
-    /// Whether one node names a release that has not arrived.
     fn awaits_a_release(&self, node: &str) -> bool {
         self.dependencies
             .get(node)
