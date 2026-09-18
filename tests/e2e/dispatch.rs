@@ -1697,6 +1697,13 @@ fn a_worker_rewrites_what_the_base_carries(world: &World) -> crate::harness::Rep
 
     // The turn ran and wrote, into the worktree the dispatch was given: the
     // double records the file it left, and it is the one the base carries.
+    // llmlint: ignore-block[tests_mirror_real_usage] the write is the *arrangement*, and
+    // the double's own record is the only place it is observable: what the turn wrote is
+    // byte for byte what the base already carries, so a read of the worktree shows the
+    // file whether or not the turn wrote it, and the tree the sibling disposes of when
+    // the node settles holds no diff to publish or view. What the journey proves — the
+    // settlement, its words, and that nothing was published — is read below through
+    // `results` and the run's own recorded journal, as every level-branch journey does.
     let turns = world.turns();
     assert_eq!(turns.len(), 1, "{turns:?}\n{}", world.dump());
     let wrote = world
@@ -1723,6 +1730,7 @@ fn a_worker_rewrites_what_the_base_carries(world: &World) -> crate::harness::Rep
         Some("work.md"),
         "the double now writes a file the base was not seeded with: {wrote}"
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     // And the branch it left is level with its base, which the node says in
     // the merge path's own words: what was compared, and that this dispatch
@@ -1750,6 +1758,12 @@ fn a_worker_rewrites_what_the_base_carries(world: &World) -> crate::harness::Rep
         .filter(|kind| ["push", "published", "change-opened"].contains(&kind.as_str()))
         .collect();
     assert!(spent.is_empty(), "a level branch was published: {spent:?}");
+    // And `results` shows a reader the same word and the same comparison.
+    world
+        .run(&["results", "rewritten"])
+        .exited(0)
+        .out_has("empty-branch")
+        .out_has("compared against origin/main");
     repo
 }
 
