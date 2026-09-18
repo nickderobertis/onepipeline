@@ -506,8 +506,16 @@ fn epochs(events: &[Envelope]) -> Epochs {
     Epochs { fired, ended_by }
 }
 
-/// The parts of an `edit-committed` record `results` names an edit by, read
-/// whole: the command's op, and the operations it compiled.
+/// The two parts of an `edit-committed` record `results` names an edit by: the
+/// op its command states, and the operations it compiled, each read as the type
+/// this crate writes it as rather than as whichever fragment happens to parse.
+// llmlint: ignore-block[boundary_inputs_validated] the journal is this crate's own
+// record rather than external input, on the ruling `journal.rs` carries for every
+// reader of it. `deny_unknown_fields` here would refuse the very record this crate
+// writes — `payload::EditCommitted` carries `author` and `operation_kinds` beside
+// these two, and a command carries every field its op takes beside `op` — and a
+// record a newer build wrote is to be *named as unreadable*, which is what a failed
+// read of it already does, never mistaken for a torn one.
 #[derive(Deserialize)]
 struct CommittedEdit {
     command: CommittedCommand,
@@ -519,14 +527,17 @@ struct CommittedEdit {
 struct CommittedCommand {
     op: String,
 }
+// llmlint: ignore-end[boundary_inputs_validated]
 
 /// How `results` names the edit that ended an epoch: its command, when it was
 /// committed, and what it retried, which is the recovery a reader is looking for.
 ///
-/// A record this build cannot read whole is named as exactly that rather than
-/// by the parts of it that happened to parse. [`epochs`] only ends an epoch at an
-/// edit whose operations the fold read, so that answer is for a record whose
-/// command was written by something other than this crate.
+/// A record this build cannot read those two parts of is named as exactly that
+/// rather than by the parts of it that happened to parse. [`epochs`] only ends an
+/// epoch at an edit whose operations the fold read, so that answer is for a record
+/// whose command was written by something other than this crate — driven by
+/// `tests/e2e/run_end_hooks.rs`'s
+/// `an_epoch_ending_edit_whose_command_this_build_cannot_read_is_named_by_when_it_was_committed`.
 fn edit_named(edit: &Envelope) -> String {
     // Named by when it was committed: a record's `seq` counts within the stream
     // that wrote it, and every process replying to a run writes its own, so the

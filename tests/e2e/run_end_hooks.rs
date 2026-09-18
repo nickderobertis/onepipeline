@@ -250,8 +250,23 @@ fn output_lines(results: &str) -> Vec<String> {
 /// the line a reader has no other command to learn, and the edit is told apart
 /// from any other by its command and by what it retried.
 fn names_edit(results: &str, before: &str, op: &str, then: &str) -> bool {
+    names_committed_at(results, &format!("{before}the {op} edit committed at "), then)
+}
+
+/// Whether `results` says `before`, then names an edit it could read nothing of
+/// but when it was committed — which the line states — and then says `then`.
+fn names_unreadable_edit(results: &str, before: &str, then: &str) -> bool {
+    names_committed_at(
+        results,
+        &format!("{before}an edit committed at "),
+        &format!(" whose record this build cannot read{then}"),
+    )
+}
+
+/// Whether some line of `results` says `before`, then a time, then `then`.
+fn names_committed_at(results: &str, before: &str, then: &str) -> bool {
     results.lines().any(|line| {
-        line.split_once(&format!("{before}the {op} edit committed at "))
+        line.split_once(before)
             .and_then(|(_, rest)| rest.split_once(then))
             .is_some_and(|(at, _)| {
                 at.len() == "2026-09-18T12:00:00.000Z".len()
@@ -975,6 +990,116 @@ fn results_labels_each_hook_from_an_earlier_epoch_as_superseded_by_the_edit_that
         .out_lacks("no run-end hook has fired since");
     superseded(&results, "failure hook fired", &first_recovery, "");
     superseded(&results, "failure hook fired", &second_recovery, "");
+}
+
+/// An epoch-ending edit whose record this build cannot read is named by the one
+/// thing it can read of it — when it was committed — and by nothing that happened
+/// to parse.
+///
+/// The record is one a **newer** build wrote. Its operations are the retry this
+/// fold reads, which is what makes it the end of the failure's epoch; its command
+/// is written in a vocabulary this build has no reader for. A reader that named it
+/// by the parts that parsed would call it "the edit edit", or print a retry it
+/// could not have attributed to any command, over a record it did not understand.
+#[test]
+fn an_epoch_ending_edit_whose_command_this_build_cannot_read_is_named_by_when_it_was_committed() {
+    let world = hooked_world("hooks-unreadable-edit");
+    let hook = hook(&world);
+    world.script("build.fail", "1");
+    let run = "unreadableedit";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
+
+    // A real retry, so the operations the record carries are exactly the ones a
+    // reopening edit writes; then the command written over in the journal, in the
+    // shape a newer build's vocabulary takes.
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb this build ships writes a
+    // command it cannot read back — only a newer build does, and there is none to run
+    // here. Rewriting the one field is the narrowest way to put that record in front of
+    // the compiled binary, and it is the same fault injection this file's unfoldable-edit
+    // journey makes for the same reason; the run, its journal, the retry that wrote the
+    // record, the driver that adopts it and the hook fixture around it are all the real
+    // ones, and every claim this journey makes is read back off the CLI.
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "retry", "id": "build", "node": agent("build-2", &[])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    let journal = world.runs.join(run).join("events.jsonl");
+    let rewritten: Vec<String> = std::fs::read_to_string(&journal)
+        .expect("the journal is kept")
+        .lines()
+        .map(|line| {
+            let mut record: Value = serde_json::from_str(line).expect("a record this run wrote");
+            if record["kind"] == "edit-committed" {
+                record["payload"]["command"] =
+                    json!({"verb": "retry", "of": "build", "with": agent("build-2", &[])});
+            }
+            record.to_string()
+        })
+        .collect();
+    std::fs::write(&journal, format!("{}\n", rewritten.join("\n")))
+        .expect("the record is rewritten");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // The record still ended the epoch — the fold read its operations — so the
+    // failure is superseded, and the edit that did it is named by its time alone.
+    let results = world.run(&["results", run]);
+    results.exited(0);
+    for (before, then) in [
+        ("failure hook fired — superseded: ", " reopened the run after it — reason: nodes"),
+        ("no run-end hook has fired since ", " reopened the run"),
+    ] {
+        assert!(
+            names_unreadable_edit(&results.stdout, before, then),
+            "`results` does not say {before:?} an edit it cannot read then {then:?}:\n{}",
+            results.stdout
+        );
+    }
+    let hook_lines: Vec<&str> = results
+        .stdout
+        .lines()
+        .filter(|line| line.contains("superseded: ") || line.contains("hook has fired since"))
+        .collect();
+    assert!(
+        hook_lines
+            .iter()
+            .all(|line| !line.contains("the edit edit") && !line.contains("retried as")),
+        "`results` named the unreadable record by the parts of it that parsed:\n{}",
+        results.stdout
+    );
+
+    // And the epoch it opened is a real one: the replacement settles done under
+    // it, the success hook fires, and the label on the superseded record stands.
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+    assert_eq!(invocations(&world, run), ["failure", "success"]);
+    let results = world.run(&["results", run]);
+    results
+        .exited(0)
+        .out_has("success hook fired — reason: none; ending: succeeded; exit: 0")
+        .out_lacks("no run-end hook has fired since");
+    assert!(
+        names_unreadable_edit(
+            &results.stdout,
+            "failure hook fired — superseded: ",
+            " reopened the run after it"
+        ),
+        "the superseded label did not survive the success that followed it:\n{}",
+        results.stdout
+    );
 }
 
 /// An accepted edit that leaves the run **unable to advance** is not an epoch,
