@@ -1628,6 +1628,47 @@ fn a_drafting_graph_the_runner_refuses_still_publishes_the_change_request() {
 #[test]
 fn a_worker_that_rewrites_what_the_base_carries_settles_empty_branch_naming_the_comparison() {
     let world = World::new("real-rewrite-level");
+    a_worker_rewrites_what_the_base_carries(&world);
+}
+
+/// The same rewrite under `core.autocrlf=true`, which is what the hosted
+/// Windows leg runs the journey above under: Git for Windows sets it in its
+/// system config, below the global one the world redirects.
+///
+/// There the journey above settled `publication-failed`. A checkout under that
+/// option writes `work.md` with CRLF, the double rewrites it with LF, and `git
+/// status --porcelain` — which reads the stat cache before any byte — calls it
+/// modified on the size alone. The engine's level-branch read took that as a
+/// tree the sibling was about to commit, the sibling's `git commit` of it was
+/// refused as nothing to commit, and a failure nobody caused settled the node.
+/// The read now compares content, and asks for the untracked files separately.
+/// Set in the world's git config so the shape is driven on every platform, and
+/// the option is read back off the checkout so a git that ignored it — or a
+/// world that stopped redirecting the global config — cannot pass this vacuously.
+#[test]
+fn a_worker_that_rewrites_what_the_base_carries_under_autocrlf_still_settles_empty_branch() {
+    let world = World::new("real-rewrite-level-crlf");
+    let gitconfig = world.gitconfig();
+    let mut config = std::fs::read_to_string(&gitconfig).expect("the world's git config");
+    config.push_str("[core]\n\tautocrlf = true\n");
+    std::fs::write(&gitconfig, config).expect("the world's git config is written");
+    let repo = a_worker_rewrites_what_the_base_carries(&world);
+    assert_eq!(
+        crate::harness::git(
+            &world,
+            &repo.checkout,
+            &["config", "--get", "core.autocrlf"]
+        )
+        .trim(),
+        "true",
+        "the checkout does not read the option, so the shape was not driven"
+    );
+}
+
+/// Seed a base that already carries the worker's file, run one lifecycle node
+/// whose worker turn rewrites it with the same content, and hold the node to
+/// `empty-branch` naming the comparison.
+fn a_worker_rewrites_what_the_base_carries(world: &World) -> crate::harness::Repository {
     world.write_graphs();
     let repo = world.repository("local-direct", &[]);
     // The base already carries the file the turn is about to write, with the
@@ -1635,13 +1676,13 @@ fn a_worker_that_rewrites_what_the_base_carries_settles_empty_branch_naming_the_
     let body = "the worker wrote this";
     std::fs::write(repo.checkout.join("work.md"), format!("{body}\n"))
         .expect("the base's copy of the worker's file is written");
-    crate::harness::git(&world, &repo.checkout, &["add", "-A"]);
+    crate::harness::git(world, &repo.checkout, &["add", "-A"]);
     crate::harness::git(
-        &world,
+        world,
         &repo.checkout,
         &["commit", "-q", "-m", "feat: an earlier run's work"],
     );
-    crate::harness::git(&world, &repo.checkout, &["push", "-q", "origin", "main"]);
+    crate::harness::git(world, &repo.checkout, &["push", "-q", "origin", "main"]);
     world.script("harness.work", body);
     let node = json!({
         "id": "service",
@@ -1709,6 +1750,7 @@ fn a_worker_that_rewrites_what_the_base_carries_settles_empty_branch_naming_the_
         .filter(|kind| ["push", "published", "change-opened"].contains(&kind.as_str()))
         .collect();
     assert!(spent.is_empty(), "a level branch was published: {spent:?}");
+    repo
 }
 
 /// The tools a real dispatched turn used, read back off the CLI.

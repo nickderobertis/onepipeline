@@ -907,10 +907,11 @@ pub fn wait_out_the_second(began: std::time::SystemTime) {
 /// Where a session's branch stands against its base, asked of the worktree
 /// `onevcs` opened for it.
 ///
-/// `Some` only for a branch this read can prove level: a **clean** worktree —
-/// the sibling commits whatever a worktree holds at publication, so a dirty tree
-/// is a commit the branch is about to gain — whose head is an ancestor of the
-/// base, with every read that decides it answered. Anything else is `None`, and
+/// `Some` only for a branch this read can prove level: a worktree with
+/// **nothing to commit** — the sibling commits whatever a worktree holds at
+/// publication, so a tree holding a change is a commit the branch is about to
+/// gain, and one holding none it cannot commit at all — whose head is an
+/// ancestor of the base, with every read that decides it answered. Anything else is `None`, and
 /// the caller publishes exactly as it always has: a read git would not answer is
 /// not evidence about the branch, and settling a node on it either way would be
 /// a report nobody could stand behind.
@@ -962,7 +963,44 @@ pub fn level_with_base(
         }
         Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     };
-    if !git(&["status", "--porcelain"])?.is_empty() {
+    // Clean means *nothing to commit*, read by content rather than off `git
+    // status --porcelain`, which answers off the stat cache: a tracked file whose
+    // size changed is `M` to it before any byte is compared. Under
+    // `core.autocrlf=true` — Git for Windows' system default — a checkout writes
+    // a text file with CRLF, and a worker rewriting it with LF and the very
+    // content the base carries leaves a file status calls modified, `git diff`
+    // finds identical once normalised, and `git commit` refuses with nothing to
+    // commit. Publishing that tree is a commit the sibling cannot write and a
+    // failure nobody caused; the branch is level. `git diff --quiet HEAD` is the
+    // content comparison over every tracked path, staged or not — exit 1 is
+    // git's answer "different", and only a refusal to answer exits higher — and
+    // the untracked files are asked for separately, since no diff lists them.
+    match std::process::Command::new("git")
+        .args(["diff", "--quiet", "HEAD", "--"])
+        .current_dir(worktree)
+        .stdin(std::process::Stdio::null())
+        .output()
+    {
+        Ok(compared) if compared.status.success() => {}
+        Ok(compared) if compared.status.code() == Some(1) => return None,
+        Ok(refused) => {
+            eprintln!(
+                "onepipeline: `git diff --quiet HEAD --` in {} exited {}: {}",
+                worktree.display(),
+                refused.status.code().unwrap_or(-1),
+                crate::views::one_line(&String::from_utf8_lossy(&refused.stderr))
+            );
+            return None;
+        }
+        Err(error) => {
+            eprintln!(
+                "onepipeline: cannot run `git diff --quiet HEAD --` in {}: {error}",
+                worktree.display()
+            );
+            return None;
+        }
+    }
+    if !git(&["ls-files", "--others", "--exclude-standard"])?.is_empty() {
         return None;
     }
     let remote = format!("origin/{base}");
@@ -2693,10 +2731,69 @@ mod tests {
         let (_, dirty) = a_cut_worktree("dirty");
         std::fs::write(dirty.join("dirty.md"), "uncommitted\n").expect("the file");
         assert_eq!(level(&dirty), None, "a dirty worktree read as level");
+        let (_, edited) = a_cut_worktree("edited");
+        std::fs::write(edited.join("README.md"), "seed, reworded\n").expect("the file");
+        assert_eq!(
+            level(&edited),
+            None,
+            "a rewritten tracked file read as level"
+        );
+        let (_, staged) = a_cut_worktree("staged");
+        git_in(&staged, &["rm", "-q", "README.md"]);
+        assert_eq!(level(&staged), None, "a staged deletion read as level");
+
+        // Level, though `git status` says otherwise: under `core.autocrlf=true`
+        // the checkout wrote `README.md` with CRLF, and the worker rewrote it
+        // with LF and the very content the base carries. Status calls it
+        // modified on the size alone, and a commit of it is refused as nothing
+        // to commit — which is what the publication used to fail on. Git for
+        // Windows sets that option system-wide, and the hosted `cross` leg met
+        // it there; set here so every platform reads the same tree.
+        let (_, normalised) = a_cut_worktree("normalised");
+        git_in(&normalised, &["config", "core.autocrlf", "true"]);
+        // Removed and checked out again rather than checked out over: a file
+        // whose stat still matches the index is one a checkout leaves alone.
+        std::fs::remove_file(normalised.join("README.md")).expect("the file");
+        git_in(&normalised, &["checkout", "-q", "--", "README.md"]);
+        assert_eq!(
+            std::fs::read(normalised.join("README.md")).expect("the file"),
+            b"seed\r\n",
+            "the checkout under autocrlf did not write CRLF, so nothing is being proved"
+        );
+        std::fs::write(normalised.join("README.md"), "seed\n").expect("the file");
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&normalised)
+            .output()
+            .expect("git runs");
+        assert_eq!(
+            String::from_utf8_lossy(&status.stdout).trim(),
+            "M README.md",
+            "git status no longer over-reports the rewrite, so nothing is being proved"
+        );
+        assert_eq!(
+            wrote(&normalised),
+            Some(Wrote::Nothing),
+            "a tracked file rewritten with what the base carries, differing only in \
+             line endings the index normalises away, was not read as level"
+        );
 
         for name in [
-            "fresh", "ff", "reset", "landed", "picked", "merged", "rebased", "applied", "undone",
-            "resumed", "ahead", "dirty",
+            "fresh",
+            "ff",
+            "reset",
+            "landed",
+            "picked",
+            "merged",
+            "rebased",
+            "applied",
+            "undone",
+            "resumed",
+            "ahead",
+            "dirty",
+            "edited",
+            "staged",
+            "normalised",
         ] {
             let _ = std::fs::remove_dir_all(
                 std::env::temp_dir()
