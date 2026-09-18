@@ -32,6 +32,29 @@ use crate::harness::{
 /// Where the fixture records what it was handed. Read by the fixture itself.
 const RECORD_ENV: &str = "ONEPIPELINE_E2E_HOOK_RECORD";
 
+/// The hook timeout every launch here names, in seconds.
+///
+/// Named rather than left to the contract's `600`, because `.config/nextest.toml`
+/// ends a test at 360 seconds: a hook stuck under the default is ended by the
+/// runner, as a bare `TIMEOUT` naming only the test, before the engine reaches
+/// its own `timed-out` ending — the record that says what was stuck. Two minutes
+/// is well inside that bound and above any hook here that is meant to finish; the
+/// one journey about the timeout itself names a shorter one, the one launch that
+/// asks what the default *is* names none, and the product default is untouched.
+const HOOK_TIMEOUT: &str = "120";
+
+/// The flags naming one command as both hooks, under [`HOOK_TIMEOUT`].
+fn both_hooks(hook: &str) -> [&str; 6] {
+    [
+        "--success-hook",
+        hook,
+        "--failure-hook",
+        hook,
+        "--hook-timeout",
+        HOOK_TIMEOUT,
+    ]
+}
+
 /// The contract's run-end hooks block.
 fn contract_block() -> Value {
     let contract =
@@ -280,7 +303,7 @@ fn a_run_whose_nodes_all_settle_done_fires_the_success_hook_once_with_what_the_c
         &world,
         run,
         vec![agent("build", &[]), handoff, drafted],
-        &["--success-hook", &hook, "--failure-hook", &hook],
+        &both_hooks(&hook),
     );
     started.exited(0).out_has("\"settlement\":\"complete\"");
 
@@ -413,20 +436,24 @@ fn a_hook_that_fails_cannot_start_or_outlives_its_timeout_changes_nothing_the_ru
     std::fs::write(records(&world).join("exits.exit"), "7").expect("the exit is scripted");
     std::fs::write(records(&world).join("outlives.hold"), "").expect("the hold is scripted");
     for (run, ending, command, timeout, exit) in [
-        ("exits", "failed", hook.as_str(), None, Some(7)),
+        ("exits", "failed", hook.as_str(), HOOK_TIMEOUT, Some(7)),
         (
             "unstartable",
             "could-not-start",
             missing.as_str(),
-            None,
+            HOOK_TIMEOUT,
             None,
         ),
-        ("outlives", "timed-out", hook.as_str(), Some("1"), None),
+        ("outlives", "timed-out", hook.as_str(), "1", None),
     ] {
-        let mut extra = vec!["--success-hook", command, "--failure-hook", command];
-        if let Some(seconds) = timeout {
-            extra.extend(["--hook-timeout", seconds]);
-        }
+        let extra = [
+            "--success-hook",
+            command,
+            "--failure-hook",
+            command,
+            "--hook-timeout",
+            timeout,
+        ];
         let began = Instant::now();
         let started = attached(&world, run, nodes(), &extra);
 
@@ -509,7 +536,7 @@ fn a_parked_frontier_with_no_decision_outstanding_fires_failure_as_unfinished() 
         &world,
         run,
         vec![agent("build", &[]), later],
-        &["--success-hook", &hook, "--failure-hook", &hook],
+        &both_hooks(&hook),
     )
     .exited(NOTHING_DRIVING)
     .out_has("\"settlement\":\"unattended\"");
@@ -537,13 +564,7 @@ fn a_run_that_ends_over_a_node_its_upstream_never_released_fires_failure_as_unfi
     let mut ship = agent("ship", &[]);
     ship["deps"] = json!(["run:neverran#build"]);
     let run = "unreleased";
-    attached(
-        &world,
-        run,
-        vec![ship],
-        &["--success-hook", &hook, "--failure-hook", &hook],
-    )
-    .exited(NOTHING_DRIVING);
+    attached(&world, run, vec![ship], &both_hooks(&hook)).exited(NOTHING_DRIVING);
 
     assert_eq!(invocations(&world, run), ["failure"]);
     let reason = &world.events_of(run, "run-hook-fired")[0]["payload"]["reason"];
@@ -584,6 +605,8 @@ fn a_cancel_that_stops_a_running_node_ends_the_run_unfinished_over_it_and_its_de
                 &hook,
                 "--failure-hook",
                 &hook,
+                "--hook-timeout",
+                HOOK_TIMEOUT,
             ],
         )
         .exited(0);
@@ -643,6 +666,8 @@ fn a_clean_stop_fires_failure_as_stopped_and_a_refused_stop_fires_nothing() {
                 &hook,
                 "--failure-hook",
                 &hook,
+                "--hook-timeout",
+                HOOK_TIMEOUT,
             ],
         )
         .exited(0);
@@ -706,7 +731,15 @@ fn a_run_whose_record_names_no_owner_hands_its_hook_no_launcher() {
     let hook = hook(&world);
     let run = "unowned";
     let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
-    let mut launch = world.cmd(&["start", &path, "--attach", "--success-hook", &hook]);
+    let mut launch = world.cmd(&[
+        "start",
+        &path,
+        "--attach",
+        "--success-hook",
+        &hook,
+        "--hook-timeout",
+        HOOK_TIMEOUT,
+    ]);
     launch
         .current_dir(&world.project)
         .env_remove("ONEPIPELINE_LAUNCHER")
@@ -734,7 +767,7 @@ fn a_failed_node_a_retry_supersedes_fires_success_once_its_replacement_settles_d
         &world,
         run,
         vec![agent("build", &[])],
-        &["--success-hook", &hook],
+        &["--success-hook", &hook, "--hook-timeout", HOOK_TIMEOUT],
     )
     .exited(NOTHING_DRIVING);
     // The failure hook is not named, so that ending fires nothing and marks nothing.
@@ -775,13 +808,7 @@ fn a_run_whose_failure_hook_fired_fires_success_once_a_retry_takes_it_on_to_comp
     let hook = hook(&world);
     world.script("build.fail", "1");
     let run = "recovered";
-    attached(
-        &world,
-        run,
-        vec![agent("build", &[])],
-        &["--success-hook", &hook, "--failure-hook", &hook],
-    )
-    .exited(NOTHING_DRIVING);
+    attached(&world, run, vec![agent("build", &[])], &both_hooks(&hook)).exited(NOTHING_DRIVING);
     assert_eq!(invocations(&world, run), ["failure"]);
     assert_eq!(
         world.events_of(run, "run-hook-fired")[0]["payload"]["reason"]["nodes"],
@@ -845,13 +872,7 @@ fn an_added_node_the_failure_skips_reopens_nothing_and_leaves_the_marker_standin
     let hook = hook(&world);
     world.script("build.fail", "1");
     let run = "stillblocked";
-    attached(
-        &world,
-        run,
-        vec![agent("build", &[])],
-        &["--success-hook", &hook, "--failure-hook", &hook],
-    )
-    .exited(NOTHING_DRIVING);
+    attached(&world, run, vec![agent("build", &[])], &both_hooks(&hook)).exited(NOTHING_DRIVING);
     assert_eq!(invocations(&world, run), ["failure"]);
 
     world
@@ -904,7 +925,7 @@ fn an_edit_that_frees_blocked_work_reopens_the_run_though_it_adds_no_node() {
         &world,
         run,
         vec![agent("build", &[]), gate, agent("after", &["gate"])],
-        &["--success-hook", &hook, "--failure-hook", &hook],
+        &both_hooks(&hook),
     )
     .exited(NOTHING_DRIVING);
     assert_eq!(invocations(&world, run), ["failure"]);
@@ -976,13 +997,7 @@ fn an_edit_that_leaves_a_ready_human_action_reopens_the_run_and_the_next_ending_
     let hook = hook(&world);
     world.script("build.fail", "1");
     let run = "gated";
-    attached(
-        &world,
-        run,
-        vec![agent("build", &[])],
-        &["--success-hook", &hook, "--failure-hook", &hook],
-    )
-    .exited(NOTHING_DRIVING);
+    attached(&world, run, vec![agent("build", &[])], &both_hooks(&hook)).exited(NOTHING_DRIVING);
     assert_eq!(
         hook_kinds(&world, run),
         ["run-hook-fired", "run-hook-finished"]
@@ -1041,7 +1056,7 @@ fn an_edit_this_build_cannot_fold_leaves_the_marker_standing_through_a_later_req
         &world,
         run,
         vec![agent("build", &[]), later],
-        &["--success-hook", &hook, "--failure-hook", &hook],
+        &both_hooks(&hook),
     )
     .exited(NOTHING_DRIVING);
     assert_eq!(invocations(&world, run), ["failure"]);
@@ -1120,6 +1135,8 @@ fn an_edit_that_found_the_run_already_live_is_not_an_epoch() {
                 &hook,
                 "--failure-hook",
                 &hook,
+                "--hook-timeout",
+                HOOK_TIMEOUT,
             ],
         )
         .exited(0);
@@ -1186,13 +1203,7 @@ fn a_run_made_live_by_something_nobody_edited_leaves_its_marker_standing() {
     let run = "patient";
     let mut ship = agent("ship", &[]);
     ship["deps"] = json!(["run:arrives#build"]);
-    attached(
-        &world,
-        run,
-        vec![ship],
-        &["--success-hook", &hook, "--failure-hook", &hook],
-    )
-    .exited(NOTHING_DRIVING);
+    attached(&world, run, vec![ship], &both_hooks(&hook)).exited(NOTHING_DRIVING);
     assert_eq!(invocations(&world, run), ["failure"]);
     assert_eq!(
         world.events_of(run, "run-hook-fired")[0]["payload"]["reason"]["nodes"],
@@ -1238,7 +1249,7 @@ fn a_retry_that_fails_in_its_turn_fires_a_second_failure_hook_for_the_new_attemp
         &world,
         run,
         vec![agent("build", &[])],
-        &["--failure-hook", &hook],
+        &["--failure-hook", &hook, "--hook-timeout", HOOK_TIMEOUT],
     )
     .exited(NOTHING_DRIVING);
     assert_eq!(invocations(&world, run), ["failure"]);
@@ -1294,13 +1305,7 @@ fn two_drivers_judging_one_reopened_run_fire_exactly_one_hook_between_them() {
     let hook = hook(&world);
     world.script("build.fail", "1");
     let run = "raced";
-    attached(
-        &world,
-        run,
-        vec![agent("build", &[])],
-        &["--success-hook", &hook, "--failure-hook", &hook],
-    )
-    .exited(NOTHING_DRIVING);
+    attached(&world, run, vec![agent("build", &[])], &both_hooks(&hook)).exited(NOTHING_DRIVING);
     assert_eq!(invocations(&world, run), ["failure"]);
 
     world
@@ -1362,7 +1367,7 @@ fn a_run_paused_on_a_decision_withholds_its_hook_and_the_adopting_driver_fires_t
         &world,
         run,
         vec![human("approve", &[]), agent("after", &["approve"])],
-        &["--success-hook", &hook, "--failure-hook", &hook],
+        &both_hooks(&hook),
     )
     .exited(0)
     .out_has("\"settlement\":\"awaiting-planner\"")
@@ -1410,7 +1415,7 @@ fn once_a_hook_has_fired_only_an_edit_that_reopens_the_run_lets_another_fire() {
         &world,
         run,
         vec![agent("build", &[]), later],
-        &["--success-hook", &hook, "--failure-hook", &hook],
+        &both_hooks(&hook),
     )
     .exited(NOTHING_DRIVING);
     assert_eq!(invocations(&world, run), ["failure"]);
@@ -1499,12 +1504,7 @@ fn a_detached_driver_fires_as_an_attached_one_does_and_its_run_is_undriven_while
     let hook = hook(&world);
     world.script("build.fail", "1");
     let nodes = || vec![agent("build", &[]), agent("ship", &["build"])];
-    let flags = [
-        "--success-hook",
-        hook.as_str(),
-        "--failure-hook",
-        hook.as_str(),
-    ];
+    let flags = both_hooks(&hook);
 
     attached(&world, "attachedtwin", nodes(), &flags).exited(NOTHING_DRIVING);
 
@@ -1732,7 +1732,7 @@ fn a_hook_that_swaps_its_log_for_a_link_shows_no_reader_the_file_it_names() {
         &world,
         run,
         vec![agent("build", &[])],
-        &["--success-hook", &hook],
+        &["--success-hook", &hook, "--hook-timeout", HOOK_TIMEOUT],
     )
     .exited(0)
     .out_has("\"settlement\":\"complete\"")
@@ -1786,6 +1786,8 @@ fn a_launch_record_unreadable_at_let_go_is_reported_rather_than_read_as_naming_n
                 &hook,
                 "--failure-hook",
                 &hook,
+                "--hook-timeout",
+                HOOK_TIMEOUT,
             ],
         )
         .exited(0);
@@ -1832,6 +1834,8 @@ fn a_hook_whose_log_cannot_be_opened_is_recorded_as_one_that_could_not_start() {
                 &hook,
                 "--failure-hook",
                 &hook,
+                "--hook-timeout",
+                HOOK_TIMEOUT,
             ],
         )
         .exited(0);
