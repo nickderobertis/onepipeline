@@ -168,7 +168,8 @@ fn run(
     );
 
     let mut spawning = std::process::Command::new(command);
-    // The launch directory, exactly as a run-end hook is started in it.
+    // A record from before the field existed names no directory, and the hook
+    // starts where this process is, which is what that launch did.
     if !record.dir.as_os_str().is_empty() {
         spawning.current_dir(&record.dir);
     }
@@ -197,18 +198,30 @@ fn run(
     // died — a hook that never stops is the timeout's to end.
     let (printed_tx, printed_rx) = mpsc::channel();
     let mut stdout = child.stdout.take();
-    std::thread::spawn(move || {
-        let mut printed = Vec::new();
-        let read = match stdout.as_mut() {
-            Some(stdout) => stdout
-                .take(MAX_STDOUT_BYTES + 1)
-                .read_to_end(&mut printed)
-                .and_then(|_| std::io::copy(stdout, &mut std::io::sink()))
-                .map(|_| ()),
-            None => Ok(()),
-        };
-        let _ = printed_tx.send(read.map(|()| printed));
-    });
+    let reading = std::thread::Builder::new()
+        .name(format!("{HOOK}-hook-stdout"))
+        .spawn(move || {
+            let mut printed = Vec::new();
+            let read = match stdout.as_mut() {
+                Some(stdout) => stdout
+                    .take(MAX_STDOUT_BYTES + 1)
+                    .read_to_end(&mut printed)
+                    .and_then(|_| std::io::copy(stdout, &mut std::io::sink()))
+                    .map(|_| ()),
+                None => Ok(()),
+            };
+            let _ = printed_tx.send(read.map(|()| printed));
+        });
+    if let Err(error) = reading {
+        // A hook nobody can read is ended rather than left running unread: what
+        // it printed would go nowhere, and the launch is refused either way.
+        let _ = sys::stop(child.id(), sys::Stop::Now);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!(
+            "could-not-start: no thread could be started to read its stdout: {error}"
+        ));
+    }
 
     let timeout = record.dispatch_env_hook_timeout();
     let deadline = hooks::deadline_after(timeout);
