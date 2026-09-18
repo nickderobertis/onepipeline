@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 
 use crate::cli::DEFAULT_HOOK_TIMEOUT_SECONDS;
 use crate::error::Result;
+use crate::event::Envelope;
 use crate::graph::NodeStatus;
 use crate::journal::{self, Journal, PipelineKind};
 use crate::ledger::{self, LaunchRecord, RunPaths};
@@ -469,23 +470,84 @@ fn mark(paths: &RunPaths, firing: &Firing, command: &str) -> Result<bool> {
 /// only for an edit arriving while a marker stands, so a run that has never fired
 /// pays for none of it.
 fn fired(paths: &RunPaths) -> bool {
+    epochs(&journal::read(&paths.journal())).fired
+}
+
+/// The run's idempotency epochs, as one walk of its journal.
+struct Epochs {
+    /// Whether the epoch the run is now in carries a marker.
+    fired: bool,
+    /// Where in the journal each edit that retired a marker is, in order: each
+    /// one ended the epoch every record before it belongs to.
+    ended_by: Vec<usize>,
+}
+
+/// Walk a journal the way [`fired`] reads it — the one rule, so the epoch
+/// `results` labels a record with is the epoch the marker was held against.
+fn epochs(events: &[Envelope]) -> Epochs {
     let mut state = RunState {
         strict: true,
         ..RunState::default()
     };
     let mut fired = false;
-    for event in &journal::read(&paths.journal()) {
+    let mut ended_by = Vec::new();
+    for (at, event) in events.iter().enumerate() {
         let kind = PipelineKind::from_wire(&event.kind);
         let edit = kind == Some(PipelineKind::EditCommitted);
         let was_live = edit && fired && live(&state);
         crate::projection::fold_one(&mut state, event);
         if edit && fired && !was_live && state.strict && live(&state) {
             fired = false;
+            ended_by.push(at);
         } else if kind == Some(PipelineKind::RunHookFired) {
             fired = true;
         }
     }
-    fired
+    Epochs { fired, ended_by }
+}
+
+/// How `results` names the edit that ended an epoch: its command, when it was
+/// committed, and what it retried, which is the recovery a reader is
+/// looking for.
+fn edit_named(edit: &Envelope) -> String {
+    let op = edit
+        .payload
+        .get("command")
+        .and_then(|command| command.get("op"))
+        .and_then(Value::as_str)
+        .unwrap_or("edit");
+    let retried: Vec<String> = edit
+        .payload
+        .get("operations")
+        .and_then(|operations| {
+            serde_json::from_value::<Vec<crate::edits::Operation>>(operations.clone()).ok()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|operation| match operation {
+            crate::edits::Operation::RetryRequested {
+                node, replacement, ..
+            } => Some(format!(
+                "{} retried as {}",
+                views::one_line(&node),
+                views::one_line(&replacement)
+            )),
+            _ => None,
+        })
+        .collect();
+    let retried = if retried.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", retried.join(", "))
+    };
+    // Named by when it was committed: a record's `seq` counts within the stream
+    // that wrote it, and every process replying to a run writes its own, so the
+    // time is what tells one edit from another to a reader.
+    format!(
+        "the {} edit committed at {}{retried}",
+        views::one_line(op),
+        views::one_line(&edit.ts)
+    )
 }
 
 /// Whether the run has work it can still carry out, on the graph as it stands.
@@ -717,9 +779,33 @@ fn relay_from(log: &Path, from: u64) -> u64 {
 /// What `results` says about a run's hooks: each that fired — which, why, how it
 /// ended, its exit, its log, and the tail of its output — and each let-go that
 /// withheld one.
+///
+/// **Each record is read against the epoch it belongs to.** A run a recovery
+/// edit reopened keeps every record from before that edit on its journal, and
+/// those records describe an ending the run has since left: a failure hook's
+/// reason names nodes the `retry` replaced, and its output is instructions for a
+/// run that is not there any more. So a record from an earlier epoch says it is
+/// superseded and names the edit that ended its epoch — the same edits
+/// [`fired`] retires a marker at, because both come from [`epochs`] — and a run
+/// whose current epoch has recorded nothing yet says so, rather than leaving the
+/// last superseded record to read as where the run is now.
+///
+/// Read from the run's own journal, which is where every one of these records is
+/// written and the only store [`fired`] reads.
 pub(crate) fn results_lines(view: &RunView) -> String {
+    let events = journal::read(&view.paths.journal());
+    let epochs = epochs(&events);
+    // The edit that ended the epoch the record at `at` is in, where one has.
+    let superseded_by = |at: usize| {
+        epochs
+            .ended_by
+            .iter()
+            .find(|&&edit| edit > at)
+            .map(|&edit| edit_named(&events[edit]))
+    };
     let mut out = String::new();
-    for (at, event) in view.events.iter().enumerate() {
+    let mut in_this_epoch = false;
+    for (at, event) in events.iter().enumerate() {
         match PipelineKind::from_wire(&event.kind) {
             Some(PipelineKind::RunHookFired) => {
                 let Some(hook) = event
@@ -730,6 +816,8 @@ pub(crate) fn results_lines(view: &RunView) -> String {
                 else {
                     continue;
                 };
+                let superseded = superseded_by(at);
+                in_this_epoch |= superseded.is_none();
                 let reason = event
                     .payload
                     .get("reason")
@@ -739,10 +827,13 @@ pub(crate) fn results_lines(view: &RunView) -> String {
                 // The log is derived from the run rather than taken from a record,
                 // so a view opens only this run's own storage.
                 let log = log_path(&view.paths, hook);
-                let finished = view.events[at + 1..].iter().find(|later| {
-                    PipelineKind::from_wire(&later.kind) == Some(PipelineKind::RunHookFinished)
+                let is_this_hook = |later: &Envelope, kind: PipelineKind| {
+                    PipelineKind::from_wire(&later.kind) == Some(kind)
                         && later.payload.get("hook").and_then(Value::as_str) == Some(hook.as_str())
-                });
+                };
+                let finished = events[at + 1..]
+                    .iter()
+                    .find(|later| is_this_hook(later, PipelineKind::RunHookFinished));
                 let ended = match finished {
                     Some(finished) => format!(
                         "ending: {}; exit: {}",
@@ -761,11 +852,25 @@ pub(crate) fn results_lines(view: &RunView) -> String {
                     ),
                     None => "still running".to_string(),
                 };
+                let standing = superseded.map_or_else(String::new, |edit| {
+                    format!(" — superseded: {edit} reopened the run after it")
+                });
                 out.push_str(&format!(
-                    "  {hook} hook fired — reason: {}; {ended}; log: {}\n",
+                    "  {hook} hook fired{standing} — reason: {}; {ended}; log: {}\n",
                     views::one_line(reason),
                     log.display()
                 ));
+                // Each firing of a hook starts its log afresh, so what the file
+                // holds now is the last firing's output and nobody else's.
+                if events[at + 1..]
+                    .iter()
+                    .any(|later| is_this_hook(later, PipelineKind::RunHookFired))
+                {
+                    out.push_str(&format!(
+                        "      its output is not repeated: a later {hook} hook rewrote the log\n"
+                    ));
+                    continue;
+                }
                 match tail(&log) {
                     Ok(lines) => {
                         for line in lines {
@@ -780,19 +885,32 @@ pub(crate) fn results_lines(view: &RunView) -> String {
                     )),
                 }
             }
-            Some(PipelineKind::RunHookWithheld) => out.push_str(&format!(
-                "  run-end hook withheld — the run is paused on a decision ({}), so no hook \
-                 fired\n",
-                views::one_line(
-                    event
-                        .payload
-                        .get("settlement")
-                        .and_then(Value::as_str)
-                        .unwrap_or(PAUSED)
-                )
-            )),
+            Some(PipelineKind::RunHookWithheld) => {
+                let superseded = superseded_by(at);
+                in_this_epoch |= superseded.is_none();
+                let standing = superseded.map_or_else(String::new, |edit| {
+                    format!(" — superseded: {edit} reopened the run after it")
+                });
+                out.push_str(&format!(
+                    "  run-end hook withheld{standing} — the run is paused on a decision ({}), \
+                     so no hook fired\n",
+                    views::one_line(
+                        event
+                            .payload
+                            .get("settlement")
+                            .and_then(Value::as_str)
+                            .unwrap_or(PAUSED)
+                    )
+                ));
+            }
             _ => {}
         }
+    }
+    if let (false, Some(&edit)) = (in_this_epoch, epochs.ended_by.last()) {
+        out.push_str(&format!(
+            "  no run-end hook has fired since {} reopened the run\n",
+            edit_named(&events[edit])
+        ));
     }
     out
 }
