@@ -317,6 +317,13 @@ pub(crate) fn blocking_surface(paths: &RunPaths) -> bool {
 /// `DRIVER DEAD` over a run it knows nothing about — so the pid and the host are
 /// each read through the accessor that turns the record's silence back into
 /// silence rather than into an answer.
+///
+/// **A recorded stop is decisive only until a driver adopts the run.** The fold
+/// clears it at `driver-adopted` — see `RunState::stop` — because the stop was
+/// evidence about the driver it ended, and the record the adoption rewrote names
+/// the one driving the run now. So a run stopped and then adopted is judged here
+/// like any other, by that driver, and a run stopped and never adopted still reads
+/// as stopped.
 pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> DriverLiveness {
     driver_liveness(
         state.stop_recorded()
