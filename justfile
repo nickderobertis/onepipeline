@@ -110,7 +110,8 @@ _ensure-strace:
     @[ "$(uname -s)" = Linux ] || exit 0; \
       command -v strace >/dev/null 2>&1 && exit 0; \
       if [ -n "${CI:-}" ]; then \
-        sudo -n apt-get update -qq >/dev/null && sudo -n apt-get install -y -qq --no-install-recommends strace >/dev/null; \
+        { sudo -n apt-get update -qq >/dev/null && sudo -n apt-get install -y -qq --no-install-recommends strace >/dev/null; } \
+          || { echo "strace could not be installed through apt-get, and the Linux-only e2e journeys refuse without it" >&2; exit 1; }; \
       else \
         just _strace-preflight; \
       fi
