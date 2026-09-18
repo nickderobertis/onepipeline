@@ -53,6 +53,21 @@ pub const CLI_BIN_ENV: &str = "ONEPIPELINE_FAKE_CLI_BIN";
 /// puts this key so the turn can say which member it was.
 pub const MEMBER_ENV: &str = "ONEPIPELINE_FAKE_MEMBER";
 
+/// The terminal event `codex exec --json` ends on when its server cannot accept
+/// the turn, as `fake-codex` answers every attempt with it.
+///
+/// Codex's own wire, which no crate in this dependency graph declares as data:
+/// the one reader of it here is the linked `oneharness_core`'s classifier, and
+/// that is what it is gated against —
+/// `tests/e2e/dispatch.rs`'s
+/// `the_codex_doubles_overload_answer_is_the_one_the_linked_classifier_reads`
+/// drives this line through that classifier and refuses a build whose linked
+/// core no longer reads it as `server_overloaded`, and the journey beside it
+/// drives the double itself through the real graph. Named here rather than in
+/// the double so that gate and the double print one line.
+pub const CODEX_SERVER_OVERLOADED: &str =
+    r#"{"type":"turn.failed","error":{"codex_error_info":"server_overloaded"}}"#;
+
 /// The directory this double reads its script from and records into.
 ///
 /// A double with no script directory has nothing to act out, which is a
