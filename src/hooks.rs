@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::cli::DEFAULT_HOOK_TIMEOUT_SECONDS;
@@ -506,23 +506,38 @@ fn epochs(events: &[Envelope]) -> Epochs {
     Epochs { fired, ended_by }
 }
 
+/// The parts of an `edit-committed` record `results` names an edit by, read
+/// whole: the command's op, and the operations it compiled.
+#[derive(Deserialize)]
+struct CommittedEdit {
+    command: CommittedCommand,
+    operations: Vec<crate::edits::Operation>,
+}
+
+/// The command half of [`CommittedEdit`]: only the op it names is read.
+#[derive(Deserialize)]
+struct CommittedCommand {
+    op: String,
+}
+
 /// How `results` names the edit that ended an epoch: its command, when it was
-/// committed, and what it retried, which is the recovery a reader is
-/// looking for.
+/// committed, and what it retried, which is the recovery a reader is looking for.
+///
+/// A record this build cannot read whole is named as exactly that rather than
+/// by the parts of it that happened to parse. [`epochs`] only ends an epoch at an
+/// edit whose operations the fold read, so that answer is for a record whose
+/// command was written by something other than this crate.
 fn edit_named(edit: &Envelope) -> String {
-    let op = edit
-        .payload
-        .get("command")
-        .and_then(|command| command.get("op"))
-        .and_then(Value::as_str)
-        .unwrap_or("edit");
-    let retried: Vec<String> = edit
-        .payload
-        .get("operations")
-        .and_then(|operations| {
-            serde_json::from_value::<Vec<crate::edits::Operation>>(operations.clone()).ok()
-        })
-        .unwrap_or_default()
+    // Named by when it was committed: a record's `seq` counts within the stream
+    // that wrote it, and every process replying to a run writes its own, so the
+    // time is what tells one edit from another to a reader.
+    let at = views::one_line(&edit.ts);
+    let Ok(read) = serde_json::from_value::<CommittedEdit>(Value::from(edit.payload.clone()))
+    else {
+        return format!("an edit committed at {at} whose record this build cannot read");
+    };
+    let retried: Vec<String> = read
+        .operations
         .into_iter()
         .filter_map(|operation| match operation {
             crate::edits::Operation::RetryRequested {
@@ -540,13 +555,9 @@ fn edit_named(edit: &Envelope) -> String {
     } else {
         format!(": {}", retried.join(", "))
     };
-    // Named by when it was committed: a record's `seq` counts within the stream
-    // that wrote it, and every process replying to a run writes its own, so the
-    // time is what tells one edit from another to a reader.
     format!(
-        "the {} edit committed at {}{retried}",
-        views::one_line(op),
-        views::one_line(&edit.ts)
+        "the {} edit committed at {at}{retried}",
+        views::one_line(&read.command.op)
     )
 }
 

@@ -2454,7 +2454,9 @@ fn settled_detail(view: &RunView, node: &str) -> Option<String> {
 /// Read off the run's own record rather than off the driver: the hold is the
 /// `node-held` the driver journalled with a `release` reason, which the fold keeps
 /// in [`RunState::holds`] until a `node-unheld` or the release's adoption clears
-/// it, so a view in another process reads exactly what the driver decided. The
+/// it, so a view in another process reads exactly what the driver decided — each
+/// reason through the engine's own reader of one, so a reason this build cannot
+/// read whole is no release hold here either, as it is none to the driver. The
 /// releases are named by the dependencies that publish them, as the record names
 /// them, and the wait is timed from the record that opened it — omitted rather
 /// than guessed for a record whose time this build cannot read.
@@ -2464,11 +2466,9 @@ fn held_for_release(view: &RunView, id: &str) -> Option<String> {
         .holds
         .get(id)?
         .iter()
-        .filter(|reason| is_release(reason))
-        .filter_map(|reason| reason.get("awaiting").and_then(serde_json::Value::as_array))
+        .filter_map(crate::engine::release_awaited)
         .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .map(one_line)
+        .map(|dependency| one_line(&dependency))
         .collect();
     // The driver names every release it holds a node for, so a hold naming none
     // is not one it wrote, and the node reads as it would with no hold at all.
@@ -2487,11 +2487,6 @@ fn held_for_release(view: &RunView, id: &str) -> Option<String> {
     ))
 }
 
-/// Whether one recorded hold reason is a release hold.
-fn is_release(reason: &serde_json::Value) -> bool {
-    reason.get("kind").and_then(serde_json::Value::as_str) == Some("release")
-}
-
 /// When the release hold a node is under began: the first `node-held` naming a
 /// release since the node was last unheld, dispatched, or held for anything else.
 ///
@@ -2506,12 +2501,16 @@ fn release_hold_since(events: &[Envelope], id: &str) -> Option<u64> {
     {
         match PipelineKind::from_wire(&event.kind) {
             Some(PipelineKind::NodeHeld) => {
-                let released = event
+                let for_a_release = event
                     .payload
                     .get("reasons")
                     .and_then(serde_json::Value::as_array)
-                    .is_some_and(|reasons| reasons.iter().any(is_release));
-                if released {
+                    .is_some_and(|reasons| {
+                        reasons
+                            .iter()
+                            .any(|reason| crate::engine::release_awaited(reason).is_some())
+                    });
+                if for_a_release {
                     since = since.or_else(|| crate::projection::millis_of(&event.ts));
                 } else {
                     since = None;
