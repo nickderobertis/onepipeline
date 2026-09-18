@@ -2366,8 +2366,8 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this asks
 // for does not exist here, for the reason `driver.rs` and `views.rs` give: the one
 // separately edged test project's input begins at `{workspaceRoot}/src/**/*`, so a journey
-// behind it is invalidated by the same unrelated source changes. These two journeys are of
-// the release hold in `src/release.rs`, driven through the reconcile loop, which any change
+// behind it is invalidated by the same unrelated source changes. These three journeys are of
+// the release hold in `src/release.rs` and `src/engine.rs`, driven through the reconcile loop, which any change
 // under `src/` can move, and they live beside the forty-odd adoption journeys in this file,
 // which is where a reader looks for one and what `just test-e2e` already runs on its own.
 /// A `published` node whose dependency **cannot be described** on the pass it
@@ -2864,7 +2864,7 @@ fn a_published_node_readied_in_the_pass_its_dependency_is_found_landed_is_held_f
 /// The release hold on one node was recorded **before** its dispatch was.
 ///
 /// The order they were written in, read off the store: a hold reported after the
-/// dispatch it should have prevented is the failure this module's two journeys
+/// dispatch it should have prevented is the failure this module's three journeys
 /// above were written for.
 fn held_before_dispatched(world: &World, run: &str, node: &str) {
     let journal = world.journal(run);
