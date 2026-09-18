@@ -2455,49 +2455,36 @@ fn settled_detail(view: &RunView, node: &str) -> Option<String> {
 /// `node-held` the driver journalled with a `release` reason, which the fold keeps
 /// in [`RunState::holds`] until a `node-unheld` or the release's adoption clears
 /// it, so a view in another process reads exactly what the driver decided. The
-/// dependencies it awaits are named with the release target the node consumes of
-/// each, where it states one, and the wait is timed from the record that opened
-/// it.
+/// releases are named by the dependencies that publish them, as the record names
+/// them, and the wait is timed from the record that opened it — omitted rather
+/// than guessed for a record whose time this build cannot read.
 fn held_for_release(view: &RunView, id: &str) -> Option<String> {
-    let releases: Vec<&serde_json::Value> = view
+    let awaited: Vec<String> = view
         .state
         .holds
         .get(id)?
         .iter()
         .filter(|reason| is_release(reason))
-        .collect();
-    if releases.is_empty() {
-        return None;
-    }
-    let consumes = view.state.graph.get(id).map(|node| &node.consumes);
-    let awaited: Vec<String> = releases
-        .iter()
         .filter_map(|reason| reason.get("awaiting").and_then(serde_json::Value::as_array))
         .flatten()
         .filter_map(serde_json::Value::as_str)
-        .map(
-            |dependency| match consumes.and_then(|consumes| consumes.get(dependency)) {
-                Some(target) => format!(
-                    "{} ({})",
-                    one_line(dependency),
-                    one_line(&target.to_string())
-                ),
-                None => one_line(dependency),
-            },
-        )
+        .map(one_line)
         .collect();
-    let awaited = if awaited.is_empty() {
-        "a published release".to_owned()
-    } else {
-        format!("the published release of {}", awaited.join(", "))
-    };
+    // The driver names every release it holds a node for, so a hold naming none
+    // is not one it wrote, and the node reads as it would with no hold at all.
+    if awaited.is_empty() {
+        return None;
+    }
     let waited = release_hold_since(&view.events, id).map_or_else(String::new, |since| {
         format!(
             ", waited {}",
             crate::telemetry::duration(sys::now_millis().saturating_sub(since))
         )
     });
-    Some(format!("held — awaiting {awaited}{waited}"))
+    Some(format!(
+        "held — awaiting the published release of {}{waited}",
+        awaited.join(", ")
+    ))
 }
 
 /// Whether one recorded hold reason is a release hold.
@@ -3793,6 +3780,59 @@ mod tests {
             payload: crate::journal::payload(fields),
             artifacts: Vec::new(),
         }
+    }
+
+    /// A release hold is timed from the record that **opened** it: restating it —
+    /// as a driver does when what it awaits shrinks, or an adopting driver does
+    /// with the hold it inherits — is not a new wait, while a dispatch, an unhold
+    /// or a hold for something else ends it, and a record whose time cannot be
+    /// read times nothing.
+    ///
+    /// Stated over records rather than driven, because the restatement and the
+    /// reset a journey would need are a driver's timing to produce and each would
+    /// be the whole journey; `adoption.rs` drives the hold the status line reads.
+    #[test]
+    fn a_release_hold_is_timed_from_the_record_that_opened_it() {
+        use crate::journal::PipelineKind::{NodeDispatched, NodeHeld, NodeUnheld};
+        let at = |kind, reason: &str, ts: &str| {
+            let mut record = event(
+                kind,
+                Some("consumer"),
+                &[("reasons", json!([{"kind": reason, "awaiting": ["engine"]}]))],
+            );
+            record.ts = ts.to_owned();
+            record
+        };
+        let first = "2026-09-18T12:00:00.000Z";
+        let later = "2026-09-18T12:05:00.000Z";
+        let opened = crate::projection::millis_of(first);
+        let reopened = crate::projection::millis_of(later);
+        assert!(opened.is_some() && reopened.is_some());
+
+        let restated = [
+            at(NodeHeld, "release", first),
+            at(NodeHeld, "release", later),
+        ];
+        assert_eq!(release_hold_since(&restated, "consumer"), opened);
+        assert_eq!(release_hold_since(&restated, "another"), None);
+
+        for ended in [NodeUnheld, NodeDispatched] {
+            let records = [
+                at(NodeHeld, "release", first),
+                at(ended, "release", first),
+                at(NodeHeld, "release", later),
+            ];
+            assert_eq!(release_hold_since(&records, "consumer"), reopened);
+            assert_eq!(release_hold_since(&records[..2], "consumer"), None);
+        }
+        let elsewhere = [
+            at(NodeHeld, "release", first),
+            at(NodeHeld, "concurrency", first),
+        ];
+        assert_eq!(release_hold_since(&elsewhere, "consumer"), None);
+
+        let unreadable = [at(NodeHeld, "release", "not a time")];
+        assert_eq!(release_hold_since(&unreadable, "consumer"), None);
     }
 
     fn dead_pid() -> u32 {
