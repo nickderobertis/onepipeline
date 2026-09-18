@@ -6138,7 +6138,13 @@ still inherits — and the ticket the store resolves over the lineage's item nev
 `todo` on a retry.
 
 Nothing about a `cancel` (`parked`) or a `drop` (`cancelled`, paired-closed) changes, and a node
-that is neither retried nor requeued is projected exactly as before.
+that is neither retried nor requeued is projected exactly as before. A running node the planner
+cancels settles `cancelled` and its item reads **`parked`** — the park outranks the settlement in
+`graph::derive`, and it is an open word — so within one build a cancel closes nothing and a
+retry or requeue of that node lands `queued` on the same item at the id it held, mints no item,
+and reports `reopened: 0` for it. The reopen count applies to an item whose pre-copy category on
+the destination was `done` or `cancelled`: what an older build wrote for a superseded node, or
+what a person closing the card left.
 
 `writeback::tests` holds one shadow task per lineage with the head's fields and the three keys,
 the root member carried on a retry, the furthest-along resolution over an older board and over
@@ -6184,6 +6190,6 @@ binary against the real `onetaskgraph` and this suite's store double.
     "record": {"key": "actions.reopened", "from_schema_version": 3, "stated_in": "entry 73"}
   },
   "retry": {"delivers": "a replacement stating none inherits the superseded node's, on its own condition"},
-  "unchanged": {"cancel": "parked", "drop": "cancelled", "untouched_node": "as before"}
+  "unchanged": {"cancel": "parked", "cancelled_running_node": "parked", "drop": "cancelled", "untouched_node": "as before"}
 }
 ```

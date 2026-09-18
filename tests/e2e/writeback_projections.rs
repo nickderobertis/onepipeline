@@ -25,8 +25,8 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 use crate::harness::{
-    agent, double, onetaskgraph_binary, plan_of, project_id, World, RENDEZVOUS_SECONDS_ENV,
-    STORE_BINARY_ENV,
+    agent, double, onetaskgraph_binary, plan_of, project_id, World, CANCEL_GRACE_ENV,
+    RENDEZVOUS_SECONDS_ENV, STORE_BINARY_ENV,
 };
 
 /// Entry 73's block, which is where the record's path and the store's answer's path are
@@ -191,6 +191,14 @@ fn noted(world: &World, run: &str, node: &str, text: &str) {
 /// Rewrite one front-matter field of a destination document, the way a person editing the
 /// board's own file does.
 fn amend(path: &Path, key: &str, value: Value) {
+    rewritten(path, path, |front| {
+        front.insert(key.to_owned(), value);
+    });
+}
+
+/// Rewrite a destination document's front matter with `edit`, from `path` to `into` — the same
+/// file for an edit in place, another for a document modelled on this one.
+fn rewritten(path: &Path, into: &Path, edit: impl FnOnce(&mut serde_json::Map<String, Value>)) {
     let document = std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("{} is readable: {error}", path.display()));
     let (front, body) = document
@@ -200,9 +208,44 @@ fn amend(path: &Path, key: &str, value: Value) {
         .expect("a store document closes its front matter");
     let mut parsed: serde_json::Map<String, Value> =
         serde_norway::from_str(front).expect("the front matter is YAML");
-    parsed.insert(key.to_owned(), value);
+    edit(&mut parsed);
     let rendered = serde_norway::to_string(&parsed).expect("the front matter renders");
-    std::fs::write(path, format!("---\n{rendered}---\n{body}")).expect("the document is written");
+    std::fs::write(into, format!("---\n{rendered}---\n{body}")).expect("the document is written");
+}
+
+/// The file a `local-md` destination keeps one item in: its id's local half, under the
+/// project's tasks folder.
+fn item_file(world: &World, task: &Value) -> std::path::PathBuf {
+    let id = task["id"].as_str().expect("an item id");
+    let local = id
+        .split_once(':')
+        .map(|(_, local)| local)
+        .expect("a qualified id");
+    world.store().join("tasks").join(format!("{local}.md"))
+}
+
+/// Cancel one node, and wait for the reconciler to commit it.
+fn cancelled(world: &World, run: &str, node: &str) {
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [{"op": "cancel", "id": node}]}).to_string(),
+        )
+        .exited(0);
+    world.until(&format!("the cancel of {node} to settle it"), |world| {
+        world.events_of(run, "node-settled").iter().any(|event| {
+            event["labels"]["node"] == node && event["payload"]["status"] == "cancelled"
+        })
+    });
+}
+
+fn edit(world: &World, run: &str, command: Value) {
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [command]}).to_string(),
+        )
+        .exited(0);
 }
 
 /// End the run's quiet driver and adopt it, so a second driver projects the same run.
@@ -734,9 +777,10 @@ fn the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent() {
     assert_eq!(counted["outcome"], "projected", "{counted}");
     assert_eq!(counted["scope"], "members", "{counted}");
     assert_eq!(counted["spent"], spent, "{counted}");
+    // The rewritten items are no shadow task of the run, so none of them is a reopen.
     assert_eq!(
         counted["actions"],
-        json!({"created": 2, "updated": 3, "unchanged": 5, "orphaned": 1}),
+        json!({"created": 2, "updated": 3, "unchanged": 5, "orphaned": 1, "reopened": 0}),
         "{counted}"
     );
     world.until_store("the copy the report was rewritten for to land", |world| {
@@ -754,7 +798,392 @@ fn the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent() {
     assert_eq!(real["spent"], Value::Null, "{real}");
     assert_eq!(
         real["actions"],
-        json!({"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0}),
+        json!({"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0, "reopened": 0}),
         "{real}"
     );
+}
+
+/// A running node that is cancelled settles `cancelled` and reads `parked` on the board — the
+/// park outranks the settlement, and it is an open word — so within one build nothing closes
+/// its item and nothing has to reopen it. What does read closed is an item a board an older
+/// build wrote, or a person, closed: `cancelled` on the destination. A retry or a requeue of
+/// such a node writes `queued` onto **that same item**, which the store reopens: the attempt
+/// that projects the retry carries the lineage root alone, reports `created: 0` and
+/// `reopened: 1`, and the board holds one item for the lineage at the id it had before, naming
+/// the replacement under `onepipeline.node`; the requeue likewise lands `queued` on its one item
+/// with `reopened: 1`; and a cancelled node nobody retries or requeues keeps its one item under
+/// the word it had. A held node keeps the run alive through three parks, and under a
+/// concurrency of two — that node in one slot, a second held node added into the other — each
+/// reopened node is read at `queued` rather than the word its dispatch would move it to.
+#[test]
+fn a_retry_or_requeue_of_a_cancelled_node_reopens_its_one_item() {
+    let run = "projections-reopen";
+    let world = World::new("writeback-projections-reopen");
+    for node in ["retried", "requeued", "left"] {
+        world.script(&format!("{node}.turn-open"), "");
+        world.script(&format!("{node}.wait"), "hold");
+        world.script(&format!("{node}.stops-when-interrupted"), "");
+    }
+    for held in ["hog", "filler"] {
+        world.script(&format!("{held}.wait"), "hold");
+    }
+    let mut plan = plan_of(
+        run,
+        vec![
+            agent("hog", &[]),
+            agent("retried", &[]),
+            agent("requeued", &[]),
+            agent("left", &[]),
+        ],
+    );
+    plan["concurrency"] = json!(2);
+    let project = world.plan(run, &plan);
+    world.script(
+        "onetaskgraph.delegate",
+        &onetaskgraph_binary().to_string_lossy(),
+    );
+    let world = world
+        .with_env(
+            STORE_BINARY_ENV,
+            &double("fake-onetaskgraph").to_string_lossy(),
+        )
+        .with_env(RENDEZVOUS_SECONDS_ENV, "600")
+        .with_env(CANCEL_GRACE_ENV, "1");
+    world.run(&["start", &project, "--detach"]).exited(0);
+
+    // One at a time in the slot beside the hog, each stopped when asked and settled cancelled.
+    for node in ["retried", "requeued", "left"] {
+        world.until(&format!("{node}'s turn to open"), |world| {
+            world
+                .events_of(run, "turn-started")
+                .iter()
+                .any(|event| event["labels"]["node"] == node)
+        });
+        cancelled(&world, run, node);
+    }
+    // Today's word for a running node the cancel stopped, with the settlement beside it.
+    projected_until(
+        &world,
+        run,
+        &project,
+        "the three cancellations to reach the board",
+        |tasks| {
+            ["retried", "requeued", "left"].iter().all(|node| {
+                board_word(tasks, node).as_deref() == Some("unknown")
+                    && board_task(tasks, node)["item"]["status"]["name"] == "parked"
+                    && board_task(tasks, node)["item"]["metadata"]["onepipeline.settlement"]
+                        ["status"]
+                        == "cancelled"
+            })
+        },
+    );
+    let before = world.store_tasks(&project);
+    let held_before = |node: &str| board_task(&before, node)["id"].clone();
+
+    // Two of the items are closed on the board — what a board an older build wrote holds
+    // for a cancelled node, and what a person closing the card leaves — and one is left as
+    // the run wrote it.
+    // llmlint: ignore-block[tests_mirror_real_usage] a `local-md` destination *is* its folder
+    // of Markdown, so closing an item on the board is writing its file; `onetaskgraph` has no
+    // verb that moves one item's status in place.
+    for node in ["retried", "requeued"] {
+        amend(
+            &item_file(&world, board_task(&before, node)),
+            "status",
+            json!("cancelled"),
+        );
+    }
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.until_store("the closed items to read cancelled", |world| {
+        let tasks = world.store_tasks(&project);
+        board_word(&tasks, "retried").as_deref() == Some("cancelled")
+            && board_word(&tasks, "requeued").as_deref() == Some("cancelled")
+    });
+
+    // A replacement behind the hog is read at `queued` for as long as the hog runs.
+
+    let reopens = |records: &[Value], root: &str| {
+        assert!(
+            !records.is_empty(),
+            "the edit of {root} was never projected"
+        );
+        for record in records {
+            assert_eq!(record["items"], json!([root]), "{record}");
+            assert_eq!(record["outcome"], "projected", "{record}");
+            assert_eq!(record["actions"]["created"], 0, "{record}");
+        }
+        records
+            .iter()
+            .map(|record| record["actions"]["reopened"].as_u64().unwrap_or_default())
+            .sum::<u64>()
+    };
+
+    let mark = records(&world, run).len();
+    edit(
+        &world,
+        run,
+        json!({"op": "retry", "id": "retried", "node": {
+            "id": "retried-2", "persona": "engineer", "task": "## What\nRetry it.",
+            "deps": ["hog"]
+        }}),
+    );
+    projected_until(
+        &world,
+        run,
+        &project,
+        "the retry to reopen the lineage's item",
+        |tasks| {
+            board_word(tasks, "retried").as_deref() == Some("queued")
+                && board_task(tasks, "retried")["item"]["metadata"]["onepipeline.node"]
+                    == "retried-2"
+        },
+    );
+    let retried = records(&world, run)[mark..].to_vec();
+    assert_eq!(
+        reopens(&retried, "retried"),
+        1,
+        "the retry's projection did not count exactly one reopen: {retried:?}"
+    );
+    let tasks = world.store_tasks(&project);
+    let lineage: Vec<&Value> = tasks
+        .iter()
+        .filter(|task| task["item"]["metadata"]["onepipeline.id"] == "retried")
+        .collect();
+    assert_eq!(lineage.len(), 1, "{tasks:?}");
+    assert_eq!(lineage[0]["id"], held_before("retried"), "{}", lineage[0]);
+    assert_eq!(lineage[0]["item"]["content"], "## What\nRetry it.");
+    assert_eq!(
+        lineage[0]["item"]["metadata"]["onepipeline.supersedes"],
+        json!(["retried"])
+    );
+    assert!(
+        !tasks
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.id"] == "retried-2"),
+        "the retry minted an item for the replacement: {tasks:?}"
+    );
+
+    // A second held node into the free slot, so the requeued node is read at `queued` too.
+    edit(
+        &world,
+        run,
+        json!({"op": "add", "node": agent("filler", &[])}),
+    );
+    projected_until(
+        &world,
+        run,
+        &project,
+        "the filler to take the slot",
+        |tasks| board_word(tasks, "filler").as_deref() == Some("in-progress"),
+    );
+    assert_eq!(
+        board_word(&world.store_tasks(&project), "requeued").as_deref(),
+        Some("cancelled"),
+        "a member copy that did not name the closed item rewrote it"
+    );
+    let mark = records(&world, run).len();
+    edit(&world, run, json!({"op": "requeue", "id": "requeued"}));
+    projected_until(
+        &world,
+        run,
+        &project,
+        "the requeue to reopen the node's item",
+        |tasks| board_word(tasks, "requeued").as_deref() == Some("queued"),
+    );
+    let requeued = records(&world, run)[mark..].to_vec();
+    assert_eq!(
+        reopens(&requeued, "requeued"),
+        1,
+        "the requeue's projection did not count exactly one reopen: {requeued:?}"
+    );
+    let tasks = world.store_tasks(&project);
+    assert_eq!(
+        board_task(&tasks, "requeued")["id"],
+        held_before("requeued")
+    );
+    assert_eq!(
+        board_task(&tasks, "requeued")["item"]["metadata"]["onepipeline.node"],
+        "requeued"
+    );
+    // And the one nobody came back to keeps its item and its word.
+    assert_eq!(board_task(&tasks, "left")["id"], held_before("left"));
+    assert_eq!(
+        board_task(&tasks, "left")["item"]["status"]["name"],
+        "parked"
+    );
+    // Every landed attempt at the current version names the count.
+    for record in records(&world, run) {
+        assert_eq!(
+            record["schema_version"].as_u64(),
+            Some(u64::from(
+                onepipeline::cli::WRITEBACK_PROJECTIONS_SCHEMA_VERSION
+            )),
+            "{record}"
+        );
+        if record["outcome"] == "projected" && record["actions"].is_object() {
+            assert!(record["actions"]["reopened"].is_u64(), "{record}");
+        }
+    }
+    world.release("hog.go");
+    world.release("filler.go");
+}
+
+/// A board an older build wrote holds one item per attempt: after `--adopt`, the whole
+/// projection carries the lineage once, onto the item of the furthest-along attempt, and leaves
+/// the root's older item byte for byte. Once this build has written the head onto that item —
+/// `onepipeline.id` the root, `onepipeline.node` the attempt — a second whole projection over
+/// the same board resolves it the same way and lands, rather than refusing two items for one
+/// `onepipeline.id`.
+#[test]
+fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item() {
+    let run = "projections-older-board";
+    let (world, project) = a_run_projecting_through_a_recording_store(
+        "writeback-projections-older-board",
+        run,
+        vec![agent("flaky", &[]), agent("hold", &[])],
+        &["flaky", "hold"],
+        None,
+    );
+    world.script("flaky-2.wait", "hold");
+    projected_until(
+        &world,
+        run,
+        &project,
+        "both nodes to reach the board",
+        |tasks| {
+            board_word(tasks, "flaky").as_deref() == Some("in-progress")
+                && board_word(tasks, "hold").as_deref() == Some("in-progress")
+        },
+    );
+    edit(
+        &world,
+        run,
+        json!({"op": "retry", "id": "flaky", "node": {
+            "id": "flaky-2", "persona": "engineer", "task": "## What\nAgain."
+        }}),
+    );
+    projected_until(
+        &world,
+        run,
+        &project,
+        "the retry to reach the lineage's item",
+        |tasks| {
+            board_task(tasks, "flaky")["item"]["metadata"]["onepipeline.node"] == "flaky-2"
+                && board_word(tasks, "flaky").as_deref() == Some("in-progress")
+        },
+    );
+
+    // What an older build left: the root's item closed and plain at its own id, and a second
+    // item for the attempt, plain at its own id. The destination is a folder of Markdown, so
+    // seeding that board is writing its files.
+    // llmlint: ignore-block[tests_mirror_real_usage] a `local-md` destination *is* its folder of
+    // Markdown, and a board an older build wrote is exactly these files; `onetaskgraph` has no
+    // verb that writes an item's reserved metadata in place.
+    let tasks = world.store_tasks(&project);
+    let root_file = item_file(&world, board_task(&tasks, "flaky"));
+    let attempt_file = root_file.with_file_name("older-build-flaky-2.md");
+    rewritten(&root_file, &attempt_file, |front| {
+        front["status"] = json!("in progress");
+        let metadata = front["metadata"].as_object_mut().expect("metadata");
+        metadata.insert("onepipeline.id".to_owned(), json!("flaky-2"));
+        metadata.remove("onepipeline.node");
+        metadata.remove("onepipeline.supersedes");
+        metadata.insert(
+            "onetaskgraph.origin".to_owned(),
+            json!("onepipeline-writeback:older/older-build-flaky-2"),
+        );
+    });
+    rewritten(&root_file, &root_file, |front| {
+        front["status"] = json!("cancelled");
+        front["title"] = json!("what the older build closed");
+        let metadata = front["metadata"].as_object_mut().expect("metadata");
+        metadata.remove("onepipeline.node");
+        metadata.remove("onepipeline.supersedes");
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let older_root = std::fs::read(&root_file).expect("the seeded root item reads");
+    let seeded = world.store_tasks(&project);
+    assert_eq!(
+        seeded
+            .iter()
+            .filter(|task| task["item"]["metadata"]["onepipeline.id"] == "flaky-2")
+            .count(),
+        1,
+        "the board was not seeded with the attempt's own item: {seeded:?}"
+    );
+    let attempt_id = seeded
+        .iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "flaky-2")
+        .map(|task| task["id"].clone())
+        .expect("the seeded attempt item");
+
+    // Stopped and then adopted, rather than adopted out from under a live driver: a driver
+    // that already knows the lineage's item projects a member copy onto it as it is displaced,
+    // and what this journey is about is a driver reading the board cold.
+    let reused_by_a_whole_projection = |world: &World, what: &str| {
+        world.run(&["stop", run]).exited(0);
+        let mark = records(world, run).len();
+        world.run(&["adopt", run, "--detach"]).exited(0);
+        world.until(&format!("{what} to be recorded"), |world| {
+            records(world, run).len() > mark && every_attempt_landed(world, run)
+        });
+        let whole = records(world, run)[mark].clone();
+        assert_eq!(whole["scope"], "whole", "{whole}");
+        assert_eq!(whole["whole_because"], "first", "{whole}");
+        assert_eq!(whole["outcome"], "projected", "{whole}");
+        assert_eq!(
+            whole["items"],
+            json!(["flaky", "hold"]),
+            "the whole projection carried other than one item per lineage: {whole}"
+        );
+        assert_eq!(whole["actions"]["created"], 0, "{whole}");
+        assert_eq!(
+            std::fs::read(&root_file).expect("the root item reads"),
+            older_root,
+            "the older build's item at the root was rewritten"
+        );
+        let tasks = world.store_tasks(&project);
+        let reused = tasks
+            .iter()
+            .find(|task| task["id"] == attempt_id)
+            .unwrap_or_else(|| panic!("the attempt's item is gone: {tasks:?}"));
+        assert_eq!(
+            reused["item"]["metadata"]["onepipeline.id"], "flaky",
+            "{reused}"
+        );
+        assert_eq!(
+            reused["item"]["metadata"]["onepipeline.node"], "flaky-2",
+            "{reused}"
+        );
+        assert_eq!(
+            reused["item"]["metadata"]["onepipeline.supersedes"],
+            json!(["flaky"]),
+            "{reused}"
+        );
+        // Open: `queued` where the adopted driver has yet to dispatch the head again,
+        // `in-progress` once it has.
+        assert!(
+            matches!(
+                reused["item"]["status"]["category"].as_str(),
+                Some("queued" | "in-progress")
+            ),
+            "{reused}"
+        );
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|task| task["item"]["metadata"]["onepipeline.id"] == "flaky")
+                .count(),
+            2,
+            "the older item at the root and the reused head are both meant to stand: {tasks:?}"
+        );
+        assert!(
+            !tasks
+                .iter()
+                .any(|task| task["item"]["metadata"]["onepipeline.id"] == "flaky-2"),
+            "an item still says it is the attempt's own: {tasks:?}"
+        );
+    };
+    reused_by_a_whole_projection(&world, "the adopted driver's whole projection");
+    reused_by_a_whole_projection(&world, "a second whole projection over the rewritten board");
 }

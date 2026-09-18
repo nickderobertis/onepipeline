@@ -213,6 +213,13 @@ fn add_reparent_and_note_are_applied_and_reported_applied() {
     });
 }
 
+/// Each ruling reaches the board on the item the node already has, and a retry reaches it on
+/// the **same** item rather than a new one: after the `retry`, the destination holds one item
+/// for the lineage, at the destination id it held before, reading the replacement's body,
+/// branch and word, with `onepipeline.id` the root, `onepipeline.node` the replacement and
+/// `onepipeline.supersedes` the superseded id — and no item whose `onepipeline.id` is the
+/// replacement's. The cancelled-then-requeued node keeps its one item, and the dropped one
+/// reads `cancelled`.
 #[test]
 fn retry_cancel_requeue_and_drop_are_projected_after_their_rulings() {
     let world = World::new("edit-writeback-remaining");
@@ -227,6 +234,24 @@ fn retry_cancel_requeue_and_drop_are_projected_after_their_rulings() {
         ],
         &["root", "retried"],
     );
+    let project = "plans:remaining-board";
+    let item_of = |tasks: &[Value], node: &str| -> Vec<Value> {
+        tasks
+            .iter()
+            .filter(|task| task["item"]["metadata"]["onepipeline.id"] == node)
+            .cloned()
+            .collect()
+    };
+    // The item the retried node holds before the retry, which is the one the retry has to
+    // write onto.
+    world.until_store("the retried node to reach the board", |world| {
+        !item_of(&world.store_tasks(project), "retried").is_empty()
+    });
+    let held_before = item_of(&world.store_tasks(project), "retried")[0]["id"]
+        .as_str()
+        .expect("an item id")
+        .to_owned();
+
     for command in [
         json!({"op": "cancel", "id": "cancelled"}),
         json!({"op": "requeue", "id": "cancelled", "amend": {"branch": "topic/resumed"}}),
@@ -244,26 +269,57 @@ fn retry_cancel_requeue_and_drop_are_projected_after_their_rulings() {
     world.until_store(
         "the remaining accepted edits to reach the project",
         |world| {
-            let tasks = world.store_tasks("plans:remaining-board");
-            let task = |id: &str| {
-                tasks
-                    .iter()
-                    .find(|task| task["item"]["metadata"]["onepipeline.id"] == id)
+            let tasks = world.store_tasks(project);
+            let one = |id: &str| {
+                let items = item_of(&tasks, id);
+                (items.len() == 1).then(|| items[0].clone())
             };
-            task("cancelled").is_some_and(|task| {
+            one("cancelled").is_some_and(|task| {
                 task["item"]["status"]["category"] == "queued"
                     && task["item"]["metadata"]["onepipeline.branch"] == "topic/resumed"
-            }) && task("dropped")
+            }) && one("dropped")
                 .is_some_and(|task| task["item"]["status"]["category"] == "cancelled")
-                && task("retried")
-                    .is_some_and(|task| task["item"]["status"]["category"] == "cancelled")
-                && task("replacement").is_some_and(|task| {
+                && one("retried").is_some_and(|task| {
                     matches!(
                         task["item"]["status"]["category"].as_str(),
-                        Some("queued" | "done")
-                    ) && task["item"]["metadata"]["onepipeline.branch"] == "topic/replacement"
+                        Some("queued" | "in-progress" | "done")
+                    ) && task["item"]["metadata"]["onepipeline.node"] == "replacement"
                 })
         },
+    );
+    let tasks = world.store_tasks(project);
+    let lineage = item_of(&tasks, "retried");
+    assert_eq!(
+        lineage.len(),
+        1,
+        "the lineage holds other than one item: {tasks:?}"
+    );
+    let lineage = &lineage[0];
+    assert_eq!(
+        lineage["id"],
+        json!(held_before),
+        "the retry was projected onto an item other than the one the node held: {lineage}"
+    );
+    assert_eq!(
+        lineage["item"]["content"], "## What\nRetry it.",
+        "{lineage}"
+    );
+    assert_eq!(lineage["item"]["metadata"]["onepipeline.id"], "retried");
+    assert_eq!(
+        lineage["item"]["metadata"]["onepipeline.node"],
+        "replacement"
+    );
+    assert_eq!(
+        lineage["item"]["metadata"]["onepipeline.supersedes"],
+        json!(["retried"])
+    );
+    assert_eq!(
+        lineage["item"]["metadata"]["onepipeline.branch"],
+        "topic/replacement"
+    );
+    assert!(
+        item_of(&tasks, "replacement").is_empty(),
+        "the retry minted an item of its own for the replacement: {tasks:?}"
     );
     world.release("retried.go");
     world.release("root.go");

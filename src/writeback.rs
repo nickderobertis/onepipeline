@@ -1953,8 +1953,10 @@ struct DestinationTaskItem {
     /// Read for `onepipeline.id`, which is how a destination task names its plan node.
     metadata: BTreeMap<String, Value>,
     /// Read for its category, which is what says whether a copy reopened the item. Lenient:
-    /// an answer without one — `store::…_a_field_it_never_read` drops it — reads as an item
-    /// whose category nobody knows, which no copy is counted as reopening.
+    /// an answer without one —
+    /// `store::a_settlement_reaches_a_store_whose_answer_dropped_a_field_this_build_never_read`
+    /// takes it away — reads as an item whose category nobody knows, which no copy is counted
+    /// as reopening.
     #[serde(default)]
     status: Option<DestinationStatus>,
     // llmlint: ignore-block[invalid_states_unrepresentable] `location` is onetaskgraph's

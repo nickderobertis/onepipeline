@@ -486,8 +486,10 @@ fn a_settlement_reaches_a_store_whose_answer_dropped_a_field_this_build_never_re
         &onetaskgraph_binary().to_string_lossy(),
     );
     // Fields of the page and of the item, and none the projection or the plan reader
-    // consumes. The double refuses a name this answer does not carry, so a fixture that
-    // moved nothing here fails rather than passing as a plain delegated answer.
+    // requires: the projection reads a task's `status` for its category where the answer
+    // carries one, and counts no reopen where it does not. The double refuses a name this
+    // answer does not carry, so a fixture that moved nothing here fails rather than passing
+    // as a plain delegated answer.
     world.script(
         "onetaskgraph.project-show.shrink",
         "plan status repositories\n",
