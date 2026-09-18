@@ -669,6 +669,12 @@ oneagentgraph = { workspace = true }
 onevcs = { workspace = true }
 # Read-only vocabulary, not a composed sibling — see `[workspace.dependencies]`.
 onejudge = { workspace = true }
+# Read-only too, and nothing here launches it: the dispatch-env hook's check
+# reads each oneharness config a launch is about to read through that library's
+# own parser, so which `env_from` sources a variant names is never restated
+# here. Already in the graph — `onejudge` and `oneagentgraph` build it — so it
+# adds nothing to what this build resolves.
+oneharness-core = { workspace = true }
 # The wire layer, re-exported — see `[workspace.dependencies]`.
 onemessagebus = { workspace = true }
 onemessagebus-agent = { workspace = true }
@@ -721,16 +727,14 @@ windows-sys = { version = "0.61", features = [
 # uses) and `sha2` spells the name. Both are already in the graph through the
 # siblings, so neither adds anything to what this build resolves.
 #
-# `oneharness-core` is here for its **types**, at the one copy the workspace pin
-# resolves: `tests/e2e/dispatch.rs` reads the history record a dispatch's
-# `oneharness-session` points at through that library's own reader, and holds
-# `observed_model`, the `model_mismatch` kind and the `model-mismatch` reason to
-# that library's own spellings rather than to strings restated here. Already in
-# the graph — `onejudge` builds it — so it adds nothing to what this build
-# resolves, and nothing this crate publishes links it.
+# `oneharness-core` is a regular dependency, below, for its config reader; the
+# suite also reads it for its **types**: `tests/e2e/dispatch.rs` reads the
+# history record a dispatch's `oneharness-session` points at through that
+# library's own reader, and holds `observed_model`, the `model_mismatch` kind and
+# the `model-mismatch` reason to that library's own spellings rather than to
+# strings restated here.
 [dev-dependencies]
 fs4 = "0.13"
-oneharness-core = { workspace = true }
 onepipeline-testfakes = { path = "crates/testfakes" }
 onevcs-testing = { workspace = true }
 sha2 = "0.10"

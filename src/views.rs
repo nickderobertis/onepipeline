@@ -3538,6 +3538,8 @@ mod tests {
             success_hook: String::new(),
             failure_hook: String::new(),
             hook_timeout: 0,
+            dispatch_env_hook: String::new(),
+            dispatch_env_hook_timeout: 0,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,

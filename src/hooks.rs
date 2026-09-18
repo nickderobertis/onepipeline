@@ -45,16 +45,22 @@ const RESULTS_OUTPUT_LINES: usize = 20;
 const MAX_TAIL_BYTES: u64 = 64 * 1024;
 
 /// How often a wait on a hook looks again, and relays what it said since.
-const POLL: Duration = Duration::from_millis(50);
+///
+/// Shared with the dispatch-env hook's wait, which is the same wait without the
+/// relay.
+pub(crate) const POLL: Duration = Duration::from_millis(50);
 
 /// The environment variable naming which hook is running.
-const HOOK_ENV: &str = "ONEPIPELINE_HOOK";
+///
+/// Every hook this crate runs — the two run-end hooks and the dispatch-env hook
+/// — is told which under this one name.
+pub(crate) const HOOK_ENV: &str = "ONEPIPELINE_HOOK";
 
 /// The environment variable naming the run a hook fired for.
-const RUN_ID_ENV: &str = "ONEPIPELINE_RUN_ID";
+pub(crate) const RUN_ID_ENV: &str = "ONEPIPELINE_RUN_ID";
 
 /// The environment variable naming that run's own directory, absolute.
-const RUN_ROOT_ENV: &str = "ONEPIPELINE_RUN_ROOT";
+pub(crate) const RUN_ROOT_ENV: &str = "ONEPIPELINE_RUN_ROOT";
 
 /// The settlement a driver lets go at when the run is paused rather than ended.
 ///
@@ -518,11 +524,18 @@ fn live(state: &RunState) -> bool {
 /// Where a hook's output is kept: `hooks/<hook>.log` under the run's own
 /// directory, absolute.
 fn log_path(paths: &RunPaths, hook: Hook) -> PathBuf {
-    run_root(paths).join("hooks").join(format!("{hook}.log"))
+    hook_log(paths, &hook.to_string())
+}
+
+/// Where the output of the hook called `name` is kept: `hooks/<name>.log` under
+/// the run's own directory, absolute. One spelling for every hook this crate
+/// runs.
+pub(crate) fn hook_log(paths: &RunPaths, name: &str) -> PathBuf {
+    run_root(paths).join("hooks").join(format!("{name}.log"))
 }
 
 /// The run's own directory, absolute, as a hook is told it.
-fn run_root(paths: &RunPaths) -> PathBuf {
+pub(crate) fn run_root(paths: &RunPaths) -> PathBuf {
     std::path::absolute(&paths.dir).unwrap_or_else(|_| paths.dir.clone())
 }
 
@@ -683,7 +696,7 @@ fn run(
 /// A timeout is any positive whole number of seconds, so one can name an instant
 /// no `Instant` holds. That is a timeout no hook can outlive, and it is waited
 /// without a bound rather than panicking on a value the launch accepted.
-fn deadline_after(timeout: NonZeroU64) -> Option<Instant> {
+pub(crate) fn deadline_after(timeout: NonZeroU64) -> Option<Instant> {
     Instant::now().checked_add(Duration::from_secs(timeout.get()))
 }
 

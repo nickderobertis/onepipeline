@@ -217,6 +217,34 @@ impl Executor for LocalExecutor {
     }
 
     fn dispatch(&self, req: DispatchRequest) -> Result<Box<dyn DispatchHandle>> {
+        // The run's launch record, read once at the last responsible moment: the
+        // labels are what identify the run, and the overrides, the source filter
+        // and the dispatch-env hook below are all what that launch decided.
+        let launched = launched_with(&req.labels)?;
+        // Relayed: this dispatch is read turn by turn into the merged store.
+        let node_sets = node_sets(launched.as_ref(), &req.labels, &req.controls)?;
+        // The dispatch-env hook, **before** anything of the launch begins — the
+        // session below included, so a launch the hook refuses cuts nothing —
+        // and never for a dispatch built outside a run, which has no launch to
+        // name one. What it adds is this child's alone: it goes into `env` below
+        // and nowhere else, and this process's own environment is untouched.
+        let added = match (
+            &launched,
+            req.labels.run_id.as_deref(),
+            req.labels.node.as_deref(),
+        ) {
+            (Some(record), Some(run), Some(node)) => {
+                let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
+                crate::dispatchenv::additions(&crate::dispatchenv::Launching {
+                    paths: &paths,
+                    record,
+                    node,
+                    graph: &req.graph,
+                    sets: &node_sets,
+                })?
+            }
+            _ => Vec::new(),
+        };
         // `WorkspaceSpec::VcsSession` means the machine running the dispatch
         // opens the session *there* — the clone, worktree, and branch are cut
         // where the work happens rather than shipped to it. This executor is
@@ -237,17 +265,15 @@ impl Executor for LocalExecutor {
             .as_ref()
             .map(|session| session.token.0.clone())
             .or_else(|| session_of_worktree(&dir));
-        // Relayed: this dispatch is read turn by turn into the merged store.
-        let node_sets = node_sets(&req.labels, &req.controls)?;
         // Every node-scope launch a run starts is one of that run's
         // `oneagentgraph` sources, so it carries the same source filter the
-        // observer graph does. Read from the launch record beside the overrides
-        // above, for the same reason: the labels are what identify the run, and
-        // this is the last responsible moment.
-        let filters = launched_with(&req.labels)?
-            .map(|record| record.filters)
-            .unwrap_or_default();
-        let env = prepare_dispatch_env(&req.labels, token.as_deref())?;
+        // observer graph does.
+        let filters = launched.map(|record| record.filters).unwrap_or_default();
+        // The hook's additions first and this crate's own keys after them, so a
+        // hook cannot move where a dispatch keeps its scratch or which run it
+        // belongs to: a later pair of the same name is the one the child gets.
+        let mut env = added;
+        env.extend(prepare_dispatch_env(&req.labels, token.as_deref())?);
         let mut run = GraphRun::start(&Launch {
             graph: &req.graph.0,
             task: &req.task,
@@ -520,11 +546,15 @@ fn register_dispatch(
 /// second condition on the graph would not narrow that: an operator may point
 /// `--pr-author-graph` at the same document a node dispatches under, and then
 /// the graph says nothing about which dispatch this is.
-fn node_sets(labels: &Labels, controls: &NodeControls) -> Result<Vec<String>> {
+fn node_sets(
+    launched: Option<&crate::ledger::LaunchRecord>,
+    labels: &Labels,
+    controls: &NodeControls,
+) -> Result<Vec<String>> {
     if labels.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
         return Ok(Vec::new());
     }
-    let mut sets = launched_with(labels)?.map_or_else(Vec::new, |record| record.node_sets);
+    let mut sets = launched.map_or_else(Vec::new, |record| record.node_sets.clone());
     if let Some(persona) = &labels.persona {
         sets.push(format!("members.{WORKER_MEMBER}.persona={persona}"));
     }
@@ -736,15 +766,14 @@ mod tests {
         std::env::set_var(crate::ledger::RUNS_DIR_ENV, &root);
 
         let sets = |persona: &str| {
-            node_sets(
-                &Labels {
-                    run_id: Some("demo".into()),
-                    persona: Some(persona.into()),
-                    ..Labels::default()
-                },
-                &NodeControls::default(),
-            )
-            .expect("the launch record is readable")
+            let labels = Labels {
+                run_id: Some("demo".into()),
+                persona: Some(persona.into()),
+                ..Labels::default()
+            };
+            let launched = launched_with(&labels).expect("the launch record is readable");
+            node_sets(launched.as_ref(), &labels, &NodeControls::default())
+                .expect("the overrides compose")
         };
         assert!(
             sets(crate::lifecycle::PR_AUTHOR_PERSONA).is_empty(),
@@ -882,6 +911,7 @@ mod tests {
         // budget is what the launch must still carry, because a dispatch that
         // dropped it here would run to the base config's default instead.
         let sets = node_sets(
+            None,
             &Labels {
                 persona: Some("engineer".into()),
                 ..Labels::default()
