@@ -2978,7 +2978,10 @@ mod tests {
             None,
             &[("teardown", json!("signalled"))],
         );
-        assert_eq!(fold(&[stopped.clone()]).stop, StopState::WorkersSignalled);
+        assert_eq!(
+            fold(std::slice::from_ref(&stopped)).stop,
+            StopState::WorkersSignalled
+        );
 
         let adopted = fold(&[
             stopped,
