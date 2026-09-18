@@ -15,8 +15,6 @@
 // names, and this suite supplies a real one. `harness.rs` carries the same suppression and
 // the full rationale.
 
-use std::io::Write;
-
 use serde_json::{json, Value};
 
 use crate::harness::{agent, double, human, plan_of, World, REFUSED};
@@ -355,13 +353,20 @@ fn a_host_named_author_is_enforced_at_reply_and_at_driver_apply() {
     assert_eq!(world.events_of(RUN, "edit-committed").len(), before);
 
     // llmlint: ignore-block[tests_mirror_real_usage] Deliberately bypasses
-    // `reply` to prove the driver's independent trust-boundary check; appending
-    // is the real local bus transport boundary.
+    // `reply` to prove the driver's independent trust-boundary check; the local
+    // transport's own append is the real host-bus boundary. It takes the
+    // queue's lock and lands each record in one write, which a bare file append
+    // does not: that tears a record across writes, and a reconciler claiming
+    // between two of them heals the fragment away as a dead writer's tail.
     // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the
     // envelopes are spelled by hand because bypassing `reply` is the point, and
     // the gate on their spelling is the driver reading them back below: it
     // records each as rejected by *author*, which a record it could not read
     // would never reach.
+    let bus = onemessagebus::LocalTransport::open(world.run_file(RUN, "channel"))
+        .expect("the host bus opens the channel");
+    let commands = onemessagebus::QueueName::try_from(onemessagebus_agent::channel::COMMANDS)
+        .expect("the command queue's name");
     for payload in [
         json!({"id": 900, "author": "stranger", "commands": [
             {"op": "add", "node": agent("also-never", &[])}
@@ -370,18 +375,22 @@ fn a_host_named_author_is_enforced_at_reply_and_at_driver_apply() {
             {"op": "complete", "reason": "looks done"}
         ]}),
     ] {
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(world.run_file(RUN, "channel/commands.jsonl"))
-            .expect("the host bus opens the command queue");
-        writeln!(file, "{payload}").expect("the host bus appends the envelope");
+        onemessagebus::Transport::append(&bus, &commands, payload.to_string().as_bytes())
+            .expect("the host bus appends the envelope");
     }
     // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
     // llmlint: ignore-end[tests_mirror_real_usage]
     world.until("the direct envelopes to be rejected", |world| {
         world.events_of(RUN, "edit-rejected").len() >= 2
     });
+    // Both landed whole: a reconciler that healed a fragment away would have
+    // recorded it here, and the envelope it belonged to would never be judged.
+    assert!(
+        !world.run_file(RUN, "channel/commands.jsonl.torn").exists(),
+        "the host bus's append was torn: {}",
+        std::fs::read_to_string(world.run_file(RUN, "channel/commands.jsonl.torn"))
+            .unwrap_or_default()
+    );
     let rejected = world.events_of(RUN, "edit-rejected");
     assert!(rejected.iter().any(|event| {
         event["payload"]["author"] == "stranger"
