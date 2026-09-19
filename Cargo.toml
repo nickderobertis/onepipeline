@@ -460,9 +460,15 @@ resolver = "2"
 # fills. 0.25.0 between them added `FailureKind::HostPrerequisite`, which
 # `failure_of` matches arm by arm, so a pin below 0.26.0 does not compile.
 # `tests/e2e/lifecycle.rs`'s pool journeys drive the hold and the refusal
-# against the linked sibling under a scratch state root, and `onevcs-testing`
-# 0.6.7 requires exactly this `onevcs`, so the two requirements and the lock
-# move together.
+# against the linked sibling under a scratch state root.
+#
+# `onevcs` 0.27.0 is the floor because it is the pool's release this crate
+# adopts as published: it adds `pool_maintain` — the identity's maintenance
+# command run in each idle slot, on a clock the caller keeps — which nothing
+# here calls, so the floor is the adoption and not a symbol. A slot under
+# maintenance is what the hold's `maintaining` counts, and the reading a held
+# node carries is the sibling's own either way. `onevcs-testing` 0.6.8 requires
+# exactly this `onevcs`, so the two requirements and the lock move together.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
@@ -484,7 +490,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.4.4"
-onevcs = "0.26.0"
+onevcs = "0.27.0"
 # The wire both siblings above now re-export: the envelope, its labels, sources
 # and phases, the filter grammar, the reader, the merge and the schema registry
 # are `onemessagebus-agent`'s over the `onemessagebus` core, and `src/event.rs`
@@ -574,7 +580,7 @@ oneharness-core = "0.14.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.6.7"
+onevcs-testing = "0.6.8"
 # **Test-support only**, and linked by `crates/testfakes` alone: the crate under test
 # still reads every plan by *driving* the `onetaskgraph` binary. These host the real
 # `local-md` plugin inside `label-strict-source`; that fake says why.
