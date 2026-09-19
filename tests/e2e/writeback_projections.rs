@@ -1149,6 +1149,31 @@ fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item(
     // that already knows the lineage's item projects a member copy onto it as it is displaced,
     // and what this journey is about is a driver reading the board cold.
     let reused_by_a_whole_projection = |world: &World, what: &str| {
+        // Stopped only once it is quiet. An adopted driver dispatches the head and `hold`
+        // again as soon as its whole projection lands, and that dispatch is projected by a
+        // member copy of its own; a stop takes no closeout — its signal ends the driver where
+        // it stands — so a stop during that copy leaves the double's record of it with no
+        // attempt beside it, and nothing after can read every attempt as landed. The
+        // adoption's whole projection writes the re-readied nodes `queued`, so `in-progress`
+        // on both items is that member copy having landed.
+        projected_until(
+            world,
+            run,
+            &project,
+            "the driver to have projected the head's dispatch",
+            |tasks| {
+                tasks
+                    .iter()
+                    .find(|task| task["id"] == attempt_id)
+                    .is_some_and(|task| task["item"]["status"]["category"] == "in-progress")
+                    && board_word(tasks, "hold").as_deref() == Some("in-progress")
+            },
+        );
+        let last = records(world, run).pop().expect("the run has projected");
+        assert_eq!(
+            last["scope"], "members",
+            "the stop would end the driver before its dispatch was projected: {last}"
+        );
         world.run(&["stop", run]).exited(0);
         let mark = records(world, run).len();
         world.run(&["adopt", run, "--detach"]).exited(0);
