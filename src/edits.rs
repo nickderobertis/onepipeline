@@ -3939,8 +3939,8 @@ mod tests {
         dir
     }
 
-    /// One validator program, written and made runnable — and spawnable the
-    /// moment this returns, whatever else this process is spawning.
+    /// One validator program, created runnable — and spawnable the moment this
+    /// returns, whatever else this process is spawning.
     ///
     /// A real executable rather than a double: what the hook promises is that a
     /// command the host names is *run*, so a stand-in for running it would prove
@@ -3948,44 +3948,46 @@ mod tests {
     /// platform-independent halves — a launch that names no validator, and one
     /// whose validator cannot be started — are tested without one.
     ///
-    /// Written by a child process, never by this one. Linux refuses to execute a
-    /// file any process holds open for writing (`ETXTBSY`), and a fork inherits
-    /// every open descriptor: a script written here would be inherited by any
-    /// child another thread spawned while it was open, and that child holds it
-    /// until it execs — later, under load, than this helper's caller execs the
-    /// script. Closing the descriptor here does not close the inherited copy,
-    /// and neither does opening the file with its mode at creation; measured
-    /// under four threads spawning continuously, both failed about one spawn in
-    /// thirty. So the body goes down a pipe to a shell that writes the file and
-    /// marks it runnable, and once that shell has been waited for, nothing holds
-    /// the script open anywhere.
+    /// The file that is run is never open for writing in this process. Linux
+    /// refuses to execute a file any process holds open for writing (`ETXTBSY`),
+    /// and a fork inherits every open descriptor: a script written here would be
+    /// inherited by any child another thread spawned while it was open, and that
+    /// child holds it until it execs — later, under load, than this helper's
+    /// caller execs the script. Closing the descriptor here does not close the
+    /// inherited copy; measured under four threads spawning continuously, a script
+    /// written here failed about one spawn in thirty. So the body is staged in a
+    /// file this process creates with its mode and never runs, and `cp` — which
+    /// creates its copy with the source's mode in the one `open(2)` that creates
+    /// it — makes the script from it in a child. Once that child has been waited
+    /// for, nothing anywhere holds the script open, and nothing has changed a
+    /// mode after the fact.
     #[cfg(unix)]
     fn validator(dir: &std::path::Path, name: &str, body: &str) -> String {
         use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
         let path = dir.join(name);
-        let mut writer = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("cat > \"$1\" && chmod 0755 \"$1\"")
-            .arg("sh")
+        let staged = dir.join(format!("{name}.staged"));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o755)
+            .open(&staged)
+            .expect("the staged validator program is created runnable")
+            .write_all(format!("#!/bin/sh\n{body}").as_bytes())
+            .expect("the validator program is staged");
+        let copied = std::process::Command::new("cp")
+            .arg(&staged)
             .arg(&path)
-            .stdin(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::inherit())
-            .spawn()
-            .expect("the shell that writes the validator program starts");
-        writer
-            .stdin
-            .take()
-            .expect("the shell's stdin is piped")
-            .write_all(format!("#!/bin/sh\n{body}").as_bytes())
-            .expect("the validator program is written");
-        let wrote = writer
-            .wait()
-            .expect("the shell that wrote it is waited for");
+            .status()
+            .expect("the copy that creates the validator program runs");
         assert!(
-            wrote.success(),
-            "the validator program was not written: {wrote}"
+            copied.success(),
+            "the validator program was not created: {copied}"
         );
+        std::fs::remove_file(&staged).expect("the staged program is removed");
         path.to_string_lossy().into_owned()
     }
 
