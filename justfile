@@ -71,6 +71,7 @@ _crate-bootstrap:
     @just _ensure-tool cargo-nextest
     @just _ensure-tool cargo-llvm-cov
     @just _ensure-onetaskgraph
+    @just _ensure-strace
     @cargo fetch --locked --quiet
 
 # The one binary this crate composes that cargo cannot build for it: `onevcs` and
@@ -98,6 +99,29 @@ _ensure-onetaskgraph:
         cp "$cargo_root/bin/onetaskgraph" "$resolved"; \
         chmod +x "$resolved"; \
       fi
+
+# The tracer the Linux-only e2e journeys (`channel.rs`, `listing.rs`,
+# `unwatched.rs`) run the binary under, and refuse without. A system package,
+# so it is installed only where the machine is this repository's to provision —
+# a CI runner, which `CI` marks — and named with its install command elsewhere:
+# a `sudo` prompt inside `just bootstrap` is a hang in a session hook. Nothing
+# on other platforms, where those journeys are compiled out.
+_ensure-strace:
+    @[ "$(uname -s)" = Linux ] || exit 0; \
+      command -v strace >/dev/null 2>&1 && exit 0; \
+      if [ -n "${CI:-}" ]; then \
+        { sudo -n apt-get update -qq >/dev/null && sudo -n apt-get install -y -qq --no-install-recommends strace >/dev/null; } \
+          || { echo "strace could not be installed through apt-get, and the Linux-only e2e journeys refuse without it" >&2; exit 1; }; \
+      else \
+        just _strace-preflight; \
+      fi
+
+# Asked ahead of the tiers that hold those journeys, so the missing tool is
+# named up front rather than by a panic inside a journey.
+_strace-preflight:
+    @[ "$(uname -s)" = Linux ] || exit 0; \
+      command -v strace >/dev/null 2>&1 \
+      || { echo "strace not installed — the Linux-only e2e journeys in tests/e2e/channel.rs, listing.rs and unwatched.rs run the binary under it and refuse without it: sudo apt-get install -y strace (or your distribution's strace package), then re-run" >&2; exit 1; }
 
 # These are test runners, not rules: their version cannot change the gate's
 # verdict, so both here and CI take the latest rather than keeping two pins that
@@ -225,6 +249,7 @@ _crate-coverage-clean:
 
 # The crate's own half of the offline suite, instrumented, reporting nothing.
 _crate-test-rest:
+    @just _strace-preflight
     @RUSTFLAGS="-D warnings" cargo llvm-cov --no-report nextest --locked -E '{{rest-tier}}' --final-status-level fail
 
 # `--failure-mode all` is load-bearing, and belongs here rather than on either
@@ -268,6 +293,7 @@ _note-test:
 # legs run the same suite through this instead of `test`.
 # The offline suite without coverage instrumentation.
 test-quick:
+    @just _strace-preflight
     @cargo nextest run --locked -E '{{offline-tiers}}'
 
 # The one journey that is not offline: the real `onevcs`, real git against a real
@@ -288,6 +314,7 @@ smoke-real:
 # The end-to-end binary journeys in isolation (also run by `test`/`check`),
 # narrowed to the journeys a nextest filter names when one is given.
 test-e2e filter="":
+    @just _strace-preflight
     @cargo nextest run --locked -E 'binary(e2e){{ if filter == "" { "" } else { " and (" + filter + ")" } }}'
 
 # Each journey starts a real two-party conversation and holds one side's turn

@@ -3948,22 +3948,109 @@ mod tests {
         dir
     }
 
-    /// One validator program, written and made runnable.
+    /// One validator program, created runnable — and spawnable the moment this
+    /// returns, whatever else this process is spawning.
     ///
     /// A real executable rather than a double: what the hook promises is that a
     /// command the host names is *run*, so a stand-in for running it would prove
     /// nothing. Unix-only because the program is a shell script; the two
     /// platform-independent halves — a launch that names no validator, and one
     /// whose validator cannot be started — are tested without one.
+    ///
+    /// The file that is run is never open for writing in this process. Linux
+    /// refuses to execute a file any process holds open for writing (`ETXTBSY`),
+    /// and a fork inherits every open descriptor: a script written here would be
+    /// inherited by any child another thread spawned while it was open, and that
+    /// child holds it until it execs — later, under load, than this helper's
+    /// caller execs the script. Closing the descriptor here does not close the
+    /// inherited copy; measured under four threads spawning continuously, a script
+    /// written here failed about one spawn in thirty. So the body is staged in a
+    /// file this process creates with its mode and never runs, and `cp` — which
+    /// creates its copy with the source's mode in the one `open(2)` that creates
+    /// it — makes the script from it in a child. Once that child has been waited
+    /// for, nothing anywhere holds the script open, and nothing has changed a
+    /// mode after the fact.
     #[cfg(unix)]
     fn validator(dir: &std::path::Path, name: &str, body: &str) -> String {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}"))
-            .expect("the validator program is written");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-            .expect("it is runnable");
+        let staged = dir.join(format!("{name}.staged"));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o755)
+            .open(&staged)
+            .expect("the staged validator program is created runnable")
+            .write_all(format!("#!/bin/sh\n{body}").as_bytes())
+            .expect("the validator program is staged");
+        let copied = std::process::Command::new("cp")
+            .arg(&staged)
+            .arg(&path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .expect("the copy that creates the validator program runs");
+        assert!(
+            copied.success(),
+            "the validator program was not created: {copied}"
+        );
+        std::fs::remove_file(&staged).expect("the staged program is removed");
         path.to_string_lossy().into_owned()
+    }
+
+    /// The path [`validator`] returns starts the moment it is returned, while
+    /// other threads of this process spawn as fast as they can — held under that
+    /// load rather than by inspection. The helper this replaced failed it with
+    /// `Text file busy` seventeen programs in.
+    #[test]
+    #[cfg(unix)]
+    fn a_validator_just_written_is_spawnable_under_concurrent_forks() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let dir = scratch("spawnable");
+        let stop = Arc::new(AtomicBool::new(false));
+        let forking: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    let mut forked = 0u64;
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = std::process::Command::new("true")
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status();
+                        forked += 1;
+                    }
+                    forked
+                })
+            })
+            .collect();
+
+        const PROGRAMS: u64 = 200;
+        let node = agent("fresh", &[]);
+        let command = Command::Add { node: node.clone() };
+        for nth in 0..PROGRAMS {
+            let accept = validator(&dir, &format!("accept-{nth}.sh"), "exit 0\n");
+            offer_to_validator(Some(&accept), &command, &node).unwrap_or_else(|error| {
+                panic!("the validator written {nth} programs in could not be run: {error}")
+            });
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        let forked: u64 = forking
+            .into_iter()
+            .map(|thread| thread.join().expect("a forking thread ends"))
+            .sum();
+        assert!(
+            forked >= PROGRAMS,
+            "only {forked} processes were spawned beside the validators, so they were not \
+             written under concurrent forks"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A frontier judging edits under one named validator.

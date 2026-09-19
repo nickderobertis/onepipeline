@@ -9,7 +9,8 @@
 //!
 //! What the stand-in `just` is asked is only as good as the recipe it stands in
 //! for, so the real `test-e2e` recipe is driven too, through `just --dry-run`,
-//! which evaluates the filter it is handed without running the suite.
+//! which evaluates the filter it is handed without running the suite — and
+//! prints the strace preflight the recipe runs first on every platform.
 
 use std::path::Path;
 use std::process::Command;
@@ -41,11 +42,11 @@ fn dry_run_of_test_e2e(filter: Option<&str>) -> String {
 fn the_e2e_recipe_narrows_the_binary_to_a_filter_and_runs_all_of_it_without_one() {
     assert_eq!(
         dry_run_of_test_e2e(Some("test(/^recorded_channel::/)")),
-        "cargo nextest run --locked -E 'binary(e2e) and (test(/^recorded_channel::/))'"
+        "just _strace-preflight\ncargo nextest run --locked -E 'binary(e2e) and (test(/^recorded_channel::/))'"
     );
     assert_eq!(
         dry_run_of_test_e2e(None),
-        "cargo nextest run --locked -E 'binary(e2e)'"
+        "just _strace-preflight\ncargo nextest run --locked -E 'binary(e2e)'"
     );
 }
 
