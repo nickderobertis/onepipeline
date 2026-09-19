@@ -48,6 +48,10 @@ verify_prereqs() {
   if command -v cargo >/dev/null 2>&1 && ! command -v cargo-nextest >/dev/null 2>&1; then
     log "cargo-nextest/cargo-llvm-cov missing — run 'just bootstrap' before 'just check'"
   fi
+  # Reported rather than installed: a `sudo` prompt has no place in a session hook.
+  if [ "$(uname -s)" = Linux ] && ! command -v strace >/dev/null 2>&1; then
+    log "strace not on PATH — the Linux-only e2e journeys refuse without it: sudo apt-get install -y strace (or your distribution's strace package)"
+  fi
 }
 
 # Persist PATH so the freshly installed `just` resolves in every later Bash call.

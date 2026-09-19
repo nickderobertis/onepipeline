@@ -63,6 +63,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just,nextest,cargo-llvm-cov
+      # Also provisions `strace`, which the Linux-only e2e journeys refuse
+      # without (`_ensure-strace` in the justfile).
       - name: Bootstrap
         run: just bootstrap
       - name: Quality gate (affected projects)

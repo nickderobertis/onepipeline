@@ -41,7 +41,9 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, let_writeback_settle, plan_of, World, NODE_SETTLED, RUNS_UNWATCHED};
+use crate::harness::{
+    agent, let_writeback_settle, plan_of, waited, World, NODE_SETTLED, RUNS_UNWATCHED,
+};
 
 use onepipeline::views::{RunPaths, SUMMARY_SCHEMA_VERSION, WATCHER_SCHEMA_VERSION};
 
@@ -766,7 +768,7 @@ fn a_settled_run_is_excluded_and_a_document_recording_settlement_behind_its_jour
 ///
 /// Named as a set because the scale journey asserts the word without being able
 /// to predict which of the four it will get: it is the guard its whole bound rests
-/// on, since a fixture can go degenerate — a clone that carried no run state would
+/// on, since a fixture can go degenerate — an assembled run carrying no run state would
 /// be excluded or refused, every other assertion would pass, and the bound would
 /// be met over rows with nothing in them.
 const STANDING_WORDS: [&str; 4] = ["ACTIVE", "PARKED", "DRIVER DEAD", "UNDRIVEN"];
@@ -1467,36 +1469,33 @@ const GROWTH_GUARD: u32 = 5;
 /// has to survive is another test on the same host, not a slow invocation.
 const TIMED: usize = 5;
 
-/// One run root cloned from a real one, under a new id and a new owner.
+/// One run root assembled from a real one, under a new id and a new owner.
 ///
-/// Everything but the journal is the template's own file, because everything but
-/// the journal is what this verb reads: the launch record and the summary document
-/// are this build's own, written by a real run driven through the binary, and only
-/// the three facts that must name *this* run rather than the one it was copied from
-/// are rewritten.
+/// Exactly the state this verb reads, each reached through the accessor the verb
+/// reaches it by: the launch record ownership is decided from, and the summary
+/// document settlement is decided from — both this build's own, written by a
+/// real run, with only the three facts that must name *this* run rewritten. The
+/// journal the document is held against is grown separately by [`journal_of`].
+///
+/// Nothing is enumerated, because the template is a **live** run: its directory
+/// also holds the temporary a document is written to before the rename into
+/// place, and a clone that walked the directory listed one and then found it
+/// gone. Naming what is read leaves transient state out by construction rather
+/// than by a list of the names it goes by.
 // llmlint: ignore-block[tests_mirror_real_usage] four hundred run roots is a *host*, not a
 // command: no verb makes one, and the only honest way to hold the shape is to assemble it.
 // What is assembled is this build's own output — one real run driven through the compiled
-// binary, cloned — rather than documents invented here.
-fn cloned_run(template: &RunPaths, root: &std::path::Path, id: &str, session: &str) -> RunPaths {
+// binary, its documents taken under new names — rather than documents invented here.
+fn assembled_run(template: &RunPaths, root: &std::path::Path, id: &str, session: &str) -> RunPaths {
     let paths = RunPaths::under(root, id);
     std::fs::create_dir_all(&paths.dir).expect("a run root");
-    let journal = template
-        .journal()
-        .file_name()
-        .expect("the journal has a name")
-        .to_owned();
-    for entry in std::fs::read_dir(&template.dir).expect("the template run") {
-        let entry = entry.expect("an entry of the template run");
-        if !entry.file_type().expect("its kind").is_file() || entry.file_name() == journal {
-            continue;
-        }
-        std::fs::copy(entry.path(), paths.dir.join(entry.file_name())).expect("a copied file");
-    }
-    for path in [paths.launch(), paths.summary()] {
-        let mut held: Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).expect("a copied document"))
-                .expect("a document");
+    for (from, to) in [
+        (template.launch(), paths.launch()),
+        (template.summary(), paths.summary()),
+    ] {
+        let read = std::fs::read_to_string(&from)
+            .unwrap_or_else(|error| panic!("{} cannot be read: {error}", from.display()));
+        let mut held: Value = serde_json::from_str(&read).expect("a document");
         held["run_id"] = json!(id);
         held["session"] = json!(session);
         // A pid means nothing across machines, so a run recorded elsewhere reads as
@@ -1504,7 +1503,7 @@ fn cloned_run(template: &RunPaths, root: &std::path::Path, id: &str, session: &s
         // so it goes on to be decided, to have its watchers read, and to be given a
         // word.
         held["host"] = json!("another-host");
-        std::fs::write(&path, held.to_string()).expect("the document");
+        std::fs::write(&to, held.to_string()).expect("the document");
     }
     paths
 }
@@ -1550,6 +1549,79 @@ fn journal_of(paths: &RunPaths, filler: &[u8], bytes: u64) {
     summary["journal_len"] = json!(about.len());
     summary["journal_mtime_ms"] = json!(u64::try_from(modified).expect("a millisecond count"));
     std::fs::write(paths.summary(), summary.to_string()).expect("the document");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// How many roots the fixture journey assembles, each under a fresh replacement
+/// of the template's document: enough that a clone listing the directory would
+/// meet a temporary about to be renamed away, which the directory walk did on
+/// every run it was tried against.
+const RACED_RUNS: usize = 300;
+
+/// The fixture is assembled beside a template that is still writing.
+///
+/// A thread repeats the driver's own replacement of the summary document — the
+/// same temporary, the same rename — as fast as the host allows, rather than at
+/// the driver's cadence of seconds, which is what left the race to the slowest
+/// leg to find. Each assembly waits for a replacement the one before did not see,
+/// under the harness's deadline: one that outran the writer would be taken
+/// beside a directory at rest, and a count asserted afterwards would fail on a
+/// host whose disk stalled the writer, as this one's did for four seconds.
+// llmlint: ignore-block[tests_mirror_real_usage] a test of the suite's own scaffolding, on
+// the grounds `harness.rs`'s self-tests stand on: what it holds is a property of the
+// fixture the scale journey is assembled from, and the writer it runs under is the
+// driver's own atomic replacement made continuous, because a driver rewriting its document
+// every few seconds cannot reach a race a few microseconds wide within a test's bound.
+#[test]
+fn the_fixture_is_assembled_beside_a_template_still_replacing_its_documents() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let world = World::new("unwatched-fixture-race");
+    world.script("build.wait", "hold");
+    let template = paths_of(&world, &held(&world, "racedtemplate"));
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let replaced = Arc::new(AtomicU64::new(0));
+    let writer = {
+        let stop = Arc::clone(&stop);
+        let replaced = Arc::clone(&replaced);
+        let summary = template.summary();
+        std::thread::spawn(move || {
+            let held = std::fs::read(&summary).expect("the template's own document");
+            while !stop.load(Ordering::Relaxed) {
+                let nth = replaced.load(Ordering::Relaxed);
+                let temporary = summary.with_extension(format!("tmp.{nth}"));
+                std::fs::write(&temporary, &held).expect("the temporary beside the document");
+                std::fs::rename(&temporary, &summary).expect("the document replaced");
+                replaced.store(nth + 1, Ordering::Relaxed);
+            }
+        })
+    };
+
+    for nth in 0..RACED_RUNS {
+        assert!(
+            waited(|| replaced.load(Ordering::Relaxed) > nth as u64),
+            "the document was replaced {} time(s) beside {nth} assembled run(s), and not again \
+             within the deadline: the host is too slow to run the fixture beside a writer",
+            replaced.load(Ordering::Relaxed)
+        );
+        let id = format!("raced-{nth:04}");
+        let paths = assembled_run(&template, &world.runs, &id, "another-planner");
+        let held = document(&paths);
+        assert_eq!(held["run_id"], json!(id), "{held}");
+        assert_eq!(held["session"], json!("another-planner"), "{held}");
+        assert!(paths.launch().is_file(), "{id} has no launch record");
+        assert!(
+            !paths.journal().exists(),
+            "{id} took the template's journal, which the fixture leaves to be grown"
+        );
+    }
+    stop.store(true, Ordering::Relaxed);
+    writer.join().expect("the writer ran to the end");
+
+    world.run(&["stop", &template.run, "--force"]).exited(0);
+    world.release("build.go");
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
@@ -1626,9 +1698,10 @@ fn a_host_sized_runs_root_is_answered_in_well_under_a_second_whatever_its_journa
     world.script("build.wait", "hold");
 
     // The template: a real run with a dispatch held open, which is what an
-    // unwatched run *is*. Cloned before it is stopped, so every clone carries an
-    // unsettled document; the template itself is then stopped, which excludes it
-    // and leaves nothing writing to this root while the clock runs.
+    // unwatched run *is*. Its documents are taken before it is stopped, so every
+    // assembled run carries an unsettled one; the template itself is then
+    // stopped, which excludes it and leaves nothing writing to this root while
+    // the clock runs.
     let template = paths_of(&world, &held(&world, "unwatchedtemplate"));
     let filler = std::fs::read(template.journal()).expect("the template's own records");
     assert!(!filler.is_empty(), "the template run recorded nothing");
@@ -1642,7 +1715,7 @@ fn a_host_sized_runs_root_is_answered_in_well_under_a_second_whatever_its_journa
         } else {
             stranger
         };
-        let paths = cloned_run(&template, &world.runs, &format!("scaled-{nth:04}"), owner);
+        let paths = assembled_run(&template, &world.runs, &format!("scaled-{nth:04}"), owner);
         journal_of(&paths, &filler, per_run);
         assembled.push(paths);
     }
