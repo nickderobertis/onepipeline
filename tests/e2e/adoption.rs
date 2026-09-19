@@ -4695,6 +4695,14 @@ fn squash_land(world: &World, checkout: &Path, branch: &str) -> String {
         .to_owned()
 }
 
+/// Cut a release from the base's tip: a tag the remote carries, which is what a
+/// release leaves in history and what `onevcs` reads to decide that a baseline
+/// captured now would be unsound for a landing the tag already contains.
+fn release_cut_from(world: &World, checkout: &Path, tag: &str) {
+    crate::harness::git(world, checkout, &["tag", tag]);
+    crate::harness::git(world, checkout, &["push", "origin", tag]);
+}
+
 fn line_about<'a>(printed: &'a str, node: &str) -> &'a str {
     printed
         .lines()
@@ -5053,11 +5061,22 @@ fn arrived_version(world: &World, run: &str, node: &str) -> Value {
 /// squash-merge commit no branch carries does not resolve at all — so its line
 /// says to state the change request instead, and settling again there is
 /// accepted as the correction it is and answered with the command.
+///
+/// The squash commit names the change request's number, the way a host's does,
+/// and that is a landing `onevcs` discovers at the correction and captures a
+/// baseline for **then** — unless a release has already been cut from it, when a
+/// reading taken now cannot stand for what was out when it landed. So a release
+/// is cut from the landing before anyone looks, which is the incident's shape:
+/// nothing captured a baseline, and the command is still the only answer.
 fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spelling: Spelling) {
     let (world, run, engine_repo, branch) = a_released_landing_nobody_published(name);
     let url = change_url_of(&world, &run, "landed");
     let landing = match spelling {
-        Spelling::Commit => squash_land(&world, &engine_repo.checkout, &branch),
+        Spelling::Commit => {
+            let landing = squash_land(&world, &engine_repo.checkout, &branch);
+            release_cut_from(&world, &engine_repo.checkout, "v0.2.0");
+            landing
+        }
         Spelling::ChangeRequest => {
             land(&world, &engine_repo.checkout, &branch);
             url.clone()
