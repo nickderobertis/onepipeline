@@ -437,6 +437,29 @@ mod tests {
         }
     }
 
+    /// The poll bound falls back to the shipped one rather than to zero or to
+    /// no bound at all — on `release::tests`' terms, and held here structurally
+    /// for the same reason that one is: the journeys set the knob to a usable
+    /// value to drive the re-read, and a value nothing can wait on has no
+    /// journey, since the behaviour it selects is the shipped minute.
+    #[test]
+    fn an_unusable_poll_bound_falls_back_to_the_shipped_one() {
+        let _held = crate::vcs::scratch_home_held();
+        for unusable in ["0", "", "soon", "-1"] {
+            std::env::set_var(POLL_ENV, unusable);
+            assert_eq!(
+                poll_seconds(),
+                DEFAULT_POLL_SECONDS,
+                "{POLL_ENV}={unusable:?}"
+            );
+        }
+        std::env::set_var(POLL_ENV, "7");
+        assert_eq!(poll_seconds(), 7);
+        assert_eq!(Workspaces::new().every, Duration::from_secs(7));
+        std::env::remove_var(POLL_ENV);
+        assert_eq!(poll_seconds(), DEFAULT_POLL_SECONDS);
+    }
+
     /// A refusal stands until the paced read comes due, and the next read is
     /// timed from it; nothing held means nothing to wait for.
     #[test]

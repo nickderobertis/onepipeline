@@ -6884,6 +6884,11 @@ fn opens_the_last_slot_on(world: &World, record: &std::path::Path, nth: u32) -> 
 /// costs the node is nothing: no boundary attempt, no settlement, a
 /// `node-requeued` on the record in the shape the contract names, a
 /// `workspace` hold, and a second dispatch once the outside session closes.
+///
+/// **Attached**, so the process this journey holds is the driver: a run whose
+/// only node is held this way is neither settled nor `awaiting-planner`, and
+/// attach waits with it — the launcher is still running while the node is
+/// held, and returns only once the identity admitted the node and it settled.
 #[cfg(unix)]
 #[test]
 fn a_session_open_refused_as_exhausted_returns_the_node_to_queued_and_it_dispatches_later() {
@@ -6909,9 +6914,12 @@ fn a_session_open_refused_as_exhausted_returns_the_node_to_queued_and_it_dispatc
         "poolexhausted",
         &plan_of("poolexhausted", vec![lifecycle("service", &[])]),
     );
-    world
-        .run(&["start", &path, "--detach", "--dispatch-env-hook", &hook])
-        .exited(0);
+    let mut launcher = world.cmd(&["start", &path, "--attach", "--dispatch-env-hook", &hook]);
+    let mut launcher = launcher
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the attached launcher starts");
     let run = "poolexhausted".to_string();
 
     world.until("the refused node to be requeued", |world| {
@@ -6962,6 +6970,16 @@ fn a_session_open_refused_as_exhausted_returns_the_node_to_queued_and_it_dispatc
         "a run waiting on the host was treated as over\n{}",
         why(&world, &run)
     );
+    // And the attached launcher is still attached: the hold is something able
+    // to move, so the run is not one it lets go of.
+    assert!(
+        launcher
+            .try_wait()
+            .expect("the launcher can be asked")
+            .is_none(),
+        "the attached launcher returned while its only node was held for a workspace\n{}",
+        why(&world, &run)
+    );
 
     // The outside session closes, and the identity admits the node.
     world
@@ -6973,9 +6991,15 @@ fn a_session_open_refused_as_exhausted_returns_the_node_to_queued_and_it_dispatc
             "onevcs session close",
         )
         .exited(0);
-    world.until("the run to settle", |world| {
-        world.run_file(&run, "result.json").is_file()
-    });
+    let ended = launcher
+        .wait_with_output()
+        .expect("the attached launcher ends");
+    assert!(
+        ended.status.success(),
+        "the attached launcher did not return settled: {}\n{}",
+        String::from_utf8_lossy(&ended.stderr),
+        why(&world, &run)
+    );
     let result = world.run_json(&run, "result.json");
     assert_eq!(
         result["state"],
