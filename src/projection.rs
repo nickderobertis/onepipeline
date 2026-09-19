@@ -215,7 +215,15 @@ pub struct RunState {
     /// The last event of any kind, in epoch milliseconds — the run's own
     /// evidence that something is still writing to it.
     pub last_write_at: Option<u64>,
-    /// What `stop` left the run as.
+    /// What `stop` left the run as, **while no later adoption has driven it**.
+    ///
+    /// Cleared by `driver-adopted`, for the reason [`let_go_by`](Self::let_go_by)
+    /// is: the stop is evidence about the driver it ended, and a driver that
+    /// adopts the run afterwards is driving it. Left standing, every reader that
+    /// takes a recorded stop as proof the driver is dead — the views, the watch,
+    /// the unwatched reader's settlement — went on reporting the replacement
+    /// driver dead and the run settled. The record itself stays on the journal
+    /// as history; what ends here is its claim about the run now.
     pub stop: StopState,
     /// The driver that let go of this run to fire its run-end hook, while no later
     /// adoption has driven it since.
@@ -637,10 +645,11 @@ impl DriverClaim {
 }
 
 impl RunState {
-    /// Whether a stop has been recorded at all, however it went.
+    /// Whether a stop has been recorded at all, however it went, with no
+    /// adoption driving the run since.
     ///
     /// Not "the run's work has ended": a recorded stop may have reached nothing.
-    /// [`stop`](Self::stop) is what says which.
+    /// [`stop`](Self::stop) is what says which, and why an adoption clears it.
     pub fn stop_recorded(&self) -> bool {
         self.stop != StopState::NotStopped
     }
@@ -1128,6 +1137,10 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         // [`abandon_the_dispatch_in_flight`].
         Some(journal::PipelineKind::DriverAdopted) => {
             state.let_go_by = None;
+            // A recorded stop is the same kind of claim as a let-go: it is about
+            // the driver it ended, and the one adopting the run now is driving
+            // it. See `RunState::stop`.
+            state.stop = StopState::NotStopped;
             abandon_the_dispatch_in_flight(state);
             state
                 .recorded
@@ -2952,6 +2965,35 @@ mod tests {
 
         assert_eq!(state.stop, StopState::WorkersUndetermined);
         assert!(state.stop_recorded());
+    }
+
+    /// A stop is evidence about the driver it ended, and an adoption after it is
+    /// a driver driving the run: the record stays on the journal, and the run no
+    /// longer reads as stopped.
+    #[test]
+    fn an_adoption_clears_the_stop_recorded_before_it() {
+        let stopped = pipeline(
+            journal::PipelineKind::RunStopped,
+            0,
+            None,
+            &[("teardown", json!("signalled"))],
+        );
+        assert_eq!(
+            fold(std::slice::from_ref(&stopped)).stop,
+            StopState::WorkersSignalled
+        );
+
+        let adopted = fold(&[
+            stopped,
+            pipeline(
+                journal::PipelineKind::DriverAdopted,
+                1,
+                None,
+                &[("adoption", json!(1))],
+            ),
+        ]);
+        assert_eq!(adopted.stop, StopState::NotStopped);
+        assert!(!adopted.stop_recorded());
     }
 
     #[test]

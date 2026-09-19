@@ -243,6 +243,43 @@ fn output_lines(results: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether `results` says `before`, then names the `op` edit — committed at a
+/// time, which the line states — and then says `then`.
+///
+/// The time is matched by its shape rather than looked up: it is the one part of
+/// the line a reader has no other command to learn, and the edit is told apart
+/// from any other by its command and by what it retried.
+fn names_edit(results: &str, before: &str, op: &str, then: &str) -> bool {
+    names_committed_at(
+        results,
+        &format!("{before}the {op} edit committed at "),
+        then,
+    )
+}
+
+/// Whether `results` says `before`, then names an edit it could read nothing of
+/// but when it was committed — which the line states — and then says `then`.
+fn names_unreadable_edit(results: &str, before: &str, then: &str) -> bool {
+    names_committed_at(
+        results,
+        &format!("{before}an edit committed at "),
+        &format!(" whose record this build cannot read{then}"),
+    )
+}
+
+/// Whether some line of `results` says `before`, then a time, then `then`.
+fn names_committed_at(results: &str, before: &str, then: &str) -> bool {
+    results.lines().any(|line| {
+        line.split_once(before)
+            .and_then(|(_, rest)| rest.split_once(then))
+            .is_some_and(|(at, _)| {
+                at.len() == "2026-09-18T12:00:00.000Z".len()
+                    && at.as_bytes()[10] == b'T'
+                    && at.ends_with('Z')
+            })
+    })
+}
+
 /// The last lines of a log, as many as the contract says `results` repeats.
 fn tail_of(log: &str) -> Vec<String> {
     let lines: Vec<&str> = log.lines().collect();
@@ -831,6 +868,247 @@ fn a_run_whose_failure_hook_fired_fires_success_once_a_retry_takes_it_on_to_comp
     );
 }
 
+/// `results` reads every hook record against the **epoch** it belongs to: a hook
+/// from before the recovery edit that reopened the run says it is superseded and
+/// names that edit, and what the run has fired since — or that it has fired
+/// nothing yet — is what reads as the run now.
+///
+/// The defect this states: the records were listed in journal order with no epoch
+/// at all, beneath a graph the `retry` had already replaced, so a recovered run
+/// went on showing its first failure hook and that hook's instructions as if they
+/// described it. Driven across two recoveries, so an epoch is told apart by the
+/// edit that ended it rather than by being first, and so the same hook firing
+/// twice — whose log the second firing rewrote — is covered too.
+#[test]
+fn results_labels_each_hook_from_an_earlier_epoch_as_superseded_by_the_edit_that_ended_it() {
+    let world = hooked_world("hooks-results-epochs");
+    let hook = hook(&world);
+    world.script("build.fail", "1");
+    world.script("build-2.fail", "1");
+    let run = "reepoched";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
+
+    // One epoch, one record, and it is the run's present state.
+    let results = world.run(&["results", run]);
+    results
+        .exited(0)
+        .out_has("failure hook fired — reason: nodes")
+        .out_lacks("superseded:")
+        .out_lacks("no run-end hook has fired since");
+
+    let retry = |from: &str, to: &str| {
+        world
+            .run_with_stdin(
+                &["reply", run],
+                &json!({"version": 2, "commands": [
+                    {"op": "retry", "id": from, "node": agent(to, &[])}
+                ]})
+                .to_string(),
+            )
+            .exited(0);
+        format!(": {from} retried as {to}")
+    };
+    let superseded = |results: &Run, record: &str, recovery: &str, then: &str| {
+        assert!(
+            names_edit(
+                &results.stdout,
+                &format!("{record} — superseded: "),
+                "retry",
+                &format!("{recovery} reopened the run after it{then}")
+            ),
+            "`results` does not say the {record} record was superseded by the retry that \
+             said {recovery:?}:\n{}",
+            results.stdout
+        );
+    };
+
+    // The retry reopens the run and nothing has fired since: the first record is
+    // superseded by the edit, and the run's present is that no hook has fired.
+    let first_recovery = retry("build", "build-2");
+    let results = world.run(&["results", run]);
+    results.exited(0);
+    superseded(
+        &results,
+        "failure hook fired",
+        &first_recovery,
+        " — reason: nodes",
+    );
+    assert!(
+        names_edit(
+            &results.stdout,
+            "no run-end hook has fired since ",
+            "retry",
+            &format!("{first_recovery} reopened the run")
+        ),
+        "`results` does not say nothing has fired since the retry:\n{}",
+        results.stdout
+    );
+
+    // The replacement fails in its turn: the new firing is the present one, and
+    // the first — whose log this firing rewrote — keeps its label and is not
+    // shown this one's output.
+    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure", "failure"]);
+    let results = world.run(&["results", run]);
+    results
+        .exited(0)
+        .out_has("its output is not repeated: a later failure hook rewrote the log")
+        .out_lacks("no run-end hook has fired since");
+    superseded(&results, "failure hook fired", &first_recovery, "");
+    let current: Vec<&str> = results
+        .stdout
+        .lines()
+        .filter(|line| line.contains("hook fired") && !line.contains("superseded:"))
+        .collect();
+    assert_eq!(
+        current.len(),
+        1,
+        "exactly one record reads as the run's present state:\n{}",
+        results.stdout
+    );
+    assert!(
+        current[0].contains("failure hook fired — reason: nodes"),
+        "{}",
+        results.stdout
+    );
+
+    // A second recovery, and a success: both failures belong to epochs it ended,
+    // each named by its own edit, and the success is the run now.
+    let second_recovery = retry("build-2", "build-3");
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+    assert_eq!(invocations(&world, run), ["failure", "failure", "success"]);
+    let results = world.run(&["results", run]);
+    results
+        .exited(0)
+        .out_has("success hook fired — reason: none; ending: succeeded; exit: 0")
+        .out_lacks("no run-end hook has fired since");
+    superseded(&results, "failure hook fired", &first_recovery, "");
+    superseded(&results, "failure hook fired", &second_recovery, "");
+}
+
+/// An epoch-ending edit whose record this build cannot read is named by the one
+/// thing it can read of it — when it was committed — and by nothing that happened
+/// to parse.
+///
+/// The record is one a **newer** build wrote. Its operations are the retry this
+/// fold reads, which is what makes it the end of the failure's epoch; its command
+/// is written in a vocabulary this build has no reader for. A reader that named it
+/// by the parts that parsed would call it "the edit edit", or print a retry it
+/// could not have attributed to any command, over a record it did not understand.
+#[test]
+fn an_epoch_ending_edit_whose_command_this_build_cannot_read_is_named_by_when_it_was_committed() {
+    let world = hooked_world("hooks-unreadable-edit");
+    let hook = hook(&world);
+    world.script("build.fail", "1");
+    let run = "unreadableedit";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
+
+    // A real retry, so the operations the record carries are exactly the ones a
+    // reopening edit writes; then the command written over in the journal, in the
+    // shape a newer build's vocabulary takes.
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb this build ships writes a
+    // command it cannot read back — only a newer build does, and there is none to run
+    // here. Rewriting the one field is the narrowest way to put that record in front of
+    // the compiled binary, and it is the same fault injection this file's unfoldable-edit
+    // journey makes for the same reason; the run, its journal, the retry that wrote the
+    // record, the driver that adopts it and the hook fixture around it are all the real
+    // ones, and every claim this journey makes is read back off the CLI.
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "retry", "id": "build", "node": agent("build-2", &[])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    let journal = world.runs.join(run).join("events.jsonl");
+    let rewritten: Vec<String> = std::fs::read_to_string(&journal)
+        .expect("the journal is kept")
+        .lines()
+        .map(|line| {
+            let mut record: Value = serde_json::from_str(line).expect("a record this run wrote");
+            if record["kind"] == "edit-committed" {
+                record["payload"]["command"] =
+                    json!({"verb": "retry", "of": "build", "with": agent("build-2", &[])});
+            }
+            record.to_string()
+        })
+        .collect();
+    std::fs::write(&journal, format!("{}\n", rewritten.join("\n")))
+        .expect("the record is rewritten");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // The record still ended the epoch — the fold read its operations — so the
+    // failure is superseded, and the edit that did it is named by its time alone.
+    let results = world.run(&["results", run]);
+    results.exited(0);
+    for (before, then) in [
+        (
+            "failure hook fired — superseded: ",
+            " reopened the run after it — reason: nodes",
+        ),
+        ("no run-end hook has fired since ", " reopened the run"),
+    ] {
+        assert!(
+            names_unreadable_edit(&results.stdout, before, then),
+            "`results` does not say {before:?} an edit it cannot read then {then:?}:\n{}",
+            results.stdout
+        );
+    }
+    let hook_lines: Vec<&str> = results
+        .stdout
+        .lines()
+        .filter(|line| line.contains("superseded: ") || line.contains("hook has fired since"))
+        .collect();
+    assert!(
+        hook_lines
+            .iter()
+            .all(|line| !line.contains("the edit edit") && !line.contains("retried as")),
+        "`results` named the unreadable record by the parts of it that parsed:\n{}",
+        results.stdout
+    );
+
+    // And the epoch it opened is a real one: the replacement settles done under
+    // it, the success hook fires, and the label on the superseded record stands.
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+    assert_eq!(invocations(&world, run), ["failure", "success"]);
+    let results = world.run(&["results", run]);
+    results
+        .exited(0)
+        .out_has("success hook fired — reason: none; ending: succeeded; exit: 0")
+        .out_lacks("no run-end hook has fired since");
+    assert!(
+        names_unreadable_edit(
+            &results.stdout,
+            "failure hook fired — superseded: ",
+            " reopened the run after it"
+        ),
+        "the superseded label did not survive the success that followed it:\n{}",
+        results.stdout
+    );
+}
+
 /// An accepted edit that leaves the run **unable to advance** is not an epoch,
 /// however much graph it moved: a node added behind the very failure that ended
 /// the run is skipped the moment it joins, so the marker stands and the same
@@ -1391,6 +1669,66 @@ fn a_run_paused_on_a_decision_withholds_its_hook_and_the_adopting_driver_fires_t
     );
 }
 
+/// A `run-hook-withheld` belongs to an epoch as a firing does: once a recovery
+/// edit reopens the run, the let-go that paused it on a decision describes an
+/// ending the run has left, and `results` says it is superseded by that edit.
+#[test]
+fn a_withheld_hook_from_an_earlier_epoch_reads_as_superseded_by_the_edit_that_ended_it() {
+    let world = hooked_world("hooks-withheld-epoch");
+    let hook = hook(&world);
+    world.script("build.fail", "1");
+    let run = "rewithheld";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[]), human("approve", &[])],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(0)
+    .out_has("\"settlement\":\"awaiting-planner\"");
+    world.run(&["attest", run, "approve"]).exited(0);
+    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"], "{}", world.dump());
+    world
+        .run(&["results", run])
+        .exited(0)
+        .out_has("run-end hook withheld — the run is paused on a decision")
+        .out_lacks("superseded:");
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "retry", "id": "build", "node": agent("build-2", &[])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    let results = world.run(&["results", run]);
+    results.exited(0);
+    for (before, then) in [
+        (
+            "run-end hook withheld — superseded: ",
+            ": build retried as build-2 reopened the run after it — the run is paused on a \
+             decision (awaiting-planner)",
+        ),
+        (
+            "failure hook fired — superseded: ",
+            ": build retried as build-2 reopened the run after it",
+        ),
+        (
+            "no run-end hook has fired since ",
+            ": build retried as build-2 reopened the run",
+        ),
+    ] {
+        assert!(
+            names_edit(&results.stdout, before, "retry", then),
+            "`results` does not say {before:?} the retry then {then:?}:\n{}",
+            results.stdout
+        );
+    }
+}
+
 /// Once a run carries a firing, only an accepted edit that makes the run **live
 /// again** lets another fire: a later adoption fires nothing, an accepted note and
 /// an accepted finding fire nothing, and the requeue that puts work back into the
@@ -1468,6 +1806,23 @@ fn once_a_hook_has_fired_only_an_edit_that_reopens_the_run_lets_another_fire() {
             &json!({"version": 2, "commands": [{"op": "requeue", "id": "later"}]}).to_string(),
         )
         .exited(0);
+    // And `results` says so, naming an edit that retried nothing by its command
+    // alone: the failure belongs to the epoch the requeue ended.
+    let results = world.run(&["results", run]);
+    results.exited(0);
+    for (before, then) in [
+        (
+            "failure hook fired — superseded: ",
+            " reopened the run after it — reason:",
+        ),
+        ("no run-end hook has fired since ", " reopened the run"),
+    ] {
+        assert!(
+            names_edit(&results.stdout, before, "requeue", then),
+            "`results` does not say {before:?} the requeue then {then:?}:\n{}",
+            results.stdout
+        );
+    }
     world
         .run(&["adopt", run])
         .exited(0)

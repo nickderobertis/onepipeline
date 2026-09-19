@@ -1806,6 +1806,16 @@ impl HoldReason {
     }
 }
 
+/// The dependencies one `node-held` entry awaits the releases of, read by the
+/// same reader a driver restores its holds with: `None` for an entry that is not
+/// a release hold, and for one this build cannot read whole.
+pub(crate) fn release_awaited(entry: &Value) -> Option<Vec<String>> {
+    match HoldReason::of_payload(entry)? {
+        HoldReason::Release { awaiting } => Some(awaiting),
+        _ => None,
+    }
+}
+
 /// Every node the loop is not running and has not settled, and what is holding
 /// it.
 ///

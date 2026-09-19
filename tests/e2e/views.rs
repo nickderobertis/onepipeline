@@ -12,7 +12,9 @@
 // `dispatch.rs` is where the real binary is driven instead. `harness.rs` carries the same
 // suppression and the full rationale.
 
-use crate::harness::{agent, human, plan_of, reaped_pid, Run, World};
+use crate::harness::{
+    agent, human, plan_of, reaped_pid, Run, World, NOTHING_DRIVING, WATCH_ELAPSED,
+};
 
 use crate::harness::lifecycle;
 use onepipeline::event::{Envelope, Source};
@@ -2181,6 +2183,141 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_stopped_and_then_adopted()
     let _ = adopting.wait();
     stopped.release();
     retaken.release();
+}
+
+/// And `status` and `watch` judge a run stopped and then **adopted** by the
+/// driver that adopted it, not by the stop before it.
+///
+/// The defect this states: the fold kept the stop as the run's standing after
+/// `driver-adopted` rewrote the launch record, and liveness read a recorded stop
+/// as proof that the driver the record names is dead — so `status` printed
+/// `DRIVER DEAD` over the live replacement and `watch` returned
+/// `nothing-driving` at once, on the run an operator had just taken over. The
+/// stop stays on the journal; what it no longer does is speak for a driver that
+/// arrived after it.
+///
+/// The stopped run is read *before* the adoption too, so the reading this fixes
+/// is the only one that moves: a run stopped and never adopted still reads as
+/// stopped.
+#[test]
+fn status_and_watch_judge_a_stopped_run_by_the_driver_that_adopted_it() {
+    let world = World::new("views-adopted-driving");
+    let meeting = world.rendezvous("build");
+    let path = world.plan(
+        "readopted",
+        &plan_of("readopted", vec![agent("build", &[])]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    // The same preconditions as the `host` journey above, read the same way
+    // and for the same reason: the surfaces that would say the run holds this
+    // dispatch are the ones under test.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] the preconditions — the registry
+    // holds this dispatch, the run recorded the adoption — are said only by `host` and
+    // `status`, which decide liveness through the code the defect was in, so a journey
+    // polling either for its precondition would pass at the instant its assertion would.
+    // They are read off the engine's own records and the double's own announcement, and
+    // every claim afterwards is read off the CLI.
+    let stopped = meeting.arrived();
+    world.until("the dispatch to record its place", |world| {
+        world.registered("readopted", stopped.pid)
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.run(&["stop", "readopted"]).exited(0);
+
+    // Stopped and not adopted: the stop is what the run is, and both verbs say so.
+    world
+        .run(&["status", "readopted"])
+        .exited(0)
+        .out_has("DRIVER DEAD");
+    let watched = world.run(&[
+        "watch",
+        "readopted",
+        "--timeout",
+        "30",
+        "--tick-interval",
+        "0",
+    ]);
+    watched.exited(NOTHING_DRIVING);
+    assert!(
+        watched.stderr.contains("nothing-driving"),
+        "a stopped, unadopted run's watch did not return nothing-driving:\n{}",
+        watched.stderr
+    );
+
+    let mut adopting = world
+        .cmd(&["adopt", "readopted"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the adopting driver starts");
+    // llmlint: ignore-block[tests_mirror_real_usage] the same preconditions as above, for
+    // the same reason.
+    world.until("the adoption to be recorded", |world| {
+        !world.events_of("readopted", "driver-adopted").is_empty()
+    });
+    assert!(
+        !world.run_file("readopted", "result.json").is_file(),
+        "the run settled before the takeover reached a worker, so no dispatch is coming — the \
+         held dispatch ended on its own, which nothing here explains; the runs root held:\n{}",
+        world.dump()
+    );
+    let retaken = meeting.arrived();
+    assert_ne!(
+        retaken.pid, stopped.pid,
+        "the takeover's arrival is the dispatch the stop was aimed at"
+    );
+    world.until(
+        "the adopted driver's dispatch to record its place",
+        |world| world.registered("readopted", retaken.pid),
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // Adopted: the replacement driver is what `status` reports, and a watch with
+    // no time to spend still returns on its clock rather than on the stop.
+    let status = world.run(&["status", "readopted"]);
+    status.exited(0).out_has("ACTIVE");
+    assert!(
+        !status.stdout.contains("DRIVER DEAD"),
+        "an adopted run's status reports the driver the stop before it ended:\n{}",
+        status.stdout
+    );
+    let armed = world.run(&[
+        "watch",
+        "readopted",
+        "--timeout",
+        "0",
+        "--tick-interval",
+        "0",
+    ]);
+    armed.exited(WATCH_ELAPSED);
+    assert!(
+        !armed.stderr.contains("nothing-driving"),
+        "a watch of an adopted run returned nothing-driving over a live driver:\n{}",
+        armed.stderr
+    );
+
+    // And the watch ends on the run's own terminal condition: the adopted
+    // dispatch is let go, and the run settles under the driver that adopted it.
+    retaken.release();
+    let settled = world.run(&[
+        "watch",
+        "readopted",
+        "--timeout",
+        "60",
+        "--tick-interval",
+        "0",
+    ]);
+    settled.exited(0);
+    assert!(
+        settled.stderr.contains("settled"),
+        "the watch over the adopted run did not end on the run settling:\n{}",
+        settled.stderr
+    );
+
+    let _ = adopting.kill();
+    let _ = adopting.wait();
+    stopped.release();
 }
 
 // llmlint: ignore-block[tests_mirror_real_usage] every state below is one registry entry
