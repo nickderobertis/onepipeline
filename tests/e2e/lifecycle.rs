@@ -6811,15 +6811,22 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
         "the second did not take the slot the first handed back\n{}",
         why(&world, &run)
     );
+    // Placement is read off the path's components, not a `/`-joined substring:
+    // the sibling writes the host's separator, and this journey runs on Windows.
+    let placed_under = |node: &str, directory: &str| {
+        PathBuf::from(worktree_of(node))
+            .components()
+            .any(|component| component.as_os_str() == directory)
+    };
     assert!(
-        worktree_of("first").contains("/pool/"),
+        placed_under("first", "pool"),
         "the sessions were not placed on a pool slot: {}",
         worktree_of("first")
     );
     // And the one that opted out of the cap was placed **past** the pool, under
     // `runs/`, while the slot was held: the override reached the sibling.
     assert!(
-        worktree_of("unbounded").contains("/runs/"),
+        placed_under("unbounded", "runs"),
         "the unbounded node was not placed under runs/: {}",
         worktree_of("unbounded")
     );
