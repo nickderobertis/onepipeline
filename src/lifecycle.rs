@@ -72,6 +72,12 @@ pub struct Launch {
 /// paying for the same refusal. The node that spends the budget settles `failed`
 /// saying how many attempts were made and what each one ended with, which is what
 /// tells a reader the difference between a failure and a loop.
+///
+/// One refusal is never asked again, whatever the budget: a push the merge path
+/// turned down for a tool or a credential **this host** is missing. No edit to
+/// the tree installs anything on the host, so it settles `failed` under
+/// `infrastructure-failure` at once, carrying the branch, its head and the hook's
+/// remediation — see [`failed_publication`].
 #[allow(
     clippy::too_many_arguments,
     reason = "one node's whole execution: the executor, the run, the launch, the node, \
@@ -1108,6 +1114,23 @@ fn failed_publication(
                 tip: crate::vcs::session_tip(token),
             }))
         }
+        // The host, not the work, refused: a tool or a credential a merge-path
+        // hook needs is missing from this host, and the hook said so. Settled
+        // once and never re-dispatched, whatever the budget has left — before
+        // this arm existed the refusal was `push-rejected`, and a whole budget of
+        // workers was sent back to a branch none of them could fix. What the
+        // settlement carries is what a person needs to fix the host and `retry`:
+        // the branch the work is on, the commit it stands at, and the hook's own
+        // remediation, which `onevcs` puts in the reason.
+        (crate::vcs::Failure::HostPrerequisite, _, _) => Attempt::settled(Settlement {
+            branch: branch.clone(),
+            head: match crate::vcs::session_tip(token) {
+                crate::vcs::SessionTip::At(commit) => Some(commit.as_str().to_owned()),
+                crate::vcs::SessionTip::Unmoved | crate::vcs::SessionTip::Unknown => None,
+            },
+            detail: Some(compose(&format!("onevcs: {reason}"), body_aside.as_deref())),
+            ..Settlement::plain(node, NodeStatus::Failed, Some(failure.outcome()))
+        }),
         _ => settled(),
     } // llmlint: ignore-end[changed_behavior_has_e2e]
 }
