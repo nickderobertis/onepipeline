@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.1](https://github.com/nickderobertis/onepipeline/compare/v0.38.0...v0.38.1) - 2026-09-19
+
+### Fixed
+
+- *(views)* read an adopted run as live, label superseded hooks, and report release holds ([#390](https://github.com/nickderobertis/onepipeline/pull/390))
+
 ## [0.38.0](https://github.com/nickderobertis/onepipeline/compare/v0.37.0...v0.38.0) - 2026-09-19
 
 ### Fixed
