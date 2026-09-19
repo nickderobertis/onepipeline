@@ -1099,17 +1099,10 @@ fn failed_publication(
                 tip: crate::vcs::session_tip(token),
             }))
         }
-        // The host, not the work, refused: a tool or a credential a merge-path
-        // hook needs is missing from this host, and the hook said so. Settled
-        // once and never re-dispatched, whatever the budget has left — before
-        // this arm existed the refusal was `push-rejected`, and a whole budget of
-        // workers was sent back to a branch none of them could fix. What the
-        // settlement carries is what a person needs to fix the host and `retry`:
-        // the branch the work is on, the commit it stands at, and the hook's own
-        // remediation, which `onevcs` puts in the reason. Driven end to end by
-        // `tests/e2e/lifecycle.rs`'s
-        // `a_push_the_merge_path_refuses_for_a_missing_host_prerequisite_settles_once_naming_the_fix`,
-        // whose hook prints the marker line.
+        // The host refused, not the work: no edit to the tree installs the tool
+        // the hook wants, so a further attempt on the branch is spent for nothing.
+        // Settled once, whatever the budget has left, with the head beside the
+        // branch so a `retry` after the install has somewhere to continue from.
         (crate::vcs::Failure::HostPrerequisite, _, _) => Attempt::settled(Settlement {
             branch: branch.clone(),
             head: match crate::vcs::session_tip(token) {
