@@ -11,14 +11,14 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73 and 76 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76 and 80 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, and 46 to 73 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, and 80 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -5683,11 +5683,15 @@ wherever the report named no ticket, so a line that reached none reads as it did
 gave tasks a `delivers`.
 
 **The record is versioned.** Every line names its `schema_version`, and `schema.current` is
-`WRITEBACK_PROJECTIONS_SCHEMA_VERSION`: version 2, the version that added `delivered`. A line
-naming no version is version 1, the shape before it, and still reads — it is written back at the
-current version; a version 1 line naming `delivered` — by the key's own name, an empty list
-included — and a version this build has never written, are refused. `example_delivered` is the golden line carrying a report's `delivered` entries, one
-member this build never names included, and it writes back as itself.
+`WRITEBACK_PROJECTIONS_SCHEMA_VERSION`: version 3. Version 2 added `delivered`; version 3 added
+`actions.reopened`, the count entry 80 derives, which every landed attempt at that version
+names. A line naming no version is version 1, the shape before either, and still reads, as does
+a version 2 line — each is written back at the current version, with `reopened` read as zero;
+a version 1 line naming `delivered`, a version 1 or 2 line naming `actions.reopened` — by the
+key's own name, zero included — a version 3 line naming `actions` without `reopened`, and a
+version this build has never written, are refused. `example_delivered` is the golden line
+carrying a report's `delivered` entries, one member this build never names included, and a
+reopen — the retried deliverer's ticket claimed again — and it writes back as itself.
 
 `tests/contract.rs` holds this block against the published constants and the record type: the
 two paths, the release, the member reads, every field and its admitted values, and the example
@@ -5708,7 +5712,7 @@ rewritten to carry known `spent` and action counts, recorded exactly.
     "record": "<run dir>/writeback-projections.jsonl",
     "one_line_per": "attempt",
     "rewritten": false,
-    "schema": {"current": 2, "read": [1, 2], "absent_means": 1, "added_at_2": ["delivered"]},
+    "schema": {"current": 3, "read": [1, 2, 3], "absent_means": 1, "added_at_2": ["delivered"], "added_at_3": ["actions.reopened"]},
     "fields": {
       "schema_version": {"type": "integer", "is": "the schema version the line is written at"},
       "at": {"type": "string", "format": "RFC 3339, UTC", "is": "when the attempt started"},
@@ -5721,7 +5725,7 @@ rewritten to carry known `spent` and action counts, recorded exactly.
       "kind": {"type": ["string", "null"], "null_when": "class is null"},
       "reason": {"type": ["string", "null"], "null_when": "outcome is projected"},
       "duration_ms": {"type": "integer", "is": "wall-clock time of the whole attempt, reads included"},
-      "actions": {"type": ["object", "null"], "members": ["created", "updated", "unchanged", "orphaned"], "null_when": "no copy report was read"},
+      "actions": {"type": ["object", "null"], "members": ["created", "updated", "unchanged", "orphaned", "reopened"], "derived": {"reopened": "by this crate, under entry 80's rule; the rest are the copy report's own counts"}, "null_when": "no copy report was read"},
       "spent": {"type": ["object", "null"], "is": "the copy report's spent object, verbatim", "null_when": "the report carried none"},
       "delivered": {"type": "array", "of": "object", "is": "the copy report's delivered entries, verbatim, on a landed or a failed attempt", "omitted_when": "the report named no delivered ticket"}
     },
@@ -5731,17 +5735,17 @@ rewritten to carry known `spent` and action counts, recorded exactly.
       "first": "nothing has landed in this driver yet, including a driver an adopt started"
     },
     "whole_because_precedence": ["store-lacks-members", "after-failure", "first"],
-    "example": {"schema_version": 2, "at": "2026-09-13T12:00:00Z", "project": "plans:writeback-quota-plan",
+    "example": {"schema_version": 3, "at": "2026-09-13T12:00:00Z", "project": "plans:writeback-quota-plan",
                 "scope": "members", "whole_because": null, "items": ["op-refusal-not-retried"],
                 "outcome": "projected", "class": null, "kind": null, "reason": null,
                 "duration_ms": 1830,
-                "actions": {"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0},
+                "actions": {"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0, "reopened": 0},
                 "spent": {"requests": 7, "budgets": [{"budget": "graphql", "unit": "points", "amount": 12, "lower_bound": false}]}},
-    "example_delivered": {"schema_version": 2, "at": "2026-09-15T12:00:00Z", "project": "plans:delivers-plan",
+    "example_delivered": {"schema_version": 3, "at": "2026-09-15T12:00:00Z", "project": "plans:delivers-plan",
                           "scope": "whole", "whole_because": "first", "items": ["build"],
                           "outcome": "projected", "class": null, "kind": null, "reason": null,
                           "duration_ms": 412,
-                          "actions": {"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0},
+                          "actions": {"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0, "reopened": 1},
                           "spent": null,
                           "delivered": [{"ticket": "tickets:board/build", "deliverer": "plans:delivers-plan/build",
                                          "outcome": "written", "from": "todo", "to": "queued",
@@ -6064,3 +6068,134 @@ Where that is not what 0.28.2 did:
   nothing and says so on stderr.
 
 <!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
+
+## 80. A retry minted a destination item per attempt, where the work has one — OPEN
+
+**Proposal (for the planner who owns the contract): a node's destination item is reused for
+the life of the work. A `retry` projects the replacement onto the item the superseded lineage
+already holds instead of creating one; a `retry` or `requeue` of a cancelled node writes an
+open word onto that same item, which the store reopens; and a plain `cancel` or `drop` keeps
+its paired close. The item is keyed by the **lineage root** and says what the lineage **head**
+says, under three reserved keys.** It changes no sentence of the contract's *Live edits write
+through*: "Every accepted graph edit updates the onetaskgraph project's tasks" stays true of
+the one task each lineage has, and the proposal is that a retry updates that task rather than
+adding one beside it.
+
+What the worker did: `task_document` rendered one shadow task per node of the snapshot, keyed
+by node id, and every node the plan or an edit ever held stayed in the snapshot — a superseded
+one included, recorded `cancelled`. So a retry of `X` under `X-2` wrote two shadow tasks: `X`
+under `cancelled`, which the store paired with closing the issue as not planned, and `X-2` with
+no origin, which the copy **created**. On the `plans` board `otg-1312` reached `otg-1312-7`,
+seven issues for one piece of work, each created seconds after its predecessor's paired close;
+every one was a card a person had to reconcile, and every dead sibling one more item a whole
+re-projection after `--adopt` spent the board's allowance on. The user's decision, in their
+words: "if we later start/retry a cancelled node it should reopen. always reuse existing
+issues."
+
+What this crate does now is the block below, and the block is the source.
+
+**Lineage.** A lineage is a node and every retry replacement of it, in order, read off the
+run's `superseded` record and nothing else — never a title, never an id's suffix. Its **root**
+is the id the plan authored or an `add` stated; its **head** is the one node in it nothing
+superseded. **One shadow task per lineage**, whose file and `--member` id are the root's, so a
+retry changes that member's rendering rather than adding a member. Its front matter and body
+are the head's own: title (the root id where the head carries none), the head's projected
+status word, the head's `task` as the body, the head's `deps` — each mapped to the shadow task
+of *its* lineage's root, since a dependency may itself have been retried — the head's
+`delivers` and the head's `repo`. Its metadata: `onepipeline.id` is the root, `onepipeline.node`
+is the head, `onepipeline.supersedes` is the superseded ids in lineage order, root first,
+written only where the head is not the root; `onepipeline.<field>` are the head's node fields;
+`onepipeline.settlement`, the landing and change keys are the head's own, absent where the head
+recorded none. A superseded node is projected as **no shadow task of its own**, and a shadow
+task the snapshot did not write is taken out of the shadow store, so a whole copy carries
+nothing an earlier build left there. What diverges beyond entry 50's keys is
+the 2 lineage keys beside `onepipeline.id`. Both are projection-only, exactly as
+`onepipeline.settlement` is: the plan reader reads past them, so a project a run wrote onto —
+its own, where the plan's store is the destination — launches again reading the head's
+definition under the root's id rather than refusing a node field named `node`.
+
+**Reading the destination.** Each item is placed in the lineage its `onepipeline.id` belongs to,
+at the position of its `onepipeline.node` where the item names one and of its `onepipeline.id`
+otherwise — which is every item an older build wrote, and every item of a node nothing retried.
+Several items under one root — what a board an older build wrote holds after an `--adopt`, and,
+once this build has projected over it, that board with the older item still plain at the root
+beside the rewritten head — resolve to the item at the **furthest-along** position; the rest
+are left exactly as they are, since a copy never deletes and nothing here cleans up. Two items
+at one position stay a refusal naming the node. Both the whole copy's `task list` and the member
+copy's `task show` also read each item's status **category**, for the count below. The whole
+re-projection after `--adopt` projects each lineage once, onto its one item — never once per
+superseded id — and a member copy names the root's member.
+
+**The record.** `items` names lineage roots. `actions` gains `reopened`: the carried items the
+store reported `updated` whose category the attempt's own pre-copy read reported `done` or
+`cancelled`, and whose projected word is neither. It is derived by this crate; the store's
+copy-report vocabulary is not extended, because an action word an older build has not heard of
+makes it drop the whole report and then re-create items. Entry 73's record moves to
+`schema_version` 3 under its own rule and holds the shape and the golden lines. Reopening the
+issue is the store's paired write on an open word; this crate writes the word and counts the
+reopen.
+
+**`retry` inherits `delivers`.** A replacement stating no `delivers` inherits the superseded
+node's, on a condition of its own — so a replacement that restates `deps` but not `delivers`
+still inherits — and the ticket the store resolves over the lineage's item never returns to
+`todo` on a retry.
+
+Nothing about a `cancel` (`parked`) or a `drop` (`cancelled`, paired-closed) changes, and a node
+that is neither retried nor requeued is projected exactly as before. A running node the planner
+cancels settles `cancelled` and its item reads **`parked`** — the park outranks the settlement in
+`graph::derive`, and it is an open word — so within one build a cancel closes nothing and a
+retry or requeue of that node lands `queued` on the same item at the id it held, mints no item,
+and reports `reopened: 0` for it. The reopen count applies to an item whose pre-copy category on
+the destination was `done` or `cancelled`: what an older build wrote for a superseded node, or
+what a person closing the card left.
+
+`writeback::tests` holds one shadow task per lineage with the head's fields and the three keys,
+the root member carried on a retry, the furthest-along resolution over an older board and over
+one this build wrote back, and `reopened` counted off the pre-copy category and the projected
+word. `tests/contract.rs` holds the record's `reopened`, its version and entry 73's golden lines.
+`live_edit::retry_cancel_requeue_and_drop_are_projected_after_their_rulings`,
+`writeback_projections::a_retry_or_requeue_of_a_cancelled_node_reopens_its_one_item`,
+`writeback_projections::an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item`
+and `delivers::a_retried_deliverer_keeps_its_ticket_claimed_across_the_retry` drive the compiled
+binary against the real `onetaskgraph` and this suite's store double;
+`store::a_retried_project_launches_again_reading_the_lineage_head_under_the_roots_id` relaunches
+a project the retry was written onto.
+
+```json
+{
+  "lineage": {
+    "read_off": "the run's superseded record: each superseded node and its replacement",
+    "never_read_off": ["a title", "an id suffix"],
+    "root": "the id the plan authored or an add stated",
+    "head": "the one node in the lineage nothing superseded",
+    "shadow_tasks_per_lineage": 1,
+    "file_and_member": "root",
+    "renders": "head",
+    "title_when_head_has_none": "root id",
+    "deps": "each mapped to the shadow task of its own lineage's root",
+    "keys": {
+      "onepipeline.id": "root",
+      "onepipeline.node": "head",
+      "onepipeline.supersedes": {"is": "the superseded ids in lineage order, root first", "written_when": "the head is not the root"}
+    },
+    "superseded_node": "no shadow task of its own",
+    "stale_shadow_task": "removed before the copy",
+    "read_on_relaunch": "the plan reader reads past both keys, as it does onepipeline.settlement"
+  },
+  "destination": {
+    "lineage_of_an_item": "onepipeline.id",
+    "position_of_an_item": "onepipeline.node where named, else onepipeline.id",
+    "several_under_one_root": "the item at the furthest-along position; the rest left as they are",
+    "same_position": "refused, naming the node",
+    "category_read_by": {"whole": "task-list", "members": "task-show"}
+  },
+  "reopened": {
+    "counted_when": ["the copy report says updated", "the pre-copy read reported done or cancelled", "the projected word is neither done nor cancelled"],
+    "derived_by": "this crate",
+    "store_vocabulary_extended": false,
+    "record": {"key": "actions.reopened", "from_schema_version": 3, "stated_in": "entry 73"}
+  },
+  "retry": {"delivers": "a replacement stating none inherits the superseded node's, on its own condition"},
+  "unchanged": {"cancel": "parked", "cancelled_running_node": "parked", "drop": "cancelled", "untouched_node": "as before"}
+}
+```

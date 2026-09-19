@@ -596,7 +596,8 @@ fn two_nodes_delivering_one_ticket_refuse_the_plan_naming_both_and_the_ticket() 
 /// `add`, `retry` and `requeue` carry a node's `delivers` onto the board, and an edit
 /// introducing a ticket another node delivers, or an entry that is not a qualified task id, is
 /// refused naming what is wrong. A retry's replacement delivering its target's ticket is not a
-/// second deliverer: the target leaves the graph.
+/// second deliverer: the target leaves the graph, and the replacement's `delivers` reaches the
+/// lineage's one item — the target's — which names the replacement under `onepipeline.node`.
 #[test]
 fn edits_carry_delivers_and_refuse_a_duplicate_or_unqualified_ticket() {
     let world = a_world_with_tickets("delivers-edits");
@@ -665,10 +666,97 @@ fn edits_carry_delivers_and_refuse_a_duplicate_or_unqualified_ticket() {
         let delivers = |node: &str| board.get(node).map(|task| task["item"]["delivers"].clone());
         delivers("extra") == Some(json!([added]))
             && delivers("waiting") == Some(json!([parked]))
-            && delivers("held-again") == Some(json!([held]))
+            && delivers("held") == Some(json!([held]))
+            && board["held"]["item"]["metadata"]["onepipeline.node"] == "held-again"
             && ticket_reads(world, &added) == "queued"
     });
+    assert!(
+        !tasks(&world, &project).contains_key("held-again"),
+        "the retry's replacement was given an item of its own"
+    );
     world.run(&["stop", name]).exited(0);
+}
+
+/// A node delivering a ticket is retried with a replacement naming no `delivers`: the
+/// replacement inherits them, the lineage's one item carries them, and the ticket reads claimed
+/// — `queued` once the retry is projected, `in-progress` while the replacement runs, `done`
+/// once it is done — and never `todo` across the retry. Both the node and its replacement are
+/// held, so each word is read at rest.
+#[test]
+fn a_retried_deliverer_keeps_its_ticket_claimed_across_the_retry() {
+    let world = a_world_with_tickets("delivers-retried");
+    let delivered = ticket(&world, "work", "todo");
+    world.script("build.wait", "hold");
+    world.script("build-2.wait", "hold");
+    let name = "retried-deliverer";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![delivering(agent("build", &[]), &[&delivered])]),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until_store("the running deliverer to claim its ticket", |world| {
+        words(world, &project).get("build").map(String::as_str) == Some("in progress")
+            && ticket_reads(world, &delivered) == "in-progress"
+    });
+    let item_before = tasks(&world, &project)["build"]["id"].clone();
+
+    edit(
+        &world,
+        name,
+        json!({"op": "retry", "id": "build", "node": {
+            "id": "build-2", "persona": "engineer", "task": "## What\nAgain."
+        }}),
+    )
+    .exited(0);
+    // Every word the ticket reads from here on, so a moment at `todo` is caught rather than
+    // overwritten by the next projection.
+    let mut seen: Vec<String> = Vec::new();
+    world.until_store(
+        "the retry to claim the ticket for the replacement",
+        |world| {
+            let read = ticket_reads(world, &delivered);
+            if seen.last() != Some(&read) {
+                seen.push(read.clone());
+            }
+            let board = tasks(world, &project);
+            board
+                .get("build")
+                .is_some_and(|task| task["item"]["metadata"]["onepipeline.node"] == "build-2")
+                && matches!(read.as_str(), "queued" | "in-progress")
+        },
+    );
+    let board = tasks(&world, &project);
+    assert_eq!(board["build"]["id"], item_before, "{}", board["build"]);
+    assert_eq!(
+        board["build"]["item"]["delivers"],
+        json!([delivered]),
+        "the lineage's item lost the delivers the replacement inherited: {}",
+        board["build"]
+    );
+    assert!(
+        !board.contains_key("build-2"),
+        "the replacement was given an item of its own: {board:?}"
+    );
+
+    world.release("build.go");
+    world.release("build-2.go");
+    world.until_store("the replacement to finish the ticket", |world| {
+        let read = ticket_reads(world, &delivered);
+        if seen.last() != Some(&read) {
+            seen.push(read.clone());
+        }
+        read == "done"
+    });
+    world.until("the run to settle", |world| settled(world, name));
+    assert!(
+        !seen.iter().any(|word| word == "todo"),
+        "the ticket returned to todo across the retry: {seen:?}"
+    );
+    assert!(
+        seen.iter()
+            .any(|word| word == "queued" || word == "in-progress"),
+        "the ticket was never read claimed for the replacement: {seen:?}"
+    );
 }
 
 /// Have the store double refuse every `project copy` it is handed from now on, the way the store

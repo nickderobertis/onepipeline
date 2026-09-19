@@ -3097,9 +3097,10 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
         Some(u64::from(current)),
         "entry 73 names a different current schema version than the worker writes"
     );
-    assert_eq!(schema["read"], json!([1, current]));
+    assert_eq!(schema["read"], json!([1, 2, current]));
     assert_eq!(schema["absent_means"], json!(1));
     assert_eq!(schema["added_at_2"], json!(["delivered"]));
+    assert_eq!(schema["added_at_3"], json!(["actions.reopened"]));
     let delivered_example = &projection["example_delivered"];
     for golden in [example, delivered_example] {
         assert_eq!(
@@ -3139,13 +3140,29 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
         "a line that reached no ticket wrote a `delivered` key"
     );
 
-    // A line an earlier build wrote names no version and no `delivered`: it still reads, as
-    // version 1, and is written back at the current version.
+    // The golden that reopened an item says so, or `reopened` on a golden proves nothing.
+    assert_eq!(
+        delivered_example["actions"]["reopened"],
+        json!(1),
+        "entry 73's delivered example counts no reopen, so the key's round trip is untested"
+    );
+    assert_eq!(example["actions"]["reopened"], json!(0));
+
+    // A line an earlier build wrote names no version, no `delivered` and no
+    // `actions.reopened`: it still reads, as version 1, and is written back at the current
+    // version with `reopened` read as zero. A version 2 line — `delivered` allowed, still no
+    // `reopened` — reads the same way.
+    let mut older_actions = example["actions"].clone();
+    older_actions
+        .as_object_mut()
+        .expect("actions is an object")
+        .remove("reopened");
     let mut unversioned = example.clone();
     unversioned
         .as_object_mut()
         .expect("a line is an object")
         .remove("schema_version");
+    unversioned["actions"] = older_actions.clone();
     let older: ProjectionRecord = serde_json::from_value(unversioned)
         .unwrap_or_else(|error| panic!("a version 1 line did not read: {error}"));
     assert_eq!(
@@ -3153,17 +3170,43 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
         *example,
         "a version 1 line was not written back at the current version"
     );
+    let mut second = delivered_example.clone();
+    second["schema_version"] = json!(2);
+    second["actions"] = older_actions.clone();
+    let second: ProjectionRecord = serde_json::from_value(second)
+        .unwrap_or_else(|error| panic!("a version 2 line did not read: {error}"));
+    let mut expected = delivered_example.clone();
+    expected["actions"]["reopened"] = json!(0);
+    assert_eq!(
+        serde_json::to_value(&second).expect("a record serializes"),
+        expected,
+        "a version 2 line was not written back at the current version with `reopened` zero"
+    );
     for (refused, patch) in [
         (
             "a version 1 line naming `delivered`",
-            json!({"schema_version": 1, "delivered": delivered_example["delivered"]}),
+            json!({"schema_version": 1, "actions": older_actions,
+                   "delivered": delivered_example["delivered"]}),
         ),
         // Refused by the key's own name rather than by what it holds: a line that names it
         // empty is still a version 1 line naming a key version 2 added, and reading it as
         // one that left the key off would let that shape through the boundary unremarked.
         (
             "a version 1 line naming an empty `delivered`",
-            json!({"schema_version": 1, "delivered": []}),
+            json!({"schema_version": 1, "actions": older_actions, "delivered": []}),
+        ),
+        // The same, for the key version 3 added: named as zero is still named.
+        (
+            "a version 1 line naming `actions.reopened`",
+            json!({"schema_version": 1}),
+        ),
+        (
+            "a version 2 line naming `actions.reopened`",
+            json!({"schema_version": 2}),
+        ),
+        (
+            "a version 3 line naming `actions` without `reopened`",
+            json!({"actions": older_actions}),
         ),
         (
             "a version this build has never written",
