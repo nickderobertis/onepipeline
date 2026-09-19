@@ -449,6 +449,11 @@ resolver = "2"
 # release, and `onevcs-testing` 0.6.5 requires exactly this `onevcs`, so the
 # two requirements and the lock move together.
 #
+# `onevcs` 0.25.0 is the floor because it names `FailureKind::HostPrerequisite`,
+# which `src/vcs.rs::failure_of` matches arm by arm (onepipeline #360). A
+# **requirement**, because `^0.24` admits no 0.25.x; `onevcs-testing` 0.6.6
+# requires exactly this `onevcs`, so the two move together.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -469,7 +474,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.4.4"
-onevcs = "0.24.2"
+onevcs = "0.25.0"
 # The wire both siblings above now re-export: the envelope, its labels, sources
 # and phases, the filter grammar, the reader, the merge and the schema registry
 # are `onemessagebus-agent`'s over the `onemessagebus` core, and `src/event.rs`
@@ -559,7 +564,7 @@ oneharness-core = "0.14.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.6.5"
+onevcs-testing = "0.6.6"
 # **Test-support only**, and linked by `crates/testfakes` alone: the crate under test
 # still reads every plan by *driving* the `onetaskgraph` binary. These host the real
 # `local-md` plugin inside `label-strict-source`; that fake says why.

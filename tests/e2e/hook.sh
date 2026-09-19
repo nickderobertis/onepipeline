@@ -21,6 +21,9 @@
 #                        stream directory was
 #   append-future-event  append a line no build of          0
 #                        `onevcs` can read
+#   missing-prerequisite refuse the push as a tool this      1
+#                        host does not have, on the line
+#                        `onevcs` reads as such
 #   anything else        refuse, naming the verbs           64
 #   a verb that could not do what it names                  1
 #
@@ -36,7 +39,7 @@ set -u
 
 fail() {
   echo "pre-push: $1" >&2
-  echo "pre-push: the verbs are: wait-for PATH | break-streams | append-future-event" >&2
+  echo "pre-push: the verbs are: wait-for PATH | break-streams | append-future-event | missing-prerequisite" >&2
   exit 64
 }
 
@@ -212,6 +215,19 @@ case "${1-}" in
     if ! printf '%s\n' '{"from":"a newer onevcs"}' >>"$stream"; then
       broke "cannot append to $stream"
     fi
+    ;;
+  missing-prerequisite)
+    takes "$#" 1 "missing-prerequisite takes no arguments"
+    # What a real hook says when the host it runs on lacks a tool it needs — the
+    # onetaskgraph publication refusing for a release-plz version was the case
+    # that earned the marker. The line has to *begin* with `onevcs`'s marker,
+    # spelled exactly as that crate states it; what follows is the remediation a
+    # person acts on, and it is what reaches the settlement's detail. The spelling
+    # is held against the linked crate by `harness::the_hooks_prerequisite_line_
+    # begins_with_the_marker_onevcs_reads`, so a marker that moved fails there
+    # rather than here as a push that was merely rejected.
+    echo "onevcs: host-prerequisite: release-plz is not on PATH; install it with cargo install release-plz and retry the node" >&2
+    exit 1
     ;;
   *)
     fail "unknown command '${1-}'"

@@ -4429,6 +4429,10 @@ pub enum ReturningHookVerb {
     BreakStreams,
     /// Append a line to this session's stream that no build of `onevcs` can read.
     AppendFutureEvent,
+    /// Refuse the push the way a hook does when the host it runs on lacks a tool
+    /// it needs: on the one line `onevcs` reads as the host's refusal rather than
+    /// the work's, naming the tool and how to install it.
+    MissingPrerequisite,
 }
 
 impl ReturningHookVerb {
@@ -4437,9 +4441,19 @@ impl ReturningHookVerb {
         match self {
             Self::BreakStreams => "break-streams",
             Self::AppendFutureEvent => "append-future-event",
+            Self::MissingPrerequisite => "missing-prerequisite",
         }
     }
 }
+
+/// The remediation the `missing-prerequisite` hook prints after the marker: what
+/// the settlement's detail has to carry to a person, word for word.
+///
+/// Stated once here and read back out of both scripts by
+/// [`the_hooks_prerequisite_line_begins_with_the_marker_onevcs_reads`], so the
+/// journey asserting on it and the hook saying it cannot drift apart.
+pub const MISSING_PREREQUISITE_REMEDIATION: &str =
+    "release-plz is not on PATH; install it with cargo install release-plz and retry the node";
 
 /// A repository's own `pre-push` hook running `verb`, written into this world as
 /// a script and handed back as the argv that runs it.
@@ -4674,9 +4688,10 @@ fn install_hook(path: &Path, argv: &[&str]) {
 /// reading the scripts rather than by generating one from the other: a generator
 /// would need a third source, and what actually has to agree is the verb each
 /// half dispatches on.
-// llmlint: ignore-block[tests_mirror_real_usage] this is a drift gate over the suite's own
-// scaffolding, not a journey: what it holds is that two files stay in step, and neither
-// file is reachable from any interface a user of this crate has. There is nothing to drive
+// llmlint: ignore-block[tests_mirror_real_usage] this and the test after it are drift gates
+// over the suite's own scaffolding, not journeys: what they hold is that two files stay in
+// step with each other and with the marker the linked sibling reads, and neither file is
+// reachable from any interface a user of this crate has. There is nothing to drive
 // through the binary here — the hook is the repository's own, which git runs at the
 // publishing push, and the journeys that exercise it are `lifecycle.rs`'s and `views.rs`'s,
 // which do drive the binary. Reading the two scripts is the only way to compare them,
@@ -4715,7 +4730,12 @@ fn both_hook_scripts_answer_the_same_verbs() {
     // empty lists and pass.
     assert_eq!(
         shell,
-        ["wait-for", "break-streams", "append-future-event"],
+        [
+            "wait-for",
+            "break-streams",
+            "append-future-event",
+            "missing-prerequisite"
+        ],
         "the hook scripts no longer dispatch the way this reads them"
     );
     // The ceiling `wait-for` gives up at is the other thing two files have to
@@ -4765,6 +4785,49 @@ fn both_hook_scripts_answer_the_same_verbs() {
                 "{script} dispatches {verb} but its refusal does not name it: {usage}"
             );
         }
+    }
+}
+
+/// The line `missing-prerequisite` prints begins with the marker the linked
+/// `onevcs` reads, and carries the remediation the journey asserts on.
+///
+/// The marker's spelling is `onevcs`'s to state, and the hook is a script no
+/// compiler checks against it: a marker that moved in the sibling would leave the
+/// hook printing a line nothing reads, and the journey would then be asserting
+/// on a push that was merely rejected. Read out of both scripts, because neither
+/// platform runs the other's.
+#[test]
+fn the_hooks_prerequisite_line_begins_with_the_marker_onevcs_reads() {
+    for (script, source) in [
+        ("hook.sh", include_str!("hook.sh")),
+        ("hook.bat", include_str!("hook.bat")),
+    ] {
+        // The `echo` that carries the marker, stripped of the shell's quoting
+        // and of the redirection to stderr that follows it on both platforms.
+        let said = source
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("echo"))
+            .find(|line| line.contains(onevcs::HOST_PREREQUISITE_MARKER))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{script} prints no line beginning `{}`; the marker onevcs reads may have \
+                     moved, and the hook has to follow it",
+                    onevcs::HOST_PREREQUISITE_MARKER
+                )
+            })
+            .trim_start_matches("echo")
+            .trim()
+            .trim_start_matches('"');
+        assert!(
+            said.starts_with(onevcs::HOST_PREREQUISITE_MARKER),
+            "{script}'s line does not *begin* with the marker, which is the only place \
+             onevcs reads it: {said}"
+        );
+        assert!(
+            said.contains(MISSING_PREREQUISITE_REMEDIATION),
+            "{script}'s remediation is not the one the journey asserts on: {said}"
+        );
     }
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
