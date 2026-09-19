@@ -1411,22 +1411,9 @@ const TIMED: usize = 5;
 fn assembled_run(template: &RunPaths, root: &std::path::Path, id: &str, session: &str) -> RunPaths {
     let paths = RunPaths::under(root, id);
     std::fs::create_dir_all(&paths.dir).expect("a run root");
-    let journal = template
-        .journal()
-        .file_name()
-        .expect("the journal has a name")
-        .to_owned();
-    for entry in std::fs::read_dir(&template.dir).expect("the template run") {
-        let entry = entry.expect("an entry of the template run");
-        if !entry.file_type().expect("its kind").is_file() || entry.file_name() == journal {
-            continue;
-        }
-        std::fs::copy(entry.path(), paths.dir.join(entry.file_name()))
-            .unwrap_or_else(|error| panic!("a copied file {:?}: {error}", entry.file_name()));
-    }
     for (from, to) in [
-        (paths.launch(), paths.launch()),
-        (paths.summary(), paths.summary()),
+        (template.launch(), paths.launch()),
+        (template.summary(), paths.summary()),
     ] {
         let read = std::fs::read_to_string(&from)
             .unwrap_or_else(|error| panic!("{} cannot be read: {error}", from.display()));
