@@ -22,19 +22,11 @@
 //!   copy is a whole-project write, so one untitled node stops every item of the run
 //!   reaching the board. Untitled nodes are ordinary — see
 //!   `graph::check_declared_version` for why an edited graph carries them.
-//! * **A task's identity is its lineage root's, not the node's.** A `retry` supersedes a
-//!   node with a replacement, and the replacement is projected onto the item the superseded
-//!   node already holds: the shadow task's file, its `--member` id and its `onepipeline.id`
-//!   are the **root's** — the id the plan authored or an `add` stated — and everything it
-//!   says is the **head's**, the one node in the lineage nothing superseded, with
-//!   `onepipeline.node` naming which attempt that is and `onepipeline.supersedes` the ones
-//!   it replaced. A superseded node has no shadow task of its own, so a retry rewrites one
-//!   item rather than closing one and minting another, and a retry or requeue of a
-//!   cancelled node writes an open word onto its item, which the store reopens. The two
-//!   lineage keys are projection-only, like the settlement: `taskgraph`'s reader reads past
-//!   them, so a plan whose own store is the destination launches again reading the head's
-//!   definition under the root's id. Entry 80 of `docs/contract-divergences.md` states the
-//!   rule; [`Lineages`] computes it.
+//! * **A task's identity is its lineage root's, not the node's.** A `retry`'s replacement
+//!   is projected onto the item the superseded node already holds, keyed by the lineage
+//!   root and saying what the lineage head says. Entry 80 of `docs/contract-divergences.md`
+//!   is the rule; [`Lineages`] computes it, [`task_document`] renders it, and `taskgraph`'s
+//!   reader reads past the two lineage keys the way it reads past the settlement.
 //! * **A project's title is not declared.** A plan's `name` is reserved project metadata,
 //!   never the board's own heading, so the destination's title is read and written back. In
 //!   particular it is *not* the project's native identifier: on a store where those two
@@ -1586,17 +1578,22 @@ struct Placed {
 
 impl Placed {
     fn of(lineages: &Lineages, task: DestinationTask) -> Result<Self, String> {
-        let named = |key: &str| {
-            task.item
-                .metadata
-                .get(key)
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-                .map(str::to_owned)
+        // A reserved key the item carries is a node id, and a node id is a non-empty
+        // string: one present as anything else is the destination's answer being wrong,
+        // which is refused by name rather than read as the key being absent.
+        let named = |key: &str| -> Result<Option<String>, String> {
+            match task.item.metadata.get(key) {
+                None => Ok(None),
+                Some(Value::String(id)) if !id.is_empty() => Ok(Some(id.clone())),
+                Some(other) => Err(format!(
+                    "task '{}' carries {key} as {other}, and a node id is a non-empty string",
+                    task.id.as_str()
+                )),
+            }
         };
         let node =
-            named(ID_KEY).ok_or_else(|| format!("task '{}' has no {ID_KEY}", task.id.as_str()))?;
-        let attempt = named(NODE_KEY).unwrap_or_else(|| node.clone());
+            named(ID_KEY)?.ok_or_else(|| format!("task '{}' has no {ID_KEY}", task.id.as_str()))?;
+        let attempt = named(NODE_KEY)?.unwrap_or_else(|| node.clone());
         let root = lineages.root_of(&node).to_owned();
         let position = lineages
             .chain(&root)
@@ -5223,6 +5220,30 @@ mod tests {
         ])
         .expect("resolves");
         assert_eq!(stray["build"].id.as_str(), "plans:board/004-build-2");
+
+        // A reserved key present as other than a non-empty string is the destination's
+        // answer being wrong, refused by the task and key rather than read as absent.
+        for (key, wrong) in [
+            (NODE_KEY, json!(7)),
+            (NODE_KEY, json!("")),
+            (ID_KEY, json!(["build"])),
+        ] {
+            let mut malformed = item("001-build", "build", None, "cancelled");
+            malformed
+                .item
+                .metadata
+                .insert(key.to_owned(), wrong.clone());
+            let refused = super::Placed::of(&lineages, malformed)
+                .err()
+                .unwrap_or_else(|| panic!("{key} present as {wrong} was read as absent"));
+            assert_eq!(
+                refused,
+                format!(
+                    "task 'plans:board/001-build' carries {key} as {wrong}, and a node id is \
+                     a non-empty string"
+                )
+            );
+        }
 
         // With the fold, the shadow task is written onto the furthest-along item.
         fixture.origins = place(older()).expect("resolves");

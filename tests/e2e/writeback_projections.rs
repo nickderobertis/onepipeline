@@ -213,6 +213,12 @@ fn rewritten(path: &Path, into: &Path, edit: impl FnOnce(&mut serde_json::Map<St
     std::fs::write(into, format!("---\n{rendered}---\n{body}")).expect("the document is written");
 }
 
+/// How the run's shadow store names a project's folder and a lineage's file: the id's
+/// bytes as hex, which is what keeps any id a file name.
+fn hex(id: &str) -> String {
+    id.bytes().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// The file a `local-md` destination keeps one item in: its id's local half, under the
 /// project's tasks folder.
 fn item_file(world: &World, task: &Value) -> std::path::PathBuf {
@@ -1102,6 +1108,28 @@ fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item(
     });
     // llmlint: ignore-end[tests_mirror_real_usage]
     let older_root = std::fs::read(&root_file).expect("the seeded root item reads");
+    // And what that build left in the run's own shadow store, which outlives its driver: a
+    // shadow task for the attempt, keyed by the attempt's id. A whole copy carries every
+    // document the shadow store holds, so one this build did not write would reach the
+    // board as an item of its own.
+    let shadow_tasks = world
+        .run_file(run, "writeback")
+        .join("tasks")
+        .join(hex(&project));
+    let root_shadow = shadow_tasks.join(format!("{}.md", hex("flaky")));
+    let stale_shadow = shadow_tasks.join(format!("{}.md", hex("flaky-2")));
+    assert!(
+        root_shadow.is_file(),
+        "the run keeps its shadow store elsewhere than {}",
+        root_shadow.display()
+    );
+    rewritten(&root_shadow, &stale_shadow, |front| {
+        let metadata = front["metadata"].as_object_mut().expect("metadata");
+        metadata.insert("onepipeline.id".to_owned(), json!("flaky-2"));
+        metadata.remove("onepipeline.node");
+        metadata.remove("onepipeline.supersedes");
+        metadata.remove("onetaskgraph.origin");
+    });
     let seeded = world.store_tasks(&project);
     assert_eq!(
         seeded
@@ -1182,6 +1210,11 @@ fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item(
                 .iter()
                 .any(|task| task["item"]["metadata"]["onepipeline.id"] == "flaky-2"),
             "an item still says it is the attempt's own: {tasks:?}"
+        );
+        assert!(
+            !stale_shadow.exists(),
+            "the shadow task an older build left for the attempt was carried: {}",
+            stale_shadow.display()
         );
     };
     reused_by_a_whole_projection(&world, "the adopted driver's whole projection");
