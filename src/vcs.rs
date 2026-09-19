@@ -2006,6 +2006,25 @@ mod tests {
             listed, vocabulary,
             "the contract's publication-failure words are not the ones this crate settles on"
         );
+        // And the one word that is shared rather than a publication's own is
+        // routed the way the contract says: a host missing a prerequisite is
+        // settled once, carrying what a person fixes the host with, and never
+        // sent back to a worker.
+        assert!(
+            contract.contains(
+                "A refused push carrying the host-prerequisite marker is **not** re-dispatched"
+            ),
+            "the contract does not say a host-prerequisite refusal is settled rather than re-dispatched"
+        );
+        assert!(
+            contract.contains(&format!(
+                "settles the node `failed` under `{}` — no word of its own and no new event \
+                 kind — carrying the preserved branch, the commit it stands at, and the \
+                 hook's own remediation",
+                Failure::HOST
+            )),
+            "the contract does not say what a host-prerequisite settlement carries"
+        );
     }
 
     /// The README summarises the same vocabulary, so it is gated the same way.
@@ -2074,6 +2093,23 @@ mod tests {
             readme.contains(&format!("Everything else settles `{}`", Failure::RESIDUAL)),
             "the README does not name `{}` as what everything else settles on",
             Failure::RESIDUAL
+        );
+        // And the host's own refusal is the other one recovered without a
+        // dispatch — the README has to say so in the same breath as the word,
+        // because a reader of the word alone would wait for a retry that never
+        // comes.
+        assert!(
+            readme.contains(&format!(
+                "is not re-dispatched at all, because no edit to the tree installs anything on \
+                 the host: it settles `failed` under `{}`",
+                Failure::HOST
+            )),
+            "the README does not say a host-prerequisite refusal settles `{}` without a re-dispatch",
+            Failure::HOST
+        );
+        assert!(
+            readme.contains("carrying the preserved branch, the commit it stands at, and the hook's own remediation"),
+            "the README does not say what a host-prerequisite settlement carries"
         );
     }
 

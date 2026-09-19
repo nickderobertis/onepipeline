@@ -1088,21 +1088,6 @@ fn failed_publication(
             ..Settlement::plain(node, NodeStatus::Failed, Some(failure.outcome()))
         })
     };
-    // llmlint: ignore-block[changed_behavior_has_e2e] the second arm covers two cases and
-    // only one of them is new. The **terminal** one — a failure no further attempt can
-    // answer — is driven end to end by
-    // `a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried`,
-    // which asserts the residual word and that the node was dispatched exactly once. It
-    // reaches the arm through a hosted identity this build has no `RemoteHost` for,
-    // because a repository's own verification no longer produces a terminal kind at all:
-    // `onevcs` 0.11.0 runs no gate, and the merge path refusing a push is `push-rejected`,
-    // which is preserving. The other case is a preserving failure whose branch the
-    // execution checkout refused: `onevcs` hands a branch back on every failure it can and
-    // reports `Refused` only when that copy itself failed — a checkout that could not be
-    // written to — which no double here injects and which the hook script deliberately
-    // keeps out of the repository. Reaching it would mean breaking the checkout
-    // mid-publication, which proves the fixture rather than this arm, and what it does is
-    // exactly what the terminal case does.
     match (failure, handed_back, branch.clone()) {
         (crate::vcs::Failure::Preserving(outcome), true, Some(branch)) => {
             Attempt::Preserving(Box::new(Preserved {
@@ -1121,7 +1106,10 @@ fn failed_publication(
         // workers was sent back to a branch none of them could fix. What the
         // settlement carries is what a person needs to fix the host and `retry`:
         // the branch the work is on, the commit it stands at, and the hook's own
-        // remediation, which `onevcs` puts in the reason.
+        // remediation, which `onevcs` puts in the reason. Driven end to end by
+        // `tests/e2e/lifecycle.rs`'s
+        // `a_push_the_merge_path_refuses_for_a_missing_host_prerequisite_settles_once_naming_the_fix`,
+        // whose hook prints the marker line.
         (crate::vcs::Failure::HostPrerequisite, _, _) => Attempt::settled(Settlement {
             branch: branch.clone(),
             head: match crate::vcs::session_tip(token) {
@@ -1131,8 +1119,24 @@ fn failed_publication(
             detail: Some(compose(&format!("onevcs: {reason}"), body_aside.as_deref())),
             ..Settlement::plain(node, NodeStatus::Failed, Some(failure.outcome()))
         }),
+        // llmlint: ignore-block[changed_behavior_has_e2e] this arm covers two cases and
+        // only one of them is new. The **terminal** one — a failure no further attempt can
+        // answer — is driven end to end by
+        // `a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried`,
+        // which asserts the residual word and that the node was dispatched exactly once. It
+        // reaches the arm through a hosted identity this build has no `RemoteHost` for,
+        // because a repository's own verification no longer produces a terminal kind at all:
+        // `onevcs` 0.11.0 runs no gate, and the merge path refusing a push is `push-rejected`,
+        // which is preserving. The other case is a preserving failure whose branch the
+        // execution checkout refused: `onevcs` hands a branch back on every failure it can and
+        // reports `Refused` only when that copy itself failed — a checkout that could not be
+        // written to — which no double here injects and which the hook script deliberately
+        // keeps out of the repository. Reaching it would mean breaking the checkout
+        // mid-publication, which proves the fixture rather than this arm, and what it does is
+        // exactly what the terminal case does.
         _ => settled(),
-    } // llmlint: ignore-end[changed_behavior_has_e2e]
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+    }
 }
 
 /// A publication's own words and what is to be said about the body, in that
