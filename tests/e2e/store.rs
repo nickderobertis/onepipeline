@@ -2784,19 +2784,68 @@ fn a_settled_project_launches_again_from_its_projected_metadata() {
 }
 
 /// A project a run retried a node of launches again, reading the lineage head's
-/// definition under the root's id.
+/// definition under the root's id — its dependents' edges included.
 ///
 /// The one item a lineage has carries `onepipeline.node` and `onepipeline.supersedes`
 /// beside its settlement — and where the plan's own store is the destination, so does the
 /// plan's task. Those are the write-back's keys and no node field answers to them, so the
 /// reader skips them the way it skips the settlement; before it did, every relaunch of a
-/// project a run had written to was refused for a field named `node` nobody authored.
+/// project a run had written to was refused for a field named `node` nobody authored. A
+/// dependent of the retried node keeps its edge onto the lineage's one item, since that is
+/// the item its dependency's root holds, and relaunches depending on the root's id.
 #[test]
 fn a_retried_project_launches_again_reading_the_lineage_head_under_the_roots_id() {
     let first = World::new("store-writeback-relaunch-retried-first");
     first.script("work.fail", "1");
     let run = "writeback-retried";
-    let project = first.plan(run, &plan_of(run, vec![crate::harness::agent("work", &[])]));
+    let project = first.plan(
+        run,
+        &plan_of(
+            run,
+            vec![
+                crate::harness::agent("work", &[]),
+                crate::harness::agent("ship", &["work"]),
+            ],
+        ),
+    );
+    let item_of = |world: &World, node: &str| -> Value {
+        world
+            .store_tasks(&project)
+            .into_iter()
+            .find(|task| task["item"]["metadata"]["onepipeline.id"] == node)
+            .unwrap_or_else(|| panic!("the board holds no item for {node}"))
+    };
+    let edge_onto = |world: &World, dependent: &str| -> Vec<String> {
+        world
+            .store_deps(
+                item_of(world, dependent)["id"]
+                    .as_str()
+                    .expect("an item id"),
+            )
+            .iter()
+            .map(|edge| {
+                edge["to"]["id"]
+                    .as_str()
+                    .expect("an edge target")
+                    .to_owned()
+            })
+            .collect()
+    };
+    let held_before = |world: &World| -> (String, Vec<String>) {
+        (
+            item_of(world, "work")["id"]
+                .as_str()
+                .expect("an item id")
+                .to_owned(),
+            edge_onto(world, "ship"),
+        )
+    };
+    let (work_item, ship_edges) = held_before(&first);
+    assert_eq!(
+        ship_edges,
+        vec![work_item.clone()],
+        "the fixture authored no edge"
+    );
     first.run(&["start", &project, "--attach"]).settled();
     first
         .run_with_stdin(
@@ -2808,22 +2857,46 @@ fn a_retried_project_launches_again_reading_the_lineage_head_under_the_roots_id(
         )
         .exited(0);
     first.run(&["adopt", run]).settled();
-    first.until("the lineage's head to reach the project", |world| {
-        world.store_tasks(&project).iter().any(|task| {
-            task["item"]["metadata"]["onepipeline.node"] == "work-2"
-                && task["item"]["metadata"]["onepipeline.settlement"]["status"] == "done"
-        })
-    });
+    first.until(
+        "the lineage's head and its dependent to reach the project",
+        |world| {
+            let tasks = world.store_tasks(&project);
+            let settled = |node: &str, head: &str| {
+                tasks.iter().any(|task| {
+                    task["item"]["metadata"]["onepipeline.id"] == node
+                        && task["item"]["metadata"]["onepipeline.node"] == head
+                        && task["item"]["metadata"]["onepipeline.settlement"]["status"] == "done"
+                })
+            };
+            settled("work", "work-2") && settled("ship", "ship")
+        },
+    );
     let tasks = first.store_tasks(&project);
     assert_eq!(
         tasks.len(),
-        1,
-        "the lineage holds other than one item: {tasks:?}"
+        2,
+        "the lineage holds other than one item beside its dependent: {tasks:?}"
+    );
+    let work = item_of(&first, "work");
+    assert_eq!(
+        work["id"],
+        json!(work_item),
+        "the retry moved the lineage's item"
     );
     assert_eq!(
-        tasks[0]["item"]["metadata"]["onepipeline.supersedes"],
+        work["item"]["metadata"]["onepipeline.supersedes"],
         json!(["work"]),
         "{tasks:?}"
+    );
+    assert_eq!(
+        edge_onto(&first, "ship"),
+        vec![work_item],
+        "the dependent's edge no longer names the lineage's one item"
+    );
+    assert_eq!(
+        item_of(&first, "ship")["item"]["metadata"]["onepipeline.settlement"]["status"],
+        "done",
+        "the dependent did not run behind the replacement: {tasks:?}"
     );
 
     let second = World::new("store-writeback-relaunch-retried-second").with_env(
@@ -2832,14 +2905,16 @@ fn a_retried_project_launches_again_reading_the_lineage_head_under_the_roots_id(
     );
     second.run(&["start", &project, "--attach"]).settled();
     assert_eq!(second.run_json(run, "result.json")["state"], "complete");
-    // What it launched is the head's definition under the root's id: one node, named as
-    // the plan authored it and titled by that name, carrying the task the retry stated.
+    // What it launched is the head's definition under the root's id: the retried node,
+    // named as the plan authored it and titled by that name, carrying the task the retry
+    // stated, and its dependent still depending on it by that name.
     let launched = second.run_json(run, "checkpoint.json")["state"]["graph"]["nodes"].clone();
     assert_eq!(
         launched,
-        json!([{
-            "id": "work", "title": "work", "task": "## What\nRedo it.", "persona": "engineer"
-        }]),
+        json!([
+            {"id": "work", "title": "work", "task": "## What\nRedo it.", "persona": "engineer"},
+            {"id": "ship", "title": "ship", "task": "## What\nDo ship.\n\n## Why\nSo the run can settle.\n\n## Acceptance criteria\n- ship is done.", "persona": "engineer", "deps": ["work"]},
+        ]),
         "{launched}"
     );
 }
