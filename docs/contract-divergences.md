@@ -6109,7 +6109,10 @@ written only where the head is not the root; `onepipeline.<field>` are the head'
 recorded none. A superseded node is projected as **no shadow task of its own**, and a shadow
 task the snapshot did not write is taken out of the shadow store, so a whole copy carries
 nothing an earlier build left there. What diverges beyond entry 50's keys is
-the 2 lineage keys beside `onepipeline.id`.
+the 2 lineage keys beside `onepipeline.id`. Both are projection-only, exactly as
+`onepipeline.settlement` is: the plan reader reads past them, so a project a run wrote onto —
+its own, where the plan's store is the destination — launches again reading the head's
+definition under the root's id rather than refusing a node field named `node`.
 
 **Reading the destination.** Each item is placed in the lineage its `onepipeline.id` belongs to,
 at the position of its `onepipeline.node` where the item names one and of its `onepipeline.id`
@@ -6154,7 +6157,9 @@ word. `tests/contract.rs` holds the record's `reopened`, its version and entry 7
 `writeback_projections::a_retry_or_requeue_of_a_cancelled_node_reopens_its_one_item`,
 `writeback_projections::an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item`
 and `delivers::a_retried_deliverer_keeps_its_ticket_claimed_across_the_retry` drive the compiled
-binary against the real `onetaskgraph` and this suite's store double.
+binary against the real `onetaskgraph` and this suite's store double;
+`store::a_retried_project_launches_again_reading_the_lineage_head_under_the_roots_id` relaunches
+a project the retry was written onto.
 
 ```json
 {
@@ -6174,7 +6179,8 @@ binary against the real `onetaskgraph` and this suite's store double.
       "onepipeline.supersedes": {"is": "the superseded ids in lineage order, root first", "written_when": "the head is not the root"}
     },
     "superseded_node": "no shadow task of its own",
-    "stale_shadow_task": "removed before the copy"
+    "stale_shadow_task": "removed before the copy",
+    "read_on_relaunch": "the plan reader reads past both keys, as it does onepipeline.settlement"
   },
   "destination": {
     "lineage_of_an_item": "onepipeline.id",

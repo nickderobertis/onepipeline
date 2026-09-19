@@ -1755,7 +1755,10 @@ fn from_entry_57(field: &str) -> Value {
 /// A node an `add` or a `retry` introduces carries no title unless the envelope
 /// names one — deliberately, for the reason `graph::check_declared_version`
 /// records — and the projection is a whole-project write, so an item a
-/// destination refuses for having no title is every item of the run missing.
+/// destination refuses for having no title is every item of the run missing. A
+/// `retry`'s replacement is written onto the superseded node's item (entry 80 of
+/// `docs/contract-divergences.md`), so the id it reaches the board under is its
+/// lineage root's, and that is the title it gets.
 #[test]
 fn nodes_a_live_edit_added_reach_the_board_titled_by_their_own_ids() {
     let world = World::new("edit-untitled");
@@ -1792,7 +1795,9 @@ fn nodes_a_live_edit_added_reach_the_board_titled_by_their_own_ids() {
         .exited(0)
         .out_has("\"applied\"");
 
-    let board = |world: &World| -> BTreeMap<String, String> {
+    // Each item's title and the lineage head it carries, by the lineage root it is
+    // keyed under.
+    let board = |world: &World| -> BTreeMap<String, (String, String)> {
         world
             .store_tasks(&format!("plans:{}", crate::harness::project_id(&run)))
             .into_iter()
@@ -1801,26 +1806,37 @@ fn nodes_a_live_edit_added_reach_the_board_titled_by_their_own_ids() {
                     task["item"]["metadata"]["onepipeline.id"]
                         .as_str()?
                         .to_owned(),
-                    task["item"]["title"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned(),
+                    (
+                        task["item"]["title"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                        task["item"]["metadata"]["onepipeline.node"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                    ),
                 ))
             })
             .collect()
     };
-    let projected = |world: &World| board(world).contains_key("slow-again");
+    let projected = |world: &World| {
+        board(world)
+            .get("slow")
+            .is_some_and(|(_, head)| head == "slow-again")
+    };
     world.until_store("the edited graph to reach the project", projected);
 
-    // The untitled three are on the board under their own ids, and the title the
-    // plan gave the fourth is untouched.
+    // The untitled three are on the board under their own ids — the replacement under
+    // its root's, on the item the retry rewrote — and the title the plan gave the fourth
+    // is untouched.
     let titles = |world: &World, id: &str| {
         board(world)
             .get(id)
-            .cloned()
+            .map(|(title, _)| title.clone())
             .unwrap_or_else(|| panic!("{id} never reached the board: {:?}", board(world)))
     };
-    for id in ["no-title", "blank-title", "slow-again"] {
+    for id in ["no-title", "blank-title", "slow"] {
         assert_eq!(
             titles(&world, id),
             id,
@@ -1829,6 +1845,11 @@ fn nodes_a_live_edit_added_reach_the_board_titled_by_their_own_ids() {
         );
     }
     assert_eq!(titles(&world, "titled"), "feat: the node the plan titled");
+    assert!(
+        !board(&world).contains_key("slow-again"),
+        "the retry minted an item of its own for the replacement: {:?}",
+        board(&world)
+    );
 
     // And the projection the incident was about: after the run settles, **every**
     // node its own record holds is on the board, each with a title. The copy is a
@@ -1844,23 +1865,38 @@ fn nodes_a_live_edit_added_reach_the_board_titled_by_their_own_ids() {
             .store_tasks(&format!("plans:{}", crate::harness::project_id(&run)))
             .iter()
             .any(|task| {
-                task["item"]["metadata"]["onepipeline.id"] == "slow-again"
+                task["item"]["metadata"]["onepipeline.id"] == "slow"
+                    && task["item"]["metadata"]["onepipeline.node"] == "slow-again"
                     && task["item"]["metadata"]["onepipeline.settlement"].is_object()
             })
     });
     let projected = board(&world);
     let result = world.run_json(&run, "result.json");
-    let recorded: Vec<String> = result["nodes"]
+    let recorded = result["nodes"]
         .as_array()
-        .expect("the run's own record names its nodes")
-        .iter()
-        .filter_map(|node| node["id"].as_str().map(str::to_owned))
-        .collect();
-    assert!(recorded.len() >= 4, "{result}");
-    for id in &recorded {
+        .expect("the run's own record names its nodes");
+    assert!(recorded.len() >= 5, "{result}");
+    // A superseded node's item is its lineage's, keyed by the root; the record says which
+    // node superseded which, so each node is looked up under its root.
+    let root_of = |id: &str| -> String {
+        let mut root = id.to_owned();
+        while let Some(superseded) = recorded
+            .iter()
+            .find(|node| node["superseded_by"] == root)
+            .and_then(|node| node["id"].as_str())
+        {
+            root = superseded.to_owned();
+        }
+        root
+    };
+    for id in recorded.iter().filter_map(|node| node["id"].as_str()) {
+        let root = root_of(id);
         assert!(
-            projected.get(id).is_some_and(|title| !title.is_empty()),
-            "the settlement projection has no titled item for '{id}': {projected:?}"
+            projected
+                .get(&root)
+                .is_some_and(|(title, _)| !title.is_empty()),
+            "the settlement projection has no titled item for '{id}' under '{root}': \
+             {projected:?}"
         );
     }
 }

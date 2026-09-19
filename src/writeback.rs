@@ -30,8 +30,11 @@
 //!   `onepipeline.node` naming which attempt that is and `onepipeline.supersedes` the ones
 //!   it replaced. A superseded node has no shadow task of its own, so a retry rewrites one
 //!   item rather than closing one and minting another, and a retry or requeue of a
-//!   cancelled node writes an open word onto its item, which the store reopens. Entry 80 of
-//!   `docs/contract-divergences.md` states the rule; [`Lineages`] computes it.
+//!   cancelled node writes an open word onto its item, which the store reopens. The two
+//!   lineage keys are projection-only, like the settlement: `taskgraph`'s reader reads past
+//!   them, so a plan whose own store is the destination launches again reading the head's
+//!   definition under the root's id. Entry 80 of `docs/contract-divergences.md` states the
+//!   rule; [`Lineages`] computes it.
 //! * **A project's title is not declared.** A plan's `name` is reserved project metadata,
 //!   never the board's own heading, so the destination's title is read and written back. In
 //!   particular it is *not* the project's native identifier: on a store where those two
@@ -99,20 +102,16 @@ use crate::graph::{Landing, NodeStatus};
 use crate::ledger::{LaunchRecord, RunPaths};
 use crate::plan::Node;
 use crate::projection::RunState;
-use crate::taskgraph::{QualifiedId, BINARY_ENV};
+use crate::taskgraph::{QualifiedId, BINARY_ENV, NODE_KEY, SUPERSEDES_KEY};
 
 const SHADOW_SOURCE: &str = "onepipeline-writeback";
 /// The reserved key naming the plan node a destination item is the shadow of: the
 /// **lineage root's** id, which is what the store's `task list` is read back by.
 const ID_KEY: &str = "onepipeline.id";
-/// The reserved key naming the lineage's head — the attempt whose fields the item carries —
-/// and, with [`SUPERSEDES_KEY`], one of the two lineage keys entry 80 of
-/// `docs/contract-divergences.md` names and
-/// [`tests::every_word_and_key_this_projection_writes_is_named_by_the_divergence`] holds it to.
-const NODE_KEY: &str = "onepipeline.node";
-/// The reserved key listing the ids a lineage's head superseded, root first, written only
-/// where the head is not the root.
-const SUPERSEDES_KEY: &str = "onepipeline.supersedes";
+// The two lineage keys, [`NODE_KEY`] and [`SUPERSEDES_KEY`], live beside the settlement
+// key in `taskgraph`, because the plan reader has to skip them exactly as it skips that
+// one; [`tests::every_word_and_key_this_projection_writes_is_named_by_the_divergence`]
+// holds them to entry 80 of `docs/contract-divergences.md`.
 /// The reserved key saying whether the change a node published reached its base.
 ///
 /// Named once, and held against the document that records them by
