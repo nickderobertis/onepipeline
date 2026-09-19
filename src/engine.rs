@@ -514,6 +514,9 @@ pub(crate) enum Message {
     /// A node's session would not open because its branch and its base conflict,
     /// which is the one refusal at that boundary no further attempt converges on.
     SessionConflicted(Box<SessionConflict>),
+    /// A node's session would not open because its identity admits no more
+    /// sessions now: the node is handed back to the queue without a settlement.
+    WorkspaceExhausted(Box<WorkspaceRefusal>),
     /// A configured drafting dispatch produced no change request body.
     BodyNotDrafted(Box<UndraftedBody>),
     /// One acceptance criterion was compared against the branch its node is
@@ -1004,6 +1007,12 @@ fn converge(
     // target's answer is a probe, and a slow one asked inline would stall the
     // loop every other node in the run depends on.
     let mut releases = crate::release::Watch::of_run(paths);
+    // What each lifecycle node's identity admits, read before the node comes
+    // forward, and the nodes held on that reading. Nothing is seeded from the
+    // journal: a workspace hold is decided by a read this driver makes, so a
+    // fresh driver reads rather than inherits, and `report_holds` diffs the
+    // answer against what the record already says.
+    let mut workspaces = crate::pool::Workspaces::new();
     // What the loop has already said out loud, so each fact is announced once
     // and again only when it becomes true again.
     let mut announced_ready: BTreeSet<String> = BTreeSet::new();
@@ -1200,6 +1209,7 @@ fn converge(
                 unpublished = false;
             }
         }
+        workspaces.begin_pass(|node| in_flight.contains_key(node));
         if start_ready(
             paths,
             journal,
@@ -1211,6 +1221,7 @@ fn converge(
             &mut in_flight,
             &paused,
             &releases,
+            &mut workspaces,
         )? {
             derived = None;
             unpublished = true;
@@ -1230,9 +1241,19 @@ fn converge(
         report_holds(
             paths,
             journal,
-            &holds_now(state, &statuses, &in_flight, &decisions, &awaiting_release),
+            &holds_now(
+                state,
+                &statuses,
+                &in_flight,
+                &decisions,
+                &awaiting_release,
+                workspaces.held(),
+            ),
             &mut holding,
         )?;
+        // The record first and the surface second, so a reader holding the
+        // surface finds the hold it reports already on the record.
+        workspaces.surface_waits(paths, journal)?;
 
         if let Some(writeback) = &writeback {
             report_unprojected(paths, journal, writeback)?;
@@ -1293,6 +1314,9 @@ fn converge(
             } else {
                 until_due(read_unread, unread.every())
             },
+            // A held identity is re-read on a clock as well as on every pass: a
+            // session another run closes is not an event this run sees.
+            workspaces.next_read(),
         ];
         let deadline = if moved {
             Duration::ZERO
@@ -1395,6 +1419,12 @@ fn converge(
                                 dispatch.control = Some(address);
                             }
                         }
+                        // The session this dispatch opened is on its identity's
+                        // records from here, so a capacity reading counts it and
+                        // the loop's own count of it ends.
+                        if crate::vcs::is_session_opened(&envelope.kind) {
+                            workspaces.placed(&node);
+                        }
                     }
                     journal.relay(&envelope)?;
                     // Once the turn itself is in the store: a presentation the
@@ -1460,6 +1490,34 @@ fn converge(
                 // the subtree below the node waits on the person answering it.
                 Message::SessionConflicted(conflict) => {
                     raise(paths, journal, session_conflict_surface(&conflict))?
+                }
+                // The node comes out of flight **without a settlement**: nothing
+                // about it was refused, only the host's room for it, so it goes
+                // back to the queue on the record and is held under `workspace`
+                // until the paced re-read finds the identity admitting it.
+                Message::WorkspaceExhausted(refusal) => {
+                    let node = refusal.node.as_str().to_owned();
+                    in_flight.remove(&node);
+                    journal.emit(
+                        journal::PipelineKind::NodeRequeued,
+                        journal::labels(&paths.run, Some(&node)),
+                        journal::payload(&[
+                            ("reason", json!(crate::pool::EXHAUSTED_REASON)),
+                            ("detail", json!(bounded(&refusal.because))),
+                        ]),
+                    )?;
+                    // The reading the hold carries is the identity's now, read
+                    // after the refusal; a read that fails holds nothing, and
+                    // the node is simply queued again.
+                    if let Some(request) = state.graph.get(&node).and_then(crate::vcs::request_for)
+                    {
+                        if let Ok(capacity) = crate::vcs::workspace_capacity(&request) {
+                            workspaces.refused(&node, crate::pool::WorkspaceHold::of(&capacity));
+                        }
+                    }
+                    state.refresh(paths);
+                    derived = None;
+                    unpublished = true;
                 }
                 // Emitted rather than relayed: it is this crate's own kind, so it
                 // belongs in this crate's own stream, numbered by the writer that
@@ -1753,6 +1811,13 @@ enum HoldReason {
     ///
     /// The dependencies awaited, by id. What each wait is stays on `release-wait`.
     Release { awaiting: Vec<String> },
+    /// Its repository identity admits no more sessions now: every slot of its
+    /// pool is held and its overflow is spent, on the reading the loop took.
+    ///
+    /// The whole reading rides the entry, because there is no other record of
+    /// it: `workspace-wait` is the surface beside this, not a record this
+    /// restates. Beside the executor's host-wide capacity, never inside it.
+    Workspace(crate::pool::WorkspaceHold),
 }
 
 impl HoldReason {
@@ -1768,6 +1833,7 @@ impl HoldReason {
                 json!({ "kind": "decision", "reference": reference.as_wire() })
             }
             Self::Release { awaiting } => json!({ "kind": "release", "awaiting": awaiting }),
+            Self::Workspace(hold) => hold.payload(),
         }
     }
 
@@ -1801,8 +1867,21 @@ impl HoldReason {
             "release" => Some(Self::Release {
                 awaiting: ids("awaiting")?,
             }),
+            crate::pool::HOLD_KIND => {
+                crate::pool::WorkspaceHold::of_payload(entry).map(Self::Workspace)
+            }
             _ => None,
         }
+    }
+}
+
+/// The workspace hold one `node-held` entry carries, read by the same reader a
+/// driver restores its holds with: `None` for an entry that is not one, and for
+/// one this build cannot read whole.
+pub(crate) fn workspace_held(entry: &Value) -> Option<crate::pool::WorkspaceHold> {
+    match HoldReason::of_payload(entry)? {
+        HoldReason::Workspace(hold) => Some(hold),
+        _ => None,
     }
 }
 
@@ -1838,6 +1917,7 @@ fn holds_now(
     in_flight: &BTreeMap<String, Dispatch>,
     decisions: &BTreeMap<DecisionRef, Decision>,
     awaiting_release: &BTreeMap<String, Vec<String>>,
+    awaiting_workspace: &BTreeMap<String, crate::pool::WorkspaceHold>,
 ) -> BTreeMap<String, Vec<HoldReason>> {
     let concurrency = state.graph.concurrency as usize;
     let ahead: Vec<String> = in_flight.keys().cloned().collect();
@@ -1890,6 +1970,9 @@ fn holds_now(
             reasons.push(HoldReason::Release {
                 awaiting: awaiting.clone(),
             });
+        }
+        if let Some(hold) = awaiting_workspace.get(&node.id) {
+            reasons.push(HoldReason::Workspace(hold.clone()));
         }
         if !reasons.is_empty() {
             holds.insert(node.id.clone(), reasons);
@@ -3386,6 +3469,7 @@ fn start_ready(
     in_flight: &mut BTreeMap<String, Dispatch>,
     paused: &BTreeSet<String>,
     releases: &crate::release::Watch,
+    workspaces: &mut crate::pool::Workspaces,
 ) -> Result<bool> {
     let concurrency = state.graph.concurrency as usize;
     // Two things become actionable here. A `ready` node is dispatched, and a
@@ -3433,6 +3517,18 @@ fn start_ready(
             continue;
         }
 
+        // A lifecycle node is asked for only where its identity has room for
+        // the session it would open. Held, it is **skipped** rather than broken
+        // past: a node of another identity behind it still starts this pass.
+        // The read is the sibling's advisory one and a read that fails holds
+        // nothing — `open` is authoritative — so the dispatch then goes ahead
+        // exactly as it did before there was a pool.
+        if let Some(request) = crate::vcs::request_for(&node) {
+            match workspaces.admit(&node.id, &request) {
+                crate::pool::Admission::Admitted | crate::pool::Admission::Unread => {}
+                crate::pool::Admission::Held => continue,
+            }
+        }
         let cancel = CancellationToken::new();
         let mut payload =
             journal::payload(&[("persona", json!(node.persona)), ("attempt", json!(1))]);
@@ -3642,7 +3738,7 @@ fn spawn(
         .spawn(move || {
             let executor = crate::rules::executor_for(&entry);
             let ended = EndedDispatches::none();
-            let settlement = if node.repo.is_some() {
+            let ending = if node.repo.is_some() {
                 crate::lifecycle::execute(
                     executor.as_ref(),
                     &paths,
@@ -3664,6 +3760,17 @@ fn spawn(
                     &tx,
                     &ended,
                 )
+            };
+            let settlement = match ending {
+                Ending::Settled(settlement) => settlement,
+                // No settlement to record and nothing kept: the refusal came
+                // before any dispatch started, so there is no registry entry to
+                // hold until the record catches up. The loop takes the node out
+                // of flight on this message alone.
+                Ending::Exhausted(refusal) => {
+                    let _ = tx.send(Message::WorkspaceExhausted(Box::new(refusal)));
+                    return;
+                }
             };
             let (recorded, on_record) = mpsc::channel();
             let _ = tx.send(Message::Settled(Box::new(Settled {
@@ -3696,7 +3803,7 @@ fn execute_direct(
     cancel: &CancellationToken,
     tx: &Sender<Message>,
     ended: &EndedDispatches,
-) -> Settlement {
+) -> Ending {
     let graph = node_graph(node.agent_graph.as_ref(), default_graph);
     // The node's controls are narrowed *before* a dispatch is composed, and a
     // declaration no dispatch can run under settles the node instead of being
@@ -3715,10 +3822,10 @@ fn execute_direct(
     let controls = match crate::controls::NodeControls::of_node(node) {
         Ok(controls) => controls,
         Err(why) => {
-            return Settlement {
+            return Ending::Settled(Settlement {
                 detail: Some(why),
                 ..Settlement::plain(&node.id, NodeStatus::Failed, Some(INVALID_NODE))
-            }
+            })
         }
     }; // llmlint: ignore-end[changed_behavior_has_e2e]
     let request = || DispatchRequest {
@@ -3729,7 +3836,54 @@ fn execute_direct(
         workspace: WorkspaceSpec::Path(project_dir()),
         cancel: cancel.clone(),
     };
-    attempt(executor, node, cancel, tx, &request, ended).settlement
+    match attempt(executor, node, cancel, tx, &request, ended) {
+        Attempted::Drained(drained) => Ending::Settled(drained.settlement),
+        // A direct node opens no session, so nothing can refuse it one; the
+        // arm is spelled because the seam is one seam.
+        Attempted::Exhausted(refusal) => Ending::Exhausted(refusal),
+    }
+}
+
+/// How a node's dispatch thread ends: with a settlement, or with the node
+/// handed back to the queue.
+///
+/// Two endings rather than a settlement with a flag on it, because the second
+/// is not a settlement at all: nothing is written against the node's status, and
+/// a reader of the run's record sees a `node-requeued` where a `node-settled`
+/// would have been.
+pub(crate) enum Ending {
+    /// The node settled, and this is how.
+    Settled(Settlement),
+    /// The identity admitted no session, so the node goes back to the queue:
+    /// no settlement, and the loop holds it under `workspace`.
+    Exhausted(WorkspaceRefusal),
+}
+
+/// One attempt's ending: drained, or handed back before anything began.
+pub(crate) enum Attempted {
+    /// It ran, or failed to, and this is how the node settles on it.
+    Drained(Drained),
+    /// The identity admitted no session. Ended at once — no backoff, no
+    /// boundary attempt spent, no `no-agent-progress` and no
+    /// `infrastructure-failure` — because none of the refusal is the node's,
+    /// and asking again seconds later meets the same full identity.
+    Exhausted(WorkspaceRefusal),
+}
+
+/// A node whose session would not open because its identity admits no more
+/// sessions now.
+///
+/// Handed to the single writer rather than acted on where it is found, for
+/// [`SessionConflict`]'s reason: the loop owns this crate's own stream and the
+/// set of nodes in flight, and a dispatch thread writing into either beside it
+/// is a second writer.
+pub(crate) struct WorkspaceRefusal {
+    /// The node whose session was refused, as a [`NodeRef`](crate::graph::NodeRef)
+    /// for [`SessionConflict::node`]'s reason.
+    pub node: crate::graph::NodeRef,
+    /// `onevcs`'s own account of the refusal: the identity, its pool and
+    /// overflow with where each came from, and every holder.
+    pub because: String,
 }
 
 /// How far one attempt got.
@@ -3778,7 +3932,7 @@ pub(crate) fn attempt(
     tx: &Sender<Message>,
     request: &dyn Fn() -> DispatchRequest,
     ended: &EndedDispatches,
-) -> Drained {
+) -> Attempted {
     // The node itself and not its id alone, because the one message this raises
     // crosses a thread boundary and carries the identity rather than borrowing
     // it — see [`CriterionChecked::node`]. Everything else here reads the id.
@@ -3807,6 +3961,31 @@ pub(crate) fn attempt(
                 ended.keep(handle);
                 drained
             }
+            // The one refusal at this boundary that is the **host's** and not
+            // the node's: the identity has no room for the session. The loop
+            // ends here, on this attempt, spending nothing — the node goes back
+            // to the queue and is asked again when the identity admits it.
+            Err(error) if crate::vcs::session_open_exhausted(&error) => {
+                return match crate::graph::NodeRef::of(node) {
+                    Some(whose) => Attempted::Exhausted(WorkspaceRefusal {
+                        node: whose,
+                        because: error.to_string(),
+                    }),
+                    // llmlint: ignore-block[changed_behavior_has_e2e] a node the graph
+                    // dispatched has an identity by construction, so no invocation
+                    // reaches this arm; it settles as the refusal it is rather than
+                    // panicking a dispatch thread.
+                    None => Attempted::Drained(Drained {
+                        settlement: Settlement {
+                            detail: Some(error.to_string()),
+                            ..failed(id, INFRASTRUCTURE_FAILURE)
+                        },
+                        reached: Reached::NotStarted,
+                        session: None,
+                        branch: None,
+                    }), // llmlint: ignore-end[changed_behavior_has_e2e]
+                };
+            }
             Err(error) => {
                 conflicted = crate::vcs::session_open_conflicted(&error);
                 Drained {
@@ -3830,7 +4009,7 @@ pub(crate) fn attempt(
             || drained.reached == Reached::Speech
             || cancel.is_cancelled()
         {
-            return drained;
+            return Attempted::Drained(drained);
         }
         // The one refusal at this boundary another attempt provably cannot
         // answer: the branch and its base disagree about a file, and no dispatch
@@ -3843,7 +4022,7 @@ pub(crate) fn attempt(
                     because: drained.settlement.detail.clone().unwrap_or_default(),
                 })));
             }
-            return drained;
+            return Attempted::Drained(drained);
         }
         last = drained;
         if attempt == attempts.get() {
@@ -3875,7 +4054,7 @@ pub(crate) fn attempt(
             carried: Vec::new(),
         })));
     }
-    last
+    Attempted::Drained(last)
 }
 
 /// A node whose session would not open because its branch and its base conflict.
@@ -7153,7 +7332,7 @@ mod tests {
             max_turns: Some(0),
             ..agent("build", &[])
         };
-        let settlement = execute_direct(
+        let Ending::Settled(settlement) = execute_direct(
             &crate::executor::LocalExecutor,
             "demo",
             "graphs/node-scope.yaml",
@@ -7162,7 +7341,9 @@ mod tests {
             &CancellationToken::new(),
             &tx,
             &EndedDispatches::none(),
-        );
+        ) else {
+            panic!("a direct node opens no session, so nothing could have refused it one")
+        };
         assert_eq!(settlement.status, NodeStatus::Failed);
         assert_eq!(settlement.outcome.as_deref(), Some("invalid-node"));
         let detail = settlement.detail.expect("the settlement says why");
@@ -7816,6 +7997,9 @@ mod tests {
     #[test]
     fn the_hold_reasons_are_the_ones_the_divergence_record_names() {
         let block = divergence_block("55.");
+        // The fifth reason is entry 81's, whose block carries one entry rather
+        // than a field list: its keys are the fields.
+        let workspace = divergence_block("81.")["hold"].clone();
 
         // One of each, so every variant's own payload is read rather than a list
         // of names kept beside them.
@@ -7833,6 +8017,10 @@ mod tests {
             HoldReason::Release {
                 awaiting: vec!["build".into()],
             },
+            HoldReason::Workspace(
+                crate::pool::WorkspaceHold::of_payload(&workspace)
+                    .expect("entry 81's hold entry reads"),
+            ),
         ];
         let mine: Vec<String> = reasons
             .iter()
@@ -7843,15 +8031,25 @@ mod tests {
                     .to_string()
             })
             .collect();
-        let named: Vec<String> = serde_json::from_value(block["reason_kinds"].clone())
+        let mut named: Vec<String> = serde_json::from_value(block["reason_kinds"].clone())
             .expect("entry 55 names its kinds");
+        named.push(workspace["kind"].as_str().expect("a kind").to_owned());
         assert_eq!(mine, named);
 
         for reason in &reasons {
             let payload = reason.payload();
             let kind = payload["kind"].as_str().expect("a kind");
-            let fields: Vec<String> = serde_json::from_value(block["fields"][kind].clone())
-                .unwrap_or_else(|e| panic!("entry 55 names {kind}'s fields: {e}"));
+            let fields: Vec<String> = match kind {
+                crate::pool::HOLD_KIND => workspace
+                    .as_object()
+                    .expect("an object")
+                    .keys()
+                    .filter(|key| *key != "kind")
+                    .cloned()
+                    .collect(),
+                _ => serde_json::from_value(block["fields"][kind].clone())
+                    .unwrap_or_else(|e| panic!("entry 55 names {kind}'s fields: {e}")),
+            };
             let carried: Vec<String> = payload
                 .as_object()
                 .expect("an object")
@@ -7995,7 +8193,28 @@ mod tests {
         let awaiting: BTreeMap<String, Vec<String>> =
             [("spare".to_string(), vec!["build".to_string()])].into();
 
-        let holds = holds_now(&state, &statuses, &in_flight, &decisions, &awaiting);
+        let held_workspace: BTreeMap<String, crate::pool::WorkspaceHold> = [(
+            "later".to_string(),
+            crate::pool::WorkspaceHold {
+                identity: "github.com/owner/service".into(),
+                pool: 1,
+                slots: 1,
+                idle: 0,
+                maintaining: 0,
+                overflow: onevcs::Bound::Bounded(0),
+                overflow_in_use: 0,
+            },
+        )]
+        .into();
+
+        let holds = holds_now(
+            &state,
+            &statuses,
+            &in_flight,
+            &decisions,
+            &awaiting,
+            &held_workspace,
+        );
 
         // The node in flight is what the loop *is* running, and the human action
         // is waiting on a person rather than on this loop. Neither is held.
@@ -8051,6 +8270,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
         );
         assert_eq!(
             holds.get("ship"),
@@ -8070,6 +8290,7 @@ mod tests {
             holds_now(
                 &state,
                 &statuses,
+                &BTreeMap::new(),
                 &BTreeMap::new(),
                 &BTreeMap::new(),
                 &BTreeMap::new()

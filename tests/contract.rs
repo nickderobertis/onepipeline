@@ -290,6 +290,8 @@ fn the_dispatch_request_carries_every_field_the_contract_declares() {
             branch: None,
             base: None,
             execution_checkout: None,
+            pool: None,
+            overflow: None,
         }),
         cancel: CancellationToken::new(),
     };
@@ -1103,6 +1105,8 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         body: Some("why".into()),
         draft: true,
         execution_checkout: Some("checkout".into()),
+        pool: Some(1),
+        overflow: Some(onevcs::Bound::Bounded(2)),
         steps: Some(Vec::new()),
         resume: Some(Resume {
             branch: "topic".into(),
@@ -1609,6 +1613,73 @@ fn the_release_adoption_surface_is_what_the_divergence_record_names() {
         "entry 40 names a different heading than this crate publishes"
     );
     assert_ne!(CROSS_REPO_REFERENCES_HEADING, PLANNER_CONTEXT_HEADING);
+}
+
+/// The placement overrides, the hold, the surface and the requeue this build
+/// carries are exactly what entry 81 records and the amended contract names.
+///
+/// The node half is driven through the public type: the entry's node parses,
+/// round-trips as written, carries the sibling's own `Bound`, and a node naming
+/// neither field is the node it always was. The kind is held against the enum.
+/// The hold entry's shape is private vocabulary and is held by `pool::tests`
+/// against the same block.
+#[test]
+fn the_workspace_placement_surface_is_what_the_divergence_record_names() {
+    let block = divergence_block("81.");
+
+    let written = block["node"].clone();
+    let node: Node = serde_json::from_value(written.clone()).expect("entry 81's node parses");
+    assert_eq!(
+        serde_json::to_value(&node).expect("serializes"),
+        written,
+        "entry 81's node does not round-trip as written"
+    );
+    assert_eq!(node.pool, Some(1));
+    assert_eq!(node.overflow, Some(onevcs::Bound::Bounded(0)));
+    // The word, as the sibling spells it, both ways.
+    let unlimited: Node = serde_json::from_value(json!({
+        "id": "n", "persona": "engineer", "task": "## What\nx", "overflow": "unlimited"
+    }))
+    .expect("the sibling's word parses");
+    assert_eq!(unlimited.overflow, Some(onevcs::Bound::Unlimited));
+    assert_eq!(
+        serde_json::to_value(&unlimited).expect("serializes")["overflow"],
+        json!("unlimited")
+    );
+    // At schema 3, and optional: a plan naming neither field round-trips
+    // without either appearing.
+    let plain = json!({"id": "solo", "persona": "engineer", "task": "## What\nx"});
+    let bare: Node = serde_json::from_value(plain.clone()).expect("a node naming neither parses");
+    assert_eq!(bare.pool, None);
+    assert_eq!(bare.overflow, None);
+    assert_eq!(
+        serde_json::to_value(&bare).expect("serializes"),
+        plain,
+        "a node naming neither field gained one on the way out"
+    );
+    assert_eq!(
+        block["refused_below_schema"].as_u64(),
+        Some(u64::from(PLAN_SCHEMA_VERSION))
+    );
+
+    // The requeue is a kind this crate emits and the contract lists.
+    let kind = block["requeue"]["kind"].as_str().expect("a kind");
+    assert_eq!(
+        PipelineKind::from_wire(&EventKind(kind.to_owned())),
+        Some(PipelineKind::NodeRequeued)
+    );
+    for names in [
+        "`pool: u32` and `overflow: N|unlimited`",
+        "**held under `workspace`**",
+        "`workspace-wait` surface",
+        "`reason: workspace-exhausted`",
+        "neither settled nor `awaiting-planner`",
+    ] {
+        assert!(
+            CONTRACT.contains(names),
+            "the contract no longer states {names}"
+        );
+    }
 }
 
 /// Every field a summary document carries, taken off a value built through the
@@ -3915,7 +3986,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 31, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 32, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -4885,6 +4956,7 @@ const RULINGS: &[(&str, &str)] = &[
     ("77.", "The planner channel is `onemessagebus`'s"),
     ("78.", "Surface kinds are an open vocabulary"),
     ("79.", "edit-applied"),
+    ("81.", "held under `workspace`"),
 ];
 
 #[test]

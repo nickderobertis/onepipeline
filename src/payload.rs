@@ -338,6 +338,23 @@ pub(crate) struct NodeDispatched {
     pub(crate) notes_carried: Option<Vec<Object>>,
 }
 
+/// The reason a dispatched node was handed back to the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum RequeueReasonWord {
+    /// `workspace-exhausted`: its repository identity admitted no session.
+    WorkspaceExhausted,
+}
+
+/// `node-requeued`: a dispatched node handed back to the queue, unsettled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct NodeRequeued {
+    /// Which ending handed it back.
+    pub(crate) reason: RequeueReasonWord,
+    /// The sibling's own account of the refusal.
+    pub(crate) detail: String,
+}
+
 /// `node-settled`: the status a node reached, and what it left.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct NodeSettled {
@@ -845,6 +862,7 @@ payload_messages! {
     NodeReady => "node-ready";
     NodeDispatched => "node-dispatched";
     NodeSettled => "node-settled";
+    NodeRequeued => "node-requeued";
     EditCommitted => "edit-committed";
     CommandAccepted => "command-accepted";
     EditRejected => "edit-rejected";

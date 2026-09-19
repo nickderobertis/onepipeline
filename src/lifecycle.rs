@@ -86,7 +86,7 @@ pub fn execute(
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
     ended: &engine::EndedDispatches,
-) -> Settlement {
+) -> engine::Ending {
     let attempts = engine::publication_attempts();
     // What each attempt's publication ended with, in order, for the settlement
     // that stops the loop. One word per attempt: the last attempt's own reason
@@ -106,16 +106,37 @@ pub fn execute(
     // was — read off the run's record, which is the one place both the delivery
     // and this thread can see.
     let mut notes: Vec<crate::note::RecordedNote> = Vec::new();
+    // The failure the attempt before this one preserved, once there is one.
+    let mut last_preserved: Option<Preserved> = None;
     loop {
         let preserved = match attempt_once(
             executor, paths, launch, &node, references, &notes, cancel, tx, ended,
         ) {
-            Attempt::Settled(settlement) => return *settlement,
+            Attempt::Settled(settlement) => return engine::Ending::Settled(*settlement),
             Attempt::Preserving(preserved) => preserved,
+            // The identity admitted no session. On the first attempt the node
+            // has nothing behind it, so it is handed back to the queue at no
+            // cost. On a later one it has: the branch the attempt before
+            // preserved, which a re-dispatch from the queue would not be pinned
+            // to. So that ending settles, naming the branch, for a `retry` to
+            // continue once the identity admits it — the same shape a
+            // re-dispatch this loop could not compose settles under.
+            Attempt::Exhausted(refusal) => {
+                return match last_preserved {
+                    None => engine::Ending::Exhausted(*refusal),
+                    Some(preserved) => engine::Ending::Settled(not_dispatched_again(
+                        &node.id,
+                        &preserved,
+                        &refusal.because,
+                    )),
+                };
+            }
         };
         endings.push(preserved.outcome);
         if let Some(same) = republished(published.as_deref(), &preserved.tip) {
-            return republished_the_same_commit(&node.id, &preserved, &endings, &same, attempt);
+            return engine::Ending::Settled(republished_the_same_commit(
+                &node.id, &preserved, &endings, &same, attempt,
+            ));
         }
         published = match &preserved.tip {
             crate::vcs::SessionTip::At(commit) => Some(commit.as_str().to_owned()),
@@ -132,7 +153,7 @@ pub fn execute(
         // then settle as the cancellation rather than as the publication failure
         // that is the useful half of what happened.
         if attempt >= attempts || cancel.is_cancelled() {
-            return stopped_retrying(&node.id, &preserved, &endings);
+            return engine::Ending::Settled(stopped_retrying(&node.id, &preserved, &endings));
         }
         attempt = attempt.saturating_add(1);
         // What the conversation that just ended was shown, and what reached the
@@ -157,20 +178,11 @@ pub fn execute(
             // record; what this arm adds is the settlement, which is `stopped_retrying`'s
             // shape with the fold's own sentence as its detail.
             Err(why) => {
-                return Settlement {
-                    detail: Some(format!(
-                        "the node was not dispatched again: {why}. The branch {} still \
-                         carries the work; re-issue any note the earlier attempt was given \
-                         and `retry` the node",
-                        preserved.branch
-                    )),
-                    branch: Some(preserved.branch.clone()),
-                    ..Settlement::plain(
-                        &node.id,
-                        NodeStatus::Failed,
-                        Some(engine::INFRASTRUCTURE_FAILURE),
-                    )
-                };
+                return engine::Ending::Settled(not_dispatched_again(
+                    &node.id,
+                    &preserved,
+                    &why.to_string(),
+                ));
             } // llmlint: ignore-end[changed_behavior_has_e2e]
         };
         // Another `node-dispatched` rather than a kind of its own, so a reader
@@ -184,6 +196,30 @@ pub fn execute(
         })));
         node =
             std::borrow::Cow::Owned(continued(launched, &preserved, attempt, attempts, &endings));
+        last_preserved = Some(*preserved);
+    }
+}
+
+/// The settlement of a node whose re-dispatch onto its preserved branch could
+/// not be composed or could not begin, saying why and where the work is.
+///
+/// One shape for both: a record this build could not read the notes off, and a
+/// session the identity had no room for. Neither is the tree being rejected,
+/// so neither settles under a publication word; what a reader has to act on is
+/// the branch, which the settlement pins for a `retry` to continue.
+fn not_dispatched_again(node: &str, preserved: &Preserved, why: &str) -> Settlement {
+    Settlement {
+        detail: Some(format!(
+            "the node was not dispatched again: {why}. The branch {} still carries the \
+             work; re-issue any note the earlier attempt was given and `retry` the node",
+            preserved.branch
+        )),
+        branch: Some(preserved.branch.clone()),
+        ..Settlement::plain(
+            node,
+            NodeStatus::Failed,
+            Some(engine::INFRASTRUCTURE_FAILURE),
+        )
     }
 }
 
@@ -337,7 +373,10 @@ fn attempt_once(
         if worktree.is_none() {
             crate::vcs::wait_out_the_second(began);
         }
-        let drained = engine::attempt(executor, node, cancel, tx, &build, ended);
+        let drained = match engine::attempt(executor, node, cancel, tx, &build, ended) {
+            engine::Attempted::Drained(drained) => drained,
+            engine::Attempted::Exhausted(refusal) => return Attempt::Exhausted(Box::new(refusal)),
+        };
         // The session the dispatch opened is what publication needs, whether or
         // not the step succeeded: a cancelled step's commits are preserved on
         // the branch it left behind.
@@ -1004,6 +1043,8 @@ fn unread_merge_path(
 enum Attempt {
     Settled(Box<Settlement>),
     Preserving(Box<Preserved>),
+    /// The identity admitted no session, before any step ran.
+    Exhausted(Box<engine::WorkspaceRefusal>),
 }
 
 impl Attempt {
@@ -2227,7 +2268,9 @@ mod tests {
             node, level, None,
         ) {
             Attempt::Settled(settlement) => *settlement,
-            Attempt::Preserving(_) => panic!("a level branch is an answer, not an attempt"),
+            Attempt::Preserving(_) | Attempt::Exhausted(_) => {
+                panic!("a level branch is an answer, not an attempt")
+            }
         };
         let node = lifecycle(None);
 
@@ -2285,7 +2328,7 @@ mod tests {
         let named =
             match level_branch_settlement(&lifecycle(None), &level(nothing), Some("kept".into())) {
                 Attempt::Settled(settlement) => settlement.branch,
-                Attempt::Preserving(_) => unreachable!(),
+                Attempt::Preserving(_) | Attempt::Exhausted(_) => unreachable!(),
             };
         assert_eq!(named.as_deref(), Some("kept"));
     }
@@ -2326,7 +2369,7 @@ mod tests {
         // one for the same reason: a regression here would go looking for
         // `oneagentgraph` rather than quietly running the step.
         let (tx, rx) = std::sync::mpsc::channel();
-        let settlement = execute(
+        let engine::Ending::Settled(settlement) = execute(
             &crate::executor::LocalExecutor,
             &RunPaths::under(std::path::Path::new("/nowhere"), "demo"),
             &Launch {
@@ -2338,7 +2381,9 @@ mod tests {
             &crate::executor::CancellationToken::new(),
             &tx,
             &engine::EndedDispatches::none(),
-        );
+        ) else {
+            panic!("the refusal comes before any session is asked for")
+        };
         assert_eq!(settlement.status, NodeStatus::Failed);
         assert_eq!(settlement.outcome.as_deref(), Some("invalid-node"));
         let detail = settlement.detail.expect("the settlement says why");

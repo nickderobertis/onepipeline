@@ -89,6 +89,18 @@ fn providers() -> Providers<'static> {
 /// the error value the seam returned rather than any prose downstream of it.
 const SESSION_OPEN_CONFLICT: &str = "the base conflicts with this branch";
 
+/// How a refusal this module composed says a session open met an **exhausted
+/// pool**: the identity's every slot is held and its overflow admits no more.
+///
+/// The second head marker, composed and read exactly as [`SESSION_OPEN_CONFLICT`]
+/// is and for the same reason: the classification is made off `onevcs`'s typed
+/// [`PoolExhausted`](onevcs::Error::PoolExhausted), and the executor seam has no
+/// room for a class of its own. What the marker carries the one hop to the
+/// retry loop is that this refusal is the **host's**, not the node's: nothing
+/// about the branch or the task was refused, so the node goes back to the queue
+/// rather than spending a boundary attempt on a host being busy.
+const SESSION_OPEN_EXHAUSTED: &str = "the identity admits no more sessions now";
+
 /// Open a session over a per-run clone and worktree.
 pub fn session_open(request: &SessionRequest) -> Result<Session> {
     providers()
@@ -97,17 +109,38 @@ pub fn session_open(request: &SessionRequest) -> Result<Session> {
         .map_err(session_refusal)
 }
 
-/// A session open `onevcs` refused, as this crate's own error — with the one
-/// refusal no further attempt converges on **named**.
+/// How many sessions a request's identity admits right now, and whether that
+/// request would be placed.
+///
+/// The sibling's own advisory read over the same records `open` reads, asked
+/// with the same request `open` would be — so what it answers is what the open
+/// would meet, short of the race between the two. Advisory is the whole of it:
+/// a read that fails holds nothing, because `open` is authoritative and refuses
+/// on its own account.
+pub fn workspace_capacity(
+    request: &SessionRequest,
+) -> std::result::Result<onevcs::WorkspaceCapacity, String> {
+    onevcs::workspace_capacity(request).map_err(|error| error.to_string())
+}
+
+/// A session open `onevcs` refused, as this crate's own error — with the two
+/// refusals no further attempt of the *node* converges on **named**.
 ///
 /// A sync conflict is two conditions sharing one word. During a publication the
 /// base moved under work already going and the bounded resolve-and-requeue lost
 /// the race, which another attempt can win — [`Preserving::SyncConflict`]. At
 /// *session open* it is a merge nobody has performed, and opening the session
 /// again reproduces the identical refusal.
+///
+/// An exhausted pool is the other: the identity has no room, which a later open
+/// may find it has again once a session somewhere closes — but not a later
+/// attempt of this dispatch, taken seconds apart with nothing changed.
 fn session_refusal(error: onevcs::Error) -> Error {
     match &error {
         onevcs::Error::SyncConflict { .. } => sibling(format!("{SESSION_OPEN_CONFLICT}: {error}")),
+        onevcs::Error::PoolExhausted { .. } => {
+            sibling(format!("{SESSION_OPEN_EXHAUSTED}: {error}"))
+        }
         _ => refusal(error),
     }
 }
@@ -127,6 +160,21 @@ pub(crate) fn session_open_conflicted(error: &Error) -> bool {
         error,
         Error::Sibling { tool, message }
             if *tool == ONEVCS && message.starts_with(SESSION_OPEN_CONFLICT)
+    )
+}
+
+/// Whether a dispatch was refused because the session it needed could not be
+/// placed: the identity's pool is full and its overflow admits no more.
+///
+/// Asked of the **error the executor seam returned**, on exactly
+/// [`session_open_conflicted`]'s terms and for its reason — the decision it
+/// drives takes a node out of flight without a settlement, which must not be
+/// reachable from anything a dispatch says about itself.
+pub(crate) fn session_open_exhausted(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Sibling { tool, message }
+            if *tool == ONEVCS && message.starts_with(SESSION_OPEN_EXHAUSTED)
     )
 }
 
@@ -383,7 +431,15 @@ pub fn failure_of(kind: onevcs::FailureKind) -> Failure {
         // another name the day anything emits it again. Terminal beside the
         // other two, on the reading the kind was written for: a verdict on the
         // tree as it stands, which nothing this crate can do from here changes.
-        FailureKind::Gate | FailureKind::Invalid | FailureKind::NotImplemented => Failure::Terminal,
+        // A hook said the publishing host is missing a tool or a credential, on
+        // the line the sibling reserves for exactly that: a refusal no change to
+        // the work can clear, so sending a worker back to the tree would meet
+        // the same missing prerequisite. The reason carries what is missing and
+        // how to install it, which is what the residual's detail hands a reader.
+        FailureKind::Gate
+        | FailureKind::Invalid
+        | FailureKind::NotImplemented
+        | FailureKind::HostPrerequisite => Failure::Terminal,
     }
 }
 
@@ -1863,6 +1919,10 @@ pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
         branch: node.branch.clone(),
         base: node.base_branch.clone(),
         execution_checkout: node.execution_checkout.clone(),
+        // The node's own placement overrides, passed through as the sibling's
+        // types: what `pool: 0` and `overflow: unlimited` mean is its to say.
+        pool: node.pool,
+        overflow: node.overflow,
     })
 }
 
@@ -1903,6 +1963,7 @@ mod tests {
         onevcs::FailureKind::ChecksUnsettled,
         onevcs::FailureKind::PushRejected,
         onevcs::FailureKind::PushedUnverified,
+        onevcs::FailureKind::HostPrerequisite,
     ];
 
     /// Every failure a further attempt can answer, as the type spells them.
@@ -2061,6 +2122,7 @@ mod tests {
             onevcs::FailureKind::Invalid,
             onevcs::FailureKind::NotImplemented,
             onevcs::FailureKind::Gate,
+            onevcs::FailureKind::HostPrerequisite,
         ];
         for kind in terminal {
             assert_eq!(
@@ -2246,6 +2308,19 @@ mod tests {
         assert_eq!(request.branch.as_deref(), Some("feature"));
         assert_eq!(request.base.as_deref(), Some("main"));
         assert_eq!(request.execution_checkout.as_deref(), Some("primary"));
+        // Naming neither override asks for the host's own resolution.
+        assert_eq!(request.pool, None);
+        assert_eq!(request.overflow, None);
+
+        // Naming both passes both through as the sibling's own types.
+        let overriding = Node {
+            pool: Some(0),
+            overflow: Some(onevcs::Bound::Unlimited),
+            ..node
+        };
+        let request = request_for(&overriding).expect("a lifecycle node asks for a session");
+        assert_eq!(request.pool, Some(0));
+        assert_eq!(request.overflow, Some(onevcs::Bound::Unlimited));
     }
 
     #[test]
@@ -2448,6 +2523,55 @@ mod tests {
         // Nor a failure of this crate's own that is not a sibling's at all.
         assert!(!session_open_conflicted(&Error::Invalid(format!(
             "{SESSION_OPEN_CONFLICT}: sync conflict"
+        ))));
+    }
+
+    /// What reads as an exhausted pool at session open, and what deliberately
+    /// does not — on [`only_the_refusal_this_module_composed_reads_as_a_session_open_conflict`]'s
+    /// terms, because the decision this one drives takes a node out of flight
+    /// without a settlement. `tests/e2e/lifecycle.rs` drives the real refusal
+    /// end to end against the linked sibling.
+    #[test]
+    fn only_the_refusal_this_module_composed_reads_as_an_exhausted_pool() {
+        let refused = session_refusal(onevcs::Error::PoolExhausted {
+            reason: "no session of github.com/owner/service can be placed now".into(),
+        });
+        assert!(
+            session_open_exhausted(&refused),
+            "the refusal this module composes for the exhausted pool was not read as one: \
+             {refused}"
+        );
+        assert!(
+            refused.to_string().contains("can be placed now"),
+            "the sibling's own account of the refusal was dropped: {refused}"
+        );
+        // The two markers are two decisions, and neither reads as the other.
+        assert!(!session_open_conflicted(&refused));
+        assert!(!session_open_exhausted(&session_refusal(
+            onevcs::Error::SyncConflict {
+                reason: "both sides changed README.md".into(),
+            }
+        )));
+
+        // Every other refusal of the same call keeps its retries.
+        let invalid = session_refusal(onevcs::Error::Invalid {
+            reason: "no such base".into(),
+        });
+        assert!(!session_open_exhausted(&invalid));
+
+        // A dispatch quoting the marker in its own account of itself is not the
+        // seam saying it, nor is a refusal spelled this way by anything that is
+        // not `onevcs`, nor a failure of this crate's own.
+        assert!(!session_open_exhausted(&Error::Sibling {
+            tool: ONEVCS,
+            message: format!("the agent reported that {SESSION_OPEN_EXHAUSTED}"),
+        }));
+        assert!(!session_open_exhausted(&Error::Sibling {
+            tool: "oneagentgraph",
+            message: format!("{SESSION_OPEN_EXHAUSTED}: pool exhausted"),
+        }));
+        assert!(!session_open_exhausted(&Error::Invalid(format!(
+            "{SESSION_OPEN_EXHAUSTED}: pool exhausted"
         ))));
     }
 

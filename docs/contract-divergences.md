@@ -6,7 +6,7 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78 and 79** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79 and 81** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
@@ -394,6 +394,16 @@ the same worktree for the same branch.
 **Still reachable, and not fixable here:** two lifecycle nodes on one repository,
 in flight at once, still reclaim each other. Their sessions are opened
 independently and neither can hold a lease.
+
+**Since `onevcs` 0.15.6 and 0.26.0, both halves are the sibling's.** 0.15.6 keeps
+a run root a session record in state `open` names, which is the record-based
+proof this entry asked for; 0.26.0's pool places a session on a warm slot that
+is **never reclaimed** — a slot is idle iff no open record names it and its
+maintenance claim is void, by that same proof — so two lifecycle nodes on one
+pooled identity take two slots, or the second is refused (`PoolExhausted`) and
+held by this crate under `workspace` (entry 81) rather than dispatched over the
+first. That closes the destruction this entry records; resolving the entry is
+its owner's.
 
 ## 15. A publication's typed outcome drops the change request's identity — OPEN
 
@@ -6202,5 +6212,120 @@ a project the retry was written onto.
   },
   "retry": {"delivers": "a replacement stating none inherits the superseded node's, on its own condition"},
   "unchanged": {"cancel": "parked", "cancelled_running_node": "parked", "drop": "cancelled", "untouched_node": "as before"}
+}
+```
+
+## 81. A full repository identity was dispatched into, and the refusal cost the node — RESOLVED
+
+**Ruling: the scheduler reads the identity's capacity before a queued lifecycle node
+comes forward and holds it under a fifth hold reason, `workspace`; a refusal that races
+the read returns the node to queued under a new kind, `node-requeued`; and two additive
+schema-3 node fields, `pool` and `overflow`, pass through to the session request.** The
+ruling is the planner's plan for adopting `onevcs` 0.26.0, and `docs/contract.md`
+carries each half: the schema-3 field list and the reserved-key list, the hold and its
+surface beside the decision-point paragraph, the attach paragraph's "nothing else able
+to move", and the kind list with the requeue beside the dispatch-retry sentence.
+
+`onevcs` 0.26.0 keeps warm worktree slots per identity and admits sessions past them up
+to an overflow bound, both sized by the host in `$ONEVCS_HOME/workspaces.yml`, so that a
+host can — in the user's words — "trade off disc wear for not blocking work" and "have a
+small overflow to prevent blocking work". A finite overflow means an identity can be
+**full**, and a session open against a full identity is refused with
+`Error::PoolExhausted` rather than made to wait. Before this entry that refusal reached
+this crate as any other session refusal did: retried across the whole boundary budget
+with backoff, and settled `infrastructure-failure` — a node failed, its dependents
+skipped, for a host being busy — and a scheduler that stalled silently instead would
+have read as a hung run.
+
+What this build does is the block below, and the block is the source.
+
+**The read.** Where `start_ready` would dispatch a lifecycle node it first asks
+`onevcs::workspace_capacity` with the same `SessionRequest` `vcs::request_for` composes
+for it. `admitted: false` holds the node this pass — **skipped**, not broken past, so a
+node of another identity behind it still starts — under `HoldReason::Workspace`, whose
+`node-held` entry carries the identity and the reading. Within one pass the loop counts
+its own dispatches per identity: the first reading of an identity is trusted whole, since
+a pinned branch an open session already holds is admitted without a slot and only the
+reading knows that, and past the first dispatch what is left is the headroom the reading
+counted less what this pass already took, so two nodes of one identity do not both leave
+on one reading of one free slot. The read is advisory and `open` is authoritative: a read
+that fails holds nothing. It sits beside the executor's host-wide `capacity()` and is
+never folded into it.
+
+**The surface and the pacing.** A held node raises `workspace-wait`, non-blocking, source
+proposal, workstream the node, on the cadence `release-wait` uses
+(`ONEPIPELINE_RELEASE_SURFACE_SECONDS`), naming the identity, the numbers, the sibling's
+`onevcs pool status <identity>` that names the holders, and that nothing times it out.
+While any node is held the identity is re-read on every pass and on a paced timer,
+`ONEPIPELINE_WORKSPACE_POLL_SECONDS` (a minute, and never longer), because a session
+another run closes is not an event this run sees. The hold clears the pass the identity
+admits it. `status` renders the hold beside the release hold; `holds_now` reports it and
+`HoldReason::of_payload` reads it back.
+
+**The refusal that races the read.** `PoolExhausted` at session open is classified off the
+typed value in `vcs::session_refusal` — a head marker on the `Error::Sibling` message,
+exactly as the session-open conflict is composed and read — and `engine::attempt` ends
+the attempt loop on it at once: no backoff, no boundary attempt spent, no
+`no-agent-progress`, no `infrastructure-failure`. The dispatch thread reports it as a
+message of its own, and the loop takes the node out of flight **without a settlement**,
+journals `node-requeued` against it carrying `reason: workspace-exhausted` and the
+sibling's own `detail`, and holds it under `workspace` on the refusal's own reading until
+the next paced read — a refusal is the newest thing known about the identity, so a pass
+that re-read straight away would either dispatch into the same refusal or restate it. A
+run whose only remaining nodes are held this way is neither terminal nor
+`awaiting-planner`: it is waiting on the host. One narrowing: an exhausted refusal met by
+a **re-dispatch inside a node's publication-retry loop** — the attempt after a
+`checks-failed`, pinned to the branch the attempt before preserved — settles
+`infrastructure-failure` naming that branch for a `retry` to continue, because a node
+handed back to the queue is dispatched from the plan's own node and would not be pinned
+to it; the first dispatch of a node is the case the requeue exists for.
+
+**The fields.** `pool: Option<u32>` and `overflow: Option<onevcs::Bound>`
+(`onepipeline.pool` / `onepipeline.overflow` in task metadata) are copied onto
+`SessionRequest.pool` / `.overflow` and carried by the per-step request, and are refused
+by name below schema 3 the way `draft` is. Their meanings are the sibling's: `pool: 0`
+still counts against `overflow`, and `overflow: unlimited` opts the open out of the cap.
+
+Driven end to end by `tests/e2e/lifecycle.rs` against the linked `onevcs` under a scratch
+state root with a `workspaces.yml`: two lifecycle nodes on a pooled identity admitting one
+session, the second held with the numbers, surfaced, rendered by `status`, and dispatched
+once the first's session closes; a node of a second identity starting behind the held one
+in the same pass; a node whose read fails dispatched as before; and the refusal, made
+deterministic by a dispatch-env hook that opens a real session on the identity's last
+slot before the driver's own open, requeued on the record and dispatched once the outside
+session closes. `tests/e2e/plan.rs` refuses the fields below schema 3, and
+`pool::tests` and `engine::tests` hold the block below against the types.
+
+```json
+{
+  "node": {
+    "id": "service",
+    "repo": "github.com/owner/service",
+    "persona": "engineer",
+    "task": "## What\nShip it.",
+    "title": "feat: ship it",
+    "pool": 1,
+    "overflow": 0
+  },
+  "field_values": {
+    "pool": "a non-negative integer; 0 places the session fresh under runs/ and still spends the overflow",
+    "overflow": "a non-negative integer, or \"unlimited\" to opt the open out of the cap"
+  },
+  "refused_below_schema": 3,
+  "hold": {
+    "kind": "workspace",
+    "identity": "github.com/owner/service",
+    "pool": 1,
+    "slots": 1,
+    "idle": 0,
+    "maintaining": 0,
+    "overflow": 0,
+    "overflow_in_use": 0
+  },
+  "surface_kind": "workspace-wait",
+  "surface": {"blocking": false, "source": "proposal", "workstream": "the held node"},
+  "requeue": {"kind": "node-requeued", "reason": "workspace-exhausted", "fields": ["reason", "detail"]},
+  "poll_env": "ONEPIPELINE_WORKSPACE_POLL_SECONDS",
+  "surface_cadence_env": "ONEPIPELINE_RELEASE_SURFACE_SECONDS"
 }
 ```

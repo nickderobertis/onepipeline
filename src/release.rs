@@ -2276,7 +2276,10 @@ fn retire(
 }
 
 /// How often a held node's wait is surfaced.
-fn surface_every_seconds() -> u64 {
+///
+/// Read by the workspace hold as well, so the two waits a node can be held
+/// under are surfaced on one cadence.
+pub(crate) fn surface_every_seconds() -> u64 {
     std::env::var(SURFACE_ENV)
         .ok()
         .and_then(|value| value.parse().ok())

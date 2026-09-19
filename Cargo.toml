@@ -449,6 +449,21 @@ resolver = "2"
 # release, and `onevcs-testing` 0.6.5 requires exactly this `onevcs`, so the
 # two requirements and the lock move together.
 #
+# `onevcs` 0.26.0 carries the **worktree pool**: warm slots per identity and an
+# overflow bound past them, sized by the host in `workspaces.yml`, with
+# `workspace_capacity` — the advisory read `src/pool.rs` asks before a queued
+# lifecycle node comes forward — `Error::PoolExhausted`, the typed refusal
+# `src/vcs.rs` classifies at session open, `Bound`, and the `pool` / `overflow`
+# overrides on `SessionRequest` a plan node's own fields are copied onto. A
+# **requirement**, twice over: `^0.24` admits no 0.26.x, the breaking position
+# pre-1.0, and `SessionRequest` grew the two fields, which every literal here
+# fills. 0.25.0 between them added `FailureKind::HostPrerequisite`, which
+# `failure_of` matches arm by arm, so a pin below 0.26.0 does not compile.
+# `tests/e2e/lifecycle.rs`'s pool journeys drive the hold and the refusal
+# against the linked sibling under a scratch state root, and `onevcs-testing`
+# 0.6.7 requires exactly this `onevcs`, so the two requirements and the lock
+# move together.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -469,7 +484,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.4.4"
-onevcs = "0.24.2"
+onevcs = "0.26.0"
 # The wire both siblings above now re-export: the envelope, its labels, sources
 # and phases, the filter grammar, the reader, the merge and the schema registry
 # are `onemessagebus-agent`'s over the `onemessagebus` core, and `src/event.rs`
@@ -559,7 +574,7 @@ oneharness-core = "0.14.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.6.5"
+onevcs-testing = "0.6.7"
 # **Test-support only**, and linked by `crates/testfakes` alone: the crate under test
 # still reads every plan by *driving* the `onetaskgraph` binary. These host the real
 # `local-md` plugin inside `label-strict-source`; that fake says why.

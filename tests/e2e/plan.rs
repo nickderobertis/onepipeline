@@ -664,6 +664,34 @@ fn a_project_the_schema_refuses_never_starts_a_run() {
                  "title": "feat: ship it", "draft": true}]}),
             "node 'publish': `draft` is a schema 3 field",
         ),
+        // The two placement overrides are held to the same version by name: a
+        // planner who sized a node's placement and had the ask dropped would
+        // find out from a session refused, or from one cut fresh where a warm
+        // slot was asked for. The values are the sibling's own — `unlimited` is
+        // how one open opts out of the cap — and they are read as its types.
+        (
+            "earlypool",
+            json!({"schema_version": 2, "tasks": [
+                {"id": "publish", "repo": "o/r", "persona": "e", "task": "t",
+                 "title": "feat: ship it", "pool": 0}]}),
+            "node 'publish': `pool` is a schema 3 field",
+        ),
+        (
+            "earlyoverflow",
+            json!({"schema_version": 2, "tasks": [
+                {"id": "publish", "repo": "o/r", "persona": "e", "task": "t",
+                 "title": "feat: ship it", "overflow": "unlimited"}]}),
+            "node 'publish': `overflow` is a schema 3 field",
+        ),
+        // A bound that is neither the word nor an integer is refused by the
+        // sibling's own reading of it, at whichever version.
+        (
+            "unboundedoverflow",
+            json!({"schema_version": 3, "tasks": [
+                {"id": "publish", "repo": "o/r", "persona": "e", "task": "t",
+                 "title": "feat: ship it", "overflow": "some"}]}),
+            "is not a bound",
+        ),
     ];
 
     for (name, plan, expected) in cases {
@@ -679,7 +707,7 @@ fn a_project_the_schema_refuses_never_starts_a_run() {
         let project = world.plan(name, &plan);
         let refused = world.run(&["start", &project]);
         refused.exited(REFUSED).err_has(expected);
-        if name.starts_with("donewhen") || name.starts_with("earlybody") {
+        if name.starts_with("donewhen") || name.starts_with("early") {
             // Each of these declares a version *earlier* than this build writes,
             // and each is answered about the field it names rather than about
             // that number: an earlier version is a document this build reads, so

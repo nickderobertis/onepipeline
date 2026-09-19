@@ -6532,3 +6532,463 @@ fn a_draft_whose_record_this_crate_cannot_read_is_finished_as_an_earlier_publica
         settled[0]
     );
 }
+
+/// The identity key `onevcs` resolves this world's `service` repository to.
+///
+/// Spelled once: the hold, the surface and the status line all name it, and a
+/// journey that read it back off the record it was asserting would prove only
+/// that the record agreed with itself.
+const SERVICE_IDENTITY: &str = "github.com/owner/service";
+
+/// Size this host's pools: one warm slot and no overflow for the `service`
+/// identity, and the shipped default — no pool, unlimited overflow — for every
+/// other.
+///
+/// A rule rather than the default, so a second identity in the same world is
+/// **unconfigured**: `onevcs` places a session of an unconfigured identity
+/// without surveying its pool, which is what lets a journey make the capacity
+/// read fail for one identity while its open still succeeds.
+fn pool_one_slot_no_overflow(world: &World) {
+    std::fs::write(
+        world.onevcs_home().join("workspaces.yml"),
+        "version: 1\nrules:\n  - match: {host: github.com, owner: owner, name: service}\n    \
+         pool: 1\n    overflow: 0\n",
+    )
+    .expect("the workspaces file is written");
+}
+
+/// The `workspace` entry holding one node, off the newest `node-held` naming it.
+fn workspace_hold_of(world: &World, run: &str, node: &str) -> Option<serde_json::Value> {
+    world
+        .events_of(run, "node-held")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .next_back()?["payload"]["reasons"]
+        .as_array()?
+        .iter()
+        .find(|reason| reason["kind"] == "workspace")
+        .cloned()
+}
+
+/// The stream position of the first event of `kind` labelled `node`.
+fn first_seq(world: &World, run: &str, kind: &str, node: &str) -> u64 {
+    world
+        .events_of(run, kind)
+        .iter()
+        .find(|event| event["labels"]["node"] == node)
+        .and_then(|event| event["seq"].as_u64())
+        .unwrap_or_else(|| panic!("no {kind} for {node}\n{}", why(world, run)))
+}
+
+/// A pooled identity that admits one session holds the second node that would
+/// open one, and lets it go when the first's session closes.
+///
+/// Against the real linked `onevcs` under a scratch state root with a
+/// `workspaces.yml`: the read is the sibling's own, the slot is a real warm
+/// worktree, and the second node runs on it once the first hands it back. Four
+/// things at once, because they are one pass's decisions. Two nodes of the one
+/// identity are both ready in the first pass with one slot between them, and the
+/// second is held on a reading taken **before** the first's session existed —
+/// which is the pass counting its own dispatch rather than the identity's
+/// records. A node of a second, unconfigured identity behind the held one starts
+/// in that same pass. A node whose capacity read fails — its identity directory
+/// carries a plain file where the pool directory would be, which the survey
+/// refuses and the open, placing an unconfigured identity without one, never
+/// looks at — is dispatched as it always was. And the hold is on the record, in
+/// `status`, and surfaced non-blocking with the identity and the numbers.
+#[test]
+fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back() {
+    let world =
+        World::new("lifecycle-pool-held").with_env("ONEPIPELINE_WORKSPACE_POLL_SECONDS", "1");
+    let repo = world.repository("local-direct", &[]);
+    let other = world.extra_repository("other");
+    let unread = world.extra_repository("unread");
+    pool_one_slot_no_overflow(&world);
+    // The identity directory exists once a session has been placed under it, so
+    // one is opened and closed in this process to find it — and then a file is
+    // put where the survey expects a directory.
+    let identity_root = world.on_onevcs(|| {
+        let vcs = onevcs::Providers::real().vcs;
+        let session = vcs
+            .open_session(onevcs::SessionRequest {
+                repo: unread.checkout.to_string_lossy().into_owned(),
+                branch: None,
+                base: None,
+                execution_checkout: None,
+                pool: None,
+                overflow: None,
+            })
+            .expect("a session opens on the unread identity");
+        let root = session
+            .worktree
+            .ancestors()
+            .nth(3)
+            .expect("<identity>/runs/<token>/worktree")
+            .to_path_buf();
+        vcs.close_session(&session.token)
+            .expect("the session closes");
+        root
+    });
+    std::fs::write(identity_root.join("pool"), "not a directory\n")
+        .expect("the file standing where the pool directory would be is written");
+    let _ = other;
+
+    // The first holds until this journey has read the hold it causes.
+    world.script("first.work", "the first wrote this\n");
+    world.script("first.wait", "");
+    world.script("second.work", "the second wrote this\n");
+    world.script("other.work", "the other wrote this\n");
+    world.script("unread.work", "the unread wrote this\n");
+    let mut on_other = lifecycle("other", &[]);
+    on_other["repo"] = json!("other");
+    let mut on_unread = lifecycle("unread", &[]);
+    on_unread["repo"] = json!("unread");
+    let path = world.plan(
+        "poolheld",
+        &plan_of(
+            "poolheld",
+            vec![
+                lifecycle("first", &[]),
+                lifecycle("second", &[]),
+                on_other,
+                on_unread,
+            ],
+        ),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    let run = "poolheld".to_string();
+
+    world.until("the second node to be held for its workspace", |world| {
+        workspace_hold_of(world, &run, "second").is_some()
+    });
+    let hold = workspace_hold_of(&world, &run, "second").expect("held");
+    assert_eq!(hold["identity"], SERVICE_IDENTITY, "{hold}");
+    assert_eq!(hold["pool"], 1, "{hold}");
+    assert_eq!(hold["overflow"], 0, "{hold}");
+    assert_eq!(hold["overflow_in_use"], 0, "{hold}");
+    for key in ["slots", "idle", "maintaining"] {
+        assert!(hold[key].is_u64(), "the hold carries no {key}: {hold}");
+    }
+    // The first was dispatched and the second was not, on the one pass both
+    // were ready in; nothing about the second settled.
+    assert_eq!(
+        dispatches_of(&world, &run, "first").len(),
+        1,
+        "{}",
+        why(&world, &run)
+    );
+    assert!(
+        dispatches_of(&world, &run, "second").is_empty(),
+        "the second node was dispatched into a full identity\n{}",
+        why(&world, &run)
+    );
+    // The two other identities started behind the held node, in that same pass:
+    // before the first's session had even opened, since that is what the read
+    // that held the second predates.
+    for node in ["other", "unread"] {
+        assert_eq!(
+            dispatches_of(&world, &run, node).len(),
+            1,
+            "{node} did not start behind the held node\n{}",
+            why(&world, &run)
+        );
+        assert!(
+            workspace_hold_of(&world, &run, node).is_none(),
+            "{node} was held for a workspace it has room in\n{}",
+            why(&world, &run)
+        );
+    }
+    let held_at = first_seq(&world, &run, "node-held", "second");
+    for node in ["first", "other", "unread"] {
+        let dispatched_at = first_seq(&world, &run, "node-dispatched", node);
+        assert!(
+            dispatched_at < held_at + 4,
+            "{node} was dispatched at {dispatched_at}, long after the hold at {held_at}\n{}",
+            why(&world, &run)
+        );
+    }
+
+    // The wait is surfaced: non-blocking, the node's own workstream, naming the
+    // identity, the numbers, and the sibling's verb that names the holders.
+    let surfaced: Vec<serde_json::Value> = world
+        .events_of(&run, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| event["payload"]["kind"] == "workspace-wait")
+        .collect();
+    assert_eq!(surfaced.len(), 1, "{surfaced:#?}\n{}", why(&world, &run));
+    assert_eq!(surfaced[0]["payload"]["blocking"], false);
+    assert_eq!(surfaced[0]["payload"]["source"], "proposal");
+    assert_eq!(surfaced[0]["labels"]["node"], "second");
+    let said = surfaced[0]["payload"]["message"]
+        .as_str()
+        .expect("the surface says something");
+    for names in [
+        "node 'second' is held",
+        &format!("'{SERVICE_IDENTITY}' workspace admits no more sessions"),
+        "pool 1 (",
+        "overflow 0 with 0 in use",
+        &format!("onevcs pool status {SERVICE_IDENTITY}"),
+        "Nothing times this out",
+    ] {
+        assert!(
+            said.contains(names),
+            "the surface does not say {names:?}: {said}"
+        );
+    }
+    // And a planner reads it off the queue without it holding anything.
+    world
+        .run(&["next", &run])
+        .exited(0)
+        .out_has("admits no more sessions");
+    // `status` renders the hold the way it renders the other holds.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has(&format!(
+            "second: held — the '{SERVICE_IDENTITY}' workspace admits no more sessions now"
+        ))
+        .out_has(&format!("onevcs pool status {SERVICE_IDENTITY}"));
+
+    // The first hands its slot back, and the second takes it.
+    world.release("first.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let result = world.run_json(&run, "result.json");
+    assert_eq!(
+        result["state"],
+        "complete",
+        "{result}\n{}",
+        why(&world, &run)
+    );
+    for node in result["nodes"].as_array().expect("nodes") {
+        assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
+    }
+    // Once each: the second was dispatched exactly once, onto the **slot** the
+    // first handed back — the one warm worktree the identity keeps, which is
+    // where both sessions say they worked — and the hold cleared on the record.
+    assert_eq!(
+        dispatches_of(&world, &run, "second").len(),
+        1,
+        "{}",
+        why(&world, &run)
+    );
+    let worktree_of = |node: &str| {
+        world
+            .events_of(&run, "session-opened")
+            .into_iter()
+            .find(|event| event["labels"]["node"] == node)
+            .and_then(|event| event["payload"]["worktree"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| panic!("{node} opened no session\n{}", why(&world, &run)))
+    };
+    assert_eq!(
+        worktree_of("first"),
+        worktree_of("second"),
+        "the second did not take the slot the first handed back\n{}",
+        why(&world, &run)
+    );
+    assert!(
+        worktree_of("first").contains("/pool/"),
+        "the sessions were not placed on a pool slot: {}",
+        worktree_of("first")
+    );
+    let unheld: Vec<serde_json::Value> = world
+        .events_of(&run, "node-unheld")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "second")
+        .collect();
+    assert_eq!(unheld.len(), 1, "{unheld:#?}\n{}", why(&world, &run));
+    assert!(
+        unheld[0]["payload"]["released"]
+            .as_array()
+            .expect("released")
+            .iter()
+            .any(|reason| reason["kind"] == "workspace"),
+        "the release does not name the workspace hold: {unheld:#?}"
+    );
+    // Both changes landed, from one slot in turn.
+    let landed = repo.base_commits(&world);
+    assert!(
+        landed.iter().any(|subject| subject.contains("first"))
+            && landed.iter().any(|subject| subject.contains("second")),
+        "both nodes' work did not land: {landed:?}"
+    );
+}
+
+/// The hook a launch names with `--dispatch-env-hook`, written by the journey
+/// below: the first time it runs it opens a **real** session on the identity's
+/// one slot through the released `onevcs` executable, so the driver's own open
+/// that follows meets a full identity; every later run does nothing.
+///
+/// Unix alone: the hook is a shell script the journey writes, and a Windows half
+/// of a one-off fixture would be one nothing here runs.
+#[cfg(unix)]
+fn opens_the_last_slot_first(world: &World, record: &std::path::Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let hook = world.root.join("open_the_last_slot.sh");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nset -eu\nif [ ! -f {record}/opened ]; then\n  {onevcs} session open \
+             service > {record}/opened.tmp 2>{record}/open.err\n  mv {record}/opened.tmp \
+             {record}/opened\nfi\nprintf '{{\"version\":1,\"env\":{{}}}}\\n'\n",
+            record = record.display(),
+            onevcs = crate::harness::onevcs_binary().display(),
+        ),
+    )
+    .expect("the hook is written");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+        .expect("the hook is executable");
+    hook.to_string_lossy().into_owned()
+}
+
+/// A session open the identity refuses as exhausted returns the node to queued.
+///
+/// The read admits the node — nothing holds the slot when it looks — and the
+/// dispatch-env hook then takes that slot before the driver's own open, which
+/// is the race the read cannot close, made deterministic. What the refusal
+/// costs the node is nothing: no boundary attempt, no settlement, a
+/// `node-requeued` on the record in the shape the contract names, a
+/// `workspace` hold, and a second dispatch once the outside session closes.
+#[cfg(unix)]
+#[test]
+fn a_session_open_refused_as_exhausted_returns_the_node_to_queued_and_it_dispatches_later() {
+    let world = World::new("lifecycle-pool-exhausted");
+    // A launch naming a hook reads every config its graph names, and the
+    // shipped node-scope graph names configs it does not ship — so this journey
+    // launches the world's own graph, written with real configs beside it.
+    world.write_graphs();
+    let graph = world.graphs().join("node-scope.yaml");
+    let world = world
+        .with_env("ONEPIPELINE_NODE_GRAPH", &graph.to_string_lossy())
+        .with_env("ONEPIPELINE_WORKSPACE_POLL_SECONDS", "1")
+        // The default, deliberately: that none of the three is spent on a full
+        // identity is half of what is held here.
+        .with_env("ONEPIPELINE_BOUNDARY_ATTEMPTS", "3");
+    let repo = world.repository("local-direct", &[]);
+    pool_one_slot_no_overflow(&world);
+    let record = world.root.join("pool-hook");
+    std::fs::create_dir_all(&record).expect("the hook's record directory");
+    let hook = opens_the_last_slot_first(&world, &record);
+    world.script("service.work", "the worker wrote this\n");
+    let path = world.plan(
+        "poolexhausted",
+        &plan_of("poolexhausted", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&["start", &path, "--detach", "--dispatch-env-hook", &hook])
+        .exited(0);
+    let run = "poolexhausted".to_string();
+
+    world.until("the refused node to be requeued", |world| {
+        !world.events_of(&run, "node-requeued").is_empty()
+    });
+    let requeued = world.events_of(&run, "node-requeued");
+    assert_eq!(requeued.len(), 1, "{requeued:#?}\n{}", why(&world, &run));
+    assert_eq!(requeued[0]["labels"]["node"], "service");
+    assert_eq!(requeued[0]["payload"]["reason"], "workspace-exhausted");
+    let detail = requeued[0]["payload"]["detail"]
+        .as_str()
+        .expect("the requeue carries the sibling's account");
+    assert!(
+        detail.contains("pool exhausted") && detail.contains(SERVICE_IDENTITY),
+        "the requeue does not carry the sibling's own refusal: {detail}"
+    );
+    // The hook's session is what holds the slot, as the sibling names it.
+    let opened: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(record.join("opened")).expect("the hook opened a session"),
+    )
+    .expect("the sibling printed the session");
+    let token = opened["token"].as_str().expect("a token").to_owned();
+    assert!(
+        detail.contains(&token),
+        "the refusal does not name the session holding the slot ({token}): {detail}"
+    );
+    world.until("the requeued node to be held for its workspace", |world| {
+        workspace_hold_of(world, &run, "service").is_some()
+    });
+    let hold = workspace_hold_of(&world, &run, "service").expect("held");
+    assert_eq!(hold["identity"], SERVICE_IDENTITY, "{hold}");
+    assert_eq!(hold["slots"], 1, "{hold}");
+    assert_eq!(hold["idle"], 0, "{hold}");
+    // One dispatch, and no settlement: the refusal spent nothing.
+    assert_eq!(
+        dispatches_of(&world, &run, "service").len(),
+        1,
+        "{}",
+        why(&world, &run)
+    );
+    assert!(
+        world.events_of(&run, "node-settled").is_empty(),
+        "the refusal settled the node\n{}",
+        why(&world, &run)
+    );
+    assert!(
+        !world.run_file(&run, "result.json").is_file(),
+        "a run waiting on the host was treated as over\n{}",
+        why(&world, &run)
+    );
+
+    // The outside session closes, and the identity admits the node.
+    world
+        .run_on(
+            world.cmd_on(
+                &crate::harness::onevcs_binary(),
+                &["session", "close", &token],
+            ),
+            "onevcs session close",
+        )
+        .exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let result = world.run_json(&run, "result.json");
+    assert_eq!(
+        result["state"],
+        "complete",
+        "{result}\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(result["nodes"][0]["status"], "done", "{result}");
+    // Two dispatches, each a first attempt of its own — never the boundary
+    // asking again — and the second after the hold cleared.
+    let dispatched = dispatches_of(&world, &run, "service");
+    assert_eq!(
+        dispatched.len(),
+        2,
+        "{dispatched:#?}\n{}",
+        why(&world, &run)
+    );
+    for dispatch in &dispatched {
+        assert_eq!(dispatch["payload"]["attempt"], 1, "{dispatch}");
+        assert!(dispatch["payload"]["reason"].is_null(), "{dispatch}");
+    }
+    let settled = world.events_of(&run, "node-settled");
+    assert_eq!(settled.len(), 1, "{settled:#?}");
+    assert_eq!(settled[0]["payload"]["outcome"], "merged", "{settled:#?}");
+    // The hold began before the second dispatch and cleared on the record —
+    // written after that pass's dispatches, as every hold transition is.
+    assert!(
+        first_seq(&world, &run, "node-held", "service")
+            < dispatched[1]["seq"].as_u64().expect("a seq"),
+        "the second dispatch left before the hold began\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(
+        world
+            .events_of(&run, "node-unheld")
+            .iter()
+            .filter(|event| event["labels"]["node"] == "service")
+            .count(),
+        1,
+        "the hold did not clear on the record\n{}",
+        why(&world, &run)
+    );
+    assert!(
+        repo.base_commits(&world)
+            .iter()
+            .any(|subject| subject.contains("service")),
+        "the work did not land: {:?}",
+        repo.base_commits(&world)
+    );
+}
