@@ -677,6 +677,26 @@ pub(crate) struct Redispatch {
     pub carried: Vec<crate::note::RecordedNote>,
 }
 
+/// The `node-dispatched` a re-asked dispatch is recorded as.
+///
+/// The notes are named on the record only where there is something to name, so
+/// a re-dispatch composed with no note reads exactly as it did before the field
+/// existed.
+fn redispatch_payload(again: &Redispatch) -> serde_json::Map<String, Value> {
+    let mut payload = journal::payload(&[
+        ("attempt", json!(again.attempt)),
+        ("attempts", json!(again.attempts)),
+        ("reason", json!(bounded(&again.reason))),
+    ]);
+    if !again.carried.is_empty() {
+        payload.insert(
+            crate::note::CARRIED_KEY.to_string(),
+            crate::note::payload_of(&again.carried),
+        );
+    }
+    payload
+}
+
 /// Everything a dispatch needs, resolved before it leaves the writer's thread.
 struct Dispatch {
     node: Node,
@@ -1461,24 +1481,10 @@ fn converge(
                                 .composed_into_the_task(note.clone(), at);
                         }
                     }
-                    let mut payload = journal::payload(&[
-                        ("attempt", json!(again.attempt)),
-                        ("attempts", json!(again.attempts)),
-                        ("reason", json!(bounded(&again.reason))),
-                    ]);
-                    // Named on the record only where there is something to name,
-                    // so a re-dispatch composed with no note reads exactly as it
-                    // did before the field existed.
-                    if !again.carried.is_empty() {
-                        payload.insert(
-                            crate::note::CARRIED_KEY.to_string(),
-                            crate::note::payload_of(&again.carried),
-                        );
-                    }
                     journal.emit(
                         journal::PipelineKind::NodeDispatched,
                         journal::labels(&paths.run, Some(&again.node)),
-                        payload,
+                        redispatch_payload(&again),
                     )?;
                 }
                 // A cancellation that reached a live turn, and one that ran out of
@@ -1496,31 +1502,50 @@ fn converge(
                 // back to the queue on the record and is held under `workspace`
                 // until the paced re-read finds the identity admitting it.
                 Message::WorkspaceExhausted(refusal) => {
-                    let node = refusal.node.as_str().to_owned();
+                    let WorkspaceRefusal {
+                        node,
+                        because,
+                        resume,
+                    } = *refusal;
+                    let node = node.as_str().to_owned();
                     in_flight.remove(&node);
+                    let mut payload = journal::payload(&[
+                        ("reason", json!(crate::pool::EXHAUSTED_REASON)),
+                        ("detail", json!(bounded(&because))),
+                    ]);
+                    // A re-dispatch keeps its pin through the queue, and the
+                    // record says so: the branch the wait is against. Absent for
+                    // a first attempt, which has none.
+                    if let Some(continuation) = &resume {
+                        payload.insert("branch".to_owned(), json!(continuation.branch()));
+                        payload.insert("attempt".to_owned(), json!(continuation.attempt));
+                    }
                     journal.emit(
                         journal::PipelineKind::NodeRequeued,
                         journal::labels(&paths.run, Some(&node)),
-                        journal::payload(&[
-                            ("reason", json!(crate::pool::EXHAUSTED_REASON)),
-                            ("detail", json!(bounded(&refusal.because))),
-                        ]),
+                        payload,
                     )?;
                     // The reading the hold carries is the identity's now, read
-                    // after the refusal; a read that fails holds nothing, and
-                    // the node is simply queued again.
+                    // after the refusal, with the request the open was refused
+                    // — the continuation's where there is one, since that is
+                    // the branch the resume opens on. A read that fails holds
+                    // nothing, and the node is simply queued again, still
+                    // resuming where it stood.
                     // llmlint: ignore-block[changed_behavior_has_e2e] the `Err` arm is
                     // unreachable from any interface: the read and the open resolve
                     // the identity through one path, so a read that fails after an
                     // open the same identity just answered is an identity that
                     // changed underneath between the two calls. The `Ok` arm is
-                    // driven by `lifecycle.rs`'s exhausted-refusal journey.
-                    if let Some(request) = state.graph.get(&node).and_then(crate::vcs::request_for)
-                    {
-                        if let Ok(capacity) = crate::vcs::workspace_capacity(&request) {
-                            workspaces.refused(&node, crate::pool::WorkspaceHold::of(&capacity));
-                        }
-                    } // llmlint: ignore-end[changed_behavior_has_e2e]
+                    // driven by `lifecycle.rs`'s exhausted-refusal journeys.
+                    let request = match &resume {
+                        Some(continuation) => crate::vcs::request_for(&continuation.node),
+                        None => state.graph.get(&node).and_then(crate::vcs::request_for),
+                    };
+                    let hold = request
+                        .and_then(|request| crate::vcs::workspace_capacity(&request).ok())
+                        .map(|capacity| crate::pool::WorkspaceHold::of(&capacity));
+                    workspaces.refused(&node, hold, resume);
+                    // llmlint: ignore-end[changed_behavior_has_e2e]
                     state.refresh(paths);
                     derived = None;
                     unpublished = true;
@@ -3529,39 +3554,68 @@ fn start_ready(
         // The read is the sibling's advisory one and a read that fails holds
         // nothing — `open` is authoritative — so the dispatch then goes ahead
         // exactly as it did before there was a pool.
-        if let Some(request) = crate::vcs::request_for(&node) {
+        //
+        // A node the identity refused mid-loop resumes from where it stood —
+        // the same attempt, pinned to the preserved branch — so it is that
+        // request, and not the plan node's, the identity is asked about.
+        let mut resume = workspaces.resuming(&node.id);
+        let opens = resume
+            .as_deref()
+            .map_or(&node, |continuation| &continuation.node);
+        if let Some(request) = crate::vcs::request_for(opens) {
             match workspaces.admit(&node.id, &request) {
                 crate::pool::Admission::Admitted | crate::pool::Admission::Unread => {}
-                crate::pool::Admission::Held => continue,
+                crate::pool::Admission::Held => {
+                    workspaces.keep_resuming(&node.id, resume);
+                    continue;
+                }
             }
         }
         let cancel = CancellationToken::new();
-        let mut payload =
-            journal::payload(&[("persona", json!(node.persona)), ("attempt", json!(1))]);
-        // A dispatch the plan or a manager asked for is composed from the plan,
-        // and a note an earlier conversation of this node read is not in it. The
-        // receipt for that note named the party that read it, which looks like
-        // success, so the dispatch that spends it says so here — and a manager
-        // reading the node's history can tell a ruling that survived from one
-        // that has to be re-issued. Only what a conversation **read**: a note
-        // no turn took rides in as the node's own context, and is not spent.
-        //
-        // llmlint: ignore[changed_behavior_has_e2e] the `?` is the refusal of a
+        // llmlint: ignore-block[changed_behavior_has_e2e] each `?` is the refusal of a
         // record this build cannot read, and no invocation a user can type
         // reaches it: the records the fold refuses are this crate's own and
         // their writers check what they write, so reaching it means a journal
         // edited by hand, which would prove the fixture rather than the code.
         // The refusal itself is held by `note::tests`, over exactly such a
-        // record; what this site adds is that the pass ends on it rather than
+        // record; what these sites add is that the pass ends on it rather than
         // announcing a dispatch as having spent nothing — the same answer the
         // lifecycle continuation gives, for the same reason, at its own site.
-        let AtDispatch { spent, carried_in } = notes_at_dispatch(paths, state, &node.id)?;
-        if !spent.is_empty() {
-            payload.insert(
-                crate::note::SPENT_KEY.to_string(),
-                crate::note::payload_of(&spent),
-            );
-        }
+        let (payload, carried_in) = match resume.as_mut() {
+            // The re-dispatch the refusal interrupted, made again: recorded as
+            // the same attempt answering the same failure, and composed with
+            // what the record says the node holds *now* — a note delivered
+            // while it waited is owed to this dispatch, not the one after.
+            Some(continuation) => {
+                continuation.notes = crate::note::standing_for(paths, &node.id)
+                    .and_then(|standing| crate::note::drain_carried(paths, &node.id, standing))?
+                    .notes();
+                (
+                    redispatch_payload(&continuation.redispatch()),
+                    continuation.notes.clone(),
+                )
+            }
+            // A dispatch the plan or a manager asked for is composed from the
+            // plan, and a note an earlier conversation of this node read is not
+            // in it. The receipt for that note named the party that read it,
+            // which looks like success, so the dispatch that spends it says so
+            // here — and a manager reading the node's history can tell a ruling
+            // that survived from one that has to be re-issued. Only what a
+            // conversation **read**: a note no turn took rides in as the node's
+            // own context, and is not spent.
+            None => {
+                let mut payload =
+                    journal::payload(&[("persona", json!(node.persona)), ("attempt", json!(1))]);
+                let AtDispatch { spent, carried_in } = notes_at_dispatch(paths, state, &node.id)?;
+                if !spent.is_empty() {
+                    payload.insert(
+                        crate::note::SPENT_KEY.to_string(),
+                        crate::note::payload_of(&spent),
+                    );
+                }
+                (payload, carried_in)
+            }
+        }; // llmlint: ignore-end[changed_behavior_has_e2e]
         journal.emit(
             journal::PipelineKind::NodeDispatched,
             journal::labels(&paths.run, Some(&node.id)),
@@ -3589,6 +3643,7 @@ fn start_ready(
             &references,
             cancel.clone(),
             tx.clone(),
+            resume,
         )?;
         let now = Instant::now();
         in_flight.insert(
@@ -3697,7 +3752,8 @@ fn may_hold_a_note(state: &RunState, node: &str) -> bool {
 #[allow(
     clippy::too_many_arguments,
     reason = "one dispatch's whole context: the run, the rules, the launch, the node, \
-              its cross-repository references, its cancellation, and where to report"
+              its cross-repository references, its cancellation, where to report, and \
+              where a refused re-dispatch resumes from"
 )]
 fn spawn(
     paths: &RunPaths,
@@ -3707,6 +3763,7 @@ fn spawn(
     references: &[crate::plan::CrossRepoReference],
     cancel: CancellationToken,
     tx: Sender<Message>,
+    resume: Option<Box<crate::lifecycle::Continuation>>,
 ) -> Result<()> {
     // The labels a `node_label` rule selects on. An executor is chosen once per
     // node, before its steps run, so a node's own labels are what exists here.
@@ -3754,6 +3811,7 @@ fn spawn(
                     &cancel,
                     &tx,
                     &ended,
+                    resume.map(|continuation| *continuation),
                 )
             } else {
                 execute_direct(
@@ -3890,6 +3948,11 @@ pub(crate) struct WorkspaceRefusal {
     /// `onevcs`'s own account of the refusal: the identity, its pool and
     /// overflow with where each came from, and every holder.
     pub because: String,
+    /// Where a re-dispatch inside the publication-retry loop stood when it was
+    /// refused, so the dispatch that resumes it continues the same attempt on
+    /// the branch the attempt before preserved. `None` for a first attempt,
+    /// which has nothing behind it and resumes from the plan's own node.
+    pub resume: Option<Box<crate::lifecycle::Continuation>>,
 }
 
 /// How far one attempt got.
@@ -3976,6 +4039,7 @@ pub(crate) fn attempt(
                     Some(whose) => Attempted::Exhausted(WorkspaceRefusal {
                         node: whose,
                         because: error.to_string(),
+                        resume: None,
                     }),
                     // llmlint: ignore-block[changed_behavior_has_e2e] a node the graph
                     // dispatched has an identity by construction, so no invocation

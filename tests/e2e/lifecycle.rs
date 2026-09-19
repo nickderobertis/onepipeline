@@ -6562,8 +6562,7 @@ fn workspace_hold_of(world: &World, run: &str, node: &str) -> Option<serde_json:
     world
         .events_of(run, "node-held")
         .into_iter()
-        .filter(|event| event["labels"]["node"] == node)
-        .next_back()?["payload"]["reasons"]
+        .rfind(|event| event["labels"]["node"] == node)?["payload"]["reasons"]
         .as_array()?
         .iter()
         .find(|reason| reason["kind"] == "workspace")
@@ -7051,20 +7050,27 @@ fn a_session_open_refused_as_exhausted_returns_the_node_to_queued_and_it_dispatc
     );
 }
 
-/// The one exhausted refusal that settles rather than requeues: the re-dispatch
-/// a preserving publication failure earns, pinned to the preserved branch, meets
-/// a full identity.
+/// An exhausted refusal met by a re-dispatch inside the publication-retry loop
+/// — the attempt after a preserved failure, pinned to the preserved branch —
+/// settles nothing and spends no boundary attempt: the node keeps its pin
+/// through the queue, and the re-dispatch lands on that same branch once the
+/// identity admits it, with no settlement in between.
 ///
-/// A node handed back to the queue is dispatched from the plan's own node, which
-/// is not pinned to that branch — so the ending names the branch for a `retry`
-/// to continue and settles `infrastructure-failure`, the shape a re-dispatch this
-/// loop could not compose already settles under. The merge path refuses the
-/// first publication (`push-rejected`, preserving), the first session closes,
-/// and the dispatch-env hook takes the freed slot on its second invocation,
-/// before the driver's own second open.
+/// The merge path refuses the first publication (`push-rejected`, preserving)
+/// and accepts the next, the first session closes, and the dispatch-env hook
+/// takes the freed slot on its second invocation — before the driver's own
+/// second open, which is the re-dispatch. What that refusal costs is nothing: a
+/// `node-requeued` naming the preserved branch and the attempt, a `workspace`
+/// hold `status` shows, and — once the outside session closes — the same
+/// attempt made again, on the branch the first attempt preserved, which the
+/// merge path then lands. A `retry` is never what continues a node the host was
+/// merely too busy for.
+///
+/// **Attached**, for the reason the first-attempt journey is: a run whose only
+/// node is waiting this way is neither settled nor `awaiting-planner`.
 #[cfg(unix)]
 #[test]
-fn an_exhausted_identity_at_a_publication_redispatch_settles_naming_the_preserved_branch() {
+fn an_exhausted_identity_at_a_publication_redispatch_keeps_the_pin_and_resumes_on_it() {
     let world = World::new("lifecycle-pool-redispatch");
     world.write_graphs();
     let graph = world.graphs().join("node-scope.yaml");
@@ -7072,7 +7078,20 @@ fn an_exhausted_identity_at_a_publication_redispatch_settles_naming_the_preserve
         .with_env("ONEPIPELINE_NODE_GRAPH", &graph.to_string_lossy())
         .with_env("ONEPIPELINE_WORKSPACE_POLL_SECONDS", "1")
         .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
-    let repo = world.repository("local-direct", &["false"]);
+    // Rejects the first push and lets every later one through: the second
+    // attempt's tree is the first's, on the branch it preserved.
+    let rejected_once = world.root.join("rejected-once");
+    let repo = world.repository(
+        "local-direct",
+        &[
+            "sh",
+            "-c",
+            &format!(
+                "if [ -e '{marker}' ]; then exit 0; fi; : > '{marker}'; exit 1",
+                marker = rejected_once.display()
+            ),
+        ],
+    );
     pool_one_slot_no_overflow(&world);
     let record = world.root.join("pool-hook");
     std::fs::create_dir_all(&record).expect("the hook's record directory");
@@ -7082,39 +7101,19 @@ fn an_exhausted_identity_at_a_publication_redispatch_settles_naming_the_preserve
         "poolredispatch",
         &plan_of("poolredispatch", vec![lifecycle("service", &[])]),
     );
-    world
-        .run(&["start", &path, "--attach", "--dispatch-env-hook", &hook])
-        .settled();
+    let mut launcher = world.cmd(&["start", &path, "--attach", "--dispatch-env-hook", &hook]);
+    let mut launcher = launcher
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the attached launcher starts");
     let run = "poolredispatch".to_string();
 
-    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
-    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
-    assert_eq!(node["outcome"], "infrastructure-failure", "{node}");
-    let branch = node["branch"]
-        .as_str()
-        .unwrap_or_else(|| panic!("the settlement names no branch: {node}"))
-        .to_string();
-    assert!(
-        repo.has_branch(&world, &branch),
-        "the preserved branch {branch} was not handed back"
-    );
-    let detail = world.events_of(&run, "node-settled")[0]["payload"]["detail"]
-        .as_str()
-        .expect("the settlement says why")
-        .to_string();
-    for names in [
-        "was not dispatched again",
-        "pool exhausted",
-        &branch,
-        "`retry`",
-    ] {
-        assert!(
-            detail.contains(names),
-            "the settlement does not say {names:?}: {detail}"
-        );
-    }
-    // The first attempt published and was refused; the second was asked for and
-    // never opened. Nothing was requeued: the node is settled, not queued.
+    world.until("the refused re-dispatch to be requeued", |world| {
+        !world.events_of(&run, "node-requeued").is_empty()
+    });
+    // The first attempt published and was refused, preserving its branch; the
+    // second was asked for on that branch and met the full identity.
     let dispatched = dispatches_of(&world, &run, "service");
     assert_eq!(
         dispatched.len(),
@@ -7122,20 +7121,166 @@ fn an_exhausted_identity_at_a_publication_redispatch_settles_naming_the_preserve
         "{dispatched:#?}\n{}",
         why(&world, &run)
     );
+    assert_eq!(dispatched[1]["payload"]["attempt"], 2, "{dispatched:#?}");
     assert!(
         dispatched[1]["payload"]["reason"]
             .as_str()
             .is_some_and(|reason| reason.starts_with("push-rejected:")),
         "{dispatched:#?}"
     );
+    // One session so far, and the branch it was cut on is the preserved one.
+    assert_eq!(
+        opened_tokens(&world, &run).len(),
+        1,
+        "{}",
+        why(&world, &run)
+    );
+    let preserved = session_branches(&world, &run)
+        .first()
+        .cloned()
+        .unwrap_or_else(|| panic!("no session opened\n{}", why(&world, &run)));
     assert!(
-        world.events_of(&run, "node-requeued").is_empty(),
-        "a re-dispatch was handed back to the queue\n{}",
+        repo.has_branch(&world, &preserved),
+        "the preserved branch {preserved} was not handed back"
+    );
+    // The requeue is the record of the wait, and it says what the wait is
+    // against: the preserved branch, at the attempt the refusal interrupted.
+    let requeued = world.events_of(&run, "node-requeued");
+    assert_eq!(requeued.len(), 1, "{requeued:#?}\n{}", why(&world, &run));
+    assert_eq!(requeued[0]["labels"]["node"], "service");
+    assert_eq!(requeued[0]["payload"]["reason"], "workspace-exhausted");
+    assert_eq!(
+        requeued[0]["payload"]["branch"],
+        json!(preserved),
+        "{requeued:#?}"
+    );
+    assert_eq!(requeued[0]["payload"]["attempt"], 2, "{requeued:#?}");
+    assert!(
+        requeued[0]["payload"]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("pool exhausted")),
+        "{requeued:#?}"
+    );
+    // No settlement, no boundary attempt, no run over: the refusal cost the
+    // node nothing, and the run is waiting on the host.
+    assert!(
+        world.events_of(&run, "node-settled").is_empty(),
+        "the refusal settled the node\n{}",
         why(&world, &run)
     );
     assert!(
-        record.join("opened").is_file(),
-        "the hook never took the slot"
+        !world.run_file(&run, "result.json").is_file(),
+        "a run waiting on the host was treated as over\n{}",
+        why(&world, &run)
+    );
+    world.until("the requeued node to be held for its workspace", |world| {
+        workspace_hold_of(world, &run, "service").is_some()
+    });
+    let hold = workspace_hold_of(&world, &run, "service").expect("held");
+    assert_eq!(hold["identity"], SERVICE_IDENTITY, "{hold}");
+    assert_eq!(hold["idle"], 0, "{hold}");
+    world.run(&["status", &run]).exited(0).out_has(&format!(
+        "service: held — the '{SERVICE_IDENTITY}' workspace admits no more sessions now"
+    ));
+    assert!(
+        launcher
+            .try_wait()
+            .expect("the launcher can be asked")
+            .is_none(),
+        "the attached launcher returned while its only node was waiting on the host\n{}",
+        why(&world, &run)
+    );
+
+    // The outside session closes, and the identity admits the re-dispatch.
+    let opened: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(record.join("opened")).expect("the hook opened a session"),
+    )
+    .expect("the sibling printed the session");
+    let token = opened["token"].as_str().expect("a token");
+    world
+        .run_on(
+            world.cmd_on(
+                &crate::harness::onevcs_binary(),
+                &["session", "close", token],
+            ),
+            "onevcs session close",
+        )
+        .exited(0);
+    let ended = launcher
+        .wait_with_output()
+        .expect("the attached launcher ends");
+    assert!(
+        ended.status.success(),
+        "the attached launcher did not return settled: {}\n{}",
+        String::from_utf8_lossy(&ended.stderr),
+        why(&world, &run)
+    );
+    // It landed, on the branch the first attempt preserved: the re-dispatch
+    // was the same attempt made again, and never a fresh branch or a `retry`.
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "merged", "{node}");
+    assert_eq!(
+        opened_tokens(&world, &run).len(),
+        2,
+        "the re-dispatch did not open a session of its own\n{}",
+        why(&world, &run)
+    );
+    let branches = session_branches(&world, &run);
+    assert!(
+        branches.iter().all(|branch| *branch == preserved),
+        "the re-dispatch did not open on the preserved branch {preserved}: {branches:?}\n{}",
+        why(&world, &run)
+    );
+    let settled = world.events_of(&run, "node-settled");
+    assert_eq!(settled.len(), 1, "{settled:#?}");
+    assert_eq!(
+        settled[0]["payload"]["branch"],
+        json!(preserved),
+        "{settled:#?}"
+    );
+    // Three dispatches: the first attempt, the second refused, and the second
+    // made again — the same attempt of the same budget answering the same
+    // failure, never a third attempt and never a first.
+    let dispatched = dispatches_of(&world, &run, "service");
+    assert_eq!(
+        dispatched.len(),
+        3,
+        "{dispatched:#?}\n{}",
+        why(&world, &run)
+    );
+    for again in &dispatched[1..] {
+        assert_eq!(again["payload"]["attempt"], 2, "{again}");
+        assert_eq!(again["payload"]["attempts"], 2, "{again}");
+        assert!(
+            again["payload"]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.starts_with("push-rejected:")),
+            "{again}"
+        );
+    }
+    assert!(
+        first_seq(&world, &run, "node-requeued", "service")
+            < dispatched[2]["seq"].as_u64().expect("a seq"),
+        "the re-dispatch left before the requeue\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(
+        world
+            .events_of(&run, "node-unheld")
+            .iter()
+            .filter(|event| event["labels"]["node"] == "service")
+            .count(),
+        1,
+        "the hold did not clear on the record\n{}",
+        why(&world, &run)
+    );
+    assert!(
+        repo.base_commits(&world)
+            .iter()
+            .any(|subject| subject.contains("service")),
+        "the work did not land: {:?}",
+        repo.base_commits(&world)
     );
 }
 

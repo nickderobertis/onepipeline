@@ -18,7 +18,10 @@
 //! own account. **After** a refusal the read could not foresee — the race
 //! between the read and the open, which nothing closes — the node is handed back
 //! to the queue at no cost, and held on the refusal's own reading until the
-//! next paced re-read. And **while** any node is held, the wait is surfaced
+//! next paced re-read; a re-dispatch refused this way keeps what it stood on,
+//! which [`Workspaces::resuming`] hands back to the dispatch that resumes it,
+//! so no refusal on any attempt of any node settles it or spends a boundary
+//! attempt. And **while** any node is held, the wait is surfaced
 //! non-blocking on the cadence a release wait is, and capacity is re-read on a
 //! paced timer as well as on every pass: a session another run closes is not an
 //! event this run sees.
@@ -190,6 +193,14 @@ pub(crate) struct Workspaces {
     /// pass that found none would say what the refusal already said. Either
     /// way the next read is the paced one.
     refused: BTreeMap<String, (Instant, WorkspaceHold)>,
+    /// Where each refused re-dispatch stood, for the dispatch that resumes it.
+    ///
+    /// A first attempt refused has nothing behind it and is absent here: it
+    /// resumes from the plan's own node. A later one is pinned to the branch
+    /// the attempt before preserved, and the queue would not know to pin it
+    /// there — so what the loop had in hand travels through the queue beside
+    /// the hold, and the node leaves on it. Kept until the node leaves.
+    resuming: BTreeMap<String, Box<crate::lifecycle::Continuation>>,
     /// When the identities were last read for a held node.
     read_at: Option<Instant>,
     /// How often a held node's identity is re-read.
@@ -206,6 +217,7 @@ impl Workspaces {
             placing: BTreeMap::new(),
             held: BTreeMap::new(),
             refused: BTreeMap::new(),
+            resuming: BTreeMap::new(),
             read_at: None,
             every: Duration::from_secs(poll_seconds()),
             surfaced: BTreeMap::new(),
@@ -267,9 +279,41 @@ impl Workspaces {
         Admission::Admitted
     }
 
-    /// Hold `node` on the refusal its open just met, until the next paced read.
-    pub(crate) fn refused(&mut self, node: &str, hold: WorkspaceHold) {
-        self.refused.insert(node.to_owned(), (Instant::now(), hold));
+    /// `node`'s open was just refused: hold it on the reading taken after the
+    /// refusal until the next paced read — where there is one; a read that
+    /// failed holds nothing, and the node is queued again — and keep where it
+    /// stood, for the dispatch that resumes it.
+    pub(crate) fn refused(
+        &mut self,
+        node: &str,
+        hold: Option<WorkspaceHold>,
+        resume: Option<Box<crate::lifecycle::Continuation>>,
+    ) {
+        if let Some(hold) = hold {
+            self.refused.insert(node.to_owned(), (Instant::now(), hold));
+        }
+        match resume {
+            Some(continuation) => self.resuming.insert(node.to_owned(), continuation),
+            None => self.resuming.remove(node),
+        };
+    }
+
+    /// Where `node` resumes from, taken for the dispatch about to leave on it:
+    /// `None` for a node that starts from the plan's own node.
+    pub(crate) fn resuming(&mut self, node: &str) -> Option<Box<crate::lifecycle::Continuation>> {
+        self.resuming.remove(node)
+    }
+
+    /// The dispatch did not leave after all — the node was held — so what it
+    /// would have resumed from is kept for the pass it does.
+    pub(crate) fn keep_resuming(
+        &mut self,
+        node: &str,
+        resume: Option<Box<crate::lifecycle::Continuation>>,
+    ) {
+        if let Some(continuation) = resume {
+            self.resuming.insert(node.to_owned(), continuation);
+        }
     }
 
     /// The nodes held this pass, and the reading each is held on.
@@ -467,7 +511,7 @@ mod tests {
         let mut workspaces = Workspaces::new();
         assert_eq!(workspaces.next_read(), Duration::MAX);
         workspaces.every = Duration::from_secs(3_600);
-        workspaces.refused("service", a_hold());
+        workspaces.refused("service", Some(a_hold()), None);
         let request = SessionRequest {
             repo: "nowhere".into(),
             branch: None,
