@@ -317,6 +317,13 @@ pub(crate) fn blocking_surface(paths: &RunPaths) -> bool {
 /// `DRIVER DEAD` over a run it knows nothing about — so the pid and the host are
 /// each read through the accessor that turns the record's silence back into
 /// silence rather than into an answer.
+///
+/// **A recorded stop is decisive only until a driver adopts the run.** The fold
+/// clears it at `driver-adopted` — see `RunState::stop` — because the stop was
+/// evidence about the driver it ended, and the record the adoption rewrote names
+/// the one driving the run now. So a run stopped and then adopted is judged here
+/// like any other, by that driver, and a run stopped and never adopted still reads
+/// as stopped.
 pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> DriverLiveness {
     driver_liveness(
         state.stop_recorded()
@@ -1907,14 +1914,21 @@ pub fn status(survey: &Survey) -> String {
         // while a supervisor looked for a wedge that was not there. So the two
         // are separate lines: what it is waiting for, or that it is waiting for
         // nothing but a slot.
+        //
+        // A node the driver holds for a release is neither: it is waiting on
+        // something outside the run altogether, for as long as that takes, so it
+        // says so first and the other two answers are not asked.
         for (id, node_status) in &statuses {
             if *node_status != NodeStatus::Ready {
                 continue;
             }
-            out.push_str(&format!(
-                "  {id}: ready — {}\n",
-                waiting_on(&view.state, id)
-            ));
+            match held_for_release(view, id) {
+                Some(held) => out.push_str(&format!("  {id}: {held}\n")),
+                None => out.push_str(&format!(
+                    "  {id}: ready — {}\n",
+                    waiting_on(&view.state, id)
+                )),
+            }
         }
         // What each amended node is currently judged against. Rendered whatever
         // that node's status is, because the reader this line is for is a
@@ -2432,6 +2446,81 @@ fn settled_detail(view: &RunView, node: &str) -> Option<String> {
         .and_then(|event| event.payload.get("detail"))
         .and_then(|detail| detail.as_str())
         .map(str::to_owned)
+}
+
+/// What a ready node reads as while the driver holds it for published releases,
+/// or `None` for a node no release holds.
+///
+/// Read off the run's own record rather than off the driver: the hold is the
+/// `node-held` the driver journalled with a `release` reason, which the fold keeps
+/// in [`RunState::holds`] until a `node-unheld` or the release's adoption clears
+/// it, so a view in another process reads exactly what the driver decided — each
+/// reason through the engine's own reader of one, so a reason this build cannot
+/// read whole is no release hold here either, as it is none to the driver. The
+/// releases are named by the dependencies that publish them, as the record names
+/// them, and the wait is timed from the record that opened it — omitted rather
+/// than guessed for a record whose time this build cannot read.
+fn held_for_release(view: &RunView, id: &str) -> Option<String> {
+    let awaited: Vec<String> = view
+        .state
+        .holds
+        .get(id)?
+        .iter()
+        .filter_map(crate::engine::release_awaited)
+        .flatten()
+        .map(|dependency| one_line(&dependency))
+        .collect();
+    // The driver names every release it holds a node for, so a hold naming none
+    // is not one it wrote, and the node reads as it would with no hold at all.
+    if awaited.is_empty() {
+        return None;
+    }
+    let waited = release_hold_since(&view.events, id).map_or_else(String::new, |since| {
+        format!(
+            ", waited {}",
+            crate::telemetry::duration(sys::now_millis().saturating_sub(since))
+        )
+    });
+    Some(format!(
+        "held — awaiting the published release of {}{waited}",
+        awaited.join(", ")
+    ))
+}
+
+/// When the release hold a node is under began: the first `node-held` naming a
+/// release since the node was last unheld, dispatched, or held for anything else.
+///
+/// A driver restates a hold as what it awaits shrinks, and an adopting driver
+/// restates the hold it inherits; neither is a new wait, so each keeps the time
+/// the first one opened.
+fn release_hold_since(events: &[Envelope], id: &str) -> Option<u64> {
+    let mut since = None;
+    for event in events
+        .iter()
+        .filter(|event| event.labels.node.as_deref() == Some(id))
+    {
+        match PipelineKind::from_wire(&event.kind) {
+            Some(PipelineKind::NodeHeld) => {
+                let for_a_release = event
+                    .payload
+                    .get("reasons")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|reasons| {
+                        reasons
+                            .iter()
+                            .any(|reason| crate::engine::release_awaited(reason).is_some())
+                    });
+                if for_a_release {
+                    since = since.or_else(|| crate::projection::millis_of(&event.ts));
+                } else {
+                    since = None;
+                }
+            }
+            Some(PipelineKind::NodeUnheld | PipelineKind::NodeDispatched) => since = None,
+            _ => {}
+        }
+    }
+    since
 }
 
 /// What a ready node is waiting on, as far as this host can tell.
@@ -3690,6 +3779,59 @@ mod tests {
             payload: crate::journal::payload(fields),
             artifacts: Vec::new(),
         }
+    }
+
+    /// A release hold is timed from the record that **opened** it: restating it —
+    /// as a driver does when what it awaits shrinks, or an adopting driver does
+    /// with the hold it inherits — is not a new wait, while a dispatch, an unhold
+    /// or a hold for something else ends it, and a record whose time cannot be
+    /// read times nothing.
+    ///
+    /// Stated over records rather than driven, because the restatement and the
+    /// reset a journey would need are a driver's timing to produce and each would
+    /// be the whole journey; `adoption.rs` drives the hold the status line reads.
+    #[test]
+    fn a_release_hold_is_timed_from_the_record_that_opened_it() {
+        use crate::journal::PipelineKind::{NodeDispatched, NodeHeld, NodeUnheld};
+        let at = |kind, reason: &str, ts: &str| {
+            let mut record = event(
+                kind,
+                Some("consumer"),
+                &[("reasons", json!([{"kind": reason, "awaiting": ["engine"]}]))],
+            );
+            record.ts = ts.to_owned();
+            record
+        };
+        let first = "2026-09-18T12:00:00.000Z";
+        let later = "2026-09-18T12:05:00.000Z";
+        let opened = crate::projection::millis_of(first);
+        let reopened = crate::projection::millis_of(later);
+        assert!(opened.is_some() && reopened.is_some());
+
+        let restated = [
+            at(NodeHeld, "release", first),
+            at(NodeHeld, "release", later),
+        ];
+        assert_eq!(release_hold_since(&restated, "consumer"), opened);
+        assert_eq!(release_hold_since(&restated, "another"), None);
+
+        for ended in [NodeUnheld, NodeDispatched] {
+            let records = [
+                at(NodeHeld, "release", first),
+                at(ended, "release", first),
+                at(NodeHeld, "release", later),
+            ];
+            assert_eq!(release_hold_since(&records, "consumer"), reopened);
+            assert_eq!(release_hold_since(&records[..2], "consumer"), None);
+        }
+        let elsewhere = [
+            at(NodeHeld, "release", first),
+            at(NodeHeld, "concurrency", first),
+        ];
+        assert_eq!(release_hold_since(&elsewhere, "consumer"), None);
+
+        let unreadable = [at(NodeHeld, "release", "not a time")];
+        assert_eq!(release_hold_since(&unreadable, "consumer"), None);
     }
 
     fn dead_pid() -> u32 {

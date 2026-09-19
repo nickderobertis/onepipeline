@@ -1059,6 +1059,61 @@ fn a_probe_that_could_not_answer_holds_the_node_and_is_never_read_as_not_release
     }
 }
 
+/// `status` reports a node the driver holds for a release **as held**, naming
+/// the release it awaits and how long it has waited — before any workspace or
+/// queued reason — and stops the moment the release lets it go.
+///
+/// The defect this states: the view explained a ready node only by workspace
+/// occupancy, so a node held on a release read `ready — queued for dispatch`
+/// while the run's own `release-wait` records said it was waiting on a release,
+/// and an operator went looking for a scheduler fault that did not exist. The
+/// view is a separate process from the driver, so what it reads is the
+/// `node-held` record the driver journalled — which is what this reads it off.
+#[test]
+fn status_names_the_release_a_held_node_awaits_rather_than_calling_it_queued() {
+    let world = watching("adoption-held-status");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+
+    let run = start(
+        &world,
+        "adoption-held-status",
+        vec![engine(), consumer(Some("published"))],
+    );
+    // Read through `status` alone, as a supervisor reads it: the hold opens once
+    // the engine's work lands, so the view is polled until it reports the node.
+    let consumer_line = |world: &World| {
+        let status = world.run(&["status", &run]);
+        status.exited(0);
+        status
+            .stdout
+            .lines()
+            .find(|line| line.trim_start().starts_with("consumer:"))
+            .map(str::to_owned)
+    };
+    world.until("status to report the held node as held", |world| {
+        consumer_line(world).is_some_and(|line| line.contains("consumer: held"))
+    });
+    let line = consumer_line(&world).expect("status reported the held node");
+    assert!(
+        line.contains("consumer: held — awaiting the published release of engine, waited "),
+        "the held node does not read as held on the engine's release: {line:?}"
+    );
+    assert!(
+        !line.contains("queued for dispatch") && !line.contains("workspace"),
+        "the held node was explained by a slot or a workspace as well: {line:?}"
+    );
+
+    // The release lets it go, and the view stops saying it is held.
+    releases_at(&answer, "0.2.0");
+    world.until("status to stop reporting the node as held", |world| {
+        !consumer_line(world).is_some_and(|line| line.contains("consumer: held"))
+    });
+}
+
 /// An answer this host **cannot read** is never read as a release that has not
 /// happened — driven at the one state of the probe where the two readings meet.
 ///
