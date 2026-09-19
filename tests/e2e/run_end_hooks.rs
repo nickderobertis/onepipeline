@@ -250,7 +250,11 @@ fn output_lines(results: &str) -> Vec<String> {
 /// the line a reader has no other command to learn, and the edit is told apart
 /// from any other by its command and by what it retried.
 fn names_edit(results: &str, before: &str, op: &str, then: &str) -> bool {
-    names_committed_at(results, &format!("{before}the {op} edit committed at "), then)
+    names_committed_at(
+        results,
+        &format!("{before}the {op} edit committed at "),
+        then,
+    )
 }
 
 /// Whether `results` says `before`, then names an edit it could read nothing of
@@ -1057,7 +1061,10 @@ fn an_epoch_ending_edit_whose_command_this_build_cannot_read_is_named_by_when_it
     let results = world.run(&["results", run]);
     results.exited(0);
     for (before, then) in [
-        ("failure hook fired — superseded: ", " reopened the run after it — reason: nodes"),
+        (
+            "failure hook fired — superseded: ",
+            " reopened the run after it — reason: nodes",
+        ),
         ("no run-end hook has fired since ", " reopened the run"),
     ] {
         assert!(
