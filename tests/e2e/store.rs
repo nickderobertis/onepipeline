@@ -486,8 +486,10 @@ fn a_settlement_reaches_a_store_whose_answer_dropped_a_field_this_build_never_re
         &onetaskgraph_binary().to_string_lossy(),
     );
     // Fields of the page and of the item, and none the projection or the plan reader
-    // consumes. The double refuses a name this answer does not carry, so a fixture that
-    // moved nothing here fails rather than passing as a plain delegated answer.
+    // requires: the projection reads a task's `status` for its category where the answer
+    // carries one, and counts no reopen where it does not. The double refuses a name this
+    // answer does not carry, so a fixture that moved nothing here fails rather than passing
+    // as a plain delegated answer.
     world.script(
         "onetaskgraph.project-show.shrink",
         "plan status repositories\n",
@@ -2781,6 +2783,142 @@ fn a_settled_project_launches_again_from_its_projected_metadata() {
     );
 }
 
+/// A project a run retried a node of launches again, reading the lineage head's
+/// definition under the root's id — its dependents' edges included.
+///
+/// The one item a lineage has carries `onepipeline.node` and `onepipeline.supersedes`
+/// beside its settlement — and where the plan's own store is the destination, so does the
+/// plan's task. Those are the write-back's keys and no node field answers to them, so the
+/// reader skips them the way it skips the settlement; before it did, every relaunch of a
+/// project a run had written to was refused for a field named `node` nobody authored. A
+/// dependent of the retried node keeps its edge onto the lineage's one item, since that is
+/// the item its dependency's root holds, and relaunches depending on the root's id.
+#[test]
+fn a_retried_project_launches_again_reading_the_lineage_head_under_the_roots_id() {
+    let first = World::new("store-writeback-relaunch-retried-first");
+    first.script("work.fail", "1");
+    let run = "writeback-retried";
+    let project = first.plan(
+        run,
+        &plan_of(
+            run,
+            vec![
+                crate::harness::agent("work", &[]),
+                crate::harness::agent("ship", &["work"]),
+            ],
+        ),
+    );
+    let item_of = |world: &World, node: &str| -> Value {
+        world
+            .store_tasks(&project)
+            .into_iter()
+            .find(|task| task["item"]["metadata"]["onepipeline.id"] == node)
+            .unwrap_or_else(|| panic!("the board holds no item for {node}"))
+    };
+    let edge_onto = |world: &World, dependent: &str| -> Vec<String> {
+        world
+            .store_deps(
+                item_of(world, dependent)["id"]
+                    .as_str()
+                    .expect("an item id"),
+            )
+            .iter()
+            .map(|edge| {
+                edge["to"]["id"]
+                    .as_str()
+                    .expect("an edge target")
+                    .to_owned()
+            })
+            .collect()
+    };
+    let held_before = |world: &World| -> (String, Vec<String>) {
+        (
+            item_of(world, "work")["id"]
+                .as_str()
+                .expect("an item id")
+                .to_owned(),
+            edge_onto(world, "ship"),
+        )
+    };
+    let (work_item, ship_edges) = held_before(&first);
+    assert_eq!(
+        ship_edges,
+        vec![work_item.clone()],
+        "the fixture authored no edge"
+    );
+    first.run(&["start", &project, "--attach"]).settled();
+    first
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [{"op": "retry", "id": "work", "node": {
+                "id": "work-2", "persona": "engineer", "task": "## What\nRedo it."
+            }}]})
+            .to_string(),
+        )
+        .exited(0);
+    first.run(&["adopt", run]).settled();
+    first.until(
+        "the lineage's head and its dependent to reach the project",
+        |world| {
+            let tasks = world.store_tasks(&project);
+            let settled = |node: &str, head: &str| {
+                tasks.iter().any(|task| {
+                    task["item"]["metadata"]["onepipeline.id"] == node
+                        && task["item"]["metadata"]["onepipeline.node"] == head
+                        && task["item"]["metadata"]["onepipeline.settlement"]["status"] == "done"
+                })
+            };
+            settled("work", "work-2") && settled("ship", "ship")
+        },
+    );
+    let tasks = first.store_tasks(&project);
+    assert_eq!(
+        tasks.len(),
+        2,
+        "the lineage holds other than one item beside its dependent: {tasks:?}"
+    );
+    let work = item_of(&first, "work");
+    assert_eq!(
+        work["id"],
+        json!(work_item),
+        "the retry moved the lineage's item"
+    );
+    assert_eq!(
+        work["item"]["metadata"]["onepipeline.supersedes"],
+        json!(["work"]),
+        "{tasks:?}"
+    );
+    assert_eq!(
+        edge_onto(&first, "ship"),
+        vec![work_item],
+        "the dependent's edge no longer names the lineage's one item"
+    );
+    assert_eq!(
+        item_of(&first, "ship")["item"]["metadata"]["onepipeline.settlement"]["status"],
+        "done",
+        "the dependent did not run behind the replacement: {tasks:?}"
+    );
+
+    let second = World::new("store-writeback-relaunch-retried-second").with_env(
+        "ONETASKGRAPH_SOURCES__PLANS__CONFIG__ROOT",
+        &first.store().to_string_lossy(),
+    );
+    second.run(&["start", &project, "--attach"]).settled();
+    assert_eq!(second.run_json(run, "result.json")["state"], "complete");
+    // What it launched is the head's definition under the root's id: the retried node,
+    // named as the plan authored it and titled by that name, carrying the task the retry
+    // stated, and its dependent still depending on it by that name.
+    let launched = second.run_json(run, "checkpoint.json")["state"]["graph"]["nodes"].clone();
+    assert_eq!(
+        launched,
+        json!([
+            {"id": "work", "title": "work", "task": "## What\nRedo it.", "persona": "engineer"},
+            {"id": "ship", "title": "ship", "task": "## What\nDo ship.\n\n## Why\nSo the run can settle.\n\n## Acceptance criteria\n- ship is done.", "persona": "engineer", "deps": ["work"]},
+        ]),
+        "{launched}"
+    );
+}
+
 /// A state a node *derives* rather than settles into reaches the board under the same
 /// vocabulary a settlement does.
 ///
@@ -3591,6 +3729,11 @@ fn an_onetaskgraph_that_cannot_report_a_version_refuses_the_launch() {
 /// the assertion is that no two of them share a word. That is a property a mapping which
 /// collapsed any pair could not have, and it is what the previous one could not state:
 /// `done` for both a merge and a failure passed every assertion anybody had written.
+///
+/// The `cancelled` word is a **drop**'s. A node a `retry` superseded settles `cancelled`
+/// too, but has no item of its own since entry 80 of `docs/contract-divergences.md`: its
+/// lineage's one item reads the replacement's word under the superseded node's id, which
+/// is held here beside the five.
 #[test]
 fn every_settlement_reaches_the_board_under_its_own_word() {
     let world = World::new("store-settlement-words");
@@ -3602,8 +3745,10 @@ fn every_settlement_reaches_the_board_under_its_own_word() {
         "abandoned.died-as",
         "provider-failure quota the subscription behind this member is exhausted",
     );
-    // Held open, so a planner can supersede it while it is still the run's to act on.
+    // Held open, so a planner can supersede one and drop the other while each is still
+    // the run's to act on.
     world.script("superseded.wait", "hold");
+    world.script("dropped.wait", "hold");
 
     let name = "settlement-words";
     let project = world.plan(
@@ -3618,6 +3763,7 @@ fn every_settlement_reaches_the_board_under_its_own_word() {
                 {"id": "broke", "persona": "engineer", "task": "## What\nFail."},
                 {"id": "abandoned", "persona": "engineer", "task": "## What\nLose the provider."},
                 {"id": "superseded", "persona": "engineer", "task": "## What\nBe retried."},
+                {"id": "dropped", "persona": "engineer", "task": "## What\nBe dropped."},
                 // The planner's own idle, declared rather than raced for: a node nothing
                 // dispatches, which is not the same fact as a node something stopped.
                 {"id": "idled", "persona": "engineer", "task": "## What\nWait.", "parked": true},
@@ -3625,29 +3771,37 @@ fn every_settlement_reaches_the_board_under_its_own_word() {
         }),
     );
     world.run(&["start", &project, "--detach"]).exited(0);
-    world.until("the held node to be dispatched", |world| {
-        world
-            .events_of(name, "node-dispatched")
-            .iter()
-            .any(|event| event["labels"]["node"] == "superseded")
+    world.until("the held nodes to be dispatched", |world| {
+        let dispatched = world.events_of(name, "node-dispatched");
+        ["superseded", "dropped"].iter().all(|node| {
+            dispatched
+                .iter()
+                .any(|event| event["labels"]["node"] == *node)
+        })
     });
 
-    // A retry takes the node out of the graph and puts its replacement in the same edit,
-    // and what became of the node it replaced is a **cancel**. That is the word a park
-    // must not share: a parked node is coming back, and this one is not.
+    // A drop takes a node out of the graph for good, and what became of it is a
+    // **cancel**. That is the word a park must not share: a parked node is coming back,
+    // and this one is not. A retry takes the superseded node out in the same edit that
+    // puts its replacement in, and the replacement is written onto the item the superseded
+    // node held.
     world
         .run_with_stdin(
             &["reply", name],
             &json!({
                 "version": 2,
-                "commands": [{"op": "retry", "id": "superseded", "node": {
-                    "id": "replacement", "persona": "engineer", "task": "## What\nRetry it."
-                }}],
+                "commands": [
+                    {"op": "drop", "id": "dropped", "dependents": "detach"},
+                    {"op": "retry", "id": "superseded", "node": {
+                        "id": "replacement", "persona": "engineer", "task": "## What\nRetry it."
+                    }},
+                ],
             })
             .to_string(),
         )
         .exited(0);
     world.release("superseded.go");
+    world.release("dropped.go");
     world.until("the run to settle", |world| {
         world.run_file(name, "result.json").is_file()
     });
@@ -3656,7 +3810,7 @@ fn every_settlement_reaches_the_board_under_its_own_word() {
         ("finished", "done"),
         ("broke", "failed"),
         ("abandoned", "provider-failed"),
-        ("superseded", "cancelled"),
+        ("dropped", "cancelled"),
         ("idled", "parked"),
     ]);
     world.until_store("every settlement to reach the board", |world| {
@@ -3664,8 +3818,27 @@ fn every_settlement_reaches_the_board_under_its_own_word() {
         expected
             .iter()
             .all(|(node, word)| projected.get(*node).map(String::as_str) == Some(*word))
+            && projected.get("superseded").map(String::as_str) == Some("done")
     });
     let projected = projected_words(&world, &project);
+    // The superseded node's lineage has one item, at its own id, saying what its
+    // replacement settled — and none the replacement's id names.
+    let tasks = world.store_tasks(&project);
+    let lineage: Vec<&Value> = tasks
+        .iter()
+        .filter(|task| task["item"]["metadata"]["onepipeline.id"] == "superseded")
+        .collect();
+    assert_eq!(lineage.len(), 1, "{tasks:?}");
+    assert_eq!(
+        lineage[0]["item"]["metadata"]["onepipeline.node"], "replacement",
+        "{tasks:?}"
+    );
+    assert!(
+        !tasks
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.id"] == "replacement"),
+        "the replacement reached the board as an item of its own: {tasks:?}"
+    );
 
     // The run's own record, so the board is being held against what actually happened
     // rather than against a second statement of the same guess.
@@ -3689,6 +3862,25 @@ fn every_settlement_reaches_the_board_under_its_own_word() {
     );
     assert_eq!(settled("superseded")["status"], "cancelled", "{result}");
     assert_eq!(settled("idled")["status"], "parked", "{result}");
+    // A dropped node is out of the graph, so the result names it nowhere; the journal is
+    // where the run says what became of it.
+    assert!(
+        !result["nodes"]
+            .as_array()
+            .expect("result nodes")
+            .iter()
+            .any(|entry| entry["id"] == "dropped"),
+        "{result}"
+    );
+    assert!(
+        world
+            .events_of(name, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "dropped"
+                && event["payload"]["status"] == "cancelled"),
+        "the drop settled its node under other than cancelled: {}",
+        world.dump()
+    );
 
     for (node, word) in &expected {
         assert_eq!(

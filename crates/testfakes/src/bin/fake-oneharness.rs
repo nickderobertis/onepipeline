@@ -77,7 +77,11 @@ enum Occurs {
 // build does not link. The reconciling gate is `tests/e2e/turns.rs`, which drives the
 // real onejudge against this process — so a flag it starts sending that is not below is
 // a refusal there rather than a double that quietly waves it through.
-const FLAGS: [(&str, Takes, Occurs); 14] = [
+const FLAGS: [(&str, Takes, Occurs); 15] = [
+    // onejudge 0.13.2 and oneagentgraph 0.4.5 ask for the machine report by name,
+    // since oneharness 0.14.0 moves `run`'s default to a human-readable view; the
+    // value is checked below, because this double prints only the JSON one.
+    ("--format", Takes::AValue, Occurs::Once),
     ("--compact", Takes::Nothing, Occurs::Once),
     ("--events", Takes::Nothing, Occurs::Once),
     ("--history", Takes::Nothing, Occurs::Once),
@@ -165,6 +169,13 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // reads the buffered document everywhere else, so a double that streamed a
     // judgement would put NDJSON where one report was expected.
     let streaming = args.iter().any(|arg| arg == "--stream");
+    // The one report this double renders is the JSON one, so a caller asking for
+    // another view by name would read a document it did not ask for.
+    if let Some(format) = fake::flag(args, "--format").filter(|format| format != "json") {
+        return fake::refuse(&format!(
+            "oneharness run was asked for `--format {format}`, and this double prints only json"
+        ));
+    }
     if (side == Side::Agent) != streaming {
         return fake::refuse(&format!(
             "oneharness run was asked for {side:?} work and {}--stream",

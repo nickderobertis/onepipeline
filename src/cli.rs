@@ -80,10 +80,11 @@ pub const WRITEBACK_PROJECTIONS_FILE: &str = "writeback-projections.jsonl";
 
 /// The schema version every line of [`WRITEBACK_PROJECTIONS_FILE`] is written at.
 ///
-/// Version 2 added `delivered`. A line naming no version is version 1, the shape before it,
-/// and still reads; a version 1 line naming `delivered`, and any version this build has never
-/// written, are refused.
-pub const WRITEBACK_PROJECTIONS_SCHEMA_VERSION: u32 = 2;
+/// Version 2 added `delivered`; version 3 added `actions.reopened`, which every landed attempt
+/// at that version names. A line naming no version is version 1, the shape before either, and
+/// still reads, as does a version 2 line; a version 1 line naming `delivered`, a version 1 or 2
+/// line naming `actions.reopened`, and any version this build has never written, are refused.
+pub const WRITEBACK_PROJECTIONS_SCHEMA_VERSION: u32 = 3;
 
 /// The file, in a run's directory, holding whether the store offers a member copy — decided
 /// once per run, before its first projection, and read by every later driver of the run.
