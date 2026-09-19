@@ -449,17 +449,10 @@ resolver = "2"
 # release, and `onevcs-testing` 0.6.5 requires exactly this `onevcs`, so the
 # two requirements and the lock move together.
 #
-# `onevcs` 0.25.0 classifies a publishing push the merge path refused on the one
-# line its `HOST_PREREQUISITE_MARKER` begins as `FailureKind::HostPrerequisite` —
-# the **host** missing a tool a hook needs, which no worker edit repairs — and
-# `src/vcs.rs::failure_of` routes that kind apart from `push-rejected`, settling
-# the node once under `infrastructure-failure` instead of spending its whole
-# redispatch budget on it (onepipeline #360). It also carries a `local-direct`
-# publication's closing lines (onevcs #154) and backfills a late-landing
-# release's baseline (onevcs #158). A **requirement**, because `^0.24` admits no
-# 0.25.x; `onevcs-testing` 0.6.6 requires exactly this `onevcs`, so the two
-# move together. A dispatch meets only the `onevcs` linked here, so none of
-# those fixes is in force until the lock below resolves to it.
+# `onevcs` 0.25.0 is the floor because it names `FailureKind::HostPrerequisite`,
+# which `src/vcs.rs::failure_of` matches arm by arm (onepipeline #360). A
+# **requirement**, because `^0.24` admits no 0.25.x; `onevcs-testing` 0.6.6
+# requires exactly this `onevcs`, so the two move together.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
