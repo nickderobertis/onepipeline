@@ -690,7 +690,7 @@ fn a_settled_run_is_excluded_and_a_document_recording_settlement_behind_its_jour
 ///
 /// Named as a set because the scale journey asserts the word without being able
 /// to predict which of the four it will get: it is the guard its whole bound rests
-/// on, since a fixture can go degenerate — a clone that carried no run state would
+/// on, since a fixture can go degenerate — an assembled run carrying no run state would
 /// be excluded or refused, every other assertion would pass, and the bound would
 /// be met over rows with nothing in them.
 const STANDING_WORDS: [&str; 4] = ["ACTIVE", "PARKED", "DRIVER DEAD", "UNDRIVEN"];
@@ -1485,8 +1485,8 @@ const RACED_RUNS: usize = 300;
 /// A thread repeats the driver's own replacement of the summary document — the
 /// same temporary, the same rename — as fast as the host allows, rather than at
 /// the driver's cadence of seconds, which is what left the race to the slowest
-/// leg to find. Each clone waits for a replacement the one before did not see,
-/// under the harness's deadline: a clone that outran the writer would be taken
+/// leg to find. Each assembly waits for a replacement the one before did not see,
+/// under the harness's deadline: one that outran the writer would be taken
 /// beside a directory at rest, and a count asserted afterwards would fail on a
 /// host whose disk stalled the writer, as this one's did for four seconds.
 // llmlint: ignore-block[tests_mirror_real_usage] a test of the suite's own scaffolding, on
@@ -1524,7 +1524,7 @@ fn the_fixture_is_assembled_beside_a_template_still_replacing_its_documents() {
     for nth in 0..RACED_RUNS {
         assert!(
             waited(|| replaced.load(Ordering::Relaxed) > nth as u64),
-            "the document was replaced {} time(s) beside {nth} clone(s), and not again \
+            "the document was replaced {} time(s) beside {nth} assembled run(s), and not again \
              within the deadline: the host is too slow to run the fixture beside a writer",
             replaced.load(Ordering::Relaxed)
         );
@@ -1620,9 +1620,10 @@ fn a_host_sized_runs_root_is_answered_in_well_under_a_second_whatever_its_journa
     world.script("build.wait", "hold");
 
     // The template: a real run with a dispatch held open, which is what an
-    // unwatched run *is*. Cloned before it is stopped, so every clone carries an
-    // unsettled document; the template itself is then stopped, which excludes it
-    // and leaves nothing writing to this root while the clock runs.
+    // unwatched run *is*. Its documents are taken before it is stopped, so every
+    // assembled run carries an unsettled one; the template itself is then
+    // stopped, which excludes it and leaves nothing writing to this root while
+    // the clock runs.
     let template = paths_of(&world, &held(&world, "unwatchedtemplate"));
     let filler = std::fs::read(template.journal()).expect("the template's own records");
     assert!(!filler.is_empty(), "the template run recorded nothing");
