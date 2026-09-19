@@ -2418,6 +2418,556 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
     }
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this asks
+// for does not exist here, for the reason `driver.rs` and `views.rs` give: the one
+// separately edged test project's input begins at `{workspaceRoot}/src/**/*`, so a journey
+// behind it is invalidated by the same unrelated source changes. These three journeys are of
+// the release hold in `src/release.rs` and `src/engine.rs`, driven through the reconcile loop, which any change
+// under `src/` can move, and they live beside the forty-odd adoption journeys in this file,
+// which is where a reader looks for one and what `just test-e2e` already runs on its own.
+/// A `published` node whose dependency **cannot be described** on the pass it
+/// becomes ready is held on that pass — not launched as if it had no
+/// out-of-repository dependency — and its hold names the dependency it could not
+/// resolve until a later pass can.
+///
+/// The failure this closes is the release-adoption mechanism failing open. What a
+/// dependency's repository releases is read from the host on the pass the consumer
+/// first becomes ready, and a read that does not go through then — here, a
+/// release-targets document an operator has half-rewritten — used to leave the
+/// node with no dependency set at all, which the hold read as *no dependency*:
+/// dispatched at once, against work no release carried, with no probe run and no
+/// hold on the record. So the unreadable read is put exactly where it bites,
+/// between the dependency's landing and the consumer's first ready pass. The
+/// dependency lands and is baselined under a document the host can read, the
+/// consumer is kept from readiness by a human action, and the document is broken
+/// before that action is taken and a fresh driver meets the ready consumer.
+///
+/// Held, and then released the only way a release hold is: the document is
+/// repaired, a later pass resolves the dependency, the probe runs and answers, and
+/// nothing but an answer of released starts the node.
+///
+/// Two releasing repositories rather than one, because the hold names **every**
+/// dependency it could not describe rather than the first it met: a reader of
+/// the wait sees all of what the node is held on, and one that stopped at the
+/// first would have a second appear only once the first was fixed.
+#[test]
+fn a_published_node_whose_dependency_cannot_be_resolved_is_held_until_it_can_be() {
+    let world = watching("adoption-unresolved");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let tool_repo = world.extra_repository("tool");
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    let (tool_script, tool_answer) = world.probe_in(&tool_repo, "tool");
+    let readable = two_that_release(&script, "tool", &tool_script);
+    world.releases(&readable);
+    releases_at(&answer, "0.1.0");
+    releases_at(&tool_answer, "1.0.0");
+
+    // The consumer is ready only once a person has acted, so both dependencies
+    // land and settle under a document this host can read — each release
+    // baseline is captured at its landing — and the moment the consumer becomes
+    // ready is one this journey chooses.
+    let mut packager = lifecycle("packager", &[]);
+    packager["repo"] = json!("tool");
+    let mut consumer = consumer(Some("published"));
+    consumer["deps"] = json!([ENGINE, "packager", "approve"]);
+    let run = start_attached(
+        &world,
+        "adoption-unresolved",
+        vec![engine(), packager, human("approve", &[]), consumer],
+    );
+    for landed in [ENGINE, "packager"] {
+        assert_eq!(
+            settled_status(&world, &run, landed).as_deref(),
+            Some("done")
+        );
+    }
+    assert!(!dispatched(&world, &run, "consumer"));
+    assert!(
+        world.events_of(&run, "release-wait").is_empty(),
+        "a node that was not ready was reported waiting on a release"
+    );
+    let baselined = (world.probe_runs(ENGINE), world.probe_runs("tool"));
+
+    // The document stops being readable — a rewrite caught halfway — and the
+    // consumer becomes ready to a driver that has never read it.
+    world.releases("version: 1\nrepositories: [\n");
+    world.run(&["attest", &run, "approve"]).exited(0);
+    world.run(&["adopt", &run, "--detach"]).exited(0);
+
+    world.until(
+        "the unresolved dependencies to hold the consumer",
+        |world| answered(world, &run, "consumer") == Some("unresolved".to_owned()),
+    );
+    assert!(
+        !dispatched(&world, &run, "consumer"),
+        "a published node was dispatched with its dependencies unresolved:\n{}",
+        world.dump()
+    );
+    assert_eq!(
+        (world.probe_runs(ENGINE), world.probe_runs("tool")),
+        baselined,
+        "a probe was run for a dependency the run could not yet describe"
+    );
+    // The wait names **both** dependencies it could not resolve and says why, in
+    // the sibling's own words about the document; what it could not read — the
+    // identity, the target, the style — it does not invent.
+    let entries = awaiting(&world, &run, "consumer");
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry["dep"].clone())
+            .collect::<Vec<Value>>(),
+        vec![json!(ENGINE), json!("packager")],
+        "the wait does not name every dependency it could not resolve: {entries:?}"
+    );
+    for entry in &entries {
+        assert_eq!(entry["last_answer"], json!("unresolved"), "{entry}");
+        assert!(
+            entry["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("malformed")),
+            "the wait does not say why the dependency could not be resolved: {entry}"
+        );
+        for absent in ["identity", "target", "style"] {
+            assert!(
+                entry[absent].is_null(),
+                "the wait invented a `{absent}` for a dependency it could not read: {entry}"
+            );
+        }
+        assert!(
+            entry["waited_seconds"].is_number() && entry["since"].is_string(),
+            "the wait does not say how long it has been: {entry}"
+        );
+    }
+    // The hold on the run's own record names them, exactly as a hold on an
+    // unreleased dependency does. The wait is recorded ahead of the hold within
+    // a pass, so the hold is waited for rather than read off the pass that
+    // recorded the wait.
+    let release_hold = json!([{ "kind": "release", "awaiting": [ENGINE, "packager"] }]);
+    world.until("the hold to reach the record", |world| {
+        world
+            .events_of(&run, "node-held")
+            .into_iter()
+            .rfind(|event| event["labels"]["node"] == "consumer")
+            .is_some_and(|hold| hold["payload"]["reasons"] == release_hold)
+    });
+    assert!(!dispatched(&world, &run, "consumer"));
+    let surface = wait_surface(&world, &run, "consumer");
+    for dep in [ENGINE, "packager"] {
+        assert!(
+            surface.contains(&format!("- {dep} — not yet resolved (")),
+            "the surface does not name the unresolved dependency '{dep}':\n{surface}"
+        );
+    }
+    assert!(
+        surface.contains("malformed") && surface.contains("waiting on 2 release(s)"),
+        "the surface does not say why or how many:\n{surface}"
+    );
+
+    // The wait is surfaced again while the dependencies stay unresolved, still
+    // naming them: an unreadable document does not go quiet.
+    let surfaced = wait_surfaces_of(&world, &run, "consumer").len();
+    world.until("the wait to be surfaced again", |world| {
+        wait_surfaces_of(world, &run, "consumer").len() > surfaced
+    });
+    assert_eq!(
+        answered(&world, &run, "consumer").as_deref(),
+        Some("unresolved")
+    );
+    assert!(wait_surface(&world, &run, "consumer").contains("not yet resolved"));
+    assert!(!dispatched(&world, &run, "consumer"));
+
+    // The operator finishes the rewrite. A later pass describes both
+    // dependencies, each probe runs, and each answers — and the answer is that
+    // nothing has been released since the baseline, which is still not a release.
+    world.releases(&readable);
+    world.until("both resolved dependencies to be probed", |world| {
+        awaiting(world, &run, "consumer")
+            .iter()
+            .filter(|entry| entry["last_answer"] == json!("not-released"))
+            .count()
+            == 2
+    });
+    assert!(
+        world.probe_runs(ENGINE) > baselined.0 && world.probe_runs("tool") > baselined.1,
+        "a probe did not run once its dependency resolved"
+    );
+    assert!(
+        !dispatched(&world, &run, "consumer"),
+        "resolving the dependencies is what started a held node"
+    );
+    let entries = awaiting(&world, &run, "consumer");
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    for (entry, (dep, identity)) in entries.iter().zip([
+        (ENGINE, "github.com/owner/engine"),
+        ("packager", "github.com/owner/tool"),
+    ]) {
+        assert_eq!(entry["dep"], json!(dep), "{entry}");
+        assert_eq!(entry["identity"], json!(identity), "{entry}");
+        assert_eq!(entry["target"], json!("crate"), "{entry}");
+        assert_eq!(entry["style"], json!("automated"), "{entry}");
+    }
+
+    releases_at(&answer, "0.2.0");
+    world.until("the engine's release to arrive", |world| {
+        world
+            .events_of(&run, "release-arrived")
+            .iter()
+            .any(|event| event["payload"]["dep"] == json!(ENGINE))
+    });
+    assert!(
+        !dispatched(&world, &run, "consumer"),
+        "one of two releases started a node held on both"
+    );
+
+    releases_at(&tool_answer, "3.4.0");
+    world.until("the held node to settle", |world| {
+        settled_status(world, &run, "consumer").is_some()
+    });
+    assert_eq!(
+        settled_status(&world, &run, "consumer").as_deref(),
+        Some("done")
+    );
+    held_before_dispatched(&world, &run, "consumer");
+    let unheld: Vec<Value> = world
+        .events_of(&run, "node-unheld")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "consumer")
+        .collect();
+    assert_eq!(
+        unheld
+            .last()
+            .map(|event| event["payload"]["released"].clone()),
+        Some(json!([{ "kind": "release", "awaiting": ["packager"] }])),
+        "the hold cleared carrying something other than the last thing holding it: {unheld:?}"
+    );
+    let task = task_of(&world, "consumer");
+    for (dependency, version) in [(ENGINE, "0.2.0"), ("packager", "3.4.0")] {
+        let row = task
+            .lines()
+            .find(|line| line.starts_with(&format!("| {dependency} |")))
+            .unwrap_or_else(|| panic!("no row for {dependency}:\n{task}"));
+        assert!(
+            row.contains(&format!("| {version} |")),
+            "a node that waited for the release was not told the version it got: {row}"
+        );
+    }
+}
+
+/// A `published` node depending on a node a `retry` replaced is held and probed
+/// on the **replacement**, exactly as one depending on the original would be.
+///
+/// The shape the defect was found in: a retry clones the node it supersedes under
+/// a new id and rewires its dependents onto it, so the id the consumer's hold has
+/// to resolve is one the plan never wrote. Held on the replacement's landing,
+/// named by the replacement's id, at the target the plan stated against the
+/// original — and started by nothing but the release.
+#[test]
+fn a_published_node_depending_on_a_retried_node_is_held_and_probed_on_the_replacement() {
+    let world = watching("adoption-retried-dependency");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories_opening_a_change(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+    world.script("gh.merged", "");
+
+    // The first attempt fails its gate; the consumer states the target it takes
+    // the engine at, keyed — as `consumes` is — by the id it depends on. A node
+    // of its own holds the run open past that failure, so the retry below is
+    // taken up by the driver that watched the failure rather than by a fresh one.
+    world.script(&format!("{ENGINE}.fail"), "1");
+    world.script("keeper.wait", "hold");
+    let mut consumer = consumer(Some("published"));
+    consumes_publishing_a_change(&mut consumer, json!({ ENGINE: "crate" }));
+    let run = start(
+        &world,
+        "adoption-retried-dependency",
+        vec![engine(), consumer, crate::harness::agent("keeper", &[])],
+    );
+    world.until("the first attempt to fail", |world| {
+        settled_status(world, &run, ENGINE).as_deref() == Some("failed")
+    });
+    assert!(!dispatched(&world, &run, "consumer"));
+
+    // The retry, as a planner writes one: a replacement under a new id, which
+    // takes the failed node's edges — and the target keyed on its id — with it.
+    let replacement = "engine-2";
+    world.script(
+        &format!("{replacement}.work"),
+        &format!("{replacement} did its work for {run}\n"),
+    );
+    let mut node = engine();
+    node["id"] = json!(replacement);
+    node["title"] = json!(format!("feat: ship {replacement}"));
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "commands": [{"op": "retry", "id": ENGINE, "node": node}]})
+                .to_string(),
+        )
+        .exited(0);
+    world.until("the replacement to land", |world| {
+        settled_status(world, &run, replacement).as_deref() == Some("done")
+    });
+
+    world.until("the probe's answer to reach the wait", |world| {
+        answered(world, &run, "consumer") == Some("not-released".to_owned())
+    });
+    assert!(
+        !dispatched(&world, &run, "consumer"),
+        "a published node was dispatched with its retried dependency unreleased:\n{}",
+        world.dump()
+    );
+    let entries = awaiting(&world, &run, "consumer");
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0]["dep"], json!(replacement));
+    assert_eq!(entries[0]["identity"], json!("github.com/owner/engine"));
+    assert_eq!(entries[0]["target"], json!("crate"));
+    assert_eq!(entries[0]["style"], json!("automated"));
+    // Every release hold on the record names the replacement and never the id it
+    // superseded, which left the graph with the retry.
+    let release_holds: Vec<Value> = world
+        .events_of(&run, "node-held")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "consumer")
+        .flat_map(|event| {
+            event["payload"]["reasons"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter(|reason| reason["kind"] == "release")
+        .collect();
+    assert!(!release_holds.is_empty(), "no release hold was recorded");
+    for reason in &release_holds {
+        assert_eq!(
+            reason["awaiting"],
+            json!([replacement]),
+            "a release hold named something other than the replacement: {reason}"
+        );
+    }
+
+    releases_at(&answer, "0.2.0");
+    world.until("the held node to settle", |world| {
+        settled_status(world, &run, "consumer").is_some()
+    });
+    assert_eq!(
+        settled_status(&world, &run, "consumer").as_deref(),
+        Some("done")
+    );
+    held_before_dispatched(&world, &run, "consumer");
+    let unheld: Vec<Value> = world
+        .events_of(&run, "node-unheld")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "consumer")
+        .collect();
+    assert_eq!(
+        unheld
+            .last()
+            .map(|event| event["payload"]["released"].clone()),
+        Some(json!([{ "kind": "release", "awaiting": [replacement] }])),
+        "{unheld:?}"
+    );
+    let task = task_of(&world, "consumer");
+    let row = task
+        .lines()
+        .find(|line| line.starts_with(&format!("| {replacement} |")))
+        .unwrap_or_else(|| panic!("no row for the replacement:\n{task}"));
+    let cells: Vec<&str> = row.trim_matches('|').split('|').map(str::trim).collect();
+    assert_eq!(cells[1], "github.com/owner/engine", "row: {row}");
+    assert_eq!(cells[4], "crate", "row: {row}");
+    assert_eq!(cells[5], "0.2.0", "row: {row}");
+    world.release("keeper.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+}
+
+/// A `published` node made ready **later in the same pass** than the release
+/// watch looked is held and probed before it is dispatched, not launched on the
+/// strength of a watch that never saw it ready.
+///
+/// The other shape the defect was found in. A dependency whose work reached the
+/// origin with its merge path unread holds its dependents, and what lifts that is
+/// the loop reading the host again — after the release watch has already decided
+/// what it holds this pass. The dependent it readies then reached the start of
+/// that same pass with no hold, no probe and no wait on the record. Here the
+/// engine's publication meets a host that goes dark, the landing is made with
+/// git, and the loop finds it for itself.
+#[test]
+fn a_published_node_readied_in_the_pass_its_dependency_is_found_landed_is_held_first() {
+    let world = watching("adoption-samepass")
+        // One read inside the publication, so the engine settles unverified on
+        // the host's outage rather than reading past it, and the loop's own
+        // re-read is a second apart.
+        .with_env("ONEPIPELINE_MERGE_PATH_READS", "1")
+        .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "1");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 3\n\
+         rules:\n\
+         \x20 - match: {host: github.com, owner: owner, name: engine}\n\
+         \x20   publication: change-auto\n\
+         \x20   approvals: none\n\
+         default:\n\
+         \x20 publication: local-direct\n\
+         \x20 approvals: none\n",
+    )
+    .expect("the rules file is written");
+    // The closeout's read and the publication's own are refused; every read
+    // after them meets a host that answers.
+    world.script("gh.outage", "2");
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+
+    let run = start(
+        &world,
+        "adoption-samepass",
+        vec![engine(), consumer(Some("published"))],
+    );
+    world.until("the engine to settle unverified", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["payload"]["outcome"] == "pushed-unverified")
+    });
+    assert!(!dispatched(&world, &run, "consumer"));
+    let asked = world.probe_runs(ENGINE);
+
+    // The landing, made with git under the trailer one leaves, and onto the
+    // origin the loop reads it from.
+    let branch = branch_of(&world, &run, ENGINE);
+    let tip = crate::harness::git(&world, &engine_repo.checkout, &["rev-parse", &branch])
+        .trim()
+        .to_owned();
+    crate::harness::git(
+        &world,
+        &engine_repo.checkout,
+        &[
+            "merge",
+            "--no-ff",
+            "-m",
+            &format!("chore: land {branch}\n\nOnevcs-Landed-Commit: {tip}\n"),
+            &branch,
+        ],
+    );
+    crate::harness::git(&world, &engine_repo.checkout, &["push", "origin", "main"]);
+
+    // Held or started, whichever the run does first: a hold recorded only after
+    // the dispatch it should have prevented is the failure this is about.
+    let held = |world: &World| {
+        world.events_of(&run, "node-held").iter().any(|event| {
+            event["labels"]["node"] == "consumer"
+                && event["payload"]["reasons"]
+                    .as_array()
+                    .is_some_and(|reasons| {
+                        reasons.contains(&json!({ "kind": "release", "awaiting": [ENGINE] }))
+                    })
+        })
+    };
+    world.until("the readied consumer to be held or started", |world| {
+        held(world) || dispatched(world, &run, "consumer")
+    });
+    assert!(
+        held(&world) && !dispatched(&world, &run, "consumer"),
+        "a published node readied mid-pass was started without a release hold:\n{}",
+        world.dump()
+    );
+    world.until("the consumer's release to be asked about", |world| {
+        world.probe_runs(ENGINE) > asked
+            && answered(world, &run, "consumer").is_some_and(|said| said != "no-answer-yet")
+    });
+    assert!(
+        !dispatched(&world, &run, "consumer"),
+        "a published node readied mid-pass was dispatched before its release answered:\n{}",
+        world.dump()
+    );
+    let entries = awaiting(&world, &run, "consumer");
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0]["dep"], json!(ENGINE));
+    assert_eq!(entries[0]["identity"], json!("github.com/owner/engine"));
+
+    // What the probe can say of a landing nobody watched land is not a release,
+    // so the person who can see one records it — and that is what starts it.
+    releases_at(&answer, "0.2.0");
+    onevcs_release(
+        &world,
+        &[
+            "acknowledge",
+            &branch,
+            "--target",
+            "crate",
+            "--version",
+            "0.2.0",
+        ],
+    );
+    world.until("the held node to settle", |world| {
+        settled_status(world, &run, "consumer").is_some()
+    });
+    assert_eq!(
+        settled_status(&world, &run, "consumer").as_deref(),
+        Some("done")
+    );
+    held_before_dispatched(&world, &run, "consumer");
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// The release hold on one node was recorded **before** its dispatch was.
+///
+/// The order they were written in, read off the store: a hold reported after the
+/// dispatch it should have prevented is the failure this module's three journeys
+/// above were written for.
+fn held_before_dispatched(world: &World, run: &str, node: &str) {
+    let journal = world.journal(run);
+    let mine = |kind: &str| {
+        journal
+            .iter()
+            .position(|event| event["kind"] == kind && event["labels"]["node"] == node)
+    };
+    let held = journal.iter().position(|event| {
+        event["kind"] == "node-held"
+            && event["labels"]["node"] == node
+            && event["payload"]["reasons"]
+                .as_array()
+                .is_some_and(|reasons| reasons.iter().any(|reason| reason["kind"] == "release"))
+    });
+    let (Some(held), Some(dispatched)) = (held, mine("node-dispatched")) else {
+        panic!(
+            "'{node}' was not both held for a release and dispatched:\n{}",
+            world.dump()
+        );
+    };
+    assert!(
+        held < dispatched,
+        "'{node}' was dispatched (event {dispatched}) before its release hold was recorded \
+         (event {held})"
+    );
+}
+
+/// Start a run attached, so it settles before the journey moves the world under
+/// the driver that adopts it.
+///
+/// Every lifecycle node writes a file, for the reason [`start`] gives.
+fn start_attached(world: &World, name: &str, nodes: Vec<Value>) -> String {
+    for node in &nodes {
+        if node.get("repo").is_none() {
+            continue;
+        }
+        let id = node["id"].as_str().expect("every node has an id");
+        world.script(
+            &format!("{id}.work"),
+            &format!("{id} did its work for {name}\n"),
+        );
+    }
+    let path = world.plan(name, &plan_of(name, nodes));
+    world.run(&["start", &path, "--attach"]).settled();
+    name.to_string()
+}
+
 /// Two producers, each stating its **own** instruction, and one block that
 /// attributes each to the dependency it is about.
 ///

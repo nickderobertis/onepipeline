@@ -92,6 +92,24 @@ const ID_KEY: &str = "onepipeline.id";
 /// project that a previous run updated must read the same node definition it launched.
 pub(crate) const SETTLEMENT_KEY: &str = "onepipeline.settlement";
 
+/// Projection-only metadata naming the lineage head a destination item carries — the
+/// attempt whose fields it renders — beside [`SUPERSEDES_KEY`]; entry 80 of
+/// `docs/contract-divergences.md` names both.
+pub(crate) const NODE_KEY: &str = "onepipeline.node";
+
+/// Projection-only metadata listing the ids a lineage's head superseded, root first,
+/// written only where the head is not the root.
+pub(crate) const SUPERSEDES_KEY: &str = "onepipeline.supersedes";
+
+/// The reserved keys the write-back owns and no node field answers to.
+///
+/// A project a run projected onto — its own, where the plan's store is the destination —
+/// carries them on every task, so a relaunch reads past them the way it reads past a
+/// settlement: what it launches is the lineage head's definition under the root's id,
+/// which is what the item says. Reading them as node fields refused the relaunch of every
+/// project a run had written to, naming `node` as a field nobody authored.
+const PROJECTION_ONLY: &[&str] = &[SETTLEMENT_KEY, NODE_KEY, SUPERSEDES_KEY];
+
 /// A reserved key this mapping fills from the task itself, and where it comes
 /// from — so a project stating it is told which end to edit rather than having
 /// its value silently lose to the task's own.
@@ -339,7 +357,7 @@ impl Store {
     fn node(&self, task: &Qualified<TaskItem>, ids: &Ids) -> std::result::Result<Value, Load> {
         let mut node = Map::new();
         for (key, value) in &task.item.metadata {
-            if key == SETTLEMENT_KEY {
+            if PROJECTION_ONLY.contains(&key.as_str()) {
                 continue;
             }
             let Some(field) = key.strip_prefix(RESERVED) else {

@@ -1127,14 +1127,8 @@ fn converge(
         // answer may sit unread for came due. A run with no out-of-repository
         // dependency and nothing landed in a repository that releases pays
         // neither: it asks nothing and takes nothing up, ever.
-        let watching = crate::release::watching(
-            state,
-            &statuses,
-            &in_flight.keys().cloned().collect::<BTreeSet<String>>(),
-        );
-        releases.refresh(paths, state, &watching);
-        let held_for_release = releases.held(&watching);
-        releases.report(paths, journal, &held_for_release, &watching)?;
+        let (watching, held_for_release) =
+            watch_releases(paths, journal, state, &statuses, &in_flight, &mut releases)?;
         // What the sibling recorded about the releases carrying this run's own
         // landed work. Not part of the wait: a release is reported whether or
         // not anything is waiting on it, because the node whose work it carries
@@ -1152,10 +1146,7 @@ fn converge(
         // this pass does not start, and neither shortens the other's wait. Read
         // twice: as what the pass may not start, and — with the dependency ids
         // each is waiting on — as what to say about why.
-        let awaiting_release: BTreeMap<String, Vec<String>> = held_for_release
-            .iter()
-            .map(|node| (node.clone(), releases.awaited_deps(node)))
-            .collect();
+        let mut awaiting_release = awaited_by(&releases, &held_for_release);
         paused.extend(held_for_release);
         if adopt_releases(paths, journal, state, &statuses, &mut releases, &in_flight)? {
             derived = None;
@@ -1182,6 +1173,20 @@ fn converge(
         // settlement unrecorded, with nothing for a later `attest` to validate
         // against.
         let statuses = statuses_of(&mut derived, state);
+        // A node this pass readied *after* the release watch looked — a re-read
+        // above finding its dependency landed — is watched before it is started,
+        // not started on the strength of a watch that never saw it ready: a
+        // `published` one is held and asked about here, in this pass, exactly as
+        // it would have been had it been ready at the top of it.
+        let readied_since = crate::release::watching(state, &statuses, &running(&in_flight))
+            .iter()
+            .any(|node| !watching.iter().any(|watched| watched.id == node.id));
+        if readied_since {
+            let (_, held_for_release) =
+                watch_releases(paths, journal, state, &statuses, &in_flight, &mut releases)?;
+            awaiting_release.extend(awaited_by(&releases, &held_for_release));
+            paused.extend(held_for_release);
+        }
         // The run claims its whole plan before it starts any of it: every node not yet started
         // is written `queued`, and the store moves each ticket those tasks deliver. Waited on
         // once per driver — a launch's and an adoption's alike — and bounded by the store's
@@ -3235,6 +3240,37 @@ fn deliver_note(
             "delivering the arrival note to node '{id}' failed: {reason}"
         ))),
     }
+}
+
+/// Take the release watch up for the nodes it cares about now, and report the
+/// ones it holds: which nodes it watched, and which of them may not start.
+fn watch_releases(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    state: &Projected,
+    statuses: &BTreeMap<String, NodeStatus>,
+    in_flight: &BTreeMap<String, Dispatch>,
+    releases: &mut crate::release::Watch,
+) -> Result<(Vec<Node>, BTreeSet<String>)> {
+    let watching = crate::release::watching(state, statuses, &running(in_flight));
+    releases.refresh(paths, state, &watching);
+    let held = releases.held(&watching);
+    releases.report(paths, journal, &held, &watching)?;
+    Ok((watching, held))
+}
+
+fn running(in_flight: &BTreeMap<String, Dispatch>) -> BTreeSet<String> {
+    in_flight.keys().cloned().collect()
+}
+
+/// The dependency ids each held node is waiting on the release of.
+fn awaited_by(
+    releases: &crate::release::Watch,
+    held: &BTreeSet<String>,
+) -> BTreeMap<String, Vec<String>> {
+    held.iter()
+        .map(|node| (node.clone(), releases.awaited_deps(node)))
+        .collect()
 }
 
 /// Tell every fast-adoption node whose awaited releases have all arrived, exactly

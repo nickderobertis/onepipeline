@@ -349,6 +349,52 @@ fn a_field_this_boundary_has_never_heard_of_is_still_refused() {
         .expect("a location spelled a way onetaskgraph does not document is refused");
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// The harness double answers `oneharness run --format` the way the real CLI's grammar
+/// reads it — and only for the one report it renders.
+///
+/// onejudge 0.13.2 and oneagentgraph 0.4.5 ask the spawned oneharness for its JSON report
+/// by name, so the double takes `--format json` and reads on to what the turn needs next;
+/// a view it does not render is refused naming the value, since a caller asking for a
+/// human report would otherwise read a JSON one it did not ask for. Driven as the process
+/// onejudge spawns, at the argv onejudge sends, against the compiled double.
+#[test]
+fn the_harness_double_takes_the_json_report_by_name_and_refuses_a_view_it_does_not_render() {
+    let fakes = std::env::temp_dir().join(format!("onepipeline-format-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fakes);
+    std::fs::create_dir_all(&fakes).expect("a scratch directory for the double");
+    let run = |format: &str| -> Output {
+        Command::new(double("fake-oneharness"))
+            .args(["run", "--format", format, "--compact", "--prompt", "probe"])
+            .env(SCRIPT_DIR_ENV, &fakes)
+            .stdin(Stdio::null())
+            .output()
+            .expect("the compiled double runs")
+    };
+    let human = run("human");
+    assert_eq!(
+        human.status.code(),
+        Some(i32::from(onepipeline_testfakes::USAGE)),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&human.stderr)
+            .contains("asked for `--format human`, and this double prints only json"),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    // Asked for by name, the format is read past, and the turn is refused for what it
+    // needs next rather than for the flag.
+    let json = run("json");
+    let said = String::from_utf8_lossy(&json.stderr);
+    assert!(
+        !said.contains("--format"),
+        "the double refused the format the real CLI takes: {said}"
+    );
+    assert!(said.contains("requires --config"), "{said}");
+    let _ = std::fs::remove_dir_all(&fakes);
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum StoreEdgeKind {

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.0](https://github.com/nickderobertis/onepipeline/compare/v0.37.0...v0.38.0) - 2026-09-19
+
+### Fixed
+
+- *(release)* hold a published node whose dependency could not be resolved this pass ([#386](https://github.com/nickderobertis/onepipeline/pull/386))
+- *(writeback)* reuse one board item for the life of a node's lineage ([#385](https://github.com/nickderobertis/onepipeline/pull/385))
+
 ## [0.37.0](https://github.com/nickderobertis/onepipeline/compare/v0.36.0...v0.37.0) - 2026-09-18
 
 ### Added
