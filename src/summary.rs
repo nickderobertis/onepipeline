@@ -222,7 +222,7 @@ pub struct RunSummary {
     pub node_counts: BTreeMap<String, u64>,
     /// Whether a stop has been recorded at all, however it went — and no
     /// adoption has driven the run since, which is what the fold's
-    /// [`RunState::stop`] answers.
+    /// `RunState::stop` answers.
     pub stop_recorded: bool,
     /// Whether every node of the graph reached a state the loop is finished
     /// with, so no further pass is coming.
