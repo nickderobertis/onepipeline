@@ -43,7 +43,6 @@ const RECORD_ENV: &str = "ONEPIPELINE_E2E_HOOK_RECORD";
 /// asks what the default *is* names none, and the product default is untouched.
 const HOOK_TIMEOUT: &str = "120";
 
-/// The flags naming one command as both hooks, under [`HOOK_TIMEOUT`].
 fn both_hooks_under_timeout(hook: &str) -> [&str; 6] {
     [
         "--success-hook",
