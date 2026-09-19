@@ -1509,12 +1509,18 @@ fn converge(
                     // The reading the hold carries is the identity's now, read
                     // after the refusal; a read that fails holds nothing, and
                     // the node is simply queued again.
+                    // llmlint: ignore-block[changed_behavior_has_e2e] the `Err` arm is
+                    // unreachable from any interface: the read and the open resolve
+                    // the identity through one path, so a read that fails after an
+                    // open the same identity just answered is an identity that
+                    // changed underneath between the two calls. The `Ok` arm is
+                    // driven by `lifecycle.rs`'s exhausted-refusal journey.
                     if let Some(request) = state.graph.get(&node).and_then(crate::vcs::request_for)
                     {
                         if let Ok(capacity) = crate::vcs::workspace_capacity(&request) {
                             workspaces.refused(&node, crate::pool::WorkspaceHold::of(&capacity));
                         }
-                    }
+                    } // llmlint: ignore-end[changed_behavior_has_e2e]
                     state.refresh(paths);
                     derived = None;
                     unpublished = true;

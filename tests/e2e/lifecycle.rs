@@ -6585,7 +6585,7 @@ fn first_seq(world: &World, run: &str, kind: &str, node: &str) -> u64 {
 ///
 /// Against the real linked `onevcs` under a scratch state root with a
 /// `workspaces.yml`: the read is the sibling's own, the slot is a real warm
-/// worktree, and the second node runs on it once the first hands it back. Four
+/// worktree, and the second node runs on it once the first hands it back. Five
 /// things at once, because they are one pass's decisions. Two nodes of the one
 /// identity are both ready in the first pass with one slot between them, and the
 /// second is held on a reading taken **before** the first's session existed —
@@ -6594,12 +6594,16 @@ fn first_seq(world: &World, run: &str, kind: &str, node: &str) -> u64 {
 /// in that same pass. A node whose capacity read fails — its identity directory
 /// carries a plain file where the pool directory would be, which the survey
 /// refuses and the open, placing an unconfigured identity without one, never
-/// looks at — is dispatched as it always was. And the hold is on the record, in
-/// `status`, and surfaced non-blocking with the identity and the numbers.
+/// looks at — is dispatched as it always was. A third node of the full identity
+/// stating `pool: 0` and `overflow: unlimited` is admitted past the hold and
+/// placed under `runs/`, which only the sibling reading those overrides off the
+/// request can do. And the hold is on the record, in `status`, and surfaced non-blocking
+/// with the identity and the numbers — again on the cadence a release wait is.
 #[test]
 fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back() {
-    let world =
-        World::new("lifecycle-pool-held").with_env("ONEPIPELINE_WORKSPACE_POLL_SECONDS", "1");
+    let world = World::new("lifecycle-pool-held")
+        .with_env("ONEPIPELINE_WORKSPACE_POLL_SECONDS", "1")
+        .with_env("ONEPIPELINE_RELEASE_SURFACE_SECONDS", "1");
     let repo = world.repository("local-direct", &[]);
     let other = world.extra_repository("other");
     let unread = world.extra_repository("unread");
@@ -6629,6 +6633,11 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
             .expect("the session closes");
         root
     });
+    // llmlint: ignore[tests_mirror_real_usage] no interface produces a capacity read
+    // that fails while the open succeeds — both resolve the identity through one path
+    // — except a pool directory the survey cannot list and an unconfigured open never
+    // consults; the file is that condition, and the behaviour it proves is the
+    // contract's own "a read that fails holds nothing".
     std::fs::write(identity_root.join("pool"), "not a directory\n")
         .expect("the file standing where the pool directory would be is written");
     let _ = other;
@@ -6639,22 +6648,29 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
     world.script("second.work", "the second wrote this\n");
     world.script("other.work", "the other wrote this\n");
     world.script("unread.work", "the unread wrote this\n");
+    world.script("unbounded.work", "the unbounded wrote this\n");
     let mut on_other = lifecycle("other", &[]);
     on_other["repo"] = json!("other");
     let mut on_unread = lifecycle("unread", &[]);
     on_unread["repo"] = json!("unread");
-    let path = world.plan(
+    // Both overrides, as the sibling reads them: `pool: 0` places this one
+    // fresh under `runs/` rather than letting it race the first for the slot,
+    // and `overflow: unlimited` is what admits it there past the rule's `0`.
+    let mut unbounded = lifecycle("unbounded", &[]);
+    unbounded["pool"] = json!(0);
+    unbounded["overflow"] = json!("unlimited");
+    let mut plan = plan_of(
         "poolheld",
-        &plan_of(
-            "poolheld",
-            vec![
-                lifecycle("first", &[]),
-                lifecycle("second", &[]),
-                on_other,
-                on_unread,
-            ],
-        ),
+        vec![
+            lifecycle("first", &[]),
+            lifecycle("second", &[]),
+            on_other,
+            on_unread,
+            unbounded,
+        ],
     );
+    plan["concurrency"] = json!(5);
+    let path = world.plan("poolheld", &plan);
     world.run(&["start", &path, "--detach"]).exited(0);
     let run = "poolheld".to_string();
 
@@ -6684,8 +6700,9 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
     );
     // The two other identities started behind the held node, in that same pass:
     // before the first's session had even opened, since that is what the read
-    // that held the second predates.
-    for node in ["other", "unread"] {
+    // that held the second predates. So did the node of the full identity that
+    // opts out of the cap.
+    for node in ["other", "unread", "unbounded"] {
         assert_eq!(
             dispatches_of(&world, &run, node).len(),
             1,
@@ -6699,26 +6716,34 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
         );
     }
     let held_at = first_seq(&world, &run, "node-held", "second");
-    for node in ["first", "other", "unread"] {
+    for node in ["first", "other", "unread", "unbounded"] {
         let dispatched_at = first_seq(&world, &run, "node-dispatched", node);
         assert!(
-            dispatched_at < held_at + 4,
+            dispatched_at < held_at + 5,
             "{node} was dispatched at {dispatched_at}, long after the hold at {held_at}\n{}",
             why(&world, &run)
         );
     }
 
     // The wait is surfaced: non-blocking, the node's own workstream, naming the
-    // identity, the numbers, and the sibling's verb that names the holders.
-    let surfaced: Vec<serde_json::Value> = world
-        .events_of(&run, "planner-surface-queued")
-        .into_iter()
-        .filter(|event| event["payload"]["kind"] == "workspace-wait")
-        .collect();
-    assert_eq!(surfaced.len(), 1, "{surfaced:#?}\n{}", why(&world, &run));
-    assert_eq!(surfaced[0]["payload"]["blocking"], false);
-    assert_eq!(surfaced[0]["payload"]["source"], "proposal");
-    assert_eq!(surfaced[0]["labels"]["node"], "second");
+    // identity, the numbers, and the sibling's verb that names the holders — and
+    // surfaced again on the cadence, so a wait nobody has ended cannot go silent.
+    let workspace_waits = |world: &World| -> Vec<serde_json::Value> {
+        world
+            .events_of(&run, "planner-surface-queued")
+            .into_iter()
+            .filter(|event| event["payload"]["kind"] == "workspace-wait")
+            .collect()
+    };
+    world.until("the wait to be surfaced again on its cadence", |world| {
+        workspace_waits(world).len() >= 2
+    });
+    let surfaced = workspace_waits(&world);
+    for surface in &surfaced {
+        assert_eq!(surface["payload"]["blocking"], false, "{surface}");
+        assert_eq!(surface["payload"]["source"], "proposal", "{surface}");
+        assert_eq!(surface["labels"]["node"], "second", "{surface}");
+    }
     let said = surfaced[0]["payload"]["message"]
         .as_str()
         .expect("the surface says something");
@@ -6792,6 +6817,13 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
         "the sessions were not placed on a pool slot: {}",
         worktree_of("first")
     );
+    // And the one that opted out of the cap was placed **past** the pool, under
+    // `runs/`, while the slot was held: the override reached the sibling.
+    assert!(
+        worktree_of("unbounded").contains("/runs/"),
+        "the unbounded node was not placed under runs/: {}",
+        worktree_of("unbounded")
+    );
     let unheld: Vec<serde_json::Value> = world
         .events_of(&run, "node-unheld")
         .into_iter()
@@ -6815,23 +6847,25 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
     );
 }
 
-/// The hook a launch names with `--dispatch-env-hook`, written by the journey
-/// below: the first time it runs it opens a **real** session on the identity's
+/// The hook a launch names with `--dispatch-env-hook`, written by the journeys
+/// below: on its `nth` invocation it opens a **real** session on the identity's
 /// one slot through the released `onevcs` executable, so the driver's own open
-/// that follows meets a full identity; every later run does nothing.
+/// that follows meets a full identity; every other invocation does nothing.
 ///
 /// Unix alone: the hook is a shell script the journey writes, and a Windows half
 /// of a one-off fixture would be one nothing here runs.
 #[cfg(unix)]
-fn opens_the_last_slot_first(world: &World, record: &std::path::Path) -> String {
+fn opens_the_last_slot_on(world: &World, record: &std::path::Path, nth: u32) -> String {
     use std::os::unix::fs::PermissionsExt;
     let hook = world.root.join("open_the_last_slot.sh");
     std::fs::write(
         &hook,
         format!(
-            "#!/bin/sh\nset -eu\nif [ ! -f {record}/opened ]; then\n  {onevcs} session open \
-             service > {record}/opened.tmp 2>{record}/open.err\n  mv {record}/opened.tmp \
-             {record}/opened\nfi\nprintf '{{\"version\":1,\"env\":{{}}}}\\n'\n",
+            "#!/bin/sh\nset -eu\nn=0\n[ -f {record}/count ] && n=$(cat {record}/count)\n\
+             n=$((n + 1))\necho $n > {record}/count\nif [ \"$n\" -eq {nth} ]; then\n  {onevcs} \
+             session open service > {record}/opened.tmp 2>{record}/open.err\n  mv \
+             {record}/opened.tmp {record}/opened\nfi\nprintf \
+             '{{\"version\":1,\"env\":{{}}}}\\n'\n",
             record = record.display(),
             onevcs = crate::harness::onevcs_binary().display(),
         ),
@@ -6869,7 +6903,7 @@ fn a_session_open_refused_as_exhausted_returns_the_node_to_queued_and_it_dispatc
     pool_one_slot_no_overflow(&world);
     let record = world.root.join("pool-hook");
     std::fs::create_dir_all(&record).expect("the hook's record directory");
-    let hook = opens_the_last_slot_first(&world, &record);
+    let hook = opens_the_last_slot_on(&world, &record, 1);
     world.script("service.work", "the worker wrote this\n");
     let path = world.plan(
         "poolexhausted",
@@ -6990,5 +7024,149 @@ fn a_session_open_refused_as_exhausted_returns_the_node_to_queued_and_it_dispatc
             .any(|subject| subject.contains("service")),
         "the work did not land: {:?}",
         repo.base_commits(&world)
+    );
+}
+
+/// The one exhausted refusal that settles rather than requeues: the re-dispatch
+/// a preserving publication failure earns, pinned to the preserved branch, meets
+/// a full identity.
+///
+/// A node handed back to the queue is dispatched from the plan's own node, which
+/// is not pinned to that branch — so the ending names the branch for a `retry`
+/// to continue and settles `infrastructure-failure`, the shape a re-dispatch this
+/// loop could not compose already settles under. The merge path refuses the
+/// first publication (`push-rejected`, preserving), the first session closes,
+/// and the dispatch-env hook takes the freed slot on its second invocation,
+/// before the driver's own second open.
+#[cfg(unix)]
+#[test]
+fn an_exhausted_identity_at_a_publication_redispatch_settles_naming_the_preserved_branch() {
+    let world = World::new("lifecycle-pool-redispatch");
+    world.write_graphs();
+    let graph = world.graphs().join("node-scope.yaml");
+    let world = world
+        .with_env("ONEPIPELINE_NODE_GRAPH", &graph.to_string_lossy())
+        .with_env("ONEPIPELINE_WORKSPACE_POLL_SECONDS", "1")
+        .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    let repo = world.repository("local-direct", &["false"]);
+    pool_one_slot_no_overflow(&world);
+    let record = world.root.join("pool-hook");
+    std::fs::create_dir_all(&record).expect("the hook's record directory");
+    let hook = opens_the_last_slot_on(&world, &record, 2);
+    world.script("service.work", "the worker wrote this\n");
+    let path = world.plan(
+        "poolredispatch",
+        &plan_of("poolredispatch", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&["start", &path, "--attach", "--dispatch-env-hook", &hook])
+        .settled();
+    let run = "poolredispatch".to_string();
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "infrastructure-failure", "{node}");
+    let branch = node["branch"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the settlement names no branch: {node}"))
+        .to_string();
+    assert!(
+        repo.has_branch(&world, &branch),
+        "the preserved branch {branch} was not handed back"
+    );
+    let detail = world.events_of(&run, "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .expect("the settlement says why")
+        .to_string();
+    for names in [
+        "was not dispatched again",
+        "pool exhausted",
+        &branch,
+        "`retry`",
+    ] {
+        assert!(
+            detail.contains(names),
+            "the settlement does not say {names:?}: {detail}"
+        );
+    }
+    // The first attempt published and was refused; the second was asked for and
+    // never opened. Nothing was requeued: the node is settled, not queued.
+    let dispatched = dispatches_of(&world, &run, "service");
+    assert_eq!(
+        dispatched.len(),
+        2,
+        "{dispatched:#?}\n{}",
+        why(&world, &run)
+    );
+    assert!(
+        dispatched[1]["payload"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with("push-rejected:")),
+        "{dispatched:#?}"
+    );
+    assert!(
+        world.events_of(&run, "node-requeued").is_empty(),
+        "a re-dispatch was handed back to the queue\n{}",
+        why(&world, &run)
+    );
+    assert!(
+        record.join("opened").is_file(),
+        "the hook never took the slot"
+    );
+}
+
+/// A merge path that says the **host** is missing something settles the node
+/// under the residual and is not retried.
+///
+/// The hook says so on the one line the sibling reserves for it, and the sibling
+/// classifies the refusal `HostPrerequisite` — a kind no change to the work can
+/// clear, so it is terminal here rather than preserving: a worker sent back to
+/// the tree would meet the same missing tool. What the settlement carries is
+/// what the hook said is missing and how to install it.
+#[test]
+fn a_merge_path_missing_a_host_prerequisite_settles_the_residual_and_is_not_retried() {
+    let world =
+        World::new("lifecycle-prerequisite").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    world.repository(
+        "local-direct",
+        &[
+            "sh",
+            "-c",
+            "echo 'onevcs: host-prerequisite: gh is not installed; install it with brew \
+             install gh' >&2; exit 1",
+        ],
+    );
+    world.script("service.work", "the worker wrote this\n");
+    let run = settle(&world, "prerequisite", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "publication-failed", "{node}");
+    assert_eq!(node["landing"], json!(null), "{node}");
+    let detail = world.events_of(&run, "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .expect("the settlement says why")
+        .to_string();
+    for names in [
+        "host prerequisite",
+        "gh is not installed",
+        "brew install gh",
+    ] {
+        assert!(
+            detail.contains(names),
+            "the settlement does not say {names:?}: {detail}"
+        );
+    }
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("publication-failed")
+        .out_has("gh is not installed");
+    // One attempt of a budget of two: the refusal is terminal.
+    assert_eq!(
+        dispatches_of(&world, &run, "service").len(),
+        1,
+        "a host prerequisite was retried\n{}",
+        why(&world, &run)
     );
 }

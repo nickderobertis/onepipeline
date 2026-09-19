@@ -70,6 +70,12 @@ mod journal;
 // project edged narrower than the crate would drop it out of `nx affected` for the very
 // changes it exists to catch.
 mod landing;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] what these journeys exercise
+// is `lifecycle`, `vcs`, `pool` and `engine` together against the linked `onevcs` over a
+// real origin — the session, the publication, the pool's hold and its refusal — so the
+// narrowest edge they can honestly sit behind is the crate itself, which is this target's;
+// a project edged narrower would drop them out of `nx affected` for the very changes they
+// exist to catch. Same grounds as `mod dispatch_env_hook` above.
 mod lifecycle;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the
 // head of `tests/e2e/listing.rs` and is not restated here; this declaration is the other
