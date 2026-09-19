@@ -336,18 +336,58 @@ impl Dependency {
 /// script probe could run — and a held node asks the same question on every
 /// reconcile pass. Configuration is a fact about the host rather than about the
 /// run, so one read per driver is the right number.
-#[derive(Debug, Default)]
+///
+/// **An answer is cached; a failure is not**, or not for good. What the sibling
+/// could not say — a release-targets document half-written, a registry another
+/// process was rewriting as it was read — is a fact about that moment, and a
+/// driver that pinned it would hold every node depending on that repository for
+/// its whole life over a read that would have gone through a second later. So a
+/// failed read is kept for one poll interval and then asked again, which is the
+/// pace every other question here is put at.
+#[derive(Debug)]
 struct Repositories {
-    known: BTreeMap<String, Option<RepositoryReleases>>,
+    known: BTreeMap<String, std::result::Result<RepositoryReleases, UnreadRepository>>,
+    retry_every: Duration,
+}
+
+#[derive(Debug, Clone)]
+struct UnreadRepository {
+    reason: String,
+    at: Instant,
+}
+
+impl Default for Repositories {
+    fn default() -> Self {
+        Self::retrying_every(Duration::from_secs(poll_seconds()))
+    }
 }
 
 impl Repositories {
-    /// What one repository releases, or `None` where the sibling could not say.
-    fn of(&mut self, repo: &str) -> Option<&RepositoryReleases> {
+    fn retrying_every(retry_every: Duration) -> Self {
+        Self {
+            known: BTreeMap::new(),
+            retry_every,
+        }
+    }
+
+    fn of(&mut self, repo: &str) -> std::result::Result<&RepositoryReleases, String> {
+        let stale = self.known.get(repo).is_some_and(|known| match known {
+            Ok(_) => false,
+            Err(unread) => unread.at.elapsed() >= self.retry_every,
+        });
+        if stale {
+            self.known.remove(repo);
+        }
         self.known
             .entry(repo.to_owned())
-            .or_insert_with(|| onevcs::release_targets(repo).ok())
+            .or_insert_with(|| {
+                onevcs::release_targets(repo).map_err(|failure| UnreadRepository {
+                    reason: failure.to_string(),
+                    at: Instant::now(),
+                })
+            })
             .as_ref()
+            .map_err(|unread| unread.reason.clone())
     }
 }
 
@@ -533,10 +573,33 @@ pub(crate) struct Watch {
     /// When a node's landings were last re-read. `None` before the first read,
     /// which is due immediately.
     read_landings: Option<Instant>,
-    /// Whether a node the last refresh watched could not be described yet.
-    unresolved: bool,
+    /// The nodes the last refresh watched whose dependencies it could not all
+    /// describe, and which of them it could not.
+    ///
+    /// **The marker a hold reads.** A node is in here or in `dependencies` and
+    /// never both: its set is frozen the first pass every dependency resolves,
+    /// and until then this says which are still unreadable and why. An entry
+    /// here holds a `published` node exactly as an unreleased dependency does,
+    /// because the two are told apart only by what a later pass can read — and a
+    /// node read as having *no* out-of-repository dependency because one could
+    /// not be described is a node launched against work no release carries.
+    unresolved: BTreeMap<String, Vec<Unresolved>>,
     asker: Asker,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Unresolved {
+    dep: String,
+    reason: String,
+    /// When it was first found unreadable, in epoch milliseconds.
+    since: u64,
+}
+
+/// The word a wait names a dependency the run could not describe by.
+///
+/// Beside the five answers and [`NO_ANSWER_YET`], and not one of them: no
+/// question was put, because there was nothing yet to put one about.
+const UNRESOLVED: &str = "unresolved";
 
 impl Watch {
     /// Start watching one run, taking up whatever a previous driver said.
@@ -588,7 +651,7 @@ impl Watch {
             adopted,
             arrived,
             surfaced: BTreeMap::new(),
-            unresolved: false,
+            unresolved: BTreeMap::new(),
             surface_every: Duration::from_secs(surface_every_seconds()),
             relay_every: Duration::from_secs(poll_seconds()),
             relayed: None,
@@ -691,7 +754,7 @@ impl Watch {
     /// for it after the answer has arrived, because the answer this holds is a
     /// cache of a thing another process writes.
     pub(crate) fn names_a_release_dependency(&self) -> bool {
-        self.unresolved || self.dependencies.values().any(|of| !of.is_empty())
+        !self.unresolved.is_empty() || self.dependencies.values().any(|of| !of.is_empty())
     }
 
     /// Whether anything this run landed could have a release recorded against it.
@@ -709,7 +772,7 @@ impl Watch {
         repositories.into_iter().any(|repo| {
             self.repositories
                 .of(&repo)
-                .is_some_and(|releases| !releases.targets.is_empty())
+                .is_ok_and(|releases| !releases.targets.is_empty())
         })
     }
 
@@ -719,6 +782,11 @@ impl Watch {
     /// its style, how long it has been on — is
     /// [`ReleaseWait`](journal::PipelineKind::ReleaseWait)'s account of it and is
     /// not copied anywhere else.
+    ///
+    /// A dependency the run could not describe is among them: what holds the
+    /// node is the release it may be waiting on, and that it could not yet be
+    /// asked about is the wait's account of itself rather than a reason to name
+    /// nothing.
     pub(crate) fn awaited_deps(&self, node: &str) -> Vec<String> {
         self.dependencies
             .get(node)
@@ -732,7 +800,15 @@ impl Watch {
                     .is_none()
             })
             .map(|dependency| dependency.dep.clone())
+            .chain(self.unresolved_of(node).iter().map(|it| it.dep.clone()))
             .collect()
+    }
+
+    fn unresolved_of(&self, node: &str) -> &[Unresolved] {
+        self.unresolved
+            .get(node)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 
     /// Take up the answers that have arrived, and ask about what is awaited now.
@@ -763,11 +839,12 @@ impl Watch {
         }
         // A node whose dependencies this run could not describe yet is answered
         // again rather than left: what it is waiting on may be another run's
-        // ledger, which moves without anything here changing, so the loop has to
-        // keep coming back for it.
-        self.unresolved = watching
-            .iter()
-            .any(|node| !self.dependencies.contains_key(&node.id));
+        // ledger or this host's own release-targets document, both of which move
+        // without anything here changing, so the loop has to keep coming back for
+        // it. `resolve` marked every watched node this pass could not describe;
+        // one no longer watched is not waiting on anything here.
+        self.unresolved
+            .retain(|node, _| watching.iter().any(|watched| watched.id == *node));
         self.asker.ask(questions_of(&waits));
     }
 
@@ -790,20 +867,28 @@ impl Watch {
     /// The nodes a release hold will not let start yet.
     ///
     /// A `published` node whose out-of-repository dependencies have not all
-    /// answered released. Nothing else holds anything: a `fast` node launches on
-    /// branch readiness alone.
+    /// answered released — **or could not all be described**, which is held on
+    /// the same footing: "not resolved this pass" says nothing about whether a
+    /// release carries the work, and a node this cannot yet be asked for is not
+    /// a node with nothing to wait on. Nothing else holds anything: a `fast` node
+    /// launches on branch readiness alone, and a node whose every dependency
+    /// resolved to nothing outside its repository is never held.
     pub(crate) fn held(&self, watching: &[Node]) -> BTreeSet<String> {
         watching
             .iter()
             .filter(|node| adoption_of(node) == Adoption::Published)
-            .filter(|node| !self.all_released(&node.id))
             .filter(|node| {
-                self.dependencies
-                    .get(&node.id)
-                    .is_some_and(|dependencies| !dependencies.is_empty())
+                self.unresolved.contains_key(&node.id) || self.awaits_a_release(&node.id)
             })
             .map(|node| node.id.clone())
             .collect()
+    }
+
+    fn awaits_a_release(&self, node: &str) -> bool {
+        self.dependencies
+            .get(node)
+            .is_some_and(|dependencies| !dependencies.is_empty())
+            && !self.all_released(node)
     }
 
     /// Report every release that has arrived, and every wait that is still on.
@@ -926,7 +1011,7 @@ impl Watch {
                 .graph
                 .get(node)
                 .and_then(|node| node.repo.clone())
-                .and_then(|repo| self.repositories.of(&repo))
+                .and_then(|repo| self.repositories.of(&repo).ok())
                 .is_none_or(|releases| releases.targets.is_empty());
             // A repository that declares no release targets releases nothing, so
             // there is nothing recorded about it to read — which is every host
@@ -1023,6 +1108,27 @@ impl Watch {
                 );
                 Value::Object(entry)
             })
+            .chain(self.unresolved_of(node).iter().map(|unresolved| {
+                // No identity, target or style: those are what could not be
+                // read. The dependency, how long, and why are what there is.
+                let entry = journal::payload(&[
+                    ("dep", json!(unresolved.dep)),
+                    ("identity", Value::Null),
+                    ("target", Value::Null),
+                    ("style", Value::Null),
+                    (
+                        "since",
+                        json!(crate::sys::rfc3339_from_millis(unresolved.since)),
+                    ),
+                    (
+                        "waited_seconds",
+                        json!(now.saturating_sub(unresolved.since) / 1_000),
+                    ),
+                    ("last_answer", json!(UNRESOLVED)),
+                    ("reason", json!(unresolved.reason)),
+                ]);
+                Value::Object(entry)
+            }))
             .collect()
     }
 
@@ -1064,6 +1170,17 @@ impl Watch {
             lines.push(format!(
                 "- {named} — {style}, waited {waited}, last answer: {answered}",
                 named = dependency.named(),
+            ));
+        }
+        // A dependency the run could not describe is named by the id the plan
+        // gives it, which is all the run has for it, and the line says why: the
+        // hold is on the reading, and the reader is who can fix the reading.
+        for unresolved in self.unresolved_of(node) {
+            let waited = crate::telemetry::duration(now.saturating_sub(unresolved.since));
+            lines.push(format!(
+                "- {dep} — not yet resolved ({reason}), waited {waited}, last answer: {UNRESOLVED}",
+                dep = unresolved.dep,
+                reason = unresolved.reason,
             ));
         }
         Surface {
@@ -1215,17 +1332,38 @@ impl Watch {
             return re_read;
         }
         let mine = identity_of(&mut self.repositories, node);
+        let now = crate::sys::now_millis();
         let mut resolved: Vec<Dependency> = Vec::new();
+        let mut unresolved: Vec<Unresolved> = Vec::new();
         for dep in &node.deps {
             match self.dependency(paths, state, node, dep, mine.as_deref()) {
-                // A dependency this run cannot describe at all leaves the whole
-                // set unfrozen: it is answered again next pass rather than the
-                // node being launched against a set with a row missing from it.
-                Resolution::Unreadable => return Vec::new(),
+                // A dependency this run cannot describe leaves the whole set
+                // unfrozen: it is answered again next pass rather than the node
+                // being launched against a set with a row missing from it. Every
+                // one of them is read rather than the first, so the hold names
+                // all it is waiting on; and the clock on each is the first pass
+                // that found it unreadable, not this one.
+                Resolution::Unreadable(reason) => {
+                    let since = self
+                        .unresolved_of(&node.id)
+                        .iter()
+                        .find(|it| it.dep == *dep)
+                        .map_or(now, |it| it.since);
+                    unresolved.push(Unresolved {
+                        dep: dep.clone(),
+                        reason,
+                        since,
+                    });
+                }
                 Resolution::NothingToAwait => {}
                 Resolution::Outside(dependency) => resolved.push(dependency),
             }
         }
+        if !unresolved.is_empty() {
+            self.unresolved.insert(node.id.clone(), unresolved);
+            return Vec::new();
+        }
+        self.unresolved.remove(&node.id);
         self.dependencies.insert(node.id.clone(), resolved.clone());
         resolved
     }
@@ -1246,7 +1384,10 @@ impl Watch {
         // worker can hold.
         if let Some(reference) = crate::crossdag::parse(dep) {
             let Some(upstream) = upstream_of(paths, &reference) else {
-                return Resolution::Unreadable;
+                return Resolution::Unreadable(format!(
+                    "the run '{}' it names has no ledger under this run root",
+                    reference.run
+                ));
             };
             let Some(repo) = upstream
                 .graph
@@ -1318,7 +1459,7 @@ impl Watch {
 fn identity_of(repositories: &mut Repositories, node: &Node) -> Option<String> {
     node.repo
         .as_deref()
-        .and_then(|repo| repositories.of(repo))
+        .and_then(|repo| repositories.of(repo).ok())
         .map(|releases| releases.identity.clone())
 }
 
@@ -1332,17 +1473,19 @@ fn across_repositories(
     mine: Option<&str>,
 ) -> std::result::Result<String, Ended> {
     let Some(upstream) = state.graph.get(dep) else {
-        return Err(Ended::Unreadable);
+        return Err(Ended::Unreadable(format!(
+            "the graph has no node '{dep}' to say where its work landed"
+        )));
     };
     let Some(repo) = upstream.repo.clone() else {
         // A dependency that lands in no repository releases nothing.
         return Err(Ended::NothingToAwait);
     };
-    let identity = repositories.of(&repo).map(|it| it.identity.clone());
-    if identity.is_none() {
-        return Err(Ended::Unreadable);
-    }
-    if identity.as_deref() == mine {
+    let identity = match repositories.of(&repo) {
+        Ok(releases) => releases.identity.clone(),
+        Err(why) => return Err(Ended::Unreadable(unread(&repo, &why))),
+    };
+    if Some(identity.as_str()) == mine {
         // The lifecycle already prepares the stacked or merged-stacked
         // branch for this one, exactly as it does today.
         return Err(Ended::NothingToAwait);
@@ -1352,16 +1495,22 @@ fn across_repositories(
 
 enum Ended {
     NothingToAwait,
-    Unreadable,
+    Unreadable(String),
 }
 
 impl From<Ended> for Resolution {
     fn from(ended: Ended) -> Self {
         match ended {
             Ended::NothingToAwait => Resolution::NothingToAwait,
-            Ended::Unreadable => Resolution::Unreadable,
+            Ended::Unreadable(why) => Resolution::Unreadable(why),
         }
     }
+}
+
+/// Why a dependency could not be described: what its repository releases could
+/// not be read, in the sibling's own words.
+fn unread(repo: &str, why: &str) -> String {
+    format!("what the repository {repo} releases could not be read: {why}")
 }
 
 /// One out-of-repository dependency, with what its repository releases: its
@@ -1374,8 +1523,9 @@ fn outside(
     (branch, commit, landing): (Option<String>, Option<String>, Option<String>),
     named: Option<TargetName>,
 ) -> Resolution {
-    let Some(releases) = repositories.of(repo) else {
-        return Resolution::Unreadable;
+    let releases = match repositories.of(repo) {
+        Ok(releases) => releases,
+        Err(why) => return Resolution::Unreadable(unread(repo, &why)),
     };
     // A repository that declares **no release targets releases nothing**, so
     // there is no release to wait for and nothing to pin against instead of
@@ -1417,25 +1567,25 @@ fn outside(
 
 /// What one `deps` entry turned out to be.
 ///
-// llmlint: ignore[changed_behavior_has_e2e] [`Unreadable`](Resolution::Unreadable) is not
-// reachable from the release watch of a run, and the graph is why: this is only ever asked about a node whose
-// dependencies have all settled `done`, and each of the three ways a dependency can be
-// unreadable stops that happening. A dep that is not in the graph is refused by
-// `graph::validate`; a dep whose repository `onevcs` cannot answer for is a node whose own
-// session could not open, so it settles `failed` and its consumer stays blocked; and a
-// cross-DAG dep whose upstream ledger cannot be read is an edge that does not resolve, so
-// its consumer stays blocked too. What the arm does — leave the set unfrozen and ask
-// again next pass — is what keeps a node from launching against a row that is missing.
-// The settle's advice does reach it, from a reply, where what a repository releases cannot
-// be read; `awaited_targets` says so in its own line, and `tests/e2e/adoption.rs` drives it.
+/// [`Unreadable`](Resolution::Unreadable) **is** reachable from the release watch
+/// of a run, and a `published` node it is reached for is held on it. The graph
+/// settles a dependency `done` before its consumer is ever asked about, but what
+/// that dependency's repository releases is read from the host — the
+/// release-targets document, the registry — on the pass the consumer becomes
+/// ready, and a read that does not go through on that pass is not a dependency
+/// the node does not have. Read as one, the node launched at once against work no
+/// release carried, with no probe and no hold on the record. So the arm leaves the
+/// set unfrozen, marks the node unresolved, and the hold names what could not be
+/// read; `tests/e2e/adoption.rs` drives it, and `awaited_targets` says the same
+/// thing in its own line where a settle reaches it from a reply.
 enum Resolution {
     /// There is no release to wait for: it lands in this node's own repository,
     /// in none at all, or in one that declares no release targets.
     NothingToAwait,
     /// It lands elsewhere, and this is what the run can say about it.
     Outside(Dependency),
-    /// The run cannot say yet.
-    Unreadable,
+    /// The run cannot say yet, and this is why.
+    Unreadable(String),
 }
 
 /// One release a node was waiting on, as the note and the event name it.
@@ -1689,7 +1839,7 @@ pub(crate) fn hold_warnings_for_stated_landings(
         let identity = repositories
             .of(&repo)
             .map(|releases| releases.identity.clone())
-            .unwrap_or_else(|| repo.clone());
+            .unwrap_or_else(|_| repo.clone());
         for target in awaited {
             let named = target.to_string();
             let reference = shell_word(landing);
@@ -1779,7 +1929,7 @@ fn asked_about(resolutions: Vec<Resolution>) -> Option<BTreeSet<TargetName>> {
     let mut asked = BTreeSet::new();
     for resolution in resolutions {
         match resolution {
-            Resolution::Unreadable => return None,
+            Resolution::Unreadable(_) => return None,
             Resolution::NothingToAwait => {}
             Resolution::Outside(dependency) => {
                 // A target the repository declares, which is what gives it a style: a
@@ -2830,6 +2980,74 @@ mod tests {
             vec![dependency(Some("crate"), Some(ReleaseStyle::Automated))],
         );
         assert!(watch.held(&[fast]).is_empty());
+    }
+
+    /// A dependency the run could not describe holds a `published` node exactly
+    /// as an unreleased one does, and the hold names it — on the record, in the
+    /// wait, and on the surface — with why it could not be read.
+    ///
+    /// The distinction this holds is between *no* out-of-repository dependency
+    /// and one that could not be resolved this pass: the first is a node with
+    /// nothing to wait on, the second was read as one and launched against work
+    /// no release carried. Driven end to end in `tests/e2e/adoption.rs`; this is
+    /// the seam, held against every reader of the marker.
+    #[test]
+    fn a_dependency_the_run_cannot_describe_holds_the_node_and_is_named() {
+        let published = Node {
+            id: "held".to_owned(),
+            adoption: Some(Adoption::Published),
+            ..Node::default()
+        };
+        let mut watch = Watch::of_run(&RunPaths::under(std::path::Path::new("/nowhere"), "demo"));
+        let since = crate::sys::now_millis().saturating_sub(5_000);
+        watch.unresolved.insert(
+            "held".to_owned(),
+            vec![Unresolved {
+                dep: "engine".to_owned(),
+                reason: "what the repository engine releases could not be read: malformed"
+                    .to_owned(),
+                since,
+            }],
+        );
+        let watching = vec![published.clone()];
+        assert!(watch.held(&watching).contains("held"));
+        assert!(watch.names_a_release_dependency());
+        assert_eq!(watch.awaited_deps("held"), vec!["engine".to_owned()]);
+
+        let awaiting = watch.awaiting("held");
+        assert_eq!(awaiting.len(), 1, "{awaiting:?}");
+        assert_eq!(awaiting[0]["dep"], json!("engine"));
+        assert_eq!(awaiting[0]["last_answer"], json!(UNRESOLVED));
+        assert_eq!(
+            awaiting[0]["reason"],
+            json!("what the repository engine releases could not be read: malformed")
+        );
+        assert!(awaiting[0]["identity"].is_null() && awaiting[0]["target"].is_null());
+        assert!(
+            awaiting[0]["waited_seconds"]
+                .as_u64()
+                .is_some_and(|waited| waited >= 5),
+            "the clock does not run from the first pass that found it unreadable: {awaiting:?}"
+        );
+        let surface = watch.wait_surface("held").message;
+        assert!(
+            surface.contains(
+                "- engine — not yet resolved (what the repository engine releases \
+                              could not be read: malformed), waited"
+            ) && surface.contains("last answer: unresolved"),
+            "{surface}"
+        );
+
+        // The marker holds nothing but a `published` node, and holds it no longer
+        // once the dependency resolves.
+        let fast = Node {
+            adoption: Some(Adoption::Fast),
+            ..published.clone()
+        };
+        assert!(watch.held(&[fast]).is_empty());
+        watch.unresolved.remove("held");
+        assert!(watch.held(&watching).is_empty());
+        assert!(watch.awaited_deps("held").is_empty());
     }
 
     /// A fresh driver takes up what its predecessor already said, so a node is
