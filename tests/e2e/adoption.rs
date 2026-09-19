@@ -27,7 +27,7 @@
 // a dispatch outcome rather than paying for a model turn. `harness.rs` carries the same
 // suppression and the full rationale.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::harness::{
     agent, counts, human, lifecycle, plan_of, project_id, reporting, Counts, Repository, World,
@@ -4943,7 +4943,7 @@ fn an_undriven_settle_says_when_its_release_question_could_not_be_asked() {
 /// gets is a version, so no baseline is ever captured for it — neither by a
 /// publication, because the merge is a person's, nor by a first answer of *no
 /// release* — which is exactly the landing `onevcs` can never release by probing.
-fn a_released_landing_nobody_published(name: &str) -> (World, String, Repository, String) {
+fn a_released_landing_nobody_published(name: &str) -> (World, String, Repository, String, PathBuf) {
     let world = watching(name);
     world.write_graphs();
     let (engine_repo, _consumer) = two_repositories(&world);
@@ -4970,7 +4970,7 @@ fn a_released_landing_nobody_published(name: &str) -> (World, String, Repository
         settled_status(world, &run, "broken") == Some("failed".to_owned())
     });
     let branch = branch_of(&world, &run, "landed");
-    (world, run, engine_repo, branch)
+    (world, run, engine_repo, branch, answer)
 }
 
 fn settle_broken(world: &World, run: &str, landing: &str, extra: Value) -> crate::harness::Run {
@@ -5052,9 +5052,15 @@ fn arrived_version(world: &World, run: &str, node: &str) -> Value {
 /// change request's URL resolves to the landed work and has no baseline, and a
 /// squash-merge commit no branch carries does not resolve at all — so its line
 /// says to state the change request instead, and settling again there is
-/// accepted as the correction it is and answered with the command.
+/// accepted as the correction it is. What that second settle is answered with is
+/// the linked `onevcs`'s to decide: a landing it finds from the change request's
+/// number in the base, after the publication that made it has ended, is
+/// reconciled where it is found — the baseline captured at that commit while no
+/// tag contains it — so the reply owes no command, the wait it raised answers
+/// `not-released` rather than `not-answered`, and the next release lifts it with
+/// nothing recorded by hand.
 fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spelling: Spelling) {
-    let (world, run, engine_repo, branch) = a_released_landing_nobody_published(name);
+    let (world, run, engine_repo, branch, answer) = a_released_landing_nobody_published(name);
     let url = change_url_of(&world, &run, "landed");
     let landing = match spelling {
         Spelling::Commit => squash_land(&world, &engine_repo.checkout, &branch),
@@ -5137,38 +5143,66 @@ fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spel
 
     // A squash-merge commit is corrected first, the way its line says: the node is
     // settled again at the change request, which is a correction of where the
-    // work landed rather than a duplicate — and that settle is answered in turn,
-    // now with the landing's missing baseline and the reference filled in.
-    let pasted = match placeholder {
-        None => pasted.to_owned(),
-        Some(_) => {
-            let restated = settle_broken(&world, &run, &url, json!({}));
-            restated.exited(0).out_has("\"applied\"");
-            restated.err_has(&format!(
-                "was settled at the landing {url}, and that landing has no release baseline \
-                 for the release target 'crate'"
-            ));
-            restated
-                .stderr
-                .lines()
-                .map(str::trim)
-                .find(|line| line.starts_with("onevcs release acknowledge "))
-                .unwrap_or_else(|| panic!("no command to paste:\n{}", restated.stderr))
-                .to_owned()
+    // work landed rather than a duplicate. That read is the first to decide the
+    // landing from the change request's number in the base, so the linked `onevcs`
+    // reconciles it there — captures the baseline at the landing commit, which no
+    // tag contains — and the reply has no hold to warn about: nothing on stderr
+    // names a baseline, a command, or a reference it could not resolve.
+    if placeholder.is_some() {
+        let restated = settle_broken(&world, &run, &url, json!({}));
+        restated.exited(0).out_has("\"applied\"");
+        for unsaid in [
+            "no release baseline",
+            "cannot resolve to landed work",
+            "onevcs release acknowledge",
+        ] {
+            assert!(
+                !restated.stderr.contains(unsaid),
+                "the corrected settle was answered with a hold the landing no longer has \
+                 ({unsaid:?}):\n{}",
+                restated.stderr
+            );
         }
-    };
-    assert_eq!(
-        pasted,
-        format!("onevcs release acknowledge '{url}' --target crate --version <VERSION>")
-    );
+        // The baseline is the sibling's record and not this crate's inference: it
+        // is what `onevcs` itself now answers about the change request.
+        match release_status_of(&world, &url) {
+            Some(onevcs::ReleaseStatus::NotReleased { at_landing, .. }) => assert_eq!(
+                at_landing,
+                onevcs::Baseline::At {
+                    version: "0.2.0".to_owned()
+                },
+                "the baseline captured at the reconciled landing is not what the probe answered"
+            ),
+            other => panic!("the reconciled landing does not answer against a baseline: {other:?}"),
+        }
+        // And the wait it raised is one a probe answer can lift: the node holds
+        // `not-released`, and the release after the baseline starts it, with
+        // nobody having recorded anything.
+        world.until(
+            "the wait to answer against the captured baseline",
+            |world| answered(world, &run, "consumer") == Some("not-released".to_owned()),
+        );
+        assert!(!dispatched(&world, &run, "consumer"));
+        releases_at(&answer, "0.3.0");
+        world.until(
+            "the release past the baseline to start the held node",
+            |world| dispatched(world, &run, "consumer"),
+        );
+        assert_eq!(arrived_version(&world, &run, "consumer"), json!("0.3.0"));
+    } else {
+        assert_eq!(
+            pasted,
+            format!("onevcs release acknowledge '{url}' --target crate --version <VERSION>")
+        );
 
-    // A person verifies the version and pastes the command into a shell, filling
-    // in only what the line left for them — so the quoting is the shell's to read.
-    paste_into_a_shell(&world, &pasted.replace("<VERSION>", "0.2.0"));
-    world.until("the acknowledgement to start the held node", |world| {
-        dispatched(world, &run, "consumer")
-    });
-    assert_eq!(arrived_version(&world, &run, "consumer"), json!("0.2.0"));
+        // A person verifies the version and pastes the command into a shell, filling
+        // in only what the line left for them — so the quoting is the shell's to read.
+        paste_into_a_shell(&world, &pasted.replace("<VERSION>", "0.2.0"));
+        world.until("the acknowledgement to start the held node", |world| {
+            dispatched(world, &run, "consumer")
+        });
+        assert_eq!(arrived_version(&world, &run, "consumer"), json!("0.2.0"));
+    }
 
     world.release("hold.go");
     world.until("the run to settle", |world| {
@@ -5204,7 +5238,7 @@ fn a_squash_merge_commit_no_release_can_be_attributed_through_is_answered_at_the
 /// release with no landing to carry, and one `onevcs` will not record.
 #[test]
 fn a_release_stated_on_the_settle_is_recorded_and_releases_the_node_waiting_on_it() {
-    let (world, run, engine_repo, branch) =
+    let (world, run, engine_repo, branch, _answer) =
         a_released_landing_nobody_published("adoption-settle-release");
     land(&world, &engine_repo.checkout, &branch);
     let url = change_url_of(&world, &run, "landed");
