@@ -1662,11 +1662,18 @@ fn the_workspace_placement_surface_is_what_the_divergence_record_names() {
         Some(u64::from(PLAN_SCHEMA_VERSION))
     );
 
-    // The requeue is a kind this crate emits and the contract lists.
+    // The requeue is a kind this crate emits and the contract lists, and the
+    // contract names the fields a pinned re-dispatch's carries beside the two
+    // every requeue does — on any attempt, settling nothing.
     let kind = block["requeue"]["kind"].as_str().expect("a kind");
     assert_eq!(
         PipelineKind::from_wire(&EventKind(kind.to_owned())),
         Some(PipelineKind::NodeRequeued)
+    );
+    assert_eq!(block["requeue"]["fields"], json!(["reason", "detail"]));
+    assert_eq!(
+        block["requeue"]["pinned_fields"],
+        json!(["branch", "attempt"])
     );
     for names in [
         "`pool: u32` and `overflow: N|unlimited`",
@@ -1674,6 +1681,10 @@ fn the_workspace_placement_surface_is_what_the_divergence_record_names() {
         "`workspace-wait` surface",
         "`reason: workspace-exhausted`",
         "neither settled nor `awaiting-planner`",
+        "on **any attempt of any node** — no pool-exhausted refusal writes a settlement or \
+         spends a boundary attempt",
+        "**keeps that pin through the queue**: its `node-requeued` also carries the `branch`",
+        "A `retry` is never what continues a node the host was merely too busy for",
     ] {
         assert!(
             CONTRACT.contains(names),

@@ -6221,7 +6221,8 @@ a project the retry was written onto.
 comes forward and holds it under a fifth hold reason, `workspace`; a refusal that races
 the read returns the node to queued under a new kind, `node-requeued`; and two additive
 schema-3 node fields, `pool` and `overflow`, pass through to the session request.** The
-ruling is the planner's plan for adopting `onevcs` 0.26.0, and `docs/contract.md`
+ruling is the planner's plan for adopting `onevcs`'s worktree pool — 0.26.0, pinned at
+0.27.0, the release it was published beside — and `docs/contract.md`
 carries each half: the schema-3 field list and the reserved-key list, the hold and its
 surface beside the decision-point paragraph, the attach paragraph's "nothing else able
 to move", and the kind list with the requeue beside the dispatch-retry sentence.
@@ -6273,12 +6274,25 @@ sibling's own `detail`, and holds it under `workspace` on the refusal's own read
 the next paced read — a refusal is the newest thing known about the identity, so a pass
 that re-read straight away would either dispatch into the same refusal or restate it. A
 run whose only remaining nodes are held this way is neither terminal nor
-`awaiting-planner`: it is waiting on the host. One narrowing: an exhausted refusal met by
-a **re-dispatch inside a node's publication-retry loop** — the attempt after a
-`checks-failed`, pinned to the branch the attempt before preserved — settles
-`infrastructure-failure` naming that branch for a `retry` to continue, because a node
-handed back to the queue is dispatched from the plan's own node and would not be pinned
-to it; the first dispatch of a node is the case the requeue exists for.
+`awaiting-planner`: it is waiting on the host.
+
+**On any attempt of any node.** A re-dispatch inside a node's publication-retry loop —
+the attempt after a `checks-failed` or a `push-rejected`, pinned to the branch the
+attempt before preserved — is refused the same way and costs the same nothing. A node
+handed back to the queue is otherwise dispatched from the plan's own node, which is not
+pinned to that branch, so what the loop had in hand travels through the queue with it: a
+continuation carrying the pinned node, the attempt, the budget and the endings behind it,
+kept beside the `workspace` hold and handed to the dispatch that leaves on it. That
+dispatch resumes the retry loop where the refusal interrupted it — the same attempt on
+the same branch, recorded as the re-dispatch it is (`attempt`, `attempts`, the reason it
+answers) and composed with the notes the record holds *then*, so a note delivered while
+the node waited is owed to it rather than to the attempt after. The `node-requeued` of
+such a refusal carries, beside `reason` and `detail`, the `branch` the wait is against
+and the `attempt` it interrupted; a first attempt's carries neither, having no pin. No
+`PoolExhausted` refusal writes a settlement or spends a boundary attempt, and a `retry`
+is never what continues a node the host was merely too busy for. An earlier dispatch of
+this adoption narrowed exactly this case to an `infrastructure-failure` naming the
+branch; the planner declined the narrowing, and this is what replaced it.
 
 **The fields.** `pool: Option<u32>` and `overflow: Option<onevcs::Bound>`
 (`onepipeline.pool` / `onepipeline.overflow` in task metadata) are copied onto
@@ -6293,8 +6307,11 @@ once the first's session closes; a node of a second identity starting behind the
 in the same pass; a node whose read fails dispatched as before; and the refusal, made
 deterministic by a dispatch-env hook that opens a real session on the identity's last
 slot before the driver's own open, requeued on the record and dispatched once the outside
-session closes. `tests/e2e/plan.rs` refuses the fields below schema 3, and
-`pool::tests` and `engine::tests` hold the block below against the types.
+session closes; and the same refusal met by the re-dispatch a `push-rejected` earned,
+requeued naming the preserved branch and the attempt, held and shown by `status`, and
+then made again on that branch — which the merge path lands — once the outside session
+closes, with no settlement between. `tests/e2e/plan.rs` refuses the fields below schema
+3, and `pool::tests` and `engine::tests` hold the block below against the types.
 
 ```json
 {
@@ -6324,7 +6341,8 @@ session closes. `tests/e2e/plan.rs` refuses the fields below schema 3, and
   },
   "surface_kind": "workspace-wait",
   "surface": {"blocking": false, "source": "proposal", "workstream": "the held node"},
-  "requeue": {"kind": "node-requeued", "reason": "workspace-exhausted", "fields": ["reason", "detail"]},
+  "requeue": {"kind": "node-requeued", "reason": "workspace-exhausted", "fields": ["reason", "detail"],
+              "pinned_fields": ["branch", "attempt"]},
   "poll_env": "ONEPIPELINE_WORKSPACE_POLL_SECONDS",
   "surface_cadence_env": "ONEPIPELINE_RELEASE_SURFACE_SECONDS"
 }

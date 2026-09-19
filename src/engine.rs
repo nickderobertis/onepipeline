@@ -1509,21 +1509,18 @@ fn converge(
                     } = *refusal;
                     let node = node.as_str().to_owned();
                     in_flight.remove(&node);
-                    let mut payload = journal::payload(&[
-                        ("reason", json!(crate::pool::EXHAUSTED_REASON)),
-                        ("detail", json!(bounded(&because))),
-                    ]);
                     // A re-dispatch keeps its pin through the queue, and the
-                    // record says so: the branch the wait is against. Absent for
-                    // a first attempt, which has none.
-                    if let Some(continuation) = &resume {
-                        payload.insert("branch".to_owned(), json!(continuation.branch()));
-                        payload.insert("attempt".to_owned(), json!(continuation.attempt));
-                    }
+                    // record says so: the branch the wait is against, and the
+                    // attempt the refusal interrupted. A first attempt has none.
                     journal.emit(
                         journal::PipelineKind::NodeRequeued,
                         journal::labels(&paths.run, Some(&node)),
-                        payload,
+                        crate::pool::requeue_payload(
+                            &because,
+                            resume
+                                .as_deref()
+                                .map(|continuation| (continuation.branch(), continuation.attempt)),
+                        ),
                     )?;
                     // The reading the hold carries is the identity's now, read
                     // after the refusal, with the request the open was refused
@@ -3919,7 +3916,8 @@ pub(crate) enum Ending {
     /// The node settled, and this is how.
     Settled(Settlement),
     /// The identity admitted no session, so the node goes back to the queue:
-    /// no settlement, and the loop holds it under `workspace`.
+    /// no settlement, and the loop holds it under `workspace` — on any attempt,
+    /// a re-dispatch keeping where it stood for the dispatch that resumes it.
     Exhausted(WorkspaceRefusal),
 }
 

@@ -51,6 +51,26 @@ pub const EXHAUSTED_REASON: &str = "workspace-exhausted";
 /// The word a `node-held` entry carries for this hold.
 pub(crate) const HOLD_KIND: &str = "workspace";
 
+/// The `node-requeued` a refused open is recorded as, in the shape the
+/// divergence record fixes: the reason, the sibling's own account bounded as
+/// every payload text is, and — for a re-dispatch that keeps its pin through
+/// the queue — the branch the wait is against and the attempt it interrupted.
+/// A first attempt has no pin and its record carries neither.
+pub(crate) fn requeue_payload(
+    because: &str,
+    pinned: Option<(&str, std::num::NonZeroU32)>,
+) -> serde_json::Map<String, Value> {
+    let mut payload = crate::journal::payload(&[
+        ("reason", json!(EXHAUSTED_REASON)),
+        ("detail", json!(crate::engine::bounded(because))),
+    ]);
+    if let Some((branch, attempt)) = pinned {
+        payload.insert("branch".to_owned(), json!(branch));
+        payload.insert("attempt".to_owned(), json!(attempt));
+    }
+    payload
+}
+
 /// The environment variable bounding how often a held node's identity is
 /// re-read for capacity when nothing else has moved.
 pub const POLL_ENV: &str = "ONEPIPELINE_WORKSPACE_POLL_SECONDS";
@@ -439,6 +459,35 @@ mod tests {
         );
         assert_eq!(block["surface_kind"], json!(WAIT_SURFACE_KIND));
         assert_eq!(block["requeue"]["reason"], json!(EXHAUSTED_REASON));
+        // The requeue carries the fields the entry names and no others: a first
+        // attempt's the two, a pinned re-dispatch's those and the pin.
+        let fields = |payload: serde_json::Map<String, Value>| -> Vec<String> {
+            payload.keys().cloned().collect()
+        };
+        let named = |key: &str| -> Vec<String> {
+            serde_json::from_value(block["requeue"][key].clone()).expect("a field list")
+        };
+        let mut unpinned = fields(requeue_payload("pool exhausted", None));
+        unpinned.sort();
+        let mut first = named("fields");
+        first.sort();
+        assert_eq!(unpinned, first);
+        let pinned = requeue_payload(
+            "pool exhausted",
+            Some((
+                "onepipeline/service",
+                std::num::NonZeroU32::new(2).expect("two"),
+            )),
+        );
+        assert_eq!(pinned["reason"], json!(EXHAUSTED_REASON));
+        assert_eq!(pinned["branch"], json!("onepipeline/service"));
+        assert_eq!(pinned["attempt"], json!(2));
+        let mut all = fields(pinned);
+        all.sort();
+        let mut both = named("fields");
+        both.extend(named("pinned_fields"));
+        both.sort();
+        assert_eq!(all, both);
 
         let unlimited = WorkspaceHold {
             overflow: Bound::Unlimited,
