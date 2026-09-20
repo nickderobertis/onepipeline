@@ -35,4 +35,7 @@ if ! printf 'maintained in %s at %s\n' "$(pwd)" "$(date +%s)" >>maintained.log; 
   exit 1
 fi
 echo "maintain: wrote maintained.log in $(pwd)"
-exit "${ONEPIPELINE_E2E_MAINTAIN_EXIT:-0}"
+if [ "${ONEPIPELINE_E2E_MAINTAIN_EXIT:-0}" != "0" ]; then
+  echo "maintain: exiting $ONEPIPELINE_E2E_MAINTAIN_EXIT because ONEPIPELINE_E2E_MAINTAIN_EXIT asks for a maintenance that fails after writing; unset it for one that succeeds" >&2
+  exit "$ONEPIPELINE_E2E_MAINTAIN_EXIT"
+fi

@@ -838,6 +838,7 @@ pub(crate) struct MaintainedIdentity {
     /// The identity key.
     pub(crate) identity: String,
     /// The cadence it was maintained on, as the schedule spells a span.
+    // llmlint: ignore[invalid_states_unrepresentable] the value is a `onevcs::Span`, written through that type's own `Display` by the one writer and read back through its `FromStr` by nothing — `results` renders the spelling; that type derives no `JsonSchema`, so this *document*, a generated schema, carries the spelling the sibling's grammar fixes rather than a restatement of its grammar here.
     pub(crate) every: String,
     /// What became of it: the sibling's outcome, or the reason there is none.
     #[serde(flatten)]

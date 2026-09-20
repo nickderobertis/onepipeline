@@ -97,6 +97,7 @@ const RECHECK: Duration = Duration::from_secs(60);
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceConfig {
     /// Schema version; [`SCHEDULE_VERSION`] is the one this build reads.
+    // llmlint: ignore[invalid_states_unrepresentable] the number the document declares, as `LaunchConfig::schema_version` and `Plan::schema_version` carry theirs: the contract's own block fixes this field as `version: 1`, a refusal by number is the loader's — `load` turns down every other value before anything reads the document — and a version enum here would be a public shape the contract does not name, refusing a later document by failing to parse rather than by naming the number it declares.
     pub version: u32,
     /// The cadence every identity no rule matches is maintained on.
     pub default: MaintenanceDefault,

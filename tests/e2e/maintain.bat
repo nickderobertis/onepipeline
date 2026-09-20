@@ -33,5 +33,8 @@ if errorlevel 1 (
   exit /b 1
 )
 echo maintain: wrote maintained.log in %CD%
-if defined ONEPIPELINE_E2E_MAINTAIN_EXIT exit /b %ONEPIPELINE_E2E_MAINTAIN_EXIT%
+if defined ONEPIPELINE_E2E_MAINTAIN_EXIT if not "%ONEPIPELINE_E2E_MAINTAIN_EXIT%"=="0" (
+  echo maintain: exiting %ONEPIPELINE_E2E_MAINTAIN_EXIT% because ONEPIPELINE_E2E_MAINTAIN_EXIT asks for a maintenance that fails after writing; unset it for one that succeeds 1>&2
+  exit /b %ONEPIPELINE_E2E_MAINTAIN_EXIT%
+)
 exit /b 0
