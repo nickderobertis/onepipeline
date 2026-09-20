@@ -482,12 +482,45 @@ mod tests {
         assert_eq!(pinned["reason"], json!(EXHAUSTED_REASON));
         assert_eq!(pinned["branch"], json!("onepipeline/service"));
         assert_eq!(pinned["attempt"], json!(2));
-        let mut all = fields(pinned);
+        let mut all = fields(pinned.clone());
         all.sort();
         let mut both = named("fields");
         both.extend(named("pinned_fields"));
         both.sort();
         assert_eq!(all, both);
+        // And the registered `node-requeued` document names both shapes: the
+        // entry's two fields are what every writer writes, the pin's two are
+        // named and optional — a document that merely tolerated them as unknown
+        // keys would say nothing about a pinned record — and each shape is
+        // admitted as this crate writes it.
+        let registry = crate::event::registry();
+        let id = crate::payload::schema_of(crate::event::PipelineKind::NodeRequeued);
+        let document = registry.schema(&id).expect("node-requeued is registered");
+        let required: Vec<String> =
+            serde_json::from_value(document["required"].clone()).expect("required keys");
+        for key in named("fields") {
+            assert!(
+                required.contains(&key),
+                "`{key}` is not required: {document}"
+            );
+        }
+        for key in named("pinned_fields") {
+            assert!(
+                document["properties"].get(&key).is_some(),
+                "the document does not name the pin's `{key}`: {document}"
+            );
+            assert!(
+                !required.contains(&key),
+                "the pin's `{key}` is required: {document}"
+            );
+        }
+        for shape in [requeue_payload("pool exhausted", None), pinned] {
+            registry
+                .check(&id, &Value::Object(shape.clone()))
+                .unwrap_or_else(|refusal| {
+                    panic!("the document refuses a requeue this crate writes: {refusal}\n{shape:?}")
+                });
+        }
 
         let unlimited = WorkspaceHold {
             overflow: Bound::Unlimited,

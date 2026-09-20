@@ -353,6 +353,13 @@ pub(crate) struct NodeRequeued {
     pub(crate) reason: RequeueReasonWord,
     /// The sibling's own account of the refusal.
     pub(crate) detail: String,
+    /// The branch a re-dispatch keeps its pin to through the queue. A first
+    /// attempt has no pin and its record carries neither this nor `attempt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) branch: Option<String>,
+    /// The publication attempt the refusal interrupted, for a pinned re-dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) attempt: Option<u64>,
 }
 
 /// `node-settled`: the status a node reached, and what it left.
@@ -964,7 +971,8 @@ mod tests {
     /// build's own end-to-end journeys for the kinds no host run has, with free
     /// text and host paths stood in for. A kind whose payload takes more than one
     /// shape — `run-hook-fired`'s `null` reason for success and a reason listing
-    /// nodes for failure — is recorded once in each.
+    /// nodes for failure, `node-requeued`'s first attempt and its pinned
+    /// re-dispatch carrying `branch` and `attempt` — is recorded once in each.
     const RECORDED: &str = include_str!("../tests/recorded/pipeline-kinds.jsonl");
 
     /// Every recorded envelope is admitted by its kind's registered document, every
