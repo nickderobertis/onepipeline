@@ -82,9 +82,13 @@ verdict="$(grep -m1 -E '^[0-9]+ rules: ' "$report")" || {
   # arrived there as nothing at all would read as a judge that never spoke. The
   # record is not a declared output, so Nx neither stores nor restores it: it is
   # this run's, written before this process exits, and the driver clears it before
-  # the next.
+  # the next. A record that could not be written is the checkout failing this run,
+  # not the judge reaching no verdict, and exits as the verdict's own write does
+  # below — the refusal is still said, since it is what the operator retries for.
   if ! mkdir -p "$root/.lint-llm-diff" || ! printf '%s\n' "$refusal" >"$root/.lint-llm-diff/refusal"; then
+    echo "$refusal" >&2
     echo "lint-llm-diff: could not record that refusal in .lint-llm-diff/refusal; free disk space and retry" >&2
+    exit 3
   fi
   echo "$refusal" >&2
   exit 2

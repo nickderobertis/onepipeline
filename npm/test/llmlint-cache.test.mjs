@@ -952,6 +952,23 @@ describe("the judged tier's refusals", () => {
     assert.doesNotMatch(result.stdout, new RegExp(PASS_VERDICT), report(result));
   });
 
+  it("says what to free when the judge cannot record its refusal", (t) => {
+    const ws = workspace(t);
+    // The same file where the record's directory belongs, met by a judge that
+    // reached no verdict: the checkout failing the run is exit 3, as it is for the
+    // verdict's own write, and never the no-verdict 2 — while the refusal itself
+    // is still said, since it is what the operator retries for.
+    writeFileSync(join(ws.root, ".lint-llm-diff"), "", "utf8");
+
+    const result = ws.judge({
+      env: { LLMLINT_DIFF_BASE_SHA: ws.head(), FAKE_LLMLINT_NO_VERDICT: "1" },
+    });
+
+    assert.equal(result.status, 3, report(result));
+    assert.match(result.stderr, /could not record that refusal/, report(result));
+    assert.match(result.stderr, /without reporting a verdict for this diff/, report(result));
+  });
+
   it("says what to repair when an earlier verdict record cannot be cleared", (t) => {
     // A record this run cannot remove could answer for it, so the judge is not
     // paid for a verdict the tier could not tell apart from the stale one.
