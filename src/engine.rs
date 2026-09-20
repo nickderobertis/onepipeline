@@ -8089,9 +8089,9 @@ mod tests {
     #[test]
     fn the_hold_reasons_are_the_ones_the_divergence_record_names() {
         let block = divergence_block("55.");
-        // The fifth reason is entry 81's, whose block carries one entry rather
+        // The fifth reason is entry 82's, whose block carries one entry rather
         // than a field list: its keys are the fields.
-        let workspace = divergence_block("81.")["hold"].clone();
+        let workspace = divergence_block("82.")["hold"].clone();
 
         // One of each, so every variant's own payload is read rather than a list
         // of names kept beside them.
@@ -8111,7 +8111,7 @@ mod tests {
             },
             HoldReason::Workspace(
                 crate::pool::WorkspaceHold::of_payload(&workspace)
-                    .expect("entry 81's hold entry reads"),
+                    .expect("entry 82's hold entry reads"),
             ),
         ];
         let mine: Vec<String> = reasons

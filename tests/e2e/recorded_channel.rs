@@ -254,8 +254,17 @@ fn answers_over(fixture: &str, program: &Path) -> Value {
     let mut steps = vec![answered(&world, program, &["status", RUN])];
     let rederived =
         std::fs::read_to_string(channel.join("queue.json")).expect("the read re-derived the queue");
+    // The one listing 0.28.2 had is this build's flat one: `runs` groups its rows
+    // by project now, under a header line each, and the rows beneath a header are
+    // the rows the release printed. So this build is asked for them flat, and the
+    // release — which knows no such flag — for its listing.
+    let listing: &[&str] = if program == binary() {
+        &["runs", "--flat"]
+    } else {
+        &["runs"]
+    };
     for args in [
-        &["runs"][..],
+        listing,
         &["results", RUN],
         &["next", RUN],
         &["next", RUN],

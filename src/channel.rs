@@ -896,7 +896,7 @@ pub(crate) use onemessagebus_agent::channel::source;
 /// `agent.planner-surface@1` and written in this field order — which is the
 /// order 0.28.2 wrote, and the order the bus reshapes every line it writes to.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, JsonSchema)]
-pub(crate) struct Surface {
+pub struct Surface {
     /// Monotonic within the run, so a consumer can report which one it read.
     pub id: u64,
     /// What the surface is asking about.
@@ -916,9 +916,9 @@ pub(crate) struct Surface {
     pub workstream: Option<String>,
     /// Whether anybody is listening for the answer.
     ///
-    /// Set by [`abandon`](ChannelState::abandon) when the process serving this
-    /// surface exited without an answer, and lifted by
-    /// [`attend`](ChannelState::attend) when a later listener of the same asker
+    /// Set by the channel's `abandon` when the process serving this surface
+    /// exited without an answer, and lifted by its `attend` when a later
+    /// listener of the same asker
     /// takes it back over — a listener ending is not the asker going. While it
     /// stands, the surface keeps its text and its place: what it gives up is its
     /// claim on the unread count, on the subtree a blocking surface holds, and on
@@ -929,7 +929,7 @@ pub(crate) struct Surface {
     pub abandoned: bool,
     /// Who raised it, when the session that did named an asker.
     ///
-    /// The key [`attend`](ChannelState::attend) matches on: a later session of
+    /// The key the channel's `attend` matches on: a later session of
     /// the same asker takes this surface back over, and a session of any other
     /// asker leaves it exactly where it is. `None` is a surface nobody named an
     /// asker for — every one an older build wrote, and every one raised outside a
@@ -1011,7 +1011,7 @@ pub(crate) struct Queue {
 
 /// One reply as it sits in the durable queue.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct QueuedReply {
+pub struct QueuedReply {
     /// Monotonic within the run.
     pub id: u64,
     /// The envelope the planner wrote.
@@ -1031,7 +1031,7 @@ pub(crate) struct QueuedReply {
 
 /// One submitted edit envelope, awaiting the reconciler.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct QueuedCommands {
+pub struct QueuedCommands {
     /// Monotonic within the run.
     pub id: u64,
     /// Who submitted it, which is what decides the ops it may carry.
@@ -1050,7 +1050,7 @@ pub(crate) struct QueuedCommands {
 /// manager believing a node's bar had changed when the command that would have
 /// changed it was never compiled.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct CommandOutcome {
+pub struct CommandOutcome {
     /// The envelope this answers.
     pub id: u64,
     /// Whether every command in it was applied.
@@ -1076,7 +1076,7 @@ pub(crate) struct CommandOutcome {
 /// a conversation that cannot unread it. A manager reading them knows which to
 /// fix, which to resend unchanged, and which not to resend at all.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct CommandResult {
+pub struct CommandResult {
     /// Where in the envelope's `commands` this one sat, from zero.
     pub index: usize,
     /// The command's op, as the envelope spelled it.
@@ -1099,7 +1099,7 @@ pub(crate) struct CommandResult {
 /// one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum CommandVerdict {
+pub enum CommandVerdict {
     /// It was validated and committed.
     Applied,
     /// It was validated and nothing was wrong with it, and **nothing of it
@@ -2024,6 +2024,60 @@ impl ChannelState {
             .map_err(queue_failure)?;
         Ok(())
     }
+
+    /// Every answer the reconciler has given, in the order it gave them.
+    // llmlint: ignore-block[changed_behavior_has_e2e] a view's read of the channel is
+    // lenient by contract, on the terms `queue` and `replies` above already read by: a
+    // queue this reader cannot open, a log it cannot read, or a record this build cannot
+    // decode renders as the answer 0.28.2 rendered — nothing — rather than refusing a
+    // view of a run whose other records are intact, and every *write* to the channel
+    // still refuses on the same failure (`channel::a_push_whose_log_cannot_be_read_is_refused_and_records_nothing`).
+    // An unreadable or half-written channel log is a host state no verb produces; the
+    // reads that succeed are driven end to end by `parity::channel_queue_reads_the_channel_and_refuses_a_run_that_is_not_there`
+    // over a recorded channel holding replies, edits and outcomes.
+    pub fn outcomes(&self) -> Vec<CommandOutcome> {
+        let Ok(outcomes) = self.plain(COMMAND_OUTCOMES) else {
+            return Vec::new();
+        };
+        outcomes
+            .log(None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(record, _)| serde_json::from_value(record).ok())
+            .collect()
+    }
+
+    /// Every surface the run has ever raised, in the order it raised them —
+    /// read and unread, answered and abandoned alike — each as its **latest**
+    /// record.
+    ///
+    /// The surfaces log is a log of transitions: a surface is appended when it is
+    /// queued, again when it is claimed, and again when it is answered, each
+    /// record carrying the whole surface as it then stood. One entry per surface
+    /// is what a reader wants, and the last record is the surface as it stands.
+    pub fn every_surface(&self) -> Vec<Surface> {
+        if !self.paths.channel_dir().is_dir() {
+            return Vec::new();
+        }
+        let Ok(surfaces) = self.surfaces() else {
+            return Vec::new();
+        };
+        let mut latest: Vec<Surface> = Vec::new();
+        for record in surfaces
+            .raw()
+            .log(None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(record, _)| serde_json::from_value::<Surface>(record).ok())
+        {
+            match latest.iter_mut().find(|held| held.id == record.id) {
+                Some(held) => *held = record,
+                None => latest.push(record),
+            }
+        }
+        latest
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 
     /// The reconciler's answer to one envelope, if it has given one.
     pub fn outcome_of(&self, id: u64) -> Option<CommandOutcome> {

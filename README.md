@@ -524,6 +524,27 @@ renders a dispatched turn's tools and its words; `telemetry` reports what each
 party spent and where the wall clock went, in eight buckets that sum exactly.
 Anything nothing in the stack measures is reported absent, never as a zero.
 
+**A listing groups its runs by project.** `runs`, and `status` and `goals` given
+no run, render every run under a header line per project — `== <project id> —
+<plan name>`, newest activity first, with the runs launched from a project that
+recorded none under `== (no project)` wherever its own recency puts it — and the
+run lines beneath a header are byte for byte the lines `runs --flat` renders,
+so a script that greps for a run's own lines reads a grouped listing as it read
+the flat one. `channel queue RUN` reads a run's channel as one JSON object —
+every surface and where it is, the replies, and the command queue with the
+reconciler's answers — and consumes nothing.
+
+**Every post-launch verb is a typed call in the library, and the binary is
+argument parsing over it.** `onepipeline::verbs` carries one function per verb
+with a renderer beside each that produces exactly what the binary prints —
+`verbs::runs`, `status`, `host`, `goals`, `results`, `transcript`, `telemetry`,
+`monitor`, `next`, `channel`, `watch`, `unwatched`, `reply`, `attest`,
+`surface`, `stop`, `adopt` and `drive_run` — so a program embedding this crate
+reads the facts behind a view and acts on a run without spawning the binary,
+and cannot drift from it: `tests/parity.rs` holds the two to one another over a
+recorded run, and a behaviour the binary has that the library lacks is a defect.
+Exit codes do not move; each result answers the code the binary exits with.
+
 `onepipeline monitor RUN [--filter NAME|SPEC | --all] [--cursor CURSOR]` makes one
 pass over the merged stream and returns. Every pass — including one that renders
 no event — ends its stdout with exactly one resume line after the trailer,

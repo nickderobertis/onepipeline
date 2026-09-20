@@ -441,21 +441,21 @@ mod tests {
         .expect("the divergence record reads");
         let entry = record
             .split("\n## ")
-            .find(|entry| entry.starts_with("81."))
-            .expect("the divergence record still carries entry 81");
+            .find(|entry| entry.starts_with("82."))
+            .expect("the divergence record still carries entry 82");
         let block = entry
             .split("```json")
             .nth(1)
             .and_then(|rest| rest.split("```").next())
-            .expect("entry 81 carries the json block this test drives");
-        let block: Value = serde_json::from_str(block).expect("entry 81's block is JSON");
+            .expect("entry 82 carries the json block this test drives");
+        let block: Value = serde_json::from_str(block).expect("entry 82's block is JSON");
 
         let written = block["hold"].clone();
-        let hold = WorkspaceHold::of_payload(&written).expect("entry 81's hold entry reads");
+        let hold = WorkspaceHold::of_payload(&written).expect("entry 82's hold entry reads");
         assert_eq!(
             hold.payload(),
             written,
-            "entry 81's hold entry does not round-trip as written"
+            "entry 82's hold entry does not round-trip as written"
         );
         assert_eq!(block["surface_kind"], json!(WAIT_SURFACE_KIND));
         assert_eq!(block["requeue"]["reason"], json!(EXHAUSTED_REASON));
