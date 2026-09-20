@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.0](https://github.com/nickderobertis/onepipeline/compare/v0.38.2...v0.39.0) - 2026-09-20
+
+### Added
+
+- *(sdk)* give every post-launch verb a typed library call and group runs by project ([#402](https://github.com/nickderobertis/onepipeline/pull/402))
+
 ## [0.38.2](https://github.com/nickderobertis/onepipeline/compare/v0.38.1...v0.38.2) - 2026-09-20
 
 ### Fixed
