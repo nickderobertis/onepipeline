@@ -22,6 +22,16 @@
 mod harness;
 
 mod adoption;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] two journeys, a few
+// minutes together, and what they exercise is the environment every dispatch the
+// engine starts is composed with — `executor`, `driver`, `lifecycle` and `agents`
+// together, through the real `oneagentgraph` and the real linked `oneharness-core` —
+// so the narrowest edge they can honestly sit behind is the crate itself, which is
+// this target's. Same grounds as `mod dispatch` below; the block form because a
+// line-scoped directive reaches only the line right below it, and this reason is
+// longer than one line.
+mod agents;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod amend;
 mod boundary;
 mod bus_config;

@@ -843,6 +843,7 @@ mod tests {
             filters: crate::filter::Filters::default(),
             bus_config: Default::default(),
             maintenance_config: None,
+            oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         };
         crate::ledger::write_json(&paths.launch(), &record).expect("a launch record");

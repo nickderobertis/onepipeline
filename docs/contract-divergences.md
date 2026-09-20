@@ -11,14 +11,14 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76 and 80 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80 and 84 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, and 80 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80 and 84 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -3252,7 +3252,10 @@ contract's vocabulary has nowhere to put one. So this crate now ships:
   grew `name` — the plan's name, read off the run's own `plan.json`, which the
   grouped listing of entry 81 labels each project by — because a version-5
   document carries no name at all rather than a run whose plan stated none, and
-  serving it would label a project nobody named.
+  serving it would label a project nobody named. It moved to version 7 when the
+  row grew `oneharness_sessions` — the run's pointer file, as the launch record
+  names it (entry 84) — because a version-6 document carries no answer to where
+  the run's sessions are rather than a run nothing wrote a pointer line for.
 - **`views::{RunTelemetry, Bucket, BucketName, Party, Usage}`**, re-exported
   because `RunSummary::timing` **is** the telemetry document whose shape the
   Views paragraph already fixes — eight buckets that sum exactly, per-party
@@ -3269,7 +3272,7 @@ cannot go on describing a document the build stopped writing:
 
 ```json
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "fields": [
     "schema_version",
     "run_id",
@@ -3296,6 +3299,7 @@ cannot go on describing a document the build stopped writing:
     "parked",
     "judge_rejected",
     "landings",
+    "oneharness_sessions",
     "journal_len",
     "journal_mtime_ms"
   ],
@@ -6535,3 +6539,88 @@ the refusals, the schema boundary and `adopt`'s replay are driven through the re
   "unrecorded_outcomes": ["no-maintain-command", "no-slots", "not-due"]
 }
 ```
+
+## 84. What agents ran under a run was knowable only on a host that configured oneharness exactly as this one did — OPEN
+
+**Proposal: the engine stamps every dispatch it starts through oneharness's own
+environment, the run keeps one small pointer file every oneharness turn under it appends
+to, and a verb reads that file and nothing else.** The amendment is one contract
+paragraph and the `oneharness_history` block beside it — the three variables the engine
+overlays, the label keys and scope words, the key-wise merge rule, the opt-out, the
+pointer file's name and the read that consumes it — with `tests/contract.rs` holding the
+crate's constants to that block; and three sentences elsewhere in the contract: `agents`
+in the SDK verb list, `oneharness_sessions()` among what `RunPaths` promises, and
+`attempt` on the executor seam's `DispatchRequest`. Every one of those is this entry's to
+record, and none is resolved from here.
+
+Before this entry, which agents ran under a node was knowable only where the target
+repository had wired it: the `role` labels an operator's transcript view groups by came
+from ai-orchestrator's own `oneharness.*.toml` files, and the `oneharness-session` event
+a run relays is emitted only for members of an `oneagentgraph` graph — so an oneharness
+turn spawned by anything else (a different graph engine, a nested tool a worker runs, a
+judge that spawns its own harness, a repository that never wrote those files) left no
+trace a run could find. The user's words: "we need to give general visibility into all
+agents launched and it should be done automatically by onepipeline via oneharness +
+metadata and work regardless of the agent structure used in the repo (ai-orchestrator is
+just one way onepipeline can be set up)", and, on where the transcripts live: "i don't
+want to move oneharness history from default location how about we add separate metadata
+we can use to find it".
+
+What this build does is the paragraph, and the paragraph is the source. Three decisions
+in it are worth stating on their own.
+
+**The stamp is composed from what the launch inherits, and only the engine's prefix is
+the engine's.** The dispatch-env hook's document is overlaid before the engine's pairs,
+so a `ONEHARNESS_HISTORY_LABELS` it wrote — or the driver's own environment carried — is
+inherited input: every key of it survives except the ones under `onepipeline.`, which are
+replaced. The observer graph's launch is `Environment::Shared`, so its composed value is
+exported into the driver process; a node's launch re-composes from what it inherits, so
+the observer's scope word never reaches a node's session. A value the label grammar
+refuses — or one carrying a comma, which the wire format has no escape for — refuses the
+launch naming the key, the way a missing `env_from` source does, because oneharness
+would refuse every run under it.
+
+**The store is never the engine's to place.** No `ONEHARNESS_HISTORY_DIR` is set; an
+inherited one passes through; a `history_dir` in a repository's configuration is
+honoured. This host's default store is 5.5 GB across 31,151 session files with a 1.27 GB
+index, the only lock-free read the library offers scans every file, and the indexed
+reader locks and rewrites the index — so the reader here opens the pointer file alone,
+through `oneharness-core`'s `io::history::read_pointers`, and `oneharness history
+pointers <file>` reads the same file with that library's own verb. The opt-out is
+oneharness's: `--no-history` on its command line, or an embedder's `RunRequest.history`,
+each of which that library ranks above its environment; its configuration *files* rank
+below the environment, so a file alone cannot opt a turn out, and the paragraph says
+"a layer of its own that oneharness ranks above the environment" rather than naming
+one.
+
+**The attempt number rides the request.** `onepipeline.attempt` is the number the
+dispatch's `node-dispatched` records, and the executor that stamps the launch is handed
+a `DispatchRequest` and nothing else about the dispatch — so the request grew
+`attempt: NonZeroU32`, threaded from `engine::attempt`'s boundary index, the lifecycle's
+publication attempt and a continuation's own. An executor on another machine, which the
+seam is shaped for, needs the same number to stamp the same labels. `Labels.extra` was
+rejected (it is stamped on every relayed envelope), and so was reading the journal at
+dispatch (the fold `notes_at_dispatch` was written to avoid, racing the loop thread that
+journals the record). The lifecycle's drafting dispatch carries the node's own attempt,
+having no `node-dispatched` of its own. One quirk is kept rather than corrected: a
+boundary re-ask inside a later publication attempt records the boundary index, as it
+always did, and the stamp follows the record. **This is a breaking change to the
+crate's public API**: `DispatchRequest` is a struct with public fields that a consumer
+builds by literal, and a literal written against the six-field shape no longer compiles.
+The planner who owns the contract ruled that the field goes on the seam and that the
+break is said plainly here rather than hidden; pre-1.0 it lands in the minor, which is
+where the release that carries this entry lands anyway.
+
+Driven end to end by `tests/e2e/agents.rs` against the linked `oneagentgraph` and
+`oneharness-core` over a repository that configures nothing: a node-scope dispatch, a
+lifecycle step, the observer graph and a drafting graph each append lines carrying the
+right scope word, step id and attempt number — the two-party member's turns through the
+spawned double and the single-sided member's in-process turn through the real core
+alike; the store the lines name is the one the process resolved (the journey's own
+`XDG_STATE_HOME`) and moves with an inherited `ONEHARNESS_HISTORY_DIR`; an inherited
+`owner=ci` survives beside the engine's keys and a stale `onepipeline.node` is replaced;
+a re-asked dispatch's lines carry attempt 2; a `--no-history` turn leaves no line and
+the read still succeeds; and `onepipeline agents` lists per run, per node and per
+project across two runs of one project, each entry resolving through `find_session_path`
+to the file its line names. `tests/parity.rs` holds the verb's rendering byte-equal to
+the SDK call, and `agents::tests` holds the merge rule and the reader against the types.

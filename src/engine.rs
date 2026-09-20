@@ -3922,15 +3922,18 @@ fn execute_direct(
             })
         }
     }; // llmlint: ignore-end[changed_behavior_has_e2e]
-    let request = || DispatchRequest {
+    let request = |attempt| DispatchRequest {
         graph: graph.clone(),
         task: node.rendered_task_with(references),
         labels: dispatch_labels(run, &node.id, None, node.persona.as_deref()),
         controls,
         workspace: WorkspaceSpec::Path(project_dir()),
         cancel: cancel.clone(),
+        attempt,
     };
-    match attempt(executor, node, cancel, tx, &request, ended) {
+    // A direct node's first dispatch is its first attempt: the record the loop
+    // wrote for it says `1`, and only a boundary re-ask moves it.
+    match attempt(executor, node, cancel, tx, &request, ended, NonZeroU32::MIN) {
         Attempted::Drained(drained) => Ending::Settled(drained.settlement),
         // A direct node opens no session, so nothing can refuse it one; the
         // arm is spelled because the seam is one seam.
@@ -4025,13 +4028,22 @@ pub(crate) struct Drained {
 /// another budget on work that is already done. A provider that refuses before
 /// the first turn is the case this exists for — the one where the failure
 /// carries no work to lose.
+///
+/// `request` is handed the attempt number the dispatch it builds runs as —
+/// the number the node's latest `node-dispatched` records, which is what the
+/// executor stamps the launch with. The first dispatch here runs as `first`,
+/// the caller's own attempt: `1` for a node's first dispatch, and the
+/// publication attempt a lifecycle node is on when its steps are asked again.
+/// Every boundary re-ask after it runs as the number the `Redispatched` below
+/// announced for it.
 pub(crate) fn attempt(
     executor: &dyn Executor,
     node: &Node,
     cancel: &CancellationToken,
     tx: &Sender<Message>,
-    request: &dyn Fn() -> DispatchRequest,
+    request: &dyn Fn(NonZeroU32) -> DispatchRequest,
     ended: &EndedDispatches,
+    first: NonZeroU32,
 ) -> Attempted {
     // The node itself and not its id alone, because the one message this raises
     // crosses a thread boundary and carries the identity rather than borrowing
@@ -4053,7 +4065,16 @@ pub(crate) fn attempt(
         // it there would put this decision within reach of anything a dispatch
         // says about itself.
         let mut conflicted = false;
-        let drained = match executor.dispatch(request()) {
+        // What the record says this dispatch is: the caller's attempt for the
+        // first, and for each re-ask the number announced for it below — which
+        // is `attempt` itself, since the announcement at the end of iteration
+        // `n` names `n + 1`.
+        let recorded_as = if attempt == 1 {
+            first
+        } else {
+            NonZeroU32::new(attempt).unwrap_or(first)
+        };
+        let drained = match executor.dispatch(request(recorded_as)) {
             Ok(mut handle) => {
                 let drained = drain(handle.as_mut(), tx, id, cancel);
                 // Kept, not dropped: its registry entry outlives it until the

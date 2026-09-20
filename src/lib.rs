@@ -44,6 +44,7 @@
 
 #![warn(missing_docs)]
 
+pub mod agents;
 pub mod channel;
 pub mod cli;
 pub mod controls;
