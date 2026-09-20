@@ -1622,6 +1622,125 @@ fn the_driving_process_is_a_single_writer() {
     world.release("build.go");
 }
 
+/// The driver a detached adoption retains outlives the process that adopted,
+/// and the interrupt that process's group takes.
+///
+/// What an API server restarting or a person pressing Ctrl-C in the shell that
+/// adopted looks like: the launcher is a shell that adopts detached and then
+/// stays, in a process group of its own, and once the retained driver has
+/// claimed the run that whole group is sent `SIGINT`. The shell dies of it; the
+/// driver, in a group of its own, does not — the run is still being driven, the
+/// held dispatch is still its, and releasing that dispatch settles the run under
+/// the driver that survived.
+///
+/// `#[cfg(unix)]` because it ends the first driver by pid and signals a group.
+#[cfg(unix)]
+#[test]
+fn a_detached_adoptions_driver_outlives_its_launcher_and_the_interrupt_its_group_takes() {
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    use std::process::Stdio;
+
+    let world = World::new("driver-adopt-survives");
+    world.script("work.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "survives", vec![agent("work", &[])]);
+    world.until("the run to dispatch something", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    end_process(driver);
+    world.until("the dead driver to be proved gone", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+
+    // The launcher: this build adopting detached, from a shell that then stays
+    // so there is a group to interrupt. `$0` is the binary, so the shell's own
+    // words never carry the path.
+    let announced = world.root.join("adopt.announced");
+    let mut launcher = world.cmd_on(
+        Path::new("sh"),
+        &[
+            "-c",
+            "\"$0\" adopt \"$1\" --detach > \"$2\" && sleep 120",
+            &crate::harness::binary().display().to_string(),
+            &run,
+            &announced.display().to_string(),
+        ],
+    );
+    launcher.process_group(0);
+    let mut launcher = launcher
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the launching shell starts");
+    let group = i32::try_from(launcher.id()).expect("a pid is a group id");
+    // Announced only once the driver has claimed the run, which is what the
+    // adopting verb waits for before it says anything.
+    world.until("the adoption to announce the driver it retained", |_| {
+        std::fs::read_to_string(&announced).is_ok_and(|said| said.trim_end().ends_with('}'))
+    });
+    let retained: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(&announced)
+            .expect("the adoption announced itself")
+            .trim(),
+    )
+    .expect("the announcement is one object");
+    let retained = retained["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .expect("the adoption announced the driver it retained");
+    assert_eq!(
+        world.run_json(&run, "launch.json")["pid"],
+        json!(retained),
+        "the run names a driver other than the one the adoption announced"
+    );
+
+    // The interrupt a terminal sends its foreground group, to the launcher's.
+    // SAFETY: `killpg` takes a group id and a signal and reports failure in its
+    // return value; the group is the launching shell's own, which this journey
+    // started in a group of its own so the signal reaches nothing else.
+    assert_eq!(unsafe { libc::killpg(group, libc::SIGINT) }, 0);
+    let ended = launcher.wait().expect("the launching shell exits");
+    assert_eq!(
+        ended.signal(),
+        Some(libc::SIGINT),
+        "the launcher was not ended by the interrupt: {ended:?}"
+    );
+
+    // The driver is still there, and still driving: the run reads as driven and
+    // its held dispatch is still its own.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let alive = std::process::Command::new("kill")
+        .args(["-0", &retained.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .expect("this host answers about a process")
+        .success();
+    assert!(
+        alive,
+        "the retained driver {retained} died with its launcher"
+    );
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("ACTIVE")
+        .out_lacks("DRIVER DEAD");
+
+    // And it finishes the work: the dispatch it inherited is released, and the
+    // run settles under it.
+    world.release("work.go");
+    world.until("the run to settle under the surviving driver", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    assert_eq!(
+        world.run_json(&run, "result.json")["nodes"][0]["status"],
+        json!("done"),
+        "{}",
+        world.dump()
+    );
+    world.until("the surviving driver to let go", |world| {
+        !world.run_file(&run, "owner.lock").exists()
+    });
+}
+
 /// Two takeovers of one dead driver's run leave one of them driving it, and the
 /// other refused **naming that one**.
 ///

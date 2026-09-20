@@ -6269,6 +6269,6 @@ paragraphs are the source. What this entry records beside them:
 in both directions, the grouped-listing types and `GROUP_HEADER` to the contract,
 and entry 56's inventory to the document; `tests/parity.rs` holds the binary to
 the SDK over the recorded run; `tests/e2e/listing.rs` drives a root holding runs
-of two projects and one of none through the binary; `tests/e2e/adoption.rs`
+of two projects and one of none through the binary; `tests/e2e/driver.rs`
 shows a retained driver still driving after the process that adopted it has
 exited and its group has taken a `SIGINT`.
