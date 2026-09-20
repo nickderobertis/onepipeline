@@ -6888,15 +6888,48 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
     for node in result["nodes"].as_array().expect("nodes") {
         assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
     }
-    // Once each: the second was dispatched exactly once, onto the **slot** the
-    // first handed back — the one warm worktree the identity keeps, which is
-    // where both sessions say they worked — and the hold cleared on the record.
+    // The second was dispatched onto the **slot** the first handed back — the
+    // one warm worktree the identity keeps, which is where both sessions say
+    // they worked — and the hold cleared on the record. Usually once; not
+    // always. The read that let it go is advisory and `open` is authoritative:
+    // the sibling counts a slot idle from the moment the first's publication
+    // closes the session record and takes it only once the tree is returned,
+    // so a read inside that window admits the second and its open is refused
+    // `PoolExhausted` — the race the contract says costs the node nothing, and
+    // the one this journey met on Windows, where the window is wide enough for
+    // the poll to land in. So what is held is the accounting rather than the
+    // count: every dispatch is a first attempt of its own — never the boundary
+    // asking again — every dispatch past the first is answered by a
+    // `node-requeued` under `workspace-exhausted`, and the node settled once.
+    let dispatched = dispatches_of(&world, &run, "second");
+    let requeued: Vec<serde_json::Value> = world
+        .events_of(&run, "node-requeued")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "second")
+        .collect();
     assert_eq!(
-        dispatches_of(&world, &run, "second").len(),
-        1,
-        "{}",
+        dispatched.len(),
+        1 + requeued.len(),
+        "a dispatch of the second is not accounted for by a refusal\n{dispatched:#?}\n\
+         {requeued:#?}\n{}",
         why(&world, &run)
     );
+    for dispatch in &dispatched {
+        assert_eq!(dispatch["payload"]["attempt"], 1, "{dispatch}");
+        assert!(dispatch["payload"]["reason"].is_null(), "{dispatch}");
+    }
+    for requeue in &requeued {
+        assert_eq!(
+            requeue["payload"]["reason"], "workspace-exhausted",
+            "{requeue}"
+        );
+    }
+    let settled_second = world
+        .events_of(&run, "node-settled")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "second")
+        .count();
+    assert_eq!(settled_second, 1, "{}", why(&world, &run));
     let worktree_of = |node: &str| {
         world
             .events_of(&run, "session-opened")
@@ -6935,15 +6968,24 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
         .into_iter()
         .filter(|event| event["labels"]["node"] == "second")
         .collect();
-    assert_eq!(unheld.len(), 1, "{unheld:#?}\n{}", why(&world, &run));
-    assert!(
-        unheld[0]["payload"]["released"]
-            .as_array()
-            .expect("released")
-            .iter()
-            .any(|reason| reason["kind"] == "workspace"),
-        "the release does not name the workspace hold: {unheld:#?}"
+    // Released once per time it was held: once for the slot the first handed
+    // back, and once more for each open the identity refused after admitting it.
+    assert_eq!(
+        unheld.len(),
+        1 + requeued.len(),
+        "{unheld:#?}\n{}",
+        why(&world, &run)
     );
+    for release in &unheld {
+        assert!(
+            release["payload"]["released"]
+                .as_array()
+                .expect("released")
+                .iter()
+                .any(|reason| reason["kind"] == "workspace"),
+            "the release does not name the workspace hold: {release:#}"
+        );
+    }
     // Both changes landed, from one slot in turn.
     let landed = repo.base_commits(&world);
     assert!(
