@@ -1797,18 +1797,17 @@ impl ProjectGroup {
     }
 }
 
-/// `onepipeline runs`.
+/// `onepipeline runs`: the listing as the binary prints it by default, grouped
+/// by project.
 ///
 /// A run root under this root that could not be read is named at the end rather
 /// than dropped: an empty listing on a host that holds runs is the reading that
 /// costs the most, because it is the one a planner acts on by starting more work.
-///
-/// The **flat** listing, by run id — what `runs --flat` prints, and the rows the
-/// grouped default renders under each project's header.
+/// `verbs::render_runs` is where the layout is chosen; this is the default one.
 pub fn runs(root: &Path, mine_only: bool, session: &str) -> String {
     runs_of(
         &crate::verbs::runs(root, session, mine_only),
-        Grouping::Flat,
+        Grouping::Grouped,
         session,
     )
 }
