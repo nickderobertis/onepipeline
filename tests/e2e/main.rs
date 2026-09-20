@@ -33,6 +33,7 @@ mod adoption;
 mod agents;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod amend;
+mod ask;
 mod boundary;
 mod bus_config;
 mod cancellation;
