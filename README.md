@@ -271,7 +271,13 @@ nothing about its tree was rejected: the work is already on the origin, so the
 default — rather than the agent re-dispatched for a fresh clone and a fresh gate to
 re-push what the remote already carries. A verdict that arrives during those reads
 settles the node; reads that never get one settle it `failed` saying where the work
-is, what commit it is at, and what stopped the read. Everything else settles
+is, what commit it is at, and what stopped the read. A push the merge path refused
+because **the host** is missing a tool or a credential a hook needs — said by the
+hook itself, on the one line beginning with `onevcs`'s host-prerequisite marker — is
+not re-dispatched at all, because no edit to the tree installs anything on the host:
+it settles `failed` under `infrastructure-failure`, the word the dispatch layer
+already uses for a host that could not launch a dispatch, carrying the preserved
+branch, the commit it stands at, and the hook's own remediation. Everything else settles
 `publication-failed` as it always
 did and is not retried: the repository's own gate, a request refused at a trust
 boundary, and a seam with no implementation behind it all answer the same way

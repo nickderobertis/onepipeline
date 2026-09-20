@@ -449,6 +449,11 @@ resolver = "2"
 # release, and `onevcs-testing` 0.6.5 requires exactly this `onevcs`, so the
 # two requirements and the lock move together.
 #
+# `onevcs` 0.25.0 is the floor because it names `FailureKind::HostPrerequisite`,
+# which `src/vcs.rs::failure_of` matches arm by arm (onepipeline #360). A
+# **requirement**, because `^0.24` admits no 0.25.x; `onevcs-testing` 0.6.6
+# requires exactly this `onevcs`, so the two move together.
+#
 # `onevcs` 0.26.0 carries the **worktree pool**: warm slots per identity and an
 # overflow bound past them, sized by the host in `workspaces.yml`, with
 # `workspace_capacity` — the advisory read `src/pool.rs` asks before a queued

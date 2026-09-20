@@ -374,6 +374,20 @@ pub enum Failure {
     /// one is answered by a bounded re-read and settles under
     /// [`Failure::UNREAD`] only when that read is spent.
     Unread,
+    /// The merge path refused the publishing push because **this host** is
+    /// missing a tool or a credential one of its hooks needs, and said so on the
+    /// one line [`onevcs::HOST_PREREQUISITE_MARKER`] begins.
+    ///
+    /// Neither of the two above, on purpose. Not [`Preserving`](Self::Preserving):
+    /// the tree was not what refused, so a worker sent back to the branch meets
+    /// the same refusal however it edits — which is exactly what happened before
+    /// this arm existed, a whole publication budget spent on a hook that wanted
+    /// one install on the host. Not [`Unread`](Self::Unread): the push never
+    /// landed, so there is no merge path to re-read. It settles under
+    /// [`Failure::HOST`], the word the dispatch layer already uses for a host
+    /// that could not launch a dispatch, carrying the preserved branch, its head
+    /// and the hook's own remediation, and is not dispatched again.
+    HostPrerequisite,
     /// Nothing a further attempt could answer: a request `onevcs` refused at its
     /// trust boundary, a seam with no implementation, and a gate that ran on the
     /// tree as it stands all answer the same way however many times they are
@@ -396,12 +410,24 @@ impl Failure {
     /// not what a reader of the settled node reads.
     pub const UNREAD: &'static str = "pushed-unverified";
 
+    /// The word a push the merge path refused for a prerequisite **this host**
+    /// is missing settles on.
+    ///
+    /// Deliberately the word [`crate::engine::INFRASTRUCTURE_FAILURE`] already
+    /// is, and not a word of its own: both are the host — never the work —
+    /// standing in the way, and a reader acts on them the same way, by fixing
+    /// the host and asking again. The one other word two vocabularies share is
+    /// `no-changes`, and `engine::tests::the_words_this_crate_publishes_are_one_vocabulary`
+    /// names both sharings rather than letting a third arrive unnoticed.
+    pub const HOST: &'static str = crate::engine::INFRASTRUCTURE_FAILURE;
+
     /// The word the node settles on.
     #[must_use]
     pub fn outcome(self) -> &'static str {
         match self {
             Self::Preserving(preserving) => preserving.outcome(),
             Self::Unread => Self::UNREAD,
+            Self::HostPrerequisite => Self::HOST,
             Self::Terminal => Self::RESIDUAL,
         }
     }
@@ -425,21 +451,19 @@ pub fn failure_of(kind: onevcs::FailureKind) -> Failure {
         // one of the four above: the tree was never rejected, so what answers it
         // is another read of the host rather than another dispatch of the agent.
         FailureKind::PushedUnverified => Failure::Unread,
+        // The merge path said, on the marker line, that the host is missing a
+        // tool or a credential a hook needs. A refusal carrying no such line is
+        // `PushRejected` above, and preserving; this one is routed apart from it
+        // because no edit to the tree clears it — the fix is on the host — and
+        // apart from `Unread` because nothing landed to re-read.
+        FailureKind::HostPrerequisite => Failure::HostPrerequisite,
         // `Gate` is a kind no publication produces any more — `onevcs` 0.11.0
         // runs no gate — and it is routed rather than dropped because the
         // sibling still names it: an arm removed here would be a wildcard by
         // another name the day anything emits it again. Terminal beside the
         // other two, on the reading the kind was written for: a verdict on the
         // tree as it stands, which nothing this crate can do from here changes.
-        // A hook said the publishing host is missing a tool or a credential, on
-        // the line the sibling reserves for exactly that: a refusal no change to
-        // the work can clear, so sending a worker back to the tree would meet
-        // the same missing prerequisite. The reason carries what is missing and
-        // how to install it, which is what the residual's detail hands a reader.
-        FailureKind::Gate
-        | FailureKind::Invalid
-        | FailureKind::NotImplemented
-        | FailureKind::HostPrerequisite => Failure::Terminal,
+        FailureKind::Gate | FailureKind::Invalid | FailureKind::NotImplemented => Failure::Terminal,
     }
 }
 
@@ -2016,7 +2040,7 @@ mod tests {
         let vocabulary: BTreeSet<&str> = EVERY_PRESERVING
             .iter()
             .map(|preserving| preserving.outcome())
-            .chain([Failure::UNREAD, Failure::RESIDUAL])
+            .chain([Failure::UNREAD, Failure::HOST, Failure::RESIDUAL])
             .collect();
         let produced: BTreeSet<&str> = EVERY_KIND
             .iter()
@@ -2033,6 +2057,25 @@ mod tests {
         assert_eq!(
             listed, vocabulary,
             "the contract's publication-failure words are not the ones this crate settles on"
+        );
+        // And the one word that is shared rather than a publication's own is
+        // routed the way the contract says: a host missing a prerequisite is
+        // settled once, carrying what a person fixes the host with, and never
+        // sent back to a worker.
+        assert!(
+            contract.contains(
+                "A refused push carrying the host-prerequisite marker is **not** re-dispatched"
+            ),
+            "the contract does not say a host-prerequisite refusal is settled rather than re-dispatched"
+        );
+        assert!(
+            contract.contains(&format!(
+                "settles the node `failed` under `{}` — no word of its own and no new event \
+                 kind — carrying the preserved branch, the commit it stands at, and the \
+                 hook's own remediation",
+                Failure::HOST
+            )),
+            "the contract does not say what a host-prerequisite settlement carries"
         );
     }
 
@@ -2103,6 +2146,23 @@ mod tests {
             "the README does not name `{}` as what everything else settles on",
             Failure::RESIDUAL
         );
+        // And the host's own refusal is the other one recovered without a
+        // dispatch — the README has to say so in the same breath as the word,
+        // because a reader of the word alone would wait for a retry that never
+        // comes.
+        assert!(
+            readme.contains(&format!(
+                "is not re-dispatched at all, because no edit to the tree installs anything on \
+                 the host: it settles `failed` under `{}`",
+                Failure::HOST
+            )),
+            "the README does not say a host-prerequisite refusal settles `{}` without a re-dispatch",
+            Failure::HOST
+        );
+        assert!(
+            readme.contains("carrying the preserved branch, the commit it stands at, and the hook's own remediation"),
+            "the README does not say what a host-prerequisite settlement carries"
+        );
     }
 
     /// Which kinds a further attempt can answer, said kind by kind — and which
@@ -2139,13 +2199,23 @@ mod tests {
             Failure::Unread,
             "a push that reached the remote is answered by re-dispatching the agent"
         );
+        // The one kind that is the **host** refusing. Deliberately not preserving
+        // — a worker sent back to the branch cannot install anything on the host,
+        // and re-dispatching it spent whole budgets on one missing tool — and not
+        // unread, because the push never landed.
+        assert_eq!(
+            failure_of(onevcs::FailureKind::HostPrerequisite),
+            Failure::HostPrerequisite,
+            "a prerequisite the host is missing is answered by re-dispatching the agent"
+        );
         let preserving: BTreeSet<&str> = EVERY_KIND
             .iter()
             .filter(|kind| !terminal.contains(kind))
             .filter(|kind| **kind != onevcs::FailureKind::PushedUnverified)
+            .filter(|kind| **kind != onevcs::FailureKind::HostPrerequisite)
             .map(|kind| match failure_of(*kind) {
                 Failure::Preserving(preserving) => preserving.outcome(),
-                Failure::Unread | Failure::Terminal => {
+                Failure::Unread | Failure::HostPrerequisite | Failure::Terminal => {
                     panic!("{kind:?} is not the tree being rejected, so nothing re-dispatches it")
                 }
             })
@@ -2166,6 +2236,12 @@ mod tests {
         // The word an unread merge path settles on is the one it always was:
         // what changed is how the node is recovered, not what a reader reads.
         assert_eq!(Failure::Unread.outcome(), "pushed-unverified");
+        // And a missing host prerequisite settles under the dispatch layer's own
+        // word for a host that could not launch, not a word of its own.
+        assert_eq!(
+            Failure::HostPrerequisite.outcome(),
+            crate::engine::INFRASTRUCTURE_FAILURE
+        );
     }
 
     /// The payload of a session opening, as one of the two producers writes it.
@@ -2375,6 +2451,10 @@ mod tests {
         assert_eq!(
             failed(onevcs::FailureKind::PushedUnverified),
             "pushed-unverified"
+        );
+        assert_eq!(
+            failed(onevcs::FailureKind::HostPrerequisite),
+            "infrastructure-failure"
         );
     }
 

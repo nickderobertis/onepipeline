@@ -72,6 +72,12 @@ pub struct Launch {
 /// paying for the same refusal. The node that spends the budget settles `failed`
 /// saying how many attempts were made and what each one ended with, which is what
 /// tells a reader the difference between a failure and a loop.
+///
+/// One refusal is never asked again, whatever the budget: a push the merge path
+/// turned down for a tool or a credential **this host** is missing. No edit to
+/// the tree installs anything on the host, so it settles `failed` under
+/// `infrastructure-failure` at once, carrying the branch, its head and the hook's
+/// remediation — see [`failed_publication`].
 #[allow(
     clippy::too_many_arguments,
     reason = "one node's whole execution: the executor, the run, the launch, the node, \
@@ -1207,21 +1213,6 @@ fn failed_publication(
             ..Settlement::plain(node, NodeStatus::Failed, Some(failure.outcome()))
         })
     };
-    // llmlint: ignore-block[changed_behavior_has_e2e] the second arm covers two cases and
-    // only one of them is new. The **terminal** one — a failure no further attempt can
-    // answer — is driven end to end by
-    // `a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried`,
-    // which asserts the residual word and that the node was dispatched exactly once. It
-    // reaches the arm through a hosted identity this build has no `RemoteHost` for,
-    // because a repository's own verification no longer produces a terminal kind at all:
-    // `onevcs` 0.11.0 runs no gate, and the merge path refusing a push is `push-rejected`,
-    // which is preserving. The other case is a preserving failure whose branch the
-    // execution checkout refused: `onevcs` hands a branch back on every failure it can and
-    // reports `Refused` only when that copy itself failed — a checkout that could not be
-    // written to — which no double here injects and which the hook script deliberately
-    // keeps out of the repository. Reaching it would mean breaking the checkout
-    // mid-publication, which proves the fixture rather than this arm, and what it does is
-    // exactly what the terminal case does.
     match (failure, handed_back, branch.clone()) {
         (crate::vcs::Failure::Preserving(outcome), true, Some(branch)) => {
             Attempt::Preserving(Box::new(Preserved {
@@ -1233,8 +1224,37 @@ fn failed_publication(
                 tip: crate::vcs::session_tip(token),
             }))
         }
+        // The host refused, not the work: no edit to the tree installs the tool
+        // the hook wants, so a further attempt on the branch is spent for nothing.
+        // Settled once, whatever the budget has left, with the head beside the
+        // branch so a `retry` after the install has somewhere to continue from.
+        (crate::vcs::Failure::HostPrerequisite, _, _) => Attempt::settled(Settlement {
+            branch: branch.clone(),
+            head: match crate::vcs::session_tip(token) {
+                crate::vcs::SessionTip::At(commit) => Some(commit.as_str().to_owned()),
+                crate::vcs::SessionTip::Unmoved | crate::vcs::SessionTip::Unknown => None,
+            },
+            detail: Some(compose(&format!("onevcs: {reason}"), body_aside.as_deref())),
+            ..Settlement::plain(node, NodeStatus::Failed, Some(failure.outcome()))
+        }),
+        // llmlint: ignore-block[changed_behavior_has_e2e] this arm covers two cases and
+        // only one of them is new. The **terminal** one — a failure no further attempt can
+        // answer — is driven end to end by
+        // `a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried`,
+        // which asserts the residual word and that the node was dispatched exactly once. It
+        // reaches the arm through a hosted identity this build has no `RemoteHost` for,
+        // because a repository's own verification no longer produces a terminal kind at all:
+        // `onevcs` 0.11.0 runs no gate, and the merge path refusing a push is `push-rejected`,
+        // which is preserving. The other case is a preserving failure whose branch the
+        // execution checkout refused: `onevcs` hands a branch back on every failure it can and
+        // reports `Refused` only when that copy itself failed — a checkout that could not be
+        // written to — which no double here injects and which the hook script deliberately
+        // keeps out of the repository. Reaching it would mean breaking the checkout
+        // mid-publication, which proves the fixture rather than this arm, and what it does is
+        // exactly what the terminal case does.
         _ => settled(),
-    } // llmlint: ignore-end[changed_behavior_has_e2e]
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+    }
 }
 
 /// A publication's own words and what is to be said about the body, in that

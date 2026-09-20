@@ -4482,9 +4482,10 @@ pub const INVALID_NODE: &str = "invalid-node";
 ///
 /// Deliberately the same word `crate::vcs::outcome_of` gives a publication with
 /// nothing to publish: the two are one fact about the node, and a second spelling
-/// would be a distinction no reader could act on. It is the one word this crate
-/// publishes twice, and [`tests::the_words_this_crate_publishes_are_one_vocabulary`]
-/// names it as such rather than letting the next sharing in unnoticed.
+/// would be a distinction no reader could act on. It is one of the two words this
+/// crate publishes twice — [`INFRASTRUCTURE_FAILURE`] is the other — and
+/// [`tests::the_words_this_crate_publishes_are_one_vocabulary`] names both as
+/// such rather than letting the next sharing in unnoticed.
 pub const NO_CHANGES: &str = "no-changes";
 
 /// A lifecycle node whose dispatch left its branch level with its base, having
@@ -4506,6 +4507,17 @@ pub const EMPTY_BRANCH: &str = "empty-branch";
 /// The dispatch layer refused **before any work began**.
 ///
 /// The word [`DISPATCH_DIED`] is deliberately not: see the reasoning there.
+///
+/// Also the word a lifecycle node settles under when its publishing push was
+/// refused by the merge path for a tool or a credential **this host** is
+/// missing — `crate::vcs::Failure::HOST` is this constant, on purpose. The two
+/// are one fact a reader acts on the same way: the host and never the work is
+/// what stands in the way, so the fix is on the host and the node is asked again
+/// only once that is done. Retried differently, though: a refused launch carries
+/// no work to lose and [`attempt`] re-asks it, while a refused push has a branch
+/// to keep and is settled once, carrying that branch and its head, rather than
+/// re-dispatched onto a refusal no edit clears. The other word two vocabularies
+/// share is [`NO_CHANGES`], and the gate there names both.
 pub const INFRASTRUCTURE_FAILURE: &str = "infrastructure-failure";
 
 /// The dispatch budget was spent without the agent producing anything.
@@ -6494,9 +6506,13 @@ mod tests {
         //
         // `no-changes` is one fact reached two ways — a node whose steps all
         // declared no diff, and a publication whose base already carried the
-        // branch — and both settle a node under the one word on purpose. It is
-        // the only word allowed in two of the three lists, and taking it out here
-        // is what makes every other collision fail.
+        // branch — and both settle a node under the one word on purpose. So is
+        // `infrastructure-failure`: a host that could not launch a dispatch and
+        // a host whose merge path refused the push for a tool it does not have
+        // are both the host, never the work, standing in the way, and a reader
+        // acts on both by fixing the host. Those two are the only words allowed
+        // in two of the three lists, and taking them out here is what makes
+        // every other collision fail.
         let mut seen: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
         let settlements: std::collections::BTreeSet<&str> =
             SETTLEMENT_OUTCOMES.iter().copied().collect();
@@ -6516,7 +6532,14 @@ mod tests {
         assert_eq!(
             seen.remove(NO_CHANGES),
             Some(2),
-            "`{NO_CHANGES}` is documented as the one word two vocabularies share"
+            "`{NO_CHANGES}` is documented as a word two vocabularies share"
+        );
+        assert_eq!(
+            seen.remove(INFRASTRUCTURE_FAILURE),
+            Some(2),
+            "`{INFRASTRUCTURE_FAILURE}` is documented as a word two vocabularies share: \
+             the dispatch layer's refusal to launch, and a merge path refusing a push \
+             for a prerequisite the host is missing"
         );
         let collided: Vec<&str> = seen
             .iter()
@@ -6571,6 +6594,7 @@ mod tests {
         onevcs::FailureKind::ChecksUnsettled,
         onevcs::FailureKind::PushRejected,
         onevcs::FailureKind::PushedUnverified,
+        onevcs::FailureKind::HostPrerequisite,
     ];
 
     /// A change request URL, for the publication outcomes that carry one.
