@@ -118,6 +118,25 @@ fn rustc_invocation(output: &Output, marker: &str) -> String {
         .to_owned()
 }
 
+/// The `--out-dir` a rustc command line names, as a path rather than as text.
+///
+/// Cargo prints each argument shell-quoted when it needs to be — a Windows
+/// path's backslashes, a space in the clone's path — and writes the platform's
+/// own separator, so the text of the argument differs from `Path::display` of
+/// the directory it names on exactly the platforms where the check matters.
+/// Comparing paths compares components, which is what the assertion means.
+fn out_dir(invocation: &str) -> PathBuf {
+    let rest = invocation
+        .split_once("--out-dir ")
+        .unwrap_or_else(|| panic!("no --out-dir in: {invocation}"))
+        .1;
+    let value = match rest.chars().next() {
+        Some(quote @ ('\'' | '"')) => rest[1..].split(quote).next(),
+        _ => rest.split(' ').next(),
+    };
+    PathBuf::from(value.expect("--out-dir names a directory"))
+}
+
 /// The keys under a table, so a table holding more than the contract's is named
 /// by what it holds rather than by a missing key.
 fn keys(table: &toml::Value, name: &str) -> Vec<String> {
@@ -154,6 +173,24 @@ fn the_config_file_carries_the_contracts_two_keys_and_nothing_else() {
         Some(1),
         "profile.dev.debug is the integer 1"
     );
+}
+
+#[test]
+fn a_shell_quoted_out_dir_is_read_as_the_path_it_names() {
+    // The line a Windows runner printed: cargo quoted the path for its
+    // backslashes, and the crate path beside it for the same reason.
+    let quoted = "     Running `rustc.exe --crate-name build_config_probe --edition=2021 \
+                  'src\\lib.rs' --crate-type lib -C debuginfo=1 \
+                  --out-dir 'D:\\a\\onepipeline\\onepipeline\\target\\debug\\deps' \
+                  -L 'dependency=D:\\a\\onepipeline\\onepipeline\\target\\debug\\deps'`";
+    assert_eq!(
+        out_dir(quoted),
+        PathBuf::from("D:\\a\\onepipeline\\onepipeline\\target\\debug\\deps")
+    );
+    let bare =
+        "     Running `rustc --crate-name build_config_probe --out-dir /clone/target/debug/deps \
+                -L dependency=/clone/target/debug/deps`";
+    assert_eq!(out_dir(bare), PathBuf::from("/clone/target/debug/deps"));
 }
 
 #[test]
@@ -200,8 +237,9 @@ fn dev_and_test_builds_carry_line_tables_only_and_release_carries_no_debuginfo()
         dev.contains("-C debuginfo=1"),
         "a dev build carries line tables only: {dev}"
     );
-    assert!(
-        dev.contains(&format!("--out-dir {}", deps.display())),
+    assert_eq!(
+        out_dir(&dev),
+        deps,
         "a dev build of a crate outside the workspace lands in <clone>/target/debug: {dev}"
     );
 
