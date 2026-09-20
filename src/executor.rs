@@ -24,6 +24,7 @@
 // `{ slots_free, load1, mem_free_bytes }`, where the probe already refuses a negative or
 // NaN load by never producing one).
 
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -89,6 +90,14 @@ pub struct DispatchRequest {
     pub workspace: WorkspaceSpec,
     /// Raised to stop the dispatch cooperatively.
     pub cancel: CancellationToken,
+    /// Which attempt of the node this dispatch is, counting from one: the
+    /// number that dispatch's `node-dispatched` records.
+    ///
+    /// On the request rather than inferred where the dispatch runs, because it
+    /// is what the executor stamps the launch's history labels with — see
+    /// [`crate::agents::ATTEMPT_LABEL`] — and an executor on another machine
+    /// has no journal to read it off.
+    pub attempt: NonZeroU32,
 }
 
 /// The workspace a dispatch runs in.
@@ -269,12 +278,61 @@ impl Executor for LocalExecutor {
         // Every node-scope launch a run starts is one of that run's
         // `oneagentgraph` sources, so it carries the same source filter the
         // observer graph does.
-        let filters = launched.map(|record| record.filters).unwrap_or_default();
+        let filters = launched
+            .as_ref()
+            .map(|record| record.filters.clone())
+            .unwrap_or_default();
         // The hook's additions first and this crate's own keys after them, so a
         // hook cannot move where a dispatch keeps its scratch or which run it
         // belongs to: a later pair of the same name is the one the child gets.
         let mut env = added;
         env.extend(prepare_dispatch_env(&req.labels, token.as_deref())?);
+        // And the run's history stamp after both, composed **from** them: the
+        // hook's document is overlaid before the engine's own pairs, so a label
+        // set it wrote is the inherited value the merge keeps every repository
+        // key of. A dispatch built outside a run has no run root to point at,
+        // and carries none of this.
+        if let (Some(record), Some(run)) = (&launched, req.labels.run_id.as_deref()) {
+            let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
+            let inherited = match env
+                .iter()
+                .rev()
+                .find(|(key, _)| key == crate::agents::LABELS_ENV)
+            {
+                Some((_, value)) => Some(value.clone()),
+                None => crate::agents::inherited_labels()?,
+            };
+            // Every dispatch inside a run is a node's: the engine composes the
+            // labels of each, and a request naming a run and no node is one
+            // nothing here built.
+            let node = req.labels.node.as_deref().ok_or_else(|| {
+                Error::Invalid(format!(
+                    "a dispatch inside run '{run}' names no node, so it cannot be stamped"
+                ))
+            })?;
+            let launched =
+                if req.labels.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
+                    crate::agents::Launched::PrAuthor {
+                        node,
+                        attempt: req.attempt,
+                    }
+                } else {
+                    crate::agents::Launched::Node {
+                        node,
+                        step: req.labels.step.as_deref(),
+                        attempt: req.attempt,
+                    }
+                };
+            env.extend(crate::agents::overlay(
+                &paths,
+                inherited.as_deref(),
+                &crate::agents::Stamp {
+                    run,
+                    project: (!record.project.is_empty()).then_some(record.project.as_str()),
+                    launched,
+                },
+            )?);
+        }
         let mut run = GraphRun::start(&Launch {
             graph: &req.graph.0,
             task: &req.task,
@@ -785,6 +843,7 @@ mod tests {
                 overflow: None,
             }),
             cancel: CancellationToken::new(),
+            attempt: NonZeroU32::MIN,
         };
         assert!(matches!(request.workspace, WorkspaceSpec::VcsSession(_)));
         assert_eq!(request.graph.0, "./graphs/node-scope.yaml");

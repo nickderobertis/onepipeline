@@ -581,6 +581,29 @@ fn plain(path: &Path) -> PathBuf {
     }
 }
 
+/// The environment variable the linked `oneharness-core` reads its per-user
+/// state directory from, by platform: `%LOCALAPPDATA%` on Windows and
+/// `$XDG_STATE_HOME` everywhere else — the library's own
+/// `io::history::resolve_dir` reads exactly one of the two and never the other,
+/// and does not publish which. A world redirects the one its platform reads,
+/// so a oneharness that resolves its default store lands it in the world;
+/// pointing `XDG_STATE_HOME` at the world on Windows left every session in
+/// the operator's `%LOCALAPPDATA%`, which is where the `cross (windows-latest)`
+/// leg found nothing under [`World::history_store`].
+///
+/// What holds this restatement to the library is
+/// `agents::every_dispatch_of_a_run_is_visible_through_its_pointer_file_with_nothing_configured`:
+/// every pointer line a launch under this redirect writes names, as its
+/// `history_dir`, the store the **real linked core** resolved from this very
+/// environment, and the journey holds each one to [`World::history_store`] —
+/// so a core that moved to another variable on either platform fails that
+/// journey there rather than quietly writing into the operator's store.
+pub const STATE_HOME_ENV: &str = if cfg!(windows) {
+    "LOCALAPPDATA"
+} else {
+    "XDG_STATE_HOME"
+};
+
 /// One test's world: a scratch root with everything the binary reads.
 pub struct World {
     /// The scratch root, removed when the test finishes.
@@ -697,6 +720,23 @@ impl World {
             // operator's own sources are not this world's.
             .env(STORE_BINARY_ENV, onetaskgraph_binary())
             .env("XDG_CONFIG_HOME", self.root.join("xdg"))
+            // And the state directory, for the same reason one layer down:
+            // every dispatch the engine starts runs with oneharness history on,
+            // and where the store lives is the *repository's* say, never the
+            // engine's — so with nothing else configured oneharness resolves
+            // its platform default, `<state dir>/oneharness/history`, and
+            // that is the operator's own store unless this points it here. See
+            // [`history_store`](World::history_store) and [`STATE_HOME_ENV`].
+            .env(STATE_HOME_ENV, self.state_home())
+            // And nothing of the operator's own oneharness history settings: a
+            // journey inherits only what it sets, so an `ONEHARNESS_HISTORY_DIR`
+            // in the shell that ran the suite cannot land a launch's sessions in
+            // the operator's store, and a label set there cannot ride into what a
+            // journey asserts a launch composed.
+            .env_remove(onepipeline::agents::HISTORY_ENV)
+            .env_remove(onepipeline::agents::HISTORY_DIR_ENV)
+            .env_remove(onepipeline::agents::POINTER_FILE_ENV)
+            .env_remove(onepipeline::agents::LABELS_ENV)
             .env("ONETASKGRAPH_DEFAULT_SOURCES", STORE_SOURCE)
             .env(
                 format!(
@@ -1080,6 +1120,23 @@ impl World {
             args,
             self,
         )
+    }
+
+    /// The platform state directory every command in this world resolves —
+    /// [`STATE_HOME_ENV`], per world — so a process that resolves a default
+    /// under it writes here and never under the operator's `~/.local/state` or
+    /// `%LOCALAPPDATA%`.
+    pub fn state_home(&self) -> PathBuf {
+        self.root.join("xdg-state")
+    }
+
+    /// Where a oneharness in this world writes its history when nothing names
+    /// a store: the platform default under [`state_home`](World::state_home),
+    /// spelled as that library spells it. A journey about *where* the store is
+    /// reads a launch's pointer lines rather than this; this is what such a
+    /// journey holds the unconfigured case to.
+    pub fn history_store(&self) -> PathBuf {
+        self.state_home().join("oneharness").join("history")
     }
 
     /// The state root `onevcs` keeps everything under.
