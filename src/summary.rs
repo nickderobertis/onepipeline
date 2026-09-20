@@ -1092,6 +1092,7 @@ impl Maintainer {
             adoptions: 0,
             filters: crate::filter::Filters::default(),
             bus_config: Default::default(),
+            maintenance_config: None,
             envelope_reviewer_bar: Default::default(),
         })
     }
@@ -1214,6 +1215,7 @@ mod tests {
             adoptions: 0,
             filters: crate::filter::Filters::default(),
             bus_config: Default::default(),
+            maintenance_config: None,
             envelope_reviewer_bar: Default::default(),
         };
         record.driven_by_this_process();

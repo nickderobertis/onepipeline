@@ -41,15 +41,16 @@ pub const DETAILED_PROFILE: &str = "detailed";
 
 /// The launch-config schema version this build **writes**.
 ///
-/// **8** since a launch names the command run before every node dispatch to
-/// refresh that child's environment: `dispatch_env_hook` and
-/// `dispatch_env_hook_timeout` are keys versions 1 to 7 never had, so a document
-/// carrying one is a different document and says so. **7** declared the
+/// **9** since a launch names the pool-maintenance schedule its idle driver
+/// sweeps on: `maintenance_config` is a key versions 1 to 8 never had, so a
+/// document carrying it is a different document and says so. **8** named the
+/// command run before every node dispatch to refresh that child's environment:
+/// `dispatch_env_hook` and `dispatch_env_hook_timeout`. **7** declared the
 /// `onemessagebus` configuration a run's channel is kept under and the bar its
 /// envelope reviewer judges against — `bus_config` and `envelope_reviewer_bar` —
 /// and **6** the commands a run fires when it ends — `success_hook`,
 /// `failure_hook` and `hook_timeout`.
-pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 8;
+pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 9;
 
 /// Every launch-config version this build **reads**, newest first.
 ///
@@ -60,12 +61,13 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 8;
 /// nothing about validating a node, a version-3 one says nothing about
 /// reviewing an envelope, a version-4 one says nothing about the write-back's
 /// budget, a version-5 one says nothing about a run-end hook, a version-6 one
-/// says nothing about the bus or a reviewer's bar, and a version-7 one says
-/// nothing about a dispatch-env hook, which is what a launch naming none of them
-/// means — and naming a later key there is refused by that field's name**,
-/// exactly as a key no version ever had is.
-pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 8] =
-    [LAUNCH_CONFIG_SCHEMA_VERSION, 7, 6, 5, 4, 3, 2, 1];
+/// says nothing about the bus or a reviewer's bar, a version-7 one says nothing
+/// about a dispatch-env hook, and a version-8 one says nothing about a
+/// maintenance schedule, which is what a launch naming none of them means — and
+/// naming a later key there is refused by that field's name**, exactly as a key
+/// no version ever had is.
+pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 9] =
+    [LAUNCH_CONFIG_SCHEMA_VERSION, 8, 7, 6, 5, 4, 3, 2, 1];
 
 /// Each key younger than the schema itself: the version it arrived at, and
 /// whether a blank value is refused.
@@ -91,7 +93,9 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 8] =
 /// blank hook as this launch saying it has none, so `driver::start` reads it the
 /// way it reads a blank drafting graph. Their timeout is a number, and a blank
 /// number is the half-written decision the budget's is. The dispatch-env hook
-/// and its timeout are read on exactly those two terms.
+/// and its timeout are read on exactly those two terms, and so is the
+/// maintenance schedule: the contract states a blank value, flag or key, as this
+/// launch saying it has none.
 const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
     ("pr_author_graph", 2, BlankValue::Kept),
     ("node_validator", 3, BlankValue::Refused),
@@ -104,6 +108,7 @@ const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
     ("bus_config", 7, BlankValue::Refused),
     ("dispatch_env_hook", 8, BlankValue::Kept),
     (DISPATCH_ENV_HOOK_TIMEOUT_KEY, 8, BlankValue::Refused),
+    (crate::maintenance::KEY, 9, BlankValue::Kept),
 ];
 
 /// The launch-config key naming the write-back's per-item budget, spelled once
@@ -461,6 +466,21 @@ pub struct LaunchConfig {
         deserialize_with = "dispatch_env_hook_timeout"
     )]
     pub dispatch_env_hook_timeout: Option<NonZeroU64>,
+    /// The pool-maintenance schedule this launch's idle driver sweeps on, if
+    /// any.
+    ///
+    /// The eighth launch-level decision, written down beside a plan for the
+    /// reason the others are: how often a host's warm worktrees are kept up is
+    /// a property of that host rather than of one launch. `--maintenance-config`
+    /// spells the same thing inline and overrides this.
+    ///
+    /// A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may
+    /// not carry one. Blank is kept as written and read at the launch as naming
+    /// none, as the hooks are. Omitted when absent, so a config that names no
+    /// schedule round-trips as the file wrote it.
+    // llmlint: ignore[invalid_states_unrepresentable] a path spelled as the launch config document wrote it, exactly as `bus_config` beside it is: resolved against the document's own directory at the launch and read there, where a document this build does not accept is refused naming its key. It is a public field of the type `docs/contract.md`'s launch config names, and a path newtype would be a public item that contract never promised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance_config: Option<String>,
 }
 
 impl Default for LaunchConfig {
@@ -479,6 +499,7 @@ impl Default for LaunchConfig {
             bus_config: None,
             dispatch_env_hook: None,
             dispatch_env_hook_timeout: None,
+            maintenance_config: None,
         }
     }
 }
@@ -522,7 +543,7 @@ impl LaunchConfig {
         // request nobody drafted a body for, one who wrote a validator would
         // find it out from a node nothing checked, and one who wrote a budget
         // would find it out from a settlement that never reached the board.
-        let carried: [(&str, Carried); 11] = [
+        let carried: [(&str, Carried); 12] = [
             (
                 "pr_author_graph",
                 Carried::text(config.pr_author_graph.as_deref()),
@@ -574,6 +595,10 @@ impl LaunchConfig {
                 config
                     .dispatch_env_hook_timeout
                     .map_or(Carried::Absent, |_| Carried::Named),
+            ),
+            (
+                crate::maintenance::KEY,
+                Carried::text(config.maintenance_config.as_deref()),
             ),
         ];
         for (key, value) in carried {
@@ -756,11 +781,12 @@ mod tests {
     /// without anyone deciding to move it. The earlier ones stay checked in for
     /// the half a single golden cannot pin — that a config written before the
     /// current version is still a document this build reads.
-    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v8.json");
+    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v9.json");
 
     /// The same document as each earlier version wrote it: the block it had, and
     /// no key that version never had, newest first.
-    const GOLDEN_EARLIER: [(u32, &str); 7] = [
+    const GOLDEN_EARLIER: [(u32, &str); 8] = [
+        (8, include_str!("../tests/golden/launch-config-v8.json")),
         (7, include_str!("../tests/golden/launch-config-v7.json")),
         (6, include_str!("../tests/golden/launch-config-v6.json")),
         (5, include_str!("../tests/golden/launch-config-v5.json")),
@@ -852,6 +878,7 @@ mod tests {
             bus_config: Some("./onemessagebus.yaml".to_string()),
             dispatch_env_hook: Some("./scripts/dispatch-env.sh".to_string()),
             dispatch_env_hook_timeout: NonZeroU64::new(60),
+            maintenance_config: Some("./maintenance.yml".to_string()),
         }
     }
 
@@ -900,8 +927,9 @@ mod tests {
                     envelope_reviewer: (version >= 4)
                         .then(|| "./scripts/review-envelope.sh".to_string()),
                     // Version 5 declared the write-back's budget, version 6 the
-                    // run-end hooks, version 7 the bus and a reviewer's bar, and
-                    // none of them the dispatch-env hook.
+                    // run-end hooks, version 7 the bus and a reviewer's bar,
+                    // version 8 the dispatch-env hook, and none of them the
+                    // maintenance schedule.
                     writeback_item_budget: NonZeroU64::new(10).filter(|_| version >= 5),
                     success_hook: (version >= 6).then(|| "./scripts/follow-up.sh".to_string()),
                     failure_hook: (version >= 6).then(|| "./scripts/report-failure.sh".to_string()),
@@ -909,8 +937,10 @@ mod tests {
                     envelope_reviewer_bar: (version >= 7)
                         .then(|| "./scripts/reviewer-bar.sh".to_string()),
                     bus_config: (version >= 7).then(|| "./onemessagebus.yaml".to_string()),
-                    dispatch_env_hook: None,
-                    dispatch_env_hook_timeout: None,
+                    dispatch_env_hook: (version >= 8)
+                        .then(|| "./scripts/dispatch-env.sh".to_string()),
+                    dispatch_env_hook_timeout: NonZeroU64::new(60).filter(|_| version >= 8),
+                    maintenance_config: None,
                 }
             );
             assert!(

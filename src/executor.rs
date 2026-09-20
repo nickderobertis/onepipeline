@@ -665,9 +665,34 @@ impl DispatchHandle for LocalDispatch {
 
 /// This host's one-minute load average, where it can be read.
 fn load_average() -> Option<f64> {
+    if let Some(stated) = stated_load_average() {
+        return Some(stated);
+    }
     let text = std::fs::read_to_string("/proc/loadavg").ok()?;
     text.split_whitespace()
         .next()?
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+/// The environment variable stating the one-minute load average this process
+/// reads in place of the host's.
+///
+/// `/proc/loadavg` is the host's whole load, which is not this process's
+/// measure everywhere it runs: a container reads its host's load beside its own
+/// cgroup's parallelism, and a suite driving several runs at once on one machine
+/// reads its own neighbours as a host with no room. Where the operator knows
+/// better, this says so; a value that is not a finite, non-negative number is
+/// ignored and the host is read.
+pub const LOAD1_ENV: &str = "ONEPIPELINE_LOAD1";
+
+/// The load average the environment states, where it states one this build
+/// can read.
+fn stated_load_average() -> Option<f64> {
+    std::env::var(LOAD1_ENV)
+        .ok()?
+        .trim()
         .parse::<f64>()
         .ok()
         .filter(|value| value.is_finite() && *value >= 0.0)
@@ -704,6 +729,28 @@ mod tests {
             "{report:?}"
         );
         assert!(report.mem_free_bytes > 0, "{report:?}");
+    }
+
+    /// A stated load average stands in for the host's, and one this build
+    /// cannot read is ignored rather than read as a host with no load.
+    #[test]
+    fn a_stated_load_average_stands_in_for_the_hosts_and_an_unreadable_one_is_ignored() {
+        let _held = crate::vcs::scratch_home_held();
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        std::env::set_var(LOAD1_ENV, "0");
+        let still = LocalExecutor.capacity();
+        assert_eq!(still.load1, 0.0);
+        assert_eq!(still.slots_free as usize, cores);
+        std::env::set_var(LOAD1_ENV, cores.to_string());
+        assert_eq!(LocalExecutor.capacity().slots_free, 0);
+        for unreadable in ["", "busy", "-1", "NaN", "inf"] {
+            std::env::set_var(LOAD1_ENV, unreadable);
+            assert_eq!(stated_load_average(), None, "{LOAD1_ENV}={unreadable:?}");
+            let host = LocalExecutor.capacity();
+            assert!(host.load1.is_finite() && host.load1 >= 0.0, "{host:?}");
+        }
+        std::env::remove_var(LOAD1_ENV);
+        assert_eq!(stated_load_average(), None);
     }
 
     #[test]

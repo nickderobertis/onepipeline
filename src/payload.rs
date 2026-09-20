@@ -815,6 +815,37 @@ pub(crate) struct RunHookWithheld {
     /// The settlement word the run was left under.
     pub(crate) settlement: WithheldSettlementWord,
 }
+
+/// `pool-maintenance`: one sweep of the schedule that did something.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct PoolMaintenance {
+    /// When the sweep started, RFC3339.
+    pub(crate) started_at: String,
+    /// Every identity the sweep records: one whose slot ran, one another run had
+    /// claimed, or one that failed.
+    pub(crate) identities: Vec<MaintainedIdentity>,
+    /// Why the host's identities could not be enumerated, where they could not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+}
+
+/// One identity of a `pool-maintenance` record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct MaintainedIdentity {
+    /// The identity key.
+    pub(crate) identity: String,
+    /// The cadence it was maintained on, as the schedule spells a span.
+    pub(crate) every: String,
+    /// The sibling's own `IdentityOutcome`, as `onevcs` serializes it: `{"claimed":
+    /// {"by_pid": N}}`, or `{"slots": [{"number": N, "outcome": ...}, ...]}` with
+    /// each slot's outcome spelled by that library. Absent where `error` stands
+    /// in for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) outcome: Option<Value>,
+    /// Why the identity could not be maintained, where it could not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+}
 // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// Declares each payload as the bus [`Message`] its kind carries, the total map
@@ -896,6 +927,7 @@ payload_messages! {
     RunHookFired => "run-hook-fired";
     RunHookFinished => "run-hook-finished";
     RunHookWithheld => "run-hook-withheld";
+    PoolMaintenance => "pool-maintenance";
 }
 
 #[cfg(test)]

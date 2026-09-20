@@ -1,0 +1,847 @@
+//! The pool-maintenance schedule, driven through the real linked `onevcs`.
+//!
+//! Every journey here runs over a scratch state root holding a pooled identity
+//! with a real idle slot — cut by a real session opened and closed through the
+//! linked library — and a `workspaces.yml` naming a `maintain` command that
+//! writes a marker into the slot's worktree. What is asserted is the sibling's
+//! own account, read through its own commands: `onevcs pool status` for the
+//! stamp the schedule is a function of, the marker for what ran, and the
+//! `onevcs repos` calls the engine makes for how many sweeps a driver made.
+//! Nothing stands in for `onevcs`; the recording executable runs the real one.
+//!
+// llmlint: ignore-file[e2e_not_mocked] the sibling under test is *not* substituted:
+// `onevcs` is the library this crate links, and the executable the engine spawns to
+// list identities is the real one, wrapped only to record that it was asked.
+// `oneagentgraph` is still the double, because what these journeys are about is the
+// idle capacity beside a dispatch and a real agent turn is a paid one.
+
+use std::path::{Path, PathBuf};
+
+use serde_json::{json, Value};
+
+use crate::harness::{agent, onevcs_binary, plan_of, repo_file, Run, World, REFUSED, USAGE_ERROR};
+
+/// The identity the world's `service` checkout registers as.
+const SERVICE_IDENTITY: &str = "github.com/owner/service";
+
+/// The environment the recording `onevcs` reads its two paths from.
+const CALLS_ENV: &str = "ONEPIPELINE_E2E_ONEVCS_CALLS";
+const REAL_ENV: &str = "ONEPIPELINE_E2E_ONEVCS_REAL";
+
+/// The pace the paced journeys run under: every second, so a second sweep is
+/// something a journey can wait for rather than a thing that happens next week.
+const FAST_PACE: &str = "1";
+
+/// A world whose driver names its pool-maintenance schedule and whose `onevcs`
+/// records every call the engine makes to it.
+///
+/// `pace` is [`onepipeline::maintenance::PACE_ENV`], or `None` for the shipped
+/// default.
+fn pooled_world(name: &str, pace: Option<&str>) -> World {
+    let world = World::new(name);
+    let calls = calls_log(&world);
+    let recorder = interpreted_script(&world, "onevcs_recording");
+    // Held still: the host's own load is its neighbours' — every other journey
+    // this suite runs at once — and a driver reading it as no free slot withholds
+    // exactly what these journeys exist to see.
+    let mut world = world
+        .with_env("ONEPIPELINE_ONEVCS_BIN", &recorder)
+        .with_env(CALLS_ENV, &calls.to_string_lossy())
+        .with_env(REAL_ENV, &onevcs_binary().to_string_lossy())
+        .with_env(onepipeline::executor::LOAD1_ENV, "0");
+    if let Some(pace) = pace {
+        world = world.with_env(onepipeline::maintenance::PACE_ENV, pace);
+    }
+    world
+}
+
+/// Where the recording `onevcs` writes one line per call.
+fn calls_log(world: &World) -> PathBuf {
+    world.root.join("onevcs-calls.log")
+}
+
+/// How many times the engine asked `onevcs repos` — one per sweep.
+fn sweeps(world: &World) -> usize {
+    std::fs::read_to_string(calls_log(world))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.trim() == "repos")
+        .count()
+}
+
+/// One of this suite's script fixtures, written into the world's scratch as the
+/// executable this platform runs it as.
+///
+/// A `.bat` on Windows, with CRLF for the reason `harness::write_hook_script`
+/// gives; the POSIX script everywhere else, marked executable.
+fn interpreted_script(world: &World, stem: &str) -> String {
+    #[cfg(windows)]
+    {
+        let path = world.root.join(format!("{stem}.bat"));
+        let body = std::fs::read_to_string(repo_file(&format!("tests/e2e/{stem}.bat")))
+            .expect("the fixture ships");
+        std::fs::write(&path, body.replace('\n', "\r\n")).expect("the script is written");
+        path.to_string_lossy().into_owned()
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = world.root.join(format!("{stem}.sh"));
+        std::fs::copy(repo_file(&format!("tests/e2e/{stem}.sh")), &path)
+            .expect("the fixture ships");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("the script is executable");
+        path.to_string_lossy().into_owned()
+    }
+}
+
+/// Size the host's pools and name the `service` identity's `maintain` command:
+/// one warm slot, no overflow, and the marker-writing script — holding on
+/// `hold` where a journey names one — under a generous bound. Every other
+/// identity takes the shipped default, which names no maintenance at all.
+fn pooled_with_maintenance(world: &World, hold: Option<&Path>) {
+    let maintain = interpreted_script(world, "maintain");
+    let mut command = vec![maintain];
+    if let Some(hold) = hold {
+        command.push(hold.to_string_lossy().into_owned());
+    }
+    let command = serde_json::to_string(&command).expect("an argv serializes");
+    std::fs::write(
+        world.onevcs_home().join("workspaces.yml"),
+        format!(
+            "version: 1\nrules:\n  - match: {{host: github.com, owner: owner, name: service}}\n    \
+             pool: 1\n    overflow: 0\n    maintain:\n      command: {command}\n      timeout: \
+             120s\n"
+        ),
+    )
+    .expect("the workspaces file is written");
+}
+
+/// Cut the identity's one slot: a real session opened and closed through the
+/// linked library, which is the only thing that places a slot under a pool.
+fn cut_a_slot(world: &World, checkout: &Path) {
+    world.on_onevcs(|| {
+        let vcs = onevcs::Providers::real().vcs;
+        let session = vcs
+            .open_session(onevcs::SessionRequest {
+                repo: checkout.to_string_lossy().into_owned(),
+                branch: None,
+                base: None,
+                execution_checkout: None,
+                pool: None,
+                overflow: None,
+            })
+            .expect("a session opens on the pooled identity");
+        vcs.close_session(&session.token)
+            .expect("the session closes and hands the slot back");
+    });
+}
+
+/// A schedule file with the given default `every`, and the rules given verbatim.
+fn schedule(world: &World, name: &str, every: &str, rules: &str) -> String {
+    let path = world.root.join(format!("{name}.yml"));
+    std::fs::write(
+        &path,
+        format!("version: 1\ndefault:\n  every: {every}\n{rules}"),
+    )
+    .expect("the schedule is written");
+    path.to_string_lossy().into_owned()
+}
+
+/// The sibling's own account of the identity's pool.
+fn pool_status(world: &World) -> Value {
+    let output = world
+        .cmd_on(&onevcs_binary(), &["pool", "status", "service", "--json"])
+        .output()
+        .expect("onevcs runs");
+    assert!(
+        output.status.success(),
+        "onevcs pool status refused: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("the status is JSON")
+}
+
+/// The one slot, as the sibling reports it.
+fn the_slot(world: &World) -> Value {
+    let status = pool_status(world);
+    let slots = status["slots"].as_array().expect("slots");
+    assert_eq!(slots.len(), 1, "{status}");
+    slots[0].clone()
+}
+
+/// The marker the maintain command leaves in the slot's worktree, one line per
+/// run of it.
+fn marker_lines(world: &World) -> usize {
+    let slot = the_slot(world);
+    let worktree = Path::new(slot["path"].as_str().expect("a slot path")).join("worktree");
+    std::fs::read_to_string(worktree.join("maintained.log"))
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+/// Every `pool-maintenance` record one run wrote.
+fn records(world: &World, run: &str) -> Vec<Value> {
+    world.events_of(run, "pool-maintenance")
+}
+
+/// Whether the driver's marker of a live sweep is on disk.
+fn sweeping(world: &World, run: &str) -> bool {
+    world.run_file(run, "maintenance.json").is_file()
+}
+
+/// Launch a run detached whose one direct node holds until released, on a
+/// plan at `concurrency`, with the extra flags given.
+fn held_run(world: &World, name: &str, concurrency: u64, extra: &[&str]) -> Run {
+    world.script(&format!("{name}-build.wait"), "hold");
+    let mut plan = plan_of(name, vec![agent(&format!("{name}-build"), &[])]);
+    plan["concurrency"] = json!(concurrency);
+    let path = world.plan(name, &plan);
+    let mut args = vec!["start", path.as_str(), "--detach"];
+    args.extend_from_slice(extra);
+    world.run(&args)
+}
+
+/// Let a held run's node go, and wait for the run to settle.
+fn release(world: &World, name: &str) {
+    world.release(&format!("{name}-build.go"));
+    world.until("the released run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+}
+
+/// Wait until the engine has made at least `n` sweeps.
+fn until_sweeps(world: &World, n: usize) {
+    world.until(
+        &format!("the driver to have swept the registry {n} time(s)"),
+        |world| sweeps(world) >= n,
+    );
+}
+
+/// The schedule is persistent rather than per run, and the driver's idle
+/// capacity is what pays for it.
+///
+/// One slot, due because it has never been maintained. An idle driver — one
+/// dispatch held, on a plan with room for two — sweeps on the schedule: the
+/// marker appears, the sibling's `pool status` carries `last_maintained`, the
+/// run's journal carries one `pool-maintenance` record with the slot's outcome,
+/// and `status` names the sweep while its thread is live. Further idle ticks
+/// inside `every` sweep the registry again — the sibling's call record says so
+/// — and run nothing and write nothing. A fresh driver launched inside `every`
+/// of the recorded stamp runs nothing and writes nothing, and one launched after
+/// `every` has elapsed maintains the slot again: the only state is the slot's.
+#[test]
+fn an_idle_driver_maintains_a_due_slot_once_and_a_fresh_driver_inside_every_runs_nothing() {
+    let world = pooled_world("maintenance-idle", Some(FAST_PACE));
+    let repo = world.repository("local-direct", &[]);
+    let hold = world.root.join("maintain.go");
+    pooled_with_maintenance(&world, Some(&hold));
+    cut_a_slot(&world, &repo.checkout);
+    assert_eq!(the_slot(&world)["last_maintained"], Value::Null);
+    let thirty = schedule(&world, "thirty", "30s", "");
+
+    // The first driver: idle beside its one held dispatch.
+    held_run(&world, "first", 2, &["--maintenance-config", &thirty]).exited(0);
+    let launch = world.run_json("first", "launch.json");
+    assert_eq!(launch["maintenance_config"]["version"], 1, "{launch}");
+    assert_eq!(
+        launch["maintenance_config"]["default"]["every"], "30s",
+        "{launch}"
+    );
+    assert!(
+        launch["maintenance_config"].get("rules").is_none(),
+        "{launch}"
+    );
+
+    // The sweep starts, and its command holds: `status` names it, and the
+    // sibling reports the slot claimed for maintenance.
+    world.until("the driver's sweep to be live", |world| {
+        sweeping(world, "first")
+    });
+    world.until("the sibling to report the slot maintaining", |world| {
+        the_slot(world)["state"]["state"] == "maintaining"
+    });
+    world
+        .run(&["status", "first"])
+        .exited(0)
+        .out_has("pool maintenance: a sweep of the host's worktree pools is in progress");
+    assert!(records(&world, "first").is_empty(), "{}", world.dump());
+
+    // Released, the command writes its marker and the sweep ends with one
+    // record carrying the slot's outcome.
+    std::fs::write(&hold, "go").expect("the hold is released");
+    world.until("the maintenance record", |world| {
+        !records(world, "first").is_empty()
+    });
+    let record = &records(&world, "first")[0];
+    let identities = record["payload"]["identities"]
+        .as_array()
+        .expect("identities");
+    assert_eq!(identities.len(), 1, "{record}");
+    assert_eq!(identities[0]["identity"], SERVICE_IDENTITY, "{record}");
+    assert_eq!(identities[0]["every"], "30s", "{record}");
+    let slots = identities[0]["outcome"]["slots"].as_array().expect("slots");
+    assert_eq!(slots.len(), 1, "{record}");
+    assert_eq!(slots[0]["number"], 1, "{record}");
+    assert_eq!(
+        slots[0]["outcome"]["ran"]["outcome"], "succeeded",
+        "{record}"
+    );
+    assert!(
+        slots[0]["outcome"]["ran"]["duration_ms"].is_u64(),
+        "{record}"
+    );
+    assert!(record["payload"].get("error").is_none(), "{record}");
+    assert_eq!(marker_lines(&world), 1);
+    let slot = the_slot(&world);
+    assert!(slot["last_maintained"].is_string(), "{slot}");
+    assert_eq!(slot["last_outcome"], "succeeded", "{slot}");
+    assert_eq!(slot["state"]["state"], "idle", "{slot}");
+    world.until("the sweep's marker to be taken back", |world| {
+        !sweeping(world, "first")
+    });
+    world
+        .run(&["status", "first"])
+        .exited(0)
+        .out_lacks("pool maintenance");
+    world
+        .run(&["results", "first"])
+        .exited(0)
+        .out_has("pool maintenance: last sweep that did something started")
+        .out_has(&format!(
+            "{SERVICE_IDENTITY} (every 30s): slot 1 ran — succeeded in"
+        ));
+
+    // Further idle ticks inside `every`: the registry is swept again, and the
+    // sibling answers not-due — nothing runs, nothing is written.
+    let swept = sweeps(&world);
+    until_sweeps(&world, swept + 2);
+    assert_eq!(marker_lines(&world), 1);
+    assert_eq!(records(&world, "first").len(), 1, "{}", world.dump());
+    let stamped = the_slot(&world)["last_maintained"].clone();
+    release(&world, "first");
+    assert_eq!(records(&world, "first").len(), 1, "{}", world.dump());
+    world
+        .run(&["results", "first"])
+        .exited(0)
+        .out_has(&format!("{SERVICE_IDENTITY} (every 30s): slot 1 ran"));
+
+    // A fresh driver inside `every` of the recorded stamp: it sweeps, and the
+    // slot's own stamp says not due.
+    let hour = schedule(&world, "hour", "1h", "");
+    held_run(&world, "second", 2, &["--maintenance-config", &hour]).exited(0);
+    let swept = sweeps(&world);
+    until_sweeps(&world, swept + 2);
+    assert!(records(&world, "second").is_empty(), "{}", world.dump());
+    assert_eq!(marker_lines(&world), 1);
+    assert_eq!(the_slot(&world)["last_maintained"], stamped);
+    release(&world, "second");
+    assert!(records(&world, "second").is_empty(), "{}", world.dump());
+
+    // And one launched after `every` has elapsed maintains the slot again.
+    let second = schedule(&world, "second", "1s", "");
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    held_run(&world, "third", 2, &["--maintenance-config", &second]).exited(0);
+    world.until("the third driver's record", |world| {
+        !records(world, "third").is_empty()
+    });
+    assert_eq!(marker_lines(&world), 2);
+    assert_ne!(the_slot(&world)["last_maintained"], stamped);
+    release(&world, "third");
+}
+
+/// Two drivers idle at once on one state root maintain the slot once between
+/// them: the second meets the first inside the identity and is answered
+/// `claimed`, writing no record of a run.
+#[test]
+fn two_drivers_idle_at_once_maintain_the_slot_once_between_them() {
+    let world = pooled_world("maintenance-two", Some(FAST_PACE));
+    let repo = world.repository("local-direct", &[]);
+    let hold = world.root.join("maintain.go");
+    pooled_with_maintenance(&world, Some(&hold));
+    cut_a_slot(&world, &repo.checkout);
+    let thirty = schedule(&world, "thirty", "30s", "");
+
+    held_run(&world, "one", 2, &["--maintenance-config", &thirty]).exited(0);
+    world.until("the first driver to claim the slot", |world| {
+        the_slot(world)["state"]["state"] == "maintaining"
+    });
+    held_run(&world, "two", 2, &["--maintenance-config", &thirty]).exited(0);
+    world.until("the second driver to be answered claimed", |world| {
+        !records(world, "two").is_empty()
+    });
+    let claimed = &records(&world, "two")[0];
+    let identities = claimed["payload"]["identities"]
+        .as_array()
+        .expect("identities");
+    assert_eq!(identities.len(), 1, "{claimed}");
+    assert_eq!(identities[0]["identity"], SERVICE_IDENTITY, "{claimed}");
+    assert!(
+        identities[0]["outcome"]["claimed"]["by_pid"].is_u64(),
+        "{claimed}"
+    );
+    assert_eq!(marker_lines(&world), 0);
+
+    std::fs::write(&hold, "go").expect("the hold is released");
+    world.until("the first driver's record", |world| {
+        !records(world, "one").is_empty()
+    });
+    let ran = &records(&world, "one")[0];
+    assert_eq!(
+        ran["payload"]["identities"][0]["outcome"]["slots"][0]["outcome"]["ran"]["outcome"],
+        "succeeded",
+        "{ran}"
+    );
+    assert_eq!(marker_lines(&world), 1);
+    world
+        .run(&["results", "two"])
+        .exited(0)
+        .out_has("claimed — another pool maintain (pid");
+
+    // Every further sweep of either driver is answered not-due.
+    let swept = sweeps(&world);
+    until_sweeps(&world, swept + 3);
+    assert_eq!(marker_lines(&world), 1);
+    assert_eq!(records(&world, "one").len(), 1, "{}", world.dump());
+    assert_eq!(records(&world, "two").len(), 1, "{}", world.dump());
+    release(&world, "one");
+    release(&world, "two");
+}
+
+/// Maintenance is withheld — no thread, no process, no record — while a pass is
+/// not idle: the run at its own concurrency ceiling, or the local executor
+/// reporting no free slot. And a launch naming no schedule sweeps nothing,
+/// whatever its capacity.
+#[test]
+fn maintenance_is_withheld_at_the_ceiling_without_a_free_slot_and_under_no_schedule() {
+    let world = pooled_world("maintenance-withheld", Some(FAST_PACE));
+    let repo = world.repository("local-direct", &[]);
+    pooled_with_maintenance(&world, None);
+    cut_a_slot(&world, &repo.checkout);
+    let thirty = schedule(&world, "thirty", "30s", "");
+
+    // Long enough for several paces to have come and gone.
+    let paces = std::time::Duration::from_secs(4);
+
+    // At the ceiling: one dispatch on a plan that admits one.
+    held_run(&world, "ceiling", 1, &["--maintenance-config", &thirty]).exited(0);
+    world.until("the dispatch", |world| {
+        !world.events_of("ceiling", "node-dispatched").is_empty()
+    });
+    std::thread::sleep(paces);
+    assert_eq!(
+        sweeps(&world),
+        0,
+        "a driver at its ceiling swept the registry"
+    );
+    assert!(!sweeping(&world, "ceiling"));
+    assert_eq!(marker_lines(&world), 0);
+    release(&world, "ceiling");
+    assert_eq!(sweeps(&world), 0);
+    assert!(records(&world, "ceiling").is_empty(), "{}", world.dump());
+
+    // No free slot: a load average of every core the host has, which the
+    // executor reports as no slot free — the dispatch still falls back onto the
+    // local executor, and the sweep does not.
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let mut full = world.as_session(&world.session);
+    full.environment.push((
+        onepipeline::executor::LOAD1_ENV.to_owned(),
+        cores.to_string(),
+    ));
+    held_run(&full, "full", 2, &["--maintenance-config", &thirty]).exited(0);
+    full.until("the dispatch", |world| {
+        !world.events_of("full", "node-dispatched").is_empty()
+    });
+    std::thread::sleep(paces);
+    assert_eq!(
+        sweeps(&full),
+        0,
+        "a driver with no free slot swept the registry"
+    );
+    assert!(!sweeping(&full, "full"));
+    assert_eq!(marker_lines(&full), 0);
+    release(&full, "full");
+    assert!(records(&full, "full").is_empty(), "{}", full.dump());
+
+    // No schedule: nothing, whatever the capacity.
+    held_run(&world, "unscheduled", 2, &[]).exited(0);
+    let launch = world.run_json("unscheduled", "launch.json");
+    assert!(launch.get("maintenance_config").is_none(), "{launch}");
+    world.until("the dispatch", |world| {
+        !world.events_of("unscheduled", "node-dispatched").is_empty()
+    });
+    std::thread::sleep(paces);
+    assert_eq!(
+        sweeps(&world),
+        0,
+        "a driver naming no schedule swept the registry"
+    );
+    assert!(!sweeping(&world, "unscheduled"));
+    assert_eq!(marker_lines(&world), 0);
+    release(&world, "unscheduled");
+    assert!(
+        records(&world, "unscheduled").is_empty(),
+        "{}",
+        world.dump()
+    );
+    world
+        .run(&["results", "unscheduled"])
+        .exited(0)
+        .out_lacks("pool maintenance");
+    assert_eq!(the_slot(&world)["last_maintained"], Value::Null);
+}
+
+/// Successive sweeps respect the driver's in-memory pace: with every identity
+/// answering not-due the first sweep finishes at once, and the idle passes that
+/// follow inside the shipped pace start no second thread and sweep the registry
+/// no second time — read off the driver's own pass counts and the sibling's
+/// call record rather than a clock.
+///
+/// Also the identity that names no maintain command: it is visited inside the
+/// one thread and skipped, with no process and no record for it.
+#[test]
+fn idle_passes_inside_the_pace_sweep_no_second_time_and_an_unmaintained_identity_is_skipped() {
+    let world =
+        pooled_world("maintenance-pace", None).with_env(crate::harness::LOOP_STATS_ENV, "1");
+    let repo = world.repository("local-direct", &[]);
+    let other = world.extra_repository("other");
+    pooled_with_maintenance(&world, None);
+    cut_a_slot(&world, &repo.checkout);
+    // Stamped by the sibling's own verb, so the driver's first sweep finds every
+    // slot not due.
+    let stamped = world
+        .cmd_on(&onevcs_binary(), &["pool", "maintain", "service"])
+        .output()
+        .expect("onevcs runs");
+    assert!(
+        stamped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stamped.stderr)
+    );
+    assert_eq!(marker_lines(&world), 1);
+    let _ = other;
+    let hour = schedule(&world, "hour", "1h", "");
+
+    held_run(&world, "paced", 2, &["--maintenance-config", &hour]).exited(0);
+    until_sweeps(&world, 1);
+    world.until("the sweep to end", |world| !sweeping(world, "paced"));
+    crate::harness::reporting(&world, "paced");
+    let before = crate::harness::counts(&world, "paced");
+
+    // Idle passes, each provoked by a channel command the loop consumes and
+    // then sits idle after.
+    for nth in 0..3 {
+        world
+            .run_with_stdin(
+                &["reply", "paced"],
+                &json!({"version": 2, "commands": [
+                    {"op": "note", "id": "paced-build", "addressee": "worker",
+                     "text": format!("idle pass {nth}"), "deliver": "next"}
+                ]})
+                .to_string(),
+            )
+            .exited(0);
+        world.until("the loop to pass again", |world| {
+            crate::harness::counts(world, "paced").since(before).passes > nth
+        });
+    }
+    assert!(
+        crate::harness::counts(&world, "paced").since(before).passes >= 3,
+        "{:?}",
+        crate::harness::counts(&world, "paced")
+    );
+    assert_eq!(
+        sweeps(&world),
+        1,
+        "the idle passes inside the pace swept again"
+    );
+    assert!(records(&world, "paced").is_empty(), "{}", world.dump());
+    assert_eq!(marker_lines(&world), 1);
+    release(&world, "paced");
+    assert_eq!(sweeps(&world), 1);
+    assert!(records(&world, "paced").is_empty(), "{}", world.dump());
+}
+
+/// A rule's `every` beats the default for the identity it matches, resolved
+/// through the linked sibling's matcher: a default measured in days and a rule
+/// of one second for `service` maintains the slot the rule names.
+#[test]
+fn a_rules_every_beats_the_default_for_the_identity_it_matches() {
+    let world = pooled_world("maintenance-rule", Some(FAST_PACE));
+    let repo = world.repository("local-direct", &[]);
+    pooled_with_maintenance(&world, None);
+    cut_a_slot(&world, &repo.checkout);
+    // Stamped now, so only a cadence shorter than the default reaches it.
+    let stamped = world
+        .cmd_on(&onevcs_binary(), &["pool", "maintain", "service"])
+        .output()
+        .expect("onevcs runs");
+    assert!(stamped.status.success());
+    assert_eq!(marker_lines(&world), 1);
+
+    // The default would never reach it; a rule for another identity says
+    // nothing about it; the rule that matches it does.
+    let ruled = schedule(
+        &world,
+        "ruled",
+        "7d",
+        "rules:\n  - match: {host: github.com, owner: owner, name: other}\n    every: 1s\n  - \
+         match: {host: github.com, owner: owner, name: service}\n    every: 1s\n",
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    held_run(&world, "ruled", 2, &["--maintenance-config", &ruled]).exited(0);
+    let launch = world.run_json("ruled", "launch.json");
+    assert_eq!(
+        launch["maintenance_config"]["rules"][1]["match"],
+        json!({"host": "github.com", "owner": "owner", "name": "service"}),
+        "{launch}"
+    );
+    world.until("the record", |world| !records(world, "ruled").is_empty());
+    let record = &records(&world, "ruled")[0];
+    assert_eq!(
+        record["payload"]["identities"][0]["every"], "1s",
+        "{record}"
+    );
+    assert_eq!(marker_lines(&world), 2);
+    release(&world, "ruled");
+
+    // And under the default alone the slot is left as it is.
+    let unruled = schedule(&world, "unruled", "7d", "");
+    held_run(&world, "unruled", 2, &["--maintenance-config", &unruled]).exited(0);
+    let swept = sweeps(&world);
+    until_sweeps(&world, swept + 2);
+    assert!(records(&world, "unruled").is_empty(), "{}", world.dump());
+    assert_eq!(marker_lines(&world), 2);
+    release(&world, "unruled");
+}
+
+/// The flag and the key: the flag beats the config even when blank, a blank key
+/// names none, the parsed document is retained and replayed by `adopt` — which
+/// takes no flag — and a document this build does not accept is refused before
+/// a run is minted, naming the key at fault.
+#[test]
+fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_before_a_run() {
+    let world = pooled_world("maintenance-launch", None);
+    let repo = world.repository("local-direct", &[]);
+    pooled_with_maintenance(&world, None);
+    cut_a_slot(&world, &repo.checkout);
+    let at = onepipeline::filter::LAUNCH_CONFIG_SCHEMA_VERSION;
+    let hour = schedule(&world, "hour", "1h", "");
+    let config = world.root.join("launch.yaml");
+    std::fs::write(
+        &config,
+        format!("schema_version: {at}\nmaintenance_config: {hour:?}\n"),
+    )
+    .expect("the config is written");
+    let config = config.to_string_lossy().into_owned();
+    let plan = |name: &str| world.plan(name, &plan_of(name, vec![agent("build", &[])]));
+
+    // A blank flag names none over the config's schedule.
+    let path = plan("blanked");
+    world
+        .run(&[
+            "start",
+            &path,
+            "--attach",
+            "--launch-config",
+            &config,
+            "--maintenance-config",
+            "",
+        ])
+        .exited(0)
+        .settled();
+    assert!(
+        world
+            .run_json("blanked", "launch.json")
+            .get("maintenance_config")
+            .is_none(),
+        "{}",
+        world.dump()
+    );
+
+    // The config alone names it, retained as the parsed document. This run is
+    // idle beside its one quick dispatch, so its driver sweeps — and, the run
+    // ending under it, closes out only once the sweep is joined and its record
+    // written: a driver closing out waits for the sweep it started.
+    let path = plan("configured");
+    world
+        .run(&["start", &path, "--attach", "--launch-config", &config])
+        .exited(0)
+        .settled();
+    let launch = world.run_json("configured", "launch.json");
+    assert_eq!(
+        launch["maintenance_config"],
+        json!({"version": 1, "default": {"every": "1h"}}),
+        "{launch}"
+    );
+    assert_eq!(sweeps(&world), 1, "{}", world.dump());
+    assert_eq!(records(&world, "configured").len(), 1, "{}", world.dump());
+    assert_eq!(marker_lines(&world), 1);
+    assert!(!sweeping(&world, "configured"));
+
+    // A blank key names none, as a blank flag does.
+    let blank = world.root.join("blank.yaml");
+    std::fs::write(
+        &blank,
+        format!("schema_version: {at}\nmaintenance_config: \"  \"\n"),
+    )
+    .expect("the config is written");
+    let path = plan("blankkey");
+    world
+        .run(&[
+            "start",
+            &path,
+            "--attach",
+            "--launch-config",
+            &blank.to_string_lossy(),
+        ])
+        .exited(0)
+        .settled();
+    assert!(world
+        .run_json("blankkey", "launch.json")
+        .get("maintenance_config")
+        .is_none());
+
+    // Refused before a run is minted, naming the key at fault, by either spelling.
+    let path = plan("refused");
+    let bad = |name: &str, body: &str| -> String {
+        let path = world.root.join(format!("{name}.yml"));
+        std::fs::write(&path, body).expect("the schedule is written");
+        path.to_string_lossy().into_owned()
+    };
+    for (document, names) in [
+        (
+            bad(
+                "unknown",
+                "version: 1\ndefault:\n  every: 7d\nat: \"03:00\"\n",
+            ),
+            "unknown field `at`",
+        ),
+        (
+            bad("versioned", "version: 2\ndefault:\n  every: 7d\n"),
+            "`version` is 2",
+        ),
+        (
+            bad(
+                "unmatched",
+                "version: 1\ndefault:\n  every: 7d\nrules:\n  - match: {}\n    every: 1d\n",
+            ),
+            "`match` names no field",
+        ),
+        (
+            bad("spanless", "version: 1\ndefault:\n  every: 7x\n"),
+            "`every`",
+        ),
+    ] {
+        world
+            .run_from(
+                &world.project,
+                &["start", &path, "--maintenance-config", &document],
+            )
+            .exited(REFUSED)
+            .err_has("--maintenance-config")
+            .err_has(names);
+        let keyed = world.root.join("keyed.yaml");
+        std::fs::write(
+            &keyed,
+            format!("schema_version: {at}\nmaintenance_config: {document:?}\n"),
+        )
+        .expect("the config is written");
+        world
+            .run_from(
+                &world.project,
+                &["start", &path, "--launch-config", &keyed.to_string_lossy()],
+            )
+            .exited(REFUSED)
+            .err_has("maintenance_config")
+            .err_has(names);
+    }
+    // And the key under every earlier schema version this build still reads,
+    // refused by name and pointed at the version that admits it.
+    for earlier in onepipeline::filter::LAUNCH_CONFIG_SCHEMA_VERSIONS_READ
+        .iter()
+        .filter(|version| **version < at)
+    {
+        let early = world.root.join(format!("early-{earlier}.yaml"));
+        std::fs::write(
+            &early,
+            format!("schema_version: {earlier}\nmaintenance_config: {hour:?}\n"),
+        )
+        .expect("the config is written");
+        world
+            .run_from(
+                &world.project,
+                &["start", &path, "--launch-config", &early.to_string_lossy()],
+            )
+            .exited(REFUSED)
+            .err_has(&format!(
+                "`maintenance_config` is a schema {at} key and this config declares \
+                 schema_version {earlier}"
+            ));
+    }
+    assert!(!world.run_file("refused", "launch.json").is_file());
+
+    // `adopt` takes no flag, and replays what the record retained: the adopting
+    // driver sweeps on the launch's schedule.
+    world
+        .run(&["adopt", "configured", "--maintenance-config", &hour])
+        .exited(USAGE_ERROR)
+        .err_has("--maintenance-config");
+    let path = world.plan(
+        "adopted",
+        &plan_of(
+            "adopted",
+            vec![
+                crate::harness::human("approve", &[]),
+                agent("build", &["approve"]),
+            ],
+        ),
+    );
+    let swept = sweeps(&world);
+    world
+        .run(&["start", &path, "--attach", "--launch-config", &config])
+        .settled();
+    assert_eq!(
+        sweeps(&world),
+        swept,
+        "a run paused on a human gate swept the registry"
+    );
+    world.run(&["attest", "adopted", "approve"]).exited(0);
+    world.script("build.wait", "hold");
+    let adopting = world
+        .cmd(&["adopt", "adopted"])
+        .spawn()
+        .expect("adopt starts");
+    until_sweeps(&world, swept + 1);
+    world.release("build.go");
+    crate::harness::ended(adopting);
+    assert_eq!(
+        world.run_json("adopted", "launch.json")["maintenance_config"]["default"]["every"],
+        "1h"
+    );
+}
+
+/// Both halves of each script fixture answer the same way: the verbs one
+/// platform runs are the verbs the other runs.
+#[test]
+fn both_halves_of_each_fixture_take_the_same_arguments() {
+    for (sh, bat, marks) in [
+        ("maintain.sh", "maintain.bat", ["maintained.log", "300"]),
+        (
+            "onevcs_recording.sh",
+            "onevcs_recording.bat",
+            [CALLS_ENV, REAL_ENV],
+        ),
+    ] {
+        let shell = std::fs::read_to_string(repo_file(&format!("tests/e2e/{sh}")))
+            .expect("the shell half ships");
+        let batch = std::fs::read_to_string(repo_file(&format!("tests/e2e/{bat}")))
+            .expect("the batch half ships");
+        for mark in marks {
+            assert!(shell.contains(mark), "{sh} no longer names {mark}");
+            assert!(batch.contains(mark), "{bat} no longer names {mark}");
+        }
+    }
+}

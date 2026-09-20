@@ -661,6 +661,26 @@ fn start(args: &StartArgs) -> Result<i32> {
         None => None,
     };
 
+    // The pool-maintenance schedule, by two rungs on the hooks' terms: the flag
+    // beats the config even when blank, and a blank rung names none. Read and
+    // checked here — before the run directory exists, so a schedule this run
+    // could not keep mints nothing — and resolved against the launch directory,
+    // as the bus configuration is.
+    let maintenance_config = match crate::hooks::named(
+        args.maintenance_config.as_deref(),
+        declared.maintenance_config.as_deref(),
+    ) {
+        Some(path) => Some(crate::maintenance::MaintenanceConfig::load(
+            if args.maintenance_config.is_some() {
+                crate::maintenance::FLAG
+            } else {
+                crate::maintenance::KEY
+            },
+            &launch_dir.join(path),
+        )?),
+        None => None,
+    };
+
     // The write-back's per-item budget, by the same three rungs. Every rung is *read*
     // rather than merely present: zero is no budget at all, and each rung refuses it by
     // its own spelling rather than falling through to the one below.
@@ -826,6 +846,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         adoptions: 0,
         filters,
         bus_config,
+        maintenance_config,
     };
     record.driven_by_this_process();
 
@@ -3308,6 +3329,7 @@ mod tests {
             adoptions: 0,
             filters: crate::filter::Filters::default(),
             bus_config: Default::default(),
+            maintenance_config: None,
             envelope_reviewer_bar: Default::default(),
         }
     }

@@ -1694,6 +1694,198 @@ fn the_workspace_placement_surface_is_what_the_divergence_record_names() {
     }
 }
 
+/// The pool-maintenance schedule this build takes is exactly what entry 83 records
+/// and the amended contract names.
+///
+/// The block is the source: the flag is asked of the parser, the key of the launch
+/// config at the version the block states and at none before it, the schedule of
+/// the public type — parsed through the sibling's own span and match, and
+/// round-tripping as written — the kind of the enum, and every environment name of
+/// the contract's own tokens. `tests/e2e/maintenance.rs` drives the schedule through
+/// the real binary and the real sibling.
+#[test]
+fn the_pool_maintenance_schedule_is_what_the_divergence_record_names() {
+    use onepipeline::maintenance::{
+        MaintenanceConfig, DEFAULT_PACE_SECONDS, FLAG, KEY, PACE_ENV, SCHEDULE_VERSION,
+    };
+    let block = divergence_block("83.");
+    assert_eq!(block["flag"].as_str(), Some(FLAG));
+    assert_eq!(block["config_key"].as_str(), Some(KEY));
+    assert!(
+        CONTRACT.contains("[--maintenance-config FILE]"),
+        "the driver invocation no longer names the maintenance flag"
+    );
+
+    // The flag, and `adopt` not taking it.
+    let Command::Start(started) = Cli::try_parse_from([
+        "onepipeline",
+        "start",
+        "plans:demo",
+        FLAG,
+        "./maintenance.yml",
+    ])
+    .expect("the flag the block names is one `start` takes")
+    .command
+    else {
+        panic!("that is not a start")
+    };
+    assert_eq!(
+        started.maintenance_config.as_deref(),
+        Some("./maintenance.yml")
+    );
+    let Command::Start(unset) = Cli::try_parse_from(["onepipeline", "start", "plans:demo"])
+        .expect("it parses")
+        .command
+    else {
+        panic!("that is not a start")
+    };
+    assert_eq!(unset.maintenance_config, None);
+    let refused = Cli::try_parse_from(["onepipeline", "adopt", "demo", FLAG, "x"])
+        .expect_err("adopt takes no maintenance flag");
+    assert!(refused.to_string().contains(FLAG), "{refused}");
+
+    // The key, at the version the block states and refused by name before it.
+    let at = u32::try_from(
+        block["config_schema_version"]
+            .as_u64()
+            .expect("the block states the version the key arrived at"),
+    )
+    .expect("a version fits");
+    assert_eq!(at, LAUNCH_CONFIG_SCHEMA_VERSION);
+    let named: LaunchConfig = serde_json::from_value(json!({
+        "schema_version": at,
+        KEY: "./maintenance.yml",
+    }))
+    .expect("a config naming the schedule parses");
+    assert_eq!(
+        named.maintenance_config.as_deref(),
+        Some("./maintenance.yml")
+    );
+    let example = fenced_block_naming("yaml", "maintenance_config:");
+    let example: LaunchConfig =
+        serde_norway::from_str(&example).expect("the contract's launch example parses");
+    assert_eq!(example.schema_version, at);
+    assert_eq!(
+        example.maintenance_config.as_deref(),
+        Some("./maintenance.yml")
+    );
+    let dir = std::env::temp_dir().join(format!(
+        "onepipeline-contract-maintenance-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    for version in LAUNCH_CONFIG_SCHEMA_VERSIONS_READ
+        .into_iter()
+        .filter(|version| *version < at)
+    {
+        let path = dir.join(format!("{version}.yaml"));
+        std::fs::write(
+            &path,
+            format!("schema_version: {version}\n{KEY}: ./maintenance.yml\n"),
+        )
+        .expect("the config is written");
+        let refused = LaunchConfig::load(&path)
+            .expect_err("a version that never had the key refuses it")
+            .to_string();
+        assert!(
+            refused.contains(&format!("`{KEY}`")) && refused.contains(&format!("schema {at} key")),
+            "schema {version} did not refuse `{KEY}` by its name: {refused}"
+        );
+    }
+
+    // The schedule, through the public type and the sibling's own grammar.
+    let written = block["schedule"].clone();
+    let schedule: MaintenanceConfig =
+        serde_json::from_value(written.clone()).expect("entry 83's schedule parses");
+    assert_eq!(schedule.version, SCHEDULE_VERSION);
+    assert_eq!(
+        block["schedule_version"].as_u64(),
+        Some(u64::from(SCHEDULE_VERSION))
+    );
+    assert_eq!(schedule.default.every.to_string(), "7d");
+    assert_eq!(schedule.rules.len(), 1);
+    assert_eq!(schedule.rules[0].every.to_string(), "3d");
+    assert_eq!(schedule.rules[0].r#match.name.as_deref(), Some("onevcs"));
+    assert_eq!(
+        serde_json::to_value(&schedule).expect("serializes"),
+        written,
+        "entry 83's schedule does not round-trip as written"
+    );
+    // The contract's own schedule block is the same document.
+    let contract_schedule: MaintenanceConfig =
+        serde_norway::from_str(&fenced_block_naming("yaml", "every: 7d"))
+            .expect("the contract's schedule example parses");
+    assert_eq!(contract_schedule, schedule);
+    // Loaded off disk, each refusal the block lists names its key.
+    let schedule_path = dir.join("schedule.yml");
+    for (document, names) in [
+        (
+            "version: 1\ndefault:\n  every: 7d\nat: \"03:00\"\n",
+            "unknown field `at`",
+        ),
+        ("version: 2\ndefault:\n  every: 7d\n", "`version` is 2"),
+        (
+            "version: 1\ndefault:\n  every: 7d\nrules:\n  - match: {}\n    every: 1d\n",
+            "`match` names no field",
+        ),
+        ("version: 1\ndefault:\n  every: 7x\n", "`every`"),
+    ] {
+        std::fs::write(&schedule_path, document).expect("the schedule is written");
+        let refused = MaintenanceConfig::load(FLAG, &schedule_path)
+            .expect_err("the document is refused")
+            .to_string();
+        assert!(
+            refused.contains(names),
+            "{document:?} was refused as: {refused}"
+        );
+    }
+    assert_eq!(
+        block["refused"].as_array().map(Vec::len),
+        Some(4),
+        "the block lists a different number of refusals than the test drives"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // The kind, the pace and the load: the enum's, the constants', and the
+    // contract's own tokens.
+    let kinds: Vec<String> =
+        serde_json::from_value(block["event_kinds"].clone()).expect("entry 83 names its kind");
+    assert_eq!(kinds, ["pool-maintenance"]);
+    assert_eq!(
+        PipelineKind::from_wire(&EventKind(kinds[0].clone())),
+        Some(PipelineKind::PoolMaintenance)
+    );
+    assert_eq!(block["pace_env"].as_str(), Some(PACE_ENV));
+    assert_eq!(
+        block["default_pace_seconds"].as_u64(),
+        Some(DEFAULT_PACE_SECONDS)
+    );
+    assert_eq!(
+        block["load_env"].as_str(),
+        Some(onepipeline::executor::LOAD1_ENV)
+    );
+    let tokens = backticked();
+    for token in [KEY, PACE_ENV, "pool-maintenance", "schema_version: 9"] {
+        assert!(
+            tokens.contains(token),
+            "the contract no longer names `{token}`"
+        );
+    }
+    assert!(
+        tokens.contains(&format!("{FLAG} FILE")),
+        "the contract no longer names `{FLAG} FILE`"
+    );
+    for names in [
+        "the flag beats the config, and a blank value, flag or key, is this launch saying it has none",
+        "`every` is the **only** key a rule or the default carries",
+        "a slot is due when `last_maintained < now − every`, and the sibling decides it",
+        "nothing is written when every identity answered `no-maintain-command`, `no-slots` or `not-due`",
+        "A launch naming no schedule runs no maintenance, spawns no thread, and behaves exactly as before",
+    ] {
+        assert!(CONTRACT.contains(names), "the contract no longer states {names}");
+    }
+}
+
 /// Every field a summary document carries, taken off a value built through the
 /// type with every absence filled in.
 ///
@@ -3997,7 +4189,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 32, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 33, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -4969,6 +5161,7 @@ const RULINGS: &[(&str, &str)] = &[
     ("79.", "edit-applied"),
     ("81.", "the CLI is argument parsing over them"),
     ("82.", "held under `workspace`"),
+    ("83.", "pool-maintenance"),
 ];
 
 #[test]

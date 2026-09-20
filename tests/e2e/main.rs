@@ -88,6 +88,7 @@ mod listing;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod live_edit;
 mod loopcost;
+mod maintenance;
 mod node_validator;
 mod plan;
 mod plan_check;
