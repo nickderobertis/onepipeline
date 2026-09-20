@@ -6995,6 +6995,174 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
     );
 }
 
+/// The reasons the newest `node-held` naming `node` carries, by kind.
+fn newest_hold_kinds(world: &World, run: &str, node: &str) -> Vec<String> {
+    world
+        .events_of(run, "node-held")
+        .into_iter()
+        .rfind(|event| event["labels"]["node"] == node)
+        .and_then(|event| {
+            event["payload"]["reasons"].as_array().map(|reasons| {
+                reasons
+                    .iter()
+                    .filter_map(|reason| reason["kind"].as_str().map(str::to_owned))
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// A node held for its workspace meets a host with no room, and the record says
+/// which of the two is holding it at each moment.
+///
+/// What is held on a pass is decided by the reads that pass makes, and a pass
+/// on which the host is already running its limit reads no identity at all —
+/// the loop stops at the concurrency guard before it reaches the held node. So
+/// a node whose identity is full reads `workspace` while the host has room for
+/// it, `concurrency` while it has none, and `workspace` again the pass the host
+/// frees a slot and the identity is asked and is still full; through all of it
+/// nothing dispatches the node, nothing releases it, and it leaves once on the
+/// slot the first hands back. Against the real linked `onevcs` under a scratch
+/// state root: the identity's fullness is the sibling's own reading each time.
+#[test]
+fn a_workspace_held_node_reads_as_held_for_concurrency_while_the_host_is_full_and_for_its_workspace_again_after(
+) {
+    let world = World::new("lifecycle-pool-conc")
+        .with_env("ONEPIPELINE_WORKSPACE_POLL_SECONDS", "1")
+        .with_env("ONEPIPELINE_RELEASE_SURFACE_SECONDS", "1");
+    let repo = world.repository("local-direct", &[]);
+    let _other = world.extra_repository("other");
+    pool_one_slot_no_overflow(&world);
+    // The first and the other each hold until this journey lets them go: the
+    // first is what fills the identity, the other is what fills the host.
+    world.script("first.work", "the first wrote this\n");
+    world.script("first.wait", "");
+    world.script("second.work", "the second wrote this\n");
+    world.script("other.work", "the other wrote this\n");
+    world.script("other.wait", "");
+    let mut on_other = lifecycle("other", &[]);
+    on_other["repo"] = json!("other");
+    let mut plan = plan_of(
+        "poolconc",
+        vec![lifecycle("first", &[]), lifecycle("second", &[]), on_other],
+    );
+    // Room for two: the first and the other, with the second held between them.
+    plan["concurrency"] = json!(2);
+    let path = world.plan("poolconc", &plan);
+    world.run(&["start", &path, "--detach"]).exited(0);
+    let run = "poolconc".to_string();
+
+    // The pass both were ready in: the first took the slot, the second was held
+    // for it, and the other started behind the held node — which is what fills
+    // the host, so the same pass's record names both reasons.
+    world.until("the second node to be held for its workspace", |world| {
+        workspace_hold_of(world, &run, "second").is_some()
+    });
+    let hold = workspace_hold_of(&world, &run, "second").expect("held");
+    assert_eq!(hold["identity"], SERVICE_IDENTITY, "{hold}");
+    for node in ["first", "other"] {
+        assert_eq!(
+            dispatches_of(&world, &run, node).len(),
+            1,
+            "{node} did not start\n{}",
+            why(&world, &run)
+        );
+    }
+    // The next pass — the paced re-read — stops at the guard before it reaches
+    // the second, so what holds it now is the host's room and not the identity.
+    world.until("the hold to read as the host's room alone", |world| {
+        newest_hold_kinds(world, &run, "second") == ["concurrency"]
+    });
+    assert!(
+        dispatches_of(&world, &run, "second").is_empty(),
+        "the second node was dispatched into a full host\n{}",
+        why(&world, &run)
+    );
+    assert!(
+        world
+            .events_of(&run, "node-unheld")
+            .iter()
+            .all(|event| event["labels"]["node"] != "second"),
+        "a change of reason was recorded as a release\n{}",
+        why(&world, &run)
+    );
+    // `status` reads the hold as the driver decided it: no longer the workspace.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("second: ready")
+        .out_lacks("second: held");
+
+    // The other lets go: the host has room again, the identity is asked again,
+    // and it is still full — so the second is held for its workspace once more.
+    world.release("other.go");
+    world.until("the hold to read as the workspace again", |world| {
+        newest_hold_kinds(world, &run, "second") == ["workspace"]
+    });
+    assert!(
+        dispatches_of(&world, &run, "second").is_empty(),
+        "the second node was dispatched into a full identity\n{}",
+        why(&world, &run)
+    );
+    world.run(&["status", &run]).exited(0).out_has(&format!(
+        "second: held — the '{SERVICE_IDENTITY}' workspace admits no more sessions now"
+    ));
+
+    // The first hands its slot back, and the second takes it.
+    world.release("first.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let result = world.run_json(&run, "result.json");
+    assert_eq!(
+        result["state"],
+        "complete",
+        "{result}\n{}",
+        why(&world, &run)
+    );
+    for node in result["nodes"].as_array().expect("nodes") {
+        assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
+    }
+    // Every dispatch of the second a first attempt, each past the first answered
+    // by a refusal — the accounting the pooled journey above holds, for the
+    // same reason — and the release that let it go names the workspace.
+    let dispatched = dispatches_of(&world, &run, "second");
+    let requeued = world
+        .events_of(&run, "node-requeued")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "second")
+        .count();
+    assert_eq!(
+        dispatched.len(),
+        1 + requeued,
+        "{dispatched:#?}\n{}",
+        why(&world, &run)
+    );
+    for dispatch in &dispatched {
+        assert_eq!(dispatch["payload"]["attempt"], 1, "{dispatch}");
+    }
+    let released = world
+        .events_of(&run, "node-unheld")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "second")
+        .last()
+        .unwrap_or_else(|| panic!("the second was never released\n{}", why(&world, &run)));
+    assert!(
+        released["payload"]["released"]
+            .as_array()
+            .expect("released")
+            .iter()
+            .any(|reason| reason["kind"] == "workspace"),
+        "the release does not name the workspace hold: {released:#}"
+    );
+    let landed = repo.base_commits(&world);
+    assert!(
+        landed.iter().any(|subject| subject.contains("first"))
+            && landed.iter().any(|subject| subject.contains("second")),
+        "both nodes' work did not land: {landed:?}"
+    );
+}
+
 /// The hook a launch names with `--dispatch-env-hook`, written by the journeys
 /// below: on its `nth` invocation it opens a **real** session on the identity's
 /// one slot through the released `onevcs` executable, so the driver's own open
