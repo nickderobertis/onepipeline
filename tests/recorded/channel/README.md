@@ -1,7 +1,9 @@
 # Recorded planner-channel directories
 
 Whole `runs/<run>/channel/` directories as `onepipeline` 0.28.2's channel code
-wrote them. `tests/e2e/recorded_channel.rs` substitutes each one into the
+wrote them — this crate's own recordings, and the one recording `onemessagebus`
+held that is not byte for byte one of them (see
+`onemessagebus-repair-2-pending-bus/`). `tests/e2e/recorded_channel.rs` substitutes each one into the
 recorded run root beside it, drives this build's `status`, `runs`, `results` and
 `next` over it, re-derives its `queue.json`, and holds every answer and every
 channel byte to what the 0.28.2 binary answered over the same directory. Those
@@ -85,6 +87,21 @@ recorded `onemessagebus-repair-2` run root and channel:
 The four files are the copy after those two commands, unedited. `surfaces.jsonl`
 is the recorded log with surface `3`'s `queued` and `claimed` records appended,
 and `queue.json` holds surface `3` pending, not abandoned, with `next_id` 4.
+
+## `onemessagebus-repair-2-pending-bus/` (produced by the 0.28.2 binary, recorded in the bus)
+
+The same state as `onemessagebus-repair-2-pending/`, produced the same way by the
+same 0.28.2 binary, and recorded in `onemessagebus` rather than here: it was
+`crates/onemessagebus-agent/tests/recorded/channel/onemessagebus-repair-2-pending/`
+at that repository's commit `07b2f2c`, the last the bus carried the
+`planner-channel` layout at (onemessagebus#126 moved the layout into this crate,
+and the bus's fixtures came with it). Its two other recorded directories,
+`domain-driven-modularity-2/` and `onemessagebus-repair-2/`, were byte for byte
+the copies above and are not repeated. This one differs from the copy above in
+the frame the serving session was fed — its message reads `Recorded for the
+onemessagebus channel fixtures: …` — and so in surface `3`'s `queued_at` and the
+projection's `accounted` and `seal`, so it is held beside it as a second recording
+of that state. Unedited, as every directory here is.
 
 ## `waiting-updates/` (produced by the 0.28.2 binary)
 

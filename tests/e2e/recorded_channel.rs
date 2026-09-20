@@ -406,6 +406,14 @@ fn a_pending_blocking_surface_is_neither_lost_nor_handed_out_twice_after_a_reope
     held_to_the_release("onemessagebus-repair-2-pending");
 }
 
+/// The same pending state as the bus recorded it: the directory `onemessagebus`
+/// held the `planner-channel` layout to before the layout moved here, read
+/// exactly as the release read it.
+#[test]
+fn the_pending_surface_the_bus_recorded_is_neither_lost_nor_handed_out_twice_after_a_reopen() {
+    held_to_the_release("onemessagebus-repair-2-pending-bus");
+}
+
 /// Updates nobody has read — a check-in a later one replaced, and a finding
 /// beside it — counted as unread by every view, and handed out by `next` as the
 /// release handed them out.

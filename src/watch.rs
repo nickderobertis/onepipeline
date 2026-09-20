@@ -555,10 +555,10 @@ impl Transport for RunChanges {
         match self.channel()? {
             Some(channel) => {
                 for name in [
-                    onemessagebus_agent::channel::SURFACES,
-                    onemessagebus_agent::channel::REPLIES,
-                    onemessagebus_agent::channel::COMMANDS,
-                    onemessagebus_agent::channel::COMMAND_OUTCOMES,
+                    crate::channel::layout::SURFACES,
+                    crate::channel::layout::REPLIES,
+                    crate::channel::layout::COMMANDS,
+                    crate::channel::layout::COMMAND_OUTCOMES,
                 ] {
                     let name = QueueName::try_from(name)
                         .map_err(|failure| Self::refused(queue, &failure.to_string()))?;
