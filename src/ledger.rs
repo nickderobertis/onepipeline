@@ -850,6 +850,19 @@ pub struct LaunchRecord {
     /// before this field existed reads as a run under the profile as declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bus_config: Option<onemessagebus::Config>,
+    /// The run's oneharness pointer file — every harness run under every
+    /// launch this run starts appends one line to it saying where its session
+    /// went — absolute, as the engine names it to each launch.
+    ///
+    /// Written at the launch, and filled in by the first adoption of a record
+    /// that predates the field, which reads as none: an older run recorded
+    /// nothing about where its sessions are, and a reader is told so rather
+    /// than handed a path nothing wrote to. The file itself is
+    /// [`RunPaths::oneharness_sessions`], which is where this crate's own
+    /// reader looks whatever the record says; this is the fact, retained for a
+    /// reader that holds the record and not the paths. See [`crate::agents`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oneharness_sessions: Option<PathBuf>,
 }
 
 impl LaunchRecord {
@@ -2899,6 +2912,7 @@ mod tests {
             adoptions: 0,
             filters: Filters::default(),
             bus_config: Default::default(),
+            oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         }
     }
@@ -3662,6 +3676,7 @@ mod tests {
             adoptions: 0,
             filters: Filters::default(),
             bus_config: Default::default(),
+            oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         };
         assert!(!record.owned_by(sys::UNKNOWN_LAUNCHER));
@@ -3700,6 +3715,7 @@ mod tests {
             adoptions: 0,
             filters: Filters::default(),
             bus_config: Default::default(),
+            oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         };
         let label = record.owner_label("mine");

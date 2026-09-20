@@ -405,6 +405,140 @@ fn transcript_renders_every_node_one_node_and_refuses_an_unknown_one() {
     );
 }
 
+/// Write a pointer file into the fixture, through the linked core's own types:
+/// two sessions, one of them two harness runs long, under two nodes of the run.
+///
+/// The recorded run predates the pointer file, so what the journey holds the
+/// binary and the SDK to is a file written the way every oneharness under a
+/// launch writes one — one line per harness run, in the shape `HistoryPointer`
+/// admits — rather than a recording of one.
+fn write_pointer_file(fixture: &Fixture) {
+    use oneharness_core::domain::harness::HarnessIdentity;
+    use oneharness_core::domain::history::{
+        HistoryId, HistoryLabels, HistoryPointer, PointerSession,
+    };
+    use oneharness_core::domain::usage::UtcInstant;
+    use std::collections::BTreeMap;
+
+    let store = if cfg!(windows) { "C:\\store" } else { "/store" };
+    let cwd = if cfg!(windows) { "C:\\work" } else { "/work" };
+    let mut text = String::new();
+    for (session, node, suffix, started) in [
+        ("turn-a", "plan", 1, 100),
+        ("turn-b", "implement", 2, 200),
+        ("turn-a", "plan", 3, 300),
+    ] {
+        let labels = HistoryLabels::new(BTreeMap::from([
+            (
+                onepipeline::agents::RUN_ID_LABEL.to_string(),
+                RUN.to_string(),
+            ),
+            (
+                onepipeline::agents::NODE_LABEL.to_string(),
+                node.to_string(),
+            ),
+            (
+                onepipeline::agents::SCOPE_LABEL.to_string(),
+                onepipeline::agents::Scope::Node.as_str().to_string(),
+            ),
+            ("role".to_string(), "worker".to_string()),
+        ]))
+        .expect("valid labels");
+        let session = PointerSession::new(
+            Path::new(store),
+            &Path::new(store)
+                .join("proj")
+                .join(format!("{session}.jsonl")),
+            "turn",
+            cwd,
+            labels,
+        )
+        .expect("a session");
+        let identity: HarnessIdentity = "claude-code".parse().expect("an identity");
+        let history_id: HistoryId = format!("00000000-0000-4000-8000-{suffix:012}")
+            .parse()
+            .expect("a history id");
+        let pointer = HistoryPointer::new(
+            &session,
+            history_id,
+            &identity,
+            UtcInstant::from_epoch(started),
+        )
+        .expect("a pointer");
+        text.push_str(&serde_json::to_string(&pointer).expect("serialises"));
+        text.push('\n');
+    }
+    std::fs::write(fixture.paths().oneharness_sessions(), text)
+        .expect("the pointer file is written");
+}
+
+#[test]
+fn agents_lists_a_runs_sessions_a_nodes_and_a_projects_and_reads_none_as_empty() {
+    let fixture = Fixture::new("agents");
+    let _env = fixture.enter();
+
+    // No pointer file yet: an empty list, and not a refusal.
+    let none = verbs::agents(&fixture.paths(), verbs::AgentScope::Run).expect("no file reads");
+    assert!(none.sessions.is_empty());
+    same(
+        "agents RUN (no pointer file)",
+        &fixture.binary(&["agents", RUN]),
+        &verbs::render_agents(&none),
+        EXIT_SUCCESS,
+    );
+
+    write_pointer_file(&fixture);
+    let whole = verbs::agents(&fixture.paths(), verbs::AgentScope::Run).expect("the run reads");
+    assert_eq!(whole.sessions.len(), 2, "{whole:?}");
+    assert_eq!(whole.sessions[0].runs.len(), 2, "{whole:?}");
+    same(
+        "agents RUN",
+        &fixture.binary(&["agents", RUN]),
+        &verbs::render_agents(&whole),
+        EXIT_SUCCESS,
+    );
+    let one = verbs::agents(&fixture.paths(), verbs::AgentScope::Node("implement"))
+        .expect("the node reads");
+    assert_eq!(one.sessions.len(), 1, "{one:?}");
+    same(
+        "agents RUN implement",
+        &fixture.binary(&["agents", RUN, "implement"]),
+        &verbs::render_agents(&one),
+        EXIT_SUCCESS,
+    );
+    let project = "authoring:onemessagebus-repair-2";
+    let across = verbs::project_agents(&fixture.root, project).expect("the project reads");
+    assert_eq!(
+        across, whole,
+        "one run of the project is the run's own list"
+    );
+    same(
+        "agents --project PROJECT",
+        &fixture.binary(&["agents", "--project", project]),
+        &verbs::render_agents(&across),
+        EXIT_SUCCESS,
+    );
+    let unknown =
+        verbs::project_agents(&fixture.root, "plans:nowhere").expect_err("no such project");
+    refused(
+        "agents --project plans:nowhere",
+        &fixture.binary(&["agents", "--project", "plans:nowhere"]),
+        &unknown,
+    );
+    let missing = verbs::agents(
+        &RunPaths::under(&fixture.root, "nowhere"),
+        verbs::AgentScope::Run,
+    );
+    // The SDK reads a run it is handed paths for; the binary resolves the id
+    // first, so an unknown run is the resolver's refusal on that side alone.
+    assert!(
+        missing.is_ok(),
+        "an absent run root is an absent pointer file"
+    );
+    let output = fixture.binary(&["agents", "nowhere"]);
+    assert_eq!(exit(&output), EXIT_REFUSED, "{}", stderr(&output));
+}
+
 #[test]
 fn telemetry_renders_each_runs_document_and_its_breakdown() {
     let fixture = Fixture::new("telemetry");

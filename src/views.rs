@@ -3939,6 +3939,7 @@ mod tests {
             adoptions: 0,
             filters: Filters::default(),
             bus_config: Default::default(),
+            oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         }
     }

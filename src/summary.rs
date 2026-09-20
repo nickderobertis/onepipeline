@@ -104,7 +104,14 @@ use crate::telemetry::{self, RunTelemetry};
 /// run's own `plan.json`: a grouped listing labels each project by it, and a
 /// version-5 document carries no name at all rather than a run whose plan stated
 /// none — so it is refolded once rather than served as a project nobody named.
-pub const SUMMARY_SCHEMA_VERSION: u32 = 6;
+///
+/// **7** since a row carries
+/// [`oneharness_sessions`](RunSummary::oneharness_sessions), the run's pointer
+/// file as the launch record names it: a reader that finds a run's agents holds
+/// the row and not the record, and a version-6 document carries no answer to
+/// where the run's sessions are rather than a run that recorded none — so it is
+/// refolded once rather than served as a run nothing wrote a pointer line for.
+pub const SUMMARY_SCHEMA_VERSION: u32 = 7;
 
 /// Read the version, refusing a document this build cannot honestly read.
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
@@ -350,6 +357,16 @@ pub struct RunSummary {
     /// carries.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub landings: BTreeMap<String, NodeLanding>,
+    /// The run's oneharness pointer file, as the launch record names it — where
+    /// every harness run under this run's launches appended a line saying which
+    /// session it wrote. See [`crate::agents`].
+    ///
+    /// Absent where the record names none: a run an earlier build launched, or
+    /// a record this build could not read. Never the path this build would have
+    /// composed, because a record that does not name the file is a run nothing
+    /// was told to write it for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oneharness_sessions: Option<PathBuf>,
     /// The journal's length in bytes when this document was written.
     ///
     /// Half of the stamp a stale summary is detected by. The journal is
@@ -597,6 +614,7 @@ impl RunSummary {
             started: launch.driver_stamp().map(str::to_string),
             let_go_by: state.let_go_by.clone(),
             timing: timing.clone(),
+            oneharness_sessions: launch.oneharness_sessions.clone(),
             parked: with_status(graph::NodeStatus::Parked),
             // The same three records `views::rejected_by_a_judge` reads, taken
             // where all three are in hand: the derived status, the settlement's
@@ -1092,6 +1110,7 @@ impl Maintainer {
             adoptions: 0,
             filters: crate::filter::Filters::default(),
             bus_config: Default::default(),
+            oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         })
     }
@@ -1214,6 +1233,7 @@ mod tests {
             adoptions: 0,
             filters: crate::filter::Filters::default(),
             bus_config: Default::default(),
+            oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         };
         record.driven_by_this_process();
@@ -1660,7 +1680,7 @@ mod tests {
     /// Read rather than restated: this is the wire a consumer parses, and the
     /// only thing that stops a field being renamed, an absence becoming a zero,
     /// or the version moving without anyone deciding to move it.
-    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v6.json");
+    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v7.json");
 
     /// The documents earlier builds wrote, kept exactly as those builds wrote them.
     ///
@@ -1670,15 +1690,17 @@ mod tests {
     /// let go of its run — a real schema 3 document, written by a build that did
     /// not read a stated landing as the node's landing — and a real schema 4
     /// document, written by a build whose `stop_recorded` outlived the adoption
-    /// that answered it — and a real schema 5 document, which carries no plan
-    /// name. The reader below has to refuse all five rather than read any as one
-    /// of its own.
-    const GOLDEN_EARLIER: [(u32, &str); 5] = [
+    /// that answered it — a real schema 5 document, which carries no plan
+    /// name — and a real schema 6 document, which carries no answer to where
+    /// the run's oneharness sessions are. The reader below has to refuse all
+    /// six rather than read any as one of its own.
+    const GOLDEN_EARLIER: [(u32, &str); 6] = [
         (1, include_str!("../tests/golden/run-summary-v1.json")),
         (2, include_str!("../tests/golden/run-summary-v2.json")),
         (3, include_str!("../tests/golden/run-summary-v3.json")),
         (4, include_str!("../tests/golden/run-summary-v4.json")),
         (5, include_str!("../tests/golden/run-summary-v5.json")),
+        (6, include_str!("../tests/golden/run-summary-v6.json")),
     ];
 
     /// The document the golden pins, built through the types.
@@ -1717,6 +1739,7 @@ mod tests {
             ),
             timing: serde_json::from_str(include_str!("../tests/golden/telemetry-v2.json"))
                 .expect("the telemetry golden reads back into the types"),
+            oneharness_sessions: Some(PathBuf::from("/runs/golden/oneharness-sessions.jsonl")),
             // Nothing parked, which is an absent key rather than an empty list on
             // the wire.
             parked: Vec::new(),
@@ -1750,13 +1773,13 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_6_document_is_the_shape_the_golden_pins() {
+    fn a_schema_7_document_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&golden()).expect("it serialises");
         assert_eq!(
             rendered.trim(),
             GOLDEN.trim(),
             "the summary document changed shape. If that was deliberate, bump \
-             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v6.json together"
+             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v7.json together"
         );
     }
 
@@ -1782,7 +1805,7 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_6_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
+    fn a_schema_7_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
         let read: RunSummary =
             serde_json::from_str(GOLDEN).expect("the golden reads back into the types");
         assert_eq!(read, golden());

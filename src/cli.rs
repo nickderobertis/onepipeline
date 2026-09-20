@@ -195,6 +195,9 @@ pub enum Command {
     Goals(OptionalRunArgs),
     /// A dispatched turn's tools and reasoning, from the evidence it retained.
     Transcript(TranscriptArgs),
+    /// Every oneharness session a run, a node or a project launched, and where
+    /// each one's transcript is.
+    Agents(AgentsArgs),
     /// Session timing and usage.
     Telemetry(TelemetryArgs),
     /// Drive one run's engine loop in this process.
@@ -889,6 +892,23 @@ pub struct TranscriptArgs {
     pub run: String,
     /// The node whose transcript to read. Omitted, every node that dispatched.
     pub node: Option<String>,
+}
+
+/// `onepipeline agents`.
+///
+/// One of a run and a project, never both: a run's sessions are read off that
+/// run's own pointer file, and a project's off every run its summary names.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(group = clap::ArgGroup::new("whose").required(true).args(["run", "project"]))]
+pub struct AgentsArgs {
+    /// The run id.
+    pub run: Option<String>,
+    /// The node whose sessions to list. Omitted, every session of the run.
+    #[arg(requires = "run")]
+    pub node: Option<String>,
+    /// Every session across the runs launched from this qualified project id.
+    #[arg(long, value_name = "PROJECT", conflicts_with_all = ["run", "node"])]
+    pub project: Option<String>,
 }
 
 /// `onepipeline telemetry`.

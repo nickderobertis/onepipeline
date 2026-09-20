@@ -260,6 +260,27 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             print!("{}", verbs::render_transcript(&transcript));
             Ok(EXIT_SUCCESS)
         }
+        Verb::Agents(args) => {
+            let agents = match (&args.run, &args.project) {
+                (Some(run), _) => verbs::agents(
+                    &resolve(run)?,
+                    match args.node.as_deref() {
+                        Some(node) => verbs::AgentScope::Node(node),
+                        None => verbs::AgentScope::Run,
+                    },
+                )?,
+                (None, Some(project)) => verbs::project_agents(&ledger::runs_root(), project)?,
+                // The parser requires one of the two, so this is a `Cli` a
+                // consumer built by hand rather than parsed.
+                (None, None) => {
+                    return Err(Error::Invalid(
+                        "`agents` takes a run id or `--project PROJECT`".into(),
+                    ))
+                }
+            };
+            print!("{}", verbs::render_agents(&agents));
+            Ok(EXIT_SUCCESS)
+        }
         Verb::Telemetry(args) => {
             let measured = verbs::telemetry(&ledger::runs_root(), args.run.as_deref())?;
             print!("{}", verbs::render_telemetry(&measured, args.breakdown)?);
@@ -826,6 +847,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         adoptions: 0,
         filters,
         bus_config,
+        oneharness_sessions: Some(sessions_file(&paths)?),
     };
     record.driven_by_this_process();
 
@@ -1418,6 +1440,18 @@ impl<'a> ObserverWatch<'a> {
     }
 }
 
+/// The run's pointer file, absolute, as the launch record retains it and the
+/// engine names it to every launch.
+///
+/// Absolute here for the reason the executor makes the runs root absolute: a
+/// dispatch does not run where this process was started, and the default root
+/// is the relative `runs`. A resolution that fails — this process's own working
+/// directory unreadable — is refused rather than recorded relative.
+fn sessions_file(paths: &RunPaths) -> Result<PathBuf> {
+    let file = paths.oneharness_sessions();
+    std::path::absolute(&file).map_err(|source| Error::Ledger { path: file, source })
+}
+
 /// Start the dag-scope graph that **observes** the run.
 ///
 /// `output` is the launcher's promise about itself: an attaching launcher stays
@@ -1438,19 +1472,41 @@ fn launch_graph(
     output: agentgraph::GraphOutput<'_>,
 ) -> Result<agentgraph::GraphRun> {
     let task = run_description(&paths.run, goal);
+    let mut env = vec![
+        (agentgraph::RUN_ID_ENV.to_string(), paths.run.clone()),
+        (
+            ledger::RUNS_DIR_ENV.to_string(),
+            ledger::runs_root().to_string_lossy().into_owned(),
+        ),
+    ];
+    // The run's history stamp, under the observer's own scope: the observer
+    // graph is a launch this run starts, so what runs under it is visible the
+    // way a node's dispatch is. What it inherits is this process's own
+    // environment — no hook runs before the observer — and the merge keeps
+    // every key of it that is not the engine's. Exported process-wide with the
+    // pairs above, and safe there for the reason the executor's are not: one
+    // driver starts one observer, a restart composes the same value, and a
+    // node's launch re-composes the label set from what it inherits, so the
+    // observer's scope word never reaches a node's session.
+    env.extend(crate::agents::overlay(
+        paths,
+        std::env::var(crate::agents::LABELS_ENV).ok().as_deref(),
+        &crate::agents::Stamp {
+            run: &paths.run,
+            project: (!record.project.is_empty()).then_some(record.project.as_str()),
+            scope: crate::agents::Scope::Observer,
+            node: None,
+            step: None,
+            attempt: None,
+        },
+    )?);
     let mut launched = agentgraph::GraphRun::start(&agentgraph::Launch {
         graph: &record.graph,
         task: &task,
         dir: &recorded_dir(record)?,
         labels: &journal::labels(&paths.run, None),
-        env: &[
-            (agentgraph::RUN_ID_ENV.to_string(), paths.run.clone()),
-            (
-                ledger::RUNS_DIR_ENV.to_string(),
-                ledger::runs_root().to_string_lossy().into_owned(),
-            ),
-        ],
-        // Both pairs are the run's, and one driver drives one run, so one
+        env: &env,
+        // Every pair is the run's, and one driver drives one run, so one
         // process-wide copy is this launch's own answer as well as everyone
         // else's — which is what lets the observer stay in the driver.
         environment: agentgraph::Environment::Shared,
@@ -1875,6 +1931,11 @@ fn validate_and_displace_for_adoption(paths: &RunPaths) -> Result<(LaunchRecord,
 fn take_the_run_over(paths: &RunPaths, record: &mut LaunchRecord) -> Result<()> {
     record.adoptions += 1;
     record.driven_by_this_process();
+    // A record an earlier build wrote names no pointer file; the dispatches
+    // this adoption makes will write one, so the record says where from here.
+    if record.oneharness_sessions.is_none() {
+        record.oneharness_sessions = Some(sessions_file(paths)?);
+    }
     let previous = paths
         .dir
         .join(format!("launch.pre-adopt-{}.json", record.adoptions));
@@ -3308,6 +3369,7 @@ mod tests {
             adoptions: 0,
             filters: crate::filter::Filters::default(),
             bus_config: Default::default(),
+            oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         }
     }

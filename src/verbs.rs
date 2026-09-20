@@ -54,6 +54,7 @@ use crate::ledger::{self, RunPaths};
 use crate::telemetry::RunTelemetry;
 use crate::views::{self, Listing, Projects, RunView, Survey};
 
+pub use crate::agents::{AgentRun, AgentScope, AgentSession, Agents};
 pub use crate::driver::{Retained, Settlement};
 pub use crate::journal::StopTeardown;
 pub use crate::unwatched::{Unwatched, UnwatchedRun};
@@ -294,6 +295,73 @@ pub fn transcript(paths: &RunPaths, node: Option<&str>) -> Result<Transcript> {
 /// The text `onepipeline transcript RUN [NODE]` prints.
 pub fn render_transcript(transcript: &Transcript) -> String {
     views::transcript(&transcript.view, transcript.node.as_deref())
+}
+
+/// `onepipeline agents RUN [NODE]`: every oneharness session a run's launches
+/// wrote — every one, or the ones a node's dispatches wrote — read off the run's
+/// own pointer file and nothing else.
+///
+/// One entry per session, grouped by `history_session`, carrying the three
+/// fields a reader opens it to its transcript through: `history_dir`,
+/// `history_project`, `history_session`. See [`crate::agents`] for what is
+/// stamped and why the store is never opened here.
+///
+/// # Errors
+///
+/// A pointer file that exists and cannot be read. A run with no pointer file —
+/// one an earlier build launched, or one that has dispatched nothing yet — is
+/// an empty list rather than an error.
+pub fn agents(paths: &RunPaths, scope: AgentScope<'_>) -> Result<Agents> {
+    Agents::of_run(paths, scope)
+}
+
+/// `onepipeline agents --project PROJECT`: the union of [`agents`] over every
+/// run under `root` whose summary names `project`, in the listing's order.
+///
+/// # Errors
+///
+/// A project no run under `root` was launched from, naming the ones that were;
+/// and a pointer file that exists and cannot be read.
+pub fn project_agents(root: &Path, project: &str) -> Result<Agents> {
+    let listing = Listing::of(root);
+    let mut agents = Agents::default();
+    let mut found = false;
+    for summary in listing
+        .summaries
+        .iter()
+        .filter(|summary| summary.project == project)
+    {
+        found = true;
+        agents.absorb(
+            &RunPaths::under(root, &summary.run_id).oneharness_sessions(),
+            AgentScope::Run,
+        )?;
+    }
+    if !found {
+        let mut launched: Vec<&str> = listing
+            .summaries
+            .iter()
+            .map(|summary| summary.project.as_str())
+            .filter(|project| !project.is_empty())
+            .collect();
+        launched.sort_unstable();
+        launched.dedup();
+        return Err(Error::Refused(format!(
+            "no run under {} was launched from project '{project}'; runs were launched from: {}",
+            root.display(),
+            if launched.is_empty() {
+                "no project at all".to_string()
+            } else {
+                launched.join(", ")
+            }
+        )));
+    }
+    Ok(agents)
+}
+
+/// The text `onepipeline agents` prints.
+pub fn render_agents(agents: &Agents) -> String {
+    crate::agents::render(agents)
 }
 
 /// `onepipeline telemetry [RUN]`: each run's timing and usage, one document per
