@@ -7144,8 +7144,7 @@ fn a_workspace_held_node_reads_as_held_for_concurrency_while_the_host_is_full_an
     let released = world
         .events_of(&run, "node-unheld")
         .into_iter()
-        .filter(|event| event["labels"]["node"] == "second")
-        .last()
+        .rfind(|event| event["labels"]["node"] == "second")
         .unwrap_or_else(|| panic!("the second was never released\n{}", why(&world, &run)));
     assert!(
         released["payload"]["released"]
