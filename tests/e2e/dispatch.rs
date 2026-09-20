@@ -4513,9 +4513,8 @@ fn a_killed_observer_is_replaced_and_the_run_goes_on_being_watched() {
     for view in [vec!["runs"], vec!["status"]] {
         let rendered = world.run_on_agentgraph(&view);
         rendered.exited(0);
-        let line = rendered
-            .stdout
-            .lines()
+        let line = rows(&rendered.stdout)
+            .into_iter()
             .find(|line| line.contains("rewatched"))
             .unwrap_or_else(|| panic!("no line for the run in:\n{}", rendered.stdout));
         assert!(
@@ -4716,9 +4715,8 @@ fn a_run_whose_observer_graph_finished_is_reported_unwatched() {
     for view in [vec!["runs"], vec!["status"]] {
         let rendered = world.run_on_agentgraph(&view);
         rendered.exited(0);
-        let line = rendered
-            .stdout
-            .lines()
+        let line = rows(&rendered.stdout)
+            .into_iter()
             .find(|line| line.contains("outlived"))
             .unwrap_or_else(|| panic!("no line for the run in:\n{}", rendered.stdout));
         assert!(
@@ -4912,9 +4910,8 @@ fn an_observer_records_its_ending_before_anything_reads_that_it_has_gone() {
     for view in [vec!["runs"], vec!["status"]] {
         let rendered = world.run_on_agentgraph(&view);
         rendered.exited(0);
-        let line = rendered
-            .stdout
-            .lines()
+        let line = rows(&rendered.stdout)
+            .into_iter()
             .find(|line| line.contains("outlasted"))
             .unwrap_or_else(|| panic!("no line for the run in:\n{}", rendered.stdout));
         assert!(
