@@ -558,6 +558,37 @@ fn watch_reads_a_settled_run_once_and_returns_and_refuses_a_foreign_cursor() {
     );
     assert_eq!(outcome.ending, verbs::WatchEnding::Settled);
 
+    // A sink that refuses ends the wait with its own refusal, and nothing more
+    // is handed to it — which is the way the binary's own sink ends a wait when
+    // the pipe it writes to has closed: a refusal, exit 2, and the reason naming
+    // the stream. The two refusals are worded by different sinks, and the
+    // answer is the same.
+    let mut handed = 0;
+    let refusal = verbs::watch(&fixture.paths(), &request, &mut |_| {
+        handed += 1;
+        Err(onepipeline::Error::Refused(
+            "the reader has gone".to_owned(),
+        ))
+    })
+    .expect_err("a refusing sink ends the wait");
+    assert_eq!(refusal.to_string(), "refused: the reader has gone");
+    assert_eq!(refusal.exit_code(), EXIT_REFUSED);
+    assert_eq!(handed, 1, "a frame was handed to a sink that had refused");
+    let mut closed = fixture
+        .command(SESSION, &["watch", RUN, "--all", "--timeout", "0"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the binary starts");
+    drop(closed.stdout.take());
+    let closed = closed.wait_with_output().expect("the binary exits");
+    assert_eq!(exit(&closed), EXIT_REFUSED, "{}", stderr(&closed));
+    assert!(
+        stderr(&closed).contains("the watch could not write to standard output"),
+        "{}",
+        stderr(&closed)
+    );
+
     let foreign = verbs::WatchRequest {
         cursor: Some("1:elsewhere:5".to_owned()),
         ..request
