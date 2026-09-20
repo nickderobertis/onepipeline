@@ -415,6 +415,7 @@ pub enum NextStatus {
 
 /// One read of the channel: the surface claimed, if one was, and the run's
 /// events shown through the reader's profile.
+// llmlint: ignore[invalid_states_unrepresentable] the three fields are the three keys the line has always carried — `{"status", "surface", "events"}` — and the shape the contract fixes as `Next { status, surface, events }`, which the downstream nodes read by name; the one place a `Next` is built is `next` below, where the status and the surface are decided by one `match` on the claim, so no caller assembles a `Surface` status beside no surface.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Next {
     /// Whether a surface was claimed, and if not, whether the run is over.
@@ -508,6 +509,7 @@ pub fn render_next(next: &Next) -> String {
 /// A reading, never a record: nothing here consumes, claims or answers. What
 /// `next` hands out and what the views count as unread are decided from the same
 /// queues this reads.
+// llmlint: ignore[invalid_states_unrepresentable] the fields are the channel's own queues as the bus's layout keeps them — the surfaces log, its projection's `waiting` and its pending slot, and the three other logs — read as one snapshot by `channel` below, which is the one place a `ChannelQueue` is built; the shape is the one the planner ruled on for the downstream nodes (`ChannelQueue { surfaces, waiting, held, replies, commands, outcomes }`), and a reading of six logs that folded them into one structure would be a projection of this crate's own beside the bus's, which is what the channel paragraph of the contract forbids.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ChannelQueue {
     /// Every surface the run has raised, in the order it raised them.

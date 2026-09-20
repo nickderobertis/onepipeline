@@ -156,6 +156,7 @@ pub struct Request {
     /// Zero turns the heartbeat off.
     pub tick: Duration,
     /// A cursor an earlier watch printed, to resume from.
+    // llmlint: ignore[invalid_states_unrepresentable] a cursor token is external input — a line an earlier watch or `monitor` printed and a caller handed back — and it is placed against *this run's journal* by `resolve_cursor`, which is the check no type can make: it is this build's spelling, it names this run, its byte is within the journal, and that byte ends a record. A `Cursor` a caller could construct would claim those without the read that decides them; the contract spells it `cursor` on the request, as the CLI takes `--cursor`, and a token this run cannot place is refused by name before anything is waited.
     pub cursor: Option<String>,
     /// What ends the wait, beside the run finishing and nothing driving it.
     pub until: Vec<WatchUntil>,
@@ -198,6 +199,7 @@ pub struct Outcome {
     /// Why the wait returned.
     pub ending: Ending,
     /// The cursor token the next watch resumes from.
+    // llmlint: ignore[invalid_states_unrepresentable] the token as the binary prints it and a later watch or `monitor` reads it back — `WatchOutcome { ending, cursor }` in the contract — spelled by the private `Cursor` here and read by `resolve_cursor` against the run it names; what a consumer does with it is hand it back, and a type it could inspect would be a second reading of a token whose one reading is that resolution.
     pub cursor: String,
 }
 
@@ -668,6 +670,7 @@ pub struct Monitored {
     /// The events the profile admitted, in merge order.
     pub events: Vec<Envelope>,
     /// The cursor token the next pass resumes from.
+    // llmlint: ignore[invalid_states_unrepresentable] the same token `Outcome::cursor` carries, on the same terms: printed on the resume line, handed back to `monitor` or `watch`, and placed by `resolve_cursor` against the run it names.
     pub cursor: String,
 }
 
