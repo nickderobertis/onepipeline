@@ -87,12 +87,10 @@ Rules:
   Nothing here reimplements what they own.
 - `summary.rs` writes the per-run summary document a listing reads instead of a
   journal, and `views::Projects` is that listing grouped by project — the
-  default shape of `runs`, and of `status` and `goals` given no run. A row's
-  `name` is the plan's, read off `plan.json` through `views::plan_of` once per
-  journal writer, because that document is never rewritten. A group header
-  opens with `views::GROUP_HEADER`, which no run line can start with, so the
-  run lines under it are the flat listing's own bytes; `tests/e2e/harness.rs`'s
-  `rows` is how a journey reads past the headers.
+  default shape of every listing. **A run's own lines in a grouped listing are
+  the flat listing's bytes**: `ai-orchestrator`'s watch greps for them, so a
+  group header may carry nothing a run line can start with, and nothing under
+  a header is indented or reworded.
 - `sys::in_own_process_group` is what a retained driver — `start --detach` and
   `adopt --detach` alike — is started with, so it outlives its launcher and the
   `SIGINT` the launcher's terminal sends its foreground group. A `stop` still

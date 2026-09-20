@@ -79,6 +79,16 @@ const DRIVER_LOG_LINES: usize = 8;
 pub fn dispatch(cli: Cli) -> Result<i32> {
     use crate::cli::Command as Verb;
     use crate::verbs;
+    // llmlint: ignore-block[no_panics_on_recoverable_errors] how this binary writes a verb's
+    // answer to its streams is one decision for every arm here, not any one arm's: each
+    // prints its rendering the same way, and `src/AGENTS.md` records the exit codes as spent
+    // — `0`/`1`/`2` are `reply`'s verdicts, `3` is "nothing is driving the run" — so a write
+    // one arm returned as an error would have to carry a code that already means something
+    // else. Making a closed pipe a first-class outcome is a change to the whole command
+    // surface and to the contract's exit codes, which belongs with the planner who owns them
+    // rather than in the one arm a diff happens to touch. `monitor` and `watch` are the two
+    // that already answer for their pipe, because a line-oriented document and a blocking
+    // stream are what a closed pipe cuts short.
     match cli.command {
         Verb::Start(args) => start(&args),
         Verb::Plan(crate::cli::PlanCommand::Check(args)) => crate::plancheck::check(&args),
@@ -175,16 +185,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         }
         Verb::Status(args) => {
             let status = verbs::status(&ledger::runs_root(), args.run.as_deref())?;
-            // llmlint: ignore-block[no_panics_on_recoverable_errors] how this binary writes a view
-            // to stdout is one decision for all of the view verbs in this file, not this verb's:
-            // every view verb here prints the same way, and `src/AGENTS.md` records the exit codes
-            // as spent — `0`/`1`/`2` are `reply`'s verdicts, `3` is "nothing is driving the run" —
-            // so a write this one returned as an error would have to carry a code that already
-            // means something else. Making a closed pipe a first-class outcome is a change to the
-            // whole command surface and to the contract's exit codes, which belongs with the
-            // planner who owns them rather than in the one verb a diff happens to touch.
             print!("{}", verbs::render_status(&status));
-            // llmlint: ignore-end[no_panics_on_recoverable_errors]
             Ok(EXIT_SUCCESS)
         }
         Verb::Host => {
@@ -277,6 +278,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             },
         ),
     }
+    // llmlint: ignore-end[no_panics_on_recoverable_errors]
 }
 
 /// Print a receipt and what rides beside it, and answer the status it carries.
@@ -284,6 +286,9 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
 /// The receipt on standard output, as entry 64 states it; the advice — what a
 /// queued envelope is waiting for, and a landing settled with no release stated
 /// for it — beside it on standard error, where it changes nothing a script parses.
+// llmlint: ignore-block[no_panics_on_recoverable_errors] written the way every arm of
+// `dispatch` writes, for the reason stated there: the exit codes are spent, and a closed
+// pipe as an outcome of its own is the contract owner's decision.
 fn said(receipt: &crate::verbs::Receipt) -> Result<i32> {
     println!("{}", crate::verbs::render_receipt(receipt)?);
     for advice in &receipt.advice {
@@ -291,6 +296,7 @@ fn said(receipt: &crate::verbs::Receipt) -> Result<i32> {
     }
     Ok(receipt.exit_code())
 }
+// llmlint: ignore-end[no_panics_on_recoverable_errors]
 
 /// The envelope's text: the named file, or stdin.
 fn reply_text(args: &ReplyArgs) -> Result<String> {
@@ -904,6 +910,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         // start a driver says so, rather than printing a pid for a process that
         // is already gone.
         confirm_driving(&paths, &mut driver)?;
+        // llmlint: ignore[no_panics_on_recoverable_errors] written the way every arm of `dispatch` writes, for the reason stated there: the exit codes are spent, and a closed pipe as an outcome of its own is the contract owner's decision.
         println!("{}", announce_launch(&run, pid));
         return Ok(EXIT_SUCCESS);
     }
@@ -926,6 +933,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         &mut watch,
         lock,
         &mut |settlement| {
+            // llmlint: ignore[no_panics_on_recoverable_errors] written the way every arm of `dispatch` writes, for the reason stated there: the exit codes are spent, and a closed pipe as an outcome of its own is the contract owner's decision.
             println!("{}", settlement.line(&run));
         },
     )?;

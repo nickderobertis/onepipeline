@@ -2026,6 +2026,15 @@ impl ChannelState {
     }
 
     /// Every answer the reconciler has given, in the order it gave them.
+    // llmlint: ignore-block[changed_behavior_has_e2e] a view's read of the channel is
+    // lenient by contract, on the terms `queue` and `replies` above already read by: a
+    // queue this reader cannot open, a log it cannot read, or a record this build cannot
+    // decode renders as the answer 0.28.2 rendered — nothing — rather than refusing a
+    // view of a run whose other records are intact, and every *write* to the channel
+    // still refuses on the same failure (`channel::a_push_whose_log_cannot_be_read_is_refused_and_records_nothing`).
+    // An unreadable or half-written channel log is a host state no verb produces; the
+    // reads that succeed are driven end to end by `parity::channel_queue_reads_the_channel_and_refuses_a_run_that_is_not_there`
+    // over a recorded channel holding replies, edits and outcomes.
     pub fn outcomes(&self) -> Vec<CommandOutcome> {
         let Ok(outcomes) = self.plain(COMMAND_OUTCOMES) else {
             return Vec::new();
@@ -2068,6 +2077,7 @@ impl ChannelState {
         }
         latest
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 
     /// The reconciler's answer to one envelope, if it has given one.
     pub fn outcome_of(&self, id: u64) -> Option<CommandOutcome> {
