@@ -29,7 +29,6 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// The one build configuration file under test, read from the tree as committed.
 fn build_config() -> String {
     let path = repo_root().join(".cargo/config.toml");
     fs::read_to_string(&path).unwrap_or_else(|error| panic!("{} reads: {error}", path.display()))
@@ -88,7 +87,6 @@ where
     output
 }
 
-/// What cargo reports as the target directory for the crate in `dir`.
 fn reported_target_directory(dir: &Path) -> PathBuf {
     let output = cargo(dir, ["metadata", "--format-version", "1", "--no-deps"]);
     let metadata: serde_json::Value =
@@ -120,24 +118,41 @@ fn rustc_invocation(output: &Output, marker: &str) -> String {
         .to_owned()
 }
 
+/// The keys under a table, so a table holding more than the contract's is named
+/// by what it holds rather than by a missing key.
+fn keys(table: &toml::Value, name: &str) -> Vec<String> {
+    table
+        .as_table()
+        .unwrap_or_else(|| panic!("[{name}] is a table"))
+        .keys()
+        .cloned()
+        .collect()
+}
+
 #[test]
-fn the_config_file_carries_the_contracts_two_keys_and_nothing_that_moves_release() {
+fn the_config_file_carries_the_contracts_two_keys_and_nothing_else() {
     let config: toml::Value = toml::from_str(&build_config()).expect(".cargo/config.toml parses");
+    assert_eq!(
+        keys(&config, ""),
+        ["build", "profile"],
+        "the file holds the two tables the contract names and no other"
+    );
+    assert_eq!(keys(&config["build"], "build"), ["target-dir"]);
     assert_eq!(
         config["build"]["target-dir"].as_str(),
         Some("target"),
         "build.target-dir is the string \"target\""
     );
     assert_eq!(
+        keys(&config["profile"], "profile"),
+        ["dev"],
+        "the file touches no profile but dev; release stays Cargo.toml's"
+    );
+    assert_eq!(keys(&config["profile"]["dev"], "profile.dev"), ["debug"]);
+    assert_eq!(
         config["profile"]["dev"]["debug"].as_integer(),
         Some(1),
         "profile.dev.debug is the integer 1"
-    );
-    let profiles = config["profile"].as_table().expect("[profile] is a table");
-    assert_eq!(
-        profiles.keys().collect::<Vec<_>>(),
-        ["dev"],
-        "the config file touches no profile but dev; release stays Cargo.toml's"
     );
 }
 
