@@ -2260,6 +2260,9 @@ pub(crate) fn status_of(view: &RunView) -> String {
                 view.paths.run
             ));
         }
+        // The host's upkeep, where the driver is at it: a person reading a quiet
+        // run wants to know the idle capacity is being spent on something.
+        out.push_str(&crate::maintenance::status_line(view));
         out.push_str(&journal_loss_line(view));
         if let Some(health) = crate::agentgraph::health() {
             out.push_str(&format!("  providers: {health}\n"));
@@ -3507,6 +3510,8 @@ pub fn results(view: &RunView) -> String {
     out.push_str(&superseded_lines(view));
     // Under the graph, because a hook is the run's rather than any node's.
     out.push_str(&crate::hooks::results_lines(view));
+    // And the last maintenance sweep that did something, for the same reason.
+    out.push_str(&crate::maintenance::results_lines(view));
     out.push_str(&journal_loss_line(view));
     out
 }
@@ -3939,6 +3944,7 @@ mod tests {
             adoptions: 0,
             filters: Filters::default(),
             bus_config: Default::default(),
+            maintenance_config: None,
             envelope_reviewer_bar: Default::default(),
         }
     }

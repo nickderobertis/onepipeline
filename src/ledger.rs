@@ -239,6 +239,16 @@ impl RunPaths {
         self.dir.join("summary.json")
     }
 
+    /// The marker a driver keeps while its pool-maintenance sweep is running.
+    ///
+    /// Written when the sweep's thread starts and taken back when it is joined,
+    /// so `status` — another process — can say a maintenance is in progress
+    /// without the driver having to be asked. A derived record of the run's
+    /// own, kept where its state is kept, for the checkpoint's reason.
+    pub(crate) fn maintenance(&self) -> PathBuf {
+        self.dir.join("maintenance.json")
+    }
+
     /// The run's fold checkpoint: what a reader resumes a fold from instead of
     /// replaying this run's whole journal.
     ///
@@ -850,6 +860,18 @@ pub struct LaunchRecord {
     /// before this field existed reads as a run under the profile as declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bus_config: Option<onemessagebus::Config>,
+    /// The pool-maintenance schedule this run's idle driver sweeps on, when the
+    /// launch named one.
+    ///
+    /// **Resolved once, at the launch**, out of the flag and the launch config in
+    /// that order, and retained as the document the launch read and checked —
+    /// as [`bus_config`](Self::bus_config) is — so every driver that adopts the
+    /// run sweeps on the schedule the run was launched under rather than on
+    /// whatever that file says now; `adopt` takes no flag of its own. Omitted
+    /// when absent, so a record written before this field existed reads as a
+    /// run naming no schedule, and sweeps nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance_config: Option<crate::maintenance::MaintenanceConfig>,
 }
 
 impl LaunchRecord {
@@ -2899,6 +2921,7 @@ mod tests {
             adoptions: 0,
             filters: Filters::default(),
             bus_config: Default::default(),
+            maintenance_config: None,
             envelope_reviewer_bar: Default::default(),
         }
     }
@@ -3662,6 +3685,7 @@ mod tests {
             adoptions: 0,
             filters: Filters::default(),
             bus_config: Default::default(),
+            maintenance_config: None,
             envelope_reviewer_bar: Default::default(),
         };
         assert!(!record.owned_by(sys::UNKNOWN_LAUNCHER));
@@ -3700,6 +3724,7 @@ mod tests {
             adoptions: 0,
             filters: Filters::default(),
             bus_config: Default::default(),
+            maintenance_config: None,
             envelope_reviewer_bar: Default::default(),
         };
         let label = record.owner_label("mine");

@@ -6,7 +6,7 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79 and 81** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82 and 83** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
@@ -6413,5 +6413,125 @@ closes, with no settlement between. `tests/e2e/plan.rs` refuses the fields below
               "pinned_fields": ["branch", "attempt"]},
   "poll_env": "ONEPIPELINE_WORKSPACE_POLL_SECONDS",
   "surface_cadence_env": "ONEPIPELINE_RELEASE_SURFACE_SECONDS"
+}
+```
+
+## 83. The worktree pool is maintained on a schedule this crate keeps no state for — RESOLVED
+
+**Ruling: a launch names a persistent maintenance schedule, `--maintenance-config FILE`
+or the launch config's `maintenance_config` at `schema_version: 9`; an idle driver
+sweeps every registered identity on it through `onevcs::pool_maintain`, the sibling's
+recorded `last_maintained` decides what is due, and one new kind, `pool-maintenance`,
+records a sweep that did something.** The ruling is the planner's plan for adopting
+`onevcs` 0.27.0's `pool_maintain`, and `docs/contract.md` carries each half: the flag in
+the driver invocation, the pool-maintenance paragraph and its two documents beside the
+dispatch-env hook, the schema-9 sentence beside the bus's, and the kind in the closed
+list.
+
+`onevcs` 0.27.0 carries `pool_maintain`: run the host's own `maintain` command — the argv
+and its bound, per identity, in `workspaces.yml` — in each idle slot, one slot at a time
+under an identity lock, and stamp the attempt on the slot as `last_maintained`. That
+library holds **no schedule**: in the user's words, "it's weird for onevcs to have cron
+config if it's not doing anything with cron". And a schedule kept here per run would be
+wrong the other way — "it should be a persistent schedule and recorded time last done not
+every x time within a run as maintenance intervals will usually be longer than dag run
+times": a per-run timer sweeps on every run of a busy host and never on a quiet one. So
+the schedule is a pure function of a host file and the sibling's stamp, and this crate
+keeps **no state**: late is fine, nothing runs twice, two drivers on one host are safe by
+the same fact, and between runs nothing runs and nothing needs to.
+
+What this build does is the block below, and the block is the source.
+
+**The file.** `version: 1`, a `default` carrying `every`, and `rules`, first match wins,
+each carrying `match` and `every` — and `every` is the *only* key either carries: no
+`at`, no cron shape. `every` is parsed through the linked `onevcs::Span` and `match` is
+`onevcs::rules::RuleMatch`, resolved per identity through `onevcs::first_matching`, so
+the span grammar and the match vocabulary have one implementation each. External input,
+refused before a run is minted and naming the key at fault: an unknown key, a `version`
+other than 1, a rule naming no match field, a malformed span. Read by two rungs on the
+hooks' terms — the flag beats the config even when blank, and a blank rung names none —
+resolved against the launch directory as `bus_config` is, retained in the launch record
+as the parsed document (`onepipeline::maintenance::MaintenanceConfig`), omitted when
+absent, and replayed by `adopt`, which takes no flag.
+
+**The idle branch.** A pass is idle when it dispatched nothing, nothing became ready, the
+run is below its own concurrency ceiling, and the local executor reports `slots_free >
+0` — the executor's own probe, cores less the one-minute load. `ONEPIPELINE_LOAD1`
+states a load average in place of the host's: a **journey lever**, so the suite can hold
+a shared host still and drive `slots_free == 0` directly, and the same lever for a host
+whose `/proc/loadavg` is not this process's measure, a container reading its host's
+load beside its own cgroup's parallelism. On an idle pass, with a schedule named, no
+sweep of this driver's running, and the in-memory pace elapsed since the last one
+started, the driver starts **one** thread. The pace is `ONEPIPELINE_MAINTENANCE_PACE_SECONDS`,
+six hundred seconds unset and never persisted: a sweep on a schedule measured in days
+answers `not-due` almost every time it is asked, and each ask surveys every identity's
+records on this host — cheap, but not worth paying on every idle pass of a loop that
+otherwise waits on its channel alone. The thread visits every registered identity in
+sorted order — read off the sibling's own `onevcs repos`, spawned the way
+`destination.rs` spawns that library's resolution verbs, which the planner ruled the
+enumeration keeps: the registry's loader is not on the library surface at this pin, and
+a direct read of `registry.json` through the document types would bind this crate to one
+on-disk shape where the sibling migrates the document on its own first contact. Only the
+identity column is read and every other column is free text; a listing that cannot be
+run, refuses, or cannot be read as one is a **stated failure** of the sweep naming the
+sibling, recorded as the sweep's `error`, and never an empty identity set read as nothing
+to maintain. Each identity is resolved to its `every` (rule, else default) and asked
+through `onevcs::pool_maintain(Scope::Repo(identity), Some(every))`. A second idle tick while
+the thread runs does nothing; a pace that came due on a pass that was not idle is
+re-asked a minute later rather than on every pass. The thread is bounded by construction
+— every command runs under the identity's own `timeout` — and a driver closing out joins
+it, whichever way the loop ends. While it is live the run root carries
+`maintenance.json`, which is what lets `status` — another process — name a maintenance in
+progress; the driver that next adopts the run takes a dead driver's marker back before
+its first pass.
+
+**The record.** The thread hands its reports back over the loop's own channel, and the
+loop journals **one** `pool-maintenance` per sweep — carrying `started_at` and, per
+identity it records, `identity`, the `every` it was maintained on and the sibling's own
+`outcome` as `onevcs` serializes its `IdentityOutcome`, or the `error` that stood in for
+one — only when some slot ran or some identity was `claimed` or failed. Nothing is written
+when every identity answered `no-maintain-command`, `no-slots` or `not-due`, and an
+identity that answered one of those is not written into a record another identity
+earned. `results` names the last record, reading each outcome back through the sibling's
+type; `status` names a sweep in progress while the marker is there and the driver is
+live.
+
+Driven end to end by `tests/e2e/maintenance.rs` against the linked `onevcs` under a
+scratch state root with a pooled identity, a real idle slot, and a `maintain` command
+that writes a marker into the slot's worktree: an idle driver maintains the due slot
+once, the sibling's `pool status` carries the stamp, further idle ticks inside `every`
+sweep the registry again and run nothing, a fresh driver inside `every` runs nothing and
+one after it maintains again; two drivers idle at once maintain it once between them,
+the other answered `claimed`; maintenance is withheld at the concurrency ceiling, with
+no free slot, and under no schedule; idle passes inside the shipped pace sweep no second
+time, read off the driver's own pass counts and the sibling's call record; a rule's
+`every` beats the default through the sibling's matcher; and the flag, the key, the blank,
+the refusals, the schema boundary and `adopt`'s replay are driven through the real
+`start`. `tests/contract.rs` holds the block below against the public types, and
+`maintenance::tests` holds the file's refusals and the record's shape.
+
+```json
+{
+  "flag": "--maintenance-config",
+  "config_key": "maintenance_config",
+  "config_schema_version": 9,
+  "schedule": {
+    "version": 1,
+    "default": {"every": "7d"},
+    "rules": [
+      {"match": {"host": "github.com", "owner": "nickderobertis", "name": "onevcs"}, "every": "3d"}
+    ]
+  },
+  "schedule_version": 1,
+  "refused": ["an unknown key", "a `version` other than 1", "a rule naming no match field", "a malformed span"],
+  "idle": ["dispatched nothing", "nothing became ready", "below the run's concurrency ceiling", "slots_free > 0"],
+  "pace_env": "ONEPIPELINE_MAINTENANCE_PACE_SECONDS",
+  "default_pace_seconds": 600,
+  "load_env": "ONEPIPELINE_LOAD1",
+  "marker": "maintenance.json",
+  "event_kinds": ["pool-maintenance"],
+  "record_fields": ["started_at", "identities"],
+  "identity_fields": ["identity", "every", "outcome"],
+  "unrecorded_outcomes": ["no-maintain-command", "no-slots", "not-due"]
 }
 ```

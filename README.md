@@ -516,6 +516,20 @@ run keeps**. The host's own composition — which helpers produce the variables 
 lives in the hook: this crate never sources or names a host variable. Naming no
 hook dispatches exactly as before.
 
+A launch may also name a **pool-maintenance schedule**: `--maintenance-config FILE`,
+or a launch config's `maintenance_config`, a file stating how old a warm worktree
+slot's `last_maintained` may be before it is due — `version: 1`, a `default`
+carrying `every`, and `rules` (first match wins) each carrying `match` and `every`,
+in `onevcs`'s own span grammar and match vocabulary. On a pass that dispatched
+nothing and has capacity to spare, the driver runs `onevcs pool maintain` over every
+registered identity with that identity's `every`, paced in memory by
+`ONEPIPELINE_MAINTENANCE_PACE_SECONDS` (ten minutes by default). The sibling's
+recorded stamp decides what is due, so nothing is kept here, nothing runs twice, two
+drivers on one host are safe, and between runs nothing runs. A sweep that ran a
+slot's command — or met another run inside an identity, or failed — journals one
+`pool-maintenance` record; `status` names a sweep in progress and `results` the last
+record. Naming no schedule runs no maintenance at all.
+
 Read-only views — `runs`, `status`, `host`, `monitor`, `results`, `goals`,
 `transcript`, `telemetry` — report unread surfaces, driver liveness, and
 provider health without touching a run. `status` says what each in-flight node

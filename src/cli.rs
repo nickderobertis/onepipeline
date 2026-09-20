@@ -344,6 +344,26 @@ pub struct StartArgs {
     /// beats the launch config's own field.
     #[arg(long, value_name = "PATH")]
     pub bus_config: Option<PathBuf>,
+    /// The pool-maintenance schedule this run's idle driver sweeps `onevcs`'s
+    /// worktree pool on: a YAML or JSON file naming, per identity, how old a
+    /// slot's `last_maintained` may be before it is due.
+    ///
+    /// `version: 1`, a `default: {every: SPAN}`, and `rules`, first match wins,
+    /// each `{match: {host, owner, name, path}, every: SPAN}` — `every` the only
+    /// key either carries, a SPAN spelled the way `onevcs` spells one (digits
+    /// then s, m, h or d), and `match` the onevcs rules vocabulary. Read at the
+    /// launch and retained in the launch record; an unknown key, another
+    /// `version`, a rule naming no match field or a malformed span is refused,
+    /// naming the key, before any run exists. On a pass that dispatched nothing
+    /// and has capacity to spare, the driver runs `onevcs pool maintain` over
+    /// every registered identity with that identity's `every`; the sibling's
+    /// recorded stamp decides what is due, so nothing is kept here, nothing runs
+    /// twice, and two drivers on one host are safe. Naming none is the shipped
+    /// default and runs no maintenance at all. Given here it beats the launch
+    /// config's own field — including when what it names is blank, which is
+    /// this launch saying it has none.
+    #[arg(long, value_name = "FILE")]
+    pub maintenance_config: Option<String>,
     /// How often the durable planner-update check-in comes due, in seconds.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_HEARTBEAT_INTERVAL_SECONDS)]
     pub heartbeat_interval: u64,

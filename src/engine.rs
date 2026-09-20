@@ -527,6 +527,9 @@ pub(crate) enum Message {
     ChainStopped(Box<ChainStopped>),
     /// The dispatch settled.
     Settled(Box<Settled>),
+    /// The pool-maintenance sweep this driver started has finished, and this is
+    /// what it did.
+    Maintained(Box<crate::maintenance::Swept>),
 }
 
 /// A node's settlement, and the thread that is waiting to hear it was recorded.
@@ -1033,6 +1036,11 @@ fn converge(
     // fresh driver reads rather than inherits, and `report_holds` diffs the
     // answer against what the record already says.
     let mut workspaces = crate::pool::Workspaces::new();
+    // The pool-maintenance schedule the launch named, if it named one: what
+    // this driver sweeps on an idle pass, paced in memory and decided on disk by
+    // the sibling's own stamps. A launch naming none starts nothing, ever.
+    let mut maintenance =
+        crate::maintenance::Maintenance::of_launch(launch.maintenance_config.clone(), paths);
     // What the loop has already said out loud, so each fact is announced once
     // and again only when it becomes true again.
     let mut announced_ready: BTreeSet<String> = BTreeSet::new();
@@ -1138,7 +1146,7 @@ fn converge(
         }
 
         let statuses = statuses_of(&mut derived, state);
-        announce_ready(paths, journal, &statuses, &mut announced_ready)?;
+        let readied = announce_ready(paths, journal, &statuses, &mut announced_ready)?;
         // The decision points holding subtrees back, and the nodes they hold.
         // Diffed against the last pass, so each one is reported when it begins
         // holding dependents back and again when it releases them.
@@ -1230,7 +1238,7 @@ fn converge(
             }
         }
         workspaces.begin_pass(|node| in_flight.contains_key(node));
-        if start_ready(
+        let started_here = start_ready(
             paths,
             journal,
             state,
@@ -1242,7 +1250,8 @@ fn converge(
             &paused,
             &releases,
             &mut workspaces,
-        )? {
+        )?;
+        if started_here {
             derived = None;
             unpublished = true;
             moved = true;
@@ -1310,6 +1319,19 @@ fn converge(
             }
         }
 
+        // The idle branch. A pass that dispatched nothing and readied nothing,
+        // on a run below its own concurrency ceiling, on a host with a free
+        // slot, is capacity nothing else is using — the cheapest time to pay for
+        // the pool's upkeep. What starts is one thread, paced in memory; what it
+        // does is decided by the slots' own stamps. Asked after the close-out
+        // above, so a run that is over starts nothing it would only have to wait
+        // for.
+        let idle = !moved
+            && !readied
+            && in_flight.len() < state.graph.concurrency as usize
+            && crate::maintenance::host_has_room();
+        maintenance.consider(idle, paths, &tx);
+
         // Nothing more to do until something happens — unless this pass is what
         // happened, in which case the next one is due now. The longest this loop
         // may go without a pass is otherwise stated here rather than inside the
@@ -1337,6 +1359,8 @@ fn converge(
             // A held identity is re-read on a clock as well as on every pass: a
             // session another run closes is not an event this run sees.
             workspaces.next_read(),
+            // The pace at which an idle driver next asks the schedule.
+            maintenance.next_due(),
         ];
         let deadline = if moved {
             Duration::ZERO
@@ -1581,6 +1605,9 @@ fn converge(
                 Message::ChainStopped(stopped) => {
                     raise(paths, journal, chain_stopped_finding(&stopped))?;
                 }
+                // The sweep this driver started is over: joined, and its one
+                // record written where it earned one.
+                Message::Maintained(swept) => maintenance.record(paths, journal, &swept)?,
                 Message::Settled(settled) => {
                     let settlement = &settled.settlement;
                     in_flight.remove(&settlement.node);
@@ -1608,6 +1635,11 @@ fn converge(
         // second when it cannot.
         watch_for_quiet(paths, journal, stall_after, &mut in_flight)?;
     }
+
+    // A sweep still running is waited for: its commands are bounded by their
+    // identities' own timeouts, and a driver that left one behind would leave a
+    // slot claimed by a process that had gone.
+    maintenance.close(paths, journal, &rx)?;
 
     Ok(graph::state_of(&statuses_of(&mut derived, state)))
 }
@@ -2292,7 +2324,7 @@ fn announce_ready(
     journal: &mut Journal,
     statuses: &BTreeMap<String, NodeStatus>,
     announced: &mut BTreeSet<String>,
-) -> Result<()> {
+) -> Result<bool> {
     announced.retain(|id| statuses.get(id).copied() == Some(NodeStatus::Ready));
     let fresh: Vec<String> = statuses
         .iter()
@@ -2300,6 +2332,7 @@ fn announce_ready(
         .map(|(id, _)| id.clone())
         .filter(|id| !announced.contains(id))
         .collect();
+    let readied = !fresh.is_empty();
     for id in fresh {
         journal.emit(
             journal::PipelineKind::NodeReady,
@@ -2308,7 +2341,7 @@ fn announce_ready(
         )?;
         announced.insert(id);
     }
-    Ok(())
+    Ok(readied)
 }
 
 /// Where a relayed envelope says its member's turn can be reached.

@@ -232,6 +232,15 @@ pub enum PipelineKind {
     /// Carries the `settlement` it let go at, which is `awaiting-planner`: the run
     /// has not ended, and the driver that adopts it judges again.
     RunHookWithheld,
+    /// One pool-maintenance sweep an idle driver ran did something.
+    ///
+    /// Written once per sweep, and only where some slot ran, some identity was
+    /// `claimed` by another run, or some identity failed — a sweep on which every
+    /// identity answered `no-maintain-command`, `no-slots` or `not-due` writes
+    /// nothing. Carries `started_at` and, per identity it records, the `every` it
+    /// was maintained on and the sibling's own `outcome` — per slot, what ran and
+    /// how it ended — or the `error` that stood in for one.
+    PoolMaintenance,
 }
 
 impl PipelineKind {
@@ -270,6 +279,7 @@ impl PipelineKind {
             Self::RunHookFired => "run-hook-fired",
             Self::RunHookFinished => "run-hook-finished",
             Self::RunHookWithheld => "run-hook-withheld",
+            Self::PoolMaintenance => "pool-maintenance",
         }
     }
 
@@ -331,6 +341,7 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::RunHookFired,
     PipelineKind::RunHookFinished,
     PipelineKind::RunHookWithheld,
+    PipelineKind::PoolMaintenance,
 ];
 
 /// The id of a stored artifact.

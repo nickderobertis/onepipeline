@@ -185,7 +185,7 @@ struct Destination {
 /// Read as an `OsString`, because a path is one: a value this platform allows and
 /// Unicode does not would be *lost* by a `String` read, and the loader would then
 /// ask an executable the operator never named while believing they named none.
-fn binary() -> std::ffi::OsString {
+pub(crate) fn binary() -> std::ffi::OsString {
     std::env::var_os(BINARY_ENV)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| DEFAULT_BINARY.into())

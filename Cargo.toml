@@ -461,11 +461,13 @@ resolver = "2"
 # `.overflow`, which every literal here fills — so a pin below it does not
 # compile. A **requirement**, because `^0.24` admits no 0.26.x.
 #
-# `onevcs` 0.27.0 is the floor because it is the pool's release this crate
-# adopts as published; what it adds over 0.26.0 (`pool_maintain`) nothing here
-# calls, so the floor is the adoption and not a symbol. `onevcs-testing` 0.6.8
-# requires exactly this `onevcs`, so the two requirements and the lock move
-# together.
+# `onevcs` 0.27.0 is the floor because it carries `pool_maintain`, `Span` and
+# `first_matching`, which `src/maintenance.rs` calls: the idle driver's sweep of
+# the worktree pool on the schedule a launch names, whose only state is the
+# stamp that library writes on each slot. Adopted as published — the release the
+# pool's maintenance verb shipped in — and `onevcs-testing` 0.6.8 requires
+# exactly this `onevcs`, so the two requirements and the lock move together.
+# `tests/e2e/maintenance.rs` drives the sweep against the linked release.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the

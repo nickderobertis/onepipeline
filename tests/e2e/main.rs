@@ -88,6 +88,14 @@ mod listing;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod live_edit;
 mod loopcost;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] about 35 seconds, and what
+// the journeys exercise is the reconcile loop's idle branch, the launch's flag-and-key
+// resolution, the launch record and the views together — `engine`, `maintenance`,
+// `driver`, `filter`, `ledger` and `views`, over the linked `onevcs` — so the narrowest
+// edge they can honestly sit behind is the crate itself, which is this target's; a
+// project edged narrower would drop them out of `nx affected` for the very changes they
+// exist to catch. Same grounds as `mod dispatch_env_hook` above.
+mod maintenance;
 mod node_validator;
 mod plan;
 mod plan_check;
