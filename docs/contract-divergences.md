@@ -6544,13 +6544,14 @@ the refusals, the schema boundary and `adopt`'s replay are driven through the re
 
 **Proposal: the engine stamps every dispatch it starts through oneharness's own
 environment, the run keeps one small pointer file every oneharness turn under it appends
-to, and a verb reads that file and nothing else.** `docs/contract.md` carries the
-paragraph beginning *Every agent a run launches is visible through oneharness's own run
-history* and the `oneharness_history` block beside it, which `tests/contract.rs` holds
-the crate's constants to; it names `agents` in the SDK verb list, adds
-`oneharness_sessions()` to what `RunPaths` promises, and adds `attempt` to the executor
-seam's `DispatchRequest`. Every one of those is this entry's to record, and none is
-resolved from here.
+to, and a verb reads that file and nothing else.** The amendment is one contract
+paragraph and the `oneharness_history` block beside it — the three variables the engine
+overlays, the label keys and scope words, the key-wise merge rule, the opt-out, the
+pointer file's name and the read that consumes it — with `tests/contract.rs` holding the
+crate's constants to that block; and three sentences elsewhere in the contract: `agents`
+in the SDK verb list, `oneharness_sessions()` among what `RunPaths` promises, and
+`attempt` on the executor seam's `DispatchRequest`. Every one of those is this entry's to
+record, and none is resolved from here.
 
 Before this entry, which agents ran under a node was knowable only where the target
 repository had wired it: the `role` labels an operator's transcript view groups by came
