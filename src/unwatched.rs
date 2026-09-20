@@ -66,6 +66,10 @@ pub struct UnwatchedRun {
     /// The run.
     pub run: String,
     /// The word the listing prints for how it is being driven.
+    // llmlint: ignore[invalid_states_unrepresentable] the listing's own word — `SETTLED`,
+    // or the liveness verdict's — as `views::summary_standing_word` answers it, which is a
+    // rendering of the private `Standing` and the contract names no type for it; this line
+    // reproduces the listing's word beside the run's id, so it carries the word.
     pub standing: &'static str,
     /// Why nothing counts as watching it, in the watcher records' own words.
     pub why_not_watched: String,

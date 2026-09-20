@@ -54,6 +54,7 @@ use onepipeline::report::{
     retain, ACCEPTED_REPORT_FILE, MAX_REPORT_BYTES, MEMBER_SETTLED, REPORT_PATH,
 };
 use onepipeline::rules::{ExecutorKind, ExecutorRules, Predicate};
+use onepipeline::verbs;
 use onepipeline::views::{
     FailureClass, Listing, NodeLanding, ProjectGroup, ProjectionActions, ProjectionEnded,
     ProjectionFailure, ProjectionRecord, ProjectionScope, Projects, RunPaths, RunSummary,
@@ -6084,8 +6085,66 @@ fn verb_functions_in_contract() -> BTreeSet<String> {
 /// directions: a function published there and not named here is surface the
 /// contract does not promise, and a name here the source dropped is a promise
 /// to nobody.
+///
+/// The names are held by reading the two; the **signatures** are held by the
+/// compiler, which is the drift gate this file uses everywhere: each verb and
+/// renderer below is coerced to a function pointer of the signature the contract
+/// spells, so a parameter or a result type that moves fails to compile here
+/// before the document can go on stating the old one.
 #[test]
 fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
+    use onemessagebus::Correlation;
+    use onepipeline::channel::SurfaceKind;
+    use onepipeline::filter::EventFilter;
+    use onepipeline::verbs::{
+        Adopt, Adopted, ChannelQueue, Goals, Grouping, Host, Monitored, Next, Receipt, Results,
+        Retained, Status, StopRequest, Stopped, Surfaced, Transcript, Unwatched, WatchFrame,
+        WatchLines, WatchOutcome, WatchRequest,
+    };
+    use onepipeline::views::{DriverLiveness, Projects};
+    use onepipeline::Result;
+
+    let _: fn(&Path, &str, bool) -> Projects = verbs::runs;
+    let _: fn(&Projects, Grouping, &str) -> String = verbs::render_runs;
+    let _: fn(&Path, Option<&str>) -> Result<Status> = verbs::status;
+    let _: fn(&Status) -> String = verbs::render_status;
+    let _: fn(&Path) -> Host = verbs::host;
+    let _: fn(&Host) -> String = verbs::render_host;
+    let _: fn(&Path, Option<&str>) -> Result<Goals> = verbs::goals;
+    let _: fn(&Goals) -> String = verbs::render_goals;
+    let _: fn(&RunPaths) -> Result<Results> = verbs::results;
+    let _: fn(&Results) -> String = verbs::render_results;
+    let _: fn(&RunPaths, Option<&str>) -> Result<Transcript> = verbs::transcript;
+    let _: fn(&Transcript) -> String = verbs::render_transcript;
+    let _: fn(&Path, Option<&str>) -> Result<Vec<RunTelemetry>> = verbs::telemetry;
+    let _: fn(&[RunTelemetry], bool) -> Result<String> = verbs::render_telemetry;
+    let _: fn(&RunTelemetry) -> String = verbs::render_telemetry_breakdown;
+    let _: fn(&RunPaths, &[Envelope]) -> RunTelemetry = onepipeline::telemetry::of_run;
+    let _: fn(&RunPaths, &EventFilter, Option<&str>) -> Result<Monitored> = verbs::monitor;
+    let _: fn(&Monitored) -> String = verbs::render_monitor;
+    let _: fn(&RunPaths, &EventFilter) -> Result<Next> = verbs::next;
+    let _: fn(&Next) -> String = verbs::render_next;
+    let _: fn(&RunPaths) -> Result<ChannelQueue> = verbs::channel;
+    let _: fn(&ChannelQueue) -> Result<String> = verbs::render_channel;
+    /// The sink a watch hands its frames to, as the contract spells it.
+    type WatchSink<'a> = &'a mut dyn FnMut(WatchFrame<'_>) -> Result<()>;
+    let _: fn(&RunPaths, &WatchRequest, WatchSink<'_>) -> Result<WatchOutcome> = verbs::watch;
+    let _: fn(&WatchFrame<'_>) -> Result<WatchLines> = verbs::render_watch_frame;
+    let _: fn(&Path, &str) -> Result<Unwatched> = verbs::unwatched;
+    let _: fn(&Unwatched) -> String = verbs::render_unwatched;
+    let _: fn(&RunPaths, Option<&Correlation>, &str) -> Result<Receipt> = verbs::reply;
+    let _: fn(&Receipt) -> Result<String> = verbs::render_receipt;
+    let _: fn(&RunPaths, &str) -> Result<Receipt> = verbs::attest;
+    let _: fn(&RunPaths, SurfaceKind, String) -> Result<Surfaced> = verbs::surface;
+    let _: fn(&Surfaced) -> String = verbs::render_surfaced;
+    let _: fn(&RunPaths, StopRequest<'_>) -> Result<Stopped> = verbs::stop;
+    let _: fn(&Stopped) -> String = verbs::render_stopped;
+    let _: fn(&RunPaths, Adopt) -> Result<Adopted> = verbs::adopt;
+    let _: fn(&Adopted) -> String = verbs::render_adopted;
+    let _: fn(&RunPaths, Retained) -> Result<i32> = verbs::drive_run;
+    let _: fn(&RunSummary) -> DriverLiveness = onepipeline::views::liveness_of;
+    let _: fn(&RunPaths) -> Result<Plan> = onepipeline::views::plan_of;
+
     let in_source = verb_functions_in_source();
     let in_contract = verb_functions_in_contract();
     assert_eq!(

@@ -466,6 +466,14 @@ fn a_listing_groups_runs_by_project_newest_first_and_keeps_every_run_line_as_it_
     });
     // And a run of no project: its launch record names none, and its summary
     // document is taken away so the row is folded off that record.
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb writes a launch record naming
+    // no project — every launch names the project it read the plan from — so the state is
+    // one an *earlier build* left, before the store was where a plan came from, and it is
+    // reached by taking the one key that build never wrote off a record this build wrote.
+    // The document beside it goes for the reason the journeys above take one away: it was
+    // written by a build that knew the project, and the row under test is the one folded
+    // off the record as it now stands. Every claim after it is read off the compiled
+    // binary's own stdout.
     let orphan = settled(&world, "orphan", vec![agent("build", &[])]);
     let launch = world.run_file(&orphan, "launch.json");
     let mut record: Value =
@@ -477,6 +485,7 @@ fn a_listing_groups_runs_by_project_newest_first_and_keeps_every_run_line_as_it_
         .remove("project");
     std::fs::write(&launch, record.to_string()).expect("the launch record is rewritten");
     std::fs::remove_file(world.run_file(&orphan, "summary.json")).expect("the document goes");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let project_of = |run: &str| {
         world.run_json(run, "launch.json")["project"]
             .as_str()

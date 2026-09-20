@@ -73,10 +73,6 @@ pub(crate) fn resolved(root: &Path, run: &str) -> Result<RunPaths> {
     Ok(paths)
 }
 
-// ---------------------------------------------------------------------------
-// Listings
-// ---------------------------------------------------------------------------
-
 /// How a listing lays its runs out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Grouping {
@@ -336,10 +332,6 @@ pub fn render_telemetry_breakdown(telemetry: &RunTelemetry) -> String {
     crate::telemetry::render_breakdown(telemetry)
 }
 
-// ---------------------------------------------------------------------------
-// The stream
-// ---------------------------------------------------------------------------
-
 /// `onepipeline monitor RUN [--cursor C]`: one pass over the merged stream, from
 /// the cursor or from the start, shown through `filter`.
 ///
@@ -408,10 +400,6 @@ pub fn render_unwatched(unwatched: &Unwatched) -> String {
         .collect::<Vec<_>>()
         .concat()
 }
-
-// ---------------------------------------------------------------------------
-// The channel
-// ---------------------------------------------------------------------------
 
 /// What `onepipeline next` answered.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -969,10 +957,6 @@ pub fn render_surfaced(surfaced: &Surfaced) -> String {
     json!({"surface": surfaced.surface, "state": "queued"}).to_string()
 }
 
-// ---------------------------------------------------------------------------
-// The driver
-// ---------------------------------------------------------------------------
-
 /// Who is stopping a run, and whether they may stop one they do not own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StopRequest<'a> {
@@ -980,6 +964,10 @@ pub struct StopRequest<'a> {
     /// the binary reads `ONEPIPELINE_LAUNCHER_SESSION` and passes it.
     pub session: &'a str,
     /// Stop a run another session owns, naming the owner.
+    // llmlint: ignore[invalid_states_unrepresentable] the flag the contract fixes for this
+    // request — `StopRequest { session, force }`, which `ui-api` and `aio-adopt` are written
+    // against — and the one the CLI parses (`--force`); the two answers it has are the two
+    // the verb has, and a named enum over them would be that boolean under another name.
     pub force: bool,
 }
 
@@ -998,6 +986,11 @@ pub struct Stopped {
     /// was left to reach. A teardown that was not clean is journalled and is
     /// **not** a stop — the run is still running — and [`refusal`](Self::refusal)
     /// says so.
+    // llmlint: ignore[invalid_states_unrepresentable] derivable from `teardown`, and the
+    // contract fixes it as a field — `Stopped { run, owner, forced, teardown, clean }` is
+    // what the downstream nodes read — so it is written from the teardown in the one place a
+    // `Stopped` is built, `driver::stop_run`, and nothing else assembles one. `forced` is
+    // independent of both: it says whose run was stopped, not how the teardown went.
     pub clean: bool,
 }
 

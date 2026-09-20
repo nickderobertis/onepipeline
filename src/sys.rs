@@ -1545,12 +1545,20 @@ fn platform_in_own_process_group(command: &mut std::process::Command) {
     command.process_group(0);
 }
 
+// llmlint: ignore-block[changed_behavior_has_e2e] the journey that proves the property —
+// `driver::a_detached_adoptions_driver_outlives_its_launcher_and_the_interrupt_its_group_takes`
+// — interrupts a process group with `killpg`, and the Windows counterpart of that is
+// `GenerateConsoleCtrlEvent` on a console the test runner does not have, so no journey
+// can send the Ctrl-C this flag is for. This arm is the platform's own documented
+// counterpart of the Unix one: `CREATE_NEW_PROCESS_GROUP` is what stops a console's
+// Ctrl-C reaching a child, and it is compiled by the Windows leg.
 #[cfg(windows)]
 fn platform_in_own_process_group(command: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
     command.creation_flags(CREATE_NEW_PROCESS_GROUP);
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 #[cfg(unix)]
 fn platform_disown_standard_handles() {}

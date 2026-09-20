@@ -94,9 +94,18 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             } else {
                 verbs::Adopt::Attached
             };
+            // llmlint: ignore-block[changed_behavior_has_e2e] an attached adoption now says
+            // its settlement once the call returns, which is after the run-end hook rather
+            // than before it; the line and the code are unchanged, and `tests/parity.rs`
+            // holds them to the SDK's. That the line is printed and the hook fired on one
+            // attached adoption is driven end to end by `run_end_hooks::*` — every journey
+            // there that runs `adopt` attached asserts `"settlement":"complete"` on stdout
+            // beside the hook's own record — and the order of the two is not a fact stdout
+            // carries. Entry 81 of `docs/contract-divergences.md` records the change.
             let adopted = verbs::adopt(&paths, how)?;
             println!("{}", verbs::render_adopted(&adopted));
             Ok(adopted.exit_code())
+            // llmlint: ignore-end[changed_behavior_has_e2e]
         }
         Verb::Channel(crate::cli::ChannelCommand::NoEngineVerb) => Err(Error::Invalid(
             "the channel exposes no engine-owned verb".to_owned(),
