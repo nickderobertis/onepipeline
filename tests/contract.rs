@@ -54,10 +54,11 @@ use onepipeline::report::{
     retain, ACCEPTED_REPORT_FILE, MAX_REPORT_BYTES, MEMBER_SETTLED, REPORT_PATH,
 };
 use onepipeline::rules::{ExecutorKind, ExecutorRules, Predicate};
+use onepipeline::verbs;
 use onepipeline::views::{
-    FailureClass, NodeLanding, ProjectionActions, ProjectionEnded, ProjectionFailure,
-    ProjectionRecord, ProjectionScope, RunPaths, RunSummary, RunTelemetry, WholeBecause,
-    SUMMARY_SCHEMA_VERSION,
+    FailureClass, Listing, NodeLanding, ProjectGroup, ProjectionActions, ProjectionEnded,
+    ProjectionFailure, ProjectionRecord, ProjectionScope, Projects, RunPaths, RunSummary,
+    RunTelemetry, WholeBecause, GROUP_HEADER, NO_PROJECT, SUMMARY_SCHEMA_VERSION,
 };
 use onevcs::{Adoption, MergePolicy, SessionRequest};
 use serde_json::{json, Value};
@@ -1632,6 +1633,7 @@ fn summary_fields() -> BTreeSet<String> {
         surfaces_read: 1,
         awaiting_human_action: true,
         project: "plans:gated".into(),
+        name: Some("Gated".into()),
         launcher: "claude-code".into(),
         session: "a-session".into(),
         started_at: Some("2026-01-01T00:00:00.000Z".into()),
@@ -3743,10 +3745,9 @@ fn the_delivered_surfaces_instant_is_what_the_divergence_record_names() {
     let field = block["queued_at_field"]
         .as_str()
         .expect("entry 66 names the field");
-    let driver =
-        std::fs::read_to_string(repo_root().join("src/driver.rs")).expect("the driver ships");
+    let verbs = std::fs::read_to_string(repo_root().join("src/verbs.rs")).expect("the verbs ship");
     assert!(
-        driver.contains(&format!("(\"{field}\", json!(surface.{field}))")),
+        verbs.contains(&format!("(\"{field}\", json!(surface.{field}))")),
         "entry 66 names a field the hand-out does not write: {field}"
     );
     let journeys = std::fs::read_to_string(repo_root().join("tests/e2e/channel.rs"))
@@ -3789,12 +3790,11 @@ fn the_replys_exit_statuses_are_what_the_divergence_record_names() {
         json!(EXIT_QUEUED),
         "entry 67 has a queued reply answering with the unfinished-run status again"
     );
-    let driver =
-        std::fs::read_to_string(repo_root().join("src/driver.rs")).expect("the driver ships");
+    let verbs = std::fs::read_to_string(repo_root().join("src/verbs.rs")).expect("the verbs ship");
     assert!(
-        driver.contains("durable command queue")
-            && driver.contains("has to drive the run for them to")
-            && driver.contains("They are not to be sent"),
+        verbs.contains("durable command queue")
+            && verbs.contains("has to drive the run for them to")
+            && verbs.contains("They are not to be sent"),
         "the reply no longer says what a queued envelope is waiting for"
     );
 }
@@ -4885,6 +4885,7 @@ const RULINGS: &[(&str, &str)] = &[
     ("77.", "The planner channel is `onemessagebus`'s"),
     ("78.", "Surface kinds are an open vocabulary"),
     ("79.", "edit-applied"),
+    ("81.", "the CLI is argument parsing over them"),
 ];
 
 #[test]
@@ -6028,4 +6029,262 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
         onepipeline::channel::Deliver,
         bool,
     ) -> onepipeline::Result<Delivered> = onepipeline::note::deliver_with;
+}
+
+/// The paragraph of the contract that states the post-launch verbs.
+fn verbs_paragraph() -> &'static str {
+    CONTRACT
+        .split("\n\n")
+        .find(|paragraph| {
+            paragraph.starts_with(
+                "**The post-launch verbs are the SDK, and the CLI is argument parsing over them.**",
+            )
+        })
+        .expect("docs/contract.md states the post-launch verbs")
+}
+
+/// Every function `src/verbs.rs` publishes.
+fn verb_functions_in_source() -> BTreeSet<String> {
+    std::fs::read_to_string(repo_root().join("src/verbs.rs"))
+        .expect("the verbs ship")
+        .lines()
+        .filter_map(|line| line.strip_prefix("pub fn "))
+        .map(|rest| {
+            rest.chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect::<String>()
+        })
+        .collect()
+}
+
+/// Every function the contract's verbs paragraph names.
+///
+/// A verb is written as its signature — `` `name(args) -> Type` `` — and a
+/// renderer as its bare name or its own signature: what is read here is every
+/// backticked span that opens with an identifier and either carries `->` or is a
+/// `render_` name. A method a result type answers (`pending()`, `refusal()`)
+/// carries neither, and belongs to its type rather than to this list.
+fn verb_functions_in_contract() -> BTreeSet<String> {
+    backticked_in(verbs_paragraph())
+        .into_iter()
+        .filter_map(|span| {
+            let name: String = span
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            let rest = &span[name.len()..];
+            let signature = rest.starts_with('(') && span.contains("->");
+            let renderer =
+                name.starts_with("render_") && (rest.is_empty() || rest.starts_with('('));
+            (!name.is_empty() && (signature || renderer)).then_some(name)
+        })
+        .collect()
+}
+
+/// The contract's list of verb functions and `src/verbs.rs` agree, in both
+/// directions: a function published there and not named here is surface the
+/// contract does not promise, and a name here the source dropped is a promise
+/// to nobody.
+///
+/// The names are held by reading the two; the **signatures** are held by the
+/// compiler, which is the drift gate this file uses everywhere: each verb and
+/// renderer below is coerced to a function pointer of the signature the contract
+/// spells, so a parameter or a result type that moves fails to compile here
+/// before the document can go on stating the old one.
+#[test]
+fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
+    use onemessagebus::Correlation;
+    use onepipeline::channel::SurfaceKind;
+    use onepipeline::filter::EventFilter;
+    use onepipeline::verbs::{
+        Adopt, Adopted, ChannelQueue, Goals, Grouping, Host, Monitored, Next, Receipt, Results,
+        Retained, Status, StopRequest, Stopped, Surfaced, Transcript, Unwatched, WatchFrame,
+        WatchLines, WatchOutcome, WatchRequest,
+    };
+    use onepipeline::views::{DriverLiveness, Projects};
+    use onepipeline::Result;
+
+    let _: fn(&Path, &str, bool) -> Projects = verbs::runs;
+    let _: fn(&Projects, Grouping, &str) -> String = verbs::render_runs;
+    let _: fn(&Path, Option<&str>) -> Result<Status> = verbs::status;
+    let _: fn(&Status) -> String = verbs::render_status;
+    let _: fn(&Path) -> Host = verbs::host;
+    let _: fn(&Host) -> String = verbs::render_host;
+    let _: fn(&Path, Option<&str>) -> Result<Goals> = verbs::goals;
+    let _: fn(&Goals) -> String = verbs::render_goals;
+    let _: fn(&RunPaths) -> Result<Results> = verbs::results;
+    let _: fn(&Results) -> String = verbs::render_results;
+    let _: fn(&RunPaths, Option<&str>) -> Result<Transcript> = verbs::transcript;
+    let _: fn(&Transcript) -> String = verbs::render_transcript;
+    let _: fn(&Path, Option<&str>) -> Result<Vec<RunTelemetry>> = verbs::telemetry;
+    let _: fn(&[RunTelemetry], bool) -> Result<String> = verbs::render_telemetry;
+    let _: fn(&RunTelemetry) -> String = verbs::render_telemetry_breakdown;
+    let _: fn(&RunPaths, &[Envelope]) -> RunTelemetry = onepipeline::telemetry::of_run;
+    let _: fn(&RunPaths, &EventFilter, Option<&str>) -> Result<Monitored> = verbs::monitor;
+    let _: fn(&Monitored) -> String = verbs::render_monitor;
+    let _: fn(&RunPaths, &EventFilter) -> Result<Next> = verbs::next;
+    let _: fn(&Next) -> String = verbs::render_next;
+    let _: fn(&RunPaths) -> Result<ChannelQueue> = verbs::channel;
+    let _: fn(&ChannelQueue) -> Result<String> = verbs::render_channel;
+    /// The sink a watch hands its frames to, as the contract spells it.
+    type WatchSink<'a> = &'a mut dyn FnMut(WatchFrame<'_>) -> Result<()>;
+    let _: fn(&RunPaths, &WatchRequest, WatchSink<'_>) -> Result<WatchOutcome> = verbs::watch;
+    let _: fn(&WatchFrame<'_>) -> Result<WatchLines> = verbs::render_watch_frame;
+    let _: fn(&Path, &str) -> Result<Unwatched> = verbs::unwatched;
+    let _: fn(&Unwatched) -> String = verbs::render_unwatched;
+    let _: fn(&RunPaths, Option<&Correlation>, &str) -> Result<Receipt> = verbs::reply;
+    let _: fn(&Receipt) -> Result<String> = verbs::render_receipt;
+    let _: fn(&RunPaths, &str) -> Result<Receipt> = verbs::attest;
+    let _: fn(&RunPaths, SurfaceKind, String) -> Result<Surfaced> = verbs::surface;
+    let _: fn(&Surfaced) -> String = verbs::render_surfaced;
+    let _: fn(&RunPaths, StopRequest<'_>) -> Result<Stopped> = verbs::stop;
+    let _: fn(&Stopped) -> String = verbs::render_stopped;
+    let _: fn(&RunPaths, Adopt) -> Result<Adopted> = verbs::adopt;
+    let _: fn(&Adopted) -> String = verbs::render_adopted;
+    let _: fn(&RunPaths, Retained) -> Result<i32> = verbs::drive_run;
+    let _: fn(&RunSummary) -> DriverLiveness = onepipeline::views::liveness_of;
+    let _: fn(&RunPaths) -> Result<Plan> = onepipeline::views::plan_of;
+
+    let in_source = verb_functions_in_source();
+    let in_contract = verb_functions_in_contract();
+    assert_eq!(
+        in_contract, in_source,
+        "the verbs paragraph and src/verbs.rs disagree\n  named and not published: {:?}\n  published and not named: {:?}",
+        in_contract.difference(&in_source).collect::<Vec<_>>(),
+        in_source.difference(&in_contract).collect::<Vec<_>>()
+    );
+    // Each of the verbs the plan fixed, by name, so the list cannot quietly lose
+    // one and still agree with a source that lost it too.
+    for verb in [
+        "next",
+        "reply",
+        "surface",
+        "attest",
+        "stop",
+        "adopt",
+        "drive_run",
+        "watch",
+        "unwatched",
+        "runs",
+        "status",
+        "host",
+        "monitor",
+        "channel",
+        "results",
+        "goals",
+        "transcript",
+        "telemetry",
+    ] {
+        assert!(
+            in_source.contains(verb),
+            "src/verbs.rs publishes no `{verb}`"
+        );
+    }
+    assert_contract_names(
+        "verbs paragraph's",
+        &[
+            "`onepipeline::verbs`",
+            "`tests/parity.rs`",
+            "`telemetry::of_run`",
+            "`views::liveness_of(&RunSummary) -> DriverLiveness`",
+            "`views::plan_of(&RunPaths) -> Plan`",
+            "`channel::{Surface, QueuedReply, QueuedCommands, CommandOutcome, CommandResult, CommandVerdict}`",
+            "`channel queue RUN`",
+        ],
+    );
+}
+
+/// The grouped listing is what the contract states, and the types it names are
+/// the ones this build carries: groups keyed by project, ordered newest activity
+/// first and then by project id, the no-project group an ordinary group, and the
+/// header marker one no run line can start with.
+#[test]
+fn the_grouped_listing_is_what_the_contract_states() {
+    assert_contract_names(
+        "grouped listing's",
+        &[
+            "`views::Projects { root, groups: Vec<ProjectGroup>, skipped }`",
+            "`ProjectGroup { project: Option<String>, name: Option<String>, last_write_at: Option<u64>, runs: Vec<RunSummary> }`",
+            "`Projects::of(&Listing)`",
+            "`Projects::flat()`",
+            "`views::GROUP_HEADER`",
+            "`runs --flat`",
+            "(no project)",
+        ],
+    );
+    assert_eq!(NO_PROJECT, "(no project)");
+    assert!(
+        GROUP_HEADER
+            .starts_with(|c: char| !c.is_alphanumeric() && c != '.' && c != '_' && c != '-'),
+        "a group header must open with something no run id can: {GROUP_HEADER:?}"
+    );
+
+    // Rows over the checked-in golden document, so a row here is a document this
+    // build reads rather than one assembled by hand.
+    let golden: RunSummary =
+        serde_json::from_str(include_str!("golden/run-summary-v6.json")).expect("the golden reads");
+    let row = |run: &str, project: &str, name: Option<&str>, at: Option<u64>| RunSummary {
+        run_id: run.into(),
+        project: project.into(),
+        name: name.map(str::to_owned),
+        last_write_at: at,
+        ..golden.clone()
+    };
+    let listing = Listing {
+        root: PathBuf::from("/runs"),
+        summaries: vec![
+            row("newer-b", "plans:b", Some("B"), Some(300)),
+            row("orphan", "", None, Some(250)),
+            row("older-b", "plans:b", None, Some(200)),
+            row("only-a", "plans:a", Some("A"), Some(100)),
+            row("undated", "plans:c", None, None),
+        ],
+        skipped: Vec::new(),
+    };
+    let projects = Projects::of(&listing);
+    assert_eq!(projects.root, listing.root);
+    /// One group as this test reads it: its project, its name, its recency, and
+    /// its runs in order.
+    type Shape<'a> = (Option<&'a str>, Option<&'a str>, Option<u64>, Vec<&'a str>);
+    let shape: Vec<Shape<'_>> = projects
+        .groups
+        .iter()
+        .map(|group| {
+            (
+                group.project.as_deref(),
+                group.name.as_deref(),
+                group.last_write_at,
+                group.runs.iter().map(|run| run.run_id.as_str()).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            (
+                Some("plans:b"),
+                Some("B"),
+                Some(300),
+                vec!["newer-b", "older-b"]
+            ),
+            (None, None, Some(250), vec!["orphan"]),
+            (Some("plans:a"), Some("A"), Some(100), vec!["only-a"]),
+            (Some("plans:c"), None, None, vec!["undated"]),
+        ]
+    );
+    assert_eq!(
+        projects
+            .flat()
+            .iter()
+            .map(|run| run.run_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["newer-b", "orphan", "older-b", "only-a", "undated"],
+        "the flat list is the listing's own order"
+    );
+    let orphans: &ProjectGroup = &projects.groups[1];
+    assert_eq!(orphans.header(), format!("{GROUP_HEADER}{NO_PROJECT}\n"));
+    assert_eq!(
+        projects.groups[0].header(),
+        format!("{GROUP_HEADER}plans:b — B\n")
+    );
 }

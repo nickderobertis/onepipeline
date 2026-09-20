@@ -99,7 +99,12 @@ use crate::telemetry::{self, RunTelemetry};
 /// written over a journal holding a stop and then an adoption says the run is
 /// stopped, and serving it would report the adopting driver dead and the run
 /// settled — the reading the fold change exists to end.
-pub const SUMMARY_SCHEMA_VERSION: u32 = 5;
+///
+/// **6** since a row carries the plan's [`name`](RunSummary::name), read off the
+/// run's own `plan.json`: a grouped listing labels each project by it, and a
+/// version-5 document carries no name at all rather than a run whose plan stated
+/// none — so it is refolded once rather than served as a project nobody named.
+pub const SUMMARY_SCHEMA_VERSION: u32 = 6;
 
 /// Read the version, refusing a document this build cannot honestly read.
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
@@ -253,6 +258,14 @@ pub struct RunSummary {
     /// a record written before the store was where a plan came from.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub project: String,
+    /// The plan's name — `onepipeline.name`, or else the project's own title, as
+    /// the plan reader resolves it — read off the run's `plan.json`. What a
+    /// grouped listing labels the project by, beside its id.
+    ///
+    /// Absent for a run whose plan stated none, and for one whose `plan.json`
+    /// this build cannot read: a name nobody recorded is not an empty name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// The launcher, as the launch record states it.
     pub launcher: String,
     /// The launching session, or **empty** for an unattributed launch — which is
@@ -352,6 +365,17 @@ pub struct RunSummary {
     pub journal_mtime_ms: u64,
 }
 
+/// The plan's name, off the run's own `plan.json`, read leniently.
+///
+/// Through the published loader, so the document a consumer reads a run's plan
+/// with is the one this row is labelled from. A plan this build cannot read — a
+/// run root with none, or one a later build wrote — leaves the row unnamed rather
+/// than refusing it: the name is a label, and every other field of the row is
+/// still the run's own.
+fn plan_name(paths: &RunPaths) -> Option<String> {
+    crate::views::plan_of(paths).ok().and_then(|plan| plan.name)
+}
+
 /// The journal's length and modification time, as it stands.
 ///
 /// A journal that is not there stamps as `(0, 0)`: a run with no store yet is a
@@ -395,6 +419,8 @@ type Stamp = (u64, u64);
 struct Store<'a> {
     /// The run's journal, folded into the plan of record.
     state: &'a RunState,
+    /// The plan's name, off the run's own `plan.json`.
+    name: Option<String>,
     /// How many records that store holds.
     event_count: u64,
     /// The wire string of the record the merge order ends with.
@@ -506,6 +532,7 @@ impl RunSummary {
             &view.launch,
             &Store {
                 state: &view.state,
+                name: plan_name(paths),
                 event_count: view.events.len() as u64,
                 last_event_kind: view.events.last().map(|event| event.kind.0.clone()),
                 timing: &telemetry::of_run(paths, &view.events),
@@ -527,6 +554,7 @@ impl RunSummary {
     ) -> Self {
         let Store {
             state,
+            name,
             event_count,
             last_event_kind,
             timing,
@@ -560,6 +588,7 @@ impl RunSummary {
             surfaces_read: state.surfaces_read,
             awaiting_human_action: state.awaiting_human_action(),
             project: launch.project.clone(),
+            name: name.clone(),
             launcher: launch.launcher.clone(),
             session: launch.session.clone(),
             started_at: launch.launched_at().map(str::to_string),
@@ -751,6 +780,9 @@ impl Folded {
 #[derive(Debug)]
 pub(crate) struct Maintainer {
     paths: RunPaths,
+    /// The plan's name, read once: `plan.json` is the run's launch record and is
+    /// never rewritten, so what it said when this writer opened is what it says.
+    name: Option<String>,
     /// The fold of every record stamped **before** [`open_ts`](Self::open_ts).
     settled: Folded,
     /// The records stamped **at** it, unfolded, so one arriving beside them can
@@ -826,6 +858,7 @@ impl Maintainer {
         }
         Self {
             paths: paths.clone(),
+            name: plan_name(paths),
             settled,
             open: events[opened..].to_vec(),
             newest_ts: events
@@ -1009,6 +1042,7 @@ impl Maintainer {
             &self.launch(),
             &Store {
                 state: &folded.state,
+                name: self.name.clone(),
                 event_count: folded.events,
                 last_event_kind: folded.last_event_kind.clone(),
                 timing: &folded.aggregate.finish(&self.paths.run, &folded.state),
@@ -1626,7 +1660,7 @@ mod tests {
     /// Read rather than restated: this is the wire a consumer parses, and the
     /// only thing that stops a field being renamed, an absence becoming a zero,
     /// or the version moving without anyone deciding to move it.
-    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v5.json");
+    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v6.json");
 
     /// The documents earlier builds wrote, kept exactly as those builds wrote them.
     ///
@@ -1636,13 +1670,15 @@ mod tests {
     /// let go of its run — a real schema 3 document, written by a build that did
     /// not read a stated landing as the node's landing — and a real schema 4
     /// document, written by a build whose `stop_recorded` outlived the adoption
-    /// that answered it. The reader below has to refuse all four rather than read
-    /// any as one of its own.
-    const GOLDEN_EARLIER: [(u32, &str); 4] = [
+    /// that answered it — and a real schema 5 document, which carries no plan
+    /// name. The reader below has to refuse all five rather than read any as one
+    /// of its own.
+    const GOLDEN_EARLIER: [(u32, &str); 5] = [
         (1, include_str!("../tests/golden/run-summary-v1.json")),
         (2, include_str!("../tests/golden/run-summary-v2.json")),
         (3, include_str!("../tests/golden/run-summary-v3.json")),
         (4, include_str!("../tests/golden/run-summary-v4.json")),
+        (5, include_str!("../tests/golden/run-summary-v5.json")),
     ];
 
     /// The document the golden pins, built through the types.
@@ -1666,6 +1702,7 @@ mod tests {
             surfaces_read: 1,
             awaiting_human_action: false,
             project: "plans:golden".into(),
+            name: Some("Golden".into()),
             launcher: "claude-code".into(),
             // Unattributed: the launch record named no session, which is the
             // `[unknown]` owner every view has always printed for one.
@@ -1713,13 +1750,13 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_5_document_is_the_shape_the_golden_pins() {
+    fn a_schema_6_document_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&golden()).expect("it serialises");
         assert_eq!(
             rendered.trim(),
             GOLDEN.trim(),
             "the summary document changed shape. If that was deliberate, bump \
-             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v5.json together"
+             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v6.json together"
         );
     }
 
@@ -1745,7 +1782,7 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_5_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
+    fn a_schema_6_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
         let read: RunSummary =
             serde_json::from_str(GOLDEN).expect("the golden reads back into the types");
         assert_eq!(read, golden());

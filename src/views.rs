@@ -61,6 +61,7 @@ use crate::rendercost::Rendered;
 use crate::report::{ToolText, Truncation};
 use crate::sys;
 use crate::vcs::LandingRead;
+use crate::verbs::Grouping;
 
 /// A run root a view refused, and the reason it gave.
 ///
@@ -92,6 +93,39 @@ pub use crate::ledger::RunPaths;
 /// [`NodeLanding`] comes with it because [`RunSummary::landings`] carries one per
 /// node: a field a consumer cannot name is a field it cannot read.
 pub use crate::summary::{Listing, NodeLanding, RunSummary, SUMMARY_SCHEMA_VERSION};
+
+/// The plan a run was launched with, read off its own `plan.json`.
+///
+/// The one loader over [`RunPaths::plan`]: `start` writes that document once and
+/// nothing rewrites it, so what this answers is the plan as it was launched — the
+/// name a listing labels the project by, the goal, and every node as the planner
+/// authored it — and never the graph as edits have since moved it, which is the
+/// fold's to say. A consumer holding a run's paths reads the plan through this
+/// rather than parsing the file for itself, so the schema it reads it at is this
+/// build's [`Plan`](crate::plan::Plan).
+///
+/// # Errors
+///
+/// [`Error::Ledger`](crate::Error::Ledger) when the file cannot be read, and
+/// [`Error::Invalid`](crate::Error::Invalid), naming the file, when what it holds
+/// is not a plan this build reads.
+pub fn plan_of(paths: &RunPaths) -> crate::Result<crate::plan::Plan> {
+    ledger::read_json(&paths.plan())
+}
+
+/// How a run is being driven, read over its **bounded** summary document.
+///
+/// The listing's own reading, published: `runs` and `status` given no run decide
+/// this word for every row out of exactly these inputs — the driver claim the
+/// document carries, the run's last write, and the run's own channel, asked now —
+/// and a consumer that restated the rule from the document's fields would carry a
+/// second run liveness to keep true. It costs what a row costs: one probe of the
+/// recorded driver on this host and one read of the channel's queue, and no part
+/// of the run's merged event store. The run's channel is found under the runs
+/// root this process reads, which is where a listing found the document.
+pub fn liveness_of(summary: &RunSummary) -> DriverLiveness {
+    Row::of(&ledger::runs_root(), summary).liveness()
+}
 
 /// What says a run is being **watched**, and what a reader makes of it now.
 ///
@@ -1631,110 +1665,281 @@ impl<'a> Row<'a> {
     }
 }
 
-/// `onepipeline runs`.
+/// A bounded listing grouped by the project each run was launched from.
+///
+/// The relation a listing of run ids leaves in a supervisor's memory — *these
+/// four runs are the same piece of work* — made a type: the engine records the
+/// project on every launch record and every summary document, and this is the
+/// listing read back along it. **The default shape of a listing**: `runs`,
+/// `status` given no run and `goals` given no run render this, and `runs --flat`
+/// is the ungrouped list beside it.
+///
+/// Built off a [`Listing`] and nothing else, so it costs what a listing costs and
+/// folds nothing. A run whose summary carries no project — a record written
+/// before the store was where a plan came from — is in one ordinary group of its
+/// own, with [`project`](ProjectGroup::project) `None`, rendered `(no project)`
+/// and ordered by its own recency exactly as every other group is: never hidden,
+/// and never last by rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Projects {
+    /// The runs root the listing read. Named on the output, because it is the
+    /// scope of every claim made from it.
+    pub root: PathBuf,
+    /// The groups, **newest activity first**: by the group's own
+    /// [`last_write_at`](ProjectGroup::last_write_at), then by project id, so the
+    /// order is total and stable. A group nothing datable was written to sorts
+    /// last among the groups, then by id.
+    pub groups: Vec<ProjectGroup>,
+    /// The run roots that did not read, each with the reason it was refused — on
+    /// the same terms [`Listing::skipped`] states.
+    pub skipped: Vec<Skipped>,
+}
+
+/// One project's runs, as a grouped listing reads them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectGroup {
+    /// The qualified onetaskgraph project id every run in the group was launched
+    /// with, or `None` for the runs whose summary carries none.
+    // llmlint: ignore[invalid_states_unrepresentable] the id as `RunSummary::project` carries it — a serialized field of a document an older build wrote, for the reason `src/summary.rs`'s file-level suppression states — grouped on by equality and never parsed; the qualified-id type is `taskgraph::QualifiedId`, private, and parsing a recorded id into it would refuse a row this build lists today.
+    pub project: Option<String>,
+    /// The plan's name, off the newest run in the group that recorded one: what
+    /// a header labels the project by, beside its id.
+    pub name: Option<String>,
+    /// The newest [`RunSummary::last_write_at`] in the group — the recency the
+    /// group is ordered by.
+    pub last_write_at: Option<u64>,
+    /// The group's runs, in the [`Listing`]'s own order: most recently written
+    /// first, then by id.
+    pub runs: Vec<RunSummary>,
+}
+
+/// What a header names a group whose runs recorded no project.
+pub const NO_PROJECT: &str = "(no project)";
+
+/// What every group header opens with, and no run line can: a run id is one
+/// path segment, and `status` and `goals` open a run's own line with it.
+pub const GROUP_HEADER: &str = "== ";
+
+impl Projects {
+    /// Group a listing's rows by project.
+    ///
+    /// Keyed by [`RunSummary::project`], an empty project being the `None`
+    /// group. Groups take their order from their newest run and their name from
+    /// the newest run that carries one; runs keep the listing's order inside a
+    /// group.
+    pub fn of(listing: &Listing) -> Self {
+        let mut groups: Vec<ProjectGroup> = Vec::new();
+        for summary in &listing.summaries {
+            let project = (!summary.project.is_empty()).then(|| summary.project.clone());
+            let group = match groups.iter_mut().find(|group| group.project == project) {
+                Some(group) => group,
+                None => {
+                    groups.push(ProjectGroup {
+                        project,
+                        name: None,
+                        last_write_at: None,
+                        runs: Vec::new(),
+                    });
+                    groups.last_mut().expect("the group just pushed")
+                }
+            };
+            if group.name.is_none() {
+                group.name.clone_from(&summary.name);
+            }
+            group.last_write_at = group.last_write_at.max(summary.last_write_at);
+            group.runs.push(summary.clone());
+        }
+        groups.sort_by(|a, b| {
+            b.last_write_at
+                .cmp(&a.last_write_at)
+                .then_with(|| a.project.cmp(&b.project))
+        });
+        Self {
+            root: listing.root.clone(),
+            groups,
+            skipped: listing.skipped.clone(),
+        }
+    }
+
+    /// Every run across the groups, in the [`Listing`]'s own order — most
+    /// recently written first, then by id — which is the flat listing the groups
+    /// were built from.
+    pub fn flat(&self) -> Vec<&RunSummary> {
+        let mut rows: Vec<&RunSummary> = self.groups.iter().flat_map(|group| &group.runs).collect();
+        rows.sort_by(|a, b| {
+            b.last_write_at
+                .cmp(&a.last_write_at)
+                .then_with(|| a.run_id.cmp(&b.run_id))
+        });
+        rows
+    }
+
+    /// Whether the listing has no run to report at all.
+    fn is_empty(&self) -> bool {
+        self.groups.iter().all(|group| group.runs.is_empty())
+    }
+}
+
+impl ProjectGroup {
+    /// The header line a grouped listing opens the group with: [`GROUP_HEADER`],
+    /// the project id — or [`NO_PROJECT`] — and the plan's name where one was
+    /// recorded.
+    ///
+    /// Opened with a marker no run line can start with, which is how it is told
+    /// from the run lines beneath it: those are rendered exactly as the flat
+    /// listing renders them, so a reader grepping a run's own lines out of a
+    /// grouped listing finds the bytes it always found.
+    pub fn header(&self) -> String {
+        let project = self.project.as_deref().unwrap_or(NO_PROJECT);
+        match &self.name {
+            Some(name) => format!("{GROUP_HEADER}{project} — {}\n", one_line(name)),
+            None => format!("{GROUP_HEADER}{project}\n"),
+        }
+    }
+}
+
+/// `onepipeline runs`: the listing as the binary prints it by default, grouped
+/// by project.
 ///
 /// A run root under this root that could not be read is named at the end rather
 /// than dropped: an empty listing on a host that holds runs is the reading that
 /// costs the most, because it is the one a planner acts on by starting more work.
+/// `verbs::render_runs` is where the layout is chosen; this is the default one.
 pub fn runs(root: &Path, mine_only: bool, session: &str) -> String {
-    let listing = Listing::of(root);
+    runs_of(
+        &crate::verbs::runs(root, session, mine_only),
+        Grouping::Grouped,
+        session,
+    )
+}
+
+/// `onepipeline runs`, over a grouped listing, laid out either way.
+///
+/// One row renderer behind both layouts, so a run's lines inside a group are
+/// byte for byte the lines the flat listing renders for it.
+pub(crate) fn runs_of(projects: &Projects, grouping: Grouping, session: &str) -> String {
     let mut out = String::new();
-    for summary in listed(&listing) {
-        let owned = ledger::owned_by(&summary.session, session);
-        if mine_only && !owned {
-            continue;
+    match grouping {
+        Grouping::Flat => {
+            for summary in by_id(projects.flat()) {
+                out.push_str(&runs_row(&projects.root, summary, session));
+            }
         }
-        let row = Row::of(root, summary);
-        let marker = if owned { '*' } else { ' ' };
-        let standing = Standing::of_row(&row);
-        out.push_str(&format!(
-            "{marker} {:<24} {:<24} {}  {}{}\n",
-            summary.run_id,
-            ledger::owner_label(&summary.launcher, &summary.session, session),
-            row.tally(),
-            standing.word(),
-            row.observer_suffix(&standing)
-        ));
-        // A run reported stopped keeps the line saying why it stopped rather
-        // than an invitation to read updates nothing will follow up on. A run
-        // that needs no intervention falls through to those updates instead:
-        // its work is over, and what is left to say about it is what nobody has
-        // read yet.
-        if let Some(intervention) = standing.intervention() {
-            out.push_str(&match intervention {
-                Intervention::Adopt => format!(
-                    "    {} — its ledger is intact; attach a fresh driver with: \
-                     onepipeline adopt {}\n",
-                    standing.word(),
-                    summary.run_id
-                ),
-                Intervention::RequeueThenAdopt(parked) => format!(
-                    "    {} — its ledger is intact; {}\n",
-                    standing.word(),
-                    requeue_then_adopt(&summary.run_id, parked)
-                ),
-                Intervention::ReviewThenSupersede(rejected) => format!(
-                    "    {} — its ledger is intact; {}\n",
-                    standing.word(),
-                    review_then_supersede(&summary.run_id, rejected)
-                ),
-            });
-            continue;
-        }
-        let unread = row.unread();
-        if let (count, Some(stale)) = (unread.count, unread.oldest_seconds) {
-            if count > 0 {
-                out.push_str(&format!(
-                    "    {count} planner update(s) waiting ({}), unread for {}; \
-                     read them with: onepipeline next {}\n",
-                    unread.phrase(),
-                    crate::telemetry::duration(stale * 1_000),
-                    summary.run_id
-                ));
+        Grouping::Grouped => {
+            // A group narrowed to nothing — `--mine` over a project every run
+            // of which is somebody else's — has no row to head.
+            for group in projects
+                .groups
+                .iter()
+                .filter(|group| !group.runs.is_empty())
+            {
+                out.push_str(&group.header());
+                for summary in &group.runs {
+                    out.push_str(&runs_row(&projects.root, summary, session));
+                }
             }
         }
     }
-    if out.is_empty() {
-        return nothing_listed(&listing);
+    if projects.is_empty() {
+        return nothing_grouped(projects);
     }
-    out.push_str(&skipped_lines(&listing.skipped));
+    out.push_str(&skipped_lines(&projects.skipped));
     out
 }
 
-/// The rows of a listing in the order a view renders them: **by run id**.
+/// One run's lines of `onepipeline runs`: its row, and beneath it either what a
+/// run nothing is driving needs, or what nobody has read.
+fn runs_row(root: &Path, summary: &RunSummary, session: &str) -> String {
+    let owned = ledger::owned_by(&summary.session, session);
+    let row = Row::of(root, summary);
+    let marker = if owned { '*' } else { ' ' };
+    let standing = Standing::of_row(&row);
+    let mut out = format!(
+        "{marker} {:<24} {:<24} {}  {}{}\n",
+        summary.run_id,
+        ledger::owner_label(&summary.launcher, &summary.session, session),
+        row.tally(),
+        standing.word(),
+        row.observer_suffix(&standing)
+    );
+    // A run reported stopped keeps the line saying why it stopped rather
+    // than an invitation to read updates nothing will follow up on. A run
+    // that needs no intervention falls through to those updates instead:
+    // its work is over, and what is left to say about it is what nobody has
+    // read yet.
+    if let Some(intervention) = standing.intervention() {
+        out.push_str(&match intervention {
+            Intervention::Adopt => format!(
+                "    {} — its ledger is intact; attach a fresh driver with: \
+                 onepipeline adopt {}\n",
+                standing.word(),
+                summary.run_id
+            ),
+            Intervention::RequeueThenAdopt(parked) => format!(
+                "    {} — its ledger is intact; {}\n",
+                standing.word(),
+                requeue_then_adopt(&summary.run_id, parked)
+            ),
+            Intervention::ReviewThenSupersede(rejected) => format!(
+                "    {} — its ledger is intact; {}\n",
+                standing.word(),
+                review_then_supersede(&summary.run_id, rejected)
+            ),
+        });
+        return out;
+    }
+    let unread = row.unread();
+    if let (count, Some(stale)) = (unread.count, unread.oldest_seconds) {
+        if count > 0 {
+            out.push_str(&format!(
+                "    {count} planner update(s) waiting ({}), unread for {}; \
+                 read them with: onepipeline next {}\n",
+                unread.phrase(),
+                crate::telemetry::duration(stale * 1_000),
+                summary.run_id
+            ));
+        }
+    }
+    out
+}
+
+/// Rows in the order the flat views render them: **by run id**.
 ///
 /// [`Listing`] serves its rows most recently written first, which is the order
-/// the ordering key on the document exists to make answerable without a fold. A
-/// view renders them by id instead, because that is the order every reader of
-/// `runs` and `status` has ever read them in and the row's own id is the thing
-/// they scan for; the recency order is there for a consumer building its own
-/// listing.
-fn listed(listing: &Listing) -> Vec<&RunSummary> {
-    let mut rows: Vec<&RunSummary> = listing.summaries.iter().collect();
+/// the ordering key on the document exists to make answerable without a fold,
+/// and the grouped listing keeps that order inside each group. The flat views
+/// render by id instead, because that is the order every reader of `runs --flat`
+/// and the old `runs` has ever read them in and the row's own id is the thing
+/// they scan for.
+fn by_id(mut rows: Vec<&RunSummary>) -> Vec<&RunSummary> {
     rows.sort_by(|a, b| a.run_id.cmp(&b.run_id));
     rows
 }
 
-/// What a bounded listing says when it has no run to report.
+/// What a listing says when it has no run to report.
 ///
 /// The same two facts [`nothing_to_report`] tells apart, over the listing's own
 /// account of what it refused: a root with nothing in it and a root whose every
 /// run was refused both rendered as `no runs recorded`, and only one of them
 /// means there is nothing running.
-fn nothing_listed(listing: &Listing) -> String {
+///
+/// A group that was read and then narrowed to nothing is still a run that was
+/// read: `runs --mine` over a root holding other sessions' work says `no runs
+/// recorded`, never that nothing under the root could be read.
+fn nothing_grouped(projects: &Projects) -> String {
     // llmlint: ignore-block[cli_output_contract] a refused run root is part of the answer,
     // not a failure of the command, on the terms `skipped_lines` and its own block state:
     // this empty case *replaces* `no runs recorded`, so it cannot live on a stream other
     // than the answer it replaces.
-    let mut out = if listing.summaries.is_empty() && !listing.skipped.is_empty() {
+    let mut out = if projects.groups.is_empty() && !projects.skipped.is_empty() {
         format!(
             "no run under {} could be read\n",
-            one_line(&listing.root.display().to_string())
+            one_line(&projects.root.display().to_string())
         )
     } else {
         "no runs recorded\n".to_string()
     };
-    out.push_str(&skipped_lines(&listing.skipped));
+    out.push_str(&skipped_lines(&projects.skipped));
     out
     // llmlint: ignore-end[cli_output_contract]
 }
@@ -1822,28 +2027,43 @@ fn status_run_lines(
 /// document. What each node of a run is doing is `status <RUN>`'s to say, and
 /// that is a detail read which folds: a per-node block for every run on a host
 /// is a fold of every store on it, which is the cost this path exists to remove.
-pub(crate) fn status_listed(listing: &Listing) -> String {
+///
+/// Grouped by project, under a header line each, with the run-level lines
+/// beneath it exactly as the flat listing renders them.
+pub(crate) fn status_listed(projects: &Projects) -> String {
     let mut out = String::new();
-    for summary in listed(listing) {
-        let row = Row::of(&listing.root, summary);
-        // Opened before anything under it renders, so the tally this line
-        // carries and the landings it counts are one render and ask each node
-        // once between them.
-        let _render = rendering(Rendered::Status, &summary.run_id);
-        let standing = Standing::of_row(&row);
-        out.push_str(&status_run_lines(
-            &row.paths,
-            &standing,
-            &row.observer_suffix(&standing),
-            &row.tally(),
-            &row.unread(),
-        ));
+    for group in projects
+        .groups
+        .iter()
+        .filter(|group| !group.runs.is_empty())
+    {
+        out.push_str(&group.header());
+        for summary in &group.runs {
+            out.push_str(&status_row(&projects.root, summary));
+        }
     }
-    if out.is_empty() {
-        return nothing_listed(listing);
+    if projects.is_empty() {
+        return nothing_grouped(projects);
     }
-    out.push_str(&skipped_lines(&listing.skipped));
+    out.push_str(&skipped_lines(&projects.skipped));
     out
+}
+
+/// One run's run-level lines of `onepipeline status`, off its bounded document.
+fn status_row(root: &Path, summary: &RunSummary) -> String {
+    let row = Row::of(root, summary);
+    // Opened before anything under it renders, so the tally this line
+    // carries and the landings it counts are one render and ask each node
+    // once between them.
+    let _render = rendering(Rendered::Status, &summary.run_id);
+    let standing = Standing::of_row(&row);
+    status_run_lines(
+        &row.paths,
+        &standing,
+        &row.observer_suffix(&standing),
+        &row.tally(),
+        &row.unread(),
+    )
 }
 
 /// `onepipeline status`.
@@ -1851,6 +2071,20 @@ pub(crate) fn status_listed(listing: &Listing) -> String {
 pub fn status(survey: &Survey) -> String {
     let mut out = String::new();
     for view in &survey.views {
+        out.push_str(&status_of(view));
+    }
+    if out.is_empty() {
+        return nothing_to_report(survey);
+    }
+    out.push_str(&skipped_lines(&survey.skipped));
+    out
+}
+
+/// `onepipeline status <RUN>`: one run's **detail** read, its run-level lines
+/// and the block under them saying what each of its nodes is doing.
+pub(crate) fn status_of(view: &RunView) -> String {
+    let mut out = String::new();
+    {
         // Opened before anything under it renders, so the summary this line
         // carries and the outstanding-landing lines below it are one render and
         // ask each node once between them.
@@ -2029,10 +2263,6 @@ pub fn status(survey: &Survey) -> String {
             out.push_str(&format!("  providers: {health}\n"));
         }
     }
-    if out.is_empty() {
-        return nothing_to_report(survey);
-    }
-    out.push_str(&skipped_lines(&survey.skipped));
     out
 }
 
@@ -2860,10 +3090,20 @@ pub fn monitor(view: &RunView, filter: &EventFilter) -> String {
 /// different moment, and a record appended between the two would be one the
 /// cursor stepped past without it ever being rendered.
 pub(crate) fn monitor_of(view: &RunView, events: &[Envelope], filter: &EventFilter) -> String {
+    monitor_shown(view, events.iter().filter(|event| filter.matches(event)))
+}
+
+/// The same pass over events a caller has **already shaped**: what a typed
+/// read hands its renderer, where the profile was applied when the events were
+/// read rather than when they are printed.
+pub(crate) fn monitor_shown<'a>(
+    view: &RunView,
+    events: impl IntoIterator<Item = &'a Envelope>,
+) -> String {
     let mut out = String::from(
         "Concise graph events; ask the producing library for full detail by stream id.\n",
     );
-    for event in events.iter().filter(|event| filter.matches(event)) {
+    for event in events {
         out.push_str(&event_line(view, event));
         out.push('\n');
     }
@@ -3472,38 +3712,77 @@ pub(crate) fn one_line(text: &str) -> String {
 pub fn goals(survey: &Survey) -> String {
     let mut out = String::new();
     for view in &survey.views {
-        let goal = view
-            .state
-            .plan
-            .as_ref()
-            .and_then(|plan| plan.goal.as_ref())
-            .map(|goal| goal.text.clone())
-            .unwrap_or_else(|| crate::plan::NO_GOAL.to_string());
-        out.push_str(&format!(
-            "{}  {}\n  {}\n  {}\n",
-            view.paths.run,
-            liveness_word(view),
-            goal,
-            view.summary()
-        ));
-        // The repository identities this run holds, so two planners can see
-        // whether they would share a checkout.
-        let mut repos: Vec<&str> = view
-            .state
-            .graph
-            .iter()
-            .filter_map(|node| node.repo.as_deref())
-            .collect();
-        repos.sort_unstable();
-        repos.dedup();
-        if !repos.is_empty() {
-            out.push_str(&format!("  identities: {}\n", repos.join(", ")));
-        }
+        out.push_str(&goals_of(view));
     }
     if out.is_empty() {
         return nothing_to_report(survey);
     }
     out.push_str(&skipped_lines(&survey.skipped));
+    out
+}
+
+/// `onepipeline goals` given **no run**: every run, grouped by project.
+///
+/// The goal lines are the fold's — the goal text and the identities come off a
+/// run's projected plan, which no bounded document carries — so the survey is
+/// what they are read from, and the grouping says only which run goes under
+/// which header and in what order. A run the survey read that the grouping does
+/// not place, or the other way about, is a run that appeared or went between the
+/// two reads, and it is left to the next listing rather than invented here.
+pub(crate) fn goals_grouped(survey: &Survey, projects: &Projects) -> String {
+    let mut out = String::new();
+    for group in projects
+        .groups
+        .iter()
+        .filter(|group| !group.runs.is_empty())
+    {
+        out.push_str(&group.header());
+        for summary in &group.runs {
+            if let Some(view) = survey
+                .views
+                .iter()
+                .find(|view| view.paths.run == summary.run_id)
+            {
+                out.push_str(&goals_of(view));
+            }
+        }
+    }
+    if survey.views.is_empty() || projects.is_empty() {
+        return nothing_to_report(survey);
+    }
+    out.push_str(&skipped_lines(&survey.skipped));
+    out
+}
+
+/// One run's lines of `onepipeline goals`.
+fn goals_of(view: &RunView) -> String {
+    let goal = view
+        .state
+        .plan
+        .as_ref()
+        .and_then(|plan| plan.goal.as_ref())
+        .map(|goal| goal.text.clone())
+        .unwrap_or_else(|| crate::plan::NO_GOAL.to_string());
+    let mut out = format!(
+        "{}  {}\n  {}\n  {}\n",
+        view.paths.run,
+        liveness_word(view),
+        goal,
+        view.summary()
+    );
+    // The repository identities this run holds, so two planners can see
+    // whether they would share a checkout.
+    let mut repos: Vec<&str> = view
+        .state
+        .graph
+        .iter()
+        .filter_map(|node| node.repo.as_deref())
+        .collect();
+    repos.sort_unstable();
+    repos.dedup();
+    if !repos.is_empty() {
+        out.push_str(&format!("  identities: {}\n", repos.join(", ")));
+    }
     out
 }
 
@@ -3716,17 +3995,9 @@ mod tests {
             "the view was read after the append, so this proves nothing"
         );
 
-        let args = crate::cli::MonitorArgs {
-            read: crate::cli::ReadArgs {
-                run: "demo".to_string(),
-                filter: None,
-                all: true,
-            },
-            cursor: None,
-        };
-        let document =
-            crate::watch::monitor_document(&args, &paths, &view, &EventFilter::default())
-                .expect("the pass renders");
+        let document = crate::watch::monitored(&paths, view, &EventFilter::default(), None)
+            .expect("the pass reads")
+            .render();
         let held = std::fs::metadata(paths.journal())
             .expect("the journal is there")
             .len();

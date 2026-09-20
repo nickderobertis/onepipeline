@@ -3689,6 +3689,21 @@ pub fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_onepipeline"))
 }
 
+/// The run lines of a listing: every line of `runs`, `status` or `goals` given
+/// no run that is not a project's header.
+///
+/// A listing groups its runs by project by default, under a header line each
+/// that names the project and the plan — and a plan's name is usually the run's
+/// own id, so a journey scanning a listing for a run's line by that id finds the
+/// header first unless it looks past them. The rows beneath a header are the
+/// rows the flat listing renders, byte for byte.
+pub fn rows(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .filter(|line| !line.starts_with(onepipeline::views::GROUP_HEADER))
+        .collect()
+}
+
 /// One of the sibling doubles, pinned to a name only this process holds.
 ///
 /// The doubles live in a separate workspace member so they can never ship, and a

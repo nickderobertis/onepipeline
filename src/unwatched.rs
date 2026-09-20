@@ -29,18 +29,74 @@ use crate::watchers::Watchers;
 /// What a reported run's line tells a caller to do about it.
 const ARM_A_WATCH: &str = "watch it with: onepipeline watch";
 
-/// `onepipeline unwatched`.
+/// What `onepipeline unwatched` found: the runs to report, and what it could
+/// not resolve.
 ///
-/// The two streams are the whole interface. One line per reported run on standard
+/// The two are the whole interface. One line per reported run on standard
 /// output, nothing at all when there is nothing to report, and everything
-/// unresolved on standard error — where it changes no status, because a run whose
-/// evidence could not be read is neither an unwatched run nor a reason to refuse
-/// the question that was asked about the others.
-pub(crate) fn unwatched(args: &UnwatchedArgs) -> Result<i32> {
-    let session = session(args)?;
-    let root = ledger::runs_root();
-    let mut reported: Vec<String> = Vec::new();
-    let owned = discover_owned_runs(&root, &session)?;
+/// unresolved on standard error — where it changes no status, because a run
+/// whose evidence could not be read is neither an unwatched run nor a reason to
+/// refuse the question that was asked about the others.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unwatched {
+    /// The runs the session owns that are not proven settled and that nothing is
+    /// watching, sorted by run id — the order a listing renders its rows in, so
+    /// a caller scanning for an id scans one order.
+    pub reported: Vec<UnwatchedRun>,
+    /// What could not be resolved, each worded for standard error and sorted,
+    /// with its own terminator.
+    pub unresolved: Vec<String>,
+}
+
+impl Unwatched {
+    /// The status the binary exits with: [`EXIT_RUNS_UNWATCHED`] where anything
+    /// was reported, [`EXIT_SUCCESS`] otherwise.
+    pub const fn exit_code(&self) -> i32 {
+        if self.reported.is_empty() {
+            EXIT_SUCCESS
+        } else {
+            EXIT_RUNS_UNWATCHED
+        }
+    }
+}
+
+/// One run nothing is watching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnwatchedRun {
+    /// The run.
+    // llmlint: ignore[invalid_states_unrepresentable] a run id is a `String` here for the reason `src/ledger.rs`'s file-level suppression states — it is read off a directory name `is_valid_run_id` has already admitted in `discover_owned_runs`, and `docs/contract.md` names no `RunId`.
+    pub run: String,
+    /// The word the listing prints for how it is being driven.
+    // llmlint: ignore[invalid_states_unrepresentable] the listing's own word — `SETTLED`,
+    // or the liveness verdict's — as `views::summary_standing_word` answers it, which is a
+    // rendering of the private `Standing` and the contract names no type for it; this line
+    // reproduces the listing's word beside the run's id, so it carries the word.
+    pub standing: &'static str,
+    /// Why nothing counts as watching it, in the watcher records' own words.
+    pub why_not_watched: String,
+}
+
+impl UnwatchedRun {
+    /// The line the binary prints for this run, terminator included.
+    pub(crate) fn line(&self) -> String {
+        format!(
+            "{:<24} {:<12} {} — {ARM_A_WATCH} {}\n",
+            self.run, self.standing, self.why_not_watched, self.run
+        )
+    }
+}
+
+/// `onepipeline unwatched`: which of `session`'s runs under `root` has nothing
+/// watching it.
+///
+/// # Errors
+///
+/// A runs root that exists and cannot be read — the question this verb cannot
+/// ask, and answering it as "nothing is unwatched" would be the silence the
+/// whole verb exists to end.
+pub(crate) fn unwatched(root: &Path, session: &str) -> Result<Unwatched> {
+    let mut reported: Vec<UnwatchedRun> = Vec::new();
+    let owned = discover_owned_runs(root, session)?;
     let mut unresolved: Vec<String> = owned.unresolved;
     for paths in owned.runs {
         match decide(&paths) {
@@ -61,45 +117,24 @@ pub(crate) fn unwatched(args: &UnwatchedArgs) -> Result<i32> {
                         refused.reason
                     ));
                 }
-                reported.push(format!(
-                    "{:<24} {:<12} {} — {ARM_A_WATCH} {}\n",
-                    paths.run,
-                    views::summary_standing_word(&root, &summary),
-                    watchers.why_not_watched(),
-                    paths.run
-                ));
+                reported.push(UnwatchedRun {
+                    run: paths.run.clone(),
+                    standing: views::summary_standing_word(root, &summary),
+                    why_not_watched: watchers.why_not_watched(),
+                });
             }
         }
     }
-    // Sorted by run id, which is the order a listing renders its rows in: this
-    // verb is read beside `runs`, and a caller scanning for an id scans one order.
-    reported.sort();
+    reported.sort_by(|a, b| a.run.cmp(&b.run));
     unresolved.sort();
-    // llmlint: ignore-block[cli_output_contract] both streams are written here rather than
-    // returned as one rendering, because the split *is* this verb's answer: the reported
-    // runs are what a hook acts on and go on standard output, and everything unresolved is
-    // named on standard error where it changes no exit status. A verb whose answer is two
-    // streams cannot hand one string to a caller that prints it.
-    // llmlint: ignore-block[no_panics_on_recoverable_errors] how this binary writes a view
-    // to a stream is one decision for all of them rather than this verb's, and
-    // `src/driver.rs` is where it is recorded and why: the exit codes are spent — `0`/`1`/
-    // `2` are `reply`'s verdicts and `3` is "nothing is driving the run" — so a write this
-    // verb returned as an error would have to carry a code that already means something
-    // else, and this one has two answers of its own on top of those. Making a closed pipe a
-    // first-class outcome is a change to the whole command surface and to the contract's
-    // exit codes, which belongs with the planner who owns them rather than in the one verb
-    // a diff happens to add.
-    eprint!("{}", unresolved.concat());
-    print!("{}", reported.concat());
-    // llmlint: ignore-end[no_panics_on_recoverable_errors]
-    // llmlint: ignore-end[cli_output_contract]
-    if reported.is_empty() {
-        return Ok(EXIT_SUCCESS);
-    }
-    Ok(EXIT_RUNS_UNWATCHED)
+    Ok(Unwatched {
+        reported,
+        unresolved,
+    })
 }
 
-/// The session this verb is asking about.
+/// The session `onepipeline unwatched` asks about, from the option or the
+/// environment.
 ///
 /// Taken from the option as well as from the environment because the consumer is
 /// a hook: it is handed the session it must ask about on standard input, and the
@@ -120,7 +155,7 @@ pub(crate) fn unwatched(args: &UnwatchedArgs) -> Result<i32> {
 // value is used. What can be made unrepresentable is what this function does: the absence
 // this verb refuses is a `Result` rather than a blank string handed on, so no caller can
 // ask about a session nobody named.
-fn session(args: &UnwatchedArgs) -> Result<String> {
+pub(crate) fn session(args: &UnwatchedArgs) -> Result<String> {
     args.session
         .clone()
         .or_else(|| std::env::var(sys::LAUNCHER_SESSION_ENV).ok())

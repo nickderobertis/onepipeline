@@ -13,7 +13,7 @@
 // suppression and the full rationale.
 
 use crate::harness::{
-    agent, human, plan_of, reaped_pid, Run, World, NOTHING_DRIVING, WATCH_ELAPSED,
+    agent, human, plan_of, reaped_pid, rows, Run, World, NOTHING_DRIVING, WATCH_ELAPSED,
 };
 
 use crate::harness::lifecycle;
@@ -223,9 +223,8 @@ fn an_observer_this_host_cannot_ask_about_is_never_reported_dead() {
         command.env("ONEAGENTGRAPH_STATE_DIR", world.graph_state());
         let rendered = world.run_on(command, "a view over an unprovable observer");
         rendered.exited(0);
-        rendered
-            .stdout
-            .lines()
+        rows(&rendered.stdout)
+            .into_iter()
             .find(|line| line.contains("unprovable"))
             .unwrap_or_else(|| panic!("no line for the run in:\n{}", rendered.stdout))
             .to_string()

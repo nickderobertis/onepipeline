@@ -6,7 +6,7 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78 and 79** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79 and 81** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
@@ -3238,7 +3238,11 @@ contract's vocabulary has nowhere to put one. So this crate now ships:
   fold (onepipeline issue #328), on the same terms: `stop_recorded` keeps its
   name, but a version-4 document over a journal holding a stop and then an
   adoption says the run is stopped, and the unwatched reader would settle a run
-  a live driver had just taken over on it.
+  a live driver had just taken over on it. It moved to version 6 when the row
+  grew `name` — the plan's name, read off the run's own `plan.json`, which the
+  grouped listing of entry 81 labels each project by — because a version-5
+  document carries no name at all rather than a run whose plan stated none, and
+  serving it would label a project nobody named.
 - **`views::{RunTelemetry, Bucket, BucketName, Party, Usage}`**, re-exported
   because `RunSummary::timing` **is** the telemetry document whose shape the
   Views paragraph already fixes — eight buckets that sum exactly, per-party
@@ -3255,7 +3259,7 @@ cannot go on describing a document the build stopped writing:
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "fields": [
     "schema_version",
     "run_id",
@@ -3270,6 +3274,7 @@ cannot go on describing a document the build stopped writing:
     "surfaces_read",
     "awaiting_human_action",
     "project",
+    "name",
     "launcher",
     "session",
     "started_at",
@@ -6204,3 +6209,66 @@ a project the retry was written onto.
   "unchanged": {"cancel": "parked", "cancelled_running_node": "parked", "drop": "cancelled", "untouched_node": "as before"}
 }
 ```
+
+## 81. The binary reached most of what it does through private code, and a listing could not say which runs were one piece of work — RESOLVED
+
+**Ruling: the CLI is argument parsing over the SDK. `onepipeline::verbs` is
+public and carries one typed function per post-launch verb with a renderer
+beside each; every post-launch arm of the binary is parse → call → render →
+exit code over that call; `tests/parity.rs` is the gate. A listing groups runs
+by project by default, through `views::Projects`, and `RunSummary` carries the
+plan's `name` at summary schema 6. `docs/contract.md` carries both paragraphs,
+directly under the Views paragraph.** The five refinements the implementation put
+to the planner were accepted as stated: the channel's record types public, a
+fallible watch sink whose error ends the wait, the extra fields on `Monitored`,
+`Stopped` and the `Adopted` enum, `telemetry` answering a `Result` and
+`runs --mine` keeping an all-other-sessions group empty, and `Receipt`'s
+process-local `advice`.
+
+What diverged. `next`, `reply`, `surface`, `attest`, `stop`, `adopt`, `runs`,
+`status`, `host`, `monitor`, `watch`, `unwatched`, `results`, `goals`,
+`transcript` and `telemetry` were private functions in `src/driver.rs` that
+printed text, and the public `views` functions returned rendered strings rather
+than the facts behind them — so a browser view could show a run but its manager
+had to leave it for a terminal to act, and a UI that grew its own copy of the
+verbs would drift from the CLI the way every duplicated surface here has. And a
+manager supervising a plan read run ids: the relation *these four runs are the
+same piece of work* lived only in their memory, although the engine recorded the
+project on every launch record and summary document.
+
+What the code does now is what the two contract paragraphs state, and the
+paragraphs are the source. What this entry records beside them:
+
+- **The row's `name`** is read off `plan.json` through the published loader,
+  once per journal writer — that document is the run's launch record and is
+  never rewritten — and a plan this build cannot read leaves the row unnamed
+  rather than refused. Entry 56's inventory moved to version 6 with it.
+- **A group header opens with `== `**, which no run line can start with — a run
+  id is one path segment, and `status` and `goals` open a run's own line with it
+  — so a reader grepping a run's lines out of a grouped listing finds the bytes
+  the flat listing always printed; `tests/e2e/harness.rs`'s `rows` is how the
+  journeys read past it.
+- **A retained driver starts in a process group of its own**
+  (`sys::in_own_process_group`: `setpgid` on Unix, `CREATE_NEW_PROCESS_GROUP`
+  on Windows), for `start --detach` as well as `adopt --detach`, so it survives
+  its launcher's exit and a `SIGINT` to the launcher's foreground group — which
+  is what an API server restarting or being interrupted looks like. A `stop`
+  still reaches it: a teardown walks descent, never the group.
+- **What the SDK still says on standard error.** A forced stop names the owner
+  it overrides, an adoption names the dispatches the dead driver abandoned, and
+  `next` reports a check-in clock it could not restart — each as the verb has
+  always said it, from inside the call. The parity gate holds stdout and exit
+  code; a typed field for each of those is the next refinement, and is not
+  proposed here.
+- **`attach` says the settlement before the run-end hook fires** through a
+  callback, so an attached `start` prints it the moment it is decided as it
+  always has; an attached `adopt` through the SDK answers it once the call
+  returns, which is after the hook.
+
+`tests/contract.rs` holds the contract's list of verb functions to `src/verbs.rs`
+in both directions, the grouped-listing types and `GROUP_HEADER` to the contract,
+and entry 56's inventory to the document; `tests/parity.rs` holds the binary to
+the SDK over the recorded run; `tests/e2e/listing.rs` drives a root holding runs
+of two projects and one of none through the binary; `tests/e2e/driver.rs`
+shows a retained driver still driving after the process that adopted it has
+exited and its group has taken a `SIGINT`.

@@ -44,9 +44,9 @@
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, let_writeback_settle, lifecycle, plan_of, World};
+use crate::harness::{agent, let_writeback_settle, lifecycle, plan_of, rows, World};
 
-use onepipeline::views::{RunPaths, SUMMARY_SCHEMA_VERSION};
+use onepipeline::views::{RunPaths, GROUP_HEADER, SUMMARY_SCHEMA_VERSION};
 
 const LISTINGS: [&[&str]; 3] = [&["runs"], &["runs", "--mine"], &["status"]];
 
@@ -440,6 +440,166 @@ fn the_listing_tells_a_driver_this_host_can_prove_is_gone_from_one_merely_quiet(
         );
     }
     quiet.release("build.go");
+}
+
+/// A listing groups its runs by the project each was launched from, newest
+/// activity first, and the run lines under a header are the flat listing's own.
+///
+/// Three projects' worth of runs: two launches of one plan, one of another, and
+/// a run whose launch record names no project at all — what a record written
+/// before the store was where a plan came from looks like. The last is the
+/// newest, so its `(no project)` group heads the listing: it is an ordinary
+/// group ordered by its own recency, never hidden and never last by rule. And
+/// the lines a supervisor's watch greps for — the unread-surface line, here —
+/// are byte for byte the lines `--flat` renders.
+#[test]
+fn a_listing_groups_runs_by_project_newest_first_and_keeps_every_run_line_as_it_was() {
+    let world = World::new("listing-grouped");
+    let alpha = settled(&world, "alpha", vec![agent("build", &[])]);
+    let beta = settled(&world, "beta", vec![agent("build", &[])]);
+    // The same plan launched again: a second run of the same piece of work,
+    // which is what a group exists to show.
+    let path = world.plan("alpha", &plan_of("alpha", vec![agent("build", &[])]));
+    world.run(&["start", &path, "--attach"]).settled();
+    world.until("the second alpha run to settle", |world| {
+        world.run_file("alpha-2", "result.json").is_file()
+    });
+    // And a run of no project: its launch record names none, and its summary
+    // document is taken away so the row is folded off that record.
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb writes a launch record naming
+    // no project — every launch names the project it read the plan from — so the state is
+    // one an *earlier build* left, before the store was where a plan came from, and it is
+    // reached by taking the one key that build never wrote off a record this build wrote.
+    // The document beside it goes for the reason the journeys above take one away: it was
+    // written by a build that knew the project, and the row under test is the one folded
+    // off the record as it now stands. Every claim after it is read off the compiled
+    // binary's own stdout.
+    let orphan = settled(&world, "orphan", vec![agent("build", &[])]);
+    let launch = world.run_file(&orphan, "launch.json");
+    let mut record: Value =
+        serde_json::from_str(&std::fs::read_to_string(&launch).expect("the launch record reads"))
+            .expect("a launch record");
+    record
+        .as_object_mut()
+        .expect("a launch record is an object")
+        .remove("project");
+    std::fs::write(&launch, record.to_string()).expect("the launch record is rewritten");
+    std::fs::remove_file(world.run_file(&orphan, "summary.json")).expect("the document goes");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let project_of = |run: &str| {
+        world.run_json(run, "launch.json")["project"]
+            .as_str()
+            .expect("a launched run names its project")
+            .to_owned()
+    };
+    let (alpha_project, beta_project) = (project_of(&alpha), project_of(&beta));
+
+    // A surface on the newest run, so a group carries the unread line a watch
+    // greps for — on the newest, because raising one is the run's newest write.
+    world
+        .run(&[
+            "surface",
+            &orphan,
+            "--kind",
+            "finding",
+            "--message",
+            "the gate is red",
+        ])
+        .exited(0);
+
+    let grouped = world.run(&["runs"]);
+    grouped.exited(0);
+    let headers: Vec<&str> = grouped
+        .stdout
+        .lines()
+        .filter(|line| line.starts_with(GROUP_HEADER))
+        .collect();
+    assert_eq!(
+        headers,
+        vec![
+            format!("{GROUP_HEADER}(no project) — orphan"),
+            format!("{GROUP_HEADER}{alpha_project} — alpha"),
+            format!("{GROUP_HEADER}{beta_project} — beta"),
+        ],
+        "the groups are not newest activity first, with the no-project group where its \
+         recency puts it:\n{}",
+        grouped.stdout
+    );
+    // Inside a group the runs keep the listing's own order: the newer launch first.
+    let alpha_rows: Vec<&str> = grouped
+        .stdout
+        .lines()
+        .skip_while(|line| !line.contains(&alpha_project))
+        .skip(1)
+        .take_while(|line| !line.starts_with(GROUP_HEADER))
+        .collect();
+    assert!(
+        alpha_rows[0].starts_with("* alpha-2 ")
+            && alpha_rows.iter().any(|row| row.starts_with("* alpha ")),
+        "the alpha group does not lead with its newest run:\n{}",
+        grouped.stdout
+    );
+    let unread = grouped
+        .stdout
+        .lines()
+        .find(|row| row.contains("planner update(s) waiting"))
+        .expect("the unread line is under the run that has one");
+    assert!(
+        unread.starts_with("    1 planner update(s) waiting (1 finding), unread for ")
+            && unread.ends_with(&format!("; read them with: onepipeline next {orphan}")),
+        "the unread line is not the line a watch greps for: {unread}"
+    );
+
+    // Every run line the grouped listing renders is a line the flat one renders,
+    // byte for byte, and the flat one carries no header at all.
+    let flat = world.run(&["runs", "--flat"]);
+    flat.exited(0);
+    assert!(
+        flat.stdout
+            .lines()
+            .all(|line| !line.starts_with(GROUP_HEADER)),
+        "--flat rendered a group header:\n{}",
+        flat.stdout
+    );
+    for row in rows(&grouped.stdout) {
+        // The one line whose bytes can move between two invocations is the
+        // unread line's age, and it is held above by its own shape.
+        if row.contains("unread for ") {
+            continue;
+        }
+        assert!(
+            flat.stdout.lines().any(|line| line == row),
+            "a grouped run line is not one the flat listing renders: {row:?}\n{}",
+            flat.stdout
+        );
+    }
+    assert_eq!(rows(&grouped.stdout).len(), rows(&flat.stdout).len());
+
+    // `status` and `goals` given no run render the same grouping.
+    for argv in [&["status"][..], &["goals"][..]] {
+        let rendered = world.run(argv);
+        rendered.exited(0);
+        let seen: Vec<&str> = rendered
+            .stdout
+            .lines()
+            .filter(|line| line.starts_with(GROUP_HEADER))
+            .collect();
+        assert_eq!(
+            seen,
+            headers,
+            "`onepipeline {}` groups differently from `runs`:\n{}",
+            argv.join(" "),
+            rendered.stdout
+        );
+        for run in [&orphan, &alpha, "alpha-2", &beta] {
+            assert!(
+                rendered.stdout.lines().any(|line| line.starts_with(run)),
+                "`onepipeline {}` has no line for {run}:\n{}",
+                argv.join(" "),
+                rendered.stdout
+            );
+        }
+    }
 }
 
 /// `--mine` renders exactly the runs the reader's session owns, and the marker
@@ -841,12 +1001,12 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
 
     let owned_rows = rendered(&world, &["runs", "--mine"]);
     assert_eq!(
-        owned_rows.lines().count(),
+        rows(&owned_rows).len(),
         SCALED_OWNED,
         "--mine over {SCALED_RUNS} run roots rendered something other than the {SCALED_OWNED} \
          this session owns"
     );
-    for row in owned_rows.lines() {
+    for row in rows(&owned_rows) {
         assert!(
             row.contains(OWNED_TALLY),
             "an owned row does not carry the node tally the bound is set against, so this \
@@ -864,7 +1024,10 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
     // a reader who cannot see what they are cannot weigh it.
     println!(
         "  the rows this bound is measured over:\n    {}\n    {}",
-        owned_rows.lines().next().unwrap_or("(no owned row)"),
+        rows(&owned_rows)
+            .first()
+            .copied()
+            .unwrap_or("(no owned row)"),
         rendered(&world, &["runs"])
             .lines()
             .find(|row| row.contains(BULK_TALLY))
@@ -874,8 +1037,8 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
     // And every row on the root, owned or not, is a row folded out of a real
     // graph rather than an empty one.
     let all_rows = rendered(&world, &["runs"]);
-    assert_eq!(all_rows.lines().count(), SCALED_RUNS);
-    for row in all_rows.lines() {
+    assert_eq!(rows(&all_rows).len(), SCALED_RUNS);
+    for row in rows(&all_rows) {
         assert!(
             row.contains(BULK_TALLY) || row.contains(OWNED_TALLY),
             "a row carries neither tally, so the fixture has gone degenerate and the bound \
@@ -968,7 +1131,7 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
          {bytes} it held"
     );
     assert_eq!(
-        rendered(&world, &["runs"]).lines().count(),
+        rows(&rendered(&world, &["runs"])).len(),
         SCALED_RUNS,
         "the run count did not stay where it was"
     );

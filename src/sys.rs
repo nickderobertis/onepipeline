@@ -1515,6 +1515,51 @@ pub fn disown_standard_handles() {
     platform_disown_standard_handles();
 }
 
+/// Have a command start **in a process group of its own**, so what it becomes
+/// outlives the process that started it.
+///
+/// A retained driver is started by a process that is about to exit — a launcher
+/// returning to its shell, an API server answering a request — and a child
+/// started in that process's group takes every signal the group takes: the
+/// `SIGINT` a terminal sends its foreground group, and the `SIGHUP` a closing
+/// session sends. A driver that died with its launcher would leave every run it
+/// held reading `DRIVER DEAD` the moment the person who adopted it pressed
+/// Ctrl-C. So it leads a group of its own, which is what `setsid(1)` gives a
+/// daemon and what `setpgid(2)` gives a process without needing a program on
+/// the host — [`CommandExt::process_group`] is POSIX and answers on macOS, where
+/// `setsid` does not ship. A `stop` still reaches it: a teardown walks descent,
+/// never the group, and the launch record names the driver's pid.
+///
+/// Windows has no process group in that sense; its counterpart is
+/// `CREATE_NEW_PROCESS_GROUP`, which is what keeps a console's Ctrl-C from
+/// reaching the child, and is what this asks for there.
+///
+/// [`CommandExt::process_group`]: std::os::unix::process::CommandExt::process_group
+pub fn in_own_process_group(command: &mut std::process::Command) {
+    platform_in_own_process_group(command);
+}
+
+#[cfg(unix)]
+fn platform_in_own_process_group(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+// llmlint: ignore-block[changed_behavior_has_e2e] the journey that proves the property —
+// `driver::a_detached_adoptions_driver_outlives_its_launcher_and_the_interrupt_its_group_takes`
+// — interrupts a process group with `killpg`, and the Windows counterpart of that is
+// `GenerateConsoleCtrlEvent` on a console the test runner does not have, so no journey
+// can send the Ctrl-C this flag is for. This arm is the platform's own documented
+// counterpart of the Unix one: `CREATE_NEW_PROCESS_GROUP` is what stops a console's
+// Ctrl-C reaching a child, and it is compiled by the Windows leg.
+#[cfg(windows)]
+fn platform_in_own_process_group(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+}
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
 #[cfg(unix)]
 fn platform_disown_standard_handles() {}
 
