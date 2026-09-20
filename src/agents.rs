@@ -116,6 +116,12 @@ impl Scope {
 
 /// The engine's own keys for one dispatch: the run and the project every
 /// launch carries, and what the launch is.
+// llmlint: ignore-block[invalid_states_unrepresentable] the run, project, node and
+// step are text here because they are text at every seam of this crate — `verbs::*`,
+// `DispatchRequest`, `LaunchRecord`, the plan's own node ids — which carries no
+// identity newtype for any of them; and `AgentScope::Node(&str)` below is the shape the
+// contract states. A newtype minted at this one site would be a second shape for an
+// identity the rest of the surface passes as `&str`, converted at every call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stamp<'a> {
     /// [`RUN_ID_LABEL`].
@@ -151,6 +157,7 @@ pub enum Launched<'a> {
         attempt: NonZeroU32,
     },
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Launched<'_> {
     /// The scope word this launch is stamped under.
@@ -317,6 +324,8 @@ pub fn render_labels(labels: &BTreeMap<String, String>) -> String {
 }
 
 /// Which of a run's sessions a read asks for.
+// llmlint: ignore-block[invalid_states_unrepresentable] `Node(&str)` is the shape the
+// contract states, and the node id is `&str` at every seam of this crate; see `Stamp`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentScope<'a> {
     /// Every line of the run's pointer file.
@@ -324,6 +333,7 @@ pub enum AgentScope<'a> {
     /// The lines whose [`NODE_LABEL`] is this node.
     Node(&'a str),
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// The agents a run, a node or a project launched: one entry per oneharness
 /// session, read off the run's pointer file and nothing else.
