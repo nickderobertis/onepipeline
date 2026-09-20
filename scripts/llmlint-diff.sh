@@ -105,8 +105,11 @@ trap 'rm -rf "$captured"' EXIT
 # as its output, never from a record an earlier run left here: the judge writes it
 # on a miss, Nx restores it on a hit, and either way it is this run's or it is absent.
 record="$root/.lint-llm-diff/verdict"
-rm -f "$record" || {
-  echo "lint-llm-diff: could not clear the previous verdict record $record; remove it and retry" >&2
+# A refusal the judge reached is recorded beside the verdict and cleared with it:
+# it is never a cached output, so it is this run's or it is absent.
+refusal="$root/.lint-llm-diff/refusal"
+rm -f "$record" "$refusal" || {
+  echo "lint-llm-diff: could not clear the previous verdict record $record or the refusal record beside it; remove them and retry" >&2
   exit 3
 }
 
@@ -137,6 +140,13 @@ if ((status != 0)); then
   # to act on it, and it is never cached, so it never has to survive a replay.
   cat "$captured/out"
   cat "$captured/err" >&2
+  # The judge's refusal reaches here through the same pipes as its verdict, and on
+  # a loaded host has arrived without it — Nx's wrapper alone, for a judge that
+  # said exactly what to do. What the judge recorded is relayed when what Nx
+  # forwarded lacks it, and only then, so a run whose refusal did arrive says it once.
+  if [ -s "$refusal" ] && ! grep -qxF -f "$refusal" "$plain"; then
+    cat "$refusal" >&2
+  fi
   echo "lint-llm-diff: $provenance" >&2
   exit "$status"
 fi
