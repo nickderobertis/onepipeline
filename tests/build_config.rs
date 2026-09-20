@@ -54,16 +54,32 @@ fn probe_crate(case: &str) -> PathBuf {
     root
 }
 
-/// Run cargo from `dir` with everything that outranks the config file removed.
+/// The cargo that builds the probe: `CARGO`, which cargo sets on every test it
+/// runs to the binary performing the build, so the probe is built by the same
+/// toolchain the tree is, as the e2e harness does.
 ///
-/// `CARGO` is the cargo running this test, as the e2e harness uses it, so the
-/// probe is built by the same toolchain the tree is.
+/// The variable is read from the environment, so a value that names no file is
+/// refused by name here rather than as a bare "No such file" from the spawn.
+fn cargo_binary() -> PathBuf {
+    let Some(cargo) = std::env::var_os("CARGO") else {
+        return PathBuf::from("cargo");
+    };
+    let cargo = PathBuf::from(cargo);
+    assert!(
+        cargo.is_file(),
+        "CARGO names {}, which is not a file",
+        cargo.display()
+    );
+    cargo
+}
+
+/// Run cargo from `dir` with everything that outranks the config file removed.
 fn cargo<I, S>(dir: &Path, args: I) -> Output
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    let mut command = Command::new(cargo_binary());
     command.args(args).current_dir(dir);
     for outranking in [
         "CARGO_TARGET_DIR",
