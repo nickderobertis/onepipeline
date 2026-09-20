@@ -6063,6 +6063,7 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         "results",
         "goals",
         "transcript",
+        "agents",
         "telemetry",
     ] {
         assert!(
@@ -6072,6 +6073,74 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         assert!(
             surface.contains(view),
             "`{view}` is not a command the binary offers"
+        );
+    }
+
+    // The run-history passage restates, in prose, what `onepipeline::agents`
+    // holds as constants and the contract's `oneharness_history` block spells:
+    // the pointer file's name, the one variable the engine never sets, the
+    // label prefix, the scope words, the opt-out, and the two shapes of the
+    // verb. Each spelling is read out of the code or the contract here, so a
+    // renamed file or scope word fails the suite rather than leaving a reader
+    // looking for a file the run no longer writes.
+    {
+        use onepipeline::agents;
+        let passage = readme
+            .split_once("**Every agent a run launches is visible, automatically")
+            .expect("the README documents the run's agent visibility")
+            .1
+            .split_once("**A listing groups its runs by project.**")
+            .expect("that passage ends where the README's next one begins")
+            .0
+            .to_string();
+        assert!(
+            passage.contains(&format!("`<run root>/{}`", agents::SESSIONS_FILE)),
+            "the README's pointer file is not the one the run writes"
+        );
+        assert!(
+            passage.contains(&format!("never sets `{}`", agents::HISTORY_DIR_ENV)),
+            "the README does not name the store variable the engine leaves alone"
+        );
+        assert!(
+            passage.contains(&format!("under the `{}` prefix", agents::LABEL_PREFIX)),
+            "the README's label prefix is not the engine's"
+        );
+        let scopes = agents::Scope::ALL
+            .iter()
+            .map(|scope| format!("`{}`", scope.as_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            passage.contains(&format!("({}, {} or {})", scopes[0], scopes[1], scopes[2])),
+            "the README's scope words are not the crate's"
+        );
+        let block: Value = serde_json::from_str(&fenced_block_naming("json", "oneharness_history"))
+            .expect("the run-history block is JSON");
+        let opt_out = block["oneharness_history"]["opt_out"]
+            .as_str()
+            .expect("the contract spells the opt-out");
+        assert!(
+            passage.contains(&format!("with `{opt_out}` writes no line")),
+            "the README's opt-out is not the contract's"
+        );
+        for usage in [
+            "`onepipeline agents RUN [NODE]`",
+            "`onepipeline agents --project PROJECT`",
+        ] {
+            assert!(
+                passage.contains(usage),
+                "the README's run-history passage does not show {usage}"
+            );
+        }
+        let agents_verb = Cli::command()
+            .get_subcommands()
+            .find(|sub| sub.get_name() == "agents")
+            .expect("the binary offers `agents`")
+            .clone();
+        assert!(
+            agents_verb
+                .get_arguments()
+                .any(|arg| arg.get_long() == Some("project")),
+            "`agents` takes no `--project`, which the README shows"
         );
     }
 

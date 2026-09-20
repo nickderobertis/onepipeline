@@ -549,3 +549,61 @@ fn an_adopted_run_whose_record_predates_the_field_names_the_file_and_lists_its_d
         listed.out_has(pointer.history_session());
     }
 }
+
+/// A pointer file is append-only and shared by every oneharness under the
+/// run, so the two things a reader meets that are not a pointer are real: the
+/// torn tail an interrupted writer left mid-line, and a line something else
+/// wrote into the file. The verb reads past both, lists every session it can,
+/// and says how many lines it could not read — and a file it cannot read at
+/// all is a refusal naming the file, never an empty listing.
+#[test]
+fn the_verb_reads_past_a_torn_tail_and_a_foreign_line_and_refuses_a_file_it_cannot_read() {
+    let world = World::new("agents-torn");
+    world.write_graphs();
+    world.script("harness.work", "the worker wrote this\n");
+    let run = "torn";
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&["start", &path, "--attach"])
+        .exited(0)
+        .settled();
+    let lines = pointers(&world, run);
+    every_line_names(&world, run, &lines);
+
+    // An oneharness interrupted mid-write leaves the start of a line with no
+    // newline; a process that took the file for something else leaves a line
+    // that is JSON and not a pointer.
+    let file = world.run_file(run, SESSIONS_FILE);
+    let mut text = std::fs::read_to_string(&file).expect("the pointer file reads");
+    text.push_str("{\"schema_version\":\"1.0\",\"history_id\":\"not a pointer\"}\n");
+    text.push_str("{\"schema_version\":\"1.0\",\"history_");
+    std::fs::write(&file, text).expect("the pointer file is appended to");
+
+    let listed = world.run_on_agentgraph(&["agents", run]);
+    listed.exited(0);
+    for pointer in &lines {
+        listed.out_has(pointer.history_session());
+    }
+    listed.out_has("2 line(s) skipped: torn or not a pointer");
+    let one = world.run_on_agentgraph(&["agents", run, "build"]);
+    one.exited(0);
+    for pointer in &lines {
+        one.out_has(pointer.history_session());
+    }
+    // The count is the file's, whatever the node asked for.
+    one.out_has("2 line(s) skipped: torn or not a pointer");
+
+    // The store the line names is still where every listed session is.
+    for pointer in &lines {
+        assert!(resolves(pointer).is_file(), "{pointer:?}");
+    }
+
+    // A pointer file the reader cannot open is not a run with no sessions.
+    std::fs::remove_file(&file).expect("the pointer file is removed");
+    std::fs::create_dir(&file).expect("something else takes its path");
+    let refused = world.run_on_agentgraph(&["agents", run]);
+    refused.exited(crate::harness::REFUSED);
+    refused.err_has("cannot read the run's pointer file");
+    refused.err_has(SESSIONS_FILE);
+    refused.out_lacks("no sessions recorded");
+}
