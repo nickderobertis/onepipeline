@@ -1700,6 +1700,7 @@ pub struct Projects {
 pub struct ProjectGroup {
     /// The qualified onetaskgraph project id every run in the group was launched
     /// with, or `None` for the runs whose summary carries none.
+    // llmlint: ignore[invalid_states_unrepresentable] the id as `RunSummary::project` carries it — a serialized field of a document an older build wrote, for the reason `src/summary.rs`'s file-level suppression states — grouped on by equality and never parsed; the qualified-id type is `taskgraph::QualifiedId`, private, and parsing a recorded id into it would refuse a row this build lists today.
     pub project: Option<String>,
     /// The plan's name, off the newest run in the group that recorded one: what
     /// a header labels the project by, beside its id.

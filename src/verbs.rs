@@ -24,6 +24,18 @@
 //! `drive-run` verb, published so an embedding binary can carry a hidden driver
 //! verb of its own and be its own detached driver.
 
+// llmlint: ignore-file[invalid_states_unrepresentable] a run id, a launching session and a
+// project id are `String`s on every result here for the reason `src/ledger.rs` states of
+// the records they are read off: each is a *serialized* field an older build wrote and a
+// consumer parses, and `docs/contract.md` names no `RunId`, `Session` or `ProjectId` — the
+// signatures it fixes for this module spell `&RunPaths`, `session: &str` and `run: String`,
+// which the downstream nodes are written against, so a newtype here would be a public
+// vocabulary the contract did not ask for. What is enforced is the boundary that matters:
+// `resolved` is where an externally supplied run id is checked before it is joined onto
+// anything, and `ledger::owned_by` is the one place ownership is decided. The shapes the
+// contract fixes field by field — `Next`, `ChannelQueue`, `StopRequest`, `Stopped` — are
+// answered at each, beside the field.
+
 use std::path::{Path, PathBuf};
 
 use serde_json::json;

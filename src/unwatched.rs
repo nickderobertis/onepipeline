@@ -64,6 +64,7 @@ impl Unwatched {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnwatchedRun {
     /// The run.
+    // llmlint: ignore[invalid_states_unrepresentable] a run id is a `String` here for the reason `src/ledger.rs`'s file-level suppression states — it is read off a directory name `is_valid_run_id` has already admitted in `discover_owned_runs`, and `docs/contract.md` names no `RunId`.
     pub run: String,
     /// The word the listing prints for how it is being driven.
     // llmlint: ignore[invalid_states_unrepresentable] the listing's own word — `SETTLED`,
