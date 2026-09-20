@@ -916,9 +916,9 @@ pub struct Surface {
     pub workstream: Option<String>,
     /// Whether anybody is listening for the answer.
     ///
-    /// Set by [`abandon`](ChannelState::abandon) when the process serving this
-    /// surface exited without an answer, and lifted by
-    /// [`attend`](ChannelState::attend) when a later listener of the same asker
+    /// Set by the channel's `abandon` when the process serving this surface
+    /// exited without an answer, and lifted by its `attend` when a later
+    /// listener of the same asker
     /// takes it back over — a listener ending is not the asker going. While it
     /// stands, the surface keeps its text and its place: what it gives up is its
     /// claim on the unread count, on the subtree a blocking surface holds, and on
@@ -929,7 +929,7 @@ pub struct Surface {
     pub abandoned: bool,
     /// Who raised it, when the session that did named an asker.
     ///
-    /// The key [`attend`](ChannelState::attend) matches on: a later session of
+    /// The key the channel's `attend` matches on: a later session of
     /// the same asker takes this surface back over, and a session of any other
     /// asker leaves it exactly where it is. `None` is a surface nobody named an
     /// asker for — every one an older build wrote, and every one raised outside a
