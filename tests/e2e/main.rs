@@ -116,6 +116,7 @@ mod scratch;
 mod session;
 mod session_reuse;
 mod shipped;
+mod stop_guard;
 mod store;
 mod summary;
 mod surface;

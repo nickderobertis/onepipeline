@@ -241,6 +241,63 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             // llmlint: ignore-end[cli_output_contract]
             Ok(unwatched.exit_code())
         }
+        Verb::StopGuard(args) => {
+            // Every ending is exit 0 and one object on standard output, or
+            // nothing: a harness reads this stream as its decision, and a status
+            // it reads as an error would make the guard's own failure the thing
+            // that refused the stop. An input naming no session is the silent
+            // ending — see `stopguard::asked` for why it is not filled from the
+            // environment.
+            let Some(asked) = crate::stopguard::asked(&args) else {
+                print!("{}", crate::stopguard::Verdict::None.render(args.format));
+                return Ok(EXIT_SUCCESS);
+            };
+            let (verdict, unresolved) = crate::stopguard::guard(&ledger::runs_root(), &asked);
+            // llmlint: ignore-block[cli_output_contract] what the ordinary `unwatched` writes
+            // on standard error for the same question, and nothing else there: the verdict
+            // is the whole of standard output, because that stream is the decision.
+            eprint!("{}", unresolved.concat());
+            print!("{}", verdict.render(args.format));
+            // llmlint: ignore-end[cli_output_contract]
+            Ok(EXIT_SUCCESS)
+        }
+        Verb::Ask(args) => {
+            // Everything read from the environment is read here, and every
+            // refusal is made before anything is raised: the question, the run,
+            // the asker and what the question is about are each checked, and a
+            // run that is not there or whose launch record cannot be read is
+            // refused with nothing on its channel.
+            let question = crate::ask::question(&args)?;
+            let run = crate::ask::run_id()?;
+            let asker = crate::ask::asker()?;
+            let about = crate::ask::about(&args)?;
+            let paths = resolve(&run)?;
+            let raised = crate::ask::Question::raise(
+                &paths,
+                crate::ask::Request {
+                    message: question,
+                    asker,
+                    about,
+                    timeout: args.timeout,
+                },
+            )?;
+            let window = raised.window();
+            // Named before the wait, so a caller ended mid-wait still holds the
+            // token a manager answers by.
+            if let Some(correlation) = raised.correlation() {
+                eprintln!("correlation: {correlation}");
+            }
+            let asked = raised.answer();
+            // llmlint: ignore-block[cli_output_contract] the bus's one-line answer is the
+            // whole of standard output, by contract, and the advice beside it goes on standard
+            // error where it changes nothing an asker parses.
+            println!("{}", asked.render());
+            if let Some(advice) = asked.advice(&paths.run, window) {
+                eprintln!("onepipeline: {advice}");
+            }
+            // llmlint: ignore-end[cli_output_contract]
+            Ok(asked.exit_code())
+        }
         Verb::Results(args) => {
             print!(
                 "{}",

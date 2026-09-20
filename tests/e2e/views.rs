@@ -346,6 +346,143 @@ fn status_carries_the_provider_health_block_from_the_sibling() {
         .out_has("providers: fake-provider");
 }
 
+/// The `free space:` lines a view carries, in order.
+fn free_space_lines(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .filter(|line| line.starts_with("  free space: "))
+        .collect()
+}
+
+/// `status <RUN>` and `host` each say what is free on the filesystem holding the
+/// runs root and the linked `onevcs`'s workspaces — one line for the one
+/// filesystem both are on here, naming both roots — and `status` says it above
+/// the provider block, where a watch that cuts the view there still reads it.
+///
+/// The one incident this reading exists for is a host at 197G/197G that
+/// reported two unrelated test failures and nothing about the disk.
+#[test]
+fn status_and_host_report_free_space_on_the_filesystem_holding_both_roots() {
+    let world = World::new("views-freespace");
+    let run = settled(&world, "spaced", vec![agent("build", &[])]);
+    let runs = world.runs.display().to_string();
+    let workspaces = world.onevcs_home().join("workspaces").display().to_string();
+
+    let status = world.run(&["status", &run]);
+    status.exited(0).out_has("providers: fake-provider");
+    let lines = free_space_lines(&status.stdout);
+    assert_eq!(
+        lines.len(),
+        1,
+        "two roots on one filesystem are one line:\n{}",
+        status.stdout
+    );
+    let line = lines[0];
+    assert!(
+        line.contains(" GiB of ") && line.contains("% free) on the filesystem holding "),
+        "{line}"
+    );
+    assert!(
+        line.contains(&format!("the runs root {runs}"))
+            && line.contains(&format!("and the lifecycle workspaces under {workspaces}")),
+        "the line does not name both roots: {line}"
+    );
+    let above: Vec<&str> = status
+        .stdout
+        .lines()
+        .take_while(|line| !line.trim_start().starts_with("providers:"))
+        .collect();
+    assert!(
+        above.contains(&line),
+        "the reading sits below the provider block:\n{}",
+        status.stdout
+    );
+
+    let host = world.run(&["host"]);
+    host.exited(0).out_has("no live dispatches");
+    let lines = free_space_lines(&host.stdout);
+    assert_eq!(lines.len(), 1, "{}", host.stdout);
+    assert!(
+        lines[0].contains(&format!("the runs root {runs}"))
+            && lines[0].contains(&format!("and the lifecycle workspaces under {workspaces}")),
+        "{}",
+        lines[0]
+    );
+    // The reading sits beside the scope line, and the rest of the view is what
+    // it was.
+    let mut host_lines = host.stdout.lines();
+    assert!(host_lines
+        .next()
+        .is_some_and(|line| line.starts_with("host ")));
+    assert!(host_lines
+        .next()
+        .is_some_and(|line| line == format!("  reading {runs}")));
+    assert_eq!(host_lines.next(), Some(lines[0]));
+    assert_eq!(host_lines.next(), Some("  no live dispatches"));
+}
+
+/// A runs root that does not exist yet is measured at its nearest existing
+/// ancestor, and the line says so; one that cannot be read says that instead of
+/// being left out.
+#[test]
+fn free_space_is_measured_at_the_nearest_ancestor_of_a_root_not_there_yet_and_names_one_it_cannot_read(
+) {
+    let world = World::new("views-freespace-roots");
+    let missing = world.root.join("not-there-yet").join("runs");
+    let asked = world
+        .cmd(&["host"])
+        .env("ONEPIPELINE_RUNS_DIR", &missing)
+        .output()
+        .expect("the binary runs");
+    assert_eq!(asked.status.code(), Some(0), "{asked:?}");
+    let stdout = String::from_utf8_lossy(&asked.stdout);
+    let lines = free_space_lines(&stdout);
+    assert_eq!(lines.len(), 1, "{stdout}");
+    assert!(
+        lines[0].contains(&format!(
+            "the runs root {} (measured at {}, the nearest directory that exists)",
+            missing.display(),
+            world.root.display()
+        )),
+        "{}",
+        lines[0]
+    );
+    assert!(lines[0].contains(" GiB of "), "{}", lines[0]);
+
+    // A root under a file: every ancestor walk stops at the file, and the host
+    // refuses to say what filesystem a component under a file is on.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb makes a runs root under a
+    // file, and none could: what this stands in for is a filesystem this process cannot
+    // ask about, in the one form every platform refuses alike. Everything asserted after
+    // it is read off the compiled binary's own streams.
+    let file = world.root.join("a-file");
+    std::fs::write(&file, "not a directory").expect("a file in the way");
+    let under = file.join("runs");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let asked = world
+        .cmd(&["host"])
+        .env("ONEPIPELINE_RUNS_DIR", &under)
+        .output()
+        .expect("the binary runs");
+    assert_eq!(asked.status.code(), Some(0), "{asked:?}");
+    let stdout = String::from_utf8_lossy(&asked.stdout);
+    let lines = free_space_lines(&stdout);
+    assert_eq!(lines.len(), 2, "{stdout}");
+    assert!(
+        lines[0].starts_with(&format!(
+            "  free space: could not be read for the runs root {}",
+            under.display()
+        )) && lines[0].ends_with("so what is free there is unknown"),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains("on the filesystem holding the lifecycle workspaces under"),
+        "the workspaces root was left out beside a root that could not be read: {stdout}"
+    );
+}
+
 /// Every measured bucket, summed. An unmeasured one carries no `ms` at all,
 /// which is the point: a zero there would read as a measurement.
 fn measured(document: &serde_json::Value) -> u64 {
