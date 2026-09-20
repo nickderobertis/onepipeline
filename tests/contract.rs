@@ -6184,7 +6184,10 @@ fn the_grouped_listing_is_what_the_contract_states() {
     };
     let projects = Projects::of(&listing);
     assert_eq!(projects.root, listing.root);
-    let shape: Vec<(Option<&str>, Option<&str>, Option<u64>, Vec<&str>)> = projects
+    /// One group as this test reads it: its project, its name, its recency, and
+    /// its runs in order.
+    type Shape<'a> = (Option<&'a str>, Option<&'a str>, Option<u64>, Vec<&'a str>);
+    let shape: Vec<Shape<'_>> = projects
         .groups
         .iter()
         .map(|group| {
