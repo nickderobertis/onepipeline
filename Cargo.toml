@@ -454,26 +454,18 @@ resolver = "2"
 # **requirement**, because `^0.24` admits no 0.25.x; `onevcs-testing` 0.6.6
 # requires exactly this `onevcs`, so the two move together.
 #
-# `onevcs` 0.26.0 carries the **worktree pool**: warm slots per identity and an
-# overflow bound past them, sized by the host in `workspaces.yml`, with
-# `workspace_capacity` — the advisory read `src/pool.rs` asks before a queued
-# lifecycle node comes forward — `Error::PoolExhausted`, the typed refusal
-# `src/vcs.rs` classifies at session open, `Bound`, and the `pool` / `overflow`
-# overrides on `SessionRequest` a plan node's own fields are copied onto. A
-# **requirement**, twice over: `^0.24` admits no 0.26.x, the breaking position
-# pre-1.0, and `SessionRequest` grew the two fields, which every literal here
-# fills. 0.25.0 between them added `FailureKind::HostPrerequisite`, which
-# `failure_of` matches arm by arm, so a pin below 0.26.0 does not compile.
-# `tests/e2e/lifecycle.rs`'s pool journeys drive the hold and the refusal
-# against the linked sibling under a scratch state root.
+# `onevcs` 0.26.0 carries the worktree pool this crate schedules over:
+# `workspace_capacity`, the advisory read `src/pool.rs` asks before a queued
+# lifecycle node comes forward; `Error::PoolExhausted`, the typed refusal
+# `src/vcs.rs` classifies at session open; and `SessionRequest.pool` /
+# `.overflow`, which every literal here fills — so a pin below it does not
+# compile. A **requirement**, because `^0.24` admits no 0.26.x.
 #
 # `onevcs` 0.27.0 is the floor because it is the pool's release this crate
-# adopts as published: it adds `pool_maintain` — the identity's maintenance
-# command run in each idle slot, on a clock the caller keeps — which nothing
-# here calls, so the floor is the adoption and not a symbol. A slot under
-# maintenance is what the hold's `maintaining` counts, and the reading a held
-# node carries is the sibling's own either way. `onevcs-testing` 0.6.8 requires
-# exactly this `onevcs`, so the two requirements and the lock move together.
+# adopts as published; what it adds over 0.26.0 (`pool_maintain`) nothing here
+# calls, so the floor is the adoption and not a symbol. `onevcs-testing` 0.6.8
+# requires exactly this `onevcs`, so the two requirements and the lock move
+# together.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
