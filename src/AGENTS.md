@@ -3,7 +3,10 @@
 Every **public** item here exists because `docs/contract.md` names it. The
 engine behind that surface is private — `mod engine`, `mod driver`, `mod edits`,
 `mod ledger`, and the rest — so a consumer can only reach what the contract
-promised.
+promised. `verbs.rs` is the published face of the post-launch verbs: the bodies
+that take the ownership lock, journal, or spawn stay in `driver.rs`, `watch.rs`
+and `unwatched.rs`, and `verbs.rs` is what a consumer — and the binary — reach
+them through.
 
 Rules:
 
@@ -32,7 +35,18 @@ Rules:
 - **Exit codes are spent.** `0` / `1` / `2` are `reply`'s applied / queued /
   refused verdicts, `3` is "nothing is driving the run", and a driver carries `0`
   for a complete graph and `1` for one that settled unfinished. Do not mint a
-  fifth without the contract naming it.
+  fifth without the contract naming it. The codes are decided by the typed
+  results in `verbs.rs` — a `Receipt`'s state, `Stopped::clean`, a
+  `WatchOutcome`'s ending, an `Adopted` settlement — each answering its code
+  through `exit_code`, and `driver::dispatch` prints that; nothing else maps an
+  outcome to a code.
+- **The CLI is argument parsing over `verbs`.** Every post-launch arm of
+  `driver::dispatch` is parse → call → render → exit code over one function of
+  `verbs.rs`, and `tests/parity.rs` holds the binary's stdout and exit code to
+  the SDK's rendering over a recorded run. A behaviour added to an arm and not
+  to its call turns that journey red; add it to the call. What the binary reads
+  from its environment — the launching session, the runs root, a reader's
+  profile — is read in the arm and passed in, never read inside a verb.
 
 ## Where the engine lives
 
@@ -71,6 +85,18 @@ Rules:
   which resolves to `<shadow-source>:<file>` — is not one.
 - `agentgraph.rs` and `vcs.rs` are the sibling CLIs, reached as subprocesses.
   Nothing here reimplements what they own.
+- `summary.rs` writes the per-run summary document a listing reads instead of a
+  journal, and `views::Projects` is that listing grouped by project — the
+  default shape of `runs`, and of `status` and `goals` given no run. A row's
+  `name` is the plan's, read off `plan.json` through `views::plan_of` once per
+  journal writer, because that document is never rewritten. A group header
+  opens with `views::GROUP_HEADER`, which no run line can start with, so the
+  run lines under it are the flat listing's own bytes; `tests/e2e/harness.rs`'s
+  `rows` is how a journey reads past the headers.
+- `sys::in_own_process_group` is what a retained driver — `start --detach` and
+  `adopt --detach` alike — is started with, so it outlives its launcher and the
+  `SIGINT` the launcher's terminal sends its foreground group. A `stop` still
+  reaches it: a teardown walks descent, never the group.
 - `report.rs` is **half public**: `retain` and the constants an accepted
   settlement is built from are the contract's retention path, published so a
   consumer writes a report through the same promise it resolves one back
