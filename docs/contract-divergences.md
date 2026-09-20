@@ -6456,16 +6456,27 @@ absent, and replayed by `adopt`, which takes no flag.
 
 **The idle branch.** A pass is idle when it dispatched nothing, nothing became ready, the
 run is below its own concurrency ceiling, and the local executor reports `slots_free >
-0` — the executor's own probe, cores less the one-minute load, which
-`ONEPIPELINE_LOAD1` states in place of the host's for a host whose load average is not
-this process's measure. On an idle pass, with a schedule named, no sweep of this driver's
-running, and the in-memory pace (`ONEPIPELINE_MAINTENANCE_PACE_SECONDS`, six hundred
-seconds unset, never persisted) elapsed since the last one started, the driver starts
-**one** thread: every registered identity in sorted order — read off the sibling's own
-`onevcs repos`, spawned the way `destination.rs` spawns that library's resolution verbs,
-because the registry's loader is not on the library surface at this pin — resolved to
-its `every` (rule, else default) and asked through
-`onevcs::pool_maintain(Scope::Repo(identity), Some(every))`. A second idle tick while
+0` — the executor's own probe, cores less the one-minute load. `ONEPIPELINE_LOAD1`
+states a load average in place of the host's: a **journey lever**, so the suite can hold
+a shared host still and drive `slots_free == 0` directly, and the same lever for a host
+whose `/proc/loadavg` is not this process's measure, a container reading its host's
+load beside its own cgroup's parallelism. On an idle pass, with a schedule named, no
+sweep of this driver's running, and the in-memory pace elapsed since the last one
+started, the driver starts **one** thread. The pace is `ONEPIPELINE_MAINTENANCE_PACE_SECONDS`,
+six hundred seconds unset and never persisted: a sweep on a schedule measured in days
+answers `not-due` almost every time it is asked, and each ask surveys every identity's
+records on this host — cheap, but not worth paying on every idle pass of a loop that
+otherwise waits on its channel alone. The thread visits every registered identity in
+sorted order — read off the sibling's own `onevcs repos`, spawned the way
+`destination.rs` spawns that library's resolution verbs, which the planner ruled the
+enumeration keeps: the registry's loader is not on the library surface at this pin, and
+a direct read of `registry.json` through the document types would bind this crate to one
+on-disk shape where the sibling migrates the document on its own first contact. Only the
+identity column is read and every other column is free text; a listing that cannot be
+run, refuses, or cannot be read as one is a **stated failure** of the sweep naming the
+sibling, recorded as the sweep's `error`, and never an empty identity set read as nothing
+to maintain. Each identity is resolved to its `every` (rule, else default) and asked
+through `onevcs::pool_maintain(Scope::Repo(identity), Some(every))`. A second idle tick while
 the thread runs does nothing; a pace that came due on a pass that was not idle is
 re-asked a minute later rather than on every pass. The thread is bounded by construction
 — every command runs under the identity's own `timeout` — and a driver closing out joins
