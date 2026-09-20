@@ -18,6 +18,7 @@
 //! library that declares it rather than copied — at the copy **onejudge** links,
 //! which is the pin the workspace manifest explains.
 
+use oneharness_core::domain::capability::{FlagKind, CAPABILITIES};
 use oneharness_core::domain::dialogue::DialogueRefusal;
 use oneharness_core::domain::events::ActionEvent;
 use oneharness_core::domain::fallback::{startup_failure_reason, RunWork};
@@ -72,41 +73,72 @@ enum Occurs {
     Repeatedly,
 }
 
-// A copy of the **CLI**'s grammar, reconciled two ways. Its spellings and
-// arities are held to the linked core's own declaration of the `run` verb —
-// `oneharness_core::domain::capability::CAPABILITIES`, the table that library's
-// SDKs render their argv from — by `tests::every_flag_is_one_the_linked_run_verb_binds`
-// below. Which of them onejudge *sends* is what `tests/e2e/turns.rs` proves, by
-// driving the real onejudge against this process: a flag it starts sending that is
-// not here is a refusal there rather than a double that quietly waves it through.
-const FLAGS: [(&str, Takes, Occurs); 16] = [
-    // onejudge 0.13.2 and oneagentgraph 0.4.5 ask for the machine report by name,
-    // since oneharness 0.14.0 moves `run`'s default to a human-readable view; the
-    // value is checked below, because this double prints only the JSON one.
-    ("--format", Takes::AValue, Occurs::Once),
-    ("--compact", Takes::Nothing, Occurs::Once),
-    ("--events", Takes::Nothing, Occurs::Once),
-    ("--history", Takes::Nothing, Occurs::Once),
-    // The opt-out the real CLI ranks above its environment: a repository that
-    // wants no history for a turn says so here, whatever `ONEHARNESS_HISTORY`
-    // the engine set on the launch.
-    ("--no-history", Takes::Nothing, Occurs::Once),
-    ("--stream", Takes::Nothing, Occurs::Once),
-    ("--control", Takes::Nothing, Occurs::Once),
-    ("--system", Takes::AValue, Occurs::Once),
-    ("--config", Takes::AValue, Occurs::Once),
-    // The one repeatable flag: onejudge's renderer emits one per harness id whose
-    // provider process oneharness is to replace with its own responder.
-    ("--mock-harness", Takes::AValue, Occurs::Repeatedly),
-    ("--cwd", Takes::AValue, Occurs::Once),
-    ("--prompt", Takes::AValue, Occurs::Once),
-    ("--prompt-file", Takes::AValue, Occurs::Once),
-    ("--history-name", Takes::AValue, Occurs::Once),
-    ("--session", Takes::AValue, Occurs::Once),
-    // onejudge 0.8.1 pins the evaluator's worktree read-only through it; the
-    // value is read through oneharness's own parser below.
-    ("--mode", Takes::AValue, Occurs::Once),
-];
+/// What `oneharness run` takes, and how, read off the linked core's own
+/// declaration of the verb rather than a copy kept here: `CAPABILITIES`'s `run`
+/// and `runStream` rows are the table that library's SDKs render their argv
+/// from, and the real CLI's clap surface is reconciled against them in that
+/// crate's own tests. A flag is an option the rows bind — `--flag VALUE` once,
+/// once per element, or a switch — or a fragment a row always emits, whose
+/// arity the fragment sequence carries (`--format json`, `--compact`,
+/// `--stream`). A flag the core lists as uncovered (`--bypass`) is one no SDK
+/// renders, so no onejudge built on those SDKs sends it; refused here, it
+/// surfaces in `tests/e2e/turns.rs` the day one does.
+fn grammar(flag: &str) -> Option<(Takes, Occurs)> {
+    // A fragment that is not a flag — the `json` after `--format` — is a value,
+    // and never an argument in its own right.
+    if !flag.starts_with("--") {
+        return None;
+    }
+    let rows = CAPABILITIES
+        .iter()
+        .filter(|capability| capability.argv == ["run"]);
+    let mut found: Option<(Takes, Occurs)> = None;
+    for row in rows {
+        for binding in row.bindings.iter().filter(|binding| binding.flag() == flag) {
+            let (takes, occurs) = match binding.kind {
+                FlagKind::Switch(_) => (Takes::Nothing, Occurs::Once),
+                FlagKind::Value(_) => (Takes::AValue, Occurs::Once),
+                FlagKind::Repeated(_) | FlagKind::KeyValue(_) => {
+                    (Takes::AValue, Occurs::Repeatedly)
+                }
+                FlagKind::Positional | FlagKind::Trailing => continue,
+            };
+            found = Some(widen(found, takes, occurs));
+        }
+        let mut always = row.always.iter().peekable();
+        while let Some(fragment) = always.next() {
+            if *fragment != flag {
+                continue;
+            }
+            let takes = match always.peek() {
+                Some(next) if !next.starts_with("--") => Takes::AValue,
+                _ => Takes::Nothing,
+            };
+            found = Some(widen(found, takes, Occurs::Once));
+        }
+    }
+    found
+}
+
+/// Two declarations of one flag — `--prompt` is bound once for a single prompt
+/// and repeated for a batch — and the double takes the wider reading of each.
+fn widen(found: Option<(Takes, Occurs)>, takes: Takes, occurs: Occurs) -> (Takes, Occurs) {
+    match found {
+        None => (takes, occurs),
+        Some((was_takes, was_occurs)) => (
+            if was_takes == Takes::AValue {
+                was_takes
+            } else {
+                takes
+            },
+            if was_occurs == Occurs::Repeatedly {
+                was_occurs
+            } else {
+                occurs
+            },
+        ),
+    }
+}
 
 /// Refuses an argv the real `oneharness run` would not take.
 ///
@@ -118,29 +150,28 @@ const FLAGS: [(&str, Takes, Occurs); 16] = [
 /// The refusals are the ones `fake::flag` cannot report: it answers with the
 /// first occurrence and cannot tell a flag sent empty from one never sent.
 fn declared(args: &[String]) -> Result<(), String> {
-    let known = |arg: &String| FLAGS.iter().find(|(name, _, _)| name == arg);
     let mut seen: Vec<&str> = Vec::new();
     let mut at = 1;
     while at < args.len() {
         let arg = &args[at];
-        let Some((name, takes, occurs)) = known(arg) else {
+        let Some((takes, occurs)) = grammar(arg) else {
             return Err(format!("oneharness run takes no argument {arg:?}"));
         };
-        if *occurs == Occurs::Once && seen.contains(name) {
+        if occurs == Occurs::Once && seen.contains(&arg.as_str()) {
             return Err(format!(
                 "oneharness run was given {arg} more than once, and it takes one"
             ));
         }
-        seen.push(name);
+        seen.push(arg);
         at += 1;
-        if *takes == Takes::AValue {
+        if takes == Takes::AValue {
             match args.get(at) {
                 None => {
                     return Err(format!(
                         "oneharness run's {arg} takes a value, and nothing followed it"
                     ))
                 }
-                Some(next) if known(next).is_some() => {
+                Some(next) if grammar(next).is_some() => {
                     return Err(format!(
                         "oneharness run's {arg} takes a value, and {next} followed it"
                     ))
@@ -1308,50 +1339,5 @@ fn report(
             stderr: String::new(),
             error: outcome.error(),
         }],
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Occurs, Takes, FLAGS};
-    use oneharness_core::domain::capability::{FlagKind, CAPABILITIES};
-
-    /// The table above is a copy of the real CLI's grammar, and this is the gate
-    /// that holds it to the linked core's own declaration of the `run` verb:
-    /// every flag this double takes is one that verb binds or always emits, at
-    /// an arity the binding admits. A flag the core renamed or dropped fails
-    /// here rather than in a journey that only sees the double refuse it.
-    #[test]
-    fn every_flag_is_one_the_linked_run_verb_binds() {
-        let run = CAPABILITIES
-            .iter()
-            .find(|capability| capability.method == "run")
-            .expect("the linked core declares `run`");
-        for (flag, takes, occurs) in FLAGS {
-            let binding = run.bindings.iter().find(|binding| binding.flag() == flag);
-            let Some(binding) = binding else {
-                // `--compact` and `--format` are what the SDK always emits for
-                // this verb rather than options it binds; `--stream` is the
-                // streaming method's, listed against `run` with the reason.
-                let always = run.always.contains(&flag)
-                    || run.uncovered.iter().any(|uncovered| uncovered.flag == flag);
-                assert!(always, "`{flag}` is not a flag the linked `run` verb takes");
-                continue;
-            };
-            let expected = match binding.kind {
-                FlagKind::Switch(_) => Takes::Nothing,
-                FlagKind::Value(_) | FlagKind::Repeated(_) | FlagKind::KeyValue(_) => Takes::AValue,
-                FlagKind::Positional | FlagKind::Trailing => {
-                    unreachable!("a binding with a flag renders it")
-                }
-            };
-            assert_eq!(takes, expected, "`{flag}` takes what the linked core says");
-            if occurs == Occurs::Repeatedly {
-                assert!(
-                    matches!(binding.kind, FlagKind::Repeated(_) | FlagKind::KeyValue(_)),
-                    "`{flag}` repeats here but the linked core binds it once"
-                );
-            }
-        }
     }
 }
