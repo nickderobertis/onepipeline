@@ -11,6 +11,10 @@ if errorlevel 1 (
   echo onevcs_recording: cannot append to %ONEPIPELINE_E2E_ONEVCS_CALLS%; point ONEPIPELINE_E2E_ONEVCS_CALLS at a file under the world's own scratch root, the way maintenance.rs does, and check that root is on a writable mount 1>&2
   exit /b 1
 )
+if not exist "%ONEPIPELINE_E2E_ONEVCS_REAL%" (
+  echo onevcs_recording: ONEPIPELINE_E2E_ONEVCS_REAL=%ONEPIPELINE_E2E_ONEVCS_REAL% is not an executable; point it at the real onevcs binary the suite built, the way maintenance.rs does with harness::onevcs_binary^(^) 1>&2
+  exit /b 64
+)
 "%ONEPIPELINE_E2E_ONEVCS_REAL%" %*
 exit /b %errorlevel%
 
