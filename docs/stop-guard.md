@@ -124,6 +124,9 @@ hook's standard input, and reads its standard output as the decision — its
 schema. Add this to `~/.codex/hooks.json` (user) or `<repo>/.codex/hooks.json`
 (project; loaded only where the `.codex/` layer is trusted):
 
+<!-- What follows was read off the installed Codex CLI rather than assumed; see
+     "What was verified, and how" at the foot of this page. -->
+
 ```json
 {
   "hooks": {
@@ -156,6 +159,16 @@ schema. Add this to `~/.codex/hooks.json` (user) or `<repo>/.codex/hooks.json`
   `none` is rendered as nothing, and the turn ends. Codex sets
   `stop_hook_active` on the stop that follows a block.
 
+- **Trust.** Codex reports a hooks file it has not yet had confirmed as
+  `trustStatus: "untrusted"`, per file and per content hash, and prompts to
+  trust it. Editing the file changes its hash, so a hook is re-confirmed after
+  every edit — expect that prompt once when you add this entry, and again
+  whenever you change it.
+- **An event name Codex does not know is dropped in silence**, with no warning
+  and no error, so a typo in `"Stop"` reads exactly like a hook that never
+  fires. `codex app-server`'s `hooks/list` (below) is how you tell the two
+  apart.
+
 Disable hooks in Codex with `[features] hooks = false` in `config.toml`; there is
 then no mechanism that can refuse a stop, and a manager arms `onepipeline watch
 <run>` by hand, asking `onepipeline unwatched --session <ID>` which runs need
@@ -168,3 +181,44 @@ flags or as the one object above, and map the verdict to whatever the harness
 reads — `block` to its refusal with `reason` as the text, `warn` to its
 user-facing message, `none` to its "proceed". The decision stays in the command;
 the adapter only renames fields.
+
+## What was verified, and how
+
+A wiring page that is wrong is worse than none, so the Codex claims above were
+read off the installed CLI (`codex-cli 0.154.0`) rather than taken from its
+documentation. What was read, and how, so the next reader can re-check it
+against whatever Codex they have:
+
+- **`Stop` is a real event with a real runtime path**, distinct from
+  `SubagentStop`: the binary carries a `stop.command.input` schema whose
+  `hook_event_name` is `const: "Stop"` and whose required fields include
+  `session_id` and `stop_hook_active`, a `stop.command.output` schema whose
+  properties are `decision` (`enum: ["block"]`), `reason`, `systemMessage`,
+  `continue`, `stopReason` and `suppressOutput`, and the runtime message
+  `Stop hook exited with code 2 but did not write a continuation prompt to
+  stderr`. The `reason` property's own description reads *"Claude requires
+  `reason` when `decision` is `block`"*, which is Codex saying in its own schema
+  that this is Claude Code's shape.
+- **`Stop` is accepted as a `hooks.json` key, `timeout` is the right spelling,
+  and `600` is the default.** Asked over the app server:
+
+  ```
+  codex app-server   # then, on stdin: initialize, initialized, hooks/list
+  ```
+
+  with a `hooks.json` naming `"Stop"`, `"SessionStart"` and one invented event,
+  it answered with the first two parsed (`"eventName": "stop"` and
+  `"sessionStart"`) and the invented one absent, with no warning or error. A
+  file-level `"timeout": 30` came back as `"timeoutSec": 30`; a file-level
+  `"timeoutSec": 45` was ignored and that handler came back at `600`. So
+  `timeout` is the key a hooks file uses, `timeoutSec` is only what the app
+  server reports it as, and an unknown event name fails silently.
+- **The `hooks` feature is on by default**: `codex features list` reports
+  `hooks  stable  true`.
+
+What could **not** be verified here is a `Stop` hook firing during a real turn:
+this host's Codex account was out of credits, and hooks do not run for a turn
+that fails before it starts. So the four bullets above are read off the parser
+and the compiled schemas, which is what decides whether the wiring is accepted;
+whether Codex then honours `decision: "block"` at runtime is its schema's claim
+and not something measured here.

@@ -11,14 +11,14 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80 and 84 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80 and 84–87 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80 and 84 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80 and 84 to 87 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -6624,3 +6624,241 @@ the read still succeeds; and `onepipeline agents` lists per run, per node and pe
 project across two runs of one project, each entry resolving through `find_session_path`
 to the file its line names. `tests/parity.rs` holds the verb's rendering byte-equal to
 the SDK call, and `agents::tests` holds the merge rule and the reader against the types.
+
+## 85. A stop hook is the only thing enforcing the watch invariant, and it lives in the consumer as a harness-specific adapter — OPEN
+
+**Proposal (for the planner who owns the contract): add `onepipeline stop-guard
+[--session <ID>] [--continuation] [--format neutral|claude-code|codex]` to the
+Views line beside `unwatched`, as a verb whose contract is one verdict object
+and exit `0` always.**
+
+Entry 68 added `onepipeline unwatched`, which answers `6` for a run a session
+owns that nothing is watching. What it did not add is anything that *asks* it.
+Prose is remembered by the model or it is not, and the measured failure 68
+records — a manager forgets to arm `watch`, and dispatched work sits for hours
+with nothing looking at it — is a failure of remembering rather than of
+knowing. What closes it is a hook that runs whether or not anybody remembered,
+and that may refuse to let a turn end.
+
+The consumer built one: `ai-orchestrator/scripts/stop-unwatched-guard.py`, 427
+lines of Python wired as a claude-code `Stop` hook, whose module docstring is
+the specification of every ending below. That file is the only thing enforcing
+this repository's own watch invariant, and it is a fact about a run — which is
+what makes it the engine's. The user's direction is explicit that it is **not a
+Claude Code feature**: *"the stop hook in onepipeline should not be specific to
+Claude Code. It should be a general command and it has docs on how to wire it
+into Claude Code and Codex."*
+
+**What this build does.** One general verb, harness-neutral in and out.
+
+*Input* is the session whose stop this is and whether the stop continues a block
+the guard itself made — as `--session`/`--continuation`, or as one object
+`{"session": …, "continuation": …}` on standard input, read closed, whose two
+field names are this verb's own. *Output* is one object on standard output —
+`{"verdict":"block","reason":…}`, `{"verdict":"warn","message":…}` or
+`{"verdict":"none"}` — and exit `0` always, because a harness reads that stream
+as its decision and a status it read as an error would make the guard's own
+failure the thing that refused the stop. No harness's field name appears in that
+contract.
+
+Three decisions in it are worth stating on their own.
+
+**Only a positively determined unwatched run blocks, and only once the block has
+been written down.** For *reporting* a run, every unknown resolves toward
+reporting it, because being wrong there costs one re-armed watch. For
+*blocking*, the irreversible act is the block itself — it holds the caller's own
+session open — so every unknown resolves toward standing aside: a question that
+could not be asked, a runs root that could not be read, a memory that could not
+be kept, an engine error in place of an answer. Each of those is a `warn`,
+never a block and never silence, because a guard that fails silent is worse than
+none. The cost is `unwatched`'s: no run's merged event store is read.
+
+**The memory is keyed by a digest of the report, never by a boolean.** A block
+is recorded before it is made, in one file per session at
+`${XDG_STATE_HOME:-$HOME/.local/state}/onepipeline/stop-guard/<sha256(session)>`
+— a relative `XDG_STATE_HOME` ignored, which is a boundary check as well as the
+specification's rule, and the session digested rather than joined onto a path,
+because it is a stranger's string arriving on standard input. On a continuation
+whose remembered digest equals the current report's, the verdict is `none`: the
+manager was told and did nothing, and a second identical block would hold the
+session open for ever. A continuation whose report has *changed* blocks again,
+which a memory holding only "blocked before" could not do. A session with
+nothing to report has its memory removed.
+
+**The session asked about is the input's, never the environment's.** A
+dispatched worker inherits its manager's `ONEPIPELINE_LAUNCHER_SESSION`, and the
+worker's own session owns no run — which is what keeps the guard silent inside a
+dispatch. So the verb never falls through to the environment, and a blank or
+absent session is `none` rather than an answer about whoever the process happens
+to be running under.
+
+**A harness's shape is a rendering, decided in one place.** `--format
+claude-code` and `--format codex` read the harness's own `Stop` payload —
+`session_id` and `stop_hook_active`, and nothing else of it — and render the same
+verdict as `{"decision":"block","reason":…}`, `{"systemMessage":…}` or nothing.
+They are presentation over the one verdict produced by `stopguard::guard`, which
+is the only place the decision is made. One reader serves both because the two
+harnesses share those field names: Codex's own compiled `stop.command.input` and
+`stop.command.output` schemas carry `session_id`, `stop_hook_active`,
+`decision: "block"`, `reason` and `systemMessage`, and its schema annotates the
+last as Claude's rule.
+
+`docs/stop-guard.md` states the neutral contract and then the wiring for each
+harness, so a reader wires either without reading this crate's source. Both
+harnesses' claims on that page were verified against the installed Codex CLI
+0.154.0 rather than assumed — see that page's own note on what was read and how.
+
+Driven end to end by `tests/e2e/stop_guard.rs` against the compiled binary, in
+an environment whose `ONEPIPELINE_LAUNCHER_SESSION` always names *another*
+session, so an answer about the right one is one the environment could not have
+given: a run nothing watches blocks once and records a digest of exactly that
+report; the same as a continuation is `none`; a continuation whose report has
+moved blocks again; a session with nothing to report is `none` with its memory
+removed; unreadable input and a blank session are `none`; an unreadable runs
+root, an unreadable or unwritable memory, a refused question and an engine error
+are each exactly one `warn` and never a block; a run whose event store cannot be
+read is still decided from its watch state; and the documented Claude Code
+wiring is driven over real `Stop` payloads and read back in that harness's
+decision shape.
+
+## 86. Two views report what is running and nothing about what it is running in — OPEN
+
+**Proposal (for the planner who owns the contract): amend the Views line so that
+`host` and `status RUN` each carry, above the provider-health block, one `free
+space:` line per distinct filesystem among the runs root and the linked
+`onevcs`'s workspaces root.**
+
+`onepipeline host` and `onepipeline status <run>` say what is running and say
+nothing about the resource whose exhaustion stops all of it. The consumer pipes
+both through `ai-orchestrator/scripts/supervision-readings.py` to add it, and
+that file's docstring records the incident: a host at 197G/197G surfaced as two
+unrelated test failures — a five-second timeout and a browser remote that never
+came up — both written up as flakes, until the next attempt said `No space left
+on device` outright. A full disk does not announce itself to a test runner; it
+announces itself as an unrelated test failing. That is a fact about the host a
+run is on, which is what makes it the engine's rather than a filter a consumer
+keeps.
+
+**What this build does.** Both views carry, per distinct filesystem:
+
+```
+  free space: 41.2 GiB of 196.9 GiB (21% free) on the filesystem holding the runs root <path> and the lifecycle workspaces under <path>
+```
+
+Four decisions in it are worth stating.
+
+**Above the provider block, in both views.** A supervisor's watch guidance cuts
+the report at `providers:` and reads only what is above it, so a reading below
+that line is one no watch following that guidance could see.
+
+**Two roots, deduplicated by device.** The runs root every view already reads,
+and the directory the linked `onevcs` cuts every per-run clone and isolated
+worktree under — `$ONEVCS_HOME/workspaces`, `~/.onevcs/workspaces` by default,
+resolved through that sibling's own published resolution rather than restated
+here. The workspaces root is the one that filled. A filesystem holding both is
+**one line naming both**, keyed on the device rather than on the free space,
+because two lines for one device read as two answers about two resources and
+matching numbers would collapse two genuinely different filesystems.
+
+**A root that is not there yet is measured at its nearest existing ancestor, and
+the line says which.** A fresh checkout whose `runs/` has never been written is
+not a host whose free space is unknown; the walk up is the answer rather than a
+fallback.
+
+**A filesystem that cannot be read says so on its own line** rather than being
+left out, and so does a workspaces root the sibling could not resolve. Silence
+is the one answer a reading of this resource may not give — that is the whole of
+the incident above. The share is integer arithmetic, so a host at 197G/197G
+reads `0%` rather than rounding up to something that is not full.
+
+Everything here **reads**, and a reading is never acted on: the space is
+host-wide on a host several managers share, and clearing it belongs to whoever
+owns what is filling it.
+
+Driven by `tests/e2e/views.rs` against the compiled binary: `status RUN` and
+`host` each carry one line for the one filesystem both roots are on, naming both
+roots, with `status`'s sitting above the provider block and `host`'s beside the
+scope line; a runs root that does not exist yet is measured at its nearest
+existing ancestor and the line says so; and a root the host refuses to answer
+about says that on its own line while the other root is still measured.
+`tests/parity.rs` holds the binary's rendering byte-equal to the SDK's with the
+measurement alone held still — it is the one thing in either view that can
+honestly differ between two reads moments apart on a busy host.
+
+## 87. A dispatched agent's one way to ask its manager anything is a consumer's shim — OPEN
+
+**Proposal (for the planner who owns the contract): add `onepipeline ask
+[TEXT…] [--file <PATH>] [--about <NODE>] [--timeout <SECONDS>]` to the dispatch
+surface, as the verb a dispatched agent asks its manager a blocking question
+with over the run's own planner channel.**
+
+The channel is already this crate's: the surface kinds, the reply envelope and
+its ops, which question a verdict is addressed to, and the bytes of every record
+the channel directory holds. What was not this crate's is the one thing a
+dispatched worker does with it. `ai-orchestrator/scripts/ask-manager.sh` is 190
+lines that JSON-encode a plain-text question into a `planner-question` frame
+with bash builtins and exec `onemessagebus ask` with the run's channel, its
+asker and its bus policy — every one of which the engine already knows, and none
+of which a consumer should be re-deriving. It is the one way a dispatch asks its
+manager anything, which under the user's direction for that repository —
+*"everything else in the repo should be very light or no wrapper on CLI tools"* —
+makes it a gap in this library rather than a script.
+
+**What this build does.** One frame of kind `planner-question`, source
+`proposal`, carrying the text, raised on the run's `surfaces` queue at
+`<runs>/<run>/channel` **under the bus policy the run's launch record carries**
+(`bus_config` in `launch.json`) — the same policy the manager's reply verbs read
+— blocking, through the **linked** `onemessagebus` rather than a spawned command
+line.
+
+Four decisions in it are worth stating.
+
+**Three input forms, and the refusal names which one it came in.** The argument
+words joined by one space, `--file`, or standard input when neither is given —
+the invocation contract every task the consumer dispatches already spells out. A
+blank question, and one carrying a NUL byte no frame can carry, are refused at
+exit `2` naming the form, because a worker that piped an empty heredoc and one
+that passed a blank argument look identical from the other side.
+
+**Every refusal is made before anything is raised.** The question, the run
+(`ONEPIPELINE_RUN_ID`, required), the asker (`ONEPIPELINE_CHANNEL_ASKER` —
+unset means nobody, set and blank is a caller that meant to name one), what the
+question is `about`, and the launch record whose policy it would be raised
+under, are each checked first. A refused `ask` leaves the channel untouched.
+
+**The reply window resolves in three steps**: `--timeout`, then the
+`reply_window_seconds` the launch record's bus configuration names for the
+`surfaces` queue — the longest, where several codecs serve it, so the question
+waits at least as long as any listener the configuration expects a manager to
+answer — then the bus's own default.
+
+**An elapsed wait is never a ruling.** Standard output is the bus's one-line
+answer verbatim and nothing else, because that is what an asker parses:
+`{"answer":"reply",…}` at exit `0`; `timeout`, `abandoned` or `refused` at exit
+`1`. A wait that elapses leaves the question standing and marks it abandoned,
+exactly as the bus's own command line does, so a later listener of the same
+asker takes it back; the correlation is named on standard error *before* the
+wait, so a caller ended mid-wait still holds the token a manager answers by.
+
+Driven end to end by `tests/e2e/ask.rs` against the compiled binary over a real
+channel, with the manager's side played by this crate's own `next` and `reply`
+verbs rather than by a double: a listener reads the frame's kind, source,
+message, `blocking`, the asker the environment named and what it is `about`;
+each of the three input forms raises the same question; each of the three
+window resolutions is driven, the first two by a listener answering after the
+shorter window would have elapsed; an elapsed wait answers `timeout` at exit `1`
+with the question still on the channel and marked abandoned; a question a real
+validator declines answers `refused` at exit `1` carrying that validator's own
+words; and every refusal — a missing `ONEPIPELINE_RUN_ID`, a blank asker, a
+blank question in each of the three forms, a NUL byte, an `--about` over 512
+bytes or carrying a control character, and a launch record that cannot be read —
+exits `2` naming its cause over a channel that stayed empty.
+
+One answer is **not** reachable through the binary and is named here rather than
+left to be discovered: `abandoned`. It is the bus's answer to an asker whose
+question was abandoned by something other than itself, and no verb of this
+crate's abandons a third party's question — so there is no journey that can
+produce it without a second implementation of the bus. Its exit code and its
+rendering are held by `ask::tests::each_answer_renders_as_the_bus_prints_it`
+against the real `Answer` type. Should the channel grow a verb that abandons a
+pending question, the journey that verb makes possible belongs here.
