@@ -2039,7 +2039,13 @@ impl ChannelState {
     }
 
     /// Every surface the run has ever raised, in the order it raised them —
-    /// read and unread, answered and abandoned alike.
+    /// read and unread, answered and abandoned alike — each as its **latest**
+    /// record.
+    ///
+    /// The surfaces log is a log of transitions: a surface is appended when it is
+    /// queued, again when it is claimed, and again when it is answered, each
+    /// record carrying the whole surface as it then stood. One entry per surface
+    /// is what a reader wants, and the last record is the surface as it stands.
     pub fn every_surface(&self) -> Vec<Surface> {
         if !self.paths.channel_dir().is_dir() {
             return Vec::new();
@@ -2047,13 +2053,20 @@ impl ChannelState {
         let Ok(surfaces) = self.surfaces() else {
             return Vec::new();
         };
-        surfaces
+        let mut latest: Vec<Surface> = Vec::new();
+        for record in surfaces
             .raw()
             .log(None)
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|(record, _)| serde_json::from_value(record).ok())
-            .collect()
+            .filter_map(|(record, _)| serde_json::from_value::<Surface>(record).ok())
+        {
+            match latest.iter_mut().find(|held| held.id == record.id) {
+                Some(held) => *held = record,
+                None => latest.push(record),
+            }
+        }
+        latest
     }
 
     /// The reconciler's answer to one envelope, if it has given one.
