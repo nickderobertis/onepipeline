@@ -673,10 +673,12 @@ include = [
 ]
 
 # llmlint: ignore-block[new_command_or_client_gets_its_own_project] `plan check`
-# is a verb on this binary, beside `start`, `validate` and `session` — not a new
-# command or client. The shipped shape is one library and one binary, which
-# `AGENTS.md` states and `docs/contract.md` states the verb against; a second
-# project for a subcommand would contradict both.
+# and `agents` are verbs on this binary, beside `start`, `validate` and
+# `session` — not a new command or client. The shipped shape is one library and
+# one binary, which `AGENTS.md` states and `docs/contract.md` states each verb
+# against — `agents` as argument parsing over `verbs::agents`, held byte-equal
+# by `tests/parity.rs` like every post-launch verb; a second project for a
+# subcommand would contradict both.
 [[bin]]
 name = "onepipeline"
 path = "src/main.rs"

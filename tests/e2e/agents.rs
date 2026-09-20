@@ -22,7 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::harness::{agent, plan_of, World};
+use crate::harness::{agent, human, plan_of, World};
 use oneharness_core::domain::history::HistoryPointer;
 use oneharness_core::io::history::{find_session_path, read_pointers};
 use onepipeline::agents::{
@@ -475,4 +475,77 @@ fn a_re_asked_dispatchs_lines_carry_the_attempt_the_record_names() {
         .run_on_agentgraph(&["agents", run, "service"])
         .exited(0)
         .out_has(&format!("{ATTEMPT_LABEL}=2"));
+}
+
+/// A run whose launch record predates the field is told where its sessions go
+/// by the adoption that dispatches for it: the record names the pointer file
+/// from then on, and the dispatches the adopting driver makes are listed off
+/// it like any other.
+#[test]
+fn an_adopted_run_whose_record_predates_the_field_names_the_file_and_lists_its_dispatches() {
+    let world = World::new("agents-adopted");
+    world.write_graphs();
+    let run = "adopted";
+    let path = world.plan(
+        run,
+        &plan_of(
+            run,
+            vec![human("approve", &[]), agent("ship", &["approve"])],
+        ),
+    );
+    // Settled at the human gate with the driver gone, then attested: the state
+    // an `adopt` picks up with work still to do.
+    world
+        .run_on_agentgraph(&["start", &path, "--attach"])
+        .exited(0);
+    world
+        .run_on_agentgraph(&["attest", run, "approve"])
+        .exited(0);
+    assert!(
+        !world.run_file(run, SESSIONS_FILE).exists(),
+        "a run that dispatched nothing yet has a pointer file: {}",
+        world.dump()
+    );
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb writes a launch record
+    // naming no pointer file — every launch this build makes names one — so the state is
+    // one an *earlier build* left, and it is reached by taking the one key that build
+    // never wrote off a record this build wrote. Every claim after it is read off the
+    // compiled binary's own records and stdout.
+    let launch = world.run_file(run, "launch.json");
+    let mut record: Value =
+        serde_json::from_str(&std::fs::read_to_string(&launch).expect("the launch record reads"))
+            .expect("a launch record");
+    assert!(
+        record
+            .as_object_mut()
+            .expect("a launch record is an object")
+            .remove("oneharness_sessions")
+            .is_some(),
+        "the launch did not record the pointer file"
+    );
+    std::fs::write(&launch, record.to_string()).expect("the launch record is rewritten");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    world.run_on_agentgraph(&["adopt", run]).exited(0).settled();
+    let file = world.run_file(run, SESSIONS_FILE);
+    assert_eq!(
+        world.run_json(run, "launch.json")["oneharness_sessions"],
+        json!(file.display().to_string()),
+        "the adoption did not fill in the pointer file"
+    );
+    let lines = pointers(&world, run);
+    every_line_names(&world, run, &lines);
+    let shipped: Vec<&HistoryPointer> = scoped(&lines, Scope::Node)
+        .into_iter()
+        .filter(|pointer| label(pointer, NODE_LABEL) == Some("ship"))
+        .collect();
+    assert!(!shipped.is_empty(), "{lines:?}");
+    for pointer in &shipped {
+        assert_eq!(label(pointer, ATTEMPT_LABEL), Some("1"), "{pointer:?}");
+    }
+    let listed = world.run_on_agentgraph(&["agents", run, "ship"]);
+    listed.exited(0);
+    for pointer in &shipped {
+        listed.out_has(pointer.history_session());
+    }
 }

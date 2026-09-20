@@ -2706,18 +2706,29 @@ fn the_run_history_surface_is_what_the_contract_names() {
     let stamp = &history["stamp"];
     let attempt =
         u32::try_from(stamp["attempt"].as_u64().expect("an attempt")).expect("an attempt fits");
+    let attempt = NonZeroU32::new(attempt).expect("an attempt counts from one");
+    let node = stamp["node"].as_str().expect("the example names a node");
+    let launched = match spelled(&["stamp", "scope"]).as_str() {
+        "node" => agents::Launched::Node {
+            node,
+            step: stamp["step"].as_str(),
+            attempt,
+        },
+        "pr-author" => agents::Launched::PrAuthor { node, attempt },
+        "observer" => agents::Launched::Observer,
+        other => panic!("the example's scope `{other}` is not one of the words"),
+    };
+    assert_eq!(
+        launched.scope().as_str(),
+        spelled(&["stamp", "scope"]),
+        "the launch's scope word is not the example's"
+    );
     let composed = agents::compose_labels(
         Some(&spelled(&["inherited"])),
         &agents::Stamp {
             run: &spelled(&["stamp", "run_id"]),
             project: stamp["project"].as_str(),
-            scope: agents::Scope::ALL
-                .into_iter()
-                .find(|scope| scope.as_str() == spelled(&["stamp", "scope"]))
-                .expect("the stamp's scope is one of the words"),
-            node: stamp["node"].as_str(),
-            step: stamp["step"].as_str(),
-            attempt: NonZeroU32::new(attempt),
+            launched,
         },
     )
     .expect("the block's example composes");

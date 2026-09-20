@@ -1490,14 +1490,11 @@ fn launch_graph(
     // observer's scope word never reaches a node's session.
     env.extend(crate::agents::overlay(
         paths,
-        std::env::var(crate::agents::LABELS_ENV).ok().as_deref(),
+        crate::agents::inherited_labels()?.as_deref(),
         &crate::agents::Stamp {
             run: &paths.run,
             project: (!record.project.is_empty()).then_some(record.project.as_str()),
-            scope: crate::agents::Scope::Observer,
-            node: None,
-            step: None,
-            attempt: None,
+            launched: crate::agents::Launched::Observer,
         },
     )?);
     let mut launched = agentgraph::GraphRun::start(&agentgraph::Launch {

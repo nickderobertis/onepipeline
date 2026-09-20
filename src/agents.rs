@@ -113,21 +113,54 @@ impl Scope {
     }
 }
 
-/// The engine's own keys for one dispatch.
+/// The engine's own keys for one dispatch: the run and the project every
+/// launch carries, and what the launch is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stamp<'a> {
     /// [`RUN_ID_LABEL`].
     pub run: &'a str,
     /// [`PROJECT_LABEL`], when the launch record names one.
     pub project: Option<&'a str>,
-    /// [`SCOPE_LABEL`].
-    pub scope: Scope,
-    /// [`NODE_LABEL`], on everything but the observer.
-    pub node: Option<&'a str>,
-    /// [`STEP_LABEL`], on a lifecycle step's dispatch.
-    pub step: Option<&'a str>,
-    /// [`ATTEMPT_LABEL`], on everything but the observer.
-    pub attempt: Option<NonZeroU32>,
+    /// Which launch this is, carrying exactly the keys its scope has.
+    pub launched: Launched<'a>,
+}
+
+/// What a launch is, and the keys that go with it — one shape per scope, so a
+/// stamp cannot name a node on the observer or leave a node's attempt off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Launched<'a> {
+    /// A node-scope dispatch: [`NODE_LABEL`] and [`ATTEMPT_LABEL`] always, and
+    /// [`STEP_LABEL`] on a lifecycle step's dispatch.
+    Node {
+        /// The node.
+        node: &'a str,
+        /// The lifecycle step, on a step's dispatch.
+        step: Option<&'a str>,
+        /// The attempt the dispatch's `node-dispatched` records.
+        attempt: NonZeroU32,
+    },
+    /// The dag-scope observer graph: the run and the project alone.
+    Observer,
+    /// The drafting graph: the node whose change request it drafts, and that
+    /// node's own attempt.
+    PrAuthor {
+        /// The node.
+        node: &'a str,
+        /// The node's attempt, which the drafting is part of.
+        attempt: NonZeroU32,
+    },
+}
+
+impl Launched<'_> {
+    /// The scope word this launch is stamped under.
+    #[must_use]
+    pub const fn scope(self) -> Scope {
+        match self {
+            Launched::Node { .. } => Scope::Node,
+            Launched::Observer => Scope::Observer,
+            Launched::PrAuthor { .. } => Scope::PrAuthor,
+        }
+    }
 }
 
 impl Stamp<'_> {
@@ -135,21 +168,50 @@ impl Stamp<'_> {
     fn pairs(&self) -> Vec<(&'static str, String)> {
         let mut pairs = vec![
             (RUN_ID_LABEL, self.run.to_string()),
-            (SCOPE_LABEL, self.scope.as_str().to_string()),
+            (SCOPE_LABEL, self.launched.scope().as_str().to_string()),
         ];
         if let Some(project) = self.project {
             pairs.push((PROJECT_LABEL, project.to_string()));
         }
-        if let Some(node) = self.node {
-            pairs.push((NODE_LABEL, node.to_string()));
-        }
-        if let Some(step) = self.step {
-            pairs.push((STEP_LABEL, step.to_string()));
-        }
-        if let Some(attempt) = self.attempt {
-            pairs.push((ATTEMPT_LABEL, attempt.to_string()));
+        match self.launched {
+            Launched::Node {
+                node,
+                step,
+                attempt,
+            } => {
+                pairs.push((NODE_LABEL, node.to_string()));
+                if let Some(step) = step {
+                    pairs.push((STEP_LABEL, step.to_string()));
+                }
+                pairs.push((ATTEMPT_LABEL, attempt.to_string()));
+            }
+            Launched::Observer => {}
+            Launched::PrAuthor { node, attempt } => {
+                pairs.push((NODE_LABEL, node.to_string()));
+                pairs.push((ATTEMPT_LABEL, attempt.to_string()));
+            }
         }
         pairs
+    }
+}
+
+/// The [`LABELS_ENV`] value this process's own environment carries, which is
+/// what a launch inherits where no dispatch-env hook set one.
+///
+/// # Errors
+///
+/// [`Error::Refused`] naming the variable where it is set to something that is
+/// not Unicode: a value the merge cannot read is not an absent one, and reading
+/// it as absent would drop every label the repository stamped.
+pub(crate) fn inherited_labels() -> Result<Option<String>> {
+    match std::env::var_os(LABELS_ENV) {
+        None => Ok(None),
+        Some(value) => value.into_string().map(Some).map_err(|value| {
+            Error::Refused(format!(
+                "the launch inherits a {LABELS_ENV} that is not Unicode ({value:?}), which \
+                 oneharness cannot read as a label set"
+            ))
+        }),
     }
 }
 
@@ -336,7 +398,9 @@ impl Agents {
         Ok(agents)
     }
 
-    /// Fold one run's pointer file into this listing.
+    /// Fold one run's pointer file into this listing: the lines `scope` keeps,
+    /// and every line the reader could not read, whatever the scope — a torn
+    /// tail is a fact about the file, not about the node asked for.
     pub(crate) fn absorb(&mut self, pointer_file: &Path, scope: AgentScope<'_>) -> Result<()> {
         let read = read_pointers(pointer_file).map_err(|error| {
             Error::Invalid(format!(
@@ -355,7 +419,6 @@ impl Agents {
         Ok(())
     }
 
-    /// Group one line under its session, keeping the earliest start.
     fn record(&mut self, pointer: &HistoryPointer) {
         let run = AgentRun {
             history_id: pointer.history_id().to_string(),
@@ -389,7 +452,6 @@ impl Agents {
     }
 }
 
-/// Whether a line is one `scope` asks for.
 fn selects(scope: AgentScope<'_>, pointer: &HistoryPointer) -> bool {
     match scope {
         AgentScope::Run => true,
@@ -459,14 +521,15 @@ impl RunPaths {
 mod tests {
     use super::*;
 
-    fn stamp<'a>(node: Option<&'a str>, step: Option<&'a str>) -> Stamp<'a> {
+    fn stamp<'a>(node: &'a str, step: Option<&'a str>) -> Stamp<'a> {
         Stamp {
             run: "demo-1",
             project: Some("plans:demo"),
-            scope: Scope::Node,
-            node,
-            step,
-            attempt: NonZeroU32::new(1),
+            launched: Launched::Node {
+                node,
+                step,
+                attempt: NonZeroU32::MIN,
+            },
         }
     }
 
@@ -476,7 +539,7 @@ mod tests {
     fn inherited_labels_survive_except_under_the_engines_prefix() {
         let composed = compose_labels(
             Some("owner=ci, onepipeline.node=other,onepipeline.scope=observer,team=core"),
-            &stamp(Some("build"), None),
+            &stamp("build", None),
         )
         .expect("a well-formed inherited set composes");
         assert_eq!(
@@ -486,23 +549,20 @@ mod tests {
         );
         // Nothing inherited, and a blank, are the engine's keys alone.
         for inherited in [None, Some(""), Some("   ")] {
-            let composed = compose_labels(inherited, &stamp(None, None)).expect("composes");
+            let composed = compose_labels(inherited, &stamp("build", None)).expect("composes");
             assert_eq!(
                 composed,
-                "onepipeline.attempt=1,onepipeline.project=plans:demo,onepipeline.run_id=demo-1,\
-                 onepipeline.scope=node"
+                "onepipeline.attempt=1,onepipeline.node=build,onepipeline.project=plans:demo,\
+                 onepipeline.run_id=demo-1,onepipeline.scope=node"
             );
         }
-        // The keys are present exactly when the stamp says.
+        // The keys are present exactly when the launch's shape says.
         let observer = compose_labels(
             None,
             &Stamp {
                 run: "demo-1",
                 project: None,
-                scope: Scope::Observer,
-                node: None,
-                step: None,
-                attempt: None,
+                launched: Launched::Observer,
             },
         )
         .expect("composes");
@@ -510,26 +570,43 @@ mod tests {
             observer,
             "onepipeline.run_id=demo-1,onepipeline.scope=observer"
         );
-        let step =
-            compose_labels(None, &stamp(Some("service"), Some("implement"))).expect("composes");
+        let step = compose_labels(None, &stamp("service", Some("implement"))).expect("composes");
         assert!(step.contains("onepipeline.step=implement"), "{step}");
+        let drafting = compose_labels(
+            None,
+            &Stamp {
+                run: "demo-1",
+                project: None,
+                launched: Launched::PrAuthor {
+                    node: "service",
+                    attempt: NonZeroU32::MIN.saturating_add(1),
+                },
+            },
+        )
+        .expect("composes");
+        assert_eq!(
+            drafting,
+            "onepipeline.attempt=2,onepipeline.node=service,onepipeline.run_id=demo-1,\
+             onepipeline.scope=pr-author"
+        );
     }
 
     /// A value the grammar refuses refuses the launch naming the key, and so
     /// does the one thing the wire cannot carry.
     #[test]
     fn a_value_the_grammar_or_the_wire_refuses_refuses_the_launch_naming_the_key() {
-        let comma = compose_labels(None, &stamp(Some("a,b"), None)).expect_err("a comma");
+        let comma = compose_labels(None, &stamp("a,b", None)).expect_err("a comma");
         assert!(
             comma.to_string().contains(NODE_LABEL) && comma.to_string().contains("comma"),
             "{comma}"
         );
-        let control = compose_labels(None, &stamp(Some("a\u{7}b"), None)).expect_err("a control");
+        let control = compose_labels(None, &stamp("a\u{7}b", None)).expect_err("a control");
         assert!(control.to_string().contains(NODE_LABEL), "{control}");
         let long = "x".repeat(257);
-        let too_long = compose_labels(None, &stamp(Some(&long), None)).expect_err("too long");
+        let too_long = compose_labels(None, &stamp(&long, None)).expect_err("too long");
         assert!(too_long.to_string().contains(NODE_LABEL), "{too_long}");
-        let malformed = compose_labels(Some("nokey"), &stamp(None, None)).expect_err("malformed");
+        let malformed =
+            compose_labels(Some("nokey"), &stamp("build", None)).expect_err("malformed");
         assert!(malformed.to_string().contains(LABELS_ENV), "{malformed}");
     }
 

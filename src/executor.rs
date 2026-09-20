@@ -294,28 +294,42 @@ impl Executor for LocalExecutor {
         // and carries none of this.
         if let (Some(record), Some(run)) = (&launched, req.labels.run_id.as_deref()) {
             let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
-            let inherited = env
+            let inherited = match env
                 .iter()
                 .rev()
                 .find(|(key, _)| key == crate::agents::LABELS_ENV)
-                .map(|(_, value)| value.clone())
-                .or_else(|| std::env::var(crate::agents::LABELS_ENV).ok());
+            {
+                Some((_, value)) => Some(value.clone()),
+                None => crate::agents::inherited_labels()?,
+            };
+            // Every dispatch inside a run is a node's: the engine composes the
+            // labels of each, and a request naming a run and no node is one
+            // nothing here built.
+            let node = req.labels.node.as_deref().ok_or_else(|| {
+                Error::Invalid(format!(
+                    "a dispatch inside run '{run}' names no node, so it cannot be stamped"
+                ))
+            })?;
+            let launched =
+                if req.labels.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
+                    crate::agents::Launched::PrAuthor {
+                        node,
+                        attempt: req.attempt,
+                    }
+                } else {
+                    crate::agents::Launched::Node {
+                        node,
+                        step: req.labels.step.as_deref(),
+                        attempt: req.attempt,
+                    }
+                };
             env.extend(crate::agents::overlay(
                 &paths,
                 inherited.as_deref(),
                 &crate::agents::Stamp {
                     run,
                     project: (!record.project.is_empty()).then_some(record.project.as_str()),
-                    scope: if req.labels.persona.as_deref()
-                        == Some(crate::lifecycle::PR_AUTHOR_PERSONA)
-                    {
-                        crate::agents::Scope::PrAuthor
-                    } else {
-                        crate::agents::Scope::Node
-                    },
-                    node: req.labels.node.as_deref(),
-                    step: req.labels.step.as_deref(),
-                    attempt: Some(req.attempt),
+                    launched,
                 },
             )?);
         }
