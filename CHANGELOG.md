@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.0](https://github.com/nickderobertis/onepipeline/compare/v0.39.0...v0.40.0) - 2026-09-20
+
+### Added
+
+- *(driver)* maintain idle pool slots from the idle branch on a persistent every-duration schedule ([#405](https://github.com/nickderobertis/onepipeline/pull/405))
+- *(scheduler)* hold a node for workspace capacity per identity, and requeue on a pool refusal ([#401](https://github.com/nickderobertis/onepipeline/pull/401))
+
 ## [0.39.0](https://github.com/nickderobertis/onepipeline/compare/v0.38.2...v0.39.0) - 2026-09-20
 
 ### Added
