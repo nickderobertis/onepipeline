@@ -100,18 +100,32 @@ fn interpreted_script(world: &World, stem: &str) -> String {
 /// `hold` where a journey names one — under a generous bound. Every other
 /// identity takes the shipped default, which names no maintenance at all.
 fn pooled_with_maintenance(world: &World, hold: Option<&Path>) {
+    pooled_with_maintenance_bounded(world, hold, "120s");
+}
+
+/// The same, under the bound given.
+fn pooled_with_maintenance_bounded(world: &World, hold: Option<&Path>, timeout: &str) {
     let maintain = interpreted_script(world, "maintain");
     let mut command = vec![maintain];
     if let Some(hold) = hold {
         command.push(hold.to_string_lossy().into_owned());
     }
-    let command = serde_json::to_string(&command).expect("an argv serializes");
+    pooled_with_command(
+        world,
+        &serde_json::to_string(&command).expect("an argv serializes"),
+        timeout,
+    );
+}
+
+/// Size the host's pools and name the `service` identity's `maintain` command
+/// verbatim, as the argv's JSON.
+fn pooled_with_command(world: &World, command: &str, timeout: &str) {
     std::fs::write(
         world.onevcs_home().join("workspaces.yml"),
         format!(
             "version: 1\nrules:\n  - match: {{host: github.com, owner: owner, name: service}}\n    \
              pool: 1\n    overflow: 0\n    maintain:\n      command: {command}\n      timeout: \
-             120s\n"
+             {timeout}\n"
         ),
     )
     .expect("the workspaces file is written");
@@ -823,12 +837,149 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
     );
 }
 
-/// Both halves of each script fixture answer the same way: the verbs one
-/// platform runs are the verbs the other runs.
+/// What a sweep records when it could not do its work — each one record, each
+/// named by `results`: a maintain command that failed, one that timed out under
+/// the identity's own bound, an identity the sibling could not maintain, and a
+/// host whose identities could not be enumerated at all.
+#[test]
+fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_host_are_recorded() {
+    let world = pooled_world("maintenance-failures", Some(FAST_PACE))
+        .with_env("ONEPIPELINE_E2E_MAINTAIN_EXIT", "3");
+    let repo = world.repository("local-direct", &[]);
+    pooled_with_maintenance(&world, None);
+    cut_a_slot(&world, &repo.checkout);
+    let second = schedule(&world, "second", "1s", "");
+
+    // A command that failed: recorded as the sibling records it, and — the
+    // attempt being what is stamped — not run again inside `every`.
+    held_run(&world, "failing", 2, &["--maintenance-config", &second]).exited(0);
+    world.until("the record of the failure", |world| {
+        !records(world, "failing").is_empty()
+    });
+    let failed = &records(&world, "failing")[0];
+    assert_eq!(
+        failed["payload"]["identities"][0]["outcome"]["slots"][0]["outcome"]["ran"]["outcome"],
+        json!({"failed": {"exit": 3}}),
+        "{failed}"
+    );
+    assert_eq!(marker_lines(&world), 1);
+    assert_eq!(
+        the_slot(&world)["last_outcome"],
+        json!({"failed": {"exit": 3}})
+    );
+    world
+        .run(&["results", "failing"])
+        .exited(0)
+        .out_has(&format!(
+            "{SERVICE_IDENTITY} (every 1s): slot 1 ran — failed (exit 3) in"
+        ));
+    release(&world, "failing");
+
+    // A command that timed out under the identity's own bound: a hold nothing
+    // releases, bounded at a second.
+    let hold = world.root.join("never.go");
+    pooled_with_maintenance_bounded(&world, Some(&hold), "1s");
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    held_run(&world, "timing", 2, &["--maintenance-config", &second]).exited(0);
+    world.until("the record of the timeout", |world| {
+        !records(world, "timing").is_empty()
+    });
+    let timed = &records(&world, "timing")[0];
+    assert_eq!(
+        timed["payload"]["identities"][0]["outcome"]["slots"][0]["outcome"]["ran"]["outcome"],
+        "timed-out",
+        "{timed}"
+    );
+    assert_eq!(
+        marker_lines(&world),
+        1,
+        "a timed-out command wrote its marker"
+    );
+    world
+        .run(&["results", "timing"])
+        .exited(0)
+        .out_has(&format!(
+            "{SERVICE_IDENTITY} (every 1s): slot 1 ran — timed out in"
+        ));
+    release(&world, "timing");
+
+    // An identity the sibling could not maintain: a workspaces file it refuses
+    // — a maintain command naming no program — is that identity's error, and
+    // the sweep's one record carries it.
+    pooled_with_command(&world, "[]", "120s");
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    held_run(
+        &world,
+        "unmaintainable",
+        2,
+        &["--maintenance-config", &second],
+    )
+    .exited(0);
+    world.until("the record of the refusal", |world| {
+        !records(world, "unmaintainable").is_empty()
+    });
+    let refused = &records(&world, "unmaintainable")[0];
+    let identity = &refused["payload"]["identities"][0];
+    assert_eq!(identity["identity"], SERVICE_IDENTITY, "{refused}");
+    assert!(identity.get("outcome").is_none(), "{refused}");
+    let error = identity["error"].as_str().expect("an error");
+    assert!(error.contains("maintain command"), "{refused}");
+    world
+        .run(&["results", "unmaintainable"])
+        .exited(0)
+        .out_has(&format!("{SERVICE_IDENTITY} (every 1s): failed — "));
+    release(&world, "unmaintainable");
+
+    // A host whose identities could not be enumerated: the executable the engine
+    // asks refuses, and the record says so with no identity at all.
+    let mut unlistable = world.as_session(&world.session);
+    unlistable.environment.retain(|(key, _)| key != CALLS_ENV);
+    held_run(
+        &unlistable,
+        "unlistable",
+        2,
+        &["--maintenance-config", &second],
+    )
+    .exited(0);
+    unlistable.until("the record of the enumeration failure", |world| {
+        !records(world, "unlistable").is_empty()
+    });
+    let unlisted = &records(&unlistable, "unlistable")[0];
+    assert_eq!(unlisted["payload"]["identities"], json!([]), "{unlisted}");
+    let error = unlisted["payload"]["error"].as_str().expect("an error");
+    assert!(
+        error.contains("repos") && error.contains("refused"),
+        "{unlisted}"
+    );
+    unlistable
+        .run(&["results", "unlistable"])
+        .exited(0)
+        .out_has("the host's identities could not be enumerated:");
+    release(&unlistable, "unlistable");
+}
+
+/// Both halves of each script fixture answer the same way: what one platform's
+/// half names, the other's names too.
+///
+/// One contract in two languages, because no platform runs both — so a name
+/// added to one and not the other is a journey that passes here and fails on the
+/// Windows leg, a fortnight later, with nothing pointing at the fixture. Held by
+/// reading the scripts, on `harness::both_hook_scripts_answer_the_same_verbs`'s
+/// grounds: no platform executes both halves, and reading them is the only way
+/// to compare them; each half is driven as a real subprocess by every journey
+/// above.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is the suite's own
+// scaffolding — that its two halves agree — which no platform can execute both sides
+// of; the fixtures themselves are run the way their callers run them, by `onevcs`
+// and by the engine, in every journey of this module.
 #[test]
 fn both_halves_of_each_fixture_take_the_same_arguments() {
     for (sh, bat, marks) in [
-        ("maintain.sh", "maintain.bat", ["maintained.log", "300"]),
+        (
+            "maintain.sh",
+            "maintain.bat",
+            ["maintained.log", "ONEPIPELINE_E2E_MAINTAIN_EXIT"],
+        ),
         (
             "onevcs_recording.sh",
             "onevcs_recording.bat",
@@ -844,4 +995,4 @@ fn both_halves_of_each_fixture_take_the_same_arguments() {
             assert!(batch.contains(mark), "{bat} no longer names {mark}");
         }
     }
-}
+} // llmlint: ignore-end[tests_mirror_real_usage]

@@ -286,18 +286,23 @@ impl Maintained {
         }
     }
 
-    /// The record's entry for this identity.
+    /// The record's entry for this identity: the sibling's outcome as the
+    /// sibling serializes it, or the reason there is none — an outcome the
+    /// sibling's own `Serialize` refused is recorded as that refusal rather than
+    /// dropped or panicked over.
     fn payload(&self) -> Value {
         let mut entry = json!({
             "identity": self.identity,
             "every": self.every.to_string(),
         });
-        match &self.outcome {
-            Ok(outcome) => {
-                entry["outcome"] = serde_json::to_value(outcome)
-                    .expect("the sibling's outcome serializes as the sibling declares it");
-            }
-            Err(why) => entry["error"] = json!(crate::engine::bounded(why)),
+        let answer = match &self.outcome {
+            Ok(outcome) => serde_json::to_value(outcome)
+                .map_err(|why| format!("the sibling's outcome could not be recorded: {why}")),
+            Err(why) => Err(why.clone()),
+        };
+        match answer {
+            Ok(outcome) => entry["outcome"] = outcome,
+            Err(why) => entry["error"] = json!(crate::engine::bounded(&why)),
         }
         entry
     }
@@ -306,7 +311,9 @@ impl Maintained {
 /// What one sweep did: every identity it visited, and how the enumeration went.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Swept {
-    /// When the sweep started, RFC3339.
+    /// When the sweep started, RFC3339, stamped by `sys::now_rfc3339` and carried
+    /// to the record as the record's own document spells it.
+    // llmlint: ignore[invalid_states_unrepresentable] the instant is a `String` on every record this crate writes — `LaunchRecord::started_at`, the envelope's `ts` — and on the sibling's `SlotStatus::last_maintained` beside it; the one writer is `sys::now_rfc3339`, and `payload::PoolMaintenance` declares the same shape.
     pub(crate) started_at: String,
     /// Every identity, in sorted order.
     pub(crate) identities: Vec<Maintained>,
@@ -369,6 +376,12 @@ fn identities() -> std::result::Result<Vec<String>, String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
+    // llmlint: ignore-block[changed_behavior_has_e2e] the two refusals below are of a
+    // listing the *linked* release does not print — one that is not UTF-8, and an
+    // unindented line with no tab in it — so no invocation of this build reaches them,
+    // and a fixture printing one would prove the fixture. Each is the failure the
+    // reachable refusal above is, recorded and rendered the same way, which
+    // `tests/e2e/maintenance.rs` drives through an executable that refuses.
     let listed = String::from_utf8(output.stdout).map_err(|error| {
         format!(
             "`{} repos` answered bytes that are not UTF-8: {error}",
@@ -390,7 +403,7 @@ fn identities() -> std::result::Result<Vec<String>, String> {
             ));
         };
         keys.push(key.to_owned());
-    }
+    } // llmlint: ignore-end[changed_behavior_has_e2e]
     keys.sort_unstable();
     keys.dedup();
     Ok(keys)
@@ -471,10 +484,16 @@ impl Sweep {
         // nothing on disk saying so. A marker that could not be written costs
         // the sweep nothing: `status` then says nothing about it, which is the
         // safe direction.
+        // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
+        // reaches a marker the run root refuses to take: the run's own journal is
+        // written beside it by the same process a moment later, so a root that refuses
+        // this write refuses the sweep's record too and the loop fails on *that*, with
+        // its reason — which `driver.rs`'s unwritable-root journeys drive. What is
+        // decided here is only that the marker is not what stops a sweep.
         let _ = crate::ledger::write_json(
             &paths.maintenance(),
             &json!({"started_at": started_at, "pid": crate::sys::pid()}),
-        );
+        ); // llmlint: ignore-end[changed_behavior_has_e2e]
         let handle = std::thread::Builder::new()
             .name("pool-maintenance".to_owned())
             .spawn(move || {
@@ -617,6 +636,16 @@ fn identity_phrase(outcome: &IdentityOutcome) -> String {
 }
 
 /// One slot's outcome, in the sibling's own words.
+///
+/// Every arm is one the sibling can answer, and `tests::every_slot_outcome_has_a_phrase`
+/// holds each spelling; `tests/e2e/maintenance.rs` drives the ones a journey can
+/// produce — a command that succeeded, failed, and timed out — through `results`.
+// llmlint: ignore-block[changed_behavior_has_e2e] `in-use`, `broken` and a command ended by a
+// signal are answered by the sibling under conditions a journey cannot schedule from
+// this crate's interface — a session opened into the slot between the survey and the
+// claim, a slot whose record the sibling cannot read, a process the host killed —
+// and a fixture that forged the record would prove the fixture; each phrase is held
+// by the unit test the doc names, over the sibling's own type.
 fn slot_phrase(outcome: &SlotOutcome) -> String {
     match outcome {
         SlotOutcome::NotDue { last_maintained } => {
@@ -654,7 +683,7 @@ fn slot_phrase(outcome: &SlotOutcome) -> String {
             format!("ran — {ended} in {duration_ms} ms{log}")
         }
     }
-}
+} // llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// The schedule as one driver runs it: when it last started a sweep, and the
 /// sweep it is running now.
@@ -761,11 +790,10 @@ impl Maintenance {
     /// it did.
     ///
     /// The thread hands its report over the loop's channel, which the loop has
-    /// stopped reading; so it is joined here and its report taken off the
-    /// channel by hand. Nothing else can be queued there by then — the loop
-    /// closes out with nothing in flight — and a message that is not the
-    /// sweep's is left where it was, for the same reason the loop's own last
-    /// pass leaves what arrives after it.
+    /// stopped reading; so it is joined here and the channel drained for its
+    /// report. Nothing else can be queued there by then — the loop closes out
+    /// with nothing in flight, and every dispatch thread has settled — so the
+    /// drain takes the sweep's report and nothing of consequence with it.
     ///
     /// # Errors
     ///
@@ -1031,6 +1059,92 @@ mod tests {
         let payload = Value::Object(failed.payload());
         assert_eq!(payload["error"], "`onevcs repos` could not be run");
         assert_eq!(payload["identities"], json!([]));
+    }
+
+    /// Every outcome the sibling can answer for a slot or an identity has a
+    /// phrase of its own in the sibling's own words, and none is left as the
+    /// unreadable case.
+    #[test]
+    fn every_slot_outcome_has_a_phrase() {
+        let phrases = [
+            (
+                SlotOutcome::NotDue {
+                    last_maintained: "2026-09-19T00:00:00.000Z".into(),
+                },
+                "not due, last maintained 2026-09-19T00:00:00.000Z",
+            ),
+            (
+                SlotOutcome::InUse {
+                    session: onevcs::SessionToken("s-abc".into()),
+                },
+                "kept: session s-abc is working in it",
+            ),
+            (
+                SlotOutcome::Broken {
+                    reason: "its record could not be read".into(),
+                },
+                "kept: its record could not be read",
+            ),
+            (
+                SlotOutcome::Ran {
+                    outcome: MaintenanceOutcome::Succeeded,
+                    duration_ms: 12,
+                    log: Some(onevcs::ArtifactId("a-1".into())),
+                },
+                "ran — succeeded in 12 ms, log a-1",
+            ),
+            (
+                SlotOutcome::Ran {
+                    outcome: MaintenanceOutcome::Failed { exit: Some(3) },
+                    duration_ms: 12,
+                    log: None,
+                },
+                "ran — failed (exit 3) in 12 ms",
+            ),
+            (
+                SlotOutcome::Ran {
+                    outcome: MaintenanceOutcome::Failed { exit: None },
+                    duration_ms: 12,
+                    log: None,
+                },
+                "ran — failed (ended by a signal, or never started) in 12 ms",
+            ),
+            (
+                SlotOutcome::Ran {
+                    outcome: MaintenanceOutcome::TimedOut,
+                    duration_ms: 1_000,
+                    log: None,
+                },
+                "ran — timed out in 1000 ms",
+            ),
+        ];
+        for (outcome, phrase) in phrases {
+            assert_eq!(slot_phrase(&outcome), phrase);
+        }
+        assert_eq!(
+            identity_phrase(&IdentityOutcome::Claimed { by_pid: 7 }),
+            "claimed — another pool maintain (pid 7) was maintaining it"
+        );
+        assert_eq!(
+            identity_phrase(&IdentityOutcome::NoMaintainCommand),
+            "no maintain command"
+        );
+        assert_eq!(identity_phrase(&IdentityOutcome::NoSlots), "no slots");
+        assert_eq!(
+            identity_phrase(&IdentityOutcome::Slots(vec![
+                SlotMaintenance {
+                    number: 1,
+                    outcome: SlotOutcome::NotDue {
+                        last_maintained: "t".into()
+                    },
+                },
+                SlotMaintenance {
+                    number: 2,
+                    outcome: SlotOutcome::Broken { reason: "r".into() },
+                },
+            ])),
+            "slot 1 not due, last maintained t; slot 2 kept: r"
+        );
     }
 
     /// A driver with no schedule starts nothing and waits on nothing; one with a

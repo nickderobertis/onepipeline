@@ -15,7 +15,7 @@ if not "%~1"=="" (
   :waitloop
   if exist "%~1" goto write
   if !left! LEQ 0 (
-    echo maintain: nothing wrote %~1 within 300 seconds 1>&2
+    echo maintain: nothing wrote %~1 within 300 seconds; the journey holding this sweep releases it by writing that path, so a hold this long is a journey that ended without releasing it — let the sibling record the failure and read the journey's own panic 1>&2
     exit /b 1
   )
   set /a "left=left-1"
@@ -29,8 +29,9 @@ if not "%~1"=="" (
 :write
 echo maintained in %CD%>>maintained.log
 if errorlevel 1 (
-  echo maintain: cannot write maintained.log in %CD% 1>&2
+  echo maintain: cannot write maintained.log in %CD%; this runs in the slot's worktree, which onevcs cut under ONEVCS_HOME, so check that state root is on a writable mount and that nothing holds the worktree read-only 1>&2
   exit /b 1
 )
 echo maintain: wrote maintained.log in %CD%
+if defined ONEPIPELINE_E2E_MAINTAIN_EXIT exit /b %ONEPIPELINE_E2E_MAINTAIN_EXIT%
 exit /b 0

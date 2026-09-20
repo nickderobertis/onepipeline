@@ -8,7 +8,7 @@ if not defined ONEPIPELINE_E2E_ONEVCS_CALLS goto unset
 if not defined ONEPIPELINE_E2E_ONEVCS_REAL goto unset
 echo %*>>"%ONEPIPELINE_E2E_ONEVCS_CALLS%"
 if errorlevel 1 (
-  echo onevcs_recording: cannot record the call in %ONEPIPELINE_E2E_ONEVCS_CALLS% 1>&2
+  echo onevcs_recording: cannot append to %ONEPIPELINE_E2E_ONEVCS_CALLS%; point ONEPIPELINE_E2E_ONEVCS_CALLS at a file under the world's own scratch root, the way maintenance.rs does, and check that root is on a writable mount 1>&2
   exit /b 1
 )
 "%ONEPIPELINE_E2E_ONEVCS_REAL%" %*

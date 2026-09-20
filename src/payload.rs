@@ -819,7 +819,10 @@ pub(crate) struct RunHookWithheld {
 /// `pool-maintenance`: one sweep of the schedule that did something.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct PoolMaintenance {
-    /// When the sweep started, RFC3339.
+    /// When the sweep started, RFC3339 — spelled as every other instant a record
+    /// of this crate carries is, and as the sibling spells `last_maintained`
+    /// beside it: the document names a string, and the writer is `sys::now_rfc3339`.
+    // llmlint: ignore[invalid_states_unrepresentable] the instant is a `String` on every record this crate and its sibling write — `LaunchRecord::started_at`, the envelope's own `ts`, `onevcs`'s `SlotStatus::last_maintained` — and this document names the same shape; the one writer stamps it through `sys::now_rfc3339`, and a reader treats an unparseable one as an unrecorded time rather than an instant.
     pub(crate) started_at: String,
     /// Every identity the sweep records: one whose slot ran, one another run had
     /// claimed, or one that failed.
@@ -836,15 +839,29 @@ pub(crate) struct MaintainedIdentity {
     pub(crate) identity: String,
     /// The cadence it was maintained on, as the schedule spells a span.
     pub(crate) every: String,
-    /// The sibling's own `IdentityOutcome`, as `onevcs` serializes it: `{"claimed":
-    /// {"by_pid": N}}`, or `{"slots": [{"number": N, "outcome": ...}, ...]}` with
-    /// each slot's outcome spelled by that library. Absent where `error` stands
-    /// in for it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) outcome: Option<Value>,
-    /// Why the identity could not be maintained, where it could not.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) error: Option<String>,
+    /// What became of it: the sibling's outcome, or the reason there is none.
+    #[serde(flatten)]
+    pub(crate) answer: MaintainedAnswer,
+}
+
+/// What one identity of a `pool-maintenance` record answered: exactly one of the
+/// sibling's outcome and an error, never both and never neither.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub(crate) enum MaintainedAnswer {
+    /// The sibling's own `IdentityOutcome`, as `onevcs` serializes it:
+    /// `{"claimed": {"by_pid": N}}`, or `{"slots": [{"number": N, "outcome": ...},
+    /// ...]}` with each slot's outcome spelled by that library.
+    // llmlint: ignore[invalid_states_unrepresentable] `onevcs::IdentityOutcome` is the type, and it is what the writer serializes and what `results` reads back; it derives no `JsonSchema`, so this *document* — a generated schema — carries it as the JSON the sibling declares rather than as a shape restated here, which would be a second copy of that library's vocabulary to drift.
+    Outcome {
+        /// The sibling's outcome.
+        outcome: Value,
+    },
+    /// Why the identity could not be maintained.
+    Error {
+        /// The reason, bounded as every payload text is.
+        error: String,
+    },
 }
 // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
