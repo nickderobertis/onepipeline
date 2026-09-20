@@ -244,7 +244,15 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
 
     match side {
         Side::Agent => match cwd {
-            Some(cwd) => agent_turn(&prompt, &cwd, dir, &selection, history.as_ref(), mode),
+            Some(cwd) => agent_turn(
+                &prompt,
+                &cwd,
+                dir,
+                &selection,
+                &config,
+                history.as_ref(),
+                mode,
+            ),
             None => fake::refuse("oneharness run requires --cwd for the side that does the work"),
         },
         Side::Judge => judge_turn(
@@ -416,15 +424,20 @@ fn prompt(args: &[String]) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one turn's whole context, handed on to `work` as it arrived"
+)]
 fn agent_turn(
     prompt: &str,
     cwd: &str,
     dir: &std::path::Path,
     selection: &Selection,
+    config: &str,
     history: Option<&History>,
     mode: PermissionMode,
 ) -> ExitCode {
-    match work(prompt, cwd, dir, selection, history, mode) {
+    match work(prompt, cwd, dir, selection, config, history, mode) {
         Ok(outcome) => outcome.exit_code(),
         Err(refusal) => fake::refuse(&refusal),
     }
@@ -434,11 +447,16 @@ fn agent_turn(
 /// process having refused, and is why the two are separate results: a turn that
 /// did the work and did not get there still streamed and still reported, and a
 /// refusal never started.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one turn's whole context — see `agent_turn`"
+)]
 fn work(
     prompt: &str,
     cwd: &str,
     dir: &std::path::Path,
     selection: &Selection,
+    config: &str,
     history: Option<&History>,
     mode: PermissionMode,
 ) -> Result<Outcome, String> {
@@ -459,6 +477,38 @@ fn work(
             // publication that turns out to have had nothing to publish is
             // asked, first, whether the turn before it wrote anything.
             fake::record(dir, "oneharness-work", &[path.display().to_string()]);
+        }
+        // A worker that runs a **nested tool which is itself an `oneharness
+        // run`** — what a repository's own agent structure may do under a
+        // dispatch, and what the engine can see only through the environment
+        // this process inherited and hands on. Each line of `harness.nested` is
+        // the extra arguments of one such run, and each is run through this
+        // very executable — the oneharness a nested tool under this dispatch
+        // resolves — as a judge-side evaluator turn over the outer turn's own
+        // config, inheriting this process's environment untouched, and recorded
+        // with its exit. Judge-side on purpose: an agent-side nested turn would
+        // read this script again and nest without end.
+        if let Some(script) = fake::node_script(dir, "harness", "nested") {
+            let this = std::env::current_exe()
+                .map_err(|error| format!("cannot name this executable: {error}"))?;
+            for extra in script.lines().filter(|line| !line.trim().is_empty()) {
+                let status = std::process::Command::new(&this)
+                    .args(["run", "--format", "json", "--compact", "--config", config])
+                    .args(extra.split_whitespace())
+                    .args(["--prompt", EVALUATOR_OPENING])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .status()
+                    .map_err(|error| format!("cannot run the nested oneharness: {error}"))?;
+                fake::record(
+                    dir,
+                    "oneharness-nested",
+                    &[
+                        extra.trim().to_string(),
+                        status.code().unwrap_or(-1).to_string(),
+                    ],
+                );
+            }
         }
     }
 

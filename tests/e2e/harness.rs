@@ -705,6 +705,15 @@ impl World {
             // that is the operator's own store unless this points it here. See
             // [`history_store`](World::history_store).
             .env("XDG_STATE_HOME", self.state_home())
+            // And nothing of the operator's own oneharness history settings: a
+            // journey inherits only what it sets, so an `ONEHARNESS_HISTORY_DIR`
+            // in the shell that ran the suite cannot land a launch's sessions in
+            // the operator's store, and a label set there cannot ride into what a
+            // journey asserts a launch composed.
+            .env_remove(onepipeline::agents::HISTORY_ENV)
+            .env_remove(onepipeline::agents::HISTORY_DIR_ENV)
+            .env_remove(onepipeline::agents::POINTER_FILE_ENV)
+            .env_remove(onepipeline::agents::LABELS_ENV)
             .env("ONETASKGRAPH_DEFAULT_SOURCES", STORE_SOURCE)
             .env(
                 format!(
