@@ -35,7 +35,8 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
-use oneharness_core::domain::history::{parse_labels, HistoryLabels, HistoryPointer};
+use oneharness_core::domain::history::{parse_labels, HistoryId, HistoryLabels, HistoryPointer};
+use oneharness_core::domain::usage::UtcInstant;
 use oneharness_core::io::history::read_pointers;
 use serde::Serialize;
 
@@ -358,10 +359,11 @@ pub struct AgentSession {
     pub project: String,
     /// When the session's first harness run began: the earliest `started`
     /// among its lines, RFC 3339 UTC.
-    pub started: String,
+    pub started: UtcInstant,
     /// The session's labels: the engine's keys, and whatever the repository
-    /// stamped beside them.
-    pub labels: BTreeMap<String, String>,
+    /// stamped beside them — oneharness's own validated set, as the line
+    /// carries it.
+    pub labels: HistoryLabels,
     /// The harness runs the session recorded, in file order.
     pub runs: Vec<AgentRun>,
 }
@@ -371,16 +373,20 @@ pub struct AgentSession {
 pub struct AgentRun {
     /// The history id the run's record closes with — what
     /// `oneharness history show <id>` resolves.
-    pub history_id: String,
+    pub history_id: HistoryId,
     /// The harness id's base, e.g. `claude-code`.
     pub harness: String,
     /// The variant, when the identity names one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
     /// The whole configured id, e.g. `claude-code:primary`.
+    ///
+    /// Text, as `HistoryPointer::harness_id` hands it out: re-parsing it into
+    /// that library's identity type would ask this host's harness registry to
+    /// vouch for a harness that ran on the host the line was written on.
     pub harness_id: String,
     /// When the run began, RFC 3339 UTC.
-    pub started: String,
+    pub started: UtcInstant,
 }
 
 impl Agents {
@@ -421,11 +427,11 @@ impl Agents {
 
     fn record(&mut self, pointer: &HistoryPointer) {
         let run = AgentRun {
-            history_id: pointer.history_id().to_string(),
+            history_id: pointer.history_id(),
             harness: pointer.harness().to_string(),
             variant: pointer.variant().map(str::to_string),
             harness_id: pointer.harness_id().to_string(),
-            started: pointer.started().as_str().to_string(),
+            started: pointer.started().clone(),
         };
         if let Some(session) = self
             .sessions
@@ -446,7 +452,7 @@ impl Agents {
             history_file: pointer.history_file().to_string(),
             project: pointer.project().to_string(),
             started: run.started.clone(),
-            labels: pointer.labels().as_map().clone(),
+            labels: pointer.labels().clone(),
             runs: vec![run],
         });
     }
@@ -486,7 +492,10 @@ pub fn render(agents: &Agents) -> String {
         out.push_str(&format!("  file {}\n", session.history_file));
         out.push_str(&format!("  cwd {}\n", session.project));
         if !session.labels.is_empty() {
-            out.push_str(&format!("  labels {}\n", render_labels(&session.labels)));
+            out.push_str(&format!(
+                "  labels {}\n",
+                render_labels(session.labels.as_map())
+            ));
         }
         for run in &session.runs {
             out.push_str(&format!(
@@ -685,11 +694,11 @@ mod tests {
         assert_eq!(one.history_session, "s-one");
         assert_eq!(one.history_dir, store);
         assert_eq!(one.history_project, "proj");
-        assert_eq!(one.labels["owner"], "ci");
+        assert_eq!(one.labels.as_map()["owner"], "ci");
         assert_eq!(
             one.runs
                 .iter()
-                .map(|run| run.history_id.as_str())
+                .map(|run| run.history_id.to_string())
                 .collect::<Vec<_>>(),
             vec![
                 "00000000-0000-4000-8000-000000000001",
@@ -697,7 +706,7 @@ mod tests {
             ]
         );
         // The earliest start among the session's lines, not the first line's.
-        assert_eq!(one.started, UtcInstant::from_epoch(100).as_str());
+        assert_eq!(one.started, UtcInstant::from_epoch(100));
         assert_eq!(one.runs[0].harness_id, "claude-code");
 
         let build = Agents::of_run(&paths, AgentScope::Node("build")).expect("reads");

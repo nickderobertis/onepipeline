@@ -72,12 +72,13 @@ enum Occurs {
     Repeatedly,
 }
 
-// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] this is a copy of the
-// **CLI**'s grammar, which no crate in this dependency graph declares as data:
-// onejudge renders it in a private function and oneharness parses it in a binary this
-// build does not link. The reconciling gate is `tests/e2e/turns.rs`, which drives the
-// real onejudge against this process — so a flag it starts sending that is not below is
-// a refusal there rather than a double that quietly waves it through.
+// A copy of the **CLI**'s grammar, reconciled two ways. Its spellings and
+// arities are held to the linked core's own declaration of the `run` verb —
+// `oneharness_core::domain::capability::CAPABILITIES`, the table that library's
+// SDKs render their argv from — by `tests::every_flag_is_one_the_linked_run_verb_binds`
+// below. Which of them onejudge *sends* is what `tests/e2e/turns.rs` proves, by
+// driving the real onejudge against this process: a flag it starts sending that is
+// not here is a refusal there rather than a double that quietly waves it through.
 const FLAGS: [(&str, Takes, Occurs); 16] = [
     // onejudge 0.13.2 and oneagentgraph 0.4.5 ask for the machine report by name,
     // since oneharness 0.14.0 moves `run`'s default to a human-readable view; the
@@ -759,6 +760,12 @@ impl History {
             .unwrap_or_default();
         // CLI over environment over the built-in default, as the real CLI ranks
         // them: `--no-history` beats a launch's `ONEHARNESS_HISTORY=1`.
+        // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the ranking
+        // is the core's own, in `io::run`'s private history opener, and the core does
+        // not publish it as data — `RunRequest::no_history` states it in prose only
+        // — so a double that must answer "history on or off" restates it; what holds
+        // the restatement is `tests/e2e/agents.rs`, whose `--no-history` turn leaves
+        // no pointer line while the launch's environment says history is on.
         let enabled = if args.iter().any(|arg| arg == "--no-history") {
             false
         } else if args.iter().any(|arg| arg == "--history") {
@@ -766,6 +773,7 @@ impl History {
         } else {
             env.history.unwrap_or(false)
         };
+        // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
         if !enabled {
             return Ok(None);
         }
@@ -1300,5 +1308,50 @@ fn report(
             stderr: String::new(),
             error: outcome.error(),
         }],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Occurs, Takes, FLAGS};
+    use oneharness_core::domain::capability::{FlagKind, CAPABILITIES};
+
+    /// The table above is a copy of the real CLI's grammar, and this is the gate
+    /// that holds it to the linked core's own declaration of the `run` verb:
+    /// every flag this double takes is one that verb binds or always emits, at
+    /// an arity the binding admits. A flag the core renamed or dropped fails
+    /// here rather than in a journey that only sees the double refuse it.
+    #[test]
+    fn every_flag_is_one_the_linked_run_verb_binds() {
+        let run = CAPABILITIES
+            .iter()
+            .find(|capability| capability.method == "run")
+            .expect("the linked core declares `run`");
+        for (flag, takes, occurs) in FLAGS {
+            let binding = run.bindings.iter().find(|binding| binding.flag() == flag);
+            let Some(binding) = binding else {
+                // `--compact` and `--format` are what the SDK always emits for
+                // this verb rather than options it binds; `--stream` is the
+                // streaming method's, listed against `run` with the reason.
+                let always = run.always.contains(&flag)
+                    || run.uncovered.iter().any(|uncovered| uncovered.flag == flag);
+                assert!(always, "`{flag}` is not a flag the linked `run` verb takes");
+                continue;
+            };
+            let expected = match binding.kind {
+                FlagKind::Switch(_) => Takes::Nothing,
+                FlagKind::Value(_) | FlagKind::Repeated(_) | FlagKind::KeyValue(_) => Takes::AValue,
+                FlagKind::Positional | FlagKind::Trailing => {
+                    unreachable!("a binding with a flag renders it")
+                }
+            };
+            assert_eq!(takes, expected, "`{flag}` takes what the linked core says");
+            if occurs == Occurs::Repeatedly {
+                assert!(
+                    matches!(binding.kind, FlagKind::Repeated(_) | FlagKind::KeyValue(_)),
+                    "`{flag}` repeats here but the linked core binds it once"
+                );
+            }
+        }
     }
 }
