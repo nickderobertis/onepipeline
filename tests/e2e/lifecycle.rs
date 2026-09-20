@@ -1896,6 +1896,104 @@ fn a_push_the_merge_path_refuses_is_redispatched_carrying_what_the_remote_wrote(
     );
 }
 
+/// A publishing push the merge path refuses because **the host** is missing a
+/// tool a hook needs is not the tree being rejected, and is not re-dispatched.
+///
+/// The hook is the repository's own `pre-push`, refusing the way the real one
+/// did — a onetaskgraph publication turned down for a release-plz the host had
+/// never installed — on the one line `onevcs` reads as the host's refusal rather
+/// than the work's. Before this routing existed that refusal was `push-rejected`,
+/// and three workers in turn were sent back to a branch none of them could fix.
+/// Now it settles once, under the word the dispatch layer already uses for a host
+/// that could not launch, carrying what a person needs to fix the host and
+/// `retry`: the branch, the commit it stands at, and the hook's own remediation.
+///
+/// The publication budget is left at its default rather than set to one, because
+/// what this proves is that the budget is **not** spent: a re-dispatch would be
+/// the defect.
+#[test]
+fn a_push_the_merge_path_refuses_for_a_missing_host_prerequisite_settles_once_naming_the_fix() {
+    let world = World::new("lifecycle-hostprereq");
+    let hook = merge_path(&world, &ReturningHookVerb::MissingPrerequisite);
+    let repo = world.repository(
+        "local-direct",
+        &hook.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    // Something new on every dispatch, as the re-dispatch journeys arrange it —
+    // so that a second dispatch, were one made, would not be settled as a
+    // republication of the same commit and read here as "not re-dispatched".
+    world.script("service.work-anew", "the worker wrote this\n");
+
+    let run = settle(&world, "hostprereq", vec![lifecycle("service", &[])]);
+    let result = world.run_json(&run, "result.json");
+    let node = result["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{result}\n{}", why(&world, &run));
+    // The existing word for a host standing in the way, and not `push-rejected`:
+    // a reader of `push-rejected` sends a worker back to the tree.
+    assert_eq!(
+        node["outcome"],
+        "infrastructure-failure",
+        "{result}\n{}",
+        why(&world, &run)
+    );
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("infrastructure-failure");
+    // Nothing landed, so nothing to point anybody at.
+    assert_eq!(node["landing"], json!(null), "{result}");
+    assert!(node["change_url"].is_null(), "{result}");
+
+    // Dispatched exactly once: a worker cannot install anything on the host, so
+    // there is nothing a second attempt on the same branch could answer.
+    let dispatched = dispatches_of(&world, &run, "service");
+    assert_eq!(
+        dispatched.len(),
+        1,
+        "a refusal no edit can clear was answered by dispatching the agent again\n{}",
+        why(&world, &run)
+    );
+
+    // What a person acts on rides the settlement: the hook's own remediation,
+    // word for word, in the detail — and not the marker, which is `onevcs`'s
+    // wire and not a sentence for anybody.
+    let settled = world.events_of(&run, "node-settled");
+    let detail = settled[0]["payload"]["detail"]
+        .as_str()
+        .expect("the settlement says why");
+    assert!(
+        detail.contains(crate::harness::MISSING_PREREQUISITE_REMEDIATION),
+        "the settlement does not carry the hook's remediation:\n{detail}"
+    );
+    assert!(
+        detail.contains("missing a prerequisite"),
+        "the settlement does not say the host is what refused:\n{detail}"
+    );
+
+    // And the work survived: the branch is in the checkout, and the settlement
+    // names both it and the commit it stands at, so a `retry` after the install
+    // has somewhere to continue from.
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    assert!(
+        repo.has_branch(&world, branch),
+        "the branch a refused push left behind was not handed back"
+    );
+    let head = node["head"]
+        .as_str()
+        .expect("the node names the commit its branch stands at");
+    assert_eq!(
+        head,
+        git(&world, &repo.checkout, &["rev-parse", branch]).trim(),
+        "the commit the settlement names is not the branch's tip"
+    );
+    // The base did not move: the refusal happened at the push.
+    assert_eq!(
+        git(&world, &repo.origin, &["rev-list", "--count", "main"]).trim(),
+        "1",
+        "a refused push reached the base"
+    );
+}
+
 /// A publishing push that reached the origin behind a host that cannot then be
 /// read is answered by **reading the host again**, not by dispatching the agent.
 ///
