@@ -433,9 +433,16 @@ fn a_re_asked_dispatchs_lines_carry_the_attempt_the_record_names() {
             .any(|event| event["payload"]["conclusion"] == "failure")
     });
     // CI ran again and nothing blocks the merge, so the host lands what the
-    // next attempt pushes.
+    // next attempt pushes. And the next attempt *changes* the branch it was
+    // handed, as its task tells it to — "republishing it unaltered meets the
+    // same refusal" — which is also what keeps this journey about the attempt
+    // number: a retry that rewrote the very bytes the first attempt committed
+    // leaves a tree `git status` reads as touched on Windows, where a rewrite
+    // refreshes the stat data, and `git commit` reads as clean, and `onevcs`'s
+    // preserve refuses on the gap between the two.
     std::fs::remove_file(world.fakes.join("gh.checks")).expect("the red check is cleared");
     world.script("gh.merged", "");
+    world.script("harness.work", "the worker fixed what the check named\n");
     world.until("the run to settle", |world| {
         world.run_file(run, "result.json").is_file()
     });
@@ -453,6 +460,15 @@ fn a_re_asked_dispatchs_lines_carry_the_attempt_the_record_names() {
         .collect();
     assert!(dispatched.len() >= 2, "{dispatched:?}\n{}", world.dump());
     assert_eq!(dispatched[1]["payload"]["attempt"], 2, "{}", dispatched[1]);
+    // Each attempt left a commit of its own on the branch: the second changed
+    // what it was handed rather than rewriting it.
+    let preserved = world.events_of(run, "commit-preserved").len();
+    assert_eq!(
+        preserved,
+        dispatched.len(),
+        "an attempt preserved no commit of its own\n{}",
+        world.dump()
+    );
 
     let lines = pointers(&world, run);
     every_line_names(&world, run, &lines);

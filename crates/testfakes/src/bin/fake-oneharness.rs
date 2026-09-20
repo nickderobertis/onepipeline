@@ -770,9 +770,10 @@ fn refused(identity: &Identity, requested: &Model, served: &Model) -> RunResult 
 /// double that ignored it would prove nothing about what a repository's
 /// oneharness meets. The store is where the environment resolves it —
 /// `ONEHARNESS_HISTORY_DIR`, else the platform state directory — and never a
-/// directory of this double's own choosing: a journey redirects
-/// `XDG_STATE_HOME` so that resolution lands inside its world, exactly as an
-/// operator's process resolves it into theirs.
+/// directory of this double's own choosing: a journey redirects the platform
+/// state directory (`XDG_STATE_HOME`; `%LOCALAPPDATA%` on Windows) so that
+/// resolution lands inside its world, exactly as an operator's process
+/// resolves it into theirs.
 #[derive(Debug)]
 struct History {
     store: std::path::PathBuf,
@@ -814,7 +815,7 @@ impl History {
         let store = oneharness_core::io::history::resolve_dir(env.history_dir.as_deref())
             .ok_or_else(|| {
                 "history is on and no store could be resolved: set ONEHARNESS_HISTORY_DIR or \
-                 XDG_STATE_HOME"
+                 the platform state directory (XDG_STATE_HOME; LOCALAPPDATA on Windows)"
                     .to_string()
             })?;
         Ok(Some(History {

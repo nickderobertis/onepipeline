@@ -581,6 +581,21 @@ fn plain(path: &Path) -> PathBuf {
     }
 }
 
+/// The environment variable the linked `oneharness-core` reads its per-user
+/// state directory from, by platform: `%LOCALAPPDATA%` on Windows and
+/// `$XDG_STATE_HOME` everywhere else — the library's own
+/// `io::history::resolve_dir` reads exactly one of the two and never the other.
+/// A world redirects the one its platform reads, so a oneharness that resolves
+/// its default store lands it in the world; pointing `XDG_STATE_HOME` at the
+/// world on Windows left every session in the operator's `%LOCALAPPDATA%`,
+/// which is where the `cross (windows-latest)` leg found nothing under
+/// [`World::history_store`].
+pub const STATE_HOME_ENV: &str = if cfg!(windows) {
+    "LOCALAPPDATA"
+} else {
+    "XDG_STATE_HOME"
+};
+
 /// One test's world: a scratch root with everything the binary reads.
 pub struct World {
     /// The scratch root, removed when the test finishes.
@@ -701,10 +716,10 @@ impl World {
             // every dispatch the engine starts runs with oneharness history on,
             // and where the store lives is the *repository's* say, never the
             // engine's — so with nothing else configured oneharness resolves
-            // its platform default, `$XDG_STATE_HOME/oneharness/history`, and
+            // its platform default, `<state dir>/oneharness/history`, and
             // that is the operator's own store unless this points it here. See
-            // [`history_store`](World::history_store).
-            .env("XDG_STATE_HOME", self.state_home())
+            // [`history_store`](World::history_store) and [`STATE_HOME_ENV`].
+            .env(STATE_HOME_ENV, self.state_home())
             // And nothing of the operator's own oneharness history settings: a
             // journey inherits only what it sets, so an `ONEHARNESS_HISTORY_DIR`
             // in the shell that ran the suite cannot land a launch's sessions in
@@ -1100,8 +1115,9 @@ impl World {
     }
 
     /// The platform state directory every command in this world resolves —
-    /// `XDG_STATE_HOME`, per world — so a process that resolves a default under
-    /// it writes here and never under the operator's `~/.local/state`.
+    /// [`STATE_HOME_ENV`], per world — so a process that resolves a default
+    /// under it writes here and never under the operator's `~/.local/state` or
+    /// `%LOCALAPPDATA%`.
     pub fn state_home(&self) -> PathBuf {
         self.root.join("xdg-state")
     }
