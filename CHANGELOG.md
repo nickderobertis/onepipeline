@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.0](https://github.com/nickderobertis/onepipeline/compare/v0.40.0...v0.41.0) - 2026-09-20
+
+### Added
+
+- *(dispatch)* stamp every dispatch with history labels and a per-run pointer file, and read the agents it launched ([#414](https://github.com/nickderobertis/onepipeline/pull/414))
+
 ## [0.40.0](https://github.com/nickderobertis/onepipeline/compare/v0.39.0...v0.40.0) - 2026-09-20
 
 ### Added
