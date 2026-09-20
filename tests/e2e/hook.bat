@@ -9,6 +9,7 @@ setlocal enabledelayedexpansion
 if "%~1"=="wait-for" goto waitfor
 if "%~1"=="break-streams" goto breakstreams
 if "%~1"=="append-future-event" goto appendfuture
+if "%~1"=="missing-prerequisite" goto missingprerequisite
 call :fail "unknown command '%~1'"
 exit /b 64
 
@@ -81,6 +82,16 @@ if errorlevel 1 (
   exit /b 1
 )
 exit /b 0
+
+rem The one line a hook says to make a refusal the host's rather than the work's;
+rem `hook.sh` says what it is for and where its spelling is held.
+:missingprerequisite
+if not "%~2"=="" (
+  call :fail "missing-prerequisite takes no arguments"
+  exit /b 64
+)
+echo onevcs: host-prerequisite: release-plz is not on PATH; install it with cargo install release-plz and retry the node 1>&2
+exit /b 1
 
 rem How long `wait-for` waits for its rendezvous before it refuses the push, and
 rem the environment variable that carries it — both in `hook.sh`, with why the
@@ -169,7 +180,7 @@ exit /b 1
 
 :fail
 echo pre-push: %~1 1>&2
-echo pre-push: the verbs are: wait-for PATH ^| break-streams ^| append-future-event 1>&2
+echo pre-push: the verbs are: wait-for PATH ^| break-streams ^| append-future-event ^| missing-prerequisite 1>&2
 goto :eof
 
 rem A verb that could not do what it names — the host's fault rather than the
