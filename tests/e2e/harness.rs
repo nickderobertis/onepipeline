@@ -584,12 +584,20 @@ fn plain(path: &Path) -> PathBuf {
 /// The environment variable the linked `oneharness-core` reads its per-user
 /// state directory from, by platform: `%LOCALAPPDATA%` on Windows and
 /// `$XDG_STATE_HOME` everywhere else — the library's own
-/// `io::history::resolve_dir` reads exactly one of the two and never the other.
-/// A world redirects the one its platform reads, so a oneharness that resolves
-/// its default store lands it in the world; pointing `XDG_STATE_HOME` at the
-/// world on Windows left every session in the operator's `%LOCALAPPDATA%`,
-/// which is where the `cross (windows-latest)` leg found nothing under
-/// [`World::history_store`].
+/// `io::history::resolve_dir` reads exactly one of the two and never the other,
+/// and does not publish which. A world redirects the one its platform reads,
+/// so a oneharness that resolves its default store lands it in the world;
+/// pointing `XDG_STATE_HOME` at the world on Windows left every session in
+/// the operator's `%LOCALAPPDATA%`, which is where the `cross (windows-latest)`
+/// leg found nothing under [`World::history_store`].
+///
+/// What holds this restatement to the library is
+/// `agents::every_dispatch_of_a_run_is_visible_through_its_pointer_file_with_nothing_configured`:
+/// every pointer line a launch under this redirect writes names, as its
+/// `history_dir`, the store the **real linked core** resolved from this very
+/// environment, and the journey holds each one to [`World::history_store`] —
+/// so a core that moved to another variable on either platform fails that
+/// journey there rather than quietly writing into the operator's store.
 pub const STATE_HOME_ENV: &str = if cfg!(windows) {
     "LOCALAPPDATA"
 } else {

@@ -814,8 +814,8 @@ impl History {
         // that was never written, with nothing saying why.
         let store = oneharness_core::io::history::resolve_dir(env.history_dir.as_deref())
             .ok_or_else(|| {
-                "history is on and no store could be resolved: set ONEHARNESS_HISTORY_DIR or \
-                 the platform state directory (XDG_STATE_HOME; LOCALAPPDATA on Windows)"
+                "history is on and no store could be resolved: set ONEHARNESS_HISTORY_DIR, or \
+                 the platform state directory oneharness-core resolves its default under"
                     .to_string()
             })?;
         Ok(Some(History {
