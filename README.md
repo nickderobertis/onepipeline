@@ -531,12 +531,34 @@ slot's command — or met another run inside an identity, or failed — journals
 record. Naming no schedule runs no maintenance at all.
 
 Read-only views — `runs`, `status`, `host`, `monitor`, `results`, `goals`,
-`transcript`, `telemetry` — report unread surfaces, driver liveness, and
-provider health without touching a run. `status` says what each in-flight node
-is doing right now, with an event count and an age; `transcript RUN [NODE]`
+`transcript`, `agents`, `telemetry` — report unread surfaces, driver liveness,
+and provider health without touching a run. `status` says what each in-flight
+node is doing right now, with an event count and an age; `transcript RUN [NODE]`
 renders a dispatched turn's tools and its words; `telemetry` reports what each
 party spent and where the wall clock went, in eight buckets that sum exactly.
 Anything nothing in the stack measures is reported absent, never as a zero.
+
+**Every agent a run launches is visible, automatically, whatever the agent
+structure of the target repository.** Every dispatch the engine starts — a
+node's, each lifecycle step's, the observer graph's and the drafting graph's —
+runs with oneharness history on and the run's **pointer file** named,
+`<run root>/oneharness-sessions.jsonl`: every oneharness turn under that launch,
+however it was reached — a graph member, a nested tool a worker runs, a judge
+that spawns a harness of its own — appends one line there saying which session it
+wrote and where. Each line is labelled with the run, the project, the scope
+(`node`, `observer` or `pr-author`), the node, the step and the attempt under
+the `onepipeline.` prefix, beside whatever labels the repository's own
+environment already stamps; the transcripts themselves **stay in each
+oneharness's own store** — the engine never sets `ONEHARNESS_HISTORY_DIR`, and
+a `history_dir` a repository configures is honoured — so nothing moves and
+nothing in the target repository has to be configured. A run's sessions are
+found with `onepipeline agents RUN [NODE]` (every session, or a node's), across
+every run of a project with `onepipeline agents --project PROJECT`, or with
+oneharness's own `oneharness history pointers <run root>/oneharness-sessions.jsonl`;
+each entry names its `history_dir`, `history_project` and `history_session`,
+which is exactly what `oneharness history show` opens the transcript through. A
+turn a repository runs with `--no-history` writes no line, and that is not an
+error.
 
 **A listing groups its runs by project.** `runs`, and `status` and `goals` given
 no run, render every run under a header line per project — `== <project id> —
@@ -551,8 +573,9 @@ reconciler's answers — and consumes nothing.
 **Every post-launch verb is a typed call in the library, and the binary is
 argument parsing over it.** `onepipeline::verbs` carries one function per verb
 with a renderer beside each that produces exactly what the binary prints —
-`verbs::runs`, `status`, `host`, `goals`, `results`, `transcript`, `telemetry`,
-`monitor`, `next`, `channel`, `watch`, `unwatched`, `reply`, `attest`,
+`verbs::runs`, `status`, `host`, `goals`, `results`, `transcript`, `agents`,
+`project_agents`, `telemetry`, `monitor`, `next`, `channel`, `watch`,
+`unwatched`, `reply`, `attest`,
 `surface`, `stop`, `adopt` and `drive_run` — so a program embedding this crate
 reads the facts behind a view and acts on a run without spawning the binary,
 and cannot drift from it: `tests/parity.rs` holds the two to one another over a

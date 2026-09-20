@@ -469,6 +469,15 @@ resolver = "2"
 # exactly this `onevcs`, so the two requirements and the lock move together.
 # `tests/e2e/maintenance.rs` drives the sweep against the linked release.
 #
+# `oneagentgraph` 0.4.6 is a **relink and nothing else** — `src/member.rs`
+# re-reads its two engines' channels and moves two version numbers in prose —
+# taken because it requires `oneharness-core` 0.17.0 and `onejudge` 0.13.3
+# exactly, and 0.17.0 is the release this crate needs: see the `oneharness-core`
+# block below. A **requirement** rather than a lock floor, because `^0.4.4`
+# admitted the release and the lock alone could have taken it — but the two pins
+# beside it could not, so the three move as one engine or the lock resolves the
+# core twice.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -488,7 +497,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.4.4"
+oneagentgraph = "0.4.6"
 onevcs = "0.27.0"
 # The wire both siblings above now re-export: the envelope, its labels, sources
 # and phases, the filter grammar, the reader, the merge and the schema registry
@@ -545,7 +554,14 @@ onemessagebus-agent = "0.7.0"
 # (oneagentgraph #124), so the three requirements move as one engine or the lock
 # resolves the classifier twice. A requirement for the same pre-1.0 reason as
 # every entry above: `^0.12` admits no 0.13.x.
-onejudge = "0.13.1"
+#
+# 0.13.3 links the `oneharness-core` 0.17.0 that writes a per-run pointer line
+# (onejudge #100); 0.13.2 between them asks the spawned `oneharness` for its
+# JSON report by name, which `crates/testfakes`'s double already took. Nothing
+# here reads anything new from it — it is taken because `oneagentgraph` 0.4.6
+# requires exactly it, and the three requirements move together or the lock
+# resolves the core twice.
+onejudge = "0.13.3"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
@@ -568,7 +584,29 @@ onejudge = "0.13.1"
 # not the CLI pins beside it: widening this requirement without moving
 # `Cargo.lock` changes what the build permits and nothing about what it links.
 # `just engines-current` is what holds the two together.
-oneharness-core = "0.14.0"
+#
+# 0.17.0 is the floor that stops this pin being test-support only: it is the
+# release whose `HistoryWriter` **appends one pointer line per harness run** to
+# the file `ONEHARNESS_HISTORY_POINTER_FILE` names (oneharness #1326), and
+# `src/agents.rs` reads that file back through the same library's own
+# `io::history::read_pointers` and holds every engine label to its
+# `HistoryLabels` grammar — the whole of how a run finds the agents it launched
+# without opening a store. Three minors sit between 0.14 and it, each
+# **breaking** in its own release note and each absorbed here: 0.15.0 adds
+# `--format` to the CLI's JSON verbs, which onejudge 0.13.2 sends and the double
+# takes; 0.16.0 defaults `run_mode` to `fallback` and the CLI's stdout to text,
+# which no config this crate ships or writes relied on the other way; and 0.17.0
+# adds `RunRequest.history_pointer_file`, and nothing here builds that request —
+# the one a single-sided turn runs under is `oneagentgraph`'s own, and it leaves
+# the field to the environment, which is where the engine puts the file's name.
+# A **requirement** and not a lock floor for the reason
+# every raise above was: `^0.14` admits no 0.17.x. `oneagentgraph` 0.4.6 and
+# `onejudge` 0.13.3 both require exactly this release, so the three move together.
+# `crates/testfakes`'s `fake-oneharness` writes its pointer line through this
+# release's writer, and `tests/e2e/agents.rs` drives both member kinds to the
+# run's pointer file against the linked releases, so a pin below the floor fails
+# there rather than reading differently.
+oneharness-core = "0.17.0"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
 # from one commit, each release of this crate requiring the exact `onevcs` it was
@@ -637,10 +675,12 @@ include = [
 ]
 
 # llmlint: ignore-block[new_command_or_client_gets_its_own_project] `plan check`
-# is a verb on this binary, beside `start`, `validate` and `session` — not a new
-# command or client. The shipped shape is one library and one binary, which
-# `AGENTS.md` states and `docs/contract.md` states the verb against; a second
-# project for a subcommand would contradict both.
+# and `agents` are verbs on this binary, beside `start`, `validate` and
+# `session` — not a new command or client. The shipped shape is one library and
+# one binary, which `AGENTS.md` states and `docs/contract.md` states each verb
+# against — `agents` as argument parsing over `verbs::agents`, held byte-equal
+# by `tests/parity.rs` like every post-launch verb; a second project for a
+# subcommand would contradict both.
 [[bin]]
 name = "onepipeline"
 path = "src/main.rs"

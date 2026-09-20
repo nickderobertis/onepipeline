@@ -22,6 +22,13 @@
 mod harness;
 
 mod adoption;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] two journeys, a few
+// minutes together, and what they exercise is the environment every dispatch the
+// engine starts is composed with — `executor`, `driver`, `lifecycle` and `agents`
+// together, through the real `oneagentgraph` and the real linked `oneharness-core` —
+// so the narrowest edge they can honestly sit behind is the crate itself, which is
+// this target's. Same grounds as `mod dispatch` below.
+mod agents;
 mod amend;
 mod boundary;
 mod bus_config;

@@ -21,7 +21,8 @@
 use oneharness_core::domain::dialogue::DialogueRefusal;
 use oneharness_core::domain::events::ActionEvent;
 use oneharness_core::domain::fallback::{startup_failure_reason, RunWork};
-use oneharness_core::domain::history::HistoryLabels;
+use oneharness_core::domain::harness::HarnessIdentity;
+use oneharness_core::domain::history::{session_name, HistoryLabels};
 use oneharness_core::domain::mode::PermissionMode;
 use oneharness_core::domain::report::{
     FallThrough, FallbackReport, OutputFormat, RunReport, RunResult, RunStreamEnvelope, Status,
@@ -77,7 +78,7 @@ enum Occurs {
 // build does not link. The reconciling gate is `tests/e2e/turns.rs`, which drives the
 // real onejudge against this process — so a flag it starts sending that is not below is
 // a refusal there rather than a double that quietly waves it through.
-const FLAGS: [(&str, Takes, Occurs); 15] = [
+const FLAGS: [(&str, Takes, Occurs); 16] = [
     // onejudge 0.13.2 and oneagentgraph 0.4.5 ask for the machine report by name,
     // since oneharness 0.14.0 moves `run`'s default to a human-readable view; the
     // value is checked below, because this double prints only the JSON one.
@@ -85,6 +86,10 @@ const FLAGS: [(&str, Takes, Occurs); 15] = [
     ("--compact", Takes::Nothing, Occurs::Once),
     ("--events", Takes::Nothing, Occurs::Once),
     ("--history", Takes::Nothing, Occurs::Once),
+    // The opt-out the real CLI ranks above its environment: a repository that
+    // wants no history for a turn says so here, whatever `ONEHARNESS_HISTORY`
+    // the engine set on the launch.
+    ("--no-history", Takes::Nothing, Occurs::Once),
     ("--stream", Takes::Nothing, Occurs::Once),
     ("--control", Takes::Nothing, Occurs::Once),
     ("--system", Takes::AValue, Occurs::Once),
@@ -218,13 +223,13 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         }
     }
 
-    // Whether onejudge asked this run to write its history record, and the name
-    // it asked for it under. Read off the argv rather than assumed: the record a
-    // journey reads back is one this process was *asked* to write.
-    let history = args
-        .iter()
-        .any(|arg| arg == "--history")
-        .then(|| fake::flag(args, "--history-name").unwrap_or_else(|| "turn".to_string()));
+    // Whether this run writes its history record, and where: resolved as the
+    // real CLI resolves it, so a journey reading the store or the pointer file
+    // back reads what a launch's environment and onejudge's argv *asked* for.
+    let history = match History::of(args, &prompt) {
+        Ok(history) => history,
+        Err(refusal) => return fake::refuse(&refusal),
+    };
     // The permission mode the turn was asked to run under, held to oneharness's
     // own spectrum by that library's parser: a word it does not spell is a launch
     // the real CLI refuses, and a double that ran anyway would settle a member on
@@ -239,10 +244,25 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
 
     match side {
         Side::Agent => match cwd {
-            Some(cwd) => agent_turn(&prompt, &cwd, dir, &selection, history.as_deref(), mode),
+            Some(cwd) => agent_turn(
+                &prompt,
+                &cwd,
+                dir,
+                &selection,
+                &config,
+                history.as_ref(),
+                mode,
+            ),
             None => fake::refuse("oneharness run requires --cwd for the side that does the work"),
         },
-        Side::Judge => judge_turn(&prompt, dir, selection.first(), mode),
+        Side::Judge => judge_turn(
+            &prompt,
+            cwd.as_deref(),
+            dir,
+            selection.first(),
+            history.as_ref(),
+            mode,
+        ),
     }
 }
 
@@ -404,15 +424,20 @@ fn prompt(args: &[String]) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one turn's whole context, handed on to `work` as it arrived"
+)]
 fn agent_turn(
     prompt: &str,
     cwd: &str,
     dir: &std::path::Path,
     selection: &Selection,
-    history: Option<&str>,
+    config: &str,
+    history: Option<&History>,
     mode: PermissionMode,
 ) -> ExitCode {
-    match work(prompt, cwd, dir, selection, history, mode) {
+    match work(prompt, cwd, dir, selection, config, history, mode) {
         Ok(outcome) => outcome.exit_code(),
         Err(refusal) => fake::refuse(&refusal),
     }
@@ -422,12 +447,17 @@ fn agent_turn(
 /// process having refused, and is why the two are separate results: a turn that
 /// did the work and did not get there still streamed and still reported, and a
 /// refusal never started.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one turn's whole context — see `agent_turn`"
+)]
 fn work(
     prompt: &str,
     cwd: &str,
     dir: &std::path::Path,
     selection: &Selection,
-    history: Option<&str>,
+    config: &str,
+    history: Option<&History>,
     mode: PermissionMode,
 ) -> Result<Outcome, String> {
     let ran = chain_step(dir, selection)?;
@@ -447,6 +477,38 @@ fn work(
             // publication that turns out to have had nothing to publish is
             // asked, first, whether the turn before it wrote anything.
             fake::record(dir, "oneharness-work", &[path.display().to_string()]);
+        }
+        // A worker that runs a **nested tool which is itself an `oneharness
+        // run`** — what a repository's own agent structure may do under a
+        // dispatch, and what the engine can see only through the environment
+        // this process inherited and hands on. Each line of `harness.nested` is
+        // the extra arguments of one such run, and each is run through this
+        // very executable — the oneharness a nested tool under this dispatch
+        // resolves — as a judge-side evaluator turn over the outer turn's own
+        // config, inheriting this process's environment untouched, and recorded
+        // with its exit. Judge-side on purpose: an agent-side nested turn would
+        // read this script again and nest without end.
+        if let Some(script) = fake::node_script(dir, "harness", "nested") {
+            let this = std::env::current_exe()
+                .map_err(|error| format!("cannot name this executable: {error}"))?;
+            for extra in script.lines().filter(|line| !line.trim().is_empty()) {
+                let status = std::process::Command::new(&this)
+                    .args(["run", "--format", "json", "--compact", "--config", config])
+                    .args(extra.split_whitespace())
+                    .args(["--prompt", EVALUATOR_OPENING])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .status()
+                    .map_err(|error| format!("cannot run the nested oneharness: {error}"))?;
+                fake::record(
+                    dir,
+                    "oneharness-nested",
+                    &[
+                        extra.trim().to_string(),
+                        status.code().unwrap_or(-1).to_string(),
+                    ],
+                );
+            }
         }
     }
 
@@ -548,15 +610,9 @@ fn work(
         });
         report.results.insert(0, refused);
     }
-    if let Some(name) = history {
-        report.history_file = Some(write_history(
-            dir,
-            cwd,
-            name,
-            prompt,
-            mode,
-            &report.results,
-        )?);
+    if let Some(history) = history {
+        report.history_file =
+            Some(history.write(std::path::Path::new(cwd), prompt, mode, &report.results)?);
     }
     stream(&RunStreamEnvelope::Result { report })?;
     Ok(outcome)
@@ -671,43 +727,118 @@ fn refused(identity: &Identity, requested: &Model, served: &Model) -> RunResult 
     }
 }
 
-/// Write this run's history records — one per attempted candidate, in result
-/// order — through oneharness's **own** writer, which chooses each record's
-/// schema version from what it carries, and answer with the session file's path
-/// for the report's `history_file`. The store is inside the script directory,
-/// so nothing here reaches an operator's own history.
-fn write_history(
-    dir: &std::path::Path,
-    cwd: &str,
-    name: &str,
-    prompt: &str,
-    mode: PermissionMode,
-    results: &[RunResult],
-) -> Result<String, String> {
-    let store = dir.join("oneharness-history");
-    let writer = HistoryWriter::open(
-        &store,
-        std::path::Path::new(cwd),
-        name,
-        HistoryLabels::default(),
-    )
-    .map_err(|error| {
-        format!(
-            "cannot open a history session under {}: {error}",
-            store.display()
-        )
-    })?;
-    for result in results {
-        writer
-            .append(mode, result.model.as_deref(), prompt, result)
+/// This run's history, as the real `oneharness run` resolves it: whether it is
+/// on, the store, the session's name and labels, and the run's pointer file.
+///
+/// The argv's own say — `--history`, `--no-history`, `--history-name` — over
+/// the `ONEHARNESS_*` environment, read through the core's **own** reader
+/// (`config::from_env`) so the double reads exactly the keys the real CLI reads
+/// and refuses exactly the values it refuses. Which is the point: the engine
+/// under test stamps a launch through that environment and nothing else, so a
+/// double that ignored it would prove nothing about what a repository's
+/// oneharness meets. The store is where the environment resolves it —
+/// `ONEHARNESS_HISTORY_DIR`, else the platform state directory — and never a
+/// directory of this double's own choosing: a journey redirects
+/// `XDG_STATE_HOME` so that resolution lands inside its world, exactly as an
+/// operator's process resolves it into theirs.
+#[derive(Debug)]
+struct History {
+    store: std::path::PathBuf,
+    name: String,
+    labels: HistoryLabels,
+    pointer_file: Option<std::path::PathBuf>,
+}
+
+impl History {
+    /// `None` is history off — the default, as it is for the real CLI.
+    fn of(args: &[String], prompt: &str) -> Result<Option<Self>, String> {
+        let env = oneharness_core::domain::config::from_env(|name| std::env::var(name).ok())
+            .map_err(|error| {
+                format!("the ONEHARNESS_* environment is not one oneharness runs under: {error}")
+            })?
+            .unwrap_or_default();
+        // CLI over environment over the built-in default, as the real CLI ranks
+        // them: `--no-history` beats a launch's `ONEHARNESS_HISTORY=1`.
+        let enabled = if args.iter().any(|arg| arg == "--no-history") {
+            false
+        } else if args.iter().any(|arg| arg == "--history") {
+            true
+        } else {
+            env.history.unwrap_or(false)
+        };
+        if !enabled {
+            return Ok(None);
+        }
+        // Refused rather than warned past as the real CLI does: a double that
+        // quietly skipped history would leave a journey asserting on a store
+        // that was never written, with nothing saying why.
+        let store = oneharness_core::io::history::resolve_dir(env.history_dir.as_deref())
+            .ok_or_else(|| {
+                "history is on and no store could be resolved: set ONEHARNESS_HISTORY_DIR or \
+                 XDG_STATE_HOME"
+                    .to_string()
+            })?;
+        Ok(Some(History {
+            store,
+            name: fake::flag(args, "--history-name").unwrap_or_else(|| session_name(prompt)),
+            labels: env.history_labels.unwrap_or_default(),
+            pointer_file: env
+                .history_pointer_file
+                .filter(|path| !path.is_empty())
+                .map(std::path::PathBuf::from),
+        }))
+    }
+
+    /// Write this run's history records — one per attempted candidate, in
+    /// result order — through oneharness's **own** writer, which chooses each
+    /// record's schema version from what it carries and, when the run names a
+    /// pointer file, appends that run's pointer line as it begins each harness
+    /// run; and answer with the session file's path for the report's
+    /// `history_file`.
+    fn write(
+        &self,
+        project: &std::path::Path,
+        prompt: &str,
+        mode: PermissionMode,
+        results: &[RunResult],
+    ) -> Result<String, String> {
+        let writer = HistoryWriter::open(&self.store, project, &self.name, self.labels.clone())
             .map_err(|error| {
                 format!(
-                    "cannot write the history record for '{}': {error}",
+                    "cannot open a history session under {}: {error}",
+                    self.store.display()
+                )
+            })?
+            .with_pointer_file(self.pointer_file.clone());
+        for result in results {
+            // The identity the pointer line names, parsed by the library's own
+            // grammar: a result naming a harness oneharness does not know is a
+            // report the real CLI could not have written.
+            let identity: HarnessIdentity = result.harness_id.parse().map_err(|error| {
+                format!(
+                    "the result's harness id '{}' is not a harness identity: {error}",
                     result.harness_id
                 )
             })?;
+            let run_id = writer.begin_harness_run(&identity);
+            writer
+                .append_streamed(
+                    run_id,
+                    mode,
+                    result.model.as_deref(),
+                    prompt,
+                    result,
+                    &std::collections::BTreeSet::new(),
+                )
+                .map_err(|error| {
+                    format!(
+                        "cannot write the history record for '{}': {error}",
+                        result.harness_id
+                    )
+                })?;
+        }
+        Ok(writer.path().display().to_string())
     }
-    Ok(writer.path().display().to_string())
 }
 
 /// The side that supervises: one buffered document carrying the answer.
@@ -718,8 +849,10 @@ fn write_history(
 /// the wrong question is a protocol failure it reports as the *member* dying.
 fn judge_turn(
     prompt: &str,
+    cwd: Option<&str>,
     dir: &std::path::Path,
     identity: &Identity,
+    history: Option<&History>,
     mode: PermissionMode,
 ) -> ExitCode {
     let answer = if prompt.contains(SUPERVISOR_OPENING) {
@@ -735,10 +868,25 @@ fn judge_turn(
     };
     // A judgement is `Answered` whatever it decided: the turn that reached the
     // decision succeeded, and a supervisor saying the work is not done is not a
-    // harness that failed to run.
-    match answer
-        .and_then(|answer| document(&report(&answer, None, Outcome::Answered, identity, mode)))
-    {
+    // harness that failed to run. Its history is written as the real CLI writes
+    // it — this side is one `oneharness run` too, and the record a journey
+    // finds through the run's pointer file is every turn's, not the worker's
+    // alone. The project is the worktree where the question was about one, and
+    // this process's own directory otherwise, as the real CLI's `project_start`
+    // is.
+    let recorded = answer.and_then(|answer| {
+        let mut report = report(&answer, None, Outcome::Answered, identity, mode);
+        if let Some(history) = history {
+            let project = match cwd {
+                Some(cwd) => std::path::PathBuf::from(cwd),
+                None => std::env::current_dir()
+                    .map_err(|error| format!("this process has no working directory: {error}"))?,
+            };
+            report.history_file = Some(history.write(&project, prompt, mode, &report.results)?);
+        }
+        document(&report)
+    });
+    match recorded {
         Ok(document) => {
             print!("{document}");
             ExitCode::SUCCESS

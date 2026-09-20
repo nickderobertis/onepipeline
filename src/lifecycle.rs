@@ -143,7 +143,7 @@ pub fn execute(
     };
     loop {
         let preserved = match attempt_once(
-            executor, paths, launch, &node, references, &notes, cancel, tx, ended,
+            executor, paths, launch, &node, references, &notes, cancel, tx, ended, attempt,
         ) {
             Attempt::Settled(settlement) => return engine::Ending::Settled(*settlement),
             Attempt::Preserving(preserved) => preserved,
@@ -327,6 +327,7 @@ fn attempt_once(
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
     ended: &engine::EndedDispatches,
+    attempt: std::num::NonZeroU32,
 ) -> Attempt {
     let run = paths.run.as_str();
     let vcs_filter = launch.vcs_filter.as_ref();
@@ -447,7 +448,7 @@ fn attempt_once(
             step.agent_graph.as_ref().or(node.agent_graph.as_ref()),
             &launch.node_graph,
         );
-        let build = || DispatchRequest {
+        let build = |attempt| DispatchRequest {
             graph: graph.clone(),
             task: step.rendered_task_carrying(node, references, notes),
             labels: engine::dispatch_labels(
@@ -459,11 +460,12 @@ fn attempt_once(
             controls: *controls,
             workspace: workspace.clone(),
             cancel: cancel.clone(),
+            attempt,
         };
         if worktree.is_none() {
             crate::vcs::wait_out_the_second(began);
         }
-        let drained = match engine::attempt(executor, node, cancel, tx, &build, ended) {
+        let drained = match engine::attempt(executor, node, cancel, tx, &build, ended, attempt) {
             engine::Attempted::Drained(drained) => drained,
             engine::Attempted::Exhausted(refusal) => return Attempt::Exhausted(Box::new(refusal)),
         };
@@ -531,6 +533,7 @@ fn attempt_once(
         ended,
         &token,
         branch,
+        attempt,
     );
     // Only where this attempt is the node's answer. A publication that failed
     // leaving the work on its branch is asked again, and reporting a criterion
@@ -600,6 +603,7 @@ fn publish(
     ended: &engine::EndedDispatches,
     token: &onevcs::SessionToken,
     branch: Option<String>,
+    attempt: std::num::NonZeroU32,
 ) -> Attempt {
     // A branch level with its base has nothing to draft a body for and nothing
     // to push, so neither is spent on it. Asked of the session's own record —
@@ -655,6 +659,7 @@ fn publish(
             cancel,
             tx,
             ended,
+            attempt,
         ) {
             None => (None, None),
             Some(Drafted::Body(body)) => (Some(body), None),
@@ -1637,6 +1642,7 @@ fn drafted(
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
     ended: &engine::EndedDispatches,
+    attempt: std::num::NonZeroU32,
 ) -> Option<Drafted> {
     let graph = launch.pr_author_graph.as_deref()?;
     let Some(worktree) = worktree else {
@@ -1661,6 +1667,9 @@ fn drafted(
         controls: NodeControls::default(),
         workspace: WorkspaceSpec::Path(worktree.to_path_buf()),
         cancel: cancel.clone(),
+        // The node's own attempt: the drafting is part of it, and the record
+        // holds no `node-dispatched` of the drafting's own.
+        attempt,
     });
     let mut handle = match dispatch {
         Ok(handle) => handle,

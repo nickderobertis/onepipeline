@@ -295,11 +295,25 @@ fn the_dispatch_request_carries_every_field_the_contract_declares() {
             overflow: None,
         }),
         cancel: CancellationToken::new(),
+        attempt: NonZeroU32::new(2).expect("two is an attempt"),
     };
 
     assert_contract_names(
         "DispatchRequest field",
-        &["graph", "task", "labels", "controls", "workspace", "cancel"],
+        &[
+            "graph",
+            "task",
+            "labels",
+            "controls",
+            "workspace",
+            "cancel",
+            "attempt",
+        ],
+    );
+    assert_eq!(
+        request.attempt.get(),
+        2,
+        "the request carries which attempt of the node it is"
     );
     assert_eq!(
         request.controls.max_turns,
@@ -412,6 +426,7 @@ fn dispatching_goes_through_the_oneagentgraph_seam_and_says_so_when_it_cannot() 
         controls: NodeControls::default(),
         workspace: WorkspaceSpec::Path(PathBuf::from(".")),
         cancel: CancellationToken::new(),
+        attempt: NonZeroU32::MIN,
     }) else {
         panic!("no `oneagentgraph` is installed here, so the dispatch cannot start");
     };
@@ -1128,8 +1143,24 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         .cloned()
         .collect();
 
+    // The run-history paragraph names a second `onepipeline.`-prefixed
+    // namespace — the labels the engine stamps on a oneharness session — which
+    // is the `oneharness_history` block's and not plan metadata at all, so what
+    // that block names is left out of this inventory.
+    let history: Value = serde_json::from_str(&fenced_block_naming("json", "oneharness_history"))
+        .expect("the run-history block is JSON");
+    let history = &history["oneharness_history"];
+    let stamped: BTreeSet<String> = history["labels"]
+        .as_object()
+        .expect("the block names its labels")
+        .values()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .chain(history["label_prefix"].as_str().map(ToOwned::to_owned))
+        .collect();
     let named: BTreeSet<String> = backticked()
         .iter()
+        .filter(|token| !stamped.contains(*token))
         .filter_map(|token| token.strip_prefix("onepipeline.").map(ToOwned::to_owned))
         .filter(|field| field != "<field>")
         .collect();
@@ -1246,6 +1277,7 @@ fn a_dispatch_built_outside_a_run_still_carries_its_controls_into_the_launch() {
         controls,
         workspace: WorkspaceSpec::Path(root.clone()),
         cancel: CancellationToken::new(),
+        attempt: NonZeroU32::MIN,
     };
 
     let Err(refused) = LocalExecutor.dispatch(request(NodeControls {
@@ -1933,6 +1965,7 @@ fn summary_fields() -> BTreeSet<String> {
         )]
         .into_iter()
         .collect(),
+        oneharness_sessions: Some("/runs/gated/oneharness-sessions.jsonl".into()),
         journal_len: 8_192,
         journal_mtime_ms: 1_786_000_000_100,
     };
@@ -2786,6 +2819,161 @@ fn the_run_end_hooks_surface_is_what_the_contract_names() {
 /// binary by `tests/e2e/dispatch_env_hook.rs`, where every environment name, the
 /// log, each ending and the refusal outcome are read out of this same block —
 /// and the README's copy of the operator-facing half to every spelling here.
+/// The run-history surface: the environment the engine overlays, the key names,
+/// the scope words, the pointer file's name and the merge rule are the block's,
+/// and the crate's constants are held to it — both directions, so a word the
+/// crate renames fails here and so does one the block keeps after the crate
+/// dropped it. The CLI takes the two spellings the paragraph states and
+/// refuses the one it does not.
+#[test]
+fn the_run_history_surface_is_what_the_contract_names() {
+    use onepipeline::agents;
+
+    let block: Value = serde_json::from_str(&fenced_block_naming("json", "oneharness_history"))
+        .expect("the run-history block is JSON");
+    let history = &block["oneharness_history"];
+    let spelled = |path: &[&str]| -> String {
+        path.iter()
+            .fold(history, |value, key| &value[*key])
+            .as_str()
+            .unwrap_or_else(|| panic!("the block names no {}", path.join(".")))
+            .to_string()
+    };
+
+    assert_eq!(spelled(&["environment", "history"]), agents::HISTORY_ENV);
+    assert_eq!(
+        spelled(&["environment", "pointer_file"]),
+        agents::POINTER_FILE_ENV
+    );
+    assert_eq!(spelled(&["environment", "labels"]), agents::LABELS_ENV);
+    assert_eq!(spelled(&["never_set"]), agents::HISTORY_DIR_ENV);
+    assert_eq!(spelled(&["pointer_file"]), agents::SESSIONS_FILE);
+    assert_eq!(
+        RunPaths::under(Path::new("/runs"), "demo")
+            .oneharness_sessions()
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some(agents::SESSIONS_FILE)
+    );
+    assert_eq!(spelled(&["label_prefix"]), agents::LABEL_PREFIX);
+    let keys = [
+        ("run_id", agents::RUN_ID_LABEL),
+        ("project", agents::PROJECT_LABEL),
+        ("scope", agents::SCOPE_LABEL),
+        ("node", agents::NODE_LABEL),
+        ("step", agents::STEP_LABEL),
+        ("attempt", agents::ATTEMPT_LABEL),
+    ];
+    for (name, constant) in keys {
+        assert_eq!(spelled(&["labels", name]), constant, "labels.{name}");
+        assert!(
+            constant.starts_with(agents::LABEL_PREFIX),
+            "{constant} is not under the engine's prefix"
+        );
+    }
+    let named_keys: BTreeSet<String> = history["labels"]
+        .as_object()
+        .expect("labels is an object")
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(
+        named_keys,
+        keys.iter().map(|(name, _)| (*name).to_string()).collect(),
+        "the block names a key the crate does not, or the crate one the block does not"
+    );
+    let scopes: std::collections::BTreeMap<String, String> =
+        serde_json::from_value(history["scopes"].clone()).expect("the scopes are words");
+    assert_eq!(
+        scopes.values().cloned().collect::<BTreeSet<_>>(),
+        agents::Scope::ALL
+            .iter()
+            .map(|scope| scope.as_str().to_string())
+            .collect(),
+        "the scope words are not the crate's"
+    );
+
+    // The merge rule, on the block's own example: the inherited repository key
+    // survives, the stale engine key is replaced, and the wire is key-ordered.
+    let stamp = &history["stamp"];
+    let attempt =
+        u32::try_from(stamp["attempt"].as_u64().expect("an attempt")).expect("an attempt fits");
+    let attempt = NonZeroU32::new(attempt).expect("an attempt counts from one");
+    let node = stamp["node"].as_str().expect("the example names a node");
+    let launched = match spelled(&["stamp", "scope"]).as_str() {
+        "node" => agents::Launched::Node {
+            node,
+            step: stamp["step"].as_str(),
+            attempt,
+        },
+        "pr-author" => agents::Launched::PrAuthor { node, attempt },
+        "observer" => agents::Launched::Observer,
+        other => panic!("the example's scope `{other}` is not one of the words"),
+    };
+    assert_eq!(
+        launched.scope().as_str(),
+        spelled(&["stamp", "scope"]),
+        "the launch's scope word is not the example's"
+    );
+    let composed = agents::compose_labels(
+        Some(&spelled(&["inherited"])),
+        &agents::Stamp {
+            run: &spelled(&["stamp", "run_id"]),
+            project: stamp["project"].as_str(),
+            launched,
+        },
+    )
+    .expect("the block's example composes");
+    assert_eq!(composed, spelled(&["composed"]));
+
+    let at = history["summary_schema_version"]
+        .as_u64()
+        .expect("the block states the summary version the field arrived at");
+    assert_eq!(
+        u64::from(SUMMARY_SCHEMA_VERSION),
+        at,
+        "the summary schema moved past the version the block states"
+    );
+    assert!(
+        CONTRACT.contains(&spelled(&["opt_out"])),
+        "the paragraph no longer states the opt-out"
+    );
+
+    // The CLI: a run with or without a node, a project, and never both.
+    for args in [
+        vec!["onepipeline", "agents", "demo"],
+        vec!["onepipeline", "agents", "demo", "service"],
+        vec!["onepipeline", "agents", "--project", "plans:demo"],
+    ] {
+        let parsed = Cli::try_parse_from(args.clone())
+            .unwrap_or_else(|error| panic!("{args:?} is not a spelling `agents` takes: {error}"));
+        assert!(
+            matches!(parsed.command, Command::Agents(_)),
+            "{args:?} parsed as something else"
+        );
+    }
+    for args in [
+        vec!["onepipeline", "agents"],
+        vec!["onepipeline", "agents", "demo", "--project", "plans:demo"],
+    ] {
+        Cli::try_parse_from(args.clone())
+            .err()
+            .unwrap_or_else(|| panic!("{args:?} is a spelling `agents` refuses"));
+    }
+    assert_contract_names(
+        "agents verb",
+        &[
+            "onepipeline agents RUN [NODE]",
+            "onepipeline agents --project PROJECT",
+            "verbs::agents(&RunPaths, AgentScope::Run | AgentScope::Node(NODE)) -> Agents",
+            "verbs::project_agents(root, PROJECT) -> Agents",
+            "RunPaths::oneharness_sessions()",
+            "RunSummary.oneharness_sessions",
+            "DispatchRequest.attempt",
+        ],
+    );
+}
+
 #[test]
 fn the_dispatch_env_hook_surface_is_what_the_contract_names() {
     let block: Value = serde_json::from_str(&fenced_block_naming("json", "dispatch_env_hook"))
@@ -6498,7 +6686,7 @@ fn the_grouped_listing_is_what_the_contract_states() {
     // Rows over the checked-in golden document, so a row here is a document this
     // build reads rather than one assembled by hand.
     let golden: RunSummary =
-        serde_json::from_str(include_str!("golden/run-summary-v6.json")).expect("the golden reads");
+        serde_json::from_str(include_str!("golden/run-summary-v7.json")).expect("the golden reads");
     let row = |run: &str, project: &str, name: Option<&str>, at: Option<u64>| RunSummary {
         run_id: run.into(),
         project: project.into(),

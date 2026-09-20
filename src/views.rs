@@ -3945,6 +3945,7 @@ mod tests {
             filters: Filters::default(),
             bus_config: Default::default(),
             maintenance_config: None,
+            oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         }
     }
