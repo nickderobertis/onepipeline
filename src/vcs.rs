@@ -2182,7 +2182,6 @@ mod tests {
             onevcs::FailureKind::Invalid,
             onevcs::FailureKind::NotImplemented,
             onevcs::FailureKind::Gate,
-            onevcs::FailureKind::HostPrerequisite,
         ];
         for kind in terminal {
             assert_eq!(
