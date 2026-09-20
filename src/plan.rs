@@ -81,6 +81,17 @@ pub(crate) fn draft_is_newer(declared: u32) -> String {
     )
 }
 
+/// What a plan below [`PLAN_SCHEMA_VERSION`] naming `pool` or `overflow` is
+/// told, for [`draft_is_newer`]'s reason: a planner who sized a node's placement
+/// and had the ask ignored would find that out from a session refused, or from
+/// one cut fresh where a warm slot was asked for.
+pub(crate) fn placement_is_newer(field: &str, declared: u32) -> String {
+    format!(
+        "`{field}` is a schema {PLAN_SCHEMA_VERSION} field and this plan declares \
+         schema_version {declared} — set `schema_version: {PLAN_SCHEMA_VERSION}`"
+    )
+}
+
 /// The heading a carried planner note is rendered under.
 pub const PLANNER_CONTEXT_HEADING: &str = "## Planner context";
 
@@ -830,6 +841,24 @@ pub struct Node {
     /// The registered checkout the per-run clone is cut from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_checkout: Option<String>,
+    /// The pool size this node's session open places against, over everything
+    /// the host configures for the identity.
+    ///
+    /// The sibling's own override and none of this crate's: `0` places the
+    /// session fresh under `runs/` and still spends the overflow, `N` may cut a
+    /// warm slot while fewer than `N` exist, and it removes no slot. Absent —
+    /// which is every plan written before this field existed — the host's
+    /// resolution decides. Copied onto the session request as it stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<u32>,
+    /// The overflow bound this node's session open is admitted against, over
+    /// everything the host configures for the identity.
+    ///
+    /// The sibling's [`Bound`](onevcs::Bound): an integer, or `unlimited`, which
+    /// is how one node opts out of the cap. Absent, the host's resolution
+    /// decides. Copied onto the session request as it stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overflow: Option<onevcs::Bound>,
     /// Several agent and human steps run in sequence on one branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steps: Option<Vec<Step>>,

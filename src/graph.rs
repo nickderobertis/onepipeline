@@ -504,6 +504,19 @@ fn check_declared_version(plan: &Plan) -> std::result::Result<(), Refusal> {
         if node.draft && plan.schema_version < crate::plan::PLAN_SCHEMA_VERSION {
             return Err(named(crate::plan::draft_is_newer(plan.schema_version)).field("draft"));
         }
+        // The two placement overrides, on `body`'s terms: the version is the
+        // whole of what each is checked for here, and what either means is the
+        // sibling's, which reads them off the session request.
+        for (field, named_it) in [
+            ("pool", node.pool.is_some()),
+            ("overflow", node.overflow.is_some()),
+        ] {
+            if named_it && plan.schema_version < crate::plan::PLAN_SCHEMA_VERSION {
+                return Err(
+                    named(crate::plan::placement_is_newer(field, plan.schema_version)).field(field),
+                );
+            }
+        }
         if plan.schema_version >= crate::plan::PLAN_SCHEMA_VERSION
             && node.repo.is_some()
             && node.title.is_none()

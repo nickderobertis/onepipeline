@@ -110,6 +110,13 @@ pub enum PipelineKind {
     NodeDispatched,
     /// A node reached a terminal status.
     NodeSettled,
+    /// A dispatched node was handed back to the queue **without a settlement**.
+    ///
+    /// Written where a dispatch ended before any work began for a reason that
+    /// is the host's rather than the node's — its repository identity admitted
+    /// no session — so the node is queued again rather than settled, and `reason`
+    /// says which such ending it was. `detail` is the sibling's own account.
+    NodeRequeued,
     /// A live edit was accepted, and committing it is what made the change it
     /// records.
     ///
@@ -236,6 +243,7 @@ impl PipelineKind {
             Self::NodeReady => "node-ready",
             Self::NodeDispatched => "node-dispatched",
             Self::NodeSettled => "node-settled",
+            Self::NodeRequeued => "node-requeued",
             Self::EditCommitted => "edit-committed",
             Self::CommandAccepted => "command-accepted",
             Self::EditRejected => "edit-rejected",
@@ -296,6 +304,7 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::NodeReady,
     PipelineKind::NodeDispatched,
     PipelineKind::NodeSettled,
+    PipelineKind::NodeRequeued,
     PipelineKind::EditCommitted,
     PipelineKind::CommandAccepted,
     PipelineKind::EditRejected,

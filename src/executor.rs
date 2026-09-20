@@ -734,6 +734,8 @@ mod tests {
                 branch: None,
                 base: None,
                 execution_checkout: None,
+                pool: None,
+                overflow: None,
             }),
             cancel: CancellationToken::new(),
         };

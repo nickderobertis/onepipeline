@@ -80,6 +80,8 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             branch: Some("feature".to_owned()),
             base: Some("main".to_owned()),
             execution_checkout: None,
+            pool: None,
+            overflow: None,
         })
         .expect("the seam opens a session");
     assert_eq!(session.branch, "feature");
@@ -201,6 +203,8 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             branch: Some("adopts-early".to_owned()),
             base: Some("main".to_owned()),
             execution_checkout: None,
+            pool: None,
+            overflow: None,
         })
         .expect("the seam opens a second session");
     let reason = onevcs::DraftReason::AwaitingRelease {

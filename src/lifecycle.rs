@@ -81,7 +81,8 @@ pub struct Launch {
 #[allow(
     clippy::too_many_arguments,
     reason = "one node's whole execution: the executor, the run, the launch, the node, \
-              its cross-repository references, its cancellation, and where to report"
+              its cross-repository references, its cancellation, where to report, and \
+              where a refused re-dispatch resumes from"
 )]
 pub fn execute(
     executor: &dyn Executor,
@@ -92,36 +93,89 @@ pub fn execute(
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
     ended: &engine::EndedDispatches,
-) -> Settlement {
-    let attempts = engine::publication_attempts();
-    // What each attempt's publication ended with, in order, for the settlement
-    // that stops the loop. One word per attempt: the last attempt's own reason
-    // leads the detail as it always has, and a detail carrying three sibling
-    // diagnostics in full would carry none of them — every payload text this
-    // crate writes is bounded.
-    let mut endings: Vec<crate::vcs::Preserving> = Vec::new();
+    resume: Option<Continuation>,
+) -> engine::Ending {
     let launched = node;
-    let mut node = std::borrow::Cow::Borrowed(node);
-    let mut attempt = std::num::NonZeroU32::MIN;
-    // The commit the branch stood at when the previous attempt published it.
-    let mut published: Option<String> = None;
-    // The manager's notes each attempt is composed with. The first attempt is
-    // composed with none: what it was owed rode in as the node's own `context`,
-    // and a note delivered into a conversation it has not opened yet cannot
-    // exist. Every attempt after it is composed with what the attempt before it
-    // was — read off the run's record, which is the one place both the delivery
-    // and this thread can see.
-    let mut notes: Vec<crate::note::RecordedNote> = Vec::new();
+    // Where the loop starts: at the first attempt, with nothing behind it, or
+    // where a refused re-dispatch left it — the same attempt, on the same
+    // preserved branch, with the same endings behind it.
+    //
+    // `endings`: what each attempt's publication ended with, in order, for the
+    // settlement that stops the loop. One word per attempt: the last attempt's
+    // own reason leads the detail as it always has, and a detail carrying three
+    // sibling diagnostics in full would carry none of them — every payload text
+    // this crate writes is bounded. `published`: the commit the branch stood at
+    // when the previous attempt published it. `notes`: the manager's notes each
+    // attempt is composed with. The first attempt is composed with none: what
+    // it was owed rode in as the node's own `context`, and a note delivered into
+    // a conversation it has not opened yet cannot exist. Every attempt after it
+    // is composed with what the attempt before it was — read off the run's
+    // record, which is the one place both the delivery and this thread can see.
+    // `last_preserved`: the failure the attempt before this one preserved, once
+    // there is one.
+    let (
+        attempts,
+        mut node,
+        mut attempt,
+        mut endings,
+        mut published,
+        mut notes,
+        mut last_preserved,
+    ) = match resume {
+        None => (
+            engine::publication_attempts(),
+            std::borrow::Cow::Borrowed(node),
+            std::num::NonZeroU32::MIN,
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        ),
+        Some(continuation) => (
+            continuation.attempts,
+            std::borrow::Cow::Owned(continuation.node),
+            continuation.attempt,
+            continuation.endings,
+            continuation.published,
+            continuation.notes,
+            Some(continuation.preserved),
+        ),
+    };
     loop {
         let preserved = match attempt_once(
             executor, paths, launch, &node, references, &notes, cancel, tx, ended,
         ) {
-            Attempt::Settled(settlement) => return *settlement,
+            Attempt::Settled(settlement) => return engine::Ending::Settled(*settlement),
             Attempt::Preserving(preserved) => preserved,
+            // The identity admitted no session, so the node goes back to the
+            // queue at no cost — on any attempt. A first attempt has nothing
+            // behind it. A later one has the branch the attempt before
+            // preserved, and the queue would not know to pin it there, so it
+            // goes back with everything this loop had in hand and the dispatch
+            // that resumes it starts here again: same attempt, same branch, no
+            // settlement in between, and never a `retry` for a host that was
+            // merely too busy.
+            Attempt::Exhausted(refusal) => {
+                let mut refusal = *refusal;
+                refusal.resume = last_preserved.map(|preserved| {
+                    Box::new(Continuation {
+                        node: node.into_owned(),
+                        attempt,
+                        attempts,
+                        endings,
+                        published,
+                        notes,
+                        preserved,
+                    })
+                });
+                return engine::Ending::Exhausted(refusal);
+            }
         };
         endings.push(preserved.outcome);
         if let Some(same) = republished(published.as_deref(), &preserved.tip) {
-            return republished_the_same_commit(&node.id, &preserved, &endings, &same, attempt);
+            return engine::Ending::Settled(republished_the_same_commit(
+                &node.id, &preserved, &endings, &same, attempt,
+            ));
         }
         published = match &preserved.tip {
             crate::vcs::SessionTip::At(commit) => Some(commit.as_str().to_owned()),
@@ -138,7 +192,7 @@ pub fn execute(
         // then settle as the cancellation rather than as the publication failure
         // that is the useful half of what happened.
         if attempt >= attempts || cancel.is_cancelled() {
-            return stopped_retrying(&node.id, &preserved, &endings);
+            return engine::Ending::Settled(stopped_retrying(&node.id, &preserved, &endings));
         }
         attempt = attempt.saturating_add(1);
         // What the conversation that just ended was shown, and what reached the
@@ -163,20 +217,11 @@ pub fn execute(
             // record; what this arm adds is the settlement, which is `stopped_retrying`'s
             // shape with the fold's own sentence as its detail.
             Err(why) => {
-                return Settlement {
-                    detail: Some(format!(
-                        "the node was not dispatched again: {why}. The branch {} still \
-                         carries the work; re-issue any note the earlier attempt was given \
-                         and `retry` the node",
-                        preserved.branch
-                    )),
-                    branch: Some(preserved.branch.clone()),
-                    ..Settlement::plain(
-                        &node.id,
-                        NodeStatus::Failed,
-                        Some(engine::INFRASTRUCTURE_FAILURE),
-                    )
-                };
+                return engine::Ending::Settled(not_dispatched_again(
+                    &node.id,
+                    &preserved,
+                    &why.to_string(),
+                ));
             } // llmlint: ignore-end[changed_behavior_has_e2e]
         };
         // Another `node-dispatched` rather than a kind of its own, so a reader
@@ -190,6 +235,81 @@ pub fn execute(
         })));
         node =
             std::borrow::Cow::Owned(continued(launched, &preserved, attempt, attempts, &endings));
+        last_preserved = Some(*preserved);
+    }
+}
+
+/// Where a lifecycle node's execution stood when its identity refused the
+/// session a re-dispatch would have opened: everything [`execute`]'s loop had in
+/// hand, so that the dispatch that resumes it continues the **same attempt on
+/// the same preserved branch** rather than starting from the plan's node.
+///
+/// The loop keeps one beside the node's `workspace` hold and hands it back to
+/// [`execute`] the pass the identity admits the node. Nothing is settled in
+/// between, and no boundary attempt is spent: the pin the attempt before wrote
+/// is the continuation's to keep, not a person's to re-issue through `retry`.
+/// What the resumed attempt is composed with is re-read at the resume — the
+/// notes are the one thing that can change while the node waits — and the rest
+/// is carried as it was.
+pub(crate) struct Continuation {
+    /// The node as the refused attempt composed it: pinned to the preserved
+    /// branch and carrying the diagnosis.
+    pub node: Node,
+    /// Which attempt the refused open was, and which the resumed dispatch
+    /// still is.
+    pub attempt: std::num::NonZeroU32,
+    /// The budget the loop was started under.
+    pub attempts: std::num::NonZeroU32,
+    /// The notes the attempt is composed with, replaced at the resume by what
+    /// the record then says.
+    pub notes: Vec<crate::note::RecordedNote>,
+    endings: Vec<crate::vcs::Preserving>,
+    published: Option<String>,
+    preserved: Preserved,
+}
+
+impl Continuation {
+    /// The preserved branch the resumed attempt is pinned to.
+    pub(crate) fn branch(&self) -> &str {
+        &self.preserved.branch
+    }
+
+    /// The re-dispatch this continuation makes again, as the record names one:
+    /// the same attempt of the same budget answering the same failure.
+    pub(crate) fn redispatch(&self) -> engine::Redispatch {
+        engine::Redispatch {
+            node: self.node.id.clone(),
+            attempt: self.attempt,
+            attempts: self.attempts,
+            reason: format!(
+                "{}: {}",
+                self.preserved.outcome.outcome(),
+                self.preserved.reason
+            ),
+            carried: self.notes.clone(),
+        }
+    }
+}
+
+/// The settlement of a node whose re-dispatch onto its preserved branch could
+/// not be composed, saying why and where the work is.
+///
+/// A record this build could not read the notes off is not the tree being
+/// rejected, so it does not settle under a publication word; what a reader has
+/// to act on is the branch, which the settlement pins for a `retry` to continue.
+fn not_dispatched_again(node: &str, preserved: &Preserved, why: &str) -> Settlement {
+    Settlement {
+        detail: Some(format!(
+            "the node was not dispatched again: {why}. The branch {} still carries the \
+             work; re-issue any note the earlier attempt was given and `retry` the node",
+            preserved.branch
+        )),
+        branch: Some(preserved.branch.clone()),
+        ..Settlement::plain(
+            node,
+            NodeStatus::Failed,
+            Some(engine::INFRASTRUCTURE_FAILURE),
+        )
     }
 }
 
@@ -343,7 +463,10 @@ fn attempt_once(
         if worktree.is_none() {
             crate::vcs::wait_out_the_second(began);
         }
-        let drained = engine::attempt(executor, node, cancel, tx, &build, ended);
+        let drained = match engine::attempt(executor, node, cancel, tx, &build, ended) {
+            engine::Attempted::Drained(drained) => drained,
+            engine::Attempted::Exhausted(refusal) => return Attempt::Exhausted(Box::new(refusal)),
+        };
         // The session the dispatch opened is what publication needs, whether or
         // not the step succeeded: a cancelled step's commits are preserved on
         // the branch it left behind.
@@ -1010,6 +1133,8 @@ fn unread_merge_path(
 enum Attempt {
     Settled(Box<Settlement>),
     Preserving(Box<Preserved>),
+    /// The identity admitted no session, before any step ran.
+    Exhausted(Box<engine::WorkspaceRefusal>),
 }
 
 impl Attempt {
@@ -2247,7 +2372,9 @@ mod tests {
             node, level, None,
         ) {
             Attempt::Settled(settlement) => *settlement,
-            Attempt::Preserving(_) => panic!("a level branch is an answer, not an attempt"),
+            Attempt::Preserving(_) | Attempt::Exhausted(_) => {
+                panic!("a level branch is an answer, not an attempt")
+            }
         };
         let node = lifecycle(None);
 
@@ -2305,7 +2432,7 @@ mod tests {
         let named =
             match level_branch_settlement(&lifecycle(None), &level(nothing), Some("kept".into())) {
                 Attempt::Settled(settlement) => settlement.branch,
-                Attempt::Preserving(_) => unreachable!(),
+                Attempt::Preserving(_) | Attempt::Exhausted(_) => unreachable!(),
             };
         assert_eq!(named.as_deref(), Some("kept"));
     }
@@ -2346,7 +2473,7 @@ mod tests {
         // one for the same reason: a regression here would go looking for
         // `oneagentgraph` rather than quietly running the step.
         let (tx, rx) = std::sync::mpsc::channel();
-        let settlement = execute(
+        let engine::Ending::Settled(settlement) = execute(
             &crate::executor::LocalExecutor,
             &RunPaths::under(std::path::Path::new("/nowhere"), "demo"),
             &Launch {
@@ -2358,7 +2485,10 @@ mod tests {
             &crate::executor::CancellationToken::new(),
             &tx,
             &engine::EndedDispatches::none(),
-        );
+            None,
+        ) else {
+            panic!("the refusal comes before any session is asked for")
+        };
         assert_eq!(settlement.status, NodeStatus::Failed);
         assert_eq!(settlement.outcome.as_deref(), Some("invalid-node"));
         let detail = settlement.detail.expect("the settlement says why");

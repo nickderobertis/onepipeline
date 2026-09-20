@@ -76,7 +76,21 @@ fi
 # where the run behind it can be read in full. A run that reached no verdict is not
 # a clean run whatever llmlint's status said, and must not be stored as one.
 verdict="$(grep -m1 -E '^[0-9]+ rules: ' "$report")" || {
-  echo "lint-llm-diff: llmlint exited cleanly without reporting a verdict for this diff; run 'llmlint --diff --diff-base $base_sha -v' to see what it did, then retry" >&2
+  refusal="lint-llm-diff: llmlint exited cleanly without reporting a verdict for this diff; run 'llmlint --diff --diff-base $base_sha -v' to see what it did, then retry"
+  # Recorded as well as said, for the reason the verdict below is: what this says
+  # reaches `scripts/llmlint-diff.sh` only through Nx's pipes, and a refusal that
+  # arrived there as nothing at all would read as a judge that never spoke. The
+  # record is not a declared output, so Nx neither stores nor restores it: it is
+  # this run's, written before this process exits, and the driver clears it before
+  # the next. A record that could not be written is the checkout failing this run,
+  # not the judge reaching no verdict, and exits as the verdict's own write does
+  # below — the refusal is still said, since it is what the operator retries for.
+  if ! mkdir -p "$root/.lint-llm-diff" || ! printf '%s\n' "$refusal" >"$root/.lint-llm-diff/refusal"; then
+    echo "$refusal" >&2
+    echo "lint-llm-diff: could not record that refusal in .lint-llm-diff/refusal; free disk space and retry" >&2
+    exit 3
+  fi
+  echo "$refusal" >&2
   exit 2
 }
 pointer="$(sed -n 's/.*\(llmlint history [A-Za-z0-9_-]*\).*/\1/p' "$report" | tail -1)"

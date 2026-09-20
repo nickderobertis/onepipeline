@@ -3290,6 +3290,8 @@ mod tests {
             branch: None,
             base: Some("main".to_owned()),
             execution_checkout: None,
+            pool: None,
+            overflow: None,
         };
         let opened = crate::vcs::session_open(&request).expect("a session opens on the checkout");
 

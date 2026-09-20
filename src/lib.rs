@@ -82,6 +82,7 @@ mod lifecycle;
 mod loopstats;
 mod payload;
 mod plancheck;
+mod pool;
 mod projection;
 mod refusal;
 mod release;

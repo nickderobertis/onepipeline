@@ -251,6 +251,17 @@ class Workspace {
     });
   }
 
+  /// Run the judge with its streams reaching nobody, as a loaded host has had Nx
+  /// do: what the judge recorded is then all the recipe can relay.
+  judgeUnheard() {
+    const judge = join(this.root, "scripts", "llmlint-judge.sh");
+    renameSync(judge, join(this.root, "scripts", "llmlint-judge-unheard.sh"));
+    writeExecutable(
+      judge,
+      "#!/usr/bin/env bash\nexec bash scripts/llmlint-judge-unheard.sh >/dev/null 2>&1\n",
+    );
+  }
+
   /// Leave llmlint only where the caller's PATH finds it, never where setup puts it.
   onInheritedLlmlintOnly() {
     const inherited = join(this.sandbox, "inherited-bin");
@@ -523,12 +534,7 @@ describe("the judged tier's computation cache", () => {
     // still certified this diff, and the replay of that run has to say so too.
     const ws = workspace(t);
     const base = ws.head();
-    const judge = join(ws.root, "scripts", "llmlint-judge.sh");
-    renameSync(judge, join(ws.root, "scripts", "llmlint-judge-unheard.sh"));
-    writeExecutable(
-      judge,
-      "#!/usr/bin/env bash\nexec bash scripts/llmlint-judge-unheard.sh >/dev/null 2>&1\n",
-    );
+    ws.judgeUnheard();
 
     const judged = ws.lint(base);
     const replayed = ws.lint(base);
@@ -875,16 +881,26 @@ describe("the judged tier's refusals", () => {
 
     const first = ws.lint(base, { env: { FAKE_LLMLINT_NO_VERDICT: "1" } });
     const second = ws.lint(base, { env: { FAKE_LLMLINT_NO_VERDICT: "1" } });
+    // The refusal reaches the recipe through Nx like the verdict does, and on a
+    // loaded host has arrived without it. The judge records it beside the verdict,
+    // and that record is what the recipe relays when Nx forwarded nothing — and
+    // does not repeat when Nx forwarded everything.
+    ws.judgeUnheard();
+    const unheard = ws.lint(base, { env: { FAKE_LLMLINT_NO_VERDICT: "1" } });
 
-    for (const result of [first, second]) {
+    for (const result of [first, second, unheard]) {
       // The tier fails, as it does for any diff it could not certify; what the
-      // report says is which of the two happened.
+      // report says is which of the two happened, exactly once.
       assert.notEqual(result.status, 0, report(result));
-      assert.match(report(result), /without reporting a verdict/, report(result));
+      assert.equal(report(result).split("without reporting a verdict").length, 2, report(result));
     }
+    assert.match(
+      readFileSync(join(ws.root, ".lint-llm-diff", "refusal"), "utf8"),
+      /^lint-llm-diff: llmlint exited cleanly without reporting a verdict for this diff; .*\n$/,
+    );
     // Never stored, so the next run asks again rather than replaying the silence.
-    assert.equal(ws.judgeRuns().length, 2, report(second));
-    assert.match(second.stderr, new RegExp(CACHE_MISS), report(second));
+    assert.equal(ws.judgeRuns().length, 3, report(unheard));
+    assert.match(unheard.stderr, new RegExp(CACHE_MISS), report(unheard));
   });
 
   it("refuses to report a pass the cached target never put a verdict in", (t) => {
@@ -934,6 +950,23 @@ describe("the judged tier's refusals", () => {
     assert.equal(result.status, 3, report(result));
     assert.match(result.stderr, /could not record the verdict/, report(result));
     assert.doesNotMatch(result.stdout, new RegExp(PASS_VERDICT), report(result));
+  });
+
+  it("says what to free when the judge cannot record its refusal", (t) => {
+    const ws = workspace(t);
+    // The same file where the record's directory belongs, met by a judge that
+    // reached no verdict: the checkout failing the run is exit 3, as it is for the
+    // verdict's own write, and never the no-verdict 2 — while the refusal itself
+    // is still said, since it is what the operator retries for.
+    writeFileSync(join(ws.root, ".lint-llm-diff"), "", "utf8");
+
+    const result = ws.judge({
+      env: { LLMLINT_DIFF_BASE_SHA: ws.head(), FAKE_LLMLINT_NO_VERDICT: "1" },
+    });
+
+    assert.equal(result.status, 3, report(result));
+    assert.match(result.stderr, /could not record that refusal/, report(result));
+    assert.match(result.stderr, /without reporting a verdict for this diff/, report(result));
   });
 
   it("says what to repair when an earlier verdict record cannot be cleared", (t) => {

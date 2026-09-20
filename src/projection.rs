@@ -940,6 +940,14 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 }
             }
         }
+        // Handed back to the queue unsettled: the dispatch's `running` comes
+        // off the record, exactly as a `requeue` edit takes it off, and the
+        // node derives from the graph again.
+        Some(journal::PipelineKind::NodeRequeued) => {
+            if let Some(node) = &event.labels.node {
+                state.recorded.remove(node);
+            }
+        }
         Some(journal::PipelineKind::NodeSettled) => {
             let Some(node) = &event.labels.node else {
                 return;

@@ -70,7 +70,16 @@ mod journal;
 // project edged narrower than the crate would drop it out of `nx affected` for the very
 // changes it exists to catch.
 mod landing;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
+// exercise is `lifecycle`, `vcs`, `pool` and `engine` together against the linked `onevcs`
+// over a real origin — the session, the publication, the pool's hold and its refusal — so
+// the narrowest edge they can honestly sit behind is the crate itself, which is this
+// target's; a project edged narrower would drop them out of `nx affected` for the very
+// changes they exist to catch. Same grounds as `mod dispatch_env_hook` above. A block
+// rather than a line, because the reason runs past the one line a line-scoped directive
+// covers and the declaration it is for is below it.
 mod lifecycle;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the
 // head of `tests/e2e/listing.rs` and is not restated here; this declaration is the other
 // site the rule reads, and what it adds is only that the module belongs to this binary for

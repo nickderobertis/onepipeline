@@ -2151,12 +2151,14 @@ pub(crate) fn status_of(view: &RunView) -> String {
         //
         // A node the driver holds for a release is neither: it is waiting on
         // something outside the run altogether, for as long as that takes, so it
-        // says so first and the other two answers are not asked.
+        // says so first and the other two answers are not asked. A node it holds
+        // for its identity's room is the same kind of answer — the driver
+        // decided not to ask for the session — and reads next.
         for (id, node_status) in &statuses {
             if *node_status != NodeStatus::Ready {
                 continue;
             }
-            match held_for_release(view, id) {
+            match held_for_release(view, id).or_else(|| held_for_workspace(view, id)) {
                 Some(held) => out.push_str(&format!("  {id}: {held}\n")),
                 None => out.push_str(&format!(
                     "  {id}: ready — {}\n",
@@ -2714,6 +2716,30 @@ fn held_for_release(view: &RunView, id: &str) -> Option<String> {
     Some(format!(
         "held — awaiting the published release of {}{waited}",
         awaited.join(", ")
+    ))
+}
+
+/// What a ready node reads as while the driver holds it for its repository
+/// identity's room, or `None` for a node no workspace holds.
+///
+/// Off the run's own record, on [`held_for_release`]'s terms: the hold is the
+/// `node-held` the driver journalled with a `workspace` reason, read through the
+/// engine's own reader of one, so a view in another process reads exactly what
+/// the driver decided. The numbers are the reading the driver held it on; the
+/// holders are the sibling's to name, and the line says which verb names them.
+fn held_for_workspace(view: &RunView, id: &str) -> Option<String> {
+    let hold = view
+        .state
+        .holds
+        .get(id)?
+        .iter()
+        .find_map(crate::engine::workspace_held)?;
+    Some(format!(
+        "held — the '{}' workspace admits no more sessions now ({}); `onevcs pool status {}` \
+         names the holders",
+        hold.identity,
+        hold.describe(),
+        hold.identity
     ))
 }
 
