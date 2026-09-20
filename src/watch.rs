@@ -23,7 +23,7 @@ use onemessagebus::{
     Transport, TransportError,
 };
 
-use crate::cli::{MonitorArgs, WatchArgs, WatchTimeout, WatchUntil, WATCH_CURSOR_VERSION};
+use crate::cli::{WatchTimeout, WatchUntil, WATCH_CURSOR_VERSION};
 use crate::error::{
     Error, Result, EXIT_NODE_SETTLED, EXIT_NOTHING_DRIVING, EXIT_SUCCESS, EXIT_SURFACE_WAITING,
     EXIT_WATCH_ELAPSED,
@@ -55,12 +55,18 @@ const MEANINGFUL: [PipelineKind; 9] = [
     PipelineKind::RunStopped,
 ];
 
-/// A closed set with a code each, so a caller branches on the status and never
-/// on the words beside it.
+/// Why a watch returned: a closed set with a code each, so a caller branches on
+/// the status and never on the words beside it.
+///
+/// Published as `verbs::WatchEnding`, which is where the exit each one maps to
+/// is read by the binary and by any consumer that carries this verb.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Ending {
+pub enum Ending {
+    /// The run's graph is complete.
     Settled,
+    /// A blocking surface is waiting to be answered.
     SurfaceWaiting,
+    /// Nothing is driving the run.
     NothingDriving,
     /// A node the wait named settled, and this is the one that did.
     ///
@@ -70,11 +76,13 @@ enum Ending {
     /// caller acts on.
     // llmlint: ignore[invalid_states_unrepresentable] a node id is a `String` everywhere it exists in this crate — `Graph`'s keys, `Envelope::labels.node`, `RunState::statuses` — and this one is *read out of* a journalled settlement's own label rather than composed here, so a newtype at this one site would validate nothing the graph has not already said while putting a type between this ending and every value it is built from. `src/cli.rs` carries the same suppression, for the same reason, on the flag this is parsed from.
     NodeSettled(String),
+    /// The wait's own bound ran out.
     Elapsed,
 }
 
 impl Ending {
-    const fn as_str(&self) -> &'static str {
+    /// The condition's own word, as the machine form's `condition` spells it.
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Settled => "settled",
             Self::SurfaceWaiting => "surface-waiting",
@@ -84,7 +92,8 @@ impl Ending {
         }
     }
 
-    const fn exit_code(&self) -> i32 {
+    /// The status the binary exits with for this ending.
+    pub const fn exit_code(&self) -> i32 {
         match self {
             Self::Settled => EXIT_SUCCESS,
             Self::SurfaceWaiting => EXIT_SURFACE_WAITING,
@@ -135,22 +144,93 @@ impl serde::Serialize for Ending {
     }
 }
 
+/// What a watch is asked for: the shape of the wait, with the run and the
+/// profile resolved by the caller.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Request {
+    /// The profile the event view is shaped through.
+    pub filter: EventFilter,
+    /// How long to wait before giving up.
+    pub timeout: WatchTimeout,
+    /// How long a silence may last before the stream says it is still there.
+    /// Zero turns the heartbeat off.
+    pub tick: Duration,
+    /// A cursor an earlier watch printed, to resume from.
+    pub cursor: Option<String>,
+    /// What ends the wait, beside the run finishing and nothing driving it.
+    pub until: Vec<WatchUntil>,
+}
+
+/// One thing a watch says as it waits, handed to the caller's sink as it
+/// happens.
+///
+/// Each frame carries the view it was decided from, so a renderer can say what
+/// the binary says — the event's line names what this crate knows about it
+/// since, and the heartbeat names how the run is being driven — without a
+/// second read of the run.
+#[derive(Debug)]
+pub enum Frame<'a> {
+    /// One meaningful event, as the envelope itself.
+    Event {
+        /// The run as the read that found the event saw it.
+        view: &'a RunView,
+        /// The event.
+        event: &'a Envelope,
+    },
+    /// A heartbeat: nothing has happened for a whole tick, and the watch is
+    /// still there.
+    Tick {
+        /// The run as the last read saw it.
+        view: &'a RunView,
+    },
+    /// The wait is over, and this is why.
+    Ended {
+        /// The run as the read that ended the wait saw it.
+        view: &'a RunView,
+        /// Why, and where the next watch resumes from.
+        outcome: &'a Outcome,
+    },
+}
+
+/// How a watch ended: the condition, and the cursor the next watch resumes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outcome {
+    /// Why the wait returned.
+    pub ending: Ending,
+    /// The cursor token the next watch resumes from.
+    pub cursor: String,
+}
+
+impl Outcome {
+    /// The status the binary exits with.
+    pub const fn exit_code(&self) -> i32 {
+        self.ending.exit_code()
+    }
+}
+
 /// Block until the run needs a supervisor, or until the wait runs out.
 ///
 /// The run and the profile are resolved by the caller, and everything else this
-/// verb can refuse is refused here before a line is written or a second is
+/// verb can refuse is refused here before a frame is handed out or a second is
 /// waited: the cursor, and every condition the wait was told to return on. A
 /// watch that waited five minutes — or, now that a wait may have no bound at all,
 /// forever — to report a typo would be worse than the loop it replaces.
-pub(crate) fn watch(args: &WatchArgs, paths: &RunPaths, filter: &EventFilter) -> Result<i32> {
-    let mut cursor = match args.cursor.as_deref() {
+///
+/// Every frame goes to `sink` as it happens, and a sink that refuses one ends
+/// the wait with its refusal: the binary's sink is a pipe, and a pipe that has
+/// closed is the end of what a watch can report.
+pub(crate) fn watch(
+    paths: &RunPaths,
+    request: &Request,
+    sink: &mut dyn FnMut(Frame<'_>) -> Result<()>,
+) -> Result<Outcome> {
+    let mut cursor = match request.cursor.as_deref() {
         Some(token) => resolve_cursor(paths, token)?,
         None => Cursor::start(&paths.run),
     };
-    let deadline = deadline(args.timeout)?;
-    let tick = Duration::from_secs(args.tick_interval);
+    let deadline = deadline(request.timeout)?;
+    let tick = request.tick;
     let mut quiet_since = Instant::now();
-    let mut out = Emitter::new();
 
     // What the wait watches is fingerprinted before the first read, so anything
     // written while that read runs moves it past what the read saw.
@@ -163,7 +243,7 @@ pub(crate) fn watch(args: &WatchArgs, paths: &RunPaths, filter: &EventFilter) ->
     // could never be met at all.
     let (mut view, mut fresh) = read_run(paths, &mut cursor)?;
     changes.observe(&view);
-    let selectors = Selectors::resolve(&args.until, &view, &fresh)?;
+    let selectors = Selectors::resolve(&request.until, &view, &fresh)?;
 
     // The record that says this run is being watched, written once every refusal
     // above has been made — a command that never watched anything leaves no
@@ -175,6 +255,21 @@ pub(crate) fn watch(args: &WatchArgs, paths: &RunPaths, filter: &EventFilter) ->
     // may never be relied upon.
     let _armed = crate::watchers::Armed::arm(paths);
 
+    let ended = |view: &RunView,
+                 ending: Ending,
+                 cursor: &Cursor,
+                 sink: &mut dyn FnMut(Frame<'_>) -> Result<()>| {
+        let outcome = Outcome {
+            ending,
+            cursor: cursor.to_string(),
+        };
+        sink(Frame::Ended {
+            view,
+            outcome: &outcome,
+        })?;
+        Ok(outcome)
+    };
+
     // Whether the last wait saw the run move. Only a pass over a run that moved
     // emits or asks whether the wait is over: everything those decide from is in
     // what `RunChanges` fingerprints, so a run that did not move is neither read
@@ -184,21 +279,21 @@ pub(crate) fn watch(args: &WatchArgs, paths: &RunPaths, filter: &EventFilter) ->
         if moved {
             for event in fresh
                 .iter()
-                .filter(|event| meaningful(event) && filter.matches(event))
+                .filter(|event| meaningful(event) && request.filter.matches(event))
             {
-                out.event(&view, event)?;
+                sink(Frame::Event { view: &view, event })?;
                 quiet_since = Instant::now();
             }
 
             if let Some(ending) = concluded(&view, paths, &selectors, &fresh) {
-                return out.returned(&view, ending, &cursor);
+                return ended(&view, ending, &cursor, sink);
             }
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return out.returned(&view, Ending::Elapsed, &cursor);
+            return ended(&view, Ending::Elapsed, &cursor, sink);
         }
         if !tick.is_zero() && quiet_since.elapsed() >= tick {
-            out.heartbeat(&view)?;
+            sink(Frame::Tick { view: &view })?;
             quiet_since = Instant::now();
         }
         let within = wake_within(deadline, tick, quiet_since);
@@ -535,55 +630,56 @@ fn deadline(timeout: WatchTimeout) -> Result<Option<Instant>> {
 ///
 /// Here rather than in the views because the cursor is this module's: one type,
 /// one parser and one tail read behind both verbs, so a token either prints is
-/// a token the other reads. The events rendered and the byte printed come out
-/// of the **same** read of the journal — see [`views::monitor_of`] for why
-/// [`RunView::open`]'s own copy of the store will not do — and the byte is past
-/// every finished record that read reached, whether or not the profile showed
-/// it, exactly as a watch advances its own.
+/// a token the other reads. The events handed back and the byte the cursor
+/// names come out of the **same** read of the journal — see [`views::monitor_of`]
+/// for why [`RunView::open`]'s own copy of the store will not do — and the byte
+/// is past every finished record that read reached, whether or not the profile
+/// showed it, exactly as a watch advances its own.
 ///
-/// Every refusal is made before a line is written, so a cursor this run cannot
-/// place prints no events at all.
-pub(crate) fn monitor(
-    args: &MonitorArgs,
+/// Every refusal is made before anything is read, so a cursor this run cannot
+/// place hands back no events at all.
+pub(crate) fn monitored(
     paths: &RunPaths,
-    view: &RunView,
+    view: RunView,
     filter: &EventFilter,
-) -> Result<i32> {
-    let document = monitor_document(args, paths, view, filter)?;
-    // One write of the whole document, and a failed one refused rather than
-    // panicked on: a caller that closed the pipe early is not this run's failure,
-    // and it is the end of what this pass can report.
-    let mut out = std::io::stdout();
-    // llmlint: ignore-block[cli_output_contract] `monitor` has no machine form: its stdout is one line-oriented document, and the resume line's place in it, last and after the trailer, is the contract its consumer reads back. The NDJSON form is `watch`'s, on its own descriptor.
-    writeln!(out, "{document}")
-        .and_then(|()| out.flush())
-        .map_err(|e| {
-            Error::Invalid(format!("`monitor` could not write to standard output: {e}"))
-        })?;
-    // llmlint: ignore-end[cli_output_contract]
-    Ok(EXIT_SUCCESS)
-}
-
-/// The document one `monitor` pass writes, resume line and all.
-///
-/// Apart from the write so the one-read property is held by a test that can put
-/// a record between the view's read and this one — which no invocation of the
-/// binary can be made to do on demand.
-pub(crate) fn monitor_document(
-    args: &MonitorArgs,
-    paths: &RunPaths,
-    view: &RunView,
-    filter: &EventFilter,
-) -> Result<String> {
-    let mut cursor = match args.cursor.as_deref() {
+    cursor: Option<&str>,
+) -> Result<Monitored> {
+    let mut cursor = match cursor {
         Some(token) => resolve_cursor(paths, token)?,
         None => Cursor::start(&paths.run),
     };
-    let fresh = tail(paths, &mut cursor);
-    Ok(format!(
-        "{}-- cursor {cursor}",
-        views::monitor_of(view, &fresh, filter)
-    ))
+    let events = tail(paths, &mut cursor)
+        .into_iter()
+        .filter(|event| filter.matches(event))
+        .collect();
+    Ok(Monitored {
+        view,
+        events,
+        cursor: cursor.to_string(),
+    })
+}
+
+/// What one `monitor` pass read: the events past the cursor it was given, shown
+/// through the profile, and the cursor the next pass resumes from.
+#[derive(Debug)]
+pub struct Monitored {
+    /// The run as the pass read it, which the event lines are rendered against.
+    pub view: RunView,
+    /// The events the profile admitted, in merge order.
+    pub events: Vec<Envelope>,
+    /// The cursor token the next pass resumes from.
+    pub cursor: String,
+}
+
+impl Monitored {
+    /// The document one `monitor` pass prints, resume line and all.
+    pub(crate) fn render(&self) -> String {
+        format!(
+            "{}-- cursor {}",
+            views::monitor_shown(&self.view, &self.events),
+            self.cursor
+        )
+    }
 }
 
 fn tail(paths: &RunPaths, cursor: &mut Cursor) -> Vec<Envelope> {
@@ -964,7 +1060,8 @@ enum Record<'a> {
         /// contradicts.
         #[serde(flatten)]
         ending: &'a Ending,
-        cursor: &'a Cursor,
+        /// The token, as [`Cursor`] spells it.
+        cursor: &'a str,
         unread: UnreadRecord<'a>,
     },
 }
@@ -1001,101 +1098,105 @@ impl<'a> UnreadRecord<'a> {
     }
 }
 
-/// The two forms a watch writes, on the two descriptors that keep them apart.
+/// The two forms of one frame, on the two descriptors that keep them apart.
 ///
-/// The human stream goes to standard error and the machine-readable one to
+/// The human line goes to standard error and the machine-readable one to
 /// standard output, which is the split an attached `start` already makes and for
 /// the same reason: a script reads stdout as NDJSON while a terminal beside it
-/// follows the run. Each line is flushed as it is written — a watch is a
-/// **blocking** verb, and a consumer reading it incrementally through a pipe
-/// would otherwise see nothing until the process exits, which is the silence
-/// this whole verb exists to end.
-struct Emitter {
-    machine: std::io::Stdout,
-    human: std::io::Stderr,
+/// follows the run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lines {
+    /// The line a person reads, without its terminator.
+    pub human: String,
+    /// The record a script reads, one JSON object, without its terminator.
+    pub machine: String,
 }
 
-impl Emitter {
-    fn new() -> Self {
-        Self {
-            machine: std::io::stdout(),
-            human: std::io::stderr(),
-        }
-    }
-
-    fn event(&mut self, view: &RunView, event: &Envelope) -> Result<()> {
-        self.say(&views::event_line(view, event), &Record::Event { event })
-    }
-
-    fn heartbeat(&mut self, view: &RunView) -> Result<()> {
-        let unread = view.unread();
-        self.say(
-            &format!(
-                "-- watching {}  {}  {}",
-                view.paths.run,
-                views::liveness_word(view),
-                unread_phrase(&unread)
-            ),
-            &Record::Heartbeat {
-                run_id: &view.paths.run,
-                unread: UnreadRecord::of(&unread),
-            },
-        )
-    }
-
-    /// The last thing a watch says: why it returned, what is unread, and the
-    /// cursor the next one resumes from.
-    fn returned(&mut self, view: &RunView, ending: Ending, cursor: &Cursor) -> Result<i32> {
-        let unread = view.unread();
-        let code = ending.exit_code();
-        self.say(
-            &format!(
-                "-- watch {} {}  {}  cursor {cursor}",
-                view.paths.run,
-                ending.phrase(),
-                unread_phrase(&unread)
-            ),
-            &Record::Return {
-                run_id: &view.paths.run,
-                ending: &ending,
-                cursor,
-                unread: UnreadRecord::of(&unread),
-            },
-        )?;
-        Ok(code)
-    }
-
-    /// Write one line of each form, flushing both.
+impl Lines {
+    /// Render one frame both ways.
     ///
-    /// A write that fails is the caller's pipe closing, which is not this run's
-    /// failure — but it is the end of what this watch can report, so it refuses
-    /// rather than going on emitting into a descriptor nobody is reading.
+    /// # Errors
     ///
-    /// **The machine record goes last**, after its human counterpart is written
-    /// and flushed, because a refusal here becomes [`EXIT_REFUSED`] and the last
-    /// machine record is where a caller reads the exit it should have got. Were
-    /// the order the other way, a stderr that broke after the return record was
-    /// flushed would leave stdout declaring exit `0` on a process that exited
-    /// `2` — a caller branching on the machine form, which is the one thing this
-    /// verb promises, would read a settled run off a watch that refused.
-    ///
-    /// [`EXIT_REFUSED`]: crate::error::EXIT_REFUSED
-    fn say(&mut self, human: &str, machine: &Record<'_>) -> Result<()> {
-        let broken = |what: &str, error: std::io::Error| {
-            Error::Invalid(format!("the watch could not write to {what}: {error}"))
+    /// [`Error::Invalid`] when the machine record cannot be rendered, which no
+    /// frame this crate builds reaches.
+    pub(crate) fn of(frame: &Frame<'_>) -> Result<Self> {
+        let rendered = |record: &Record<'_>| {
+            serde_json::to_string(record)
+                .map_err(|e| Error::Invalid(format!("the watch could not render a record: {e}")))
         };
-        let machine = serde_json::to_string(machine)
-            .map_err(|e| Error::Invalid(format!("the watch could not render a record: {e}")))?;
-        writeln!(self.human, "{human}").map_err(|e| broken("standard error", e))?;
-        self.human
-            .flush()
-            .map_err(|e| broken("standard error", e))?;
-        writeln!(self.machine, "{machine}").map_err(|e| broken("standard output", e))?;
-        self.machine
-            .flush()
-            .map_err(|e| broken("standard output", e))?;
-        Ok(())
+        let (human, machine) = match frame {
+            Frame::Event { view, event } => (
+                views::event_line(view, event),
+                rendered(&Record::Event { event })?,
+            ),
+            Frame::Tick { view } => {
+                let unread = view.unread();
+                (
+                    format!(
+                        "-- watching {}  {}  {}",
+                        view.paths.run,
+                        views::liveness_word(view),
+                        unread_phrase(&unread)
+                    ),
+                    rendered(&Record::Heartbeat {
+                        run_id: &view.paths.run,
+                        unread: UnreadRecord::of(&unread),
+                    })?,
+                )
+            }
+            Frame::Ended { view, outcome } => {
+                let unread = view.unread();
+                (
+                    format!(
+                        "-- watch {} {}  {}  cursor {}",
+                        view.paths.run,
+                        outcome.ending.phrase(),
+                        unread_phrase(&unread),
+                        outcome.cursor
+                    ),
+                    rendered(&Record::Return {
+                        run_id: &view.paths.run,
+                        ending: &outcome.ending,
+                        cursor: &outcome.cursor,
+                        unread: UnreadRecord::of(&unread),
+                    })?,
+                )
+            }
+        };
+        Ok(Self { human, machine })
     }
+}
+
+/// Write one frame's two lines to the process's two streams, flushing both.
+///
+/// Each line is flushed as it is written — a watch is a **blocking** verb, and a
+/// consumer reading it incrementally through a pipe would otherwise see nothing
+/// until the process exits, which is the silence this whole verb exists to end.
+///
+/// A write that fails is the caller's pipe closing, which is not this run's
+/// failure — but it is the end of what this watch can report, so it refuses
+/// rather than going on emitting into a descriptor nobody is reading.
+///
+/// **The machine record goes last**, after its human counterpart is written
+/// and flushed, because a refusal here becomes [`EXIT_REFUSED`] and the last
+/// machine record is where a caller reads the exit it should have got. Were
+/// the order the other way, a stderr that broke after the return record was
+/// flushed would leave stdout declaring exit `0` on a process that exited
+/// `2` — a caller branching on the machine form, which is the one thing this
+/// verb promises, would read a settled run off a watch that refused.
+///
+/// [`EXIT_REFUSED`]: crate::error::EXIT_REFUSED
+pub(crate) fn say(lines: &Lines) -> Result<()> {
+    let broken = |what: &str, error: std::io::Error| {
+        Error::Invalid(format!("the watch could not write to {what}: {error}"))
+    };
+    let mut human = std::io::stderr();
+    let mut machine = std::io::stdout();
+    writeln!(human, "{}", lines.human).map_err(|e| broken("standard error", e))?;
+    human.flush().map_err(|e| broken("standard error", e))?;
+    writeln!(machine, "{}", lines.machine).map_err(|e| broken("standard output", e))?;
+    machine.flush().map_err(|e| broken("standard output", e))?;
+    Ok(())
 }
 
 /// How many planner surfaces are unread and of which kinds, as one clause.
@@ -1560,7 +1661,7 @@ mod tests {
             Record::Return {
                 run_id: "demo",
                 ending: &Ending::NodeSettled("build".to_string()),
-                cursor: &Cursor::start("demo"),
+                cursor: &Cursor::start("demo").to_string(),
                 unread: UnreadRecord::of(&unread),
             },
         ];
@@ -1684,7 +1785,7 @@ mod tests {
             Record::Return {
                 run_id: "demo",
                 ending: &Ending::NodeSettled("build".to_string()),
-                cursor: &Cursor::start("demo"),
+                cursor: &Cursor::start("demo").to_string(),
                 unread: UnreadRecord::of(&unread),
             },
         ] {

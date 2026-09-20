@@ -55,6 +55,8 @@ pub mod note;
 pub mod plan;
 pub mod report;
 pub mod rules;
+pub mod telemetry;
+pub mod verbs;
 pub mod views;
 
 // The engine behind the contract's surface. These modules are private on
@@ -87,7 +89,6 @@ mod rendercost;
 mod summary;
 mod sys;
 mod taskgraph;
-mod telemetry;
 mod unwatched;
 mod vcs;
 mod watch;

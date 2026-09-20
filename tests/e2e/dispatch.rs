@@ -19,7 +19,7 @@
 // these journeys run inside `just check`, which has neither a credential nor a budget
 // for one.
 
-use crate::harness::{agent, human, plan_of, World, REFUSED, REPORTING_MEMBER};
+use crate::harness::{agent, human, plan_of, rows, World, REFUSED, REPORTING_MEMBER};
 use serde_json::{json, Value};
 
 #[cfg(unix)]
@@ -4330,9 +4330,8 @@ fn a_run_whose_observer_graph_is_watching_and_then_is_killed_reads_as_each() {
     let line = |run: &str, view: &[&str]| -> String {
         let rendered = world.run_on_agentgraph(view);
         rendered.exited(0);
-        rendered
-            .stdout
-            .lines()
+        rows(&rendered.stdout)
+            .into_iter()
             .find(|line| line.contains(run))
             .unwrap_or_else(|| panic!("no line for {run} in:\n{}", rendered.stdout))
             .to_string()

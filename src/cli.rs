@@ -225,12 +225,16 @@ pub enum PlanCommand {
     Check(PlanCheckArgs),
 }
 
-/// The channel has no engine-owned serving verbs.
+/// The channel has no engine-owned serving verbs; what it has is a read.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[command(rename_all = "kebab-case")]
 pub enum ChannelCommand {
     /// Parser sentinel: the channel exposes no executable engine verb.
     #[command(hide = true, name = "__no-engine-verb")]
     NoEngineVerb,
+    /// Read a run's channel: every surface and where it is, the replies, and the
+    /// command queue with the reconciler's answers. Consumes nothing.
+    Queue(RunArgs),
 }
 
 /// `onepipeline plan check`.
@@ -873,6 +877,9 @@ pub struct RunsArgs {
     /// List only the runs this session launched.
     #[arg(long)]
     pub mine: bool,
+    /// One row per run, by run id, rather than grouped by project.
+    #[arg(long)]
+    pub flat: bool,
 }
 
 /// `onepipeline transcript`.

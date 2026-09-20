@@ -672,6 +672,11 @@ fn rendered(world: &World, argv: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// The run rows of a grouped listing, collected.
+fn rows(rendered: &str) -> Vec<&str> {
+    crate::harness::rows(rendered)
+}
+
 fn median(world: &World, argv: &[&str]) -> std::time::Duration {
     let mut took: Vec<std::time::Duration> = Vec::with_capacity(TIMED);
     for nth in 0..=TIMED {
@@ -841,12 +846,12 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
 
     let owned_rows = rendered(&world, &["runs", "--mine"]);
     assert_eq!(
-        owned_rows.lines().count(),
+        rows(&owned_rows).len(),
         SCALED_OWNED,
         "--mine over {SCALED_RUNS} run roots rendered something other than the {SCALED_OWNED} \
          this session owns"
     );
-    for row in owned_rows.lines() {
+    for row in rows(&owned_rows) {
         assert!(
             row.contains(OWNED_TALLY),
             "an owned row does not carry the node tally the bound is set against, so this \
@@ -864,7 +869,10 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
     // a reader who cannot see what they are cannot weigh it.
     println!(
         "  the rows this bound is measured over:\n    {}\n    {}",
-        owned_rows.lines().next().unwrap_or("(no owned row)"),
+        rows(&owned_rows)
+            .first()
+            .copied()
+            .unwrap_or("(no owned row)"),
         rendered(&world, &["runs"])
             .lines()
             .find(|row| row.contains(BULK_TALLY))
@@ -874,8 +882,8 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
     // And every row on the root, owned or not, is a row folded out of a real
     // graph rather than an empty one.
     let all_rows = rendered(&world, &["runs"]);
-    assert_eq!(all_rows.lines().count(), SCALED_RUNS);
-    for row in all_rows.lines() {
+    assert_eq!(rows(&all_rows).len(), SCALED_RUNS);
+    for row in rows(&all_rows) {
         assert!(
             row.contains(BULK_TALLY) || row.contains(OWNED_TALLY),
             "a row carries neither tally, so the fixture has gone degenerate and the bound \
@@ -968,7 +976,7 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
          {bytes} it held"
     );
     assert_eq!(
-        rendered(&world, &["runs"]).lines().count(),
+        rows(&rendered(&world, &["runs"])).len(),
         SCALED_RUNS,
         "the run count did not stay where it was"
     );

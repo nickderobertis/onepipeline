@@ -13,6 +13,7 @@
 //! because taking over ongoing work is exactly the case where a second opinion
 //! is worth more than an override.
 
+use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,11 +22,8 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 use crate::agentgraph;
-use crate::channel::{Author, ChannelState, Command, Reply, Surface, SurfaceKind};
-use crate::cli::{
-    AdoptArgs, AttestArgs, Cli, DriveRunArgs, OptionalRunArgs, ReadArgs, ReplyArgs, RunsArgs,
-    StartArgs, StopArgs, SurfaceArgs, TelemetryArgs, TranscriptArgs, ADOPT_FLAG, DAG_GRAPH_OFF,
-};
+use crate::channel::{Author, ChannelState, Command, Reply};
+use crate::cli::{Cli, ReadArgs, ReplyArgs, StartArgs, SurfaceArgs, ADOPT_FLAG, DAG_GRAPH_OFF};
 use crate::concurrency::{self, Liveness, State};
 use crate::edits::{self, Frontier};
 use crate::engine;
@@ -36,7 +34,6 @@ use crate::journal::{self, Journal};
 use crate::ledger::{self, LaunchRecord, RunPaths};
 use crate::plan::Plan;
 use crate::sys::{self, Claim};
-use crate::telemetry;
 use crate::views::{self, RunView};
 
 /// How often an attach re-reads the run to see whether it has settled.
@@ -72,29 +69,135 @@ const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
 const DRIVER_LOG_LINES: usize = 8;
 
 /// Execute one parsed command line.
+///
+/// **Argument parsing over the [`verbs`](crate::verbs)**: every post-launch arm
+/// here is parse → call → render → exit code and nothing else, so a behaviour
+/// the binary has and the SDK lacks cannot be added here without being added
+/// there. `tests/parity.rs` holds the two to one another. What keeps an arm of
+/// its own is a launch — `start`, `plan check`, and the two hidden retained
+/// verbs — which is not a post-launch verb.
 pub fn dispatch(cli: Cli) -> Result<i32> {
     use crate::cli::Command as Verb;
+    use crate::verbs;
     match cli.command {
         Verb::Start(args) => start(&args),
         Verb::Plan(crate::cli::PlanCommand::Check(args)) => crate::plancheck::check(&args),
-        Verb::Adopt(args) => adopt(&args),
+        Verb::Adopt(args) => {
+            let paths = resolve(&args.run)?;
+            let how = if args.detach {
+                // Before the driver exists, and only on this path: a detaching
+                // launcher is about to exit, and the driver it is about to
+                // start must not hold this process's streams open behind it.
+                // See [`sys::disown_standard_handles`] for what inherits what.
+                sys::disown_standard_handles();
+                verbs::Adopt::Detached(retain_this_executable(&paths, Retained::Adopting)?)
+            } else {
+                verbs::Adopt::Attached
+            };
+            let adopted = verbs::adopt(&paths, how)?;
+            println!("{}", verbs::render_adopted(&adopted));
+            Ok(adopted.exit_code())
+        }
         Verb::Channel(crate::cli::ChannelCommand::NoEngineVerb) => Err(Error::Invalid(
             "the channel exposes no engine-owned verb".to_owned(),
         )),
-        Verb::DriveRun(args) => drive_run(&args),
-        Verb::Next(args) => next(&args),
-        Verb::Reply(args) => reply(&args),
-        Verb::Surface(args) => surface(&args),
-        Verb::Attest(args) => attest(&args),
-        Verb::Stop(args) => stop(&args),
-        Verb::Runs(args) => runs(&args),
-        Verb::Status(args) => status(&args),
-        Verb::Host => report(&OptionalRunArgs { run: None }, views::host),
+        Verb::Channel(crate::cli::ChannelCommand::Queue(args)) => {
+            let queue = verbs::channel(&resolve(&args.run)?)?;
+            println!("{}", verbs::render_channel(&queue)?);
+            Ok(EXIT_SUCCESS)
+        }
+        Verb::DriveRun(args) => verbs::drive_run(
+            &resolve(&args.run)?,
+            if args.adopt {
+                Retained::Adopting
+            } else {
+                Retained::Driving
+            },
+        ),
+        Verb::Next(args) => {
+            let paths = resolve(&args.run)?;
+            let filter = read_filter(&paths, &args)?;
+            let next = verbs::next(&paths, &filter)?;
+            println!("{}", verbs::render_next(&next));
+            Ok(EXIT_SUCCESS)
+        }
+        Verb::Reply(args) => {
+            let paths = resolve(&args.run)?;
+            let text = reply_text(&args)?;
+            let receipt = verbs::reply(&paths, args.correlation.as_ref(), &text)?;
+            said(&receipt)
+        }
+        Verb::Surface(args) => {
+            let paths = resolve(&args.run)?;
+            // Read the body before anything is queued, so an unreadable file or
+            // an empty stdin refuses the command rather than queuing a surface
+            // with nothing in it.
+            let message = surface_message(&args)?;
+            let surfaced = verbs::surface(&paths, args.kind, message)?;
+            println!("{}", verbs::render_surfaced(&surfaced));
+            Ok(EXIT_SUCCESS)
+        }
+        Verb::Attest(args) => said(&verbs::attest(&resolve(&args.run)?, &args.reference)?),
+        Verb::Stop(args) => {
+            let paths = resolve(&args.run)?;
+            let stopped = verbs::stop(
+                &paths,
+                verbs::StopRequest {
+                    session: &sys::launching_session(),
+                    force: args.force,
+                },
+            )?;
+            if let Some(refusal) = stopped.refusal() {
+                return Err(Error::Refused(refusal));
+            }
+            println!("{}", verbs::render_stopped(&stopped));
+            Ok(stopped.exit_code())
+        }
+        Verb::Runs(args) => {
+            let session = sys::launching_session();
+            let projects = verbs::runs(&ledger::runs_root(), &session, args.mine);
+            let grouping = if args.flat {
+                verbs::Grouping::Flat
+            } else {
+                verbs::Grouping::Grouped
+            };
+            print!("{}", verbs::render_runs(&projects, grouping, &session));
+            Ok(EXIT_SUCCESS)
+        }
+        Verb::Status(args) => {
+            let status = verbs::status(&ledger::runs_root(), args.run.as_deref())?;
+            // llmlint: ignore-block[no_panics_on_recoverable_errors] how this binary writes a view
+            // to stdout is one decision for all of the view verbs in this file, not this verb's:
+            // every view verb here prints the same way, and `src/AGENTS.md` records the exit codes
+            // as spent — `0`/`1`/`2` are `reply`'s verdicts, `3` is "nothing is driving the run" —
+            // so a write this one returned as an error would have to carry a code that already
+            // means something else. Making a closed pipe a first-class outcome is a change to the
+            // whole command surface and to the contract's exit codes, which belongs with the
+            // planner who owns them rather than in the one verb a diff happens to touch.
+            print!("{}", verbs::render_status(&status));
+            // llmlint: ignore-end[no_panics_on_recoverable_errors]
+            Ok(EXIT_SUCCESS)
+        }
+        Verb::Host => {
+            print!("{}", verbs::render_host(&verbs::host(&ledger::runs_root())));
+            Ok(EXIT_SUCCESS)
+        }
         Verb::Monitor(args) => {
             let paths = resolve(&args.read.run)?;
-            let view = RunView::open(&paths)?;
-            let filter = read_filter(&view, &args.read)?;
-            crate::watch::monitor(&args, &paths, &view, &filter)
+            let filter = read_filter(&paths, &args.read)?;
+            let monitored = verbs::monitor(&paths, &filter, args.cursor.as_deref())?;
+            // One write of the whole document, and a failed one refused rather than
+            // panicked on: a caller that closed the pipe early is not this run's failure,
+            // and it is the end of what this pass can report.
+            let mut out = std::io::stdout();
+            // llmlint: ignore-block[cli_output_contract] `monitor` has no machine form: its stdout is one line-oriented document, and the resume line's place in it, last and after the trailer, is the contract its consumer reads back. The NDJSON form is `watch`'s, on its own descriptor.
+            writeln!(out, "{}", verbs::render_monitor(&monitored))
+                .and_then(|()| out.flush())
+                .map_err(|e| {
+                    Error::Invalid(format!("`monitor` could not write to standard output: {e}"))
+                })?;
+            // llmlint: ignore-end[cli_output_contract]
+            Ok(EXIT_SUCCESS)
         }
         Verb::Watch(args) => {
             // Both refusals are made before anything blocks: a run that is not
@@ -102,18 +205,56 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             // out its whole timeout to report a mistyped profile name would be
             // worse than the shell loop it replaces.
             let paths = resolve(&args.read.run)?;
-            let view = RunView::open(&paths)?;
-            let filter = read_filter(&view, &args.read)?;
-            crate::watch::watch(&args, &paths, &filter)
+            let filter = read_filter(&paths, &args.read)?;
+            let request = verbs::WatchRequest {
+                filter,
+                timeout: args.timeout,
+                tick: Duration::from_secs(args.tick_interval),
+                cursor: args.cursor.clone(),
+                until: args.until.clone(),
+            };
+            let outcome = verbs::watch(&paths, &request, &mut |frame| {
+                crate::watch::say(&verbs::render_watch_frame(&frame)?)
+            })?;
+            Ok(outcome.exit_code())
         }
-        Verb::Unwatched(args) => crate::unwatched::unwatched(&args),
+        Verb::Unwatched(args) => {
+            let session = crate::unwatched::session(&args)?;
+            let unwatched = verbs::unwatched(&ledger::runs_root(), &session)?;
+            // llmlint: ignore-block[cli_output_contract] both streams are written here rather than
+            // returned as one rendering, because the split *is* this verb's answer: the reported
+            // runs are what a hook acts on and go on standard output, and everything unresolved is
+            // named on standard error where it changes no exit status. A verb whose answer is two
+            // streams cannot hand one string to a caller that prints it.
+            eprint!("{}", unwatched.unresolved.concat());
+            print!("{}", verbs::render_unwatched(&unwatched));
+            // llmlint: ignore-end[cli_output_contract]
+            Ok(unwatched.exit_code())
+        }
         Verb::Results(args) => {
-            print!("{}", views::results(&RunView::open(&resolve(&args.run)?)?));
+            print!(
+                "{}",
+                verbs::render_results(&verbs::results(&resolve(&args.run)?)?)
+            );
             Ok(EXIT_SUCCESS)
         }
-        Verb::Goals(args) => report(&args, views::goals),
-        Verb::Transcript(args) => transcript(&args),
-        Verb::Telemetry(args) => report_telemetry(&args),
+        Verb::Goals(args) => {
+            print!(
+                "{}",
+                verbs::render_goals(&verbs::goals(&ledger::runs_root(), args.run.as_deref())?)
+            );
+            Ok(EXIT_SUCCESS)
+        }
+        Verb::Transcript(args) => {
+            let transcript = verbs::transcript(&resolve(&args.run)?, args.node.as_deref())?;
+            print!("{}", verbs::render_transcript(&transcript));
+            Ok(EXIT_SUCCESS)
+        }
+        Verb::Telemetry(args) => {
+            let measured = verbs::telemetry(&ledger::runs_root(), args.run.as_deref())?;
+            print!("{}", verbs::render_telemetry(&measured, args.breakdown)?);
+            Ok(EXIT_SUCCESS)
+        }
         Verb::Drive(args) => agentgraph::drive(
             &args.graph,
             &args.task,
@@ -129,25 +270,40 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
     }
 }
 
-/// The paths for a run that exists, or a refusal naming the root searched.
+/// Print a receipt and what rides beside it, and answer the status it carries.
+///
+/// The receipt on standard output, as entry 64 states it; the advice — what a
+/// queued envelope is waiting for, and a landing settled with no release stated
+/// for it — beside it on standard error, where it changes nothing a script parses.
+fn said(receipt: &crate::verbs::Receipt) -> Result<i32> {
+    println!("{}", crate::verbs::render_receipt(receipt)?);
+    for advice in &receipt.advice {
+        eprintln!("{advice}");
+    }
+    Ok(receipt.exit_code())
+}
+
+/// The envelope's text: the named file, or stdin.
+fn reply_text(args: &ReplyArgs) -> Result<String> {
+    match &args.file {
+        Some(path) => std::fs::read_to_string(path).map_err(|e| Error::Ledger {
+            path: path.clone(),
+            source: e,
+        }),
+        None => {
+            let mut buffer = String::new();
+            std::io::stdin()
+                .read_to_string_compat(&mut buffer)
+                .map_err(|e| Error::Refused(format!("cannot read the reply from stdin: {e}")))?;
+            Ok(buffer)
+        }
+    }
+}
+
+/// The paths for a run that exists under the runs root this process reads, or
+/// a refusal naming the root searched.
 fn resolve(run: &str) -> Result<RunPaths> {
-    // Before it is joined onto anything. A run id that navigates is not a run
-    // this root holds, and reporting it as merely missing would leave a caller
-    // believing the path they typed was looked for where they meant.
-    if !ledger::is_valid_run_id(run) {
-        return Err(Error::Invalid(format!(
-            "'{run}' is not a run id: a run id names one directory under the runs root, \
-             so it may not be a path"
-        )));
-    }
-    let paths = RunPaths::new(run);
-    if !paths.exists() {
-        return Err(Error::NoSuchRun {
-            run: run.to_string(),
-            root: ledger::runs_root(),
-        });
-    }
-    Ok(paths)
+    crate::verbs::resolved(&ledger::runs_root(), run)
 }
 
 fn launch_dir() -> Result<PathBuf> {
@@ -338,7 +494,11 @@ fn declared_filters(
 /// profile name is a bare word — so the only ambiguity would be a file on disk
 /// named `planner`, and a run's own vocabulary is what a reader of that run
 /// means.
-fn read_filter(view: &RunView, args: &ReadArgs) -> Result<EventFilter> {
+///
+/// Off the run's **launch record** alone — the profiles a run has are declared
+/// there — so resolving a reader's flags costs one small file and never the fold
+/// the verb it is parsed for is about to make.
+fn read_filter(paths: &RunPaths, args: &ReadArgs) -> Result<EventFilter> {
     if args.all {
         return Ok(EventFilter::default());
     }
@@ -346,7 +506,8 @@ fn read_filter(view: &RunView, args: &ReadArgs) -> Result<EventFilter> {
     if named.trim_start().starts_with('{') {
         return Ok(EventFilter::read(named)?);
     }
-    match view.launch.filters.profile(named) {
+    let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
+    match launch.filters.profile(named) {
         Ok(filter) => Ok(filter),
         // A spec named as a path is still a spec: the profile lookup is what
         // failed, and this is the second reading rather than a fallback that
@@ -725,7 +886,8 @@ fn start(args: &StartArgs) -> Result<i32> {
         // launch would have run in-process — and it launches the observer
         // itself, so `stop` reaches that graph through the driver's own process
         // tree rather than leaving an agent running beside a stopped run.
-        let mut driver = retain_driver(&paths, Retained::Driving)?;
+        let mut driver =
+            retain_driver(&paths, &retain_this_executable(&paths, Retained::Driving)?)?;
         let pid = driver.id();
         // The driver records its own pid and its observer's graph run, so there
         // is one writer of those fields and no race between this process and the
@@ -733,7 +895,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         // start a driver says so, rather than printing a pid for a process that
         // is already gone.
         confirm_driving(&paths, &mut driver)?;
-        announce_launch(&run, pid);
+        println!("{}", announce_launch(&run, pid));
         return Ok(EXIT_SUCCESS);
     }
 
@@ -749,7 +911,16 @@ fn start(args: &StartArgs) -> Result<i32> {
     let mut observer = observe(&paths, &mut record, goal.as_deref(), output)?;
     ledger::write_json(&paths.launch(), &record)?;
     let mut watch = ObserverWatch::of(&paths, record, goal, output);
-    attach(&paths, observer.as_mut(), &mut watch, lock)
+    let settlement = attach(
+        &paths,
+        observer.as_mut(),
+        &mut watch,
+        lock,
+        &mut |settlement| {
+            println!("{}", settlement.line(&run));
+        },
+    )?;
+    Ok(settlement.exit_code())
 }
 
 /// Launch the run's observer graph, when it was launched with one.
@@ -835,18 +1006,16 @@ fn driver_said(paths: &RunPaths) -> String {
 /// One shape for both detaching verbs — a launch and an adoption leave the same
 /// thing behind, so an operator reads the same record either way, and
 /// `--detach` means on `adopt` exactly what it means on `start`.
-fn announce_launch(run: &str, pid: u32) {
-    println!(
-        "{}",
-        json!({
-            "run_id": run,
-            "pid": pid,
-            "commands": {
-                "next": format!("onepipeline next {run}"),
-                "monitor": format!("onepipeline monitor {run}"),
-            },
-        })
-    );
+pub(crate) fn announce_launch(run: &str, pid: u32) -> String {
+    json!({
+        "run_id": run,
+        "pid": pid,
+        "commands": {
+            "next": format!("onepipeline next {run}"),
+            "monitor": format!("onepipeline monitor {run}"),
+        },
+    })
+    .to_string()
 }
 
 /// What a retained driver is being started to do.
@@ -857,8 +1026,13 @@ fn announce_launch(run: &str, pid: u32) {
 /// the ownership lock. Only the retained process holds that lock, so only it can
 /// do it: a launcher that adopted on its behalf would be writing on behalf of a
 /// driver that does not exist yet.
+///
+/// Published as `verbs::Retained`, because [`verbs::drive_run`] is the public
+/// body of the hidden verb and this is what it is told.
+///
+/// [`verbs::drive_run`]: crate::verbs::drive_run
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Retained {
+pub enum Retained {
     /// `start --detach`: the run has never been driven.
     Driving,
     /// `adopt --detach`: the run is being taken over from the driver that had
@@ -866,12 +1040,39 @@ enum Retained {
     Adopting,
 }
 
+/// This executable at [`engine::DRIVE_VERB`], as the program a detached launch
+/// or adoption retains.
+///
+/// What the binary retains is *itself*: the run is then driven by the same
+/// engine an attached launch would have run in-process. An embedding program
+/// carrying a hidden driver verb of its own names that instead.
+pub(crate) fn retain_this_executable(
+    paths: &RunPaths,
+    retained: Retained,
+) -> Result<crate::verbs::Retain> {
+    let program = std::env::current_exe().map_err(|e| {
+        Error::Invalid(format!(
+            "cannot find this executable to retain a driver: {e}"
+        ))
+    })?;
+    let mut args = vec![engine::DRIVE_VERB.to_owned(), paths.run.clone()];
+    if retained == Retained::Adopting {
+        args.push(format!("--{ADOPT_FLAG}"));
+    }
+    Ok(crate::verbs::Retain { program, args })
+}
+
 /// Start the retained driver a detached launch leaves behind.
 ///
-/// This executable, at [`engine::DRIVE_VERB`], with its output in the run's own
-/// driver log: the process that returns from `start --detach` must not be
-/// holding the pipe a driver writes to.
-fn retain_driver(paths: &RunPaths, retained: Retained) -> Result<std::process::Child> {
+/// `retain`'s program and arguments, exactly as stated — nothing is appended —
+/// with its output in the run's own driver log: the process that returns from a
+/// detaching verb must not be holding the pipe a driver writes to. And in a
+/// process group of its own, so it outlives the process that started it and the
+/// `SIGINT` that process's terminal sends: see [`sys::in_own_process_group`].
+pub(crate) fn retain_driver(
+    paths: &RunPaths,
+    retain: &crate::verbs::Retain,
+) -> Result<std::process::Child> {
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -884,16 +1085,9 @@ fn retain_driver(paths: &RunPaths, retained: Retained) -> Result<std::process::C
         path: paths.driver_log(),
         source,
     })?;
-    let exe = std::env::current_exe().map_err(|e| {
-        Error::Invalid(format!(
-            "cannot find this executable to retain a driver: {e}"
-        ))
-    })?;
-    let mut command = std::process::Command::new(exe);
-    command.arg(engine::DRIVE_VERB).arg(&paths.run);
-    if retained == Retained::Adopting {
-        command.arg(format!("--{ADOPT_FLAG}"));
-    }
+    let mut command = std::process::Command::new(&retain.program);
+    command.args(&retain.args);
+    sys::in_own_process_group(&mut command);
     command
         .stdin(std::process::Stdio::null())
         .stdout(log)
@@ -917,8 +1111,8 @@ fn retain_driver(paths: &RunPaths, retained: Retained) -> Result<std::process::C
 /// written once, below, with the observer up and this process's pid on it —
 /// so a detaching launcher's wait ends on a driver that is running, and no
 /// reader ever sees the run naming a process that is not driving it.
-fn drive_run(args: &DriveRunArgs) -> Result<i32> {
-    let paths = resolve(&args.run)?;
+pub(crate) fn drive_run(paths: &RunPaths, retained: Retained) -> Result<i32> {
+    let paths = paths.clone();
     // The lock before the claim: a driver that wrote its pid into the record and
     // then lost the race for the lock would leave the run naming a process that
     // is gone, and every reader would call it undriven while the driver that
@@ -927,7 +1121,7 @@ fn drive_run(args: &DriveRunArgs) -> Result<i32> {
     let mut record: LaunchRecord = ledger::read_json(&paths.launch())?;
     let view = RunView::open(&paths)?;
     let log = paths.driver_log();
-    if args.adopt {
+    if retained == Retained::Adopting {
         take_the_run_over(&paths, &mut record)?;
         report_and_journal_adoption(&paths, &record, &view)?;
     }
@@ -1288,8 +1482,10 @@ fn run_description(run: &str, goal: Option<&str>) -> String {
 /// so the next move is the planner's. Deliberately neither "the graph finished"
 /// — the loop returns while independent branches may still have been dispatched
 /// — nor "the observer exited", which says nothing about the run at all.
+///
+/// Published as `verbs::Settlement`: it is what an attached adoption answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Settlement {
+pub enum Settlement {
     /// The graph completed successfully.
     Complete,
     /// A **blocking** decision point is outstanding and nothing else can move:
@@ -1300,7 +1496,8 @@ enum Settlement {
 }
 
 impl Settlement {
-    fn as_str(self) -> &'static str {
+    /// The word the settlement line spells.
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Complete => "complete",
             Self::AwaitingPlanner => "awaiting-planner",
@@ -1308,7 +1505,8 @@ impl Settlement {
         }
     }
 
-    fn exit_code(self) -> i32 {
+    /// The status an attached launch or adoption exits with.
+    pub fn exit_code(self) -> i32 {
         match self {
             // Exits non-zero because it is the state a planner must intervene
             // in, and because a launch that parked reads exactly like one that
@@ -1316,6 +1514,11 @@ impl Settlement {
             Self::Unattended => EXIT_NOTHING_DRIVING,
             _ => EXIT_SUCCESS,
         }
+    }
+
+    /// The line an attached launch or adoption prints once the run has settled.
+    pub(crate) fn line(self, run: &str) -> String {
+        json!({"run_id": run, "settlement": self.as_str()}).to_string()
     }
 }
 
@@ -1358,12 +1561,18 @@ fn relay_observer(
 /// resumes the paused subtree inside the running loop, with no external driver
 /// action — and returns when the graph is terminal or when nothing at all can
 /// move without the channel. Only then does this return.
+///
+/// `said` is told the settlement the moment it is decided and before any run-end
+/// hook fires, which is when an attached launch prints it: nothing a hook does —
+/// however it ends, and whatever it launches — can change the settlement, and a
+/// caller reading it should not wait out the hook to learn it.
 fn attach(
     paths: &RunPaths,
     observer: Option<&mut agentgraph::GraphRun>,
     watch: &mut ObserverWatch<'_>,
     lock: ledger::OwnershipLock,
-) -> Result<i32> {
+    said: &mut dyn FnMut(Settlement),
+) -> Result<Settlement> {
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watched = observer;
     // The sender is kept as well as given away, because a restart needs one for
@@ -1490,16 +1699,13 @@ fn attach(
             // between two maintainers over one journal, which nothing can stage on purpose.
             crate::summary::seal(paths);
             let settlement = settlement_of(&view);
-            println!(
-                "{}",
-                json!({"run_id": paths.run, "settlement": settlement.as_str()})
-            );
+            said(settlement);
             // After the settlement is decided and said, so nothing a hook does —
             // however it ends, and whatever it launches — can change either.
             if driven.departure == engine::Departure::Released {
                 crate::hooks::at_let_go(paths, crate::hooks::Relay::Stderr);
             }
-            return Ok(settlement.exit_code());
+            return Ok(settlement);
         }
         std::thread::sleep(ATTACH_POLL);
     }
@@ -1523,42 +1729,45 @@ fn settlement_of(view: &RunView) -> Settlement {
     Settlement::Unattended
 }
 
-/// `onepipeline adopt`.
+/// `onepipeline adopt --detach`: validate, displace the parked driver, and hand
+/// the run to the program `retain` names.
+///
+/// Nothing is written here, and the lock is not taken here either. The process
+/// that will drive the run is the one that takes the lock, bumps the adoption,
+/// and names itself — one writer of each — so a reader between this line and
+/// the driver being up sees the run exactly as the refusals left it: undriven,
+/// and adoptable again. A launcher that claimed on the driver's behalf would
+/// instead be publishing its own pid for a run it is about to walk away from.
+///
+/// Answers the retained driver's pid once it has claimed the run.
+pub(crate) fn adopt_detached(paths: &RunPaths, retain: &crate::verbs::Retain) -> Result<u32> {
+    validate_and_displace_for_adoption(paths)?;
+    let mut driver = retain_driver(paths, retain)?;
+    let pid = driver.id();
+    confirm_driving(paths, &mut driver)?;
+    Ok(pid)
+}
+
+/// `onepipeline adopt`: validate, displace the parked driver, and drive the run
+/// in this process until it settles.
 ///
 /// Adoption keeps everything the run owns and replaces only the driver: the run
-/// id, the journal, and the ledger are the ones it already had.
-///
-/// `--attach` and `--detach` mean here what they mean on `start`, with the same
-/// default: attached, this process is the fresh driver; detached, the driver it
-/// retains is, and this one returns as soon as that driver has claimed the run.
-fn adopt(args: &AdoptArgs) -> Result<i32> {
-    let paths = resolve(&args.run)?;
-    let (mut record, view) = validate_and_displace_for_adoption(&paths)?;
-
-    if args.detach {
-        // Nothing is written here, and the lock is not taken here either. The
-        // process that will drive the run is the one that takes the lock, bumps
-        // the adoption, and names itself — one writer of each — so a reader
-        // between this line and the driver being up sees the run exactly as the
-        // refusals above left it: undriven, and adoptable again. A launcher that
-        // claimed on the driver's behalf would instead be publishing its own pid
-        // for a run it is about to walk away from.
-        sys::disown_standard_handles();
-        let mut driver = retain_driver(&paths, Retained::Adopting)?;
-        let pid = driver.id();
-        confirm_driving(&paths, &mut driver)?;
-        announce_launch(&paths.run, pid);
-        return Ok(EXIT_SUCCESS);
-    }
+/// id, the journal, and the ledger are the ones it already had. `said` is told
+/// the settlement as [`attach`] says it.
+pub(crate) fn adopt_attached(
+    paths: &RunPaths,
+    said: &mut dyn FnMut(Settlement),
+) -> Result<Settlement> {
+    let (mut record, view) = validate_and_displace_for_adoption(paths)?;
 
     // And the lock decides, before anything is written: an adoption that
     // recorded itself and *then* lost the race would leave the record naming
     // this process while the driver that won carried on.
-    let lock = engine::claim(&paths)?;
+    let lock = engine::claim(paths)?;
 
-    take_the_run_over(&paths, &mut record)?;
+    take_the_run_over(paths, &mut record)?;
     ledger::write_json(&paths.launch(), &record)?;
-    report_and_journal_adoption(&paths, &record, &view)?;
+    report_and_journal_adoption(paths, &record, &view)?;
 
     // Relayed: an adoption attaches, so this process stays to read it. The goal
     // comes off the run's own projected plan rather than off the project the
@@ -1578,14 +1787,14 @@ fn adopt(args: &AdoptArgs) -> Result<i32> {
         .and_then(|plan| plan.goal.as_ref())
         .map(|goal| goal.text.clone());
     let output = agentgraph::GraphOutput::Relayed;
-    let mut observer = observe(&paths, &mut record, goal.as_deref(), output)?;
+    let mut observer = observe(paths, &mut record, goal.as_deref(), output)?;
     ledger::write_json(&paths.launch(), &record)?;
-    let mut watch = ObserverWatch::of(&paths, record, goal, output);
+    let mut watch = ObserverWatch::of(paths, record, goal, output);
     // An adoption resumes the graph exactly where the journal left it, including
     // mid-decision: the fold reconstructs the outstanding decision points from
     // the settlements that produced them, so a subtree that was paused stays
     // paused and is released by the same `attest` it always was.
-    attach(&paths, observer.as_mut(), &mut watch, lock)
+    attach(paths, observer.as_mut(), &mut watch, lock, said)
 }
 
 /// The checks every adoption makes before anything is written, and the parked
@@ -1738,15 +1947,25 @@ fn displace_the_parked_driver(record: &LaunchRecord) {
     }
 }
 
-/// `onepipeline stop`.
-fn stop(args: &StopArgs) -> Result<i32> {
-    let paths = resolve(&args.run)?;
-    let session = sys::launching_session();
+/// `onepipeline stop`: end the run `session` is acting on, journal the stop, and
+/// answer what the teardown established.
+///
+/// A run another session owns is refused with [`Error::NotOwned`] unless
+/// `force`, and a forced stop journals the owner it overrode. Every teardown
+/// that reached the run is journalled, and the answer says whether it was
+/// **clean** — a run whose processes were not all reached is still running, and
+/// [`verbs::Stopped::refusal`](crate::verbs::Stopped::refusal) is what the
+/// binary says about that instead of a stop.
+pub(crate) fn stop_run(
+    paths: &RunPaths,
+    session: &str,
+    force: bool,
+) -> Result<crate::verbs::Stopped> {
     let record: LaunchRecord = ledger::read_json(&paths.launch())?;
-    let owner = record.owner_label(&session);
+    let owner = record.owner_label(session);
 
-    if !record.owned_by(&session) {
-        if !args.force {
+    if !record.owned_by(session) {
+        if !force {
             return Err(Error::NotOwned {
                 run: paths.run.clone(),
                 owner,
@@ -1765,7 +1984,7 @@ fn stop(args: &StopArgs) -> Result<i32> {
     // and no stop is recorded on that path: a run whose registry cannot be read
     // is one nobody can say is idle, and writing "stopped" over it would be the
     // same false completion this verb refuses everywhere else.
-    let teardown = terminate(&paths, &record).map_err(|why| {
+    let teardown = terminate(paths, &record).map_err(|why| {
         Error::Refused(format!(
             "run '{}' was not stopped: this build cannot establish what it is running — {why}. \
              The run is untouched; nothing was signalled. Fix or remove the entry the path \
@@ -1784,89 +2003,41 @@ fn stop(args: &StopArgs) -> Result<i32> {
         #[cfg(unix)]
         Some(sys::Teardown::Refused) => journal::StopTeardown::Refused,
     };
-    let mut journal = Journal::open(&paths);
+    let mut journal = Journal::open(paths);
     journal.emit(
         journal::PipelineKind::RunStopped,
         journal::labels(&paths.run, None),
         journal::payload(&[
             ("owner", json!(owner)),
-            ("forced", json!(args.force)),
+            ("forced", json!(force)),
             (journal::STOP_TEARDOWN, json!(established)),
         ]),
     )?;
-    // Deliberately neither `stopped: true` nor exit 0 for either of these: a run
-    // whose processes were not all reached is still running, and reporting that
-    // as a clean stop is the false completion this refusal removes. The two say
-    // different things because they leave the operator in different places.
-    let run = &paths.run;
-    match teardown {
-        Some(sys::Teardown::NotAttempted) => {
-            return Err(Error::Refused(format!(
-                "run '{run}' was not stopped: this host gave no answer its tree could be \
-                 read from — no process listing, or nothing that says whether a pid it \
-                 recorded is still the process it named, each said above — so the \
-                 processes the run started could not be found, and ending its driver \
-                 alone would have orphaned them. The run is untouched — run \
-                 `onepipeline stop {run}` again once this host answers"
-            )));
-        }
-        Some(sys::Teardown::PartlySignalled) => {
-            return Err(Error::Refused(format!(
-                "run '{run}' was only partly stopped: part of its process tree was \
-                 signalled and at least one process in it is still running — one this \
-                 session could not signal, or one that took the ask and stayed. Find it \
-                 in this host's process list and end it as the user that owns it"
-            )));
-        }
-        Some(sys::Teardown::IdentityDeclined) => {
-            return Err(Error::Refused(format!(
-                "run '{run}' was not stopped: live processes were found, but every recorded \
-                 identity disagreed with the process now holding its pid, so none was safe \
-                 to signal. This is distinct from a run with nothing left to stop; inspect \
-                 the declined claims above and retry only after correcting the run records"
-            )));
-        }
-        // llmlint: ignore-block[changed_behavior_has_e2e] this arm has no journey and
-        // cannot have one: reaching it takes a run every process of which refuses this
-        // user's signal, and a process this user may not signal is not a thing for a
-        // suite to go and make — the same reason `sys::established` is a fold driven
-        // from the answers a round of signalling gives rather than from signals, and the
-        // reason the Windows teardown arm carries this directive too. What the arm is
-        // built from is proved there, at
-        // `a_teardown_refused_by_everything_it_aimed_at_reports_no_signal_at_all` and
-        // `a_stop_that_could_signal_nothing_it_aimed_at_says_so`; every other outcome
-        // this match renders is driven end to end in `tests/e2e/driver.rs`.
-        #[cfg(unix)]
-        Some(sys::Teardown::Refused) => {
-            return Err(Error::Refused(format!(
-                "run '{run}' was not stopped: its process tree was found and every \
-                 process in it refused this session's signal, so nothing was signalled \
-                 and all of it is still running. Running `onepipeline stop {run}` again \
-                 as this user will be refused the same way — find the tree in this \
-                 host's process list and end it as the user that owns it"
-            )));
-        } // llmlint: ignore-end[changed_behavior_has_e2e]
-        None | Some(sys::Teardown::Signalled) | Some(sys::Teardown::NothingToStop) => {}
+    let stopped = crate::verbs::Stopped {
+        run: paths.run.clone(),
+        owner,
+        forced: force,
+        teardown: established,
+        // Deliberately neither `stopped: true` nor exit 0 for a teardown that
+        // was not clean: a run whose processes were not all reached is still
+        // running, and reporting that as a clean stop is the false completion
+        // this refusal removes.
+        clean: matches!(
+            teardown,
+            None | Some(sys::Teardown::Signalled) | Some(sys::Teardown::NothingToStop)
+        ),
+    };
+    if !stopped.clean {
+        return Ok(stopped);
     }
     // What the run claimed and never started is released now, because the driver the
     // signal ended took no closeout of its own. Best effort: it changes neither this
     // verb's answer nor its status.
-    crate::writeback::release_stopped(&paths, &record);
-    // `teardown` qualifies `stopped`: the ledger record is what stops a run, and
-    // it is written either way.
-    println!(
-        "{}",
-        json!({
-            "run_id": paths.run,
-            "stopped": true,
-            "owner": owner,
-            journal::STOP_TEARDOWN: established,
-        })
-    );
-    // Only a clean teardown reaches here, after `run-stopped` is journaled and the
-    // stop said, so a hook changes neither this verb's answer nor its status.
-    crate::hooks::at_stop(&paths);
-    Ok(EXIT_SUCCESS)
+    crate::writeback::release_stopped(paths, &record);
+    // Only a clean teardown reaches here, after `run-stopped` is journaled, so a
+    // hook changes neither this verb's answer nor its status.
+    crate::hooks::at_stop(paths);
+    Ok(stopped)
 }
 
 /// Ask everything driving this run on this host to stop, and watch it go.
@@ -2107,74 +2278,6 @@ fn lock_held_on(paths: &RunPaths) -> Option<ledger::LockRecord> {
     }
 }
 
-/// `onepipeline next` — the channel's only consumer.
-///
-/// Rendering is not reading: `monitor` shows a pending surface without
-/// consuming it, and this is what advances the queue and restarts the check-in
-/// clock.
-fn next(args: &ReadArgs) -> Result<i32> {
-    let paths = resolve(&args.run)?;
-    let view = RunView::open(&paths)?;
-    // Read before anything is claimed, so a spec this run cannot honour refuses
-    // the read rather than consuming a surface into an output that then fails to
-    // render.
-    let filter = read_filter(&view, args)?;
-    let events = views::shaped(&view, &filter);
-    let channel = ChannelState::new(&paths);
-
-    let Some(surface) = channel.claim()? else {
-        let settled = view.liveness().is_undriven();
-        let status = if settled { "finished" } else { "running" };
-        println!(
-            "{}",
-            json!({"status": status, "surface": null, "events": events})
-        );
-        return Ok(EXIT_SUCCESS);
-    };
-
-    let mut journal = Journal::open(&paths);
-    journal.emit(
-        journal::PipelineKind::PlannerSurfaced,
-        journal::labels(&paths.run, surface.workstream.as_deref()),
-        journal::payload(&[
-            ("kind", json!(surface.kind)),
-            ("message", json!(surface.message)),
-            ("source", json!(surface.source)),
-            ("blocking", json!(surface.blocking)),
-            // When the text was true, beside the text: a surface is written in
-            // the present tense and this record's own stamp is the reading.
-            // Divergence 66 is why it is the queued instant and not an age.
-            ("queued_at", json!(surface.queued_at)),
-        ]),
-    )?;
-
-    // Consumption is what restarts the check-in clock — the whole reset
-    // contract. Which clocks is the observer graph's own to say: every member it
-    // declared `resettable`, and the engine names none. Addressed by the
-    // **graph** run's id, which is what the sibling minted and the only id its
-    // signals answer to; this run's id names a run `oneagentgraph` has never
-    // heard of. A run that launched no observer graph has no clock to restart
-    // and nothing to report. A failure to reach the sibling is reported and does
-    // not fail the read: the planner has the surface either way.
-    if view.launch.observer_graph().is_some() {
-        if let Err(error) = agentgraph::recorded_graph_run(&view.launch.graph_run, &paths.run)
-            .and_then(|graph_run| agentgraph::reset_resettable(&graph_run))
-        {
-            eprintln!("onepipeline: could not restart the check-in clock: {error}");
-        }
-    }
-
-    // The surface is delivered whatever the profile said. A profile shapes the
-    // **event view** and nothing else: which surfaces exist, and the unread
-    // accounting over them, belong to the channel, so a blocking surface reaches
-    // its planner under the narrowest profile a run has.
-    println!(
-        "{}",
-        json!({"status": "surface", "surface": surface, "events": events})
-    );
-    Ok(EXIT_SUCCESS)
-}
-
 /// The surface's text: `--message`, the named file, or stdin, in that order.
 ///
 /// Trimmed at its ends as `reply` trims the envelope it reads, so `echo` and a
@@ -2207,101 +2310,6 @@ fn surface_message(args: &SurfaceArgs) -> Result<String> {
     Ok(body.to_string())
 }
 
-/// `onepipeline surface`.
-fn surface(args: &SurfaceArgs) -> Result<i32> {
-    let paths = resolve(&args.run)?;
-    // Read the body before anything is queued, so an unreadable file or an empty
-    // stdin refuses the command rather than queuing a surface with nothing in it.
-    let message = surface_message(args)?;
-    // What it is about, and what raised it, are two facts: a check-in is the
-    // scheduled member's own, and a finding typed here is advice like any other.
-    let source = if args.kind.as_str() == SurfaceKind::CHECK_IN {
-        crate::channel::source::CHECK_IN
-    } else {
-        crate::channel::source::PROPOSAL
-    };
-    let queued = ChannelState::new(&paths).push(Surface {
-        id: 0,
-        kind: args.kind.as_str().to_string(),
-        message,
-        source: source.to_string(),
-        // Neither is a request: a check-in update and a finding typed at this
-        // verb are reports, and never hold a subtree back waiting for a
-        // decision. A finding that means to stop one says so through the
-        // envelope's `finding` op, which carries `blocking`.
-        blocking: false,
-        queued_at: sys::now_millis(),
-        abandoned: false,
-        // Raised by a command that has already answered its caller and exited,
-        // so there is no listener to name and none to come back: nothing
-        // abandons this and nothing adopts it.
-        asker: None,
-        workstream: None,
-        correlation: None,
-    })?;
-    let mut journal = Journal::open(&paths);
-    journal.emit(
-        journal::PipelineKind::PlannerSurfaceQueued,
-        journal::labels(&paths.run, None),
-        journal::payload(&[
-            ("kind", json!(queued.kind)),
-            ("message", json!(queued.message)),
-            ("source", json!(queued.source)),
-            ("blocking", json!(false)),
-        ]),
-    )?;
-    println!("{}", json!({"surface": queued.id, "state": "queued"}));
-    Ok(EXIT_SUCCESS)
-}
-
-/// `onepipeline attest` — the shorthand for a reply carrying one `attest`.
-fn attest(args: &AttestArgs) -> Result<i32> {
-    submit(
-        &resolve(&args.run)?,
-        None,
-        &Reply {
-            version: Some(crate::channel::REPLY_ENVELOPE_VERSION),
-            // The person who took the action, through the planner's own channel:
-            // `attest` is not an op an observer may issue at all.
-            author: Author::planner(),
-            commands: vec![Command::Attest {
-                reference: args.reference.clone(),
-            }],
-            ..Reply::default()
-        },
-    )
-}
-
-/// `onepipeline reply`.
-fn reply(args: &ReplyArgs) -> Result<i32> {
-    let paths = resolve(&args.run)?;
-    let text = match &args.file {
-        Some(path) => std::fs::read_to_string(path).map_err(|e| Error::Ledger {
-            path: path.clone(),
-            source: e,
-        })?,
-        None => {
-            let mut buffer = String::new();
-            std::io::stdin()
-                .read_to_string_compat(&mut buffer)
-                .map_err(|e| Error::Refused(format!("cannot read the reply from stdin: {e}")))?;
-            buffer
-        }
-    };
-    // A reply this schema refuses is read a second time, leniently, to see
-    // whether a retired plan field is why — an `add` carrying one is the same
-    // planner mistake as a task carrying one, and deserves the same answer.
-    let envelope: Reply = serde_json::from_str(text.trim()).map_err(|e| {
-        let why = serde_json::from_str::<serde_json::Value>(text.trim())
-            .ok()
-            .as_ref()
-            .and_then(crate::plan::retired_field_refusal)
-            .unwrap_or_else(|| e.to_string());
-        Error::Refused(format!("the reply is malformed: {why}"))
-    })?;
-    submit(&paths, args.correlation.as_ref(), &envelope)
-}
-
 /// What one submitted envelope became.
 ///
 /// An answer rather than an exit code, because two callers read it: `reply`
@@ -2316,7 +2324,7 @@ fn reply(args: &ReplyArgs) -> Result<i32> {
 /// options would spell two more states — a local apply with nothing compiled, a
 /// reconciled one carrying operations — that no path can reach and every reader
 /// would still have to answer for.
-enum Submitted {
+pub(crate) enum Submitted {
     /// A commandless verdict, queued for whichever reader the run owes one.
     Answered {
         /// The reply's id in the channel.
@@ -2343,226 +2351,6 @@ enum Submitted {
         /// The reply's id in the channel.
         reply: u64,
     },
-}
-
-/// Validate a reply, queue it, and report which of the four true things happened.
-///
-/// The object this prints is stated in entry **64** of
-/// `docs/contract-divergences.md` and nowhere else;
-/// `channel::the_reply_receipt_names_each_half_the_envelope_carried` gates this
-/// code against it.
-fn submit(
-    paths: &RunPaths,
-    correlation: Option<&onemessagebus::Correlation>,
-    envelope: &Reply,
-) -> Result<i32> {
-    let verdict = if envelope.carries_verdict() {
-        VerdictHalf::OnTheQueue
-    } else {
-        VerdictHalf::NotCarried
-    };
-    let (receipt, code) = match submit_envelope(paths, correlation, envelope)? {
-        Submitted::Answered { reply } => (Receipt::Answered { reply, verdict }, EXIT_SUCCESS),
-        // This process applied them itself, so there is no queue and no id in it.
-        Submitted::AppliedHere { .. } => (Receipt::AppliedHere { verdict }, EXIT_SUCCESS),
-        Submitted::AppliedByRun { reply } => {
-            (Receipt::AppliedByRun { reply, verdict }, EXIT_SUCCESS)
-        }
-        // llmlint: ignore-block[cli_output_contract] the two outcomes this status shares are
-        // told apart on stdout, by the receipt's `state`; the status answers whether the
-        // envelope was accepted, which sharing it is the whole point of. Divergence 67.
-        Submitted::Queued { reply } => {
-            // The status cannot say what is left to happen, so the words do.
-            eprintln!(
-                "onepipeline: the edits are on run '{}'s durable command queue and have \
-                 not been reconciled yet, so something has to drive the run for them to \
-                 take effect: they are applied by the driver holding it, or by \
-                 `onepipeline adopt {}` if nothing is driving it. They are not to be sent \
-                 again — a second copy is a second edit.",
-                paths.run, paths.run
-            );
-            (Receipt::Queued { reply, verdict }, EXIT_SUCCESS)
-        } // llmlint: ignore-end[cli_output_contract]
-    };
-    println!(
-        "{}",
-        serde_json::to_string(&receipt).map_err(|e| Error::Invalid(format!("receipt: {e}")))?
-    );
-    // Beside the receipt rather than in it — the receipt is a transport's answer and
-    // stays exactly what it was — and only once the settle has been applied: a
-    // landing settled with no release stated for it, which no probe answer will ever
-    // release, is said to the person who settled it now rather than discovered later
-    // from a dependent that is still waiting.
-    if matches!(
-        receipt,
-        Receipt::AppliedHere { .. } | Receipt::AppliedByRun { .. }
-    ) && envelope.commands.iter().any(|command| {
-        matches!(
-            command,
-            Command::Settle {
-                landing: Some(_),
-                release: None,
-                ..
-            }
-        )
-    }) {
-        // The settle is applied whatever this read finds, so a run that cannot be
-        // read back now costs the advice and never the exit status the receipt has.
-        // llmlint: ignore-block[changed_behavior_has_e2e] a run whose store cannot be
-        // read in the instant after this process applied an edit to it is not a state an
-        // invocation can put a run into; the read that succeeds is driven end to end by
-        // `tests/e2e/adoption.rs`.
-        match crate::views::RunView::open(paths) {
-            Ok(view) => {
-                for said in crate::release::hold_warnings_for_stated_landings(
-                    &view.state,
-                    &envelope.commands,
-                ) {
-                    eprintln!("{said}");
-                }
-            }
-            Err(unread) => eprintln!(
-                "onepipeline: the settle was applied, and whether its landing has a release \
-                 baseline could not be asked, because the run could not be read back: {unread}"
-            ),
-        } // llmlint: ignore-end[changed_behavior_has_e2e]
-    }
-    Ok(code)
-}
-
-/// `onepipeline reply`'s answer, whose shape [`submit`] states.
-///
-/// One variant per outcome [`Submitted`] can reach, so the receipt cannot be
-/// built out of parts that contradict each other: which words `state` and
-/// `commands` spell, and whether there is a channel identifier to name at all,
-/// are decided by the same choice rather than carried as three fields a caller
-/// assembles.
-enum Receipt {
-    /// A commandless verdict.
-    Answered {
-        /// Its id in the channel.
-        reply: u64,
-        /// Whether the envelope carried a verdict at all: an envelope carrying
-        /// neither half is answered here too, and names neither.
-        verdict: VerdictHalf,
-    },
-    /// Every command applied by this process, which had no queue to put them in
-    /// and so has no identifier to name.
-    AppliedHere {
-        /// The verdict half that rode along, if one did.
-        verdict: VerdictHalf,
-    },
-    /// Every command applied by the run's own reconciler.
-    AppliedByRun {
-        /// The envelope's id in the command queue.
-        reply: u64,
-        /// The verdict half that rode along, if one did.
-        verdict: VerdictHalf,
-    },
-    /// Accepted and durable, and not reconciled within the reply timeout. Still
-    /// queued: **not** an instruction to send it again.
-    Queued {
-        /// The envelope's id in the command queue.
-        reply: u64,
-        /// The verdict half that rode along, if one did.
-        verdict: VerdictHalf,
-    },
-}
-
-impl Receipt {
-    /// The identifier in the channel. The wire spells the local apply's absence
-    /// `0`, which is what this receipt has always answered there and is not a
-    /// second identifier.
-    fn reply(&self) -> u64 {
-        match self {
-            Self::Answered { reply, .. }
-            | Self::AppliedByRun { reply, .. }
-            | Self::Queued { reply, .. } => *reply,
-            Self::AppliedHere { .. } => 0,
-        }
-    }
-
-    /// The word `state` has spelled since before the two halves were named.
-    fn state(&self) -> &'static str {
-        match self {
-            Self::Answered { .. } => "delivered",
-            Self::AppliedHere { .. } | Self::AppliedByRun { .. } => "applied",
-            Self::Queued { .. } => "queued",
-        }
-    }
-
-    /// The same word again where there were commands to have one, under a name
-    /// saying whose it is, and nothing where the envelope carried none.
-    fn commands(&self) -> Option<&'static str> {
-        match self {
-            Self::Answered { .. } => None,
-            applied_or_queued => Some(applied_or_queued.state()),
-        }
-    }
-
-    /// The verdict half, whichever outcome the commands reached.
-    fn verdict(&self) -> VerdictHalf {
-        match self {
-            Self::Answered { verdict, .. }
-            | Self::AppliedHere { verdict }
-            | Self::AppliedByRun { verdict, .. }
-            | Self::Queued { verdict, .. } => *verdict,
-        }
-    }
-}
-
-/// What became of an envelope's verdict half.
-///
-/// **Two variants and not three**: what happens to a verdict that reaches a
-/// receipt is not a variable — it was queued, on every path [`submit`] can take —
-/// so the only thing left to say is whether the envelope carried one. The other
-/// thing that can happen to a verdict is a refusal, which is an error and never a
-/// receipt.
-#[derive(Clone, Copy)]
-enum VerdictHalf {
-    /// The envelope carried none, so the receipt names none.
-    NotCarried,
-    /// Carried, and on the reply queue for whichever reader claims it.
-    OnTheQueue,
-}
-
-impl VerdictHalf {
-    /// The word the receipt writes, and nothing for the half it never carried.
-    ///
-    /// `delivered` for the same reason `state` has always spelled it so:
-    /// **delivery on this channel is acceptance**, a planner writing when it has
-    /// something to say with nothing obliged to be listening at that moment. So
-    /// the two keys cannot disagree about one half. Which question it answers is
-    /// bound as `ChannelState::answer` states and entry 63 of
-    /// `docs/contract-divergences.md` records, and which listener then reads it
-    /// is not something a receipt written at submission could answer.
-    fn word(self) -> Option<&'static str> {
-        match self {
-            Self::NotCarried => None,
-            Self::OnTheQueue => Some("delivered"),
-        }
-    }
-}
-
-/// Written by hand rather than derived, because every key is read off the one
-/// variant and a derive would need them stored as fields that could disagree.
-impl serde::Serialize for Receipt {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut receipt = serializer.serialize_map(None)?;
-        receipt.serialize_entry("reply", &self.reply())?;
-        receipt.serialize_entry("state", self.state())?;
-        if let Some(verdict) = self.verdict().word() {
-            receipt.serialize_entry("verdict", verdict)?;
-        }
-        if let Some(commands) = self.commands() {
-            receipt.serialize_entry("commands", commands)?;
-        }
-        receipt.end()
-    }
 }
 
 /// Deliver one note through the channel's own path, and answer what the
@@ -2739,7 +2527,7 @@ fn deliver_verdict_half(
 /// The author's op allowlist is enforced here, before anything is queued: an
 /// author that asks for an op it may not issue is refused with the reason, and
 /// nothing durable is written on its behalf.
-fn submit_envelope(
+pub(crate) fn submit_envelope(
     paths: &RunPaths,
     correlation: Option<&onemessagebus::Correlation>,
     envelope: &Reply,
@@ -3274,103 +3062,6 @@ fn reply_timeout_seconds() -> u64 {
         .and_then(|value| value.parse().ok())
         .filter(|seconds| *seconds > 0)
         .unwrap_or(crate::channel::DEFAULT_REPLY_TIMEOUT_SECONDS)
-}
-
-// llmlint: ignore-block[cli_output_contract] a refused run root is part of the answer these
-// views were asked for, not a failure of the command, so it goes to stdout and the exit
-// code stays 0: failing `runs` because one stray directory sits beside the runs would break
-// every wrapper over it. A caller that named *one* run and could not have it is a different
-// case, and `resolve` and `RunView::open` still refuse it outright.
-/// `onepipeline runs`.
-fn runs(args: &RunsArgs) -> Result<i32> {
-    print!(
-        "{}",
-        views::runs(&ledger::runs_root(), args.mine, &sys::launching_session())
-    );
-    Ok(EXIT_SUCCESS)
-}
-
-/// `onepipeline status`.
-///
-/// The two halves of this verb are two different reads, and deliberately so. A
-/// named run is a **detail** read: it folds that run's merged store and reports
-/// what each of its nodes is doing. No run named is a **listing**, and a listing
-/// may never fold — it answers the run-level lines out of each run's bounded
-/// summary document, so asking a host what is running costs a document per run
-/// rather than every byte every run has recorded.
-fn status(args: &OptionalRunArgs) -> Result<i32> {
-    let rendered = match &args.run {
-        Some(run) => views::status(&views::Survey::of_one(RunView::open(&resolve(run)?)?)),
-        None => views::status_listed(&views::Listing::of(&ledger::runs_root())),
-    };
-    // llmlint: ignore-block[no_panics_on_recoverable_errors] how this binary writes a view
-    // to stdout is one decision for all thirty-one of them in this file, not this verb's:
-    // every view verb here prints the same way, and `src/AGENTS.md` records the exit codes
-    // as spent — `0`/`1`/`2` are `reply`'s verdicts, `3` is "nothing is driving the run" —
-    // so a write this one returned as an error would have to carry a code that already
-    // means something else. Making a closed pipe a first-class outcome is a change to the
-    // whole command surface and to the contract's exit codes, which belongs with the
-    // planner who owns them rather than in the one verb a diff happens to touch.
-    print!("{rendered}");
-    // llmlint: ignore-end[no_panics_on_recoverable_errors]
-    Ok(EXIT_SUCCESS)
-}
-
-/// A view that covers one run, or every run when given none.
-fn report(args: &OptionalRunArgs, render: fn(&views::Survey) -> String) -> Result<i32> {
-    let survey = match &args.run {
-        Some(run) => views::Survey::of_one(RunView::open(&resolve(run)?)?),
-        None => views::Survey::of(&ledger::runs_root()),
-    };
-    print!("{}", render(&survey));
-    Ok(EXIT_SUCCESS)
-}
-// llmlint: ignore-end[cli_output_contract]
-
-/// `onepipeline transcript`.
-///
-/// A node this run never dispatched is refused rather than answered with an
-/// empty transcript: the two read alike, and only one of them means the reader
-/// typed a name that is not in this run.
-fn transcript(args: &TranscriptArgs) -> Result<i32> {
-    let view = RunView::open(&resolve(&args.run)?)?;
-    if let Some(node) = &args.node {
-        if views::nodes_with_agent_records(&view, Some(node)).is_empty() {
-            let recorded = views::nodes_with_agent_records(&view, None);
-            return Err(Error::Refused(format!(
-                "run '{}' has recorded nothing for node '{node}'; it has records for: {}",
-                args.run,
-                if recorded.is_empty() {
-                    "nothing yet".to_string()
-                } else {
-                    recorded.join(", ")
-                }
-            )));
-        }
-    }
-    print!("{}", views::transcript(&view, args.node.as_deref()));
-    Ok(EXIT_SUCCESS)
-}
-
-/// `onepipeline telemetry`.
-fn report_telemetry(args: &TelemetryArgs) -> Result<i32> {
-    let survey = match &args.run {
-        Some(run) => views::Survey::of_one(RunView::open(&resolve(run)?)?),
-        None => views::Survey::of(&ledger::runs_root()),
-    };
-    for view in &survey.views {
-        let aggregated = telemetry::of_run(&view.paths, &view.events);
-        if args.breakdown {
-            print!("{}", telemetry::render_breakdown(&aggregated));
-        } else {
-            println!(
-                "{}",
-                serde_json::to_string(&aggregated)
-                    .map_err(|e| Error::Invalid(format!("telemetry: {e}")))?
-            );
-        }
-    }
-    Ok(EXIT_SUCCESS)
 }
 
 /// `Stdin::read_to_string` under a name that does not collide with the trait

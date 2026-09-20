@@ -1632,6 +1632,7 @@ fn summary_fields() -> BTreeSet<String> {
         surfaces_read: 1,
         awaiting_human_action: true,
         project: "plans:gated".into(),
+        name: Some("Gated".into()),
         launcher: "claude-code".into(),
         session: "a-session".into(),
         started_at: Some("2026-01-01T00:00:00.000Z".into()),
@@ -3743,10 +3744,9 @@ fn the_delivered_surfaces_instant_is_what_the_divergence_record_names() {
     let field = block["queued_at_field"]
         .as_str()
         .expect("entry 66 names the field");
-    let driver =
-        std::fs::read_to_string(repo_root().join("src/driver.rs")).expect("the driver ships");
+    let verbs = std::fs::read_to_string(repo_root().join("src/verbs.rs")).expect("the verbs ship");
     assert!(
-        driver.contains(&format!("(\"{field}\", json!(surface.{field}))")),
+        verbs.contains(&format!("(\"{field}\", json!(surface.{field}))")),
         "entry 66 names a field the hand-out does not write: {field}"
     );
     let journeys = std::fs::read_to_string(repo_root().join("tests/e2e/channel.rs"))
@@ -3789,12 +3789,11 @@ fn the_replys_exit_statuses_are_what_the_divergence_record_names() {
         json!(EXIT_QUEUED),
         "entry 67 has a queued reply answering with the unfinished-run status again"
     );
-    let driver =
-        std::fs::read_to_string(repo_root().join("src/driver.rs")).expect("the driver ships");
+    let verbs = std::fs::read_to_string(repo_root().join("src/verbs.rs")).expect("the verbs ship");
     assert!(
-        driver.contains("durable command queue")
-            && driver.contains("has to drive the run for them to")
-            && driver.contains("They are not to be sent"),
+        verbs.contains("durable command queue")
+            && verbs.contains("has to drive the run for them to")
+            && verbs.contains("They are not to be sent"),
         "the reply no longer says what a queued envelope is waiting for"
     );
 }

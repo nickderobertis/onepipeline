@@ -896,7 +896,7 @@ pub(crate) use onemessagebus_agent::channel::source;
 /// `agent.planner-surface@1` and written in this field order — which is the
 /// order 0.28.2 wrote, and the order the bus reshapes every line it writes to.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, JsonSchema)]
-pub(crate) struct Surface {
+pub struct Surface {
     /// Monotonic within the run, so a consumer can report which one it read.
     pub id: u64,
     /// What the surface is asking about.
@@ -1011,7 +1011,7 @@ pub(crate) struct Queue {
 
 /// One reply as it sits in the durable queue.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct QueuedReply {
+pub struct QueuedReply {
     /// Monotonic within the run.
     pub id: u64,
     /// The envelope the planner wrote.
@@ -1031,7 +1031,7 @@ pub(crate) struct QueuedReply {
 
 /// One submitted edit envelope, awaiting the reconciler.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct QueuedCommands {
+pub struct QueuedCommands {
     /// Monotonic within the run.
     pub id: u64,
     /// Who submitted it, which is what decides the ops it may carry.
@@ -1050,7 +1050,7 @@ pub(crate) struct QueuedCommands {
 /// manager believing a node's bar had changed when the command that would have
 /// changed it was never compiled.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct CommandOutcome {
+pub struct CommandOutcome {
     /// The envelope this answers.
     pub id: u64,
     /// Whether every command in it was applied.
@@ -1076,7 +1076,7 @@ pub(crate) struct CommandOutcome {
 /// a conversation that cannot unread it. A manager reading them knows which to
 /// fix, which to resend unchanged, and which not to resend at all.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct CommandResult {
+pub struct CommandResult {
     /// Where in the envelope's `commands` this one sat, from zero.
     pub index: usize,
     /// The command's op, as the envelope spelled it.
@@ -1099,7 +1099,7 @@ pub(crate) struct CommandResult {
 /// one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum CommandVerdict {
+pub enum CommandVerdict {
     /// It was validated and committed.
     Applied,
     /// It was validated and nothing was wrong with it, and **nothing of it
@@ -2023,6 +2023,37 @@ impl ChannelState {
             .push(record)
             .map_err(queue_failure)?;
         Ok(())
+    }
+
+    /// Every answer the reconciler has given, in the order it gave them.
+    pub fn outcomes(&self) -> Vec<CommandOutcome> {
+        let Ok(outcomes) = self.plain(COMMAND_OUTCOMES) else {
+            return Vec::new();
+        };
+        outcomes
+            .log(None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(record, _)| serde_json::from_value(record).ok())
+            .collect()
+    }
+
+    /// Every surface the run has ever raised, in the order it raised them —
+    /// read and unread, answered and abandoned alike.
+    pub fn every_surface(&self) -> Vec<Surface> {
+        if !self.paths.channel_dir().is_dir() {
+            return Vec::new();
+        }
+        let Ok(surfaces) = self.surfaces() else {
+            return Vec::new();
+        };
+        surfaces
+            .raw()
+            .log(None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(record, _)| serde_json::from_value(record).ok())
+            .collect()
     }
 
     /// The reconciler's answer to one envelope, if it has given one.

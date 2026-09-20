@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::dispatch::OBSERVER_RESTARTS_ENV;
-use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
+use crate::harness::{agent, human, plan_of, rows, World, NOTHING_DRIVING, REFUSED};
 // The journeys that end a process, and those that assert against a process table,
 // are `#[cfg(unix)]`, so what only they reach for is imported on the same terms.
 // Both names have to be: `end_process` is `#[cfg(unix)]` in `harness.rs`, so an
@@ -2103,9 +2103,8 @@ fn an_observer_that_stops_watching_a_driven_run_is_started_again_within_a_bound(
     for view in [vec!["runs"], vec!["status"]] {
         let rendered = world.run(&view);
         rendered.exited(0);
-        let line = rendered
-            .stdout
-            .lines()
+        let line = rows(&rendered.stdout)
+            .into_iter()
             .find(|line| line.contains(&run))
             .unwrap_or_else(|| panic!("no line for the run in:\n{}", rendered.stdout));
         assert!(

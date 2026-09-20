@@ -3238,7 +3238,11 @@ contract's vocabulary has nowhere to put one. So this crate now ships:
   fold (onepipeline issue #328), on the same terms: `stop_recorded` keeps its
   name, but a version-4 document over a journal holding a stop and then an
   adoption says the run is stopped, and the unwatched reader would settle a run
-  a live driver had just taken over on it.
+  a live driver had just taken over on it. It moved to version 6 when the row
+  grew `name` — the plan's name, read off the run's own `plan.json`, which the
+  grouped listing of entry 81 labels each project by — because a version-5
+  document carries no name at all rather than a run whose plan stated none, and
+  serving it would label a project nobody named.
 - **`views::{RunTelemetry, Bucket, BucketName, Party, Usage}`**, re-exported
   because `RunSummary::timing` **is** the telemetry document whose shape the
   Views paragraph already fixes — eight buckets that sum exactly, per-party
@@ -3255,7 +3259,7 @@ cannot go on describing a document the build stopped writing:
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "fields": [
     "schema_version",
     "run_id",
@@ -3270,6 +3274,7 @@ cannot go on describing a document the build stopped writing:
     "surfaces_read",
     "awaiting_human_action",
     "project",
+    "name",
     "launcher",
     "session",
     "started_at",

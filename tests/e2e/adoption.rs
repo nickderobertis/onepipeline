@@ -30,8 +30,8 @@
 use std::path::Path;
 
 use crate::harness::{
-    agent, counts, human, lifecycle, plan_of, project_id, reporting, Counts, Repository, World,
-    LOOP_STATS_ENV, REFUSED,
+    agent, counts, human, lifecycle, plan_of, project_id, reporting, rows, Counts, Repository,
+    World, LOOP_STATS_ENV, REFUSED,
 };
 use oneagentgraph::event::{session_label, SESSION_LABEL};
 use onepipeline::plan::CROSS_REPO_REFERENCES_HEADING;
@@ -4878,9 +4878,8 @@ fn a_node_settled_at_a_change_request_reads_landed_in_every_surface() {
 
 fn not_landed_in_listing(world: &World, run: &str) -> usize {
     let listing = world.run(&["runs"]);
-    listing
-        .stdout
-        .lines()
+    rows(&listing.stdout)
+        .into_iter()
         .find(|line| line.split_whitespace().any(|word| word == run))
         .and_then(|row| {
             let before = &row[..row.find(" not landed")?];

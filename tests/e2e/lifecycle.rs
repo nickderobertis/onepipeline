@@ -24,7 +24,8 @@
 use std::path::PathBuf;
 
 use crate::harness::{
-    agent, git, hook_script, lifecycle, plan_of, Repository, ReturningHookVerb, World, REFUSED,
+    agent, git, hook_script, lifecycle, plan_of, rows, Repository, ReturningHookVerb, World,
+    REFUSED,
 };
 use onevcs::provenance::SUBJECT_LIMIT;
 use serde_json::json;
@@ -4078,9 +4079,8 @@ fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did() {
     let listed = world.run(&["runs"]);
     listed.exited(0);
     let row = |run: &str| {
-        listed
-            .stdout
-            .lines()
+        rows(&listed.stdout)
+            .into_iter()
             .find(|line| line.contains(run))
             .unwrap_or_else(|| panic!("`runs` never listed {run}:\n{}", listed.stdout))
             .to_string()
