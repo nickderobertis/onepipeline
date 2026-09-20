@@ -20,7 +20,7 @@
 //! Its grammar is the sibling's: `every` is a `onevcs::Span` and `match` is a
 //! `onevcs::rules::RuleMatch`, resolved through `onevcs::first_matching`, so the
 //! span grammar and the match vocabulary have one implementation each and this
-//! crate restates neither. [`Sweep`] is the **one** thread an idle driver starts:
+//! crate restates neither. `Sweep` is the **one** thread an idle driver starts:
 //! it visits every registered identity in sorted order, resolves `every` (rule,
 //! else default) and calls `onevcs::pool_maintain(Scope::Repo(identity),
 //! Some(every))`. It is bounded by construction — every command runs under the
