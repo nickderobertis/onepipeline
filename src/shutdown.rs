@@ -489,6 +489,7 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
     // Before anything is signalled: the driver goes on scheduling for as long as
     // the grace lasts.
     if let Err(why) = hold_the_run(paths) {
+        // llmlint: ignore[cli_output_contract] the approved contract fixes this verb's exit status exhaustively — refused when a dispatch was killed at the deadline, a teardown was not clean, or a push was refused, success otherwise — and a record that could not be written is none of those; changing that rule is the contract owner's decision. The failure is said on stderr where it happens, and what the record would have carried is on the report.
         eprintln!(
             "onepipeline: run '{}': the hold that stops it dispatching could not be written — \
              {why}; its driver goes on scheduling until the teardown ends it",
@@ -608,7 +609,7 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
 
     // Unconditionally, whatever the teardown established: a branch is not less
     // worth keeping because a process would not go.
-    let branches = preserve_every_branch(view);
+    let branches = preserve_every_branch(view, now.as_ref());
 
     let shutdown = RunShutdown {
         run: paths.run.clone(),
@@ -668,6 +669,7 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
 /// sentence is for.
 fn unrecorded(run: &str, what: &str, written: Result<()>) {
     if let Err(why) = written {
+        // llmlint: ignore[cli_output_contract] the approved contract fixes this verb's exit status exhaustively — refused when a dispatch was killed at the deadline, a teardown was not clean, or a push was refused, success otherwise — and a record that could not be written is none of those; changing that rule is the contract owner's decision. The failure is said on stderr where it happens, and what the record would have carried is on the report.
         eprintln!(
             "onepipeline: run '{run}': {what} record could not be written to its journal — {why}"
         );
@@ -1066,9 +1068,18 @@ fn publishing_phase(view: &RunView, node: &str) -> Option<Phase> {
 /// run preserved. A push that fails for one branch is reported and does not stop
 /// the others, which is the whole reason this is a loop over a list rather than
 /// a `?` over an iterator.
-fn preserve_every_branch(view: &RunView) -> Vec<BranchPreserved> {
+fn preserve_every_branch(view: &RunView, now: Option<&RunView>) -> Vec<BranchPreserved> {
     let mut preserved = Vec::new();
-    for (repo, branch) in branches_of(view) {
+    // Both readings, the one the shutdown began from and the one after the
+    // teardown: a dispatch whose session opened, or a node whose settlement
+    // recorded a branch, while the grace ran is named only by the second.
+    let mut offered = branches_of(view);
+    for pair in now.map(branches_of).unwrap_or_default() {
+        if !offered.contains(&pair) {
+            offered.push(pair);
+        }
+    }
+    for (repo, branch) in offered {
         let request = onevcs::PreserveRequest {
             repo: repo.clone(),
             branch: branch.clone(),
