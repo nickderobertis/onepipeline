@@ -708,7 +708,10 @@ pub fn registry() -> Registry {
     for (version, document) in [(2, REPLY_ENVELOPE_V2), (3, REPLY_ENVELOPE_V3)] {
         let schema: Value = serde_json::from_str(document).expect("a committed schema is JSON");
         registry
-            .register_schema(SchemaId::literal("agent", "reply-envelope", version), schema)
+            .register_schema(
+                SchemaId::literal("agent", "reply-envelope", version),
+                schema,
+            )
             .expect("the reply envelope schema registers");
     }
     let profile = onemessagebus_agent::registry();

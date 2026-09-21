@@ -111,6 +111,7 @@ mod plan;
 mod plan_check;
 mod real_vcs;
 mod recorded_channel;
+mod release_channel;
 mod run_end_hooks;
 mod scratch;
 mod session;

@@ -54,13 +54,13 @@ use crate::plan::Node;
 
 pub mod layout;
 
-pub use layout::{
-    source, CommandOutcome, CommandResult, CommandVerdict, Surface, ASKER_ENV,
-    REPLY_ENVELOPE_VERSION, REPLY_ENVELOPE_VERSIONS_READ,
-};
 use layout::{
     recorded_correlation, PlannerChannel, COMMANDS, COMMAND_OUTCOMES, PLANNER_CHANNEL, REPLIES,
     SURFACES,
+};
+pub use layout::{
+    source, CommandOutcome, CommandResult, CommandVerdict, Surface, ASKER_ENV,
+    REPLY_ENVELOPE_VERSION, REPLY_ENVELOPE_VERSIONS_READ,
 };
 
 /// Every schema the `planner-channel` layout registers, built once per process.
@@ -89,12 +89,12 @@ where
     D: serde::Deserializer<'de>,
 {
     let declared = Option::<u32>::deserialize(deserializer)?;
-    Ok(declared.map(|version| {
-        match registry().read_at(layout::REPLY_ENVELOPE_FAMILY, version) {
+    Ok(declared.map(
+        |version| match registry().read_at(layout::REPLY_ENVELOPE_FAMILY, version) {
             Read::At(read) => read,
             Read::Unknown(_) => version,
-        }
-    }))
+        },
+    ))
 }
 
 /// Who wrote a reply, and therefore which ops it may carry.

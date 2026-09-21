@@ -3,7 +3,11 @@
 Whole `runs/<run>/channel/` directories as `onepipeline` 0.28.2's channel code
 wrote them — this crate's own recordings, and the one recording `onemessagebus`
 held that is not byte for byte one of them (see
-`onemessagebus-repair-2-pending-bus/`). `tests/e2e/recorded_channel.rs` substitutes each one into the
+`onemessagebus-repair-2-pending-bus/`). `tests/channel_layout.rs` reads each one
+through this crate's `planner-channel` layout and re-applies its history into an
+empty directory, byte for byte; `tests/e2e/release_channel.rs` holds a channel
+this build writes to the live 0.28.2 wheel and the other way round; and
+`tests/e2e/recorded_channel.rs` substitutes each one into the
 recorded run root beside it, drives this build's `status`, `runs`, `results` and
 `next` over it, re-derives its `queue.json`, and holds every answer and every
 channel byte to what the 0.28.2 binary answered over the same directory. Those

@@ -32,7 +32,7 @@ use serde_json::{json, Value};
 use crate::harness::{binary, World};
 
 /// The run every recorded channel is read inside: the recorded run root's own id.
-const RUN: &str = "onemessagebus-repair-2";
+pub(crate) const RUN: &str = "onemessagebus-repair-2";
 
 /// The variable that turns these journeys from comparing into capturing.
 const CAPTURE_ENV: &str = "ONEPIPELINE_RECORD_CHANNEL_ANSWERS_WITH";
@@ -42,7 +42,7 @@ const CAPTURE_ENV: &str = "ONEPIPELINE_RECORD_CHANNEL_ANSWERS_WITH";
 /// The one list of them: the write-side journey fails on a channel file either
 /// binary writes that this does not name, and the recorded directories' README
 /// points here rather than restating it.
-const LAYOUT: [&str; 7] = [
+pub(crate) const LAYOUT: [&str; 7] = [
     "surfaces.jsonl",
     "queue.json",
     "replies.jsonl",
@@ -52,7 +52,7 @@ const LAYOUT: [&str; 7] = [
     "command-outcomes.jsonl",
 ];
 
-fn recorded(relative: &str) -> PathBuf {
+pub(crate) fn recorded(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/recorded")
         .join(relative)
@@ -62,7 +62,9 @@ fn copied(from: &Path, into: &Path) {
     std::fs::create_dir_all(into).expect("a directory to seed");
     for entry in std::fs::read_dir(from).expect("a recorded directory") {
         let entry = entry.expect("a recorded file");
-        if entry.file_name() == "README.md" {
+        // A transport may keep a directory of its own beside the layout's files;
+        // only the files are the channel.
+        if entry.file_name() == "README.md" || !entry.path().is_file() {
             continue;
         }
         std::fs::copy(entry.path(), into.join(entry.file_name())).expect("a recorded file copies");
@@ -97,11 +99,18 @@ fn recording_host() -> String {
 /// copy of the launch record names a pid no process holds: every host then proves
 /// the driver over by the same answer, and neither the reading host's name nor
 /// what it happens to be running decides a word of what the verbs answer.
-fn recorded_world(name: &str) -> World {
+pub(crate) fn recorded_world(name: &str) -> World {
     World::new(name).with_env("HOSTNAME", &recording_host())
 }
 
 fn seeded(world: &World, fixture: &str) -> PathBuf {
+    seeded_with(world, Some(&recorded(&format!("channel/{fixture}"))))
+}
+
+/// The world's copy of the recorded run root, its driver proved gone on any
+/// host, with `channel`'s files as its `channel/` — or an empty `channel/` when
+/// there is none.
+pub(crate) fn seeded_with(world: &World, channel: Option<&Path>) -> PathBuf {
     let root = world.runs.join(RUN);
     copied(&recorded(&format!("run-root/{RUN}")), &root);
     let launch = root.join("launch.json");
@@ -117,9 +126,12 @@ fn seeded(world: &World, fixture: &str) -> PathBuf {
         record.replace(&driver, &format!("\"pid\": {NO_PROCESS},")),
     )
     .expect("the seeded launch record is written");
-    let channel = root.join("channel");
-    copied(&recorded(&format!("channel/{fixture}")), &channel);
-    channel
+    let into = root.join("channel");
+    match channel {
+        Some(from) => copied(from, &into),
+        None => std::fs::create_dir_all(&into).expect("an empty channel directory"),
+    }
+    into
 }
 
 fn recorded_driver_pid(record: &str) -> u64 {
@@ -218,7 +230,7 @@ fn recorded_streams() -> BTreeSet<String> {
 /// the one thing two worlds running the same steps cannot share — along with how
 /// long anything has been unread, which is the clock's, and the stamp of any
 /// event this world's own invocations journalled.
-fn answered(world: &World, program: &Path, args: &[&str]) -> Value {
+pub(crate) fn answered(world: &World, program: &Path, args: &[&str]) -> Value {
     let output = world
         .cmd_on(program, args)
         .output()
@@ -452,7 +464,7 @@ fn value_end(text: &str, from: usize) -> usize {
 
 /// `text` with every [`UNSHARED`] value blanked and every [`CORRELATION`] taken
 /// out.
-fn normalized(text: &str) -> String {
+pub(crate) fn normalized(text: &str) -> String {
     let mut out = text.to_owned();
     for key in UNSHARED {
         let needle = format!("\"{key}\":");

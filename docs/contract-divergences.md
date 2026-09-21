@@ -6031,6 +6031,15 @@ byte for byte with 0.28.2's; a verdict is bound to one question, as entry 63 now
 records; and the envelope reviewer takes a bar under which its passes are kept,
 while the node validator keeps none.**
 
+**Since: the layout is this crate's.** onemessagebus#126, accepted by that
+repository's owner, moves the `planner-channel` layout out of `onemessagebus-agent`,
+and the planner's task that carries the engine's half of that move
+brought it here as `onepipeline::channel::layout`, over the core's public `Layout`
+trait, with the same queues, policies, grants, preparation and schema ids, and the
+bus's recorded channel directories and its 0.28.2 journey beside it. Everything this
+entry rules still holds; only whose crate declares the layout moved, and
+`docs/contract.md` says so.
+
 What moved. The channel directory's queues, cursors, projection and exclusive
 sections are the bus's `Queue` over `LocalTransport`. A question the retired onemessagebus server
 raises is asked with `Bus::ask` under a durable `Asker` and waited on with

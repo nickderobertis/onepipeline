@@ -63,6 +63,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just,nextest,cargo-llvm-cov
+      # `tests/e2e/release_channel.rs` drives the pinned `onepipeline-cli` 0.28.2
+      # wheel through `uv tool run`, and refuses without uv.
+      - uses: astral-sh/setup-uv@v6
       # Also provisions `strace`, which the Linux-only e2e journeys refuse
       # without (`_ensure-strace` in the justfile).
       - name: Bootstrap
@@ -164,6 +167,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just,nextest
+      # The 0.28.2 channel journey's wheel, as in `gate`.
+      - uses: astral-sh/setup-uv@v6
       - name: Bootstrap
         run: just bootstrap
       - name: Quality gate (cross-platform legs)
