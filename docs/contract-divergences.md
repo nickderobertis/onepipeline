@@ -7081,6 +7081,18 @@ doubled at `ONEVCS_GH`. The journeys:
   gone afterwards. The checkout's worktree list, status and `HEAD` are unchanged.
 - `repo_recover_lands_a_preserved_branch_with_the_body_it_was_drafted`: the same
   through `recover`, for a branch `onevcs preserve` put on the origin.
+- `repo_recover_drafts_only_where_publish_branch_would_and_lands_through_a_dead_draft`:
+  through `recover`, `--no-draft`, a caller's `--body` and a `local-direct`
+  identity spend no turn. A missing graph is refused. A member that died lands
+  with no body and its ending named.
+- `a_policy_narrowed_to_open_a_change_request_is_drafted_for`: a `local-direct`
+  identity narrowed with `--policy change-open` is drafted for, because the
+  narrowed policy opens a change request.
+- `the_base_is_found_however_the_checkout_knows_its_origins_default`: the task
+  names `origin/main` whether the checkout records the origin's `HEAD`, only the
+  origin advertises it, or neither does and the checkout tracks one branch there.
+- `a_branch_with_nothing_past_its_base_is_drafted_from_its_diff_alone`: the task
+  says the diff is the only record, instead of listing no commits.
 - `a_local_direct_identity_lands_with_no_drafting_turn_spent`: with and without a
   graph named, the branch lands on the base and no turn is spent.
 - `no_draft_and_a_callers_own_body_land_with_no_drafting_turn_spent`: `--no-draft`,
@@ -7098,5 +7110,7 @@ doubled at `ONEVCS_GH`. The journeys:
   caller's title verbatim.
 
 Each journey was seen to fail for its own reason against a build that dropped the
-body, kept the worktree, ignored `local-direct`, kept a death to itself, or
-printed a synopsis other than the one above.
+body, kept the worktree, ignored `local-direct` or the narrowed policy, kept a
+death to itself, lost a way of finding the base, dropped the empty-branch
+sentence, ignored a caller's body on `recover`, or printed a synopsis other than
+the one above.

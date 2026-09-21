@@ -1,29 +1,12 @@
 //! Landing a branch **out of band**: `onepipeline publish-branch` and
 //! `onepipeline repo-recover`.
 //!
-//! The two verbs an operator lands a branch with outside a run are `onevcs`'s —
-//! `publish-branch` and `recover` — and each opens a change request with whatever
-//! body it is handed, which from an operator naming a branch is none. The drafter
-//! that knows how to write one is this crate's, in the lifecycle closeout, so these
-//! verbs put that same drafter in front of the linked `onevcs` verb: a branch landed
-//! by hand gets its description from the one drafter a branch landed by a run does.
-//! Divergence 88 in `docs/contract-divergences.md` is the proposal they answer.
-//!
-//! **A passthrough first.** Every argument but the two named here reaches the linked
-//! `onevcs` verb unchanged and in order, and is judged by that verb's own parser:
-//! the report, the verdict and the exit status are its, and a refused argument is
-//! its refusal. The verb is **called**, through the library the engine already
-//! publishes through, and never spawned.
-//!
-//! **A draft that cannot run never blocks the landing.** Whichever of the three
-//! [`Undrafted`] endings the graph reaches is said on standard error in the run
-//! path's own words, with `oneagentgraph`'s classification of each member death
-//! beside it, and the verb runs with no body. There is no retry here: the graph's
-//! own schema retry budget is the only one.
-//!
-//! **The turn is spent before the push**, because the body is an argument to the
-//! verb and the verb is what pushes: a branch its merge path then refuses has paid
-//! for a body nothing used.
+//! The drafter is this crate's — the lifecycle closeout's [`crate::lifecycle::draft`]
+//! — and the verbs an operator lands a branch with outside a run are `onevcs`'s, so
+//! this is the one place the two meet: the linked verb, **called** rather than
+//! spawned, with that drafter in front of it. What the verbs promise, and why they
+//! are this crate's rather than the consumer's, is entry 88 of
+//! `docs/contract-divergences.md`.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -652,34 +635,67 @@ mod tests {
     }
 
     /// A death reads as the producer classified it, and a truncated detail says so.
+    ///
+    /// Every payload here is the sibling's own `MemberDied`, serialised, so the field
+    /// names [`death`] reads by are held to the type `oneagentgraph` publishes deaths
+    /// through: a field renamed there fails this rather than reading as a death that
+    /// named nothing.
     #[test]
     fn a_member_death_is_said_in_oneagentgraphs_own_classification() {
-        let envelope = |payload: serde_json::Value| -> Envelope {
+        let envelope = |died: oneagentgraph::event::MemberDied| -> Envelope {
             serde_json::from_value(serde_json::json!({
                 "v": 1, "ts": "2026-01-01T00:00:00Z", "stream": "s", "seq": 1,
-                "source": "agentgraph", "kind": "member-died",
-                "labels": {"member": "author"}, "payload": payload,
+                "source": "agentgraph",
+                "kind": oneagentgraph::event::EventKind::MemberDied.as_str(),
+                "labels": {"member": "author"},
+                "payload": serde_json::to_value(died).expect("a death serialises"),
             }))
             .expect("an envelope")
         };
+        let died = |rule: oneagentgraph::member::Rule,
+                    cause: oneagentgraph::event::Cause,
+                    detail: &str,
+                    truncated: bool| oneagentgraph::event::MemberDied {
+            rule: rule.as_str().to_owned(),
+            cause,
+            detail: detail.to_owned(),
+            truncated,
+            exit_code: None,
+            disposition: None,
+            stderr_tail: None,
+            candidates: Vec::new(),
+        };
         assert_eq!(
-            death(&envelope(serde_json::json!({
-                "rule": "unstartable", "cause": "spawn", "detail": "no such file"
-            }))),
+            death(&envelope(died(
+                oneagentgraph::member::Rule::Unstartable,
+                oneagentgraph::event::Cause::Spawn,
+                "no such file",
+                false
+            ))),
             Some("author died: rule=unstartable cause=spawn detail=no such file".to_owned())
         );
         assert_eq!(
-            death(&envelope(serde_json::json!({
-                "rule": "exit", "cause": "unclassified", "detail": "cut", "truncated": true
-            }))),
+            death(&envelope(died(
+                oneagentgraph::member::Rule::ProviderFailure,
+                oneagentgraph::event::Cause::Unclassified,
+                "cut",
+                true
+            ))),
             Some(
-                "author died: rule=exit cause=unclassified detail=cut (oneagentgraph truncated \
-                 this detail)"
+                "author died: rule=provider-failure cause=unclassified detail=cut \
+                 (oneagentgraph truncated this detail)"
                     .to_owned()
             )
         );
+        let mut bare = envelope(died(
+            oneagentgraph::member::Rule::Unstartable,
+            oneagentgraph::event::Cause::Spawn,
+            "",
+            false,
+        ));
+        bare.payload.clear();
         assert_eq!(
-            death(&envelope(serde_json::json!({}))),
+            death(&bare),
             Some("author died, and oneagentgraph named no rule, cause or detail for it".to_owned())
         );
     }

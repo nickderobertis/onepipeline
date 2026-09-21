@@ -58,6 +58,21 @@ fn branch_with_work_under(world: &World, repository: &Repository, subject: &str)
     head
 }
 
+/// Put [`BRANCH`] on the origin the way a run's publication leaves interrupted
+/// work — its commit marked an incomplete step — which is what `recover` lands.
+fn preserved_branch(world: &World, repository: &Repository) {
+    branch_with_work_under(world, repository, "feat: add the widget (incomplete step)");
+    let preserved = world
+        .cmd_on(&onevcs_binary(), &["preserve", BRANCH, "--repo", "service"])
+        .output()
+        .expect("onevcs runs");
+    assert!(
+        preserved.status.success(),
+        "the branch could not be preserved: {}",
+        String::from_utf8_lossy(&preserved.stderr)
+    );
+}
+
 /// Everything about a checkout a landing promises to leave as it found it: its
 /// worktree list, its working tree, and what it has checked out.
 fn state_of(world: &World, checkout: &Path) -> (String, String, String) {
@@ -138,7 +153,6 @@ fn publish_branch_lands_a_change_request_with_the_body_its_branch_was_drafted() 
     ]);
     landed.exited(0);
 
-    // The body the drafter wrote is what the change request opened with.
     assert_eq!(
         opened(&world),
         vec![(
@@ -213,22 +227,7 @@ fn publish_branch_lands_a_change_request_with_the_body_its_branch_was_drafted() 
 fn repo_recover_lands_a_preserved_branch_with_the_body_it_was_drafted() {
     let world = World::new("oob-recover");
     let repository = world.repository("change-open", &[]);
-    // What `recover` lands is interrupted work: a commit a run left marked as an
-    // incomplete step, which is what `onevcs` reads that off.
-    branch_with_work_under(
-        &world,
-        &repository,
-        "feat: add the widget (incomplete step)",
-    );
-    let preserved = world
-        .cmd_on(&onevcs_binary(), &["preserve", BRANCH, "--repo", "service"])
-        .output()
-        .expect("onevcs runs");
-    assert!(
-        preserved.status.success(),
-        "the branch could not be preserved: {}",
-        String::from_utf8_lossy(&preserved.stderr)
-    );
+    preserved_branch(&world, &repository);
     world.script("pr-author.body", "## What\nA recovered widget.\n");
     let graph = world.pr_author_graph();
 
@@ -423,7 +422,6 @@ fn every_argument_reaches_the_onevcs_verb_and_its_refusals_are_its_own() {
     branch_with_work(&world, &repository);
     let graph = world.pr_author_graph();
 
-    // An argument `onevcs publish-branch` does not take is its refusal.
     world
         .run(&[
             "publish-branch",
@@ -437,7 +435,6 @@ fn every_argument_reaches_the_onevcs_verb_and_its_refusals_are_its_own() {
         .exited(2)
         .err_has("unexpected argument '--draft-it-please'")
         .err_has("Usage: onevcs publish-branch");
-    // As is a `--policy` its parser does not know, value and all.
     world
         .run(&[
             "publish-branch",
@@ -449,7 +446,6 @@ fn every_argument_reaches_the_onevcs_verb_and_its_refusals_are_its_own() {
         ])
         .exited(2)
         .err_has("sideways");
-    // Drafting would happen, and nothing can draft: refused, with nothing landed.
     world
         .run(&["publish-branch", BRANCH, "--repo", "service"])
         .exited(2)
@@ -514,4 +510,216 @@ fn the_synopsis_the_register_proposes_is_the_one_the_binary_prints() {
         })
         .collect();
     assert_eq!(proposed, printed);
+}
+
+/// `repo-recover` makes every decision `publish-branch` does: no turn for
+/// `--no-draft`, a caller's own body, or a `local-direct` identity; a refusal
+/// where it would draft with no graph named; and a landing with no body, its
+/// ending named, where the draft dies.
+#[test]
+fn repo_recover_drafts_only_where_publish_branch_would_and_lands_through_a_dead_draft() {
+    // Held across the cases: the last world a process drops takes this process's
+    // doubles with it, the `onevcs` binary `preserved_branch` runs included.
+    let _held = World::new("oob-recover-held");
+    for case in ["no-draft", "body", "local-direct", "no-graph", "died"] {
+        let world = World::new(&format!("oob-recover-{case}"));
+        let publication = if case == "local-direct" {
+            "local-direct"
+        } else {
+            "change-open"
+        };
+        // A recovery attests the work complete, so a `local-direct` identity needs
+        // something on its merge path to verify it: a `pre-push` hook that lets the
+        // publishing push through.
+        let pre_push: &[&str] = if case == "local-direct" {
+            &["true"]
+        } else {
+            &[]
+        };
+        let repository = world.repository(publication, pre_push);
+        preserved_branch(&world, &repository);
+        let graph = world.pr_author_graph();
+        if case == "died" {
+            world.script("unknown.died-as", "unstartable spawn no harness to start\n");
+        }
+        let mut args = vec![
+            "repo-recover",
+            BRANCH,
+            "--repo",
+            "service",
+            "--title",
+            "feat: recover the widget",
+        ];
+        match case {
+            "no-draft" => args.push("--no-draft"),
+            "body" => args.extend(["--body", "## What\nRecovered by hand."]),
+            _ => {}
+        }
+        if case != "no-graph" {
+            args.extend(["--pr-author-graph", &graph]);
+        }
+        let landed = world.run(&args);
+
+        let turns = drafting_dispatches(&world).len();
+        match case {
+            "no-graph" => {
+                landed.exited(2).err_has("--pr-author-graph");
+                assert_eq!(turns, 0, "{case}");
+                assert!(opened(&world).is_empty(), "{case}: {:?}", opened(&world));
+                continue;
+            }
+            "died" => {
+                landed
+                    .exited(0)
+                    .err_has("worker died: rule=unstartable cause=spawn")
+                    .err_has("(dispatch-failed), so widget lands with no body");
+                assert_eq!(turns, 1, "{case}");
+            }
+            _ => {
+                landed.exited(0);
+                assert_eq!(turns, 0, "{case}: a drafting turn was spent");
+            }
+        }
+        if case == "local-direct" {
+            assert!(opened(&world).is_empty(), "{:?}", opened(&world));
+            assert_eq!(
+                repository.base_file("widget.txt").as_deref(),
+                Some("a widget\n"),
+                "{}",
+                world.dump()
+            );
+        } else {
+            let opened = opened(&world);
+            assert_eq!(opened.len(), 1, "{case}: {opened:?}\n{}", world.dump());
+            let expected = if case == "body" {
+                "## What\nRecovered by hand."
+            } else {
+                ""
+            };
+            assert_eq!(opened[0].1.trim_end(), expected, "{case}: {opened:?}");
+        }
+    }
+}
+
+/// A `--policy` a `publish-branch` is narrowed to decides whether a body is
+/// drafted, over the identity's rules: a `local-direct` identity narrowed to
+/// `change-open` opens a change request, so its body is drafted.
+#[test]
+fn a_policy_narrowed_to_open_a_change_request_is_drafted_for() {
+    let world = World::new("oob-narrowed");
+    let repository = world.repository("local-direct", &[]);
+    branch_with_work(&world, &repository);
+    world.script("pr-author.body", "## What\nA widget, reviewed.\n");
+    let graph = world.pr_author_graph();
+    world
+        .run(&[
+            "publish-branch",
+            BRANCH,
+            "--repo",
+            "service",
+            "--policy",
+            "change-open",
+            "--title",
+            "feat: add the widget",
+            "--pr-author-graph",
+            &graph,
+        ])
+        .exited(0);
+
+    assert_eq!(drafting_dispatches(&world).len(), 1, "{}", world.dump());
+    assert_eq!(
+        opened(&world),
+        vec![(
+            "feat: add the widget".to_owned(),
+            "## What\nA widget, reviewed.".to_owned()
+        )],
+        "{}",
+        world.dump()
+    );
+}
+
+/// The base a drafter is shown is the origin's default branch however the
+/// checkout knows it: from its own record of the origin's `HEAD`, from what the
+/// origin advertises when it has no record, and from the one branch it tracks
+/// there when the origin advertises nothing.
+#[test]
+fn the_base_is_found_however_the_checkout_knows_its_origins_default() {
+    for case in ["recorded", "advertised", "only-tracked"] {
+        let world = World::new(&format!("oob-base-{case}"));
+        let repository = world.repository("change-open", &[]);
+        branch_with_work(&world, &repository);
+        match case {
+            "recorded" => {
+                git(
+                    &world,
+                    &repository.checkout,
+                    &["remote", "set-head", "origin", "main"],
+                );
+            }
+            "only-tracked" => {
+                git(
+                    &world,
+                    &repository.origin,
+                    &["symbolic-ref", "HEAD", "refs/heads/gone"],
+                );
+            }
+            _ => {}
+        }
+        let graph = world.pr_author_graph();
+        world.script("pr-author.body", "## What\nA widget.\n");
+        world
+            .run(&[
+                "publish-branch",
+                BRANCH,
+                "--repo",
+                "service",
+                "--pr-author-graph",
+                &graph,
+            ])
+            .exited(0);
+
+        let drafts = drafting_dispatches(&world);
+        assert_eq!(drafts.len(), 1, "{case}");
+        let task = flag_of(&drafts[0], "--task");
+        assert!(
+            task.contains("its base is `origin/main`"),
+            "{case}: the task names another base:\n{task}"
+        );
+        assert_eq!(
+            opened(&world).first().map(|(_, body)| body.as_str()),
+            Some("## What\nA widget."),
+            "{case}\n{}",
+            world.dump()
+        );
+    }
+}
+
+/// A branch carrying no commit its base does not is drafted from its diff alone,
+/// and the task says so rather than listing nothing under a heading.
+#[test]
+fn a_branch_with_nothing_past_its_base_is_drafted_from_its_diff_alone() {
+    let world = World::new("oob-empty");
+    let repository = world.repository("change-open", &[]);
+    git(&world, &repository.checkout, &["branch", BRANCH]);
+    let graph = world.pr_author_graph();
+    world.run(&[
+        "publish-branch",
+        BRANCH,
+        "--repo",
+        "service",
+        "--pr-author-graph",
+        &graph,
+    ]);
+
+    let drafts = drafting_dispatches(&world);
+    assert_eq!(drafts.len(), 1, "{}", world.dump());
+    let task = flag_of(&drafts[0], "--task");
+    assert!(
+        task.contains(
+            "The branch carries no commit its base does not, so its diff is the only record \
+             there is of what it did."
+        ),
+        "{task}"
+    );
+    assert!(!task.contains("The commit messages of"), "{task}");
 }
