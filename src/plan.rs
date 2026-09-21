@@ -115,7 +115,7 @@ pub const AMENDMENT_HEADING: &str = "### Amendment";
 
 /// What an amendment tells its reader about its own authority.
 ///
-/// The opposite of [`CROSS_REPO_REFERENCES_PREAMBLE`] and of the sentence a
+/// The opposite of `CROSS_REPO_REFERENCES_PREAMBLE` and of the sentence a
 /// carried note is rendered under, and deliberately so. A note reports observed
 /// state and adds no acceptance criteria; an amendment **is** part of the bar,
 /// read by the worker and by the judge that reviews it. Its precedence is over

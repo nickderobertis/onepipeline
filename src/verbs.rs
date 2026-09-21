@@ -514,7 +514,7 @@ pub struct Next {
 /// observer graph declares resettable.
 ///
 /// One surface is never handed out: a `release-wait` whose hold has cleared
-/// since it was queued — [`release::wait_outlived`](crate::release::wait_outlived)
+/// since it was queued — `release::wait_outlived`
 /// says which record cleared it. It is claimed, so the queue moves past it, and
 /// withheld rather than delivered: said on stderr, and recorded neither as
 /// `planner-surfaced`, which it was not, nor by restarting any check-in clock,
