@@ -342,11 +342,12 @@ impl Shutdown {
 
 /// Whether a shutdown of this run stands, so nothing new may start for it.
 ///
-/// Asked by the reconcile loop before it dispatches, and by the liveness reading
-/// — a run put down by a shutdown is not one a driver is moving, however alive
-/// the process holding it still is.
+/// Asked by the reconcile loop before it dispatches. A hold whose presence
+/// cannot be read is taken as standing: dispatching into a run that may be
+/// shutting down is the one mistake the hold exists to prevent, and an `adopt`
+/// is what lifts it either way.
 pub(crate) fn begun(paths: &RunPaths) -> bool {
-    marker(paths).exists()
+    marker(paths).try_exists().unwrap_or(true)
 }
 
 /// Forget a shutdown, because the run is being taken up again.
@@ -516,7 +517,19 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
     let watched = in_flight(view, live);
     // Where the record stood when the shutdown began, so the wait reads only
     // what the run has written since rather than the whole of its history.
-    let from = std::fs::metadata(paths.journal()).map_or(0, |held| held.len());
+    let from = match std::fs::metadata(paths.journal()) {
+        Ok(held) => held.len(),
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(why) => {
+            eprintln!(
+                "onepipeline: run '{}': where its journal stood could not be read — {why}; \
+                 nothing it records during the wait is read, so each dispatch is known to \
+                 have ended by its own process alone",
+                paths.run
+            );
+            u64::MAX
+        }
+    };
     let mut journal = Journal::open(paths);
 
     let addresses = addresses_by_node(&view.events);
@@ -568,7 +581,15 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
 
     // Read again, because what a publication had reached is what the report
     // names, and one may have begun after the shutdown did.
-    let now = RunView::open(paths).ok();
+    let now = RunView::open(paths)
+        .map_err(|why| {
+            eprintln!(
+                "onepipeline: run '{}' could not be read again after its teardown — {why}; \
+                 what a publication had reached is reported as it stood when the shutdown began",
+                paths.run
+            );
+        })
+        .ok();
     let dispatches: Vec<DispatchStopped> = asked
         .into_iter()
         .map(|(dispatch, interrupt, detail)| {

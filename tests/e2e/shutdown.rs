@@ -18,8 +18,8 @@
 // full rationale.
 
 // llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
-// assumed: the twenty-three journeys here take about 195 seconds summed and about 50 on
-// the wall under nextest's parallelism, the longest about 38 — each waits out a real grace
+// assumed: the twenty-four journeys here take between about 90 and 195 seconds summed and
+// 25 to 50 on the wall under nextest's parallelism, by the host's load — each waits out a real grace
 // against real dispatches and pushes to a real origin, because a bound on how long a worker
 // is given cannot be stated without a clock running it. What they exercise is the shutdown
 // verb over `driver`'s teardown, `engine`'s interrupt, `views` and the linked `onevcs`

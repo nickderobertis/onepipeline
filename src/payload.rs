@@ -549,13 +549,11 @@ pub(crate) struct DispatchStopped {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum InterruptWord {
-    /// `delivered`.
     Delivered,
-    /// `no-turn`.
     NoTurn,
-    /// `failed`.
     Failed,
-    /// `not-asked`: the `--force` path, where nothing was asked at all.
+    /// `not-asked`: nothing was asked at all — the `--force` path, or a run the
+    /// hold could not be written for.
     NotAsked,
 }
 
@@ -575,11 +573,8 @@ impl From<crate::shutdown::Answer> for InterruptWord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum DispatchEndingWord {
-    /// `graceful`.
     Graceful,
-    /// `killed`.
     Killed,
-    /// `still-running`.
     StillRunning,
 }
 
@@ -626,19 +621,12 @@ pub(crate) struct HostShutdown {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum TeardownWord {
-    /// `signalled`.
     Signalled,
-    /// `nothing-to-stop`.
     NothingToStop,
-    /// `identity-declined`.
     IdentityDeclined,
-    /// `not-attempted`.
     NotAttempted,
-    /// `partly-signalled`.
     PartlySignalled,
-    /// `refused`.
     Refused,
-    /// `elsewhere`.
     Elsewhere,
 }
 
@@ -704,13 +692,9 @@ pub(crate) struct BranchPreserved {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum PreservedWord {
-    /// `pushed`.
     Pushed,
-    /// `already-on-origin`.
     AlreadyOnOrigin,
-    /// `no-remote`.
     NoRemote,
-    /// `refused`.
     Refused,
 }
 
