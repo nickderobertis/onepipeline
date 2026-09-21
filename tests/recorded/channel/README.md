@@ -12,7 +12,10 @@ recorded run root beside it, drives this build's `status`, `runs`, `results` and
 `next` over it, re-derives its `queue.json`, and holds every answer and every
 channel byte to what the 0.28.2 binary answered over the same directory. Those
 answers are checked in under `../answers/`, and `scripts/record-channel-answers.sh`
-is how they were captured.
+is how they were captured. `tests/layout_document.rs` offers every record each one
+holds through a bus of the compiled-in layout and one of the published
+`schemas/planner-channel.json`, and holds the two directories they write to one
+another.
 
 Every file here is byte for byte what was on disk. Nothing was edited or
 redacted. The journeys edit one thing in their *copy* of the recorded run root,

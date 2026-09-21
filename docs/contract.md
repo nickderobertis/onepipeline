@@ -23,6 +23,24 @@ author as its source, its findings use that source, and it may requeue only its 
 Serving a channel member protocol, resolving schema links and interpreting codec
 bindings belong to the host's `onemessagebus serve`, not this engine.
 
+**The planner-channel layout is published as a document.**
+`schemas/planner-channel.json` is a `onemessagebus` schema bundle declaring
+version `1.0.0` and carrying one layout, `planner-channel` — its queues and their
+policies, its operations and authors, how an offer to each queue is prepared, and
+the schemas those name — generated from the layout this engine compiles in through
+the bus's own `LayoutDocument` and `SchemaBundle` types: the compiled-in layout is its one source, and the file is never edited by
+hand. A host's bus links it from its configuration's `schemas` key at
+`https://raw.githubusercontent.com/nickderobertis/onepipeline/v<version>/schemas/planner-channel.json`,
+`<version>` the release its engine pin names, so its `onemessagebus` reads and
+writes the channel directory this engine does. The engine itself keeps running
+the compiled-in layout. Where the bus's step vocabulary cannot say what the
+compiled-in preparation does, the document's bus differs from the engine, and
+only there: a bare envelope that omits its author routes a command record that
+omits it too, where the engine writes `author: planner`; one naming `author:
+planner` routes a reply that keeps it, where the engine drops it; and a
+malformed reply or command envelope is refused in the bus's words rather than
+this engine's. Each of those reads back as the same record.
+
 **A chain that stopped raises a finding.** A `member-died` published under
 `oneagentgraph`'s provider rule, `provider-failure`, is read as an identity chain
 that stopped when its cause — read through the linked `oneagentgraph::event::Cause`

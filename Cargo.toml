@@ -707,6 +707,9 @@ include = [
   # time — the telemetry document, and one launch config per schema version this
   # build reads. Without them the packaged crate does not build, let alone test.
   "tests/golden/*.json",
+  # The planner-channel envelope schemas `src/channel/layout.rs` reads at compile
+  # time; without them `cargo publish`'s verification build of the crate fails.
+  "/schemas/**",
   "Cargo.toml",
   "README.md",
   "LICENSE",

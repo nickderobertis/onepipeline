@@ -811,6 +811,68 @@ fn the_contract_names_the_producers_words_for_a_chain_that_stopped() {
     }
 }
 
+/// The committed planner-channel document is the one this build generates
+/// from its compiled-in layout, through the bus's own document types: a change
+/// to the layout that is not regenerated here fails, and so does a hand edit.
+///
+/// `ONEPIPELINE_WRITE_LAYOUT_DOCUMENT=1` writes the generated document in place
+/// of the committed one instead — how it is regenerated, and never set by a
+/// check.
+#[test]
+fn the_committed_planner_channel_document_is_the_compiled_in_layout() {
+    use onepipeline::channel::layout::{bundle_json, DOCUMENT_PATH};
+    let path = repo_root().join(DOCUMENT_PATH);
+    let generated = bundle_json();
+    if std::env::var_os("ONEPIPELINE_WRITE_LAYOUT_DOCUMENT").is_some() {
+        std::fs::write(&path, &generated).expect("the document is written");
+    }
+    let committed = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{DOCUMENT_PATH} is committed: {error}"));
+    assert!(
+        committed == generated,
+        "{DOCUMENT_PATH} is not what the compiled-in layout generates. If the layout \
+         changed on purpose, raise `DOCUMENT_VERSION` and regenerate it with \
+         `ONEPIPELINE_WRITE_LAYOUT_DOCUMENT=1 cargo test --test contract \
+         the_committed_planner_channel_document_is_the_compiled_in_layout`; never edit it \
+         by hand.\n--- committed\n{committed}\n--- generated\n{generated}"
+    );
+}
+
+/// The contract states where the document is, the version it declares and
+/// that the compiled-in layout is its source — and each of those is true of the
+/// committed document, read back through the bus's own bundle type.
+#[test]
+fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
+    use onepipeline::channel::layout::{document, DOCUMENT_PATH, DOCUMENT_VERSION};
+    let passage = CONTRACT
+        .split_once("**The planner-channel layout is published as a document.**")
+        .and_then(|(_, rest)| rest.split_once("\n\n"))
+        .map(|(passage, _)| passage)
+        .expect("the contract states the published layout document");
+    let named = backticked_in(passage);
+    for word in [
+        DOCUMENT_PATH,
+        DOCUMENT_VERSION,
+        "LayoutDocument",
+        "SchemaBundle",
+    ] {
+        assert!(
+            named.contains(word),
+            "the layout-document paragraph does not name `{word}`: {passage}"
+        );
+    }
+    assert!(
+        passage.contains("compiled-in layout is its one source"),
+        "the paragraph does not say where the document comes from: {passage}"
+    );
+    let committed = std::fs::read_to_string(repo_root().join(DOCUMENT_PATH))
+        .expect("the document is committed");
+    let bundle =
+        onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
+    assert_eq!(bundle.version().to_string(), DOCUMENT_VERSION);
+    assert_eq!(bundle.layouts(), [document()]);
+}
+
 /// `exclude` wins, an absent `include` admits everything, and a glob is `*`.
 #[test]
 fn the_grammar_matches_the_way_the_contract_says_it_does() {

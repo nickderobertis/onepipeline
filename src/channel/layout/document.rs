@@ -61,7 +61,6 @@ enum Envelope {
 }
 
 impl Envelope {
-    /// The path of `member` of the envelope.
     fn at(self, member: &str) -> FieldPath {
         match self {
             Self::Bare => field(member),

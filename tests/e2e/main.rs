@@ -80,6 +80,12 @@ mod journal;
 // project edged narrower than the crate would drop it out of `nx affected` for the very
 // changes it exists to catch.
 mod landing;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] two journeys, about ten
+// seconds together — one detached run and a handful of `onemessagebus` invocations, the
+// shape and cost of `channel` and `boundary` in this same target — and what they hold is
+// the document this crate publishes against the binary it builds, so the narrowest edge
+// they can honestly sit behind is the crate itself, which is this target's.
+mod layout_document;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
 // exercise is `lifecycle`, `vcs`, `pool` and `engine` together against the linked `onevcs`
 // over a real origin — the session, the publication, the pool's hold and its refusal — so

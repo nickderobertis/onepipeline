@@ -34,9 +34,13 @@ export NX_DAEMON="${NX_DAEMON-false}"
 # for housekeeping: this workspace's pinned Nx is the only one that may run.
 export NX_USE_LOCAL=true
 
-if [ ! -e node_modules/.bin/nx ] && [ ! -e node_modules/.bin/nx.cmd ]; then
+# The pinned `onemessagebus` CLI is the other shim the checks read — the
+# layout-document journey drives it — so a tree installed before it was pinned
+# is installed again rather than failing that journey.
+if { [ ! -e node_modules/.bin/nx ] && [ ! -e node_modules/.bin/nx.cmd ]; } \
+  || { [ ! -e node_modules/.bin/onemessagebus ] && [ ! -e node_modules/.bin/onemessagebus.cmd ]; }; then
   if ! command -v npm >/dev/null 2>&1; then
-    echo "nx: npm not found; cannot install the pinned Nx the project graph needs" >&2
+    echo "nx: npm not found; cannot install the pinned Nx the project graph needs, or the pinned onemessagebus CLI the checks drive" >&2
     echo "ACTION: install Node.js 20+ (https://nodejs.org/) and re-run 'just bootstrap'" >&2
     exit 1
   fi
