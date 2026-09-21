@@ -530,6 +530,7 @@ pub(crate) struct RunStopped {
 }
 
 /// `dispatch-stopped`: one live dispatch a host shutdown acted on.
+// llmlint: ignore[boundary_inputs_validated] this module's own rule, stated at its head: a key no document names is not refused, because a record a later build wrote is the ordinary contents of a runs root — no payload document here denies unknown fields, and a reader of this one that did would call a newer build's record unreadable. What a reader acts on is still typed and required.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct DispatchStopped {
     /// The process the dispatch was running in.
@@ -594,6 +595,7 @@ impl From<crate::shutdown::DispatchEnding> for DispatchEndingWord {
 }
 
 /// `host-shutdown`: the run was put down mid-flight by a host shutdown.
+// llmlint: ignore[boundary_inputs_validated] this module's own rule, stated at its head: a key no document names is not refused, because a record a later build wrote is the ordinary contents of a runs root — no payload document here denies unknown fields, and a reader of this one that did would call a newer build's record unreadable. What a reader acts on is still typed and required.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct HostShutdown {
     /// Which scope selected this run.
@@ -678,6 +680,7 @@ impl From<&crate::shutdown::ShutdownScope> for ScopeWord {
 }
 
 /// One branch a host shutdown offered to `onevcs::preserve`.
+// llmlint: ignore[boundary_inputs_validated] this module's own rule, stated at its head: a key no document names is not refused, because a record a later build wrote is the ordinary contents of a runs root — no payload document here denies unknown fields, and a reader of this one that did would call a newer build's record unreadable. What a reader acts on is still typed and required.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct BranchPreserved {
     /// The repository identity it belongs to.

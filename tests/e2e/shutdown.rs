@@ -1142,3 +1142,71 @@ fn the_last_section_names_every_other_unpublished_branch_on_the_host() {
     );
     world.release("build.go");
 }
+
+/// `status` and `results` read the **latest** shutdown a run carries, and say a
+/// shutdown record that does not decode is unreadable rather than guessing.
+///
+/// A host shut down twice is the ordinary way to carry two: the second one's
+/// words — `already-on-origin` — are the ones read. The unreadable half appends
+/// records by hand, which is what a journal a newer or broken writer left looks
+/// like to this build's reader.
+// llmlint: ignore-block[tests_mirror_real_usage] the two records appended at the end are
+// written by hand, because no verb of this build writes a `host-shutdown` or a
+// `dispatch-stopped` its own document refuses; that is the reader's boundary under test.
+// Everything before them is the real binary shutting a real run down twice.
+#[test]
+fn status_and_results_read_the_latest_shutdown_and_name_an_unreadable_one() {
+    let world = World::new("shutdown-read-back");
+    world.repository("local-direct", &[]);
+    held(&world, "service");
+    let run = launch(&world, "readback", vec![lifecycle("service", &[])]);
+    until_in_flight(&world, &run, &["service"]);
+    let branch = session_branch(&world, &run, "service");
+
+    world.run(&["shutdown", &run, "--force"]).exited(0);
+    world.run(&["shutdown", &run, "--force"]).exited(0);
+    assert_eq!(world.events_of(&run, "host-shutdown").len(), 2);
+    world.run(&["results", &run]).exited(0).out_has(&format!(
+        "its work is on {branch} (already on its origin at this commit)"
+    ));
+
+    let journal = world.run_file(&run, "events.jsonl");
+    let mut text = std::fs::read_to_string(&journal).expect("the journal reads");
+    for (seq, kind, node) in [
+        (0, "dispatch-stopped", Some("service")),
+        (1, "host-shutdown", None),
+    ] {
+        let mut labels = json!({"run_id": run});
+        if let Some(node) = node {
+            labels["node"] = json!(node);
+        }
+        text.push_str(
+            &json!({
+                "v": 2,
+                "ts": "2099-01-01T00:00:00.000Z",
+                "stream": "hand-written",
+                "seq": seq,
+                "source": "pipeline",
+                "kind": kind,
+                "labels": labels,
+                "payload": {"ended": 7},
+                "artifacts": [],
+            })
+            .to_string(),
+        );
+        text.push('\n');
+    }
+    std::fs::write(&journal, text).expect("the journal is written");
+
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("HOST SHUTDOWN")
+        .out_has("service: its dispatch-stopped record could not be read");
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("unknown: the host-shutdown record could not be read");
+    world.release("service.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
