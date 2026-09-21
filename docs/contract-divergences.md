@@ -6839,9 +6839,13 @@ that line is one no watch following that guidance could see.
 
 **Two roots, deduplicated by device.** The runs root every view already reads,
 and the directory the linked `onevcs` cuts every per-run clone and isolated
-worktree under — `$ONEVCS_HOME/workspaces`, `~/.onevcs/workspaces` by default,
-resolved through that sibling's own published resolution rather than restated
-here. The workspaces root is the one that filled. A filesystem holding both is
+worktree under — `$ONEVCS_HOME/workspaces`, `~/.onevcs/workspaces` by default.
+The state root is resolved through that sibling's own published resolution
+rather than restated here; the sibling publishes no path for the `workspaces`
+directory inside it, so that one name is held to what the linked `onevcs` does
+by a journey that drives a real lifecycle node and fails when the checkout it
+cut is not under the root the line names. The workspaces root is the one that
+filled. A filesystem holding both is
 **one line naming both**, keyed on the device rather than on the free space,
 because two lines for one device read as two answers about two resources and
 matching numbers would collapse two genuinely different filesystems.
@@ -6863,7 +6867,8 @@ owns what is filling it.
 
 Driven by `tests/e2e/views.rs` against the compiled binary: `status RUN` and
 `host` each carry one line for the one filesystem both roots are on, naming both
-roots, with `status`'s sitting above the provider block and `host`'s beside the
+roots — the workspaces root being the one the linked `onevcs` cut that run's
+lifecycle checkout under — with `status`'s sitting above the provider block and `host`'s beside the
 scope line; a runs root that does not exist yet is measured at its nearest
 existing ancestor and the line says so; and a root the host refuses to answer
 about says that on its own line while the other root is still measured, as does

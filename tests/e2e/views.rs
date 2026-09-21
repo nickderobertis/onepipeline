@@ -375,12 +375,18 @@ fn free_space_lines(stdout: &str) -> Vec<&str> {
 ///
 /// The one incident this reading exists for is a host at 197G/197G that
 /// reported two unrelated test failures and nothing about the disk.
+///
+/// The workspaces root is read off the line rather than spelled here, and held
+/// to where the linked `onevcs` really cut this run's lifecycle checkout: that
+/// sibling publishes no path for the directory, so the checkout it made is the
+/// one account of its layout this journey can reconcile the line against.
 #[test]
 fn status_and_host_report_free_space_on_the_filesystem_holding_both_roots() {
     let world = World::new("views-freespace");
-    let run = settled(&world, "spaced", vec![agent("build", &[])]);
+    world.repository("local-direct", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    let run = settled(&world, "spaced", vec![lifecycle("service", &[])]);
     let runs = world.runs.display().to_string();
-    let workspaces = world.onevcs_home().join("workspaces").display().to_string();
 
     let status = world.run(&["status", &run]);
     status.exited(0).out_has("providers: fake-provider");
@@ -392,6 +398,24 @@ fn status_and_host_report_free_space_on_the_filesystem_holding_both_roots() {
         status.stdout
     );
     let line = lines[0];
+    const WORKSPACES: &str = " and the lifecycle workspaces under ";
+    let workspaces = line
+        .split_once(WORKSPACES)
+        .map(|(_, root)| root.to_owned())
+        .unwrap_or_else(|| panic!("the line names no workspaces root: {line}"));
+    let checkouts = checkouts_under(&world.onevcs_home());
+    assert!(
+        !checkouts.is_empty(),
+        "the linked onevcs cut no checkout under {} for a lifecycle node",
+        world.onevcs_home().display()
+    );
+    for checkout in &checkouts {
+        assert!(
+            checkout.starts_with(&workspaces),
+            "the linked onevcs cut {} outside the workspaces root the line names: {line}",
+            checkout.display()
+        );
+    }
     assert!(
         line.contains(" GiB of ") && line.contains("% free) on the filesystem holding "),
         "{line}"
@@ -475,6 +499,29 @@ fn status_and_host_report_free_space_on_the_filesystem_holding_both_roots() {
         .is_some_and(|line| line == format!("  reading {runs}")));
     assert_eq!(host_lines.next(), Some(lines[0]));
     assert_eq!(host_lines.next(), Some("  no live dispatches"));
+}
+
+/// Every git checkout under `root`: a directory holding a `.git`, not descended
+/// into further.
+fn checkouts_under(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        if dir.join(".git").exists() {
+            found.push(dir);
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        pending.extend(
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir() && !path.is_symlink()),
+        );
+    }
+    found
 }
 
 /// A runs root that does not exist yet is measured at its nearest existing

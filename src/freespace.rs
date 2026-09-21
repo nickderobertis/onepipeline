@@ -189,9 +189,13 @@ struct Identity(String);
 /// worktree under, resolved as that library resolves its own state root —
 /// `ONEVCS_HOME` when it is set to something non-empty, `~/.onevcs` otherwise.
 ///
-/// Reached through the sibling's published resolution rather than restated:
-/// `onevcs::workspaces::default_path` is that state root's own sizing file, and
-/// the workspaces directory is the sibling's fixed name beside it.
+/// The state root is reached through the sibling's published resolution rather
+/// than restated: `onevcs::workspaces::default_path` is that root's own sizing
+/// file. The `workspaces` name beside it is the one piece the sibling does not
+/// publish, so it is held to the sibling's behaviour instead:
+/// `status_and_host_report_free_space_on_the_filesystem_holding_both_roots`
+/// drives a real lifecycle node and fails when the checkout the linked `onevcs`
+/// cut for it is not under the root this names.
 fn workspaces_root() -> Result<PathBuf, String> {
     let sizing = onevcs::workspaces::default_path().map_err(|error| error.to_string())?;
     let root = sizing
