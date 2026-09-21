@@ -1206,10 +1206,11 @@ pub fn render_stopped(stopped: &Stopped) -> String {
 /// # Errors
 ///
 /// [`Error::NotOwned`] for a run another session owns under the two scopes that
-/// keep `stop`'s ownership rule — `--host` deliberately does not keep it —
-/// [`Error::NoSuchRun`] for a run id this root does not hold, and
-/// [`Error::Refused`] for a run whose dispatch registry cannot be read. Each is
-/// refused before anything is signalled.
+/// keep `stop`'s ownership rule — `--host` deliberately does not keep it — and
+/// [`Error::NoSuchRun`] for a run id this root does not hold, each refused
+/// before anything is signalled. A run whose dispatch registry cannot be read
+/// is reported rather than refused: its teardown is `not-attempted`, which is
+/// the exit status's refusal, and its branches are still pushed.
 pub fn shutdown(root: &Path, request: ShutdownRequest) -> Result<Shutdown> {
     crate::shutdown::shutdown(root, request)
 }

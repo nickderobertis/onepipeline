@@ -324,8 +324,14 @@ fn a_forced_shutdown_asks_nothing_and_waits_for_nothing() {
             "{}",
             shutdown.stdout
         );
+        // `--grace 0` is the same path as `--force`, and is recorded as one.
         let recorded = host_shutdown(&world, run);
-        assert_eq!(recorded["forced"], json!(args.contains(&"--force")));
+        assert_eq!(recorded["forced"], true, "{recorded}");
+        assert!(
+            shutdown.stdout.contains("  forced  "),
+            "{}",
+            shutdown.stdout
+        );
     }
 }
 
@@ -835,4 +841,168 @@ fn a_landed_nodes_branch_is_not_offered_and_the_work_in_flight_is() {
     assert_eq!(branches[0]["branch"], json!(live), "{branches}");
     assert_eq!(branches[0]["result"], "pushed", "{branches}");
     assert!(on_origin(&world, &repository.origin, &live).is_some());
+}
+
+/// A run whose dispatch registry cannot be read is reported rather than refused,
+/// its branches are still pushed, and the rest of the host is still shut down.
+///
+/// A host shutdown works through every run on the host, and the worst answer it
+/// could give to one unreadable run is to stop there: every run after it would
+/// be left running and unpushed on a machine about to go away.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_registry_is_reported_and_the_rest_of_the_host_is_still_shut_down() {
+    let world = World::new("shutdown-unreadable-registry");
+    let repository = world.repository("local-direct", &[]);
+    held(&world, "service");
+    held(&world, "build");
+    let broken = launch(&world, "broken", vec![lifecycle("service", &[])]);
+    until_in_flight(&world, &broken, &["service"]);
+    let sound = launch(&world, "sound", vec![agent("build", &[])]);
+    until_in_flight(&world, &sound, &["build"]);
+    let branch = session_branch(&world, &broken, "service");
+    let planted = world.run_file(&broken, "dispatches/planted.json");
+    std::fs::write(&planted, "not an entry this build knows").expect("an unreadable entry");
+
+    let shutdown = world.run(&["shutdown", "--host", "--force"]);
+    // A teardown that could not be attempted is a shutdown that did not do what
+    // it was asked, and it says why on stderr.
+    shutdown
+        .exited(REFUSED)
+        .err_has("cannot establish what it is running");
+    assert!(
+        shutdown
+            .stdout
+            .contains("was not stopped: this host gave no answer"),
+        "the unread teardown is not reported in stop's own words:\n{}",
+        shutdown.stdout
+    );
+    assert_eq!(host_shutdown(&world, &broken)["teardown"], "not-attempted");
+    assert!(
+        on_origin(&world, &repository.origin, &branch).is_some(),
+        "an unreadable registry cost the run its branch:\n{}",
+        shutdown.stdout
+    );
+    // And the run after it was shut down all the same.
+    assert_eq!(host_shutdown(&world, &sound)["teardown"], "signalled");
+    assert_eq!(
+        stopped_for(&world, &sound, "build")["payload"]["ended"],
+        "killed"
+    );
+
+    // The run this journey broke, put back and stopped the ordinary way.
+    std::fs::remove_file(&planted).expect("the entry is taken away again");
+    world.run(&["stop", &broken]).exited(0);
+    for node in ["service", "build"] {
+        world.release(&format!("{node}.go"));
+    }
+}
+
+/// A lever that breaks is an answer rather than a failure, and the deadline
+/// still applies.
+#[cfg(unix)]
+#[test]
+fn a_lever_that_breaks_is_reported_and_the_deadline_still_applies() {
+    let world = World::new("shutdown-lever-broke");
+    world.script("interrupt.fail", "");
+    held(&world, "build");
+    let run = launch(&world, "leverbroke", vec![agent("build", &[])]);
+    until_in_flight(&world, &run, &["build"]);
+
+    let shutdown = world.run(&["shutdown", &run, "--grace", "1"]);
+    shutdown.exited(REFUSED);
+    let line = line_for(&shutdown.stdout, "build");
+    assert!(line.contains("interrupt failed"), "{line}");
+    assert!(line.contains("the lever failed"), "{line}");
+    assert!(line.contains("ended killed"), "{line}");
+    let stopped = stopped_for(&world, &run, "build");
+    assert_eq!(stopped["payload"]["interrupt"], "failed", "{stopped}");
+}
+
+/// A branch already level with its origin is a fact reported at exit 0.
+///
+/// The ordinary way to meet one: a host shut down twice. The first shutdown
+/// pushed the branch; the second finds nothing live, nothing to tear down, and
+/// the origin already carrying that commit — so there is nothing it failed to do.
+#[test]
+fn a_branch_already_on_its_origin_is_reported_and_is_not_a_failure() {
+    let world = World::new("shutdown-already-on-origin");
+    let repository = world.repository("local-direct", &[]);
+    held(&world, "service");
+    let run = launch(&world, "twice", vec![lifecycle("service", &[])]);
+    until_in_flight(&world, &run, &["service"]);
+    let branch = session_branch(&world, &run, "service");
+
+    world.run(&["shutdown", &run, "--force"]).exited(0);
+    let pushed = on_origin(&world, &repository.origin, &branch).expect("the first push landed");
+
+    let again = world.run(&["shutdown", &run, "--force"]);
+    again.exited(0).out_has("no live dispatch to interrupt");
+    let line = again
+        .stdout
+        .lines()
+        .find(|line| line.contains(&format!("@{branch}:")))
+        .unwrap_or_else(|| panic!("the report names no {branch}:\n{}", again.stdout));
+    assert!(line.contains("already on its origin"), "{line}");
+    assert!(line.contains(&pushed), "{line}");
+    let recorded = world.events_of(&run, "host-shutdown");
+    assert_eq!(recorded.len(), 2, "{recorded:?}");
+    assert_eq!(
+        recorded[1]["payload"]["branches"][0]["result"],
+        "already-on-origin"
+    );
+    world.release("service.go");
+}
+
+/// A branch nothing outside this host can carry — its checkout has no origin —
+/// is a fact the report names, with the commit that is at risk, at exit 0.
+///
+/// The one state here set by hand: the session's own clone losing its `origin`
+/// remote. No verb produces it — `onevcs register` refuses an identity with no
+/// origin — and it is what a clone whose remote an operator removed looks like to
+/// the preserving push, which asks the location and never the identity.
+// llmlint: ignore-block[tests_mirror_real_usage] the one value set by hand is the session
+// clone's `origin` remote, removed with git, and no product surface sets it: registering an
+// identity requires an origin, so a location with none is reached only by somebody removing
+// it. Everything else is the real binary against a real run, and the assertion is on what
+// the preserving push answered for that location.
+#[test]
+fn a_branch_with_no_origin_to_go_to_is_reported_with_its_commit() {
+    let world = World::new("shutdown-no-remote");
+    world.repository("local-direct", &[]);
+    held(&world, "service");
+    let run = launch(&world, "noremote", vec![lifecycle("service", &[])]);
+    until_in_flight(&world, &run, &["service"]);
+    let branch = session_branch(&world, &run, "service");
+    let token = branch.trim_start_matches("onevcs/").to_string();
+    let clone = clone_of(&world.onevcs_home().join("workspaces"), &token)
+        .unwrap_or_else(|| panic!("no run clone for session {token}"));
+    git(&world, &clone, &["remote", "remove", "origin"]);
+
+    let shutdown = world.run(&["shutdown", &run, "--force"]);
+    shutdown.exited(0);
+    let line = shutdown
+        .stdout
+        .lines()
+        .find(|line| line.contains(&format!("@{branch}:")))
+        .unwrap_or_else(|| panic!("the report names no {branch}:\n{}", shutdown.stdout));
+    assert!(line.contains("no origin to push to"), "{line}");
+    let recorded = host_shutdown(&world, &run);
+    assert_eq!(recorded["branches"][0]["result"], "no-remote");
+    assert_eq!(recorded["branches"][0]["remote"], Value::Null);
+    let commit = recorded["branches"][0]["commit"]
+        .as_str()
+        .expect("the commit nothing else carries is named");
+    assert!(line.contains(commit), "{line}");
+    world.release("service.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The clone a session's worktree commits into, found under the state root.
+fn clone_of(workspaces: &Path, token: &str) -> Option<std::path::PathBuf> {
+    std::fs::read_dir(workspaces)
+        .ok()?
+        .flatten()
+        .map(|identity| identity.path().join("runs").join(token).join("clone"))
+        .find(|clone| clone.is_dir())
 }

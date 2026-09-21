@@ -533,7 +533,7 @@ pub(crate) struct RunStopped {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct DispatchStopped {
     /// The process the dispatch was running in.
-    pub(crate) pid: u64,
+    pub(crate) pid: u32,
     /// What the interrupt was answered with.
     pub(crate) interrupt: InterruptWord,
     /// The answer in the words a reader is shown.
@@ -556,6 +556,18 @@ pub(crate) enum InterruptWord {
     Failed,
     /// `not-asked`: the `--force` path, where nothing was asked at all.
     NotAsked,
+}
+
+impl From<crate::shutdown::Answer> for InterruptWord {
+    fn from(answer: crate::shutdown::Answer) -> Self {
+        use crate::shutdown::Answer as A;
+        match answer {
+            A::Delivered => Self::Delivered,
+            A::NoTurn => Self::NoTurn,
+            A::Failed => Self::Failed,
+            A::NotAsked => Self::NotAsked,
+        }
+    }
 }
 
 /// How a dispatch a host shutdown acted on ended.
@@ -599,11 +611,46 @@ pub(crate) struct HostShutdown {
     /// How many were killed at the deadline.
     pub(crate) killed: u32,
     /// What the teardown established, in `run-stopped`'s own vocabulary.
-    pub(crate) teardown: String,
+    pub(crate) teardown: TeardownWord,
     /// The runs root the shutdown read.
     pub(crate) root: String,
     /// One entry per branch the run's records named.
     pub(crate) branches: Vec<BranchPreserved>,
+}
+
+/// What a teardown established, in the words `run-stopped` carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum TeardownWord {
+    /// `signalled`.
+    Signalled,
+    /// `nothing-to-stop`.
+    NothingToStop,
+    /// `identity-declined`.
+    IdentityDeclined,
+    /// `not-attempted`.
+    NotAttempted,
+    /// `partly-signalled`.
+    PartlySignalled,
+    /// `refused`.
+    Refused,
+    /// `elsewhere`.
+    Elsewhere,
+}
+
+impl From<crate::journal::StopTeardown> for TeardownWord {
+    fn from(teardown: crate::journal::StopTeardown) -> Self {
+        use crate::journal::StopTeardown as T;
+        match teardown {
+            T::Signalled => Self::Signalled,
+            T::NothingToStop => Self::NothingToStop,
+            T::IdentityDeclined => Self::IdentityDeclined,
+            T::NotAttempted => Self::NotAttempted,
+            T::PartlySignalled => Self::PartlySignalled,
+            T::Refused => Self::Refused,
+            T::Elsewhere => Self::Elsewhere,
+        }
+    }
 }
 
 /// Which scope a host shutdown selected a run under.
@@ -1277,6 +1324,26 @@ mod tests {
             crate::shutdown::Preserved::Refused,
         ] {
             assert_eq!(word(&PreservedWord::from(preserved)), preserved.as_str());
+        }
+        for answer in [
+            crate::shutdown::Answer::Delivered,
+            crate::shutdown::Answer::NoTurn,
+            crate::shutdown::Answer::Failed,
+            crate::shutdown::Answer::NotAsked,
+        ] {
+            assert_eq!(word(&InterruptWord::from(answer)), answer.as_str());
+        }
+        for teardown in [
+            crate::journal::StopTeardown::Signalled,
+            crate::journal::StopTeardown::NothingToStop,
+            crate::journal::StopTeardown::IdentityDeclined,
+            crate::journal::StopTeardown::NotAttempted,
+            crate::journal::StopTeardown::PartlySignalled,
+            crate::journal::StopTeardown::Refused,
+            crate::journal::StopTeardown::Elsewhere,
+        ] {
+            assert_eq!(word(&TeardownWord::from(teardown)), teardown.word());
+            assert_eq!(word(&TeardownWord::from(teardown)), word(&teardown));
         }
         for scope in [
             crate::shutdown::ShutdownScope::Run(String::new()),

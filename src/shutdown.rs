@@ -66,17 +66,39 @@ const MARKER: &str = "shutting-down.json";
 /// that a journey with a one-second grace still tells the two endings apart.
 const POLL: Duration = Duration::from_millis(50);
 
-/// The word a `dispatch-stopped` carries when the running turn took the
-/// redirection.
-const DELIVERED: &str = "delivered";
-/// The word for a dispatch that had no controllable turn to redirect. A fact
-/// about the lever rather than a failure.
-const NO_TURN: &str = "no-turn";
-/// The word for a lever that was pulled and broke. Also not a failure of the
-/// shutdown: the deadline applies either way.
-const FAILED: &str = "failed";
-/// The word for the `--force` path, where nothing was asked at all.
-const NOT_ASKED: &str = "not-asked";
+/// What one dispatch's interrupt was answered with.
+///
+/// The typed answer behind [`DispatchStopped::interrupt`], which the contract
+/// spells as a `String`: every value that field carries is one of these, made
+/// by [`as_str`](Self::as_str), and `payload::InterruptWord` is built from this
+/// through an exhaustive `From` — so the words have one source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Answer {
+    /// There was no controllable turn to redirect. A fact about the lever
+    /// rather than a failure. Ranked lowest: it is what a dispatch that named
+    /// several members answers only when none of them answered anything else.
+    NoTurn,
+    /// The lever was pulled and broke. Also not a failure of the shutdown: the
+    /// deadline applies either way.
+    Failed,
+    /// The running turn took the redirection. Ranked highest, because what a
+    /// reader has to know is whether *anything* took the ask.
+    Delivered,
+    /// The `--force` path, where nothing was asked at all.
+    NotAsked,
+}
+
+impl Answer {
+    /// The word this answer travels as, on the record and on the seam.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Delivered => "delivered",
+            Self::NoTurn => "no-turn",
+            Self::Failed => "failed",
+            Self::NotAsked => "not-asked",
+        }
+    }
+}
 
 /// Which runs a shutdown acts on.
 ///
@@ -192,6 +214,7 @@ pub struct DispatchStopped {
     pub pid: u32,
     /// What the interrupt was answered with: `delivered`, `no-turn`, `failed`,
     /// or `not-asked` for the forced path.
+    // llmlint: ignore[invalid_states_unrepresentable] the contract spells this field `pub interrupt: String` in the seam `onepipeline-ui` is written against, so its type is not this module's to narrow; every value it carries is made by `Answer::as_str`, the one source of the four words, which the payload's own closed `InterruptWord` is built from through an exhaustive `From`.
     pub interrupt: String,
     /// That answer in the words a reader is shown, and — for a dispatch the
     /// deadline reaped inside a publication of its own — what that leaves behind
@@ -253,7 +276,7 @@ impl RunShutdown {
             StopTeardown::Signalled | StopTeardown::NothingToStop | StopTeardown::Elsewhere
         ) && self.dispatches.iter().all(|stopped| match stopped.ended {
             DispatchEnding::Graceful => true,
-            DispatchEnding::Killed => stopped.interrupt == NOT_ASKED,
+            DispatchEnding::Killed => stopped.interrupt == Answer::NotAsked.as_str(),
             DispatchEnding::StillRunning => false,
         }) && self
             .branches
@@ -272,7 +295,8 @@ pub struct Shutdown {
     pub scope: ShutdownScope,
     /// The grace each dispatch had.
     pub grace: Duration,
-    /// Whether the interrupt and the wait were skipped.
+    /// Whether the interrupt and the wait were skipped — by `--force`, or by a
+    /// grace of zero, which is the same path.
     pub forced: bool,
     /// One entry per run acted on.
     pub runs: Vec<RunShutdown>,
@@ -315,8 +339,19 @@ pub(crate) fn begun(paths: &RunPaths) -> bool {
 /// Called by the adoption that claims the run, under its ownership lock: an
 /// `adopt` is the deliberate decision to run this run again, and it is the only
 /// thing that lifts the hold.
-pub(crate) fn adopted(paths: &RunPaths) {
-    let _ = std::fs::remove_file(marker(paths));
+///
+/// # Errors
+///
+/// A hold that is there and could not be removed. Refused rather than ignored:
+/// an adoption that went ahead would drive a run that goes on dispatching
+/// nothing, and report having adopted it.
+pub(crate) fn adopted(paths: &RunPaths) -> Result<()> {
+    let path = marker(paths);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(Error::Ledger { path, source }),
+    }
 }
 
 fn marker(paths: &RunPaths) -> PathBuf {
@@ -334,15 +369,17 @@ fn marker(paths: &RunPaths) -> PathBuf {
 /// # Errors
 ///
 /// [`Error::NotOwned`] for a run another session owns under the two scopes that
-/// keep `stop`'s ownership rule, refused before anything is signalled;
-/// [`Error::NoSuchRun`] for a run id this root does not hold; and a run whose
-/// dispatch registry cannot be read, which is a run nobody can say is idle.
+/// keep `stop`'s ownership rule, and [`Error::NoSuchRun`] for a run id this root
+/// does not hold — both refused before anything is signalled — and a journal
+/// that cannot be appended to. A run whose dispatch registry cannot be read is
+/// not an error: its teardown is reported `not-attempted` and its branches are
+/// still pushed.
 pub fn shutdown(root: &Path, request: ShutdownRequest) -> Result<Shutdown> {
     let selected = select(root, &request)?;
     let mut runs = Vec::new();
     let mut pushed: BTreeSet<(String, String)> = BTreeSet::new();
     for view in &selected {
-        let one = shut_one_down(root, view, &request)?;
+        let one = shut_one_down(root, view, &request);
         for branch in &one.branches {
             if branch.outcome == Preserved::Pushed {
                 pushed.insert((branch.identity.clone(), branch.branch.clone()));
@@ -351,11 +388,12 @@ pub fn shutdown(root: &Path, request: ShutdownRequest) -> Result<Shutdown> {
         runs.push(one);
     }
     let (not_pushed, not_pushed_unread) = elsewhere_on_this_host(&pushed);
+    let forced = !request.asks();
     Ok(Shutdown {
         root: root.to_path_buf(),
         scope: request.scope,
         grace: request.grace,
-        forced: request.force,
+        forced,
         runs,
         not_pushed,
         not_pushed_unread,
@@ -407,7 +445,13 @@ fn select(root: &Path, request: &ShutdownRequest) -> Result<Vec<RunView>> {
 }
 
 /// The whole verb, for one run.
-fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> Result<RunShutdown> {
+///
+/// Nothing here refuses. A run is one of possibly many a host shutdown is
+/// working through, and a record this one cannot write — the hold, a journal
+/// line — is said on stderr and the shutdown goes on: the interrupt, the
+/// teardown and the pushes are what keep the work, and ending the whole host's
+/// shutdown over one run's journal would leave every run after it unpushed.
+fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunShutdown {
     let paths = &view.paths;
     let owner = view.launch.owner_label(&request.session);
     let forced_over_owner =
@@ -421,13 +465,25 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> Resu
 
     // 1. Nothing new starts — written before anything is signalled, because the
     //    driver goes on scheduling for as long as the grace lasts.
-    hold_the_run(paths)?;
+    if let Err(why) = hold_the_run(paths) {
+        eprintln!(
+            "onepipeline: run '{}': the hold that stops it dispatching could not be written — \
+             {why}; its driver goes on scheduling until the teardown ends it",
+            paths.run
+        );
+    }
 
     // The work itself, off the registry with its start token, exactly as
     // `roots_to_stop` reads it and never off `ps`. A registry that cannot be
-    // read is a run nobody can say is idle, so it refuses here as `stop` refuses
-    // — before the interrupt, so nothing has been asked of anybody.
-    let watched = in_flight(view, live_dispatches(paths)?);
+    // read is a run nobody can say is idle: nothing of it is asked or waited
+    // for, its teardown is the `not-attempted` a `stop` would refuse on, and its
+    // branches are still pushed — one unreadable run does not end a host
+    // shutdown for every run after it.
+    let live = live_dispatches(paths).unwrap_or_else(|why| {
+        eprintln!("onepipeline: {why}");
+        Vec::new()
+    });
+    let watched = in_flight(view, live);
     // Where the record stood when the shutdown began, so the wait reads only
     // what the run has written since rather than the whole of its history.
     let from = std::fs::metadata(paths.journal()).map_or(0, |held| held.len());
@@ -441,14 +497,14 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> Resu
     for dispatch in watched {
         let (word, detail) = if !request.asks() {
             (
-                NOT_ASKED.to_string(),
+                Answer::NotAsked,
                 "nothing was asked of this dispatch: the shutdown was forced, so it went \
                  straight to the teardown and whatever its turn had not committed is gone"
                     .to_string(),
             )
         } else if dispatch.in_the_driver {
             (
-                NO_TURN.to_string(),
+                Answer::NoTurn,
                 format!(
                     "it was inside a publication of its own, which has no turn to interrupt, \
                      so there was nothing to ask; it is killed in {}s if the publication has \
@@ -466,7 +522,7 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> Resu
                 request.grace,
             )
         };
-        asked.push((dispatch, word, detail));
+        asked.push((dispatch, word.as_str().to_string(), detail));
     }
 
     // 3. The wait, watching the processes the registry names — and, for a node
@@ -517,7 +573,7 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> Resu
         })
         .collect();
     for stopped in &dispatches {
-        journal.emit(
+        let written = journal.emit(
             journal::PipelineKind::DispatchStopped,
             journal::labels(&paths.run, Some(&stopped.node)),
             journal::payload(&[
@@ -530,7 +586,8 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> Resu
                     json!(u64::try_from(stopped.waited.as_millis()).unwrap_or(u64::MAX)),
                 ),
             ]),
-        )?;
+        );
+        unrecorded(&paths.run, "a dispatch-stopped", written);
     }
 
     // 5. The preserving push, for every branch this run's own records name.
@@ -549,13 +606,13 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> Resu
     // Written after the teardown and the pushes, so the record says what
     // happened rather than what was about to be tried. Deliberately **not** a
     // `run-stopped`, and no run-end hook fires: the run has not ended.
-    journal.emit(
+    let written = journal.emit(
         journal::PipelineKind::HostShutdown,
         journal::labels(&paths.run, None),
         journal::payload(&[
             ("scope", json!(request.scope.as_str())),
             ("owner", json!(shutdown.owner)),
-            ("forced", json!(request.force)),
+            ("forced", json!(!request.asks())),
             ("grace_seconds", json!(request.grace.as_secs())),
             (
                 "dispatches",
@@ -566,7 +623,7 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> Resu
                 json!(counted(&shutdown, DispatchEnding::Graceful)),
             ),
             ("killed", json!(counted(&shutdown, DispatchEnding::Killed))),
-            (journal::STOP_TEARDOWN, json!(shutdown.teardown)),
+            (journal::STOP_TEARDOWN, json!(shutdown.teardown.word())),
             ("root", json!(root.display().to_string())),
             (
                 "branches",
@@ -584,8 +641,22 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> Resu
                     .collect::<Vec<_>>()),
             ),
         ]),
-    )?;
-    Ok(shutdown)
+    );
+    unrecorded(&paths.run, "the host-shutdown", written);
+    shutdown
+}
+
+/// Say that a record of this shutdown could not be written, and go on.
+///
+/// The report still carries what the record would have: this is the run's own
+/// account of it that is missing, and a later reader of that journal is who the
+/// sentence is for.
+fn unrecorded(run: &str, what: &str, written: Result<()>) {
+    if let Err(why) = written {
+        eprintln!(
+            "onepipeline: run '{run}': {what} record could not be written to its journal — {why}"
+        );
+    }
 }
 
 fn counted(shutdown: &RunShutdown, ending: DispatchEnding) -> u32 {
@@ -619,8 +690,8 @@ fn live_dispatches(paths: &RunPaths) -> Result<Vec<DispatchRecord>> {
     Ok(ledger::dispatches_of(paths)
         .map_err(|why| {
             Error::Refused(format!(
-                "run '{}' was not shut down: this build cannot establish what it is running — \
-                 {why}. The run is untouched; nothing was signalled",
+                "run '{}': this build cannot establish what it is running — {why}; nothing \
+                 of it is asked to stop or waited for, and its branches are preserved anyway",
                 paths.run
             ))
         })?
@@ -711,10 +782,10 @@ fn ask_it_to_stop(
     node: &str,
     addresses: &[TurnAddress],
     grace: Duration,
-) -> (String, String) {
+) -> (Answer, String) {
     if addresses.is_empty() {
         return (
-            NO_TURN.to_string(),
+            Answer::NoTurn,
             format!(
                 "nothing of this dispatch has named a turn to interrupt, so there was nothing \
                  to ask; it is killed in {}s if it has not exited by then",
@@ -722,7 +793,7 @@ fn ask_it_to_stop(
             ),
         );
     }
-    let mut word = NO_TURN;
+    let mut word = Answer::NoTurn;
     let mut answers = Vec::new();
     for address in addresses {
         let interrupt = agentgraph::interrupt(address, CANCEL_INPUT);
@@ -734,23 +805,29 @@ fn ask_it_to_stop(
             if event.labels.node.is_none() {
                 event.labels.node = Some(node.to_string());
             }
-            let _ = journal.relay(&event);
+            if let Err(why) = journal.relay(&event) {
+                eprintln!(
+                    "onepipeline: node '{node}': the record of its interrupt could not be \
+                     written to the run's journal — {why}"
+                );
+            }
         }
         // Delivered outranks a lever that broke, which outranks a turn that was
         // not there: one dispatch may have named several members, and what the
         // reader has to know is whether *anything* took the ask.
         let (rank, answer) = match &interrupt.outcome {
-            Interrupted::Delivered => (DELIVERED, "the running turn took the redirection".into()),
-            Interrupted::Failed(why) => (FAILED, format!("the lever failed ({why})")),
-            Interrupted::NoTurn(why) => (NO_TURN, format!("no turn to redirect ({why})")),
+            Interrupted::Delivered => (
+                Answer::Delivered,
+                "the running turn took the redirection".into(),
+            ),
+            Interrupted::Failed(why) => (Answer::Failed, format!("the lever failed ({why})")),
+            Interrupted::NoTurn(why) => (Answer::NoTurn, format!("no turn to redirect ({why})")),
         };
-        if rank == DELIVERED || (rank == FAILED && word != DELIVERED) {
-            word = rank;
-        }
+        word = word.max(rank);
         answers.push(format!("{}: {answer}", address.member()));
     }
     (
-        word.to_string(),
+        word,
         format!(
             "asked the {} turn(s) this dispatch had named to stop, commit, and end — {}. It is \
              killed in {}s if it has not exited by then",

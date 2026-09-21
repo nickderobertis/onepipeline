@@ -1969,7 +1969,7 @@ fn take_the_run_over(paths: &RunPaths, record: &mut LaunchRecord) -> Result<()> 
     // An adoption is the deliberate decision to run this run again, and it is
     // the only thing that lifts a host shutdown's hold: until it happens the
     // run dispatches nothing, whatever survived the teardown.
-    crate::shutdown::adopted(paths);
+    crate::shutdown::adopted(paths)?;
     record.adoptions += 1;
     record.driven_by_this_process();
     // A record an earlier build wrote names no pointer file; the dispatches
