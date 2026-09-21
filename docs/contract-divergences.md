@@ -6869,7 +6869,8 @@ Driven by `tests/e2e/views.rs` against the compiled binary: `status RUN` and
 `host` each carry one line for the one filesystem both roots are on, naming both
 roots — the workspaces root being the one the linked `onevcs` cut that run's
 lifecycle checkout under — with `status`'s sitting above the provider block and `host`'s beside the
-scope line; a runs root that does not exist yet is measured at its nearest
+scope line; two roots on two filesystems are two lines, each naming its own
+root — on Unix, where `/dev` is always a filesystem of its own; a runs root that does not exist yet is measured at its nearest
 existing ancestor and the line says so; and a root the host refuses to answer
 about says that on its own line while the other root is still measured, as does
 a workspaces root the linked `onevcs` refuses to resolve.

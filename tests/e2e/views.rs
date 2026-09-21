@@ -524,6 +524,75 @@ fn checkouts_under(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     found
 }
 
+/// Two roots on two filesystems are two lines, each naming its own root and
+/// carrying its own reading, in the order the roots are named — the runs root
+/// first.
+///
+/// The second filesystem is `/dev`, which every Unix mounts as a filesystem of
+/// its own (devtmpfs or tmpfs on Linux, devfs on macOS) and which no temporary
+/// directory a world lives in is on: the linked onevcs's state root is pointed
+/// there, and its workspaces root, which does not exist, is measured at it. The
+/// view only reads, so nothing is written under `/dev`. Unix only because
+/// Windows has no directory guaranteed to be on another volume than the world's.
+#[cfg(unix)]
+#[test]
+fn two_roots_on_two_filesystems_are_two_lines_each_naming_its_own_root() {
+    use std::os::unix::fs::MetadataExt;
+
+    let world = World::new("views-freespace-two");
+    let other = std::path::Path::new("/dev");
+    let device = |path: &std::path::Path| {
+        std::fs::metadata(path)
+            .unwrap_or_else(|error| panic!("{} cannot be read: {error}", path.display()))
+            .dev()
+    };
+    assert_ne!(
+        device(&world.root),
+        device(other),
+        "the world and /dev are one filesystem here, so this journey cannot put the roots on two"
+    );
+    let workspaces = other.join("workspaces");
+    assert!(
+        !workspaces.exists(),
+        "{} exists, so it would not be measured at /dev",
+        workspaces.display()
+    );
+
+    let asked = world
+        .cmd(&["host"])
+        .env("ONEVCS_HOME", other)
+        .output()
+        .expect("the binary runs");
+    assert_eq!(asked.status.code(), Some(0), "{asked:?}");
+    let stdout = String::from_utf8_lossy(&asked.stdout);
+    let lines = free_space_lines(&stdout);
+    assert_eq!(lines.len(), 2, "two filesystems are two lines:\n{stdout}");
+    assert!(
+        lines[0].ends_with(&format!(
+            " on the filesystem holding the runs root {}",
+            world.runs.display()
+        )),
+        "the first line is not the runs root's alone: {}",
+        lines[0]
+    );
+    assert!(
+        lines[1].ends_with(&format!(
+            " on the filesystem holding the lifecycle workspaces under {} (measured at {}, the \
+             nearest directory that exists)",
+            workspaces.display(),
+            other.display()
+        )),
+        "the second line is not the workspaces root's alone: {}",
+        lines[1]
+    );
+    for line in &lines {
+        assert!(
+            line.starts_with("  free space: ") && line.contains(" GiB of "),
+            "{line}"
+        );
+    }
+}
+
 /// A runs root that does not exist yet is measured at its nearest existing
 /// ancestor, and the line says so; one that cannot be read says that instead of
 /// being left out.
