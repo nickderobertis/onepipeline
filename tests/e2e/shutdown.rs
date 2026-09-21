@@ -1221,3 +1221,39 @@ fn status_and_results_read_the_latest_shutdown_and_name_an_unreadable_one() {
     world.release("service.go");
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A shutdown that names no `--grace` gives each dispatch the ten-minute
+/// default, and says so on its report and its record.
+///
+/// Proved through a worker that takes the ask, so the grace is given and never
+/// waited out: the command returns as soon as the worker has gone, and the
+/// deadline it was bounded by is the one the report and the record name.
+#[cfg(unix)]
+#[test]
+fn a_shutdown_naming_no_grace_gives_the_ten_minute_default() {
+    let world = World::new("shutdown-default-grace");
+    held(&world, "build");
+    world.script("build.stops-when-interrupted", "");
+    let run = launch(&world, "defaultgrace", vec![agent("build", &[])]);
+    until_in_flight(&world, &run, &["build"]);
+
+    let since = Instant::now();
+    let shutdown = world.run(&["shutdown", &run]);
+    shutdown.exited(0).out_has("grace 600s");
+    assert!(
+        since.elapsed() < Duration::from_secs(120),
+        "a worker that took the ask was waited on as if it had not"
+    );
+    assert!(
+        line_for(&shutdown.stdout, "build").contains("killed in 600s if it has not exited"),
+        "{}",
+        shutdown.stdout
+    );
+    let recorded = host_shutdown(&world, &run);
+    assert_eq!(recorded["grace_seconds"], 600, "{recorded}");
+    assert_eq!(recorded["forced"], false, "{recorded}");
+    assert_eq!(
+        stopped_for(&world, &run, "build")["payload"]["ended"],
+        "graceful"
+    );
+}
