@@ -295,7 +295,11 @@ fn the_question_is_taken_from_the_argument_words_a_file_or_standard_input_alike(
     // Closed, so the verb's read of standard input can end.
     drop(piped.stdin.take());
     let surface = question_on(&world, &run);
-    assert_eq!(surface["message"], json!("## What\npiped in\n"), "{surface}");
+    assert_eq!(
+        surface["message"],
+        json!("## What\npiped in\n"),
+        "{surface}"
+    );
     answer(&world, &run, &surface, "yes");
     assert_eq!(waited(piped).code, 0);
 }
@@ -378,7 +382,9 @@ fn an_elapsed_wait_answers_timeout_at_exit_one_and_leaves_the_question_standing(
     assert_eq!(elapsed["correlation"], surface["correlation"], "{elapsed}");
     // The question is still the run's to answer, and the verb says how.
     assert!(
-        answered.stderr.contains("the question stands on the channel"),
+        answered
+            .stderr
+            .contains("the question stands on the channel"),
         "{}",
         answered.stderr
     );
@@ -494,7 +500,12 @@ fn every_refusal_names_its_cause_at_exit_two_and_raises_nothing_on_the_channel()
     assert_eq!(over.code, REFUSED, "{}", over.stderr);
     assert!(over.stderr.contains("--about"), "{}", over.stderr);
 
-    let control = waited(asking(&world, &run, &["--about", "bui\u{7}ld", "which?"], &[]));
+    let control = waited(asking(
+        &world,
+        &run,
+        &["--about", "bui\u{7}ld", "which?"],
+        &[],
+    ));
     assert_eq!(control.code, REFUSED, "{}", control.stderr);
     assert!(control.stderr.contains("--about"), "{}", control.stderr);
 
@@ -611,7 +622,10 @@ fn the_question_blocks_until_the_manager_answers() {
     // anybody has answered it.
     std::thread::sleep(Duration::from_secs(2));
     assert!(
-        asked.try_wait().expect("the child is asked about").is_none(),
+        asked
+            .try_wait()
+            .expect("the child is asked about")
+            .is_none(),
         "the question did not block for its answer"
     );
 
