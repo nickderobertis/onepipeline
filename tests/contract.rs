@@ -2797,6 +2797,7 @@ fn the_run_end_hooks_surface_is_what_the_contract_names() {
         "at most once per ending",
         "judged by what the edit left behind, not by which operation it carried",
         "a run recovered from a failure still fires the hook it then reaches",
+        "a settle that carries a failed ending to a complete one",
     ] {
         assert!(
             contract.contains(promise),

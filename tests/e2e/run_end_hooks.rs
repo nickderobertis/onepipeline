@@ -900,6 +900,130 @@ fn a_run_whose_failure_hook_fired_fires_success_once_a_retry_takes_it_on_to_comp
     );
 }
 
+/// The other recovery a manager makes by hand: a run whose **failure** hook fired
+/// and whose failed node was then **settled `done`** — the work had landed some
+/// other way — fires its **success** hook for the complete ending that settle
+/// produced, exactly once.
+///
+/// The defect this states (#396): the marker was retired only by an edit that
+/// made the run live, and a settle that moves a failed node straight to `done`
+/// never passes through a live graph, so the failure's marker went on suppressing
+/// the success hook for an ending it never fired for. Driven beside the rule's
+/// other half: a settle that changes *why* the run failed and not that it did —
+/// the parked node settled `failed` — is not an epoch and fires nothing.
+#[test]
+fn a_run_whose_failure_hook_fired_fires_success_once_a_settle_takes_it_on_to_complete() {
+    let world = hooked_world("hooks-settle-success");
+    let hook = hook(&world);
+    world.script("build.fail", "1");
+    let mut later = agent("later", &[]);
+    later["parked"] = json!(true);
+    let run = "settled";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[]), later],
+        &both_hooks_under_timeout(&hook),
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
+    assert_eq!(
+        world.events_of(run, "run-hook-fired")[0]["payload"]["reason"]["nodes"],
+        json!([
+            {"id": "build", "status": "failed", "outcome": "task-failed"},
+            {"id": "later", "status": "parked", "outcome": null}
+        ])
+    );
+
+    // A settle that leaves the run failed has changed the failure's reason and
+    // not the ending: the marker stands, and the same ending fires no second hook.
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "settle", "id": "later", "outcome": "failed",
+                 "evidence": "nobody is going to pick this up"}
+            ]})
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"], "{}", world.dump());
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 1);
+
+    // The settle that carries the run from a failed ending to a complete one is
+    // the epoch, though the graph it leaves behind holds nothing to carry out.
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "settle", "id": "build", "outcome": "done",
+                 "evidence": "the accepted branch was published by hand"},
+                {"op": "settle", "id": "later", "outcome": "done",
+                 "evidence": "and so was this one"}
+            ]})
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    // And `results` says so before any driver looks: the failure belongs to the
+    // epoch the settle ended, and nothing has fired for the new one yet.
+    let results = world.run(&["results", run]);
+    results.exited(0);
+    for (before, then) in [
+        (
+            "failure hook fired — superseded: ",
+            " reopened the run after it — reason:",
+        ),
+        ("no run-end hook has fired since ", " reopened the run"),
+    ] {
+        assert!(
+            names_edit(&results.stdout, before, "settle", then),
+            "`results` does not say {before:?} the settle then {then:?}:\n{}",
+            results.stdout
+        );
+    }
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+
+    assert_eq!(
+        invocations(&world, run),
+        ["failure", "success"],
+        "{}",
+        world.dump()
+    );
+    let fired = world.events_of(run, "run-hook-fired");
+    assert_eq!(fired.len(), 2, "{fired:?}");
+    assert_eq!(
+        fired[1]["payload"],
+        json!({"hook": "success", "command": hook, "reason": null})
+    );
+    let handed = handed(&world, run, 2);
+    assert_eq!(handed.env["hook"], Some("success".to_string()));
+    assert_eq!(handed.stdin["hook"], "success");
+    assert_eq!(handed.stdin["reason"], Value::Null);
+
+    // Exactly once for that ending: a driver that looks again finds the marker.
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+    assert_eq!(invocations(&world, run), ["failure", "success"]);
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 2);
+    let results = world.run(&["results", run]);
+    results.exited(0);
+    assert!(
+        results
+            .stdout
+            .contains("success hook fired — reason: none; ending: succeeded; exit: 0"),
+        "{}",
+        results.stdout
+    );
+}
+
 /// `results` reads every hook record against the **epoch** it belongs to: a hook
 /// from before the recovery edit that reopened the run says it is superseded and
 /// names that edit, and what the run has fired since — or that it has fired
