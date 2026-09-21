@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.1](https://github.com/nickderobertis/onepipeline/compare/v0.42.0...v0.42.1) - 2026-09-21
+
+### Fixed
+
+- *(channel)* own the planner-channel layout and its journeys, and read an older record's bus config ([#439](https://github.com/nickderobertis/onepipeline/pull/439))
+
 ## [0.42.0](https://github.com/nickderobertis/onepipeline/compare/v0.41.2...v0.42.0) - 2026-09-21
 
 ### Added
