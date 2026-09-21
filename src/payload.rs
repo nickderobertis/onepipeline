@@ -612,6 +612,7 @@ pub(crate) struct HostShutdown {
     /// What the teardown established, in `run-stopped`'s own vocabulary.
     pub(crate) teardown: TeardownWord,
     /// The runs root the shutdown read.
+    // llmlint: ignore[invalid_states_unrepresentable] a rendering for a reader rather than a path anything reopens — the runs root as the shutdown displayed it — and the approved contract spells this record's field `"root": string`; nothing reads it back to decide anything.
     pub(crate) root: String,
     /// One entry per branch the run's records named.
     pub(crate) branches: Vec<BranchPreserved>,
