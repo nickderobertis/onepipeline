@@ -97,23 +97,54 @@ pub const PLANNER_CONTEXT_HEADING: &str = "## Planner context";
 
 /// The heading a node's binding amendment is rendered under.
 ///
+/// A **sub-heading of the task's own `## Acceptance criteria`**, never a section
+/// beside it. An amendment is part of the bar the judge reads, and a bar in two
+/// sections is two bars: rendered as its own `## Amendment` beside the criteria
+/// it overrode, an amendment admitting a file the original criteria excluded was
+/// read by a judge as one instruction among two of equal standing, and a
+/// gate-green node was failed against the criterion the manager had superseded.
+/// So the amendment's clauses are rendered *inside* the criteria section, under
+/// this heading, opening with [`AMENDMENT_PRECEDENCE`] — one acceptance section,
+/// resolved in its own text.
+///
 /// Published beside [`PLANNER_CONTEXT_HEADING`] for the same reason, and to be
 /// read *against* it: an amendment changes what the node is judged against and a
 /// carried note does not. A reader of the task — or of the stream — finds each
 /// block by a name this crate publishes rather than by matching prose.
-pub const AMENDMENT_HEADING: &str = "## Amendment";
+pub const AMENDMENT_HEADING: &str = "### Amendment";
 
 /// What an amendment tells its reader about its own authority.
 ///
 /// The opposite of [`CROSS_REPO_REFERENCES_PREAMBLE`] and of the sentence a
 /// carried note is rendered under, and deliberately so. A note reports observed
 /// state and adds no acceptance criteria; an amendment **is** part of the bar,
-/// read by the worker and by the judge that reviews it, so where it and the
-/// task's own operational notes disagree it is the one that holds. The authority
-/// is the section's first sentence because an instruction whose authority is
-/// unstated is one a reader has to guess at.
-const AMENDMENT_PRECEDENCE: &str =
+/// read by the worker and by the judge that reviews it. Its precedence is over
+/// the **whole task** — the criteria it sits among, the prose above them and the
+/// operational notes below — and not over the notes alone, which is the reading
+/// that let an original criterion go on binding beside the ruling that relaxed
+/// it. The authority is the block's first sentence because an instruction whose
+/// authority is unstated is one a reader has to guess at.
+pub const AMENDMENT_PRECEDENCE: &str = "This node's manager amended its bar. Every clause \
+     below is an acceptance criterion of this node and takes precedence over the whole \
+     task: where a clause here contradicts a criterion above it, anything the task says \
+     elsewhere, or an operational note below, the clause here wins and the contradicted \
+     one no longer binds.";
+
+/// What the manager-notes section tells its reader about its own authority.
+///
+/// The sentence the amendment block used to open with, kept for the notes
+/// because that is the authority a delivered note had in the conversation it
+/// reached — a ruling issued *because* of how the operational notes were being
+/// read.
+const NOTES_PRECEDENCE: &str =
     "Where this section and the operational notes below disagree, this section wins.";
+
+/// The heading a task states its bar under, matched as a whole line.
+///
+/// Where an amendment is rendered into, and the one section `criteria` reads a
+/// bar off — so the two readers of a node's bar, its judge and the engine's own
+/// check, are reading the same section.
+pub(crate) const CRITERIA_HEADING: &str = "## Acceptance criteria";
 
 /// The heading the notes an earlier dispatch of the node read are rendered under.
 ///
@@ -127,12 +158,12 @@ pub(crate) const MANAGER_NOTES_HEADING: &str = "## Manager notes";
 
 /// What the manager-notes section tells its reader about itself.
 ///
-/// The first sentence is [`AMENDMENT_PRECEDENCE`]'s, because that is the
-/// authority a delivered note had in the conversation it reached — a ruling
-/// issued *because* of how the operational notes were being read — and a
-/// continuation that demoted it to observed state would be the incident this
-/// section exists to end: a worker obeying a manager ruling and its judge failing
-/// it for exactly that, having never been shown the ruling.
+/// The first sentence is [`NOTES_PRECEDENCE`], because that is the authority a
+/// delivered note had in the conversation it reached — a ruling issued *because*
+/// of how the operational notes were being read — and a continuation that
+/// demoted it to observed state would be the incident this section exists to
+/// end: a worker obeying a manager ruling and its judge failing it for exactly
+/// that, having never been shown the ruling.
 const MANAGER_NOTES_PREAMBLE: &str = "The manager delivered these notes to this node during an \
                                        earlier dispatch of it, and this dispatch continues that \
                                        node's work: each stands here exactly as it stood there, \
@@ -140,14 +171,15 @@ const MANAGER_NOTES_PREAMBLE: &str = "The manager delivered these notes to this 
                                        states a criterion is part of the bar this node is judged \
                                        against.";
 
-/// The task section an amendment is rendered immediately above, when the task
-/// has one.
+/// The task section an amendment is rendered above, and the notes an earlier
+/// dispatch read are rendered immediately above, when the task has one.
 ///
 /// A node's operational notes live here — how this host runs its gate, what it
 /// must not do — and an amendment placed under them would read as one more note
-/// among them rather than as the ruling that overrides them. Above them, opening
-/// with [`AMENDMENT_PRECEDENCE`], is the convention that resolved this in
-/// practice.
+/// among them rather than as the ruling that overrides them. An amendment goes
+/// into the task's [`CRITERIA_HEADING`] section, which a task states above its
+/// notes; a task stating no such section is given one here, immediately above
+/// this heading, so the placement is the same either way.
 const ADDITIONAL_INFO_HEADING: &str = "## Additional info";
 
 /// The heading the out-of-repository dependencies of a fast-adoption node are
@@ -347,8 +379,9 @@ impl Node {
     /// A carried planner note is rendered as a trailing `## Planner context`
     /// section stating that it reports observed state and adds no acceptance
     /// criteria — so a worker cannot read one as a new bar to clear. A carried
-    /// **amendment** is rendered under [`AMENDMENT_HEADING`] and says the
-    /// opposite about itself, because it is part of the bar the judge reads.
+    /// **amendment** is rendered into the task's `## Acceptance criteria` under
+    /// [`AMENDMENT_HEADING`] and says the opposite about itself, because it is
+    /// part of the bar the judge reads.
     pub fn rendered_task(&self) -> String {
         self.rendered_task_with(&[])
     }
@@ -581,17 +614,163 @@ pub fn arrival_note(arrived: &[CrossRepoReference]) -> String {
 
 /// One task with its node's amendment rendered into it.
 ///
-/// **Above the operational notes, never after them.** A task that states
-/// [`ADDITIONAL_INFO_HEADING`] gets the block immediately before that heading,
-/// and one that states none gets it at the end — which is the same placement
-/// read the same way, since a task with no notes has nothing for the amendment
-/// to sit above.
+/// **One acceptance section, resolved in its own text.** The amendment's clauses
+/// go at the end of the task's [`CRITERIA_HEADING`] section, under
+/// [`AMENDMENT_HEADING`] and opening with [`AMENDMENT_PRECEDENCE`]: each clause
+/// is a criterion, and where one contradicts an original criterion the section
+/// itself says which binds. A judge reading the section is never handed the
+/// original and the ruling as two peers of equal standing, which is what a
+/// section of its own beside the criteria was read as.
+///
+/// **Above the operational notes, never after them.** A task states its
+/// criteria above its notes, so rendering into them keeps the placement; a task
+/// stating no criteria section is given one immediately before
+/// [`ADDITIONAL_INFO_HEADING`], and at the end where it states no notes either
+/// — the same placement read the same way, since a task with no notes has
+/// nothing for the amendment to sit above.
 fn amended(task: &str, amendment: &str) -> String {
-    let block = format!("{AMENDMENT_HEADING}\n{AMENDMENT_PRECEDENCE}\n\n{amendment}\n");
+    let block = format!(
+        "{AMENDMENT_HEADING}\n{AMENDMENT_PRECEDENCE}\n\n{}",
+        amendment_clauses(amendment)
+    );
+    if let Some(end) = criteria_section_end(task) {
+        let (bar, rest) = task.split_at(end);
+        return if rest.trim().is_empty() {
+            format!("{}\n\n{block}", bar.trim_end())
+        } else {
+            format!("{}\n\n{block}\n{rest}", bar.trim_end())
+        };
+    }
+    let block = format!("{CRITERIA_HEADING}\n\n{block}");
     match additional_info_at(task) {
         Some(at) => format!("{}\n\n{block}\n{}", task[..at].trim_end(), &task[at..]),
         None => format!("{}\n\n{block}", task.trim_end()),
     }
+}
+
+/// An amendment's text as the clauses of a criteria section, one bullet each.
+///
+/// **The one reading of an amendment**, shared by the rendering the judge reads
+/// and by [`criteria`](crate::criteria)'s check of the same node, so what the
+/// engine can answer about a node is what its judge was handed. Every word the
+/// manager wrote is kept; what changes is only the shape, into the one a criteria
+/// section is read in:
+///
+/// * a bullet — `-`, `*`, `+`, or a numbered item — is one clause;
+/// * a paragraph is one clause, its lines joined, so a ruling written as a
+///   sentence reads as one criterion rather than as prose beside the criteria;
+/// * a heading — an amendment written as a task states one over its own bar —
+///   is kept as a bold label rather than as a heading, because a heading inside
+///   the criteria section would end it, and the section is the point.
+pub(crate) fn amendment_clauses(amendment: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut open: Option<String> = None;
+    fn close(open: &mut Option<String>, lines: &mut Vec<String>) {
+        if let Some(clause) = open.take() {
+            lines.push(format!("- {clause}"));
+        }
+    }
+    for line in amendment.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            close(&mut open, &mut lines);
+            continue;
+        }
+        if let Some(text) = heading_text(trimmed) {
+            close(&mut open, &mut lines);
+            if !text.is_empty() {
+                lines.push(String::new());
+                lines.push(format!("**{text}**"));
+                lines.push(String::new());
+            }
+            continue;
+        }
+        if let Some(item) = list_item(trimmed) {
+            close(&mut open, &mut lines);
+            open = Some(item.to_owned());
+            continue;
+        }
+        match &mut open {
+            Some(clause) => {
+                clause.push(' ');
+                clause.push_str(trimmed);
+            }
+            None => open = Some(trimmed.to_owned()),
+        }
+    }
+    close(&mut open, &mut lines);
+    let mut rendered = String::new();
+    let mut blank = true;
+    for line in lines {
+        if line.is_empty() {
+            if !blank {
+                rendered.push('\n');
+            }
+            blank = true;
+            continue;
+        }
+        rendered.push_str(&line);
+        rendered.push('\n');
+        blank = false;
+    }
+    rendered
+}
+
+/// A heading's text, for a line that is one: `#`s and the space after them
+/// stripped.
+fn heading_text(line: &str) -> Option<&str> {
+    let text = line.trim_start_matches('#');
+    if text.len() == line.len() {
+        return None;
+    }
+    (text.is_empty() || text.starts_with(' ')).then(|| text.trim())
+}
+
+/// A list item's text, for a line that is one: a bullet marker or a number
+/// followed by `.` or `)`, and the space after it, stripped.
+fn list_item(line: &str) -> Option<&str> {
+    if let Some(item) = ["- ", "* ", "+ "]
+        .iter()
+        .find_map(|marker| line.strip_prefix(marker))
+    {
+        return Some(item.trim());
+    }
+    let digits = line.chars().take_while(char::is_ascii_digit).count();
+    if digits == 0 {
+        return None;
+    }
+    let rest = &line[digits..];
+    rest.strip_prefix(". ")
+        .or_else(|| rest.strip_prefix(") "))
+        .map(str::trim)
+}
+
+/// Where the task's criteria section ends, as a byte offset: the line the next
+/// level-two heading is on, or the end of the task for a section that is last.
+///
+/// `None` for a task stating no [`CRITERIA_HEADING`] as a whole line. A deeper
+/// heading inside the section — the amendment's own is one — does not end it,
+/// for the same reason `criteria` reads past one.
+fn criteria_section_end(task: &str) -> Option<usize> {
+    let mut at = 0;
+    let mut inside = false;
+    for line in task.split_inclusive('\n') {
+        let trimmed = line.trim_end();
+        if inside && is_section_heading(trimmed) {
+            return Some(at);
+        }
+        if trimmed == CRITERIA_HEADING {
+            inside = true;
+        }
+        at += line.len();
+    }
+    inside.then_some(task.len())
+}
+
+/// Whether a line opens a task section: a level-two heading, and not a deeper
+/// one.
+pub(crate) fn is_section_heading(line: &str) -> bool {
+    line.starts_with("##") && !line.starts_with("###")
 }
 
 /// One task with the notes an earlier dispatch of its node read rendered into it.
@@ -601,7 +780,7 @@ fn amended(task: &str, amendment: &str) -> String {
 /// a reader meets the standing bar and then the rulings issued against it.
 fn with_notes(task: &str, notes: &[crate::note::RecordedNote]) -> String {
     let mut block =
-        format!("{MANAGER_NOTES_HEADING}\n{AMENDMENT_PRECEDENCE}\n\n{MANAGER_NOTES_PREAMBLE}\n");
+        format!("{MANAGER_NOTES_HEADING}\n{NOTES_PRECEDENCE}\n\n{MANAGER_NOTES_PREAMBLE}\n");
     for (index, note) in notes.iter().enumerate() {
         block.push_str(&format!(
             "\n{}. Addressed to {} — {}.\n",
@@ -1205,12 +1384,14 @@ mod tests {
         );
     }
 
-    /// An amendment is the opposite of the note beside it, and both halves are
-    /// asserted: it opens by claiming authority over the notes below it, it
-    /// carries no disclaimer of its own, and it sits **above** the operational
-    /// notes rather than among them.
+    /// An amendment is the opposite of the note beside it, and every half is
+    /// asserted: it is rendered **inside** the task's acceptance criteria as
+    /// clauses of that one section, it opens by claiming precedence over the
+    /// whole task, it carries no disclaimer of its own, and it sits **above**
+    /// the operational notes rather than among them — and never as a section of
+    /// its own beside the criteria it overrides.
     #[test]
-    fn an_amendment_renders_above_the_operational_notes_and_states_its_authority() {
+    fn an_amendment_renders_into_the_acceptance_criteria_and_states_its_precedence() {
         let node = Node {
             id: "build".into(),
             persona: Some("engineer".into()),
@@ -1223,25 +1404,24 @@ mod tests {
             ..Node::default()
         };
         let rendered = node.rendered_task();
-        let at = |needle: &str| {
-            rendered
-                .find(needle)
-                .unwrap_or_else(|| panic!("{needle} is not in:\n{rendered}"))
-        };
-        assert!(
-            at("## Acceptance criteria") < at(AMENDMENT_HEADING)
-                && at(AMENDMENT_HEADING) < at("## Additional info"),
-            "the amendment is not immediately above the operational notes:\n{rendered}"
+        assert_eq!(
+            rendered,
+            format!(
+                "## What\nship it\n\n## Acceptance criteria\n\n- it ships\n\n\
+                 ### Amendment\n{AMENDMENT_PRECEDENCE}\n\n\
+                 - The four comment lines are out of scope: leave them.\n\n\
+                 ## Additional info\n\nRun the gate once, over the finished tree.\n"
+            )
         );
         assert!(
-            rendered.contains(
-                "Where this section and the operational notes below disagree, this section wins."
-            ),
-            "{rendered}"
+            !rendered.contains("\n## Amendment\n")
+                && rendered.matches("## Acceptance criteria").count() == 1,
+            "the amendment is a section beside the criteria rather than part of them:\n{rendered}"
         );
         assert!(
-            rendered.contains("The four comment lines are out of scope: leave them."),
-            "{rendered}"
+            AMENDMENT_PRECEDENCE.contains("takes precedence over the whole task")
+                && AMENDMENT_PRECEDENCE.contains("the clause here wins"),
+            "the amendment does not state its precedence over the whole task: {AMENDMENT_PRECEDENCE}"
         );
         // The note's disclaimer is the note's. An amendment that carried one
         // would be the very thing this lever exists because `context` is.
@@ -1330,9 +1510,10 @@ mod tests {
         );
         assert_eq!(
             rendered.matches(AMENDMENT_PRECEDENCE).count(),
-            2,
+            1,
             "{rendered}"
         );
+        assert_eq!(rendered.matches(NOTES_PRECEDENCE).count(), 1, "{rendered}");
         for said in [
             "1. Addressed to both parties — delivered into the worker's turn, and read by the \
              supervisor with that turn's response.",
@@ -1361,8 +1542,9 @@ mod tests {
             .contains(MANAGER_NOTES_HEADING));
     }
 
-    /// A task with no operational notes takes its amendment at the end, and a
-    /// node with no amendment renders exactly what it always rendered.
+    /// A task with no operational notes and no criteria section takes its
+    /// amendment at the end, under a criteria section opened for it, and a node
+    /// with no amendment renders exactly what it always rendered.
     #[test]
     fn an_amendment_lands_at_the_end_of_a_task_that_states_no_operational_notes() {
         let mut node = Node {
@@ -1376,10 +1558,13 @@ mod tests {
         node.amendment = Some("Leave the comments.".into());
         assert_eq!(
             node.rendered_task(),
-            "## What\nship it\n\n\
-             ## Amendment\n\
-             Where this section and the operational notes below disagree, this section wins.\n\n\
-             Leave the comments.\n"
+            format!(
+                "## What\nship it\n\n\
+                 ## Acceptance criteria\n\n\
+                 ### Amendment\n\
+                 {AMENDMENT_PRECEDENCE}\n\n\
+                 - Leave the comments.\n"
+            )
         );
 
         // Blank is nothing, exactly as a blank note is: whitespace does not
@@ -1424,7 +1609,63 @@ mod tests {
             rendered.contains("adds no acceptance criteria"),
             "{rendered}"
         );
-        assert!(rendered.contains("this section wins"), "{rendered}");
+        assert!(rendered.contains(AMENDMENT_PRECEDENCE), "{rendered}");
+    }
+
+    /// Every word of an amendment is kept and only its shape changes: a sentence
+    /// is one clause, a bullet or a numbered item is one clause each, a wrapped
+    /// line rejoins the clause above it, and a heading — an amendment written as
+    /// a task states one over its own bar — is a label rather than a heading, so
+    /// it cannot end the section it is rendered into.
+    #[test]
+    fn an_amendments_clauses_are_its_bullets_and_paragraphs_and_a_heading_is_a_label() {
+        let amendment = "## What\nWork.\n\n## Acceptance criteria\n\n\
+                         - the row in `notes.md`\n  is `state: done`\n* second\n+ third\n\
+                         1. fourth\n2) fifth\n\nTwo lines\nof one ruling.\n\n\n#not a heading\n";
+        assert_eq!(
+            amendment_clauses(amendment),
+            "**What**\n\n- Work.\n\n**Acceptance criteria**\n\n\
+             - the row in `notes.md` is `state: done`\n- second\n- third\n- fourth\n- fifth\n\
+             - Two lines of one ruling.\n- #not a heading\n"
+        );
+        // And the criteria section that is rendered into stays one section: a
+        // task whose criteria are followed by more sections keeps them after the
+        // amendment, and one whose criteria section is last takes it at the end.
+        let node = Node {
+            id: "build".into(),
+            task: Some(
+                "## What\nship it\n\n## Acceptance criteria\n- it ships\n\n## Notes\nnone\n".into(),
+            ),
+            amendment: Some(amendment.into()),
+            ..Node::default()
+        };
+        let rendered = node.rendered_task();
+        let at = |needle: &str| {
+            rendered
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} is not in:\n{rendered}"))
+        };
+        assert!(
+            at("- it ships") < at(AMENDMENT_HEADING)
+                && at(AMENDMENT_HEADING) < at("**Acceptance criteria**")
+                && at("- fifth") < at("## Notes\nnone"),
+            "{rendered}"
+        );
+        assert_eq!(
+            rendered.matches("## Acceptance criteria").count(),
+            1,
+            "{rendered}"
+        );
+        let last = Node {
+            task: Some("## What\nship it\n\n## Acceptance criteria\n- it ships\n".into()),
+            ..node
+        };
+        let rendered = last.rendered_task();
+        assert!(
+            rendered.contains("- it ships\n\n### Amendment\n")
+                && rendered.ends_with("- #not a heading\n"),
+            "{rendered}"
+        );
     }
 
     /// Every step of a workstream is judged against the node's amendment,
@@ -1443,8 +1684,8 @@ mod tests {
             ..Node::default()
         };
         let rendered = step.rendered_task_for(&node, &[]);
-        assert!(rendered.contains("Leave the comments."), "{rendered}");
-        assert!(rendered.contains("this section wins"), "{rendered}");
+        assert!(rendered.contains("- Leave the comments."), "{rendered}");
+        assert!(rendered.contains(AMENDMENT_PRECEDENCE), "{rendered}");
         assert!(rendered.contains("the API moved"), "{rendered}");
         assert!(
             rendered.find(AMENDMENT_HEADING) < rendered.find("## Additional info"),

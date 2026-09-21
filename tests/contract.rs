@@ -49,8 +49,8 @@ use onepipeline::note::{Addressee, Delivered, Note, Party, Reached};
 use onepipeline::plan::{
     adoption_instructions, arrival_note, CrossRepoReference, Node, NodeKind, Plan, RepoType,
     Resume, Step, Workflow, ADOPTION_INSTRUCTION_VARIABLES, AMENDMENT_HEADING,
-    CROSS_REPO_REFERENCES_HEADING, DEFAULT_ADOPTION_INSTRUCTION, OBSERVED_STATE,
-    PLANNER_CONTEXT_HEADING, PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
+    AMENDMENT_PRECEDENCE, CROSS_REPO_REFERENCES_HEADING, DEFAULT_ADOPTION_INSTRUCTION,
+    OBSERVED_STATE, PLANNER_CONTEXT_HEADING, PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
 };
 use onepipeline::report::{
     retain, ACCEPTED_REPORT_FILE, MAX_REPORT_BYTES, MEMBER_SETTLED, REPORT_PATH,
@@ -2156,32 +2156,68 @@ fn the_amendment_and_validator_surface_is_what_the_divergence_record_names() {
         "a node naming no amendment gained one on the way out"
     );
 
-    // The heading, which is a published constant, and the rendering it opens:
-    // the amendment states its own authority over the notes it sits above.
+    // The heading and the precedence sentence, which are published constants,
+    // and the rendering they open: the amendment's clauses are criteria of the
+    // one section the entry names, above the notes, opening with the sentence
+    // that states their precedence over the whole task — and never a section of
+    // their own beside the criteria they override.
     assert_eq!(
         block["heading"].as_str(),
         Some(AMENDMENT_HEADING),
         "entry 41 names a different heading than this crate publishes"
     );
+    assert_eq!(
+        block["precedence"].as_str(),
+        Some(AMENDMENT_PRECEDENCE),
+        "entry 41 states a different precedence sentence than this crate publishes"
+    );
     assert_ne!(AMENDMENT_HEADING, PLANNER_CONTEXT_HEADING);
-    let rendered = Node {
-        task: Some("## What\nship it\n\n## Additional info\n\nrun the gate.\n".into()),
-        ..node.clone()
+    let section = block["rendered_into"]
+        .as_str()
+        .expect("entry 41 names the section the amendment is rendered into");
+    assert!(
+        section.starts_with("## ") && AMENDMENT_HEADING.starts_with("### "),
+        "the amendment's heading is not a sub-heading of the section it is rendered into"
+    );
+    for task in [
+        // A task stating the section: the amendment joins it, above the notes.
+        "## What\nship it\n\n## Acceptance criteria\n\n- it ships\n\n## Additional info\n\nrun the gate.\n",
+        // A task stating none: one is opened for it, above the notes.
+        "## What\nship it\n\n## Additional info\n\nrun the gate.\n",
+    ] {
+        let rendered = Node {
+            task: Some(task.into()),
+            ..node.clone()
+        }
+        .rendered_task();
+        let at = |needle: &str| {
+            rendered
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} is not rendered: {rendered}"))
+        };
+        assert!(
+            at(section) < at(AMENDMENT_HEADING) && at(AMENDMENT_HEADING) < at("## Additional info"),
+            "the amendment is not inside the criteria and above the notes: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches(section).count(),
+            1,
+            "the amendment made a second acceptance section: {rendered}"
+        );
+        assert!(
+            !rendered.contains("\n## Amendment"),
+            "the amendment is a section of its own beside the criteria: {rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("{AMENDMENT_HEADING}\n{AMENDMENT_PRECEDENCE}\n\n- {text}\n")),
+            "the amendment's clause is not a criterion under the sentence stating its \
+             precedence: {rendered}"
+        );
+        assert!(
+            AMENDMENT_PRECEDENCE.contains("takes precedence over the whole task"),
+            "the amendment does not state its precedence over the whole task"
+        );
     }
-    .rendered_task();
-    let (heading, notes) = (
-        rendered.find(AMENDMENT_HEADING).expect("it is rendered"),
-        rendered.find("## Additional info").expect("the notes are"),
-    );
-    assert!(
-        heading < notes,
-        "the amendment is below the notes: {rendered}"
-    );
-    assert!(rendered.contains(&text), "{rendered}");
-    assert!(
-        rendered.contains("this section wins"),
-        "the amendment does not state its authority: {rendered}"
-    );
 
     // The validator, named three ways, with the config key at the version the
     // entry states.
