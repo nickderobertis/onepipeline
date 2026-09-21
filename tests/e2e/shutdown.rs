@@ -18,7 +18,7 @@
 // full rationale.
 
 // llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
-// assumed: the twenty-four journeys here take between about 90 and 195 seconds summed and
+// assumed: the twenty-five journeys here take between about 90 and 195 seconds summed and
 // 25 to 50 on the wall under nextest's parallelism, by the host's load — each waits out a real grace
 // against real dispatches and pushes to a real origin, because a bound on how long a worker
 // is given cannot be stated without a clock running it. What they exercise is the shutdown
@@ -931,6 +931,40 @@ fn a_lever_that_breaks_is_reported_and_the_deadline_still_applies() {
     assert!(line.contains("ended killed"), "{line}");
     let stopped = stopped_for(&world, &run, "build");
     assert_eq!(stopped["payload"]["interrupt"], "failed", "{stopped}");
+}
+
+/// A dispatch that has named no turn is recorded as having none to ask, and the
+/// deadline still applies.
+///
+/// The worker has started and recorded nothing yet — no member, no turn — so the
+/// run's own record carries no address to interrupt. That is an answer rather
+/// than a failure of the lever, and the wait is the same one an asked worker gets.
+#[cfg(unix)]
+#[test]
+fn a_dispatch_that_named_no_turn_has_none_to_ask_and_the_deadline_still_applies() {
+    let world = World::new("shutdown-no-turn");
+    world.script("build.wait", "hold");
+    let run = launch(&world, "noturn", vec![agent("build", &[])]);
+    world.until("the held dispatch to be registered", |world| {
+        !world.dispatch_records(&run).is_empty()
+    });
+
+    let shutdown = world.run(&["shutdown", &run, "--grace", "1"]);
+    shutdown.exited(REFUSED);
+    let line = line_for(&shutdown.stdout, "build");
+    assert!(line.contains("interrupt no-turn"), "{line}");
+    assert!(
+        line.contains("nothing of this dispatch has named a turn to interrupt"),
+        "{line}"
+    );
+    assert!(line.contains("ended killed"), "{line}");
+    let stopped = stopped_for(&world, &run, "build");
+    assert_eq!(stopped["payload"]["interrupt"], "no-turn", "{stopped}");
+    assert!(
+        world.events_of(&run, "turn-started").is_empty(),
+        "the worker named a turn, so this journey proves nothing: {}",
+        world.dump()
+    );
 }
 
 /// A branch already level with its origin is a fact reported at exit 0.
