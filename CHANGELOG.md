@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.1](https://github.com/nickderobertis/onepipeline/compare/v0.41.0...v0.41.1) - 2026-09-21
+
+### Fixed
+
+- *(run)* fire the success hook after a settle completes an ended run, and count a reused board item once ([#433](https://github.com/nickderobertis/onepipeline/pull/433))
+
 ## [0.41.0](https://github.com/nickderobertis/onepipeline/compare/v0.40.0...v0.41.0) - 2026-09-20
 
 ### Added
