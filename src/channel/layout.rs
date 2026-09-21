@@ -1115,15 +1115,23 @@ impl Channel {
     ///
     /// # Errors
     ///
-    /// A queue failure.
+    /// A queue failure, or a record on the outcome queue that does not read as an
+    /// outcome — refused rather than passed over, because the record passed over
+    /// could be this envelope's answer, and "not answered yet" would then be a
+    /// wrong answer rather than an unknown one.
     pub fn outcome_of(&self, id: u64) -> Result<Option<CommandOutcome>, QueueError> {
-        Ok(self
-            .outcomes
-            .raw()
-            .log(None)?
-            .into_iter()
-            .filter_map(|(record, _)| serde_json::from_value::<CommandOutcome>(record).ok())
-            .find(|outcome| outcome.id == id))
+        for (record, _) in self.outcomes.raw().log(None)? {
+            let outcome = serde_json::from_value::<CommandOutcome>(record).map_err(|failure| {
+                QueueError::Shape {
+                    queue: name(COMMAND_OUTCOMES),
+                    why: failure.to_string(),
+                }
+            })?;
+            if outcome.id == id {
+                return Ok(Some(outcome));
+            }
+        }
+        Ok(None)
     }
 }
 

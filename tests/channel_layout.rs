@@ -727,3 +727,26 @@ fn a_framed_reply_is_checked_and_kept_whole_and_a_surface_that_is_not_an_object_
         vec![(queue(SURFACES), json!("text"))]
     );
 }
+
+/// An outcome record that does not read as one is refused naming the queue,
+/// rather than read as an envelope nobody has answered yet.
+#[test]
+fn an_outcome_record_that_does_not_read_is_refused_rather_than_passed_over() {
+    let scratch = Scratch::new("outcomes");
+    let dir = copy_of("domain-driven-modularity-2", scratch.path());
+    let transport: Arc<dyn Transport> = Arc::new(LocalTransport::open(&dir).expect("opens"));
+    let channel = Channel::open(&transport).expect("the channel opens");
+    assert!(channel.outcome_of(6).expect("a read").is_some());
+
+    let log = dir.join("command-outcomes.jsonl");
+    let mut text = std::fs::read_to_string(&log).expect("the outcome log");
+    text.push_str("{\"id\":7,\"applied\":\"yes\"}\n");
+    std::fs::write(&log, text).expect("a malformed outcome is appended");
+    let refused = channel
+        .outcome_of(7)
+        .expect_err("an outcome that does not read");
+    assert!(
+        refused.to_string().starts_with("command-outcomes: "),
+        "{refused}"
+    );
+}
