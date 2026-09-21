@@ -201,6 +201,30 @@ fn window_said(answered: &Answered) -> u64 {
         .unwrap_or_else(|| panic!("`ask` never named its window: {}", answered.stderr))
 }
 
+/// The synopsis entry 87 of `docs/contract-divergences.md` proposes is the
+/// verb's own: the same flags `--help` lists.
+#[test]
+fn the_proposed_synopsis_is_the_verbs_own() {
+    let world = World::new("ask-synopsis");
+    let register = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
+    )
+    .expect("the register ships");
+    let synopsis = register
+        .split("add `onepipeline ask")
+        .nth(1)
+        .and_then(|rest| rest.split('`').next())
+        .expect("entry 87 proposes the synopsis");
+    let help = world.run(&["ask", "--help"]);
+    help.exited(0);
+    assert_eq!(
+        crate::stop_guard::flags_of(synopsis),
+        crate::stop_guard::flags_of(&help.stdout),
+        "the proposed synopsis and the verb's flags differ:\n{synopsis}\n{}",
+        help.stdout
+    );
+}
+
 /// The whole seam of one question: the frame a manager reads, and the answer
 /// the asker gets back.
 ///

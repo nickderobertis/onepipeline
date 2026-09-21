@@ -387,6 +387,48 @@ fn status_and_host_report_free_space_on_the_filesystem_holding_both_roots() {
             && line.contains(&format!("and the lifecycle workspaces under {workspaces}")),
         "the line does not name both roots: {line}"
     );
+    // The line is the one entry 86 of `docs/contract-divergences.md` shows,
+    // with the measurement and the two paths in the places it names.
+    let register = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
+    )
+    .expect("the register ships");
+    let documented = register
+        .lines()
+        .find(|line| line.starts_with("  free space: "))
+        .expect("entry 86 shows the line");
+    let shape = |line: &str| -> String {
+        let (reading, roots) = line
+            .strip_prefix("  free space: ")
+            .and_then(|rest| rest.split_once(" on the filesystem holding "))
+            .unwrap_or_else(|| panic!("not a free-space line: {line}"));
+        let (free, rest) = reading.split_once(" GiB of ").expect("a free figure");
+        let (total, share) = rest.split_once(" GiB (").expect("a total figure");
+        let percent = share.strip_suffix("% free)").expect("a share");
+        assert!(
+            free.parse::<f64>().is_ok()
+                && total.parse::<f64>().is_ok()
+                && percent.parse::<u8>().is_ok(),
+            "the reading is not `<GiB> GiB of <GiB> GiB (<n>% free)`: {reading}"
+        );
+        // A root measured at an ancestor says so in a note the example, whose
+        // roots both exist, does not carry; the note is held by the journey
+        // below.
+        let mut roots = roots.to_owned();
+        const NOTE_END: &str = ", the nearest directory that exists)";
+        while let Some(start) = roots.find(" (measured at ") {
+            let end = roots[start..].find(NOTE_END).expect("the note closes") + start;
+            roots.replace_range(start..end + NOTE_END.len(), "");
+        }
+        roots
+            .replace(&runs, "<path>")
+            .replace(&workspaces, "<path>")
+    };
+    assert_eq!(
+        shape(line),
+        shape(documented),
+        "the rendered line is not the shape entry 86 documents"
+    );
     let above: Vec<&str> = status
         .stdout
         .lines()

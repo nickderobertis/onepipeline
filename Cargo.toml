@@ -729,6 +729,7 @@ thiserror = "2"
 # llmlint: ignore-block[new_command_or_client_gets_its_own_project] a dependency of two verbs
 # of this one binary, not a new command or client: both read the engine's own run store and
 # channel through this crate's private modules and ship in its one artifact.
+# llmlint: ignore[crates_stay_in_one_cargo_workspace] `[workspace.dependencies]` holds the sibling engines both members build against, and `just engines-current` reads every pin there as an engine floor; `sha2` is neither, and is pinned beside `serde` and `thiserror` as every root-only dependency is.
 sha2 = "0.10"
 # llmlint: ignore-end[new_command_or_client_gets_its_own_project]
 

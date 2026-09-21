@@ -6806,6 +6806,13 @@ manager anything, which under the user's direction for that repository —
 *"everything else in the repo should be very light or no wrapper on CLI tools"* —
 makes it a gap in this library rather than a script.
 
+<!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] a register entry states
+the surface it proposes so the planner who owns `docs/contract.md` can rule on it — that is
+what AGENTS.md requires this file to be — and it is not a second source of the build: the
+frame's kind and source are `onemessagebus-agent`'s channel vocabulary, re-used by name; the
+answer object is `onemessagebus::sdk_schema::Asked`, serialised; and the proposed synopsis is
+held to the verb's `--help` by `tests/e2e/ask.rs`, which drives every answer, exit status and
+refusal this entry names through the compiled binary. -->
 **What this build does.** One frame of kind `planner-question`, source
 `proposal`, carrying the text, raised on the run's `surfaces` queue at
 `<runs>/<run>/channel` **under the bus policy the run's launch record carries**
@@ -6864,6 +6871,7 @@ left to be discovered: `abandoned`. It is the bus's answer to an asker whose
 question was abandoned by something other than itself, and no verb of this
 crate's abandons a third party's question — so there is no journey that can
 produce it without a second implementation of the bus. Its exit code and its
-rendering are held by `ask::tests::each_answer_renders_as_the_bus_prints_it`
-against the real `Answer` type. Should the channel grow a verb that abandons a
+rendering are held by `ask::tests::each_answer_renders_as_the_bus_prints_it`,
+which reads each rendered line back as the bus's own `sdk_schema::Asked`. Should the channel grow a verb that abandons a
 pending question, the journey that verb makes possible belongs here.
+<!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->

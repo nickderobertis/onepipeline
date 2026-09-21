@@ -55,14 +55,32 @@ fn held(world: &World, name: &str) -> String {
     name.to_string()
 }
 
-/// Where the guard remembers what it last blocked `session` on.
+/// Where the guard remembers what it last blocked `session` on, under the
+/// state root `guarded` names, spelled by the template `docs/stop-guard.md`
+/// documents — so the page's path and the verb's cannot drift apart.
 fn memory(world: &World, session: &str) -> PathBuf {
+    let page = page();
+    let template = page
+        .split('`')
+        .find(|span| span.starts_with("${XDG_STATE_HOME:-"))
+        .expect("the page documents the memory's path");
+    let under = template
+        .split_once("}/")
+        .and_then(|(_, rest)| rest.strip_suffix("/<sha256(session)>"))
+        .expect("the template is `${state root}/<dir>/<sha256(session)>`");
     world
         .root
         .join("state")
-        .join("onepipeline")
-        .join("stop-guard")
+        .join(under)
         .join(hex(&Sha256::digest(session.as_bytes())))
+}
+
+/// Every `--flag` a synopsis or a `--help` names, `--help` itself aside.
+pub(crate) fn flags_of(text: &str) -> std::collections::BTreeSet<String> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .filter(|word| word.starts_with("--") && word.len() > 2 && *word != "--help")
+        .map(str::to_owned)
+        .collect()
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -144,6 +162,32 @@ fn documented(told: &Value) {
         keys(told),
         "`{word}` is not the shape docs/stop-guard.md documents: {told}"
     );
+}
+
+/// The synopsis the page states is the verb's own: the same flags `--help`
+/// lists, and the same format names.
+#[test]
+fn the_documented_synopsis_is_the_verbs_own() {
+    let world = World::new("stop-guard-synopsis");
+    let page = page();
+    let synopsis = page
+        .lines()
+        .find(|line| line.starts_with("onepipeline stop-guard "))
+        .expect("the page states the synopsis");
+    let help = world.run(&["stop-guard", "--help"]);
+    help.exited(0);
+    assert_eq!(
+        flags_of(synopsis),
+        flags_of(&help.stdout),
+        "the page's synopsis and the verb's flags differ:\n{synopsis}\n{}",
+        help.stdout
+    );
+    for format in ["neutral", "claude-code", "codex"] {
+        assert!(
+            page.contains(&format!("`--format {format}`")) && help.stdout.contains(format),
+            "`--format {format}` is not both documented and offered"
+        );
+    }
 }
 
 /// Feed one neutral input object to the guard.
