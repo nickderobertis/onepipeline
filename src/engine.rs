@@ -3532,6 +3532,15 @@ fn start_ready(
     releases: &crate::release::Watch,
     workspaces: &mut crate::pool::Workspaces,
 ) -> Result<bool> {
+    // Nothing new starts once this run's shutdown has begun. Asked here rather
+    // than left to the teardown that is coming: the driver goes on scheduling
+    // for as long as the grace lasts, and a node it dispatched into a host that
+    // is going away is a worker with nowhere to put its work. The hold outlives
+    // this process — a run whose teardown left a driver standing goes on
+    // dispatching nothing — and an `adopt` is what lifts it.
+    if crate::shutdown::begun(paths) {
+        return Ok(false);
+    }
     let concurrency = state.graph.concurrency as usize;
     // Two things become actionable here. A `ready` node is dispatched, and a
     // human action that has just become ready is *recorded* as waiting — the
@@ -7059,6 +7068,7 @@ mod tests {
             exit_code: None,
             disposition: None,
             stderr_tail: None,
+            candidates: Vec::new(),
         })
         .expect("the sibling's death serializes");
         let published = Envelope {

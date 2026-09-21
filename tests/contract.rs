@@ -108,18 +108,6 @@ fn fenced_blocks(language: &str) -> Vec<String> {
     blocks
 }
 
-/// The one fenced block in the contract carrying the given info string.
-fn fenced_block(language: &str) -> String {
-    let blocks = fenced_blocks(language);
-    assert_eq!(
-        blocks.len(),
-        1,
-        "expected exactly one ```{language} block in docs/contract.md, found {}",
-        blocks.len()
-    );
-    blocks.into_iter().next().expect("one block")
-}
-
 /// The one fenced block of that language whose body names `needle`.
 ///
 /// The contract carries more than one example in a given language, so a fixture
@@ -860,7 +848,7 @@ fn a_dispatch_is_cancelled_the_two_ways_the_contract_names() {
 
 #[test]
 fn the_contract_declares_the_seams_traits_and_methods() {
-    let sketch = fenced_block("rust");
+    let sketch = fenced_block_naming("rust", "pub trait Executor");
     for item in [
         "pub trait Executor",
         "fn name(",
@@ -878,6 +866,233 @@ fn the_contract_declares_the_seams_traits_and_methods() {
             "the contract's Rust block no longer declares `{item}`"
         );
     }
+}
+
+/// The host-shutdown seam the contract spells, held to the types the crate
+/// publishes.
+///
+/// The block is a **sketch** — the contract writes the seam as a consumer reads
+/// it — so what is held here is that every item it names exists under that name,
+/// and the signatures are held by the coercions in
+/// `the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other`,
+/// which is the drift gate this file uses everywhere. A type added to the block
+/// and not to `verbs` fails to compile here before the document can promise it.
+#[test]
+fn the_contract_declares_the_host_shutdown_seam_this_crate_publishes() {
+    use onepipeline::verbs::{
+        BranchPreserved, DispatchEnding, DispatchStopped, Preserved, RunShutdown, Shutdown,
+        ShutdownRequest, ShutdownScope, StopTeardown,
+    };
+    let sketch = fenced_block_naming("rust", "pub enum ShutdownScope");
+    for item in [
+        "pub enum ShutdownScope { Run(String), Mine, Host }",
+        "pub struct ShutdownRequest",
+        "pub enum DispatchEnding { Graceful, Killed, StillRunning }",
+        "pub enum Preserved { Pushed, AlreadyOnOrigin, NoRemote, Refused }",
+        "pub struct DispatchStopped",
+        "pub struct BranchPreserved",
+        "pub struct RunShutdown",
+        "pub struct Shutdown",
+        "pub fn shutdown(root: &Path, request: ShutdownRequest) -> Result<Shutdown>;",
+        "pub fn render_shutdown(shutdown: &Shutdown) -> String;",
+        "impl Shutdown { pub fn exit_code(&self) -> i32; }",
+        "pub not_pushed: Vec<(String, String)>",
+        "pub not_pushed_unread: Option<String>",
+    ] {
+        assert!(
+            sketch.contains(item),
+            "the contract's shutdown block no longer declares `{item}`"
+        );
+    }
+
+    // Every field the block spells, with its type, is exactly the set the
+    // exhaustive literals below name — so a field the document adds, drops,
+    // renames or retypes fails here, and one the crate adds or drops fails
+    // those literals to compile.
+    for (name, fields) in [
+        (
+            "ShutdownRequest",
+            &[
+                ("scope", "ShutdownScope"),
+                ("session", "String"),
+                ("grace", "Duration"),
+                ("force", "bool"),
+            ][..],
+        ),
+        (
+            "DispatchStopped",
+            &[
+                ("node", "String"),
+                ("pid", "u32"),
+                ("interrupt", "String"),
+                ("detail", "String"),
+                ("ended", "DispatchEnding"),
+                ("waited", "Duration"),
+            ][..],
+        ),
+        (
+            "BranchPreserved",
+            &[
+                ("identity", "String"),
+                ("branch", "String"),
+                ("outcome", "Preserved"),
+                ("remote", "Option<String>"),
+                ("commit", "Option<String>"),
+                ("detail", "String"),
+            ][..],
+        ),
+        (
+            "RunShutdown",
+            &[
+                ("run", "String"),
+                ("owner", "String"),
+                ("forced_over_owner", "bool"),
+                ("dispatches", "Vec<DispatchStopped>"),
+                ("teardown", "journal::StopTeardown"),
+                ("branches", "Vec<BranchPreserved>"),
+            ][..],
+        ),
+        (
+            "Shutdown",
+            &[
+                ("root", "PathBuf"),
+                ("scope", "ShutdownScope"),
+                ("grace", "Duration"),
+                ("forced", "bool"),
+                ("runs", "Vec<RunShutdown>"),
+                ("not_pushed", "Vec<(String, String)>"),
+                ("not_pushed_unread", "Option<String>"),
+            ][..],
+        ),
+    ] {
+        let expected: Vec<(String, String)> = fields
+            .iter()
+            .map(|(field, ty)| ((*field).to_string(), (*ty).to_string()))
+            .collect();
+        assert_eq!(
+            sketch_struct_fields(&sketch, name),
+            expected,
+            "the contract's `{name}` fields have drifted from the type this crate publishes"
+        );
+    }
+
+    // The values the block names, built here so a variant renamed or dropped
+    // fails to compile rather than leaving the document promising it.
+    let stopped = DispatchStopped {
+        node: "build".into(),
+        pid: 4_242,
+        interrupt: "delivered".into(),
+        detail: "the running turn took the redirection".into(),
+        ended: DispatchEnding::Graceful,
+        waited: std::time::Duration::from_secs(3),
+    };
+    let preserved = BranchPreserved {
+        identity: "github.com/owner/service".into(),
+        branch: "feat/thing".into(),
+        outcome: Preserved::Pushed,
+        remote: Some("https://github.com/owner/service.git".into()),
+        commit: Some("abc1234".into()),
+        detail: String::new(),
+    };
+    let run = RunShutdown {
+        run: "run-1".into(),
+        owner: "[mine]".into(),
+        forced_over_owner: false,
+        dispatches: vec![stopped],
+        teardown: StopTeardown::Signalled,
+        branches: vec![preserved],
+    };
+    let shutdown = Shutdown {
+        root: PathBuf::from("/runs"),
+        scope: ShutdownScope::Host,
+        grace: std::time::Duration::from_secs(600),
+        forced: false,
+        runs: vec![run],
+        not_pushed: vec![("github.com/owner/other".into(), "feat/left".into())],
+        not_pushed_unread: None,
+    };
+    // Everything went as it was asked to, so this is exit 0 — and the report
+    // still names the branch nobody pushed, which is a fact rather than a
+    // failure.
+    assert_eq!(shutdown.exit_code(), 0);
+    let report = onepipeline::verbs::render_shutdown(&shutdown);
+    assert!(report.contains("/runs"), "{report}");
+    assert!(
+        report.contains("github.com/owner/other@feat/left"),
+        "{report}"
+    );
+    assert!(report.contains("on its origin unproven"), "{report}");
+
+    // And a dispatch the deadline reaped is the refusal the contract assigns.
+    let killed = Shutdown {
+        runs: vec![RunShutdown {
+            dispatches: vec![DispatchStopped {
+                ended: DispatchEnding::Killed,
+                ..shutdown.runs[0].dispatches[0].clone()
+            }],
+            ..shutdown.runs[0].clone()
+        }],
+        ..shutdown
+    };
+    assert_eq!(killed.exit_code(), EXIT_REFUSED);
+
+    // The three scopes and the default grace are the document's own.
+    assert_ne!(ShutdownScope::Mine, ShutdownScope::Host);
+    let _: ShutdownRequest = ShutdownRequest {
+        scope: ShutdownScope::Run("run-1".into()),
+        session: "s".into(),
+        grace: std::time::Duration::from_secs(onepipeline::cli::DEFAULT_SHUTDOWN_GRACE_SECONDS),
+        force: false,
+    };
+    assert_eq!(onepipeline::cli::DEFAULT_SHUTDOWN_GRACE_SECONDS, 600);
+    assert_contract_names(
+        "shutdown paragraph's",
+        &[
+            "`onepipeline shutdown [RUN] [--mine] [--host] [--grace SECONDS] [--force]`",
+            "**default 600**",
+            "A shutdown journals no `run-stopped` and fires no run-end hook",
+            "on its origin *unproven*",
+        ],
+    );
+}
+
+/// The `pub name: Type` fields a sketched `pub struct` spells, in order, with
+/// each type's whitespace collapsed and the block's doc comments left out.
+fn sketch_struct_fields(sketch: &str, name: &str) -> Vec<(String, String)> {
+    let code: String = sketch
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("///"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let open = format!("pub struct {name} {{");
+    let start = code
+        .find(&open)
+        .unwrap_or_else(|| panic!("the contract's shutdown block declares no `{open}`"))
+        + open.len();
+    // The body ends at the brace that closes it; a field type such as
+    // `Vec<(String, String)>` nests parentheses and angles but never braces.
+    let body = &code[start..start + code[start..].find('}').expect("the struct closes")];
+    let mut fields = Vec::new();
+    let mut depth = 0_i32;
+    let mut field = String::new();
+    for ch in body.chars().chain(std::iter::once(',')) {
+        match ch {
+            '<' | '(' => depth += 1,
+            '>' | ')' => depth -= 1,
+            _ => {}
+        }
+        if ch == ',' && depth == 0 {
+            let spelled = field.split_whitespace().collect::<Vec<_>>().join(" ");
+            if let Some(rest) = spelled.strip_prefix("pub ") {
+                let (field_name, ty) = rest.split_once(':').expect("a field has a type");
+                fields.push((field_name.trim().to_string(), ty.trim().to_string()));
+            }
+            field.clear();
+        } else {
+            field.push(ch);
+        }
+    }
+    fields
 }
 
 /// A plan exercising every node shape the contract names.
@@ -4473,7 +4688,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 33, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 35, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -5008,6 +5223,17 @@ fn every_command_the_contract_names_parses() {
         ("attest", &["attest", "run-1", "approve"]),
         ("stop", &["stop", "run-1"]),
         ("stop --force", &["stop", "run-1", "--force"]),
+        ("shutdown RUN", &["shutdown", "run-1"]),
+        ("shutdown --mine", &["shutdown", "--mine"]),
+        ("shutdown --host", &["shutdown", "--host"]),
+        (
+            "shutdown --host --grace",
+            &["shutdown", "--host", "--grace", "60"],
+        ),
+        (
+            "shutdown --mine --force",
+            &["shutdown", "--mine", "--force"],
+        ),
         ("runs", &["runs"]),
         ("runs --mine", &["runs", "--mine"]),
         ("status", &["status"]),
@@ -6727,8 +6953,8 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
     use onepipeline::filter::EventFilter;
     use onepipeline::verbs::{
         Adopt, Adopted, ChannelQueue, Goals, Grouping, Host, Monitored, Next, Receipt, Results,
-        Retained, Status, StopRequest, Stopped, Surfaced, Transcript, Unwatched, WatchFrame,
-        WatchLines, WatchOutcome, WatchRequest,
+        Retained, Shutdown, ShutdownRequest, Status, StopRequest, Stopped, Surfaced, Transcript,
+        Unwatched, WatchFrame, WatchLines, WatchOutcome, WatchRequest,
     };
     use onepipeline::views::{DriverLiveness, Projects};
     use onepipeline::Result;
@@ -6768,6 +6994,8 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
     let _: fn(&Surfaced) -> String = verbs::render_surfaced;
     let _: fn(&RunPaths, StopRequest<'_>) -> Result<Stopped> = verbs::stop;
     let _: fn(&Stopped) -> String = verbs::render_stopped;
+    let _: fn(&Path, ShutdownRequest) -> Result<Shutdown> = verbs::shutdown;
+    let _: fn(&Shutdown) -> String = verbs::render_shutdown;
     let _: fn(&RunPaths, Adopt) -> Result<Adopted> = verbs::adopt;
     let _: fn(&Adopted) -> String = verbs::render_adopted;
     let _: fn(&RunPaths, Retained) -> Result<i32> = verbs::drive_run;
@@ -6790,6 +7018,8 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
         "surface",
         "attest",
         "stop",
+        "shutdown",
+        "render_shutdown",
         "adopt",
         "drive_run",
         "watch",

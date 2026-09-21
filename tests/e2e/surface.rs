@@ -33,6 +33,7 @@ const COMMANDS: &[(&str, &[&str])] = &[
     ),
     ("attest", &["attest", "run-1", "approve"]),
     ("stop", &["stop", "run-1"]),
+    ("shutdown", &["shutdown", "run-1"]),
     ("runs", &["runs"]),
     ("status", &["status"]),
     ("host", &["host"]),
@@ -116,6 +117,7 @@ fn a_verb_that_names_a_run_nobody_recorded_refuses_and_says_where_it_looked() {
         vec!["transcript", "ghost"],
         vec!["status", "ghost"],
         vec!["stop", "ghost"],
+        vec!["shutdown", "ghost"],
         vec!["adopt", "ghost"],
     ] {
         world

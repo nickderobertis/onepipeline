@@ -172,6 +172,25 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             println!("{}", verbs::render_stopped(&stopped));
             Ok(stopped.exit_code())
         }
+        Verb::Shutdown(args) => {
+            let shutdown = verbs::shutdown(
+                &ledger::runs_root(),
+                verbs::ShutdownRequest {
+                    scope: match (args.run, args.mine) {
+                        (Some(run), _) => verbs::ShutdownScope::Run(run),
+                        (None, true) => verbs::ShutdownScope::Mine,
+                        // `--host`, which the parser's required group is what
+                        // makes the only remaining answer.
+                        (None, false) => verbs::ShutdownScope::Host,
+                    },
+                    session: sys::launching_session(),
+                    grace: std::time::Duration::from_secs(args.grace),
+                    force: args.force,
+                },
+            )?;
+            print!("{}", verbs::render_shutdown(&shutdown));
+            Ok(shutdown.exit_code())
+        }
         Verb::Runs(args) => {
             let session = sys::launching_session();
             let projects = verbs::runs(&ledger::runs_root(), &session, args.mine);
@@ -1947,6 +1966,10 @@ fn validate_and_displace_for_adoption(paths: &RunPaths) -> Result<(LaunchRecord,
 /// after adopting, and truncating it would lose the account of the driver that
 /// died.
 fn take_the_run_over(paths: &RunPaths, record: &mut LaunchRecord) -> Result<()> {
+    // An adoption is the deliberate decision to run this run again, and it is
+    // the only thing that lifts a host shutdown's hold: until it happens the
+    // run dispatches nothing, whatever survived the teardown.
+    crate::shutdown::adopted(paths)?;
     record.adoptions += 1;
     record.driven_by_this_process();
     // A record an earlier build wrote names no pointer file; the dispatches
@@ -2088,17 +2111,7 @@ pub(crate) fn stop_run(
             paths.run, paths.run
         ))
     })?;
-    let established = match teardown {
-        None => journal::StopTeardown::Elsewhere,
-        Some(sys::Teardown::Signalled) => journal::StopTeardown::Signalled,
-        Some(sys::Teardown::NothingToStop) => journal::StopTeardown::NothingToStop,
-        Some(sys::Teardown::IdentityDeclined) => journal::StopTeardown::IdentityDeclined,
-        Some(sys::Teardown::NotAttempted) => journal::StopTeardown::NotAttempted,
-        Some(sys::Teardown::PartlySignalled) => journal::StopTeardown::PartlySignalled,
-        // Unix-only, as the variant is: no Windows teardown establishes it.
-        #[cfg(unix)]
-        Some(sys::Teardown::Refused) => journal::StopTeardown::Refused,
-    };
+    let established = established(teardown);
     let mut journal = Journal::open(paths);
     journal.emit(
         journal::PipelineKind::RunStopped,
@@ -2136,6 +2149,26 @@ pub(crate) fn stop_run(
     Ok(stopped)
 }
 
+/// What one host's teardown established, as the journal records it.
+///
+/// Apart from [`stop_run`] because two verbs record one teardown — `stop`, and
+/// the host shutdown, whose `host-shutdown` carries the word `run-stopped`
+/// already carries. One mapping or two to drift, and a drifted one would have a
+/// reader call the same outcome by two names.
+pub(crate) fn established(teardown: Option<sys::Teardown>) -> journal::StopTeardown {
+    match teardown {
+        None => journal::StopTeardown::Elsewhere,
+        Some(sys::Teardown::Signalled) => journal::StopTeardown::Signalled,
+        Some(sys::Teardown::NothingToStop) => journal::StopTeardown::NothingToStop,
+        Some(sys::Teardown::IdentityDeclined) => journal::StopTeardown::IdentityDeclined,
+        Some(sys::Teardown::NotAttempted) => journal::StopTeardown::NotAttempted,
+        Some(sys::Teardown::PartlySignalled) => journal::StopTeardown::PartlySignalled,
+        // Unix-only, as the variant is: no Windows teardown establishes it.
+        #[cfg(unix)]
+        Some(sys::Teardown::Refused) => journal::StopTeardown::Refused,
+    }
+}
+
 /// Ask everything driving this run on this host to stop, and watch it go.
 ///
 /// Politely: a driver takes the ask first so it records its own abandonment
@@ -2163,7 +2196,7 @@ pub(crate) fn stop_run(
 // single-writer lock, so one run has one driver, and the pair a stop can meet — the pid a
 // stale record names beside the pid the lock stamps — is what the first of those walks over
 // one listing.
-fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
+pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
     let Aim::Here {
         roots,
         unproven,

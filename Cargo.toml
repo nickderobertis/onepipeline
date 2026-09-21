@@ -3,6 +3,7 @@
 # the programs this stack spawns: `oneagentgraph`, and the `gh` behind `onevcs`.
 # Members are listed explicitly so a new one joins the graph deliberately rather
 # than by changing what `--workspace` means.
+# llmlint: ignore[new_command_or_client_gets_its_own_project] no new command or client binary joins this workspace: `onepipeline shutdown` is one more verb of the existing `onepipeline` CLI, which `docs/contract.md` states as one command surface over `onepipeline::verbs`, and this repository is one Rust build unit (the directive further down says the same for the whole crate).
 members = [".", "crates/testfakes"]
 resolver = "2"
 
@@ -469,6 +470,18 @@ resolver = "2"
 # exactly this `onevcs`, so the two requirements and the lock move together.
 # `tests/e2e/maintenance.rs` drives the sweep against the linked release.
 #
+# `onevcs` 0.29.0 is the floor because it carries the **preserving push** as a
+# library call: `preserve`/`PreserveRequest`/`Preserved`, which puts an
+# unpublished branch on its identity's origin under its own name without opening
+# a change request or running a merge path, and `recoverable`, the enumeration of
+# every preserved-but-unpublished branch on this host. `src/shutdown.rs` calls
+# both — they are the last two steps of `onepipeline shutdown` — and neither
+# exists below it, so a pin under this floor does not compile. A **requirement**,
+# because `^0.27` admits no 0.29.x; 0.28.0 in the gap adds nothing this crate
+# links, and `onevcs-testing` 0.6.10 requires exactly this `onevcs`, so the two
+# requirements and the lock move together. `tests/e2e/shutdown.rs` drives the
+# preservation against a real origin.
+#
 # `oneagentgraph` 0.4.6 is a **relink and nothing else** — `src/member.rs`
 # re-reads its two engines' channels and moves two version numbers in prose —
 # taken because it requires `oneharness-core` 0.17.0 and `onejudge` 0.13.3
@@ -498,7 +511,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.4.6"
-onevcs = "0.27.0"
+onevcs = "0.29.0"
 # The wire both siblings above now re-export: the envelope, its labels, sources
 # and phases, the filter grammar, the reader, the merge and the schema registry
 # are `onemessagebus-agent`'s over the `onemessagebus` core, and `src/event.rs`
@@ -617,7 +630,7 @@ oneharness-core = "0.17.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.6.8"
+onevcs-testing = "0.6.10"
 # **Test-support only**, and linked by `crates/testfakes` alone: the crate under test
 # still reads every plan by *driving* the `onetaskgraph` binary. These host the real
 # `local-md` plugin inside `label-strict-source`; that fake says why.

@@ -1069,3 +1069,67 @@ fn liveness_over_the_summary_is_the_listings_own_reading() {
         verbs::render_runs(&projects, verbs::Grouping::Flat, SESSION)
     );
 }
+
+/// `shutdown` is argument parsing over `verbs::shutdown`: the binary's report
+/// and exit code are the SDK's rendering and `exit_code`, byte for byte, and a
+/// refusal is the SDK's error.
+///
+/// Both sides run over a fresh copy at the **same** runs root, one after the
+/// other, because the report names the root it read. `ONEVCS_HOME` points both
+/// at one empty state root of their own, so neither reads this host's own
+/// branches into the section the report ends on.
+#[test]
+fn shutdown_is_the_sdks_report_and_exit_code() {
+    let onevcs_home = std::env::temp_dir().join(format!(
+        "onepipeline-parity-{}-shutdown-onevcs",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&onevcs_home);
+    std::fs::create_dir_all(&onevcs_home).expect("an empty onevcs state root");
+    let request = |scope: verbs::ShutdownScope, session: &str| verbs::ShutdownRequest {
+        scope,
+        session: session.to_owned(),
+        grace: Duration::from_secs(600),
+        force: true,
+    };
+
+    let ours = Fixture::new("shutdown");
+    let env = ours.enter();
+    std::env::set_var("ONEVCS_HOME", &onevcs_home);
+    let not_owned = verbs::shutdown(
+        &ours.root,
+        request(verbs::ShutdownScope::Run(RUN.to_owned()), STRANGER),
+    )
+    .expect_err("not this session's run");
+    assert!(matches!(not_owned, onepipeline::Error::NotOwned { .. }));
+    let shutdown = verbs::shutdown(
+        &ours.root,
+        request(verbs::ShutdownScope::Run(RUN.to_owned()), SESSION),
+    )
+    .expect("the run is shut down");
+    std::env::remove_var("ONEVCS_HOME");
+    drop(env);
+    drop(ours);
+
+    let theirs = Fixture::new("shutdown");
+    refused(
+        "shutdown RUN, as a stranger",
+        &theirs
+            .command(STRANGER, &["shutdown", RUN, "--force"])
+            .env("ONEVCS_HOME", &onevcs_home)
+            .output()
+            .expect("the binary runs"),
+        &not_owned,
+    );
+    same(
+        "shutdown RUN --force",
+        &theirs
+            .command(SESSION, &["shutdown", RUN, "--force"])
+            .env("ONEVCS_HOME", &onevcs_home)
+            .output()
+            .expect("the binary runs"),
+        &verbs::render_shutdown(&shutdown),
+        shutdown.exit_code(),
+    );
+    let _ = std::fs::remove_dir_all(&onevcs_home);
+}
