@@ -1570,7 +1570,12 @@ as loudly as one that drops one.
     "consumes": {"engine": "crate"}
   },
   "event_kinds": ["release-wait", "release-arrived", "release-adopted"],
-  "heading": "## Cross-repository references"
+  "heading": "## Cross-repository references",
+  "wait_surface": {
+    "kind": "release-wait",
+    "epoch": "queued_at",
+    "withheld_after": ["node-unheld", "release-adopted", "node-dispatched"]
+  }
 }
 ```
 
@@ -1627,6 +1632,36 @@ about that dependency again, and the clock the wait was measured on is dropped
 when it arrives rather than left running under a later hold. Held end to end by
 `tests/e2e/adoption.rs`'s
 `a_release_that_arrived_is_not_awaited_again_when_its_probe_stops_answering`.
+
+*A wait surface that has outlived its hold is **withheld**, never handed out.*
+A surface is written in the present tense and handed out whenever a reader gets
+to it, and the queue holds a backlog — so a `release-wait` queued about a hold is
+still waiting to be read after the hold has cleared, and one queued by the very
+pass that then cleared it is the same thing at its shortest. Measured: a node's
+journal recorded `release-arrived`, `node-unheld` and `node-dispatched`, and a
+surface still saying it was held, `waited 0s, last answer: no-answer-yet`, was
+read four and a half minutes after the dispatch and sent an operator after a hold
+that no longer existed. **The rule:** the hold epoch a `release-wait` surface
+belongs to is fixed by the instant it was queued — its `queued_at`, stamped by the
+driver that raised it from the clock its journal is stamped from — and the
+surface is discarded at the hand-out, by `onepipeline next`, when the node's own
+record carries, *at or after that instant*, any of the three records that end a
+release hold: a `node-unheld`, a `release-adopted`, or a `node-dispatched`. At or
+after, because the record the same pass writes is milliseconds behind the surface
+and may share its millisecond; and nothing earlier counts, because a record from
+before the wait was queued belongs to an earlier hold of the same node — a
+requeue, or a fresh driver re-asking — and says nothing about this one. A
+withheld surface is claimed, so the queue moves past it, and is said on stderr
+naming the record that ended the hold; it is recorded neither as
+`planner-surfaced`, which it was not, nor by restarting any check-in clock, which
+a reading nobody made does not, and the `planner-surface-queued` that recorded
+its queuing stands. A genuine hold still raises its wait and goes on raising it
+on its interval, and each of those reaches the reader while the hold is on. The
+block above names the kind, what fixes its epoch, and the three kinds that end
+it; `src/release.rs`'s `wait_outlived` is the one reading of the rule, and
+`tests/e2e/adoption.rs`'s
+`a_wait_queued_about_a_hold_that_has_since_cleared_is_withheld_from_the_reader`
+drives it through the binary, delaying the reader across the unhold.
 
 **One thing that is held by a fold test rather than by a journey, and why.** A
 fresh driver takes up what its predecessor already said, out of the journal,
@@ -1840,13 +1875,41 @@ per-node `results` view before anything replaces it. It is journalled as an
 operation of its own, so replaying a run's journal reconstructs the amended task
 without re-judging it.
 
-It is rendered under a heading of its own, immediately **above** the task's
-`## Additional info` section where the task has one and at the end otherwise, and
-opens with the sentence that states its authority: *where this section and the
-operational notes below disagree, this section wins*. That placement and that
-sentence are the convention that resolved this in practice — both supervisory
-conflicts in the session this comes from traced to an instruction's authority
-being written down nowhere.
+It is rendered **into the task's own `## Acceptance criteria` section**, as one
+precedence-resolved acceptance section and never as a section of its own beside
+the criteria it overrides: the amendment's clauses go at the end of that section,
+under the sub-heading `### Amendment`, one bullet each, and the block opens with
+the sentence that states their precedence over the **whole task** — *This node's
+manager amended its bar. Every clause below is an acceptance criterion of this
+node and takes precedence over the whole task: where a clause here contradicts a
+criterion above it, anything the task says elsewhere, or an operational note
+below, the clause here wins and the contradicted one no longer binds.* A task
+that states no criteria section is given one, immediately **above** its
+`## Additional info` where it has one and at the end otherwise, so the block is
+above the operational notes either way. Every word the manager wrote is kept and
+only the shape changes: a sentence is one clause, a bullet or a numbered item is
+one clause each, and a heading — an amendment written as a task states one over
+its own bar — is kept as a bold label, since a heading inside the section would
+end it. The engine's own check of a node's bar (entry 47) reads the amendment
+through the same resolution, so what it can answer about a node is what the
+node's judge was handed: the amendment's clauses are criteria, and an original
+criterion naming a file the amendment names is superseded rather than read
+beside it.
+
+That shape replaced a section of its own. Rendered as `## Amendment` beside the
+criteria, opening with *where this section and the operational notes below
+disagree, this section wins*, the amendment claimed precedence over the notes
+alone and stood as a peer of the criteria it overrode — and a judge reading an
+original file allowlist beside the amendment that relaxed it failed a gate-green
+node for touching the very script the in-force amendment admitted, so the manager
+published the branch and corrected the settlement by hand. The authority sentence
+and the placement above the notes were the convention that resolved the earlier
+conflicts — both supervisory conflicts in the session this comes from traced to
+an instruction's authority being written down nowhere — and they stand; what
+moved is the section the sentence is written into and how far the precedence
+reaches. The manager-notes block a continuation renders (entry 60) keeps the
+older sentence, because that is the authority a delivered note had in the
+conversation it reached.
 
 It is **not** on the monitor allowlist. What a node is judged against is a
 decomposition decision the monitor's own persona already reserves to the planner,
@@ -1927,7 +1990,9 @@ introduces them, exactly as entries 39 and 40 did.
 the op named here must be one this build accepts and the contract's own list does
 not, must round-trip as written, and must be allowed for exactly the authors
 named; the node must parse at schema 3 and round-trip exactly as written; the
-heading must be the constant this crate publishes; and the launch config must
+heading and the precedence sentence must be the constants this crate publishes,
+and the rendering must put the amendment's clauses inside the section named,
+above the notes, opening with that sentence; and the launch config must
 parse at the version stated and carry the key. `tests/e2e/node_validator.rs`
 reads the three spellings out of the same block and drives their precedence
 against a real validator command, so the order is proven rather than asserted in
@@ -1949,7 +2014,9 @@ prose.
     "task": "## What\nship it",
     "amendment": "The redundant comment lines are out of scope for this node: leave them."
   },
-  "heading": "## Amendment",
+  "heading": "### Amendment",
+  "rendered_into": "## Acceptance criteria",
+  "precedence": "This node's manager amended its bar. Every clause below is an acceptance criterion of this node and takes precedence over the whole task: where a clause here contradicts a criterion above it, anything the task says elsewhere, or an operational note below, the clause here wins and the contradicted one no longer binds.",
   "validator": {
     "flag": "--node-validator",
     "environment": "ONEPIPELINE_NODE_VALIDATOR",

@@ -513,6 +513,14 @@ pub struct Next {
 /// `planner-surfaced`, and restarts the check-in clock of every member the run's
 /// observer graph declares resettable.
 ///
+/// One surface is never handed out: a `release-wait` whose hold has cleared
+/// since it was queued — `release::wait_outlived`
+/// says which record cleared it. It is claimed, so the queue moves past it, and
+/// withheld rather than delivered: said on stderr, and recorded neither as
+/// `planner-surfaced`, which it was not, nor by restarting any check-in clock,
+/// which a reading nobody made does not. The next surface waiting is handed out
+/// in its place.
+///
 /// # Errors
 ///
 /// A run whose store cannot be read, or a channel that refuses the claim.
@@ -521,17 +529,28 @@ pub fn next(paths: &RunPaths, filter: &EventFilter) -> Result<Next> {
     let events: Vec<Envelope> = views::shaped(&view, filter).into_iter().cloned().collect();
     let channel = ChannelState::new(paths);
 
-    let Some(surface) = channel.claim()? else {
-        let settled = view.liveness().is_undriven();
-        return Ok(Next {
-            status: if settled {
-                NextStatus::Finished
-            } else {
-                NextStatus::Running
-            },
-            surface: None,
-            events,
-        });
+    let surface = loop {
+        let Some(surface) = channel.claim()? else {
+            let settled = view.liveness().is_undriven();
+            return Ok(Next {
+                status: if settled {
+                    NextStatus::Finished
+                } else {
+                    NextStatus::Running
+                },
+                surface: None,
+                events,
+            });
+        };
+        match crate::release::wait_outlived(&view.events, &surface) {
+            Some(cleared) => eprintln!(
+                "onepipeline: withheld a stale `{}` surface queued at {}: {}",
+                surface.kind,
+                surface.queued_at,
+                cleared.said(surface.workstream.as_deref().unwrap_or_default()),
+            ),
+            None => break surface,
+        }
     };
 
     let mut journal = Journal::open(paths);
