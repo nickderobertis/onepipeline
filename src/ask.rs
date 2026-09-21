@@ -18,6 +18,7 @@ use onemessagebus::sdk_schema::Asked as Wire;
 use onemessagebus::{Address, Answer, Asker, Correlation, Pending};
 use serde_json::{json, Value};
 
+use crate::channel::layout::SURFACES;
 use crate::channel::{source, ChannelState, Surface};
 use crate::cli::AskArgs;
 use crate::error::{Error, Result, EXIT_QUEUED, EXIT_SUCCESS};
@@ -317,7 +318,7 @@ fn reply_window(config: Option<&onemessagebus::Config>) -> Option<Duration> {
             codec
                 .queue
                 .as_ref()
-                .is_some_and(|queue| queue.as_str() == onemessagebus_agent::channel::SURFACES)
+                .is_some_and(|queue| queue.as_str() == SURFACES)
         })
         .filter_map(|codec| codec.reply_window_seconds)
         .map(|seconds| Duration::from_secs(seconds.get()))

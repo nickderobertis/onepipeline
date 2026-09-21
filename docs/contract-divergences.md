@@ -6879,9 +6879,9 @@ honestly differ between two reads moments apart on a busy host.
 surface, as the verb a dispatched agent asks its manager a blocking question
 with over the run's own planner channel.**
 
-The channel is already this crate's: the surface kinds, the reply envelope and
-its ops, which question a verdict is addressed to, and the bytes of every record
-the channel directory holds. What was not this crate's is the one thing a
+The channel is already this crate's: the `planner-channel` layout itself, the
+surface kinds, the reply envelope and its ops, which question a verdict is
+addressed to, and the bytes of every record the channel directory holds. What was not this crate's is the one thing a
 dispatched worker does with it. `ai-orchestrator/scripts/ask-manager.sh` is 190
 lines that JSON-encode a plain-text question into a `planner-question` frame
 with bash builtins and exec `onemessagebus ask` with the run's channel, its
@@ -6894,7 +6894,8 @@ makes it a gap in this library rather than a script.
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] a register entry states
 the surface it proposes so the planner who owns `docs/contract.md` can rule on it — that is
 what AGENTS.md requires this file to be — and it is not a second source of the build: the
-frame's kind and source are `onemessagebus-agent`'s channel vocabulary, re-used by name; the
+frame's source and queue are the `planner-channel` layout's vocabulary, which this crate
+declares at `onepipeline::channel::layout` (entry 77's *Since*), re-used by name; the
 answer object is `onemessagebus::sdk_schema::Asked`, serialised; and the proposed synopsis is
 held to the verb's `--help` by `tests/e2e/ask.rs`, which drives every answer, exit status and
 refusal this entry names through the compiled binary. -->
