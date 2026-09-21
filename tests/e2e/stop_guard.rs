@@ -349,6 +349,33 @@ fn unreadable_input_and_a_blank_session_are_silent_and_never_the_environments() 
         );
         assert!(asked.stderr.is_empty(), "{input:?}: {}", asked.stderr);
     }
+    // Bytes that are not text at all — a payload the harness garbled — are the
+    // same nothing: the read itself fails, and that says nothing about a run.
+    let mut child = world
+        .cmd(&["stop-guard"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the binary starts");
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(b"{\"session\": \"\xff\xfe\"}")
+            .expect("the bytes are written");
+    }
+    let garbled = child.wait_with_output().expect("the guard ends");
+    assert_eq!(garbled.status.code(), Some(0), "{garbled:?}");
+    assert_eq!(
+        verdict(&String::from_utf8_lossy(&garbled.stdout)),
+        Some(json!({"verdict": "none"})),
+        "{garbled:?}"
+    );
+    assert!(garbled.stderr.is_empty(), "{garbled:?}");
+
     // And `--session ""` is that same nothing rather than a fall-through.
     let blank = world.run(&["stop-guard", "--session", ""]);
     blank.exited(0);
