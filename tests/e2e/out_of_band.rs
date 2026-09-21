@@ -849,6 +849,7 @@ fn a_drafting_worktree_that_cannot_be_removed_is_named_for_the_operator() {
 
 /// A world whose drafting turns make their directories under its own root, so a
 /// landing that failed to remove one leaves it where the world is cleaned up.
+#[cfg(unix)]
 fn world_with_its_own_tmp(name: &str) -> World {
     let world = World::new(name);
     let tmp = world.root.join("tmp");
@@ -892,6 +893,7 @@ fn start_landing(world: &World, graph: &str, launcher: Option<&str>) -> std::pro
 }
 
 /// The drafting worktree the double recorded once its turn was in flight.
+#[cfg(unix)]
 fn drafting_worktree(world: &World) -> std::path::PathBuf {
     let recorded = world.fakes.join("pr-author-tree.jsonl");
     world.until("the drafting turn to be in flight", |_| {
