@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use crate::harness::end_process;
-use crate::harness::{agent, git, lifecycle, plan_of, World, REFUSED};
+use crate::harness::{agent, git, lifecycle, plan_of, World, REFUSED, USAGE_ERROR};
 use serde_json::{json, Value};
 
 /// A grace a journey can wait out, and long enough that a worker that takes
@@ -719,5 +719,77 @@ fn the_last_section_says_when_the_host_could_not_be_read() {
     );
     // A fact, never a failure: nothing was killed and the tree was reached.
     shutdown.exited(0);
+    world.release("build.go");
+}
+
+/// A worker that ends when it is asked has its branch on the origin afterwards.
+///
+/// The preserving push's other half beside the survivor journey: here the
+/// teardown ended everything and nothing was killed. The worker took the
+/// redirection, wrote what it was told to and ended, its node published inside
+/// the grace, and the branch it had been on is still offered to `onevcs` and is
+/// on the origin afterwards — a clean shutdown, at exit 0.
+#[test]
+fn a_worker_that_ends_on_its_interrupt_has_its_branch_on_the_origin_afterwards() {
+    let world = World::new("shutdown-graceful-branch");
+    let repository = world.repository("local-direct", &[]);
+    held(&world, "service");
+    world.script("service.stops-when-interrupted", "");
+    let run = launch(&world, "graceful", vec![lifecycle("service", &[])]);
+    until_in_flight(&world, &run, &["service"]);
+    let branch = session_branch(&world, &run, "service");
+
+    let shutdown = world.run(&["shutdown", &run, "--grace", GRACE]);
+    shutdown.exited(0);
+    let stopped = stopped_for(&world, &run, "service");
+    assert_eq!(stopped["payload"]["interrupt"], "delivered", "{stopped}");
+    assert_eq!(stopped["payload"]["ended"], "graceful", "{stopped}");
+    // What the redirection asked for is what the worker did: it finished and
+    // committed, and that work reached the base inside the grace.
+    assert!(
+        repository.base_file("service-redirected.md").is_some(),
+        "the worker's last work did not survive the shutdown:\n{}",
+        shutdown.stdout
+    );
+    assert!(
+        on_origin(&world, &repository.origin, &branch).is_some(),
+        "{branch} is not on the origin after a worker that took the ask:\n{}",
+        shutdown.stdout
+    );
+    assert_eq!(
+        host_shutdown(&world, &run)["branches"][0]["result"],
+        "pushed"
+    );
+}
+
+/// Exactly one scope, and it is required: naming none, or naming two, is refused
+/// before anything is signalled.
+#[test]
+fn a_shutdown_names_exactly_one_scope_or_is_refused_before_it_signals_anything() {
+    let world = World::new("shutdown-scope");
+    held(&world, "build");
+    let run = launch(&world, "scoped", vec![agent("build", &[])]);
+    until_in_flight(&world, &run, &["build"]);
+    let worker = registered_pid(&world, &run, "build");
+
+    for args in [
+        vec!["shutdown"],
+        vec!["shutdown", "--grace", "0"],
+        vec!["shutdown", run.as_str(), "--host"],
+        vec!["shutdown", run.as_str(), "--mine"],
+        vec!["shutdown", "--mine", "--host"],
+    ] {
+        world
+            .run(&args)
+            .exited(USAGE_ERROR)
+            .err_has("--mine")
+            .err_has("--host");
+    }
+    assert!(
+        world.registered(&run, worker),
+        "a refused shutdown ended the dispatch"
+    );
+    assert!(world.events_of(&run, "host-shutdown").is_empty());
+    assert!(!world.run_file(&run, "shutting-down.json").exists());
     world.release("build.go");
 }
