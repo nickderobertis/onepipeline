@@ -231,7 +231,13 @@ fn views_of(world: &World, root: &Path, run: &str) -> String {
             "`onepipeline {verb}` refused the run: {}",
             String::from_utf8_lossy(&rendered.stderr)
         );
-        String::from_utf8_lossy(&rendered.stdout).into_owned()
+        String::from_utf8_lossy(&rendered.stdout)
+            .split_inclusive('\n')
+            // A `free space:` line reads the host the view runs on, not the
+            // journal, so it is no part of how a build reads a document; the
+            // line itself is held in `views.rs`.
+            .filter(|line| !line.starts_with("  free space: "))
+            .collect::<String>()
     };
     format!("{}\n{}", read("status"), read("results"))
 }
