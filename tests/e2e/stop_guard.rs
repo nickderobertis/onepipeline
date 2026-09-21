@@ -392,6 +392,31 @@ fn a_question_that_cannot_be_asked_and_a_memory_that_cannot_be_kept_warn_and_nev
     );
     std::fs::remove_dir_all(&path).expect("the directory in the way");
 
+    // And one it cannot remove, for a session with nothing unwatched: silence
+    // there would leave a memory a later continuation is let through on.
+    let idle = "a-session-owning-nothing";
+    // llmlint: ignore-block[tests_mirror_real_usage] the same directory-in-the-way the
+    // two cases above place, filled so it cannot be removed as a file either; nothing
+    // user-facing leaves one, and it stands in for a memory the host refuses to delete.
+    let stuck = memory(&world, idle);
+    std::fs::create_dir_all(stuck.join("held")).expect("something unremovable at the path");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let unremoved = ask(&world, &json!({"session": idle}));
+    unremoved.exited(0);
+    let told = verdict(&unremoved.stdout).expect("a verdict");
+    assert_eq!(told["verdict"], json!("warn"), "{told}");
+    documented(&told);
+    let message = told["message"].as_str().expect("a message");
+    assert!(
+        message.contains("could not remove what it last blocked on")
+            && message.contains(&format!("onepipeline unwatched --session {idle}")),
+        "{message}"
+    );
+    std::fs::remove_dir_all(&stuck).expect("the directory in the way");
+    let cleared = ask(&world, &json!({"session": idle}));
+    cleared.exited(0);
+    assert_eq!(verdict(&cleared.stdout), Some(json!({"verdict": "none"})));
+
     // With the way clear, the same stop blocks — so the warnings above were
     // about the memory and nothing else.
     let blocked = ask(&world, &json!({"session": session}));

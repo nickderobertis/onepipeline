@@ -6683,7 +6683,8 @@ whose remembered digest equals the current report's, the verdict is `none`: the
 manager was told and did nothing, and a second identical block would hold the
 session open for ever. A continuation whose report has *changed* blocks again,
 which a memory holding only "blocked before" could not do. A session with
-nothing to report has its memory removed.
+nothing to report has its memory removed, and a memory that cannot be removed is
+a `warn` rather than silence.
 
 **The session asked about is the input's, never the environment's.** A
 dispatched worker inherits its manager's `ONEPIPELINE_LAUNCHER_SESSION`, and the

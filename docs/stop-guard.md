@@ -39,7 +39,7 @@ running under. `--session ""` is that same nothing.
 | Verdict | Object | When |
 | --- | --- | --- |
 | block | `{"verdict":"block","reason":"<report>"}` | A run the session owns is **proven** unwatched. `reason` is `onepipeline unwatched`'s own lines, byte for byte: one per run, naming it, its standing word, why nothing counts as watching it, and the `onepipeline watch <run>` that does. |
-| warn | `{"verdict":"warn","message":"<one sentence>"}` | Something that is not evidence: the runs root could not be read, the question was refused, the engine answered with an error, or the guard's own memory could not be read or written. The sentence names what could not be answered and the exact command to ask it by hand — `onepipeline unwatched --session <ID>` — and, where runs *are* unwatched over a memory the guard could not keep, names them and the `onepipeline watch <run>` for each. |
+| warn | `{"verdict":"warn","message":"<one sentence>"}` | Something that is not evidence: the runs root could not be read, the question was refused, the engine answered with an error, or the guard's own memory could not be read, written or removed. The sentence names what could not be answered and the exact command to ask it by hand — `onepipeline unwatched --session <ID>` — and, where runs *are* unwatched over a memory the guard could not keep, names them and the `onepipeline watch <run>` for each. |
 | none | `{"verdict":"none"}` | Nothing to say: the session owns nothing unwatched, the input could not be read or named no session, or this stop continues a block on a report that has not changed. |
 
 Nothing else is written on standard output. Standard error carries exactly what
@@ -56,7 +56,8 @@ ever. A continuation whose report has *changed* — a second run now unwatched, 
 a different one — blocks again. A session with nothing to report has its memory
 removed. A memory that cannot be read on a continuation, or cannot be written
 before a block, is a `warn`, never a block: the record is what makes a block
-safe to make.
+safe to make. One that cannot be removed is a `warn` too, because left behind it
+would let a later continuation over that same report through unrefused.
 
 **Cost** is `unwatched`'s: proportional to the run roots under the runs root,
 and no run's merged event store is read.

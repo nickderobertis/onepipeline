@@ -443,6 +443,49 @@ fn an_elapsed_wait_answers_timeout_at_exit_one_and_leaves_the_question_standing(
         .err_has("has settled");
 }
 
+/// An elapsed question that cannot be marked abandoned is still `timeout` at
+/// exit `1` — the wait did elapse — and the advice says the mark failed rather
+/// than promising a later listener takes the question back.
+#[cfg(unix)]
+#[test]
+fn an_elapsed_question_that_cannot_be_marked_says_so_rather_than_promising_it_was() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let world = World::new("ask-unmarked");
+    let run = run_of(&world, "askunmarked");
+    let asked = asking(&world, &run, &["--timeout", "3", "anybody there?"], &[]);
+    question_on(&world, &run);
+
+    // The channel directory made one this asker may not write, once the question
+    // is on it and handed over, so the one write left — the abandoned mark — is
+    // refused.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] a run root the asker may not write is
+    // the host's doing rather than the CLI's, and nothing user-facing produces it; the same
+    // placement `channel.rs::a_read_still_answers_from_the_log_when_it_cannot_write_the_
+    // projection_back` makes. Everything asserted after it is read off the binary's streams.
+    let channel = world.run_file(&run, "channel");
+    let writable = std::fs::metadata(&channel)
+        .expect("the channel directory")
+        .permissions();
+    std::fs::set_permissions(&channel, std::fs::Permissions::from_mode(0o555))
+        .expect("the directory is made read-only");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let answered = waited(asked);
+    std::fs::set_permissions(&channel, writable).expect("the directory is writable again");
+
+    assert_eq!(answered.code, 1, "{}", answered.stderr);
+    assert_eq!(answered.answer()["answer"], json!("timeout"));
+    assert!(
+        answered
+            .stderr
+            .contains("but could not be marked abandoned (")
+            && !answered.stderr.contains(", marked abandoned,"),
+        "the advice promised a mark that was not made: {}",
+        answered.stderr
+    );
+}
+
 /// Everything refused before anything is raised, at exit `2`, naming its cause —
 /// and with the run's channel carrying nothing at all afterwards.
 ///

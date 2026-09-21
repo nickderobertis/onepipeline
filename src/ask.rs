@@ -255,21 +255,24 @@ impl Question {
     /// listening for the answer now, and a later listener of the same asker
     /// takes it back. An elapsed wait is never a ruling.
     pub(crate) fn answer(self) -> Asked {
-        Asked(match self {
-            Self::Refused(reason) => Wire::Refused {
-                correlation: None,
-                reason,
+        match self {
+            Self::Refused(reason) => Asked {
+                wire: Wire::Refused {
+                    correlation: None,
+                    reason,
+                },
+                unmarked: None,
             },
             Self::Pending { pending, window } => {
                 let answer = pending.wait(window);
-                if matches!(answer, Answer::Timeout) {
-                    // A mark that cannot be made changes nothing about the
-                    // answer: the question stands either way, and the wait
-                    // still elapsed.
-                    let _ = pending.abandon();
-                }
+                // A mark that cannot be made changes nothing about the answer —
+                // the question stands either way, and the wait still elapsed —
+                // but it changes what the advice may promise, so it is kept.
+                let unmarked = matches!(answer, Answer::Timeout)
+                    .then(|| pending.abandon().err().map(|error| error.to_string()))
+                    .flatten();
                 let correlation = pending.correlation().clone();
-                match answer {
+                let wire = match answer {
                     Answer::Reply(reply) => Wire::Reply { correlation, reply },
                     Answer::Timeout => Wire::Timeout { correlation },
                     Answer::Abandoned => Wire::Abandoned { correlation },
@@ -277,9 +280,10 @@ impl Question {
                         correlation: Some(correlation),
                         reason: refusal.reason,
                     },
-                }
+                };
+                Asked { wire, unmarked }
             }
-        })
+        }
     }
 }
 
@@ -309,13 +313,20 @@ fn reply_window(config: Option<&onemessagebus::Config>) -> Option<Duration> {
 /// command line prints, so the correlation is carried exactly where the bus
 /// says an answer has one and the line is the bus's rendering rather than a
 /// restatement of it.
+///
+/// `unmarked` is why an elapsed question could not be marked abandoned, where
+/// it could not: said on standard error, and never in the answer, which is the
+/// bus's word for what happened to the wait.
 #[derive(Debug)]
-pub(crate) struct Asked(Wire);
+pub(crate) struct Asked {
+    wire: Wire,
+    unmarked: Option<String>,
+}
 
 impl Asked {
     /// `0` for a reply; `1` for a timeout, an abandoned listener, or a refusal.
     pub(crate) const fn exit_code(&self) -> i32 {
-        match self.0 {
+        match self.wire {
             Wire::Reply { .. } => EXIT_SUCCESS,
             Wire::Timeout { .. } | Wire::Abandoned { .. } | Wire::Refused { .. } => EXIT_QUEUED,
         }
@@ -325,7 +336,7 @@ impl Asked {
     /// or `timeout`, `abandoned` and `refused` naming the correlation where
     /// there is one and the reason where there is one.
     pub(crate) fn render(&self) -> String {
-        serde_json::to_string(&self.0).unwrap_or_else(|error| {
+        serde_json::to_string(&self.wire).unwrap_or_else(|error| {
             // Unreachable for a type of strings and JSON values; said as a
             // refusal in the bus's own shape rather than as nothing.
             json!({"answer": "refused", "reason": format!("the answer could not be rendered: {error}")})
@@ -335,13 +346,20 @@ impl Asked {
 
     /// What to do next, for standard error, where the answer is not a reply.
     pub(crate) fn advice(&self, run: &str, window: Duration) -> Option<String> {
-        match &self.0 {
+        match &self.wire {
             Wire::Reply { .. } => None,
             Wire::Timeout { correlation } => Some(format!(
                 "no reply echoing {correlation} arrived within {} seconds; the question stands \
-                 on the channel, marked abandoned, and a manager may still answer it with \
-                 `onepipeline reply {run} --correlation {correlation}`",
-                window.as_secs()
+                 on the channel, {}, and a manager may still answer it with `onepipeline reply \
+                 {run} --correlation {correlation}`",
+                window.as_secs(),
+                self.unmarked.as_ref().map_or_else(
+                    || "marked abandoned".to_owned(),
+                    |why| format!(
+                        "but could not be marked abandoned ({why}), so a later listener will \
+                         not take it back"
+                    )
+                )
             )),
             Wire::Abandoned { correlation } => Some(format!(
                 "the question {correlation} was abandoned and nobody re-attended it; ask again"
@@ -378,7 +396,10 @@ mod tests {
             },
         ];
         for wire in answers {
-            let asked = Asked(wire.clone());
+            let asked = Asked {
+                wire: wire.clone(),
+                unmarked: None,
+            };
             let line = asked.render();
             assert!(!line.contains('\n'), "{line}");
             let read: Wire = serde_json::from_str(&line).expect("the bus reads its own answer");
@@ -390,10 +411,18 @@ mod tests {
             );
             assert_eq!(asked.advice("r", Duration::from_secs(7)).is_none(), reply);
         }
-        assert!(Asked(Wire::Timeout { correlation })
-            .advice("r", Duration::from_secs(7))
-            .expect("advice")
-            .contains("within 7 seconds"));
+        let marked = Asked {
+            wire: Wire::Timeout {
+                correlation: correlation.clone(),
+            },
+            unmarked: None,
+        }
+        .advice("r", Duration::from_secs(7))
+        .expect("advice");
+        assert!(
+            marked.contains("within 7 seconds") && marked.contains("marked abandoned"),
+            "{marked}"
+        );
     }
 
     /// The reply window is the longest a codec on the `surfaces` queue names,

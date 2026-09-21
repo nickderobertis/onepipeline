@@ -207,14 +207,16 @@ pub(crate) fn guard(root: &Path, asked: &Asked) -> (Verdict, Vec<String>) {
     let session = asked.session.as_str();
     let unwatched = match crate::unwatched::unwatched(root, session) {
         Ok(unwatched) => unwatched,
-        Err(error) => {
-            forget(session);
-            return (unguarded(session, &error), Vec::new());
-        }
+        // The memory is left as it is: a question that could not be asked says
+        // nothing about whether the condition it records moved, and a kept
+        // memory changes no later verdict but an identical continuation's.
+        Err(error) => return (unguarded(session, &error), Vec::new()),
     };
     if unwatched.reported.is_empty() {
-        forget(session);
-        return (Verdict::None, unwatched.unresolved);
+        return match forget(session) {
+            Ok(()) => (Verdict::None, unwatched.unresolved),
+            Err(why) => (unforgotten(session, &why), unwatched.unresolved),
+        };
     }
     // The verb's own lines, byte for byte: they are what name the runs to watch
     // and the command that watches each, and nothing here reads a run out of
@@ -279,6 +281,17 @@ fn stood_aside(session: &str, report: &str, because: &str) -> Verdict {
          and arm `{ARM_A_WATCH} <run>` on each:\n{}",
         lines.len(),
         lines.join("\n")
+    ))
+}
+
+/// The warning for a session with nothing unwatched whose memory this guard
+/// could not remove: what was answered, what was not, and how to finish it.
+fn unforgotten(session: &str, why: &str) -> Verdict {
+    Verdict::Warn(format!(
+        "stop-guard: nothing this session owns is unwatched, but the guard could not remove \
+         what it last blocked on ({why}), so a later continuation over that same report would \
+         be let through unrefused; remove it by hand, and ask again with `onepipeline unwatched \
+         --session {session}`."
     ))
 }
 
@@ -350,17 +363,19 @@ fn remember(session: &str, digest: &str) -> Result<(), String> {
 }
 
 /// Drop what was remembered for `session`, this stop having nothing to block
-/// on.
+/// on, or say why it could not be.
 ///
-/// Every ending that is not a block, because what the memory is *for* is
-/// telling a continuation whether the condition moved, and a turn that ended
-/// without blocking leaves no block for the next one to continue. A memory that
-/// cannot be removed changes nothing: the next ordinary stop is not a
-/// continuation, so it blocks on what it finds whether or not anything was
-/// remembered.
-fn forget(session: &str) {
-    if let Ok(path) = memory(session) {
-        let _ = std::fs::remove_file(path);
+/// What the memory is *for* is telling a continuation whether the condition
+/// moved, and a session with nothing unwatched leaves no block for the next
+/// stop to continue — while a memory left behind would let a continuation over
+/// the same report through should that report return. A memory that was never
+/// written is already gone.
+fn forget(session: &str) -> Result<(), String> {
+    let path = memory(session)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{}: {error}", path.display())),
     }
 }
 
