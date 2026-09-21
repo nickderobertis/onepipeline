@@ -87,6 +87,7 @@ fn a_settled_run_whose_record_an_older_build_wrote_is_read_adopted_and_fires_its
     );
     fields.insert("bus_config".into(), older_bus_config());
     let written = serde_json::to_string_pretty(&record).expect("the record serializes");
+    // llmlint: ignore[tests_mirror_real_usage] the state under test is a record an *older* build wrote, which no interface of this build can produce; it is seeded from recorded bytes as `recorded_channel` seeds a recorded channel, and everything after it is the user's own verbs.
     std::fs::write(&launch, &written).expect("the older record is written");
 
     // Every view reads the run, and none of them rewrites its record.

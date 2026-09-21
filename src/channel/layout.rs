@@ -408,6 +408,7 @@ pub struct CommandResult {
     /// What became of it.
     pub outcome: CommandVerdict,
     /// Why it refused, or what refused around it, when either happened.
+    // llmlint: ignore[invalid_states_unrepresentable] the record `command-outcomes.jsonl` holds, in the shape 0.28.2 wrote and the recorded directories carry; folding `reason` into the verdict would change the bytes this layout must read and write exactly, and the reconciler that writes a result is where the pairing is enforced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -423,6 +424,11 @@ pub struct CommandResult {
 /// manager believing a node's bar had changed when the command that would have
 /// changed it was never compiled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+// llmlint: ignore-block[invalid_states_unrepresentable] the record `command-outcomes.jsonl`
+// holds, in the shape 0.28.2 wrote and the recorded directories carry: `applied` and
+// `reason` are the whole envelope's answer every reader that predates `results` still
+// reads, so they cannot become one tagged value without changing bytes this layout must
+// read and write exactly. The reconciler that writes an outcome is where they agree.
 pub struct CommandOutcome {
     /// The envelope this answers.
     pub id: u64,
@@ -438,6 +444,7 @@ pub struct CommandOutcome {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub results: Vec<CommandResult>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Message for CommandOutcome {
     const SCHEMA: SchemaId = COMMAND_OUTCOME_SCHEMA;
@@ -1172,5 +1179,74 @@ mod tests {
         assert_eq!(envelope.version, Some(1));
         assert!(!envelope.carries_verdict());
         assert!(!envelope.carries_edits_without_a_verdict());
+    }
+
+    /// The committed reply envelope documents are held to the two Rust types
+    /// that read an envelope — the layout's [`ReplyEnvelope`] and the engine's
+    /// [`channel::Reply`](crate::channel::Reply) — so neither can grow, lose or
+    /// retype a field the documents do not say, nor a document an op field no
+    /// command carries.
+    #[test]
+    fn the_reply_envelope_documents_are_what_the_envelope_types_read() {
+        let generated = [
+            schemars::schema_for!(ReplyEnvelope).to_value(),
+            schemars::schema_for!(crate::channel::Reply).to_value(),
+        ];
+        // What a property is on the wire: its JSON type with the `null` an
+        // `Option` adds taken out, or the reference it names.
+        let wire = |property: &Value| -> Value {
+            match &property["type"] {
+                Value::Array(types) => {
+                    let kept: Vec<&Value> = types.iter().filter(|t| *t != "null").collect();
+                    serde_json::json!(kept[0])
+                }
+                Value::Null => property["$ref"].clone(),
+                other => other.clone(),
+            }
+        };
+        let command = &generated[1]["$defs"]["Command"]["oneOf"];
+        let op_fields: std::collections::BTreeSet<&str> = command
+            .as_array()
+            .expect("the command schema is a union of its ops")
+            .iter()
+            .flat_map(|op| op["properties"].as_object().into_iter().flatten())
+            .map(|(field, _)| field.as_str())
+            .collect();
+        for (version, document) in [(2, REPLY_ENVELOPE_V2), (3, REPLY_ENVELOPE_V3)] {
+            let document: Value = serde_json::from_str(document).expect("a committed schema");
+            assert_eq!(document["properties"]["version"]["const"], version);
+            assert_eq!(document["additionalProperties"], false);
+            let properties = document["properties"].as_object().expect("properties");
+            for schema in &generated {
+                let theirs = schema["properties"].as_object().expect("properties");
+                assert_eq!(
+                    properties.keys().collect::<Vec<_>>(),
+                    theirs.keys().collect::<Vec<_>>(),
+                    "version {version}'s document names other fields than {}",
+                    schema["title"]
+                );
+                for (field, property) in properties {
+                    if field == "author" || field == "version" {
+                        continue;
+                    }
+                    let theirs = wire(&theirs[field]);
+                    let ours = wire(property);
+                    assert!(
+                        ours == theirs,
+                        "version {version}'s `{field}` is {ours}, and {} reads {theirs}",
+                        schema["title"]
+                    );
+                }
+            }
+            let fields = document["$defs"]["Command"]["properties"]
+                .as_object()
+                .expect("the command's fields");
+            for field in fields.keys() {
+                assert!(
+                    op_fields.contains(field.as_str()),
+                    "version {version}'s document names a command field `{field}` no op carries"
+                );
+            }
+        }
     }
 }

@@ -65,6 +65,7 @@ jobs:
           tool: just,nextest,cargo-llvm-cov
       # `tests/e2e/release_channel.rs` drives the pinned `onepipeline-cli` 0.28.2
       # wheel through `uv tool run`, and refuses without uv.
+      # llmlint: ignore[external_service_suite_stays_out_of_the_affected_tier] the planner's task (onepipeline#380's branch, the engine's half of onemessagebus#126) places the 0.28.2 byte-compatibility journey in this crate's e2e suite and CI, where the bus ran it; what it reaches is PyPI serving one pinned, immutable, credential-free wheel that uv caches after the first resolution, and an unreachable registry fails the journey naming uv rather than passing it.
       - uses: astral-sh/setup-uv@v6
       # Also provisions `strace`, which the Linux-only e2e journeys refuse
       # without (`_ensure-strace` in the justfile).
@@ -168,6 +169,7 @@ jobs:
         with:
           tool: just,nextest
       # The 0.28.2 channel journey's wheel, as in `gate`.
+      # llmlint: ignore[external_service_suite_stays_out_of_the_affected_tier] as in `gate`: the task places that journey in this suite, and what it reaches is one pinned, immutable, credential-free wheel uv caches.
       - uses: astral-sh/setup-uv@v6
       - name: Bootstrap
         run: just bootstrap
