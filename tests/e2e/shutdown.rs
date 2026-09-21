@@ -1282,3 +1282,35 @@ fn a_grace_the_clock_cannot_count_to_is_refused_before_anything_is_signalled() {
     assert!(!world.run_file(&run, "shutting-down.json").exists());
     world.release("build.go");
 }
+
+/// An adoption that cannot lift a shutdown's hold refuses, naming it, rather
+/// than driving a run that would go on dispatching nothing while reporting it
+/// adopted.
+// llmlint: ignore-block[tests_mirror_real_usage] the one thing set by hand is the hold's
+// path, replaced with a directory so that it cannot be removed: no verb leaves a hold an
+// adoption cannot lift, which is a host refusing the removal. The shutdown before it and the
+// adoption refused after it are the real binary.
+#[cfg(unix)]
+#[test]
+fn an_adoption_that_cannot_lift_the_hold_refuses_and_names_it() {
+    let world = World::new("shutdown-stuck-hold");
+    held(&world, "build");
+    let run = launch(&world, "stuckhold", vec![agent("build", &[])]);
+    until_in_flight(&world, &run, &["build"]);
+    world.run(&["shutdown", &run, "--force"]).exited(0);
+
+    let hold = world.run_file(&run, "shutting-down.json");
+    std::fs::remove_file(&hold).expect("the hold the shutdown wrote");
+    std::fs::create_dir_all(hold.join("held")).expect("a hold nothing can remove as a file");
+
+    world
+        .run(&["adopt", &run])
+        .exited(REFUSED)
+        .err_has("shutting-down.json");
+    assert!(
+        world.events_of(&run, "driver-adopted").is_empty(),
+        "an adoption that could not lift the hold went ahead"
+    );
+    world.release("build.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
