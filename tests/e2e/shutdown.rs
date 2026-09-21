@@ -1257,3 +1257,28 @@ fn a_shutdown_naming_no_grace_gives_the_ten_minute_default() {
         "graceful"
     );
 }
+
+/// A grace this host's clock cannot count to is refused, naming it, before
+/// anything is signalled — rather than overflowing the deadline mid-shutdown.
+#[test]
+fn a_grace_the_clock_cannot_count_to_is_refused_before_anything_is_signalled() {
+    let world = World::new("shutdown-huge-grace");
+    held(&world, "build");
+    let run = launch(&world, "hugegrace", vec![agent("build", &[])]);
+    until_in_flight(&world, &run, &["build"]);
+    let worker = registered_pid(&world, &run, "build");
+
+    let grace = u64::MAX.to_string();
+    world
+        .run(&["shutdown", &run, "--grace", &grace])
+        .exited(REFUSED)
+        .err_has(&format!("a grace of {grace}s"))
+        .err_has("nothing was signalled");
+    assert!(
+        world.registered(&run, worker),
+        "a refused shutdown ended the dispatch"
+    );
+    assert!(world.events_of(&run, "host-shutdown").is_empty());
+    assert!(!world.run_file(&run, "shutting-down.json").exists());
+    world.release("build.go");
+}

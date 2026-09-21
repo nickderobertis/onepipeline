@@ -388,6 +388,16 @@ fn marker(paths: &RunPaths) -> PathBuf {
 /// not an error: its teardown is reported `not-attempted` and its branches are
 /// still pushed.
 pub fn shutdown(root: &Path, request: ShutdownRequest) -> Result<Shutdown> {
+    // A grace this host's clock cannot count to is refused here, before any run
+    // is selected or signalled: it is external input, and a deadline that
+    // overflows is a panic midway through a host's shutdown rather than an answer.
+    if Instant::now().checked_add(request.grace).is_none() {
+        return Err(Error::Invalid(format!(
+            "a grace of {}s is further away than this host's clock can count to; nothing \
+             was signalled — name a grace in seconds this host can wait out",
+            request.grace.as_secs()
+        )));
+    }
     let selected = select(root, &request)?;
     let mut runs = Vec::new();
     let mut pushed: BTreeSet<(String, String)> = BTreeSet::new();
@@ -866,7 +876,11 @@ fn wait_for_them(
     if !request.asks() {
         return waited;
     }
-    let deadline = asked_at + request.grace;
+    // Refused in `shutdown` where it could not be counted to; the wait started
+    // after that check, so the only difference is the moments between them.
+    let deadline = asked_at
+        .checked_add(request.grace)
+        .unwrap_or_else(|| asked_at + Duration::from_secs(u64::from(u32::MAX)));
     let driven = asked.iter().any(|(dispatch, ..)| dispatch.in_the_driver)
         || RunView::open(paths)
             .ok()
