@@ -377,7 +377,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1279,9 +1279,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneagentgraph"
-version = "0.4.6"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd26b3cee8e500791d44bfaf7328067f6d72d707cef222693e4ea668b60f1772"
+checksum = "2f1fa02c5f99568224cfe0843af59a58cdb79aa6011dc39eaf58bff51cb70e23"
 dependencies = [
  "clap",
  "libc",
@@ -1519,9 +1519,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.27.0"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5aa724a5daac8696a94900e5cb90939013234502320b736d4f6ca4740c57db46"
+checksum = "6662211419a9b021bbcd5bbc90497475254d6d64f178383246df4620d056c7bd"
 dependencies = [
  "clap",
  "dunce",
@@ -1547,9 +1547,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.6.8"
+version = "0.6.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc2b35aaa6c88e2ab7bfda94cb53ea849a0166ea4b14d78b35bd40160bf6a340"
+checksum = "d75c44059c3df4910ceae8e920822d63fa3fad936f34685038b315578d00b3cc"
 dependencies = [
  "onemessagebus-agent",
  "onevcs",
@@ -1880,7 +1880,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1937,7 +1937,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2322,7 +2322,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2870,7 +2870,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
