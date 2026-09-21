@@ -63,10 +63,6 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just,nextest,cargo-llvm-cov
-      # `tests/e2e/release_channel.rs` drives the pinned `onepipeline-cli` 0.28.2
-      # wheel through `uv tool run`, and refuses without uv.
-      # llmlint: ignore[external_service_suite_stays_out_of_the_affected_tier] the planner's task (onepipeline#380's branch, the engine's half of onemessagebus#126) places the 0.28.2 byte-compatibility journey in this crate's e2e suite and CI, where the bus ran it; what it reaches is PyPI serving one pinned, immutable, credential-free wheel that uv caches after the first resolution, and an unreachable registry fails the journey naming uv rather than passing it.
-      - uses: astral-sh/setup-uv@v6
       # Also provisions `strace`, which the Linux-only e2e journeys refuse
       # without (`_ensure-strace` in the justfile).
       - name: Bootstrap
@@ -168,9 +164,6 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just,nextest
-      # The 0.28.2 channel journey's wheel, as in `gate`.
-      # llmlint: ignore[external_service_suite_stays_out_of_the_affected_tier] as in `gate`: the task places that journey in this suite, and what it reaches is one pinned, immutable, credential-free wheel uv caches.
-      - uses: astral-sh/setup-uv@v6
       - name: Bootstrap
         run: just bootstrap
       - name: Quality gate (cross-platform legs)
@@ -274,6 +267,30 @@ jobs:
           # No ONEPIPELINE_SMOKE_REPO: the journey's own default is the scratch
           # repository, and naming it here again would be a second place for it
           # to be wrong. Set it only to point a run somewhere else.
+
+  # The 0.28.2 channel compatibility tier: a channel this build writes, read by
+  # the pinned `onepipeline-cli` 0.28.2 wheel, and the other way round. Its own job
+  # because uv fetches that wheel from a package registry, which the offline gate
+  # above never reaches — `just test` excludes the `release_channel` binary by
+  # name, and `just release-compat` runs it and nothing else. It never skips:
+  # without uv, or a registry uv cannot reach, the journey fails naming uv.
+  release-compat:
+    needs: changes
+    if: needs.changes.outputs.crate == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,nextest
+      - uses: astral-sh/setup-uv@v6
+      # The store every world reads its plan through; this job runs no
+      # `just bootstrap`, so it provisions that one binary as `smoke` does.
+      - name: The onetaskgraph every plan is read through
+        run: just _ensure-onetaskgraph
+      - name: The 0.28.2 wheel against this build
+        run: just release-compat
 
   # Advisory + license audit and unused-dependency check. Its own Linux-only job:
   # it needs a network advisory DB and must not be duplicated across the matrix.

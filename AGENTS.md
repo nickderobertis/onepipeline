@@ -64,10 +64,11 @@ and is never resolved unilaterally.
 `just --list` is the index; do not hand-roll equivalents. `just check` is the
 deterministic gate and `just gate` is the complete pre-push bar — `check` plus
 the diff-scoped llmlint tier — and a change is not done until `gate` is green.
-`deps-check`, `engines-current`, `msrv`, and `smoke-real` sit outside both
-because two need the network — an advisory database and the crates.io index —
-one a second toolchain, and one a GitHub credential; CI runs each as its own job,
-through the recipe rather than around it.
+`deps-check`, `engines-current`, `msrv`, `release-compat`, and `smoke-real` sit
+outside both because three need the network — an advisory database, the
+crates.io index, and the PyPI wheel of `onepipeline-cli` 0.28.2 the channel
+compatibility journeys drive — one a second toolchain, and one a GitHub
+credential; CI runs each as its own job, through the recipe rather than around it.
 
 The repo-wide verbs delegate to **Nx**, which fans a uniformly-named target out
 across every project; what a target *does* stays with its project. Never loop

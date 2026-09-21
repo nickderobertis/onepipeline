@@ -112,8 +112,7 @@ mod plan;
 mod plan_check;
 mod real_vcs;
 mod recorded_channel;
-// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] the planner's task puts the 0.28.2 byte-compatibility journey in this crate's e2e suite, and what it exercises — the `planner-channel` layout in `src/channel/` and the channel verbs of the compiled binary, against the pinned wheel — is this target's own; two journeys, about twenty seconds once uv has the wheel cached, beside `recorded_channel` which holds the same bytes to recorded answers.
-mod release_channel;
+mod recorded_support;
 mod run_end_hooks;
 mod scratch;
 mod session;

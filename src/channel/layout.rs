@@ -13,7 +13,7 @@
 //! carried through its 0.7.0 line, brought here because the protocol is this
 //! engine's rather than the bus's. Behaviour is copied, not
 //! prose: the recorded directories under `tests/recorded/channel/` and the
-//! 0.28.2 byte-compatibility journey (`tests/e2e/release_channel.rs`) are what
+//! 0.28.2 byte-compatibility journey (`tests/release_channel/`, `just release-compat`) are what
 //! hold it to what that module did, and `tests/channel_layout.rs` re-applies
 //! each recorded history through this layout byte for byte.
 //!

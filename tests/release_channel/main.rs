@@ -19,6 +19,14 @@
 //! This journey was `onemessagebus`'s (`crates/onemessagebus-e2e/tests/e2e/onepipeline.rs`)
 //! while the bus carried the layout; onemessagebus#126 moved the layout here, and
 //! the proof came with it.
+//!
+//! **Its own binary and its own CI job**, for the reason `smoke` has both: it
+//! reaches a package registry, which the offline tier never does. `just test`,
+//! `just test-quick` and so `just check` run `not binary(release_channel)`, and
+//! `just release-compat` — what CI's `release-compat` job calls — runs this and
+//! nothing else. Without uv, or with a registry uv cannot reach, it fails naming
+//! uv; it never skips. The offline tier still holds the same bytes to 0.28.2 through
+//! the answers `tests/e2e/recorded_channel.rs` compares against.
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
@@ -36,8 +44,14 @@ use onepipeline::channel::layout::{
 };
 use serde_json::{json, Map, Value};
 
-use crate::harness::{binary, World};
-use crate::recorded_channel::{answered, normalized, recorded_world, seeded_with, LAYOUT, RUN};
+use harness::{binary, World};
+use recorded_support::{answered, normalized, recorded_world, seeded_with, LAYOUT, RUN};
+
+#[path = "../e2e/harness.rs"]
+mod harness;
+
+#[path = "../e2e/recorded_support.rs"]
+mod recorded_support;
 
 /// The release whose channel this build is held to.
 const RELEASE: &str = "0.28.2";
@@ -63,7 +77,7 @@ fn release() -> &'static Path {
                 panic!(
                     "this journey runs the {from} wheel through `uv tool run`, and uv could not \
                      be started ({failure}); install uv (https://docs.astral.sh/uv/) — CI sets \
-                     it up for every job that runs this suite"
+                     it up for the `release-compat` job that runs this binary"
                 )
             });
         assert!(

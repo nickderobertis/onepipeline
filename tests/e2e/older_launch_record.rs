@@ -22,7 +22,7 @@
 
 use serde_json::{json, Value};
 
-use crate::recorded_channel::{recorded, recorded_world, seeded_with, RUN};
+use crate::recorded_support::{recorded, recorded_world, seeded_with, RUN};
 use crate::run_end_hooks::{hook, invocations, records, HOOK_TIMEOUT, RECORD_ENV};
 
 /// The real launch record whose bus configuration predates `select` and `frames`.
