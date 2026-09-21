@@ -6632,6 +6632,13 @@ the SDK call, and `agents::tests` holds the merge rule and the reader against th
 Views line beside `unwatched`, as a verb whose contract is one verdict object
 and exit `0` always.**
 
+<!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] a register entry states
+the surface it proposes so the planner who owns `docs/contract.md` can rule on it — that is
+what AGENTS.md requires this file to be — and it is not a second source of the build. The
+proposed synopsis is held to the verb's `--help` by `tests/e2e/stop_guard.rs`; the neutral
+contract and the memory's path are held by the same journeys, read out of
+`docs/stop-guard.md`; and the harness field names are the harnesses' own, gated as that
+page's own suppression records. -->
 Entry 68 added `onepipeline unwatched`, which answers `6` for a run a session
 owns that nothing is watching. What it did not add is anything that *asks* it.
 Prose is remembered by the model or it is not, and the measured failure 68
@@ -6721,6 +6728,8 @@ are each exactly one `warn` and never a block; a run whose event store cannot be
 read is still decided from its watch state; and the documented Claude Code
 wiring is driven over real `Stop` payloads and read back in that harness's
 decision shape.
+
+<!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
 
 ## 86. Two views report what is running and nothing about what it is running in — OPEN
 

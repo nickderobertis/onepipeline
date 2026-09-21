@@ -182,6 +182,28 @@ fn the_documented_synopsis_is_the_verbs_own() {
         "the page's synopsis and the verb's flags differ:\n{synopsis}\n{}",
         help.stdout
     );
+    // And the synopsis entry 85 of the register proposes is that same one.
+    let register = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
+    )
+    .expect("the register ships");
+    let proposed = register
+        .split("add `onepipeline stop-guard")
+        .nth(1)
+        .and_then(|rest| rest.split('`').next())
+        .expect("entry 85 proposes the synopsis");
+    assert_eq!(
+        flags_of(proposed),
+        flags_of(&help.stdout),
+        "entry 85's synopsis and the verb's flags differ:\n{proposed}\n{}",
+        help.stdout
+    );
+    for format in ["neutral", "claude-code", "codex"] {
+        assert!(
+            proposed.contains(format),
+            "entry 85 does not propose `--format {format}`"
+        );
+    }
     for format in ["neutral", "claude-code", "codex"] {
         assert!(
             page.contains(&format!("`--format {format}`")) && help.stdout.contains(format),
