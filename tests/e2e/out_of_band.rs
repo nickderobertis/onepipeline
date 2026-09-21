@@ -723,3 +723,126 @@ fn a_branch_with_nothing_past_its_base_is_drafted_from_its_diff_alone() {
     );
     assert!(!task.contains("The commit messages of"), "{task}");
 }
+
+/// A draft that cannot even start — a `--repo` nothing resolves, a branch the
+/// checkout does not have, a temporary directory the host will not give — spends
+/// no turn and still hands the landing to `onevcs`, saying on standard error which
+/// ending it was and why.
+#[test]
+fn a_draft_that_cannot_start_hands_the_landing_to_onevcs_and_says_why() {
+    let _held = World::new("oob-unstarted-held");
+    for case in ["unresolved", "no-branch", "no-tmp"] {
+        let world = World::new(&format!("oob-unstarted-{case}"));
+        let world = if case == "no-tmp" {
+            let nowhere = world
+                .root
+                .join("no-such-tmp")
+                .to_string_lossy()
+                .into_owned();
+            world.with_env("TMPDIR", &nowhere)
+        } else {
+            world
+        };
+        let repository = world.repository("change-open", &[]);
+        branch_with_work(&world, &repository);
+        let graph = world.pr_author_graph();
+        let (branch, repo) = match case {
+            "unresolved" => (BRANCH, "nowhere-registered"),
+            "no-branch" => ("never-cut", "service"),
+            _ => (BRANCH, "service"),
+        };
+        let landed = world.run(&[
+            "publish-branch",
+            branch,
+            "--repo",
+            repo,
+            "--title",
+            "feat: add the widget",
+            "--pr-author-graph",
+            &graph,
+        ]);
+
+        landed
+            .err_has("the change request's body was not drafted: the drafting dispatch could not start: ")
+            .err_has(&format!("(dispatch-failed), so {branch} lands with no body"));
+        let why = match case {
+            "unresolved" => "`onevcs resolve nowhere-registered` refused",
+            "no-branch" => "has no branch 'never-cut', locally or on its origin",
+            _ => "could not be created",
+        };
+        landed.err_has(why);
+        assert!(drafting_dispatches(&world).is_empty(), "{case}");
+        // `onevcs` then answered for the landing, in its own words and at its own
+        // code: it refuses the two it cannot land, and lands the third bodyless.
+        if case == "no-tmp" {
+            landed.exited(0);
+            assert_eq!(
+                opened(&world),
+                vec![("feat: add the widget".to_owned(), String::new())],
+                "{}",
+                world.dump()
+            );
+        } else {
+            assert_ne!(landed.code, 0, "{case}: {}", landed.stderr);
+            landed.err_has("onevcs: ");
+            assert!(opened(&world).is_empty(), "{case}: {:?}", opened(&world));
+        }
+    }
+}
+
+/// A drafting worktree that cannot be taken back out — the drafter left something
+/// in it nobody but its owner can delete — does not cost the landing: the body
+/// still lands, and standard error names the worktree, the checkout and the
+/// command that removes it, and the directory left for the operator.
+#[cfg(unix)]
+#[test]
+fn a_drafting_worktree_that_cannot_be_removed_is_named_for_the_operator() {
+    let world = World::new("oob-unremovable");
+    let tmp = world.root.join("tmp");
+    std::fs::create_dir_all(&tmp).expect("a temporary directory");
+    let world = world.with_env("TMPDIR", &tmp.to_string_lossy());
+    let repository = world.repository("change-open", &[]);
+    branch_with_work(&world, &repository);
+    world.script("pr-author.body", "## What\nA widget.\n");
+    world.script("pr-author.leaves-unremovable", "1");
+    let graph = world.pr_author_graph();
+    let landed = world.run(&[
+        "publish-branch",
+        BRANCH,
+        "--repo",
+        "service",
+        "--title",
+        "feat: add the widget",
+        "--pr-author-graph",
+        &graph,
+    ]);
+
+    // Given back to the world before anything can fail, so its own removal is not
+    // what this journey leaves behind.
+    let restored = std::process::Command::new("chmod")
+        .args(["-R", "u+w"])
+        .arg(&tmp)
+        .status()
+        .expect("chmod runs");
+    assert!(restored.success());
+
+    landed
+        .exited(0)
+        .err_has("onepipeline: the drafting worktree at ")
+        .err_has(&format!(
+            "could not be removed from {}",
+            repository.checkout.display()
+        ))
+        .err_has("worktree remove --force")
+        .err_has("could not be removed: ")
+        .err_has("remove it by hand");
+    assert_eq!(
+        opened(&world),
+        vec![(
+            "feat: add the widget".to_owned(),
+            "## What\nA widget.".to_owned()
+        )],
+        "{}",
+        world.dump()
+    );
+}

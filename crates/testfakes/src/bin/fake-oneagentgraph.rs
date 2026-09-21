@@ -579,6 +579,15 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     if persona.as_deref() == Some("pr-author") && dir.join("pr-author.records-tree").exists() {
         record_tree(args, dir);
     }
+    // A drafter that leaves behind something its worktree's owner cannot remove:
+    // a directory it made unwritable, with a file in it (`pr-author.leaves-unremovable`).
+    // What a journey needs to see how a landing reports a worktree it could not take
+    // back out of the checkout — the one failure its cleanup can meet.
+    #[cfg(unix)]
+    if persona.as_deref() == Some("pr-author") && dir.join("pr-author.leaves-unremovable").exists()
+    {
+        leave_unremovable(args);
+    }
 
     // A dispatch scripted to produce *nothing* produces nothing at all — not
     // even the announcement a turn opens with. That is the whole case boundary
@@ -863,6 +872,26 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Make `locked/kept` under the dispatch's `--dir`, and then make `locked`
+/// read-only, so nothing but its owner restoring the permission can delete it.
+#[cfg(unix)]
+fn leave_unremovable(args: &[String]) {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(worktree) = fake::flag(args, "--dir") else {
+        fake::fail("a drafting dispatch was given no --dir to leave anything in");
+    };
+    let locked = std::path::Path::new(&worktree).join("locked");
+    let made = std::fs::create_dir_all(&locked)
+        .and_then(|()| std::fs::write(locked.join("kept"), "left by the drafter\n"))
+        .and_then(|()| std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)));
+    if let Err(error) = made {
+        fake::fail(&format!(
+            "{} could not be left behind: {error}",
+            locked.display()
+        ));
+    }
+}
+
 /// Record the tree a dispatch's `--dir` has checked out into
 /// `pr-author-tree.jsonl`: its directory, its `HEAD` commit, and whether `HEAD`
 /// is detached — `git symbolic-ref` answers nothing for a detached one.
@@ -886,7 +915,9 @@ fn record_tree(args: &[String], dir: &std::path::Path) {
         &dir.join("pr-author-tree.jsonl"),
         &serde_json::json!({
             "dir": worktree,
-            "head": String::from_utf8_lossy(&head.stdout).trim(),
+            "head": String::from_utf8(head.stdout)
+                .unwrap_or_else(|error| fake::fail(&format!("git answered a HEAD that is not UTF-8: {error}")))
+                .trim(),
             "detached": detached,
         })
         .to_string(),

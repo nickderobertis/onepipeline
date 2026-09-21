@@ -7101,6 +7101,15 @@ doubled at `ONEVCS_GH`. The journeys:
   that died, every answer schema-refused, and an empty answer each land with no
   body. Each names its ending on standard error, the death with its
   classification. No retry, and the checkout is unchanged.
+- `a_draft_that_cannot_start_hands_the_landing_to_onevcs_and_says_why`: a
+  `--repo` nothing resolves, a branch the checkout lacks, and a temporary
+  directory the host refuses each spend no turn. Each names why on standard error
+  and leaves the landing to `onevcs`, which refuses the first two and lands the
+  third with no body.
+- `a_drafting_worktree_that_cannot_be_removed_is_named_for_the_operator`: a
+  drafter that left something undeletable costs the landing nothing. Standard
+  error names the worktree, the checkout, the command that removes it, and the
+  directory left to remove by hand.
 - `the_synopsis_the_register_proposes_is_the_one_the_binary_prints`: the block
   above is each verb's `--help` usage line, byte for byte.
 - `every_argument_reaches_the_onevcs_verb_and_its_refusals_are_its_own`: an
@@ -7112,5 +7121,6 @@ doubled at `ONEVCS_GH`. The journeys:
 Each journey was seen to fail for its own reason against a build that dropped the
 body, kept the worktree, ignored `local-direct` or the narrowed policy, kept a
 death to itself, lost a way of finding the base, dropped the empty-branch
-sentence, ignored a caller's body on `recover`, or printed a synopsis other than
-the one above.
+sentence, ignored a caller's body on `recover`, hid why a draft could not start,
+swallowed a worktree it could not remove, or printed a synopsis other than the
+one above.

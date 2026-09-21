@@ -56,8 +56,19 @@ struct Split {
     forwarded: Vec<OsString>,
     /// What [`PR_AUTHOR_GRAPH_FLAG`] named, the last time it was given.
     graph: Option<OsString>,
-    /// Whether [`NO_DRAFT_FLAG`] was given.
-    no_draft: bool,
+    /// Whether the caller declined a draft with [`NO_DRAFT_FLAG`].
+    drafting: Drafting,
+}
+
+/// Whether a landing may spend a drafting turn at all.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Drafting {
+    /// Where one is wanted: the caller brought no body and the identity opens a
+    /// change request.
+    #[default]
+    WhereWanted,
+    /// Never: the caller said [`NO_DRAFT_FLAG`].
+    Declined,
 }
 
 /// Land one branch through the linked `onevcs` verb, drafting its body first
@@ -79,7 +90,7 @@ pub(crate) fn land(verb: Verb, args: Vec<OsString>) -> Result<i32> {
             return Ok(refused.exit_code());
         }
     };
-    if let Some(body) = drafted_for(verb, &cli, &split.graph, split.no_draft)? {
+    if let Some(body) = drafted_for(verb, &cli, &split.graph, split.drafting)? {
         match &mut cli.command {
             onevcs::cli::Command::PublishBranch(args) => args.body = Some(body),
             onevcs::cli::Command::Recover(args) => args.body = Some(body),
@@ -107,7 +118,7 @@ fn split(verb: Verb, args: Vec<OsString>) -> Result<Split> {
             split.forwarded.extend(args);
             break;
         } else if text == NO_DRAFT_FLAG {
-            split.no_draft = true;
+            split.drafting = Drafting::Declined;
         } else if text == PR_AUTHOR_GRAPH_FLAG {
             split.graph = Some(args.next().ok_or_else(|| {
                 Error::Invalid(format!(
@@ -165,7 +176,7 @@ fn drafted_for(
     verb: Verb,
     cli: &onevcs::cli::Cli,
     graph: &Option<OsString>,
-    no_draft: bool,
+    drafting: Drafting,
 ) -> Result<Option<String>> {
     let (branch, repo, brought, narrowed) = match (&cli.command, verb) {
         (onevcs::cli::Command::PublishBranch(args), Verb::PublishBranch) => (
@@ -191,7 +202,7 @@ fn drafted_for(
             )))
         }
     };
-    if no_draft || brought {
+    if drafting == Drafting::Declined || brought {
         return Ok(None);
     }
     let named = repo.to_string_lossy();
@@ -292,7 +303,7 @@ fn draft(graph: &str, checkout: &Path, branch: &str) -> Drafted {
                 ..Labels::default()
             },
             controls: NodeControls::default(),
-            workspace: WorkspaceSpec::Path(scratch.worktree.clone()),
+            workspace: WorkspaceSpec::Path(tree.worktree),
             cancel: CancellationToken::new(),
             attempt: std::num::NonZeroU32::MIN,
         },
@@ -359,8 +370,9 @@ fn death(envelope: &Envelope) -> Option<String> {
 struct Scratch {
     dir: PathBuf,
     checkout: PathBuf,
-    worktree: PathBuf,
-    cut: bool,
+    /// The worktree, once one has been cut — and only then, so what is removed is
+    /// only ever what was added.
+    worktree: Option<PathBuf>,
 }
 
 /// What the branch says about itself, read out of the checkout before the
@@ -370,6 +382,8 @@ struct Tree {
     base: String,
     /// The full commit messages of `<base>..<branch>`, oldest first.
     commits: String,
+    /// The detached worktree of the branch the drafter works in.
+    worktree: PathBuf,
 }
 
 impl Scratch {
@@ -385,10 +399,9 @@ impl Scratch {
             match std::fs::create_dir(&dir) {
                 Ok(()) => {
                     return Ok(Self {
-                        worktree: dir.join("branch"),
                         dir,
                         checkout: checkout.to_path_buf(),
-                        cut: false,
+                        worktree: None,
                     })
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -439,10 +452,23 @@ impl Scratch {
             &format!("{base}..{head}"),
             "--",
         ])?;
-        let worktree = self.worktree.to_string_lossy().into_owned();
-        self.git(&["worktree", "add", "--detach", &worktree, &head])?;
-        self.cut = true;
-        Ok(Tree { base, commits })
+        let worktree = self.dir.join("branch");
+        git_in(
+            &self.checkout,
+            [
+                OsStr::new("worktree"),
+                OsStr::new("add"),
+                OsStr::new("--detach"),
+                worktree.as_os_str(),
+                OsStr::new(&head),
+            ],
+        )?;
+        self.worktree = Some(worktree.clone());
+        Ok(Tree {
+            base,
+            commits,
+            worktree,
+        })
     }
 
     /// The origin's default branch, as a ref the checkout resolves — asked the way
@@ -501,24 +527,24 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        if self.cut {
+        if let Some(worktree) = &self.worktree {
             let removed = git_in(
                 &self.checkout,
                 [
                     OsStr::new("worktree"),
                     OsStr::new("remove"),
                     OsStr::new("--force"),
-                    self.worktree.as_os_str(),
+                    worktree.as_os_str(),
                 ],
             );
             if let Err(why) = removed {
                 eprintln!(
                     "onepipeline: the drafting worktree at {} could not be removed from {}: \
                      {why}; remove it with `git -C {} worktree remove --force {}`",
-                    self.worktree.display(),
+                    worktree.display(),
                     self.checkout.display(),
                     self.checkout.display(),
-                    self.worktree.display()
+                    worktree.display()
                 );
             }
         }
@@ -533,6 +559,12 @@ impl Drop for Scratch {
 }
 
 /// Run one git command in `dir`, answering its trimmed stdout or its refusal.
+///
+/// Its stdout is read as UTF-8 or not at all: it is refs, a base and the commit
+/// messages a drafter is handed, and a lossy decode would hand the drafter text
+/// nobody wrote. Its stderr is a sentence for a person, relayed lossily so a byte
+/// that is not UTF-8 does not cost the operator the only thing the failure said —
+/// the split `destination::ask` makes for the same reason.
 fn git_in<'a>(
     dir: &Path,
     args: impl IntoIterator<Item = &'a OsStr>,
@@ -556,10 +588,14 @@ fn git_in<'a>(
             "{} exited {}: {}",
             named(),
             output.status.code().unwrap_or(-1),
+            // llmlint: ignore[boundary_inputs_validated] a diagnostic relayed to a
+            // person, never parsed or acted on: see this function's own note.
             crate::views::one_line(&String::from_utf8_lossy(&output.stderr))
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    String::from_utf8(output.stdout)
+        .map(|said| said.trim().to_owned())
+        .map_err(|error| format!("{} answered bytes that are not UTF-8: {error}", named()))
 }
 
 #[cfg(test)]
@@ -602,7 +638,7 @@ mod tests {
                     "change-open"
                 ]),
                 graph: Some("graphs/pr-author.yaml".into()),
-                no_draft: true,
+                drafting: Drafting::Declined,
             }
         );
         // After `--` nothing is this crate's.
@@ -613,7 +649,7 @@ mod tests {
         .expect("the line splits");
         assert_eq!(after.forwarded, words(&["--", "--no-draft"]));
         assert_eq!(after.graph, Some("g.yaml".into()));
-        assert!(!after.no_draft);
+        assert_eq!(after.drafting, Drafting::WhereWanted);
         assert!(split(Verb::Recover, words(&["b", "--pr-author-graph"])).is_err());
     }
 
