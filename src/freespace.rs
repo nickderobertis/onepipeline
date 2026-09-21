@@ -126,6 +126,13 @@ impl Filesystem {
         let mut measured = path.to_path_buf();
         loop {
             match measure(&measured) {
+                // Windows answers `NotFound` for a component under a file where
+                // Unix answers "not a directory", so the walk can reach a file:
+                // that is the same refusal, and the file is no directory a root
+                // could be created in.
+                Ok(_) if measured != path && !measured.is_dir() => {
+                    return Err(format!("{}: not a directory", measured.display()))
+                }
                 Ok((identity, free, total)) => {
                     return Ok(Self {
                         identity,
