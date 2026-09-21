@@ -321,6 +321,8 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             // llmlint: ignore-end[cli_output_contract]
             Ok(asked.exit_code())
         }
+        Verb::PublishBranch(args) => crate::land::land(crate::land::Verb::PublishBranch, args.args),
+        Verb::RepoRecover(args) => crate::land::land(crate::land::Verb::Recover, args.args),
         Verb::Results(args) => {
             print!(
                 "{}",
@@ -473,7 +475,7 @@ fn recorded_dir(record: &LaunchRecord) -> Result<PathBuf> {
 // oneagentgraph's transparent ConfigRef are already string-valued. A second newtype would
 // duplicate the sibling type without adding an invariant: relative references are made
 // absolute here, and the nonempty launch-record invariant is checked before every run.
-fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
+pub(crate) fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
     // Refused before anything is joined or opened, because a blank reference
     // resolves to `base` itself — the launch directory — and what happens next
     // is whatever the host's file API answers for opening a directory, which is

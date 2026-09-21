@@ -1,0 +1,686 @@
+//! Landing a branch **out of band**: `onepipeline publish-branch` and
+//! `onepipeline repo-recover`.
+//!
+//! The two verbs an operator lands a branch with outside a run are `onevcs`'s —
+//! `publish-branch` and `recover` — and each opens a change request with whatever
+//! body it is handed, which from an operator naming a branch is none. The drafter
+//! that knows how to write one is this crate's, in the lifecycle closeout, so these
+//! verbs put that same drafter in front of the linked `onevcs` verb: a branch landed
+//! by hand gets its description from the one drafter a branch landed by a run does.
+//! Divergence 88 in `docs/contract-divergences.md` is the proposal they answer.
+//!
+//! **A passthrough first.** Every argument but the two named here reaches the linked
+//! `onevcs` verb unchanged and in order, and is judged by that verb's own parser:
+//! the report, the verdict and the exit status are its, and a refused argument is
+//! its refusal. The verb is **called**, through the library the engine already
+//! publishes through, and never spawned.
+//!
+//! **A draft that cannot run never blocks the landing.** Whichever of the three
+//! [`Undrafted`] endings the graph reaches is said on standard error in the run
+//! path's own words, with `oneagentgraph`'s classification of each member death
+//! beside it, and the verb runs with no body. There is no retry here: the graph's
+//! own schema retry budget is the only one.
+//!
+//! **The turn is spent before the push**, because the body is an argument to the
+//! verb and the verb is what pushes: a branch its merge path then refuses has paid
+//! for a body nothing used.
+
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use clap::{CommandFactory, Parser};
+
+use crate::controls::NodeControls;
+use crate::error::{Error, Result};
+use crate::event::{Envelope, Labels};
+use crate::executor::{CancellationToken, DispatchRequest, LocalExecutor, WorkspaceSpec};
+use crate::ledger::RunPaths;
+use crate::lifecycle::{Drafted, Undrafted, PR_AUTHOR_PERSONA};
+
+/// The flag naming the graph a body is drafted by — the spelling `start` gives
+/// the same graph.
+pub(crate) const PR_AUTHOR_GRAPH_FLAG: &str = "--pr-author-graph";
+
+/// The flag that lands with no drafting turn spent, for a bulk landing that would
+/// otherwise pay one agent turn per branch.
+pub(crate) const NO_DRAFT_FLAG: &str = "--no-draft";
+
+/// Which `onevcs` verb a landing forwards to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Verb {
+    /// `onevcs publish-branch`, which `onepipeline publish-branch` fronts.
+    PublishBranch,
+    /// `onevcs recover`, which `onepipeline repo-recover` fronts.
+    Recover,
+}
+
+impl Verb {
+    /// The verb's name on `onevcs`'s own command line.
+    fn onevcs(self) -> &'static str {
+        match self {
+            Self::PublishBranch => "publish-branch",
+            Self::Recover => "recover",
+        }
+    }
+}
+
+/// What a landing's command line said, once this crate's two flags are taken out
+/// of it.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Split {
+    /// Everything else, in the order it was typed: `onevcs`'s to judge.
+    forwarded: Vec<OsString>,
+    /// What [`PR_AUTHOR_GRAPH_FLAG`] named, the last time it was given.
+    graph: Option<OsString>,
+    /// Whether [`NO_DRAFT_FLAG`] was given.
+    no_draft: bool,
+}
+
+/// Land one branch through the linked `onevcs` verb, drafting its body first
+/// where one is wanted, and answer with that verb's exit status.
+pub(crate) fn land(verb: Verb, args: Vec<OsString>) -> Result<i32> {
+    let split = split(verb, args)?;
+    let argv = [OsString::from("onevcs"), OsString::from(verb.onevcs())]
+        .into_iter()
+        .chain(split.forwarded);
+    // `onevcs`'s own parser, so what may be passed is its list and a refused
+    // argument is refused in its words — exactly as its own binary would.
+    let mut cli = match onevcs::cli::Cli::try_parse_from(argv) {
+        Ok(cli) => cli,
+        Err(refused) => {
+            // llmlint: ignore[cli_output_contract] this is `onevcs`'s own usage
+            // refusal or help, printed to the stream clap chooses, at the code it
+            // chooses — which is what the passthrough owes a caller.
+            let _ = refused.print();
+            return Ok(refused.exit_code());
+        }
+    };
+    if let Some(body) = drafted_for(verb, &cli, &split.graph, split.no_draft)? {
+        match &mut cli.command {
+            onevcs::cli::Command::PublishBranch(args) => args.body = Some(body),
+            onevcs::cli::Command::Recover(args) => args.body = Some(body),
+            _ => {}
+        }
+    }
+    Ok(i32::from(onevcs::run(&cli)))
+}
+
+/// Take this crate's two flags out of a landing's command line, leaving every
+/// other argument where it was.
+///
+/// Before a `--` only, because everything after one is a positional to `onevcs`.
+/// An option `onevcs`'s parser says takes a value has that value carried with it
+/// unread, so a title that happens to read `--no-draft` stays a title: which
+/// options take one is asked of the sibling's own parser rather than listed here.
+fn split(verb: Verb, args: Vec<OsString>) -> Result<Split> {
+    let valued = valued_options(verb);
+    let mut split = Split::default();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let text = arg.to_str().unwrap_or_default();
+        if text == "--" {
+            split.forwarded.push(arg);
+            split.forwarded.extend(args);
+            break;
+        } else if text == NO_DRAFT_FLAG {
+            split.no_draft = true;
+        } else if text == PR_AUTHOR_GRAPH_FLAG {
+            split.graph = Some(args.next().ok_or_else(|| {
+                Error::Invalid(format!(
+                    "{PR_AUTHOR_GRAPH_FLAG} was given no value: name the graph the body is \
+                     drafted by, or pass {NO_DRAFT_FLAG}"
+                ))
+            })?);
+        } else if let Some(graph) = text.strip_prefix(&format!("{PR_AUTHOR_GRAPH_FLAG}=")) {
+            split.graph = Some(graph.into());
+        } else if valued.iter().any(|option| option == text) {
+            split.forwarded.push(arg);
+            split.forwarded.extend(args.next());
+        } else {
+            split.forwarded.push(arg);
+        }
+    }
+    Ok(split)
+}
+
+/// Every spelling of an option the `onevcs` verb takes a separate value for, read
+/// off that verb's own parser.
+fn valued_options(verb: Verb) -> Vec<String> {
+    let cli = onevcs::cli::Cli::command();
+    let Some(command) = cli.find_subcommand(verb.onevcs()) else {
+        return Vec::new();
+    };
+    command
+        .get_arguments()
+        .filter(|argument| !argument.is_positional() && argument.get_action().takes_values())
+        .flat_map(|argument| {
+            argument
+                .get_long()
+                .map(|long| format!("--{long}"))
+                .into_iter()
+                .chain(argument.get_short().map(|short| format!("-{short}")))
+        })
+        .collect()
+}
+
+/// The body this landing is drafted, where one is drafted at all.
+///
+/// Nothing is drafted — and no turn spent — for a caller who said `--no-draft`,
+/// one who brought a body of their own, or an identity whose publication is
+/// `local-direct`, which opens no change request for a body to describe. The
+/// workflow is the identity's **rules**, read through the resolution the loader
+/// asks — never the registration's own field — or the `--policy` a
+/// `publish-branch` was narrowed to. An identity whose rules this build could not
+/// read is drafted for, because a landing that misses a body somebody wanted is
+/// the worse of the two ways to be wrong.
+///
+/// Where drafting would happen and no graph is named, the landing is refused
+/// before anything runs: the caller asked for a body and said nothing that could
+/// write one.
+fn drafted_for(
+    verb: Verb,
+    cli: &onevcs::cli::Cli,
+    graph: &Option<OsString>,
+    no_draft: bool,
+) -> Result<Option<String>> {
+    let (branch, repo, brought, narrowed) = match (&cli.command, verb) {
+        (onevcs::cli::Command::PublishBranch(args), Verb::PublishBranch) => (
+            &args.branch,
+            &args.repo,
+            args.body.is_some() || args.body_file.is_some(),
+            args.policy,
+        ),
+        (onevcs::cli::Command::Recover(args), Verb::Recover) => (
+            &args.branch,
+            &args.repo,
+            args.body.is_some() || args.body_file.is_some(),
+            None,
+        ),
+        // llmlint: ignore[changed_behavior_has_e2e] unreachable: the command line was
+        // parsed with this verb's name as its subcommand, so `onevcs`'s parser answers
+        // that variant or refuses. Kept as a refusal rather than a panic so a sibling
+        // release that renamed a verb is a message, not a crash.
+        _ => {
+            return Err(Error::Invalid(format!(
+                "`onevcs {}` parsed as a different command",
+                verb.onevcs()
+            )))
+        }
+    };
+    if no_draft || brought {
+        return Ok(None);
+    }
+    let named = repo.to_string_lossy();
+    let destination = crate::destination::resolve(&named);
+    let publication = narrowed.or_else(|| {
+        destination
+            .as_ref()
+            .ok()
+            .and_then(|destination| destination.publication.clone().ok())
+    });
+    if publication.is_some_and(|policy| !crate::destination::opens_a_change_request(policy)) {
+        return Ok(None);
+    }
+    let Some(graph) = graph else {
+        return Err(Error::Invalid(format!(
+            "`onepipeline {}` would draft the change request's body for {branch}, and no graph \
+             to draft it with was named: pass {PR_AUTHOR_GRAPH_FLAG} <PATH>, bring a body with \
+             --body or --body-file, or pass {NO_DRAFT_FLAG}",
+            match verb {
+                Verb::PublishBranch => "publish-branch",
+                Verb::Recover => "repo-recover",
+            }
+        )));
+    };
+    let graph = graph.to_str().ok_or_else(|| {
+        Error::Invalid(format!(
+            "{PR_AUTHOR_GRAPH_FLAG} names a path that is not UTF-8: {}",
+            graph.to_string_lossy()
+        ))
+    })?;
+    let here = std::env::current_dir().map_err(|error| {
+        Error::Invalid(format!(
+            "the working directory {PR_AUTHOR_GRAPH_FLAG} resolves against cannot be read: \
+             {error}"
+        ))
+    })?;
+    let graph = crate::driver::resolve_graph(graph, &here)?;
+    // The directory the drafter reads the branch from: the value itself where it is
+    // one, and otherwise the publication checkout the registry maps it to.
+    let checkout = if repo.is_dir() {
+        Ok(repo.clone())
+    } else {
+        destination.map(|destination| destination.resolved.publication_checkout)
+    };
+    let drafted = match checkout {
+        Ok(checkout) => draft(&graph, &checkout, branch),
+        Err(why) => Drafted::Undrafted(Undrafted::Dispatch(format!(
+            "the drafting dispatch could not start: {why}"
+        ))),
+    };
+    Ok(match drafted {
+        Drafted::Body(body) => Some(body),
+        Drafted::Undrafted(ending) => {
+            eprintln!(
+                "onepipeline: {} ({}), so {branch} lands with no body",
+                ending.why(),
+                ending.ending()
+            );
+            None
+        }
+    })
+}
+
+/// Draft one branch's body through `graph`, in a temporary detached worktree of
+/// the branch cut from `checkout` and removed however this returns.
+fn draft(graph: &str, checkout: &Path, branch: &str) -> Drafted {
+    let could_not_start = |why: String| {
+        Drafted::Undrafted(Undrafted::Dispatch(format!(
+            "the drafting dispatch could not start: {why}"
+        )))
+    };
+    let mut scratch = match Scratch::new(checkout) {
+        Ok(scratch) => scratch,
+        Err(why) => return could_not_start(why),
+    };
+    let tree = match scratch.cut(branch) {
+        Ok(tree) => tree,
+        Err(why) => return could_not_start(why),
+    };
+    let paths = RunPaths::under(&scratch.dir, "draft");
+    if let Err(error) = std::fs::create_dir_all(&paths.dir) {
+        return could_not_start(format!(
+            "{} could not be created: {error}",
+            paths.dir.display()
+        ));
+    }
+    let mut deaths = Vec::new();
+    let (drafted, handle) = crate::lifecycle::draft(
+        &LocalExecutor,
+        DispatchRequest {
+            graph: oneagentgraph::config::ConfigRef(graph.to_owned()),
+            task: crate::lifecycle::out_of_band_drafting_task(branch, &tree.base, &tree.commits),
+            // The persona alone: there is no run and no node, so the dispatch is
+            // registered nowhere and composes nothing of a run's onto the graph —
+            // the same drafting dispatch the closeout makes, outside a run.
+            labels: Labels {
+                persona: Some(PR_AUTHOR_PERSONA.to_owned()),
+                ..Labels::default()
+            },
+            controls: NodeControls::default(),
+            workspace: WorkspaceSpec::Path(scratch.worktree.clone()),
+            cancel: CancellationToken::new(),
+            attempt: std::num::NonZeroU32::MIN,
+        },
+        &paths,
+        &mut |envelope| deaths.extend(death(&envelope)),
+    );
+    drop(handle);
+    if matches!(drafted, Drafted::Undrafted(Undrafted::Dispatch(_))) {
+        for died in &deaths {
+            eprintln!("onepipeline: {died}");
+        }
+    }
+    drafted
+}
+
+/// One `member-died` a drafting graph published, as the line that says what
+/// `oneagentgraph` classified it as — or `None` for any other envelope.
+///
+/// Read by field rather than into the sibling's `MemberDied`, for the reason the
+/// engine's own reading of a death gives: that type refuses unknown fields, and a
+/// newer producer adding one would cost the operator the diagnosis. A detail the
+/// producer marked truncated is said to be, because the fix could be in the part
+/// that was cut.
+fn death(envelope: &Envelope) -> Option<String> {
+    if envelope.source != crate::event::Source::Agentgraph
+        || envelope.kind.0 != oneagentgraph::event::EventKind::MemberDied.as_str()
+    {
+        return None;
+    }
+    let member = envelope.labels.member.as_deref().unwrap_or("a member");
+    let stated: Vec<String> = ["rule", "cause", "detail"]
+        .into_iter()
+        .filter_map(|field| {
+            let value = envelope.payload.get(field)?.as_str()?;
+            (!value.is_empty()).then(|| format!("{field}={}", crate::views::one_line(value)))
+        })
+        .collect();
+    let truncated = envelope
+        .payload
+        .get("truncated")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    Some(match (stated.is_empty(), truncated) {
+        (true, _) => {
+            format!("{member} died, and oneagentgraph named no rule, cause or detail for it")
+        }
+        (false, false) => format!("{member} died: {}", stated.join(" ")),
+        (false, true) => format!(
+            "{member} died: {} (oneagentgraph truncated this detail)",
+            stated.join(" ")
+        ),
+    })
+}
+
+/// A drafting turn's own directory, and the worktree it cuts from the checkout.
+///
+/// Dropped on every way out of [`draft`], a panic included, and dropping it
+/// removes both: the worktree **by path** with `git worktree remove`, which is
+/// what takes its entry out of the checkout's worktree list — never `prune`, which
+/// would sweep every other stale entry that checkout happens to carry, and those
+/// are somebody else's — and then the directory. Either failing is said on
+/// standard error rather than swallowed, because the promise is that the checkout
+/// is left as it was found.
+struct Scratch {
+    dir: PathBuf,
+    checkout: PathBuf,
+    worktree: PathBuf,
+    cut: bool,
+}
+
+/// What the branch says about itself, read out of the checkout before the
+/// worktree is cut.
+struct Tree {
+    /// The base, as a ref the checkout resolves.
+    base: String,
+    /// The full commit messages of `<base>..<branch>`, oldest first.
+    commits: String,
+}
+
+impl Scratch {
+    fn new(checkout: &Path) -> std::result::Result<Self, String> {
+        static MINTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir();
+        for _ in 0..64 {
+            let dir = root.join(format!(
+                "onepipeline-draft-{}-{}",
+                crate::sys::pid(),
+                MINTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => {
+                    return Ok(Self {
+                        worktree: dir.join("branch"),
+                        dir,
+                        checkout: checkout.to_path_buf(),
+                        cut: false,
+                    })
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(format!("{} could not be created: {error}", dir.display()))
+                }
+            }
+        }
+        Err(format!(
+            "no directory for the drafting turn could be created under {}",
+            root.display()
+        ))
+    }
+
+    /// Read what the branch says about itself and cut a detached worktree of it.
+    ///
+    /// The branch is the checkout's own where it has one, and its origin's where
+    /// it does not — a preserved branch `recover` lands may be only there. The base
+    /// is the origin's default branch, which is the base `onevcs` lands both verbs
+    /// onto.
+    fn cut(&mut self, branch: &str) -> std::result::Result<Tree, String> {
+        let head = [
+            format!("refs/heads/{branch}"),
+            format!("refs/remotes/origin/{branch}"),
+        ]
+        .into_iter()
+        .find(|reference| {
+            self.git(&["show-ref", "--verify", "--quiet", reference])
+                .is_ok()
+        })
+        .ok_or_else(|| {
+            format!(
+                "the checkout {} has no branch '{branch}', locally or on its origin",
+                self.checkout.display()
+            )
+        })?;
+        let base = self.base().ok_or_else(|| {
+            format!(
+                "the base {branch} lands on is unknown: {} names no default branch for its \
+                 origin",
+                self.checkout.display()
+            )
+        })?;
+        let commits = self.git(&[
+            "log",
+            "--reverse",
+            "--format=commit %h%n%n%B",
+            &format!("{base}..{head}"),
+            "--",
+        ])?;
+        let worktree = self.worktree.to_string_lossy().into_owned();
+        self.git(&["worktree", "add", "--detach", &worktree, &head])?;
+        self.cut = true;
+        Ok(Tree { base, commits })
+    }
+
+    /// The origin's default branch, as a ref the checkout resolves — asked the way
+    /// `onevcs` asks it for the landing itself: the checkout's own record of the
+    /// origin's `HEAD`, then what the origin advertises, then the one branch the
+    /// checkout tracks there when it tracks only one.
+    fn base(&self) -> Option<String> {
+        if let Ok(tracked) = self.git(&[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ]) {
+            return Some(tracked);
+        }
+        let advertised = self
+            .git(&["ls-remote", "--symref", "origin", "HEAD"])
+            .ok()
+            .and_then(|said| {
+                said.lines().find_map(|line| {
+                    let (named, _) = line.strip_prefix("ref: refs/heads/")?.split_once('\t')?;
+                    Some(format!("origin/{named}"))
+                })
+            })
+            .filter(|named| {
+                self.git(&[
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/remotes/{named}"),
+                ])
+                .is_ok()
+            });
+        if advertised.is_some() {
+            return advertised;
+        }
+        let tracked = self
+            .git(&[
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/remotes/origin",
+            ])
+            .ok()?;
+        let mut candidates = tracked.lines().filter(|named| *named != "origin/HEAD");
+        match (candidates.next(), candidates.next()) {
+            (Some(only), None) => Some(only.to_owned()),
+            _ => None,
+        }
+    }
+
+    /// Run git in the checkout, answering its stdout or why it did not answer.
+    fn git(&self, args: &[&str]) -> std::result::Result<String, String> {
+        git_in(&self.checkout, args.iter().map(OsStr::new))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if self.cut {
+            let removed = git_in(
+                &self.checkout,
+                [
+                    OsStr::new("worktree"),
+                    OsStr::new("remove"),
+                    OsStr::new("--force"),
+                    self.worktree.as_os_str(),
+                ],
+            );
+            if let Err(why) = removed {
+                eprintln!(
+                    "onepipeline: the drafting worktree at {} could not be removed from {}: \
+                     {why}; remove it with `git -C {} worktree remove --force {}`",
+                    self.worktree.display(),
+                    self.checkout.display(),
+                    self.checkout.display(),
+                    self.worktree.display()
+                );
+            }
+        }
+        if let Err(error) = std::fs::remove_dir_all(&self.dir) {
+            eprintln!(
+                "onepipeline: the drafting turn's directory {} could not be removed: {error}; \
+                 remove it by hand",
+                self.dir.display()
+            );
+        }
+    }
+}
+
+/// Run one git command in `dir`, answering its trimmed stdout or its refusal.
+fn git_in<'a>(
+    dir: &Path,
+    args: impl IntoIterator<Item = &'a OsStr>,
+) -> std::result::Result<String, String> {
+    let args: Vec<&OsStr> = args.into_iter().collect();
+    let named = || {
+        let words: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        format!("`git {}` in {}", words.join(" "), dir.display())
+    };
+    let output = Command::new("git")
+        .args(&args)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("{} could not be run: {error}", named()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{} exited {}: {}",
+            named(),
+            output.status.code().unwrap_or(-1),
+            crate::views::one_line(&String::from_utf8_lossy(&output.stderr))
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn words(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    /// This crate's two flags come out wherever they sit — the consumer appends
+    /// `--pr-author-graph` after everything it forwards — and every other argument
+    /// keeps its place, a valued option's value included however it reads.
+    #[test]
+    fn only_this_crates_two_flags_are_taken_out_and_the_rest_keep_their_order() {
+        let taken = split(
+            Verb::PublishBranch,
+            words(&[
+                "feature",
+                "--title",
+                "--no-draft",
+                "--repo=service",
+                "--no-draft",
+                "--policy",
+                "change-open",
+                "--pr-author-graph",
+                "graphs/pr-author.yaml",
+            ]),
+        )
+        .expect("the line splits");
+        assert_eq!(
+            taken,
+            Split {
+                forwarded: words(&[
+                    "feature",
+                    "--title",
+                    "--no-draft",
+                    "--repo=service",
+                    "--policy",
+                    "change-open"
+                ]),
+                graph: Some("graphs/pr-author.yaml".into()),
+                no_draft: true,
+            }
+        );
+        // After `--` nothing is this crate's.
+        let after = split(
+            Verb::Recover,
+            words(&["--pr-author-graph=g.yaml", "--", "--no-draft"]),
+        )
+        .expect("the line splits");
+        assert_eq!(after.forwarded, words(&["--", "--no-draft"]));
+        assert_eq!(after.graph, Some("g.yaml".into()));
+        assert!(!after.no_draft);
+        assert!(split(Verb::Recover, words(&["b", "--pr-author-graph"])).is_err());
+    }
+
+    /// The set of options that carry a value is `onevcs`'s, read off its parser.
+    #[test]
+    fn the_valued_options_are_read_off_the_siblings_own_parser() {
+        let valued = valued_options(Verb::PublishBranch);
+        for option in ["--repo", "--title", "--policy", "--body", "--body-file"] {
+            assert!(
+                valued.iter().any(|known| known == option),
+                "{option}: {valued:?}"
+            );
+        }
+        let valued = valued_options(Verb::Recover);
+        assert!(
+            !valued.iter().any(|known| known == "--policy"),
+            "{valued:?}"
+        );
+    }
+
+    /// A death reads as the producer classified it, and a truncated detail says so.
+    #[test]
+    fn a_member_death_is_said_in_oneagentgraphs_own_classification() {
+        let envelope = |payload: serde_json::Value| -> Envelope {
+            serde_json::from_value(serde_json::json!({
+                "v": 1, "ts": "2026-01-01T00:00:00Z", "stream": "s", "seq": 1,
+                "source": "agentgraph", "kind": "member-died",
+                "labels": {"member": "author"}, "payload": payload,
+            }))
+            .expect("an envelope")
+        };
+        assert_eq!(
+            death(&envelope(serde_json::json!({
+                "rule": "unstartable", "cause": "spawn", "detail": "no such file"
+            }))),
+            Some("author died: rule=unstartable cause=spawn detail=no such file".to_owned())
+        );
+        assert_eq!(
+            death(&envelope(serde_json::json!({
+                "rule": "exit", "cause": "unclassified", "detail": "cut", "truncated": true
+            }))),
+            Some(
+                "author died: rule=exit cause=unclassified detail=cut (oneagentgraph truncated \
+                 this detail)"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            death(&envelope(serde_json::json!({}))),
+            Some("author died, and oneagentgraph named no rule, cause or detail for it".to_owned())
+        );
+    }
+}

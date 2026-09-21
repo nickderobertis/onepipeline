@@ -153,7 +153,7 @@ fn report_unchecked(node: &str, repo: &str, why: &str) {
 /// `workflow`, which `onevcs` 0.20.0 stopped printing when it retired the
 /// inferred classification; the policy line below is what names the same thing.
 #[derive(serde::Deserialize)]
-struct Resolved {
+pub(crate) struct Resolved {
     // llmlint: ignore-block[invalid_states_unrepresentable] a repository identity is a
     // `String` on every surface `onevcs` publishes — `registry::Identity::origin`,
     // `SessionHolder::identity`, `RepositoryReleases::identity` — and this crate already
@@ -165,19 +165,19 @@ struct Resolved {
     identity: String, // llmlint: ignore-end[invalid_states_unrepresentable]
     /// Where this repository's own hooks are, which is the whole of what it is
     /// read for here.
-    publication_checkout: PathBuf,
+    pub(crate) publication_checkout: PathBuf,
 }
 
 /// What one repository answered about itself.
-struct Destination {
-    resolved: Resolved,
+pub(crate) struct Destination {
+    pub(crate) resolved: Resolved,
     /// The policy its rules file resolves it to, or why this build has no answer.
     ///
     /// Held apart from the resolution around it rather than sinking the whole of
     /// it, because the two refusals need different halves: the subject policy
     /// needs only the checkout, and a rules file this build could not read is no
     /// reason to stop asking a repository's own hook about a title.
-    publication: std::result::Result<MergePolicy, String>,
+    pub(crate) publication: std::result::Result<MergePolicy, String>,
 }
 
 /// The executable this process asks.
@@ -224,7 +224,10 @@ fn ask(verb: &[&str], repo: &str) -> Result<String, String> {
 }
 
 /// One repository, as `onevcs`'s own resolution verbs answer for it.
-fn resolve(repo: &str) -> Result<Destination, String> {
+///
+/// Asked by the loader of every lifecycle node's repository, and by the
+/// out-of-band landing verbs of the one `--repo` names — see [`crate::land`].
+pub(crate) fn resolve(repo: &str) -> Result<Destination, String> {
     let resolved: Resolved =
         serde_json::from_str(ask(&["resolve"], repo)?.trim()).map_err(|error| {
             format!("`onevcs resolve {repo}` did not answer the shape this build reads: {error}")
@@ -398,7 +401,7 @@ fn draft_refusal(
 ///
 /// One policy does not, and it is the one `onevcs` names when it refuses a draft:
 /// `local-direct` squashes the branch onto the base with git alone.
-fn opens_a_change_request(policy: MergePolicy) -> bool {
+pub(crate) fn opens_a_change_request(policy: MergePolicy) -> bool {
     policy != MergePolicy::LocalDirect
 }
 
