@@ -26,7 +26,13 @@ fn repository() -> PathBuf {
 /// the CLI would prove nothing about what a host's bus reads.
 fn bus_cli() -> PathBuf {
     let shims = repository().join("node_modules").join(".bin");
-    ["onemessagebus", "onemessagebus.cmd"]
+    // npm writes both shims everywhere; only the `.cmd` one is a program Windows
+    // runs, and only the extensionless one is a program a unix shell does.
+    #[cfg(windows)]
+    let names = ["onemessagebus.cmd", "onemessagebus"];
+    #[cfg(not(windows))]
+    let names = ["onemessagebus", "onemessagebus.cmd"];
+    names
         .into_iter()
         .map(|name| shims.join(name))
         .find(|shim| shim.exists())
