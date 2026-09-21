@@ -30,6 +30,16 @@
 //! dispatch was in flight is left in flight, which is exactly the state `adopt`
 //! already reconciles.
 
+// llmlint: ignore-file[invalid_states_unrepresentable] the run ids, sessions, nodes,
+// identities, branches, remotes and commits here are `String`s because the approved
+// contract spells the host-shutdown seam with exactly those types — `ShutdownScope::Run(String)`,
+// `session: String`, `not_pushed: Vec<(String, String)>` and the rest — and `onepipeline-ui`
+// is written against that seam, so a newtype would be a public vocabulary the contract did not
+// ask for. The same reason `src/verbs.rs` gives for the same fields at the head of that file.
+// What is enforced is where each value comes from: a run id through `verbs::resolved`,
+// identities and branches and commits as `onevcs::preserve` answered them, and the closed
+// words — endings, outcomes, answers, scopes — are enums.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -466,8 +476,8 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
         );
     }
 
-    // 1. Nothing new starts — written before anything is signalled, because the
-    //    driver goes on scheduling for as long as the grace lasts.
+    // Before anything is signalled: the driver goes on scheduling for as long as
+    // the grace lasts.
     if let Err(why) = hold_the_run(paths) {
         eprintln!(
             "onepipeline: run '{}': the hold that stops it dispatching could not be written — \
@@ -492,9 +502,6 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
     let from = std::fs::metadata(paths.journal()).map_or(0, |held| held.len());
     let mut journal = Journal::open(paths);
 
-    // 2. Every live dispatch is asked to stop, through the lever a `cancel`
-    //    already pulls. One inside a publication has no turn to ask, and is
-    //    bounded by the grace like any other.
     let addresses = addresses_by_node(&view.events);
     let mut asked: Vec<(Watched, String, String)> = Vec::new();
     for dispatch in watched {
@@ -528,13 +535,9 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
         asked.push((dispatch, word.as_str().to_string(), detail));
     }
 
-    // 3. The wait, watching the processes the registry names — and, for a node
-    //    whose work is the driver's publication, the run's own record of it.
     let asked_at = Instant::now();
     let waited = wait_for_them(paths, from, &asked, asked_at, request);
 
-    // 4. The teardown: whatever is still standing, and then the run's driver,
-    //    ended the way `stop` ends them.
     let teardown = tear_the_run_down(paths, view);
 
     // Read again, because what a publication had reached is what the report
@@ -593,9 +596,8 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
         unrecorded(&paths.run, "a dispatch-stopped", written);
     }
 
-    // 5. The preserving push, for every branch this run's own records name.
-    //    Attempted whether or not the teardown ended everything: a branch is not
-    //    less worth keeping because a process would not go.
+    // Unconditionally, whatever the teardown established: a branch is not less
+    // worth keeping because a process would not go.
     let branches = preserve_every_branch(view);
 
     let shutdown = RunShutdown {

@@ -683,6 +683,7 @@ impl From<&crate::shutdown::ShutdownScope> for ScopeWord {
 // llmlint: ignore[boundary_inputs_validated] this module's own rule, stated at its head: a key no document names is not refused, because a record a later build wrote is the ordinary contents of a runs root — no payload document here denies unknown fields, and a reader of this one that did would call a newer build's record unreadable. What a reader acts on is still typed and required.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct BranchPreserved {
+    // llmlint: ignore-block[invalid_states_unrepresentable] a wire document of what `onevcs::preserve` answered, field for field as the approved contract spells the record — `identity`, `branch`, `remote: string|null`, `commit: string|null` — and that library carries each as a `String` itself; this crate reads them back only to render them.
     /// The repository identity it belongs to.
     pub(crate) identity: String,
     /// The branch, under the name it already had.
@@ -695,6 +696,7 @@ pub(crate) struct BranchPreserved {
     pub(crate) commit: Option<String>,
     /// What the sibling said, in the words a reader is shown.
     pub(crate) detail: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// What preserving one branch found to do.

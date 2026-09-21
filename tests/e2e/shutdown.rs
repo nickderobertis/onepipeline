@@ -685,6 +685,7 @@ fn a_dispatch_killed_inside_its_publication_is_named_with_what_that_leaves() {
 /// A shutdown's last section names every other unpublished branch on the host
 /// it did not push — and, where that enumeration cannot be read, says so rather
 /// than reporting none.
+// llmlint: ignore-block[tests_mirror_real_usage] the one thing set by hand is `onevcs`'s state-root registry, overwritten with bytes that are not one, because no verb produces a host whose enumeration cannot be read — that is a damaged or foreign state root, which is the state under test. The shutdown is the real binary against a real run, and the assertion is on what its report says.
 #[cfg(unix)]
 #[test]
 fn the_last_section_says_when_the_host_could_not_be_read() {
@@ -727,6 +728,7 @@ fn the_last_section_says_when_the_host_could_not_be_read() {
     shutdown.exited(0);
     world.release("build.go");
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A worker that ends when it is asked has its branch on the origin afterwards.
 ///
@@ -849,6 +851,7 @@ fn a_landed_nodes_branch_is_not_offered_and_the_work_in_flight_is() {
 /// A host shutdown works through every run on the host, and the worst answer it
 /// could give to one unreadable run is to stop there: every run after it would
 /// be left running and unpushed on a machine about to go away.
+// llmlint: ignore-block[tests_mirror_real_usage] the one thing set by hand is a planted entry in the run's dispatch registry that no build can read, exactly as `driver.rs`'s `stopping_a_run_whose_registry_cannot_be_read_refuses_and_leaves_the_run_retryable` plants it: no verb writes an unreadable entry, so reaching this state takes a host that corrupted one. Both runs, their dispatches and the shutdown are the real binary.
 #[cfg(unix)]
 #[test]
 fn an_unreadable_registry_is_reported_and_the_rest_of_the_host_is_still_shut_down() {
@@ -897,6 +900,7 @@ fn an_unreadable_registry_is_reported_and_the_rest_of_the_host_is_still_shut_dow
         world.release(&format!("{node}.go"));
     }
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A lever that breaks is an answer rather than a failure, and the deadline
 /// still applies.
