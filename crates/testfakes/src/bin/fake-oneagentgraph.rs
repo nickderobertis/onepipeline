@@ -965,6 +965,8 @@ fn publish_deaths(
             exit_code: None,
             disposition: None,
             stderr_tail: None,
+            // No fallback chain runs here, so none was exhausted.
+            candidates: Vec::new(),
         };
         let envelope = oneagentgraph::event::Envelope {
             v: oneagentgraph::event::ENVELOPE_VERSION,

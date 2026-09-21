@@ -7068,6 +7068,7 @@ mod tests {
             exit_code: None,
             disposition: None,
             stderr_tail: None,
+            candidates: Vec::new(),
         })
         .expect("the sibling's death serializes");
         let published = Envelope {
