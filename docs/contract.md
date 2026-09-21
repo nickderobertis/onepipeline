@@ -23,6 +23,22 @@ author as its source, its findings use that source, and it may requeue only its 
 Serving a channel member protocol, resolving schema links and interpreting codec
 bindings belong to the host's `onemessagebus serve`, not this engine.
 
+**A chain that stopped raises a finding.** A `member-died` published under
+`oneagentgraph`'s provider rule, `provider-failure`, is read as an identity chain
+that stopped when its cause — read through the linked `oneagentgraph::event::Cause`
+— is `unclassified`, a candidate that ran and produced no usable result so the
+chain did not move on, or `fallback_chain_exhausted`, a chain that attempted every
+candidate it named and reached none. Either is raised as a non-blocking `finding`
+of source `proposal` naming the node, or the run's observer, and the member: for
+`unclassified`, the candidate it stopped at and what it stepped past; for
+`fallback_chain_exhausted`, every attempted candidate in attempt order with its
+identity, its failure kind (`unclassified` where oneharness named none) and its
+detail. It fails nothing: the node settles on the death as any provider death
+does, its `cause` the producer's word, and for `fallback_chain_exhausted` the
+settlement's `detail` carries
+`attempted: <identity> [<kind>]: <detail>; …` beside the dispatch's own. A
+provider death of any other cause, and any death under another rule, raises none.
+
 A plan is **one onetaskgraph project**, and a node is one task in it. Plan schema v3 = ai-orchestrator tracked-graph schema v7 node shapes (`agent` direct, lifecycle with `repo`, `kind: human`, nested `steps` on one branch, `expects_no_diff`, `context`, cross-DAG `run:<id>#<node>` refs, What/Why/Acceptance-criteria task prose, per-node `max_turns`), with: `repo` resolved through onevcs; new optional per-node `executor: NAME`; new optional `agent_graph: REF` overriding the default node-scope graph config; a **required** `title` on every lifecycle node and an optional `body` beside it, which are the subject and the prose its change request opens with, and an optional `draft: bool` beside those, default `false`, which leaves that change request as a draft at closeout for a person to lift; two optional placement overrides beside those, `pool: u32` and `overflow: N|unlimited`, which are `onevcs`'s own per-open overrides copied onto the session request exactly as written — `pool: 0` still counts against `overflow`, and `overflow: unlimited` opts the open out of the cap; onepipeline adds no vocabulary of its own — and refused by name below schema 3 exactly as `draft` is; and **no `done_when`** — v7's judge-only bar is retired here, because onejudge hands that field to the judge verbatim and the criterion belongs in the onejudge document the node-scope graph's worker already points at, written once. A per-node bar is the task's own `## Acceptance criteria`, which the judge reads as the first message of the transcript it is given. A plan still carrying `done_when` is refused **by name**, and the refusal says where the bar goes instead.
 
 `schema_version: 3` is the change that made the change request the plan's to state, and it is **additive**: this build reads **3, 2, and 1**, and what each version added is keyed to the version the *document* declares. A lifecycle node needs a `title` at 3; a plan written before it states none, and its publication takes no subject of its own — which is onevcs deriving one from the branch's own conventional commits, a better subject than anything this layer could compose about work it did not do. A plan below 3 naming `body` is refused **by that field's name**, exactly as a field no schema ever had is: the field is what its author has to act on, not the number the document was written at. `done_when` is answered the same way at every version — it is not a field of this schema, and the refusal says where the review bar goes instead. `verify_via_ci` is retired on the same terms and refused by that field's own name at every version: it was accepted here and read by nothing, and what it asked for is now observed rather than declared — a `change-auto` publication watches the host's own required checks to their conclusion, so the refusal names that policy rather than leaving its author to guess what asks for CI verification now. The **only** version refusal is a number this build has never written, and it names the versions that are read. Every optional field is omitted from what this crate writes when it is empty, so a plan round-trips as the file wrote it.

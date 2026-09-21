@@ -784,6 +784,33 @@ fn the_marked_copy_of_the_bus_contract_is_reconciled_against_the_released_bus() 
     );
 }
 
+/// The contract's statement of a chain-stopping death names the linked
+/// producer's own words for the rule and both causes, so a variant renamed
+/// there fails here rather than leaving the paragraph describing a word nothing
+/// publishes. `tests/e2e/boundary.rs` drives both causes through the binary.
+#[test]
+fn the_contract_names_the_producers_words_for_a_chain_that_stopped() {
+    use oneagentgraph::event::Cause;
+    let passage = CONTRACT
+        .split_once("**A chain that stopped raises a finding.**")
+        .and_then(|(_, rest)| rest.split_once("\n\n"))
+        .map(|(passage, _)| passage)
+        .expect("the contract states which death is a chain that stopped");
+    let named = backticked_in(passage);
+    for word in [
+        oneagentgraph::member::Rule::ProviderFailure.as_str(),
+        Cause::Unclassified.as_str(),
+        Cause::FallbackChainExhausted.as_str(),
+        "finding",
+        "proposal",
+    ] {
+        assert!(
+            named.contains(word),
+            "the chain-stopping paragraph does not name `{word}`: {passage}"
+        );
+    }
+}
+
 /// `exclude` wins, an absent `include` admits everything, and a glob is `*`.
 #[test]
 fn the_grammar_matches_the_way_the_contract_says_it_does() {
