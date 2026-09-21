@@ -6780,7 +6780,8 @@ Driven by `tests/e2e/views.rs` against the compiled binary: `status RUN` and
 roots, with `status`'s sitting above the provider block and `host`'s beside the
 scope line; a runs root that does not exist yet is measured at its nearest
 existing ancestor and the line says so; and a root the host refuses to answer
-about says that on its own line while the other root is still measured.
+about says that on its own line while the other root is still measured, as does
+a workspaces root the linked `onevcs` refuses to resolve.
 `tests/parity.rs` holds the binary's rendering byte-equal to the SDK's with the
 measurement alone held still — it is the one thing in either view that can
 honestly differ between two reads moments apart on a busy host.
@@ -6830,7 +6831,9 @@ under, are each checked first. A refused `ask` leaves the channel untouched.
 `reply_window_seconds` the launch record's bus configuration names for the
 `surfaces` queue — the longest, where several codecs serve it, so the question
 waits at least as long as any listener the configuration expects a manager to
-answer — then the bus's own default.
+answer — then the bus's own default. `--timeout 0` is refused: no wait at all
+is not a window. The window resolved is named on standard error beside the
+correlation, before the wait, as `waiting up to <N> seconds for the reply`.
 
 **An elapsed wait is never a ruling.** Standard output is the bus's one-line
 answer verbatim and nothing else, because that is what an asker parses:
@@ -6845,14 +6848,15 @@ channel, with the manager's side played by this crate's own `next` and `reply`
 verbs rather than by a double: a listener reads the frame's kind, source,
 message, `blocking`, the asker the environment named and what it is `about`;
 each of the three input forms raises the same question; each of the three
-window resolutions is driven, the first two by a listener answering after the
-shorter window would have elapsed; an elapsed wait answers `timeout` at exit `1`
+window resolutions is driven by a listener answering after a shorter window
+would have elapsed, and held to the window the verb names — the flag's, the
+longer of two `surfaces` codecs', and the bus's own default; an elapsed wait answers `timeout` at exit `1`
 with the question still on the channel and marked abandoned; a question a real
 validator declines answers `refused` at exit `1` carrying that validator's own
 words; and every refusal — a missing `ONEPIPELINE_RUN_ID`, a blank asker, a
-blank question in each of the three forms, a NUL byte, an `--about` over 512
-bytes or carrying a control character, and a launch record that cannot be read —
-exits `2` naming its cause over a channel that stayed empty.
+blank question in each of the three forms, a question file that cannot be read,
+a NUL byte, an `--about` over 512 bytes or carrying a control character, a
+`--timeout` of zero, and a launch record that cannot be read — exits `2` naming its cause over a channel that stayed empty.
 
 One answer is **not** reachable through the binary and is named here rather than
 left to be discovered: `abandoned`. It is the bus's answer to an asker whose

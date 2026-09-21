@@ -33,7 +33,13 @@ mod adoption;
 mod agents;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod amend;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] `ask` is a verb of this
+// binary over `src/ask.rs`, `src/channel.rs` and `src/driver.rs`, each of which any change
+// under `src/` can move, so the narrowest edge it can honestly sit behind is the crate's.
+// Its waits are the behaviour under test — a reply arriving after a shorter window would
+// have elapsed — and are a few seconds in all.
 mod ask;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod boundary;
 mod bus_config;
 mod cancellation;
@@ -117,7 +123,12 @@ mod scratch;
 mod session;
 mod session_reuse;
 mod shipped;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] `stop-guard` is a verb of
+// this binary over `src/stopguard.rs` and `src/unwatched.rs`, and it answers off the run
+// store every launch writes, so any change under `src/` can move what it decides: the crate
+// is the narrowest edge it can honestly sit behind, as for `mod unwatched` beside it.
 mod stop_guard;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod store;
 mod summary;
 mod surface;

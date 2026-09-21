@@ -481,6 +481,36 @@ fn free_space_is_measured_at_the_nearest_ancestor_of_a_root_not_there_yet_and_na
         lines[1].contains("on the filesystem holding the lifecycle workspaces under"),
         "the workspaces root was left out beside a root that could not be read: {stdout}"
     );
+
+    // A workspaces root the linked onevcs cannot resolve — its state root set and
+    // empty, which that library refuses rather than guessing — is a line saying
+    // so, beside the runs root's reading rather than in place of it.
+    let asked = world
+        .cmd(&["host"])
+        .env("ONEVCS_HOME", "")
+        .output()
+        .expect("the binary runs");
+    assert_eq!(asked.status.code(), Some(0), "{asked:?}");
+    let stdout = String::from_utf8_lossy(&asked.stdout);
+    let lines = free_space_lines(&stdout);
+    assert_eq!(lines.len(), 2, "{stdout}");
+    assert!(
+        lines[0].contains(&format!(
+            "% free) on the filesystem holding the runs root {}",
+            world.runs.display()
+        )) && !lines[0].contains("lifecycle workspaces"),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines[1].starts_with(
+            "  free space: could not be read for the lifecycle workspaces, because the linked \
+             onevcs could not resolve its state root: "
+        ) && lines[1].contains("ONEVCS_HOME")
+            && lines[1].ends_with("so what is free there is unknown"),
+        "{}",
+        lines[1]
+    );
 }
 
 /// Every measured bucket, summed. An unmeasured one carries no `ms` at all,

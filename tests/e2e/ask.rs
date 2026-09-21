@@ -19,7 +19,6 @@
 // `harness.rs` carries the same suppression and the full rationale. The manager's side is
 // not a double either: the listener below is this crate's own `next` and `reply` verbs.
 
-use std::io::Read;
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
@@ -63,23 +62,26 @@ fn run_under(world: &World, name: &str, config: &str) -> String {
     name.to_string()
 }
 
-/// A bus configuration whose `surfaces` codec names `seconds` as its reply
-/// window.
-fn window_of(seconds: u64) -> String {
-    format!(
-        "version: 1\n\
-         transport: {{kind: local}}\n\
-         profile: planner-channel\n\
-         codecs:\n  \
-           asked:\n    \
-             queue: surfaces\n    \
-             reply_window_seconds: {seconds}\n    \
-             select: kind\n    \
-             frames:\n      \
-               planner-question:\n        \
-                 schema: agent.planner-surface@1\n        \
-                 bindings: [{{do: answer, response: {{}}}}]\n"
-    )
+/// A bus configuration whose `surfaces` codecs name `seconds` as their reply
+/// windows, one codec per window.
+fn window_of(seconds: &[u64]) -> String {
+    let codecs: String = seconds
+        .iter()
+        .enumerate()
+        .map(|(index, seconds)| {
+            format!(
+                "  asked{index}:\n    \
+                   queue: surfaces\n    \
+                   reply_window_seconds: {seconds}\n    \
+                   select: kind\n    \
+                   frames:\n      \
+                     planner-question:\n        \
+                       schema: agent.planner-surface@1\n        \
+                       bindings: [{{do: answer, response: {{}}}}]\n"
+            )
+        })
+        .collect();
+    format!("version: 1\ntransport: {{kind: local}}\nprofile: planner-channel\ncodecs:\n{codecs}")
 }
 
 /// `onepipeline ask` as a worker runs it: the run on `ONEPIPELINE_RUN_ID`, and
@@ -163,30 +165,40 @@ fn answer(world: &World, run: &str, surface: &Value, message: &str) {
         .exited(0);
 }
 
-/// The run's channel queue, as the projection on disk holds it.
-///
-/// Read off `channel/queue.json` rather than off the run's event store, because
-/// a settled run has no driver journaling anything — the queue file is what the
-/// channel itself keeps, and it is the record a refusal has to leave untouched.
-/// A run nothing has ever raised on has no queue file at all, which is the
-/// strongest form of "nothing was raised" there is.
-fn queue_of(world: &World, run: &str) -> Value {
-    match std::fs::read_to_string(world.run_file(run, "channel/queue.json")) {
-        Ok(text) => serde_json::from_str(&text).expect("the queue is JSON"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Null,
-        Err(error) => panic!("the channel's queue could not be read: {error}"),
-    }
-}
-
-/// Every `planner-question` frame that queue holds, waiting or handed over.
+/// Every `planner-question` the run has raised, read the way anybody reads a
+/// run's channel without consuming it: `onepipeline channel queue`.
 fn questions_on(world: &World, run: &str) -> Vec<Value> {
-    let queue = queue_of(world, run);
-    let waiting = queue["waiting"].as_array().cloned().unwrap_or_default();
-    waiting
+    let queue = world.run(&["channel", "queue", run]);
+    queue.exited(0);
+    queue.json()["surfaces"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
         .into_iter()
-        .chain(std::iter::once(queue["pending"].clone()))
         .filter(|frame| frame["kind"] == QUESTION_KIND)
         .collect()
+}
+
+/// The surface the run's pending slot holds — handed over, and answered or
+/// abandoned — as `onepipeline channel queue` reports it.
+fn held_on(world: &World, run: &str) -> Value {
+    let queue = world.run(&["channel", "queue", run]);
+    queue.exited(0);
+    queue.json()["held"].clone()
+}
+
+/// The window `ask` said it waits, in seconds, off its standard error.
+fn window_said(answered: &Answered) -> u64 {
+    answered
+        .stderr
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("waiting up to ")?
+                .strip_suffix(" seconds for the reply")?
+                .parse()
+                .ok()
+        })
+        .unwrap_or_else(|| panic!("`ask` never named its window: {}", answered.stderr))
 }
 
 /// The whole seam of one question: the frame a manager reads, and the answer
@@ -306,24 +318,31 @@ fn the_question_is_taken_from_the_argument_words_a_file_or_standard_input_alike(
 
 /// The reply window resolves three ways, in order: `--timeout`, then the
 /// `reply_window_seconds` the run's launch record's bus configuration names for
-/// the `surfaces` queue, then the bus's own default.
+/// the `surfaces` queue — the longest, where several codecs serve it — then the
+/// bus's own default.
 ///
-/// The first two are driven by a listener that answers **after** the shorter
-/// window would have elapsed, so a verb that took the wrong one would have
-/// timed out before the reply arrived. The third is read off the verb's own
-/// account of the window it waited, because waiting the bus's default out is a
-/// journey nobody would run.
+/// Each is driven by a listener that answers **after** the shorter window would
+/// have elapsed, so a verb that took the wrong one would have timed out before
+/// the reply arrived; and each is held to the window the verb says it waits,
+/// which is what tells the bus's default from any other long-enough window.
 #[test]
 fn the_reply_window_is_the_flags_then_the_launch_records_then_the_buss_own() {
     let world = World::new("ask-window");
 
     // A configuration naming one second, and a flag naming far more: the flag
     // wins, and the proof is that a reply arriving well after that second is
-    // still the answer.
-    let flagged = run_under(&world, "askflag", &window_of(1));
-    let asked = asking(&world, &flagged, &["--timeout", "120", "which bound?"], &[]);
+    // still the answer — with the asker still blocked in between.
+    let flagged = run_under(&world, "askflag", &window_of(&[1]));
+    let mut asked = asking(&world, &flagged, &["--timeout", "120", "which bound?"], &[]);
     let surface = question_on(&world, &flagged);
     std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        asked
+            .try_wait()
+            .expect("the child is asked about")
+            .is_none(),
+        "the question did not block for its answer"
+    );
     answer(&world, &flagged, &surface, "the wider one");
     let answered = waited(asked);
     assert_eq!(
@@ -333,11 +352,12 @@ fn the_reply_window_is_the_flags_then_the_launch_records_then_the_buss_own() {
         answered.stderr
     );
     assert_eq!(answered.code, 0);
+    assert_eq!(window_said(&answered), 120, "{}", answered.stderr);
 
-    // No flag, and a configuration naming a window long enough to answer in:
-    // the launch record's is what is waited, and a verb falling back to the
-    // one-second codec of the run above would have timed out.
-    let recorded = run_under(&world, "askrecorded", &window_of(120));
+    // No flag, and two codecs serving the queue — one second and long enough to
+    // answer in: the launch record's longer one is what is waited, and a verb
+    // taking the one-second codec would have timed out.
+    let recorded = run_under(&world, "askrecorded", &window_of(&[1, 120]));
     let asked = asking(&world, &recorded, &["which bound?"], &[]);
     let surface = question_on(&world, &recorded);
     std::thread::sleep(Duration::from_secs(3));
@@ -349,19 +369,24 @@ fn the_reply_window_is_the_flags_then_the_launch_records_then_the_buss_own() {
         "the launch record's window was not waited: {}",
         answered.stderr
     );
+    assert_eq!(window_said(&answered), 120, "{}", answered.stderr);
 
-    // And a run whose configuration names no window at all: the bus's own
-    // default, which the verb names on standard error when the wait elapses.
+    // And a run whose configuration names no window at all, asked with no flag:
+    // the bus's own default is waited, and it is long enough that a reply after
+    // a one-second window would have elapsed is still the answer.
     let bare = run_of(&world, "askbare");
-    let asked = asking(&world, &bare, &["--timeout", "1", "which bound?"], &[]);
-    question_on(&world, &bare);
-    let elapsed = waited(asked);
-    assert_eq!(elapsed.code, 1, "{}", elapsed.stderr);
-    assert_eq!(elapsed.answer()["answer"], json!("timeout"));
-    assert!(
-        elapsed.stderr.contains("within 1 seconds"),
-        "the verb did not say what window it waited: {}",
-        elapsed.stderr
+    let asked = asking(&world, &bare, &["which bound?"], &[]);
+    let surface = question_on(&world, &bare);
+    std::thread::sleep(Duration::from_secs(2));
+    answer(&world, &bare, &surface, "the bus's own");
+    let answered = waited(asked);
+    assert_eq!(answered.code, 0, "{}", answered.stderr);
+    assert_eq!(answered.answer()["answer"], json!("reply"));
+    assert_eq!(
+        window_said(&answered),
+        onemessagebus::DEFAULT_REPLY_WINDOW.as_secs(),
+        "the bus's default was not the window waited: {}",
+        answered.stderr
     );
 }
 
@@ -396,10 +421,12 @@ fn an_elapsed_wait_answers_timeout_at_exit_one_and_leaves_the_question_standing(
         panic!("the elapsed question was withdrawn: {standing:?}");
     };
     assert_eq!(question["message"], json!("anybody there?"), "{question}");
+    let held = held_on(&world, &run);
+    assert_eq!(held["correlation"], surface["correlation"], "{held}");
     assert_eq!(
-        question["abandoned"],
+        held["abandoned"],
         json!(true),
-        "the elapsed question was left attended: {question}"
+        "the elapsed question was left attended: {held}"
     );
 
     // What the advice cannot promise on a *settled* run is that the reply will
@@ -475,6 +502,27 @@ fn every_refusal_names_its_cause_at_exit_two_and_raises_nothing_on_the_channel()
         "{}",
         from_file.stderr
     );
+
+    // A question file that is not there: named, with the path.
+    let missing = world.root.join("no-such-question.md");
+    let unread = waited(asking(
+        &world,
+        &run,
+        &["--file", &missing.to_string_lossy()],
+        &[],
+    ));
+    assert_eq!(unread.code, REFUSED, "{}", unread.stderr);
+    assert!(
+        unread.stderr.contains("could not be read")
+            && unread.stderr.contains(&*missing.to_string_lossy()),
+        "{}",
+        unread.stderr
+    );
+
+    // A reply window of nothing: no wait at all is not a window.
+    let zero = waited(asking(&world, &run, &["--timeout", "0", "which?"], &[]));
+    assert_eq!(zero.code, REFUSED, "{}", zero.stderr);
+    assert!(zero.stderr.contains("--timeout"), "{}", zero.stderr);
 
     // Standard input carrying nothing: the form a worker reaches when its
     // heredoc was empty.
@@ -606,42 +654,6 @@ fn the_answer_is_the_only_thing_on_standard_output_and_the_advice_is_beside_it()
         "a reply carried advice it did not need: {}",
         answered.stderr
     );
-}
-
-/// A guard against a verb that quietly stopped blocking: the answer arrives only
-/// after the manager replies, so the asker is still running while nobody has.
-#[test]
-fn the_question_blocks_until_the_manager_answers() {
-    let world = World::new("ask-blocks");
-    let run = run_of(&world, "askblocks");
-
-    let mut asked = asking(&world, &run, &["--timeout", "120", "which bound?"], &[]);
-    let surface = question_on(&world, &run);
-
-    // Still waiting, a moment after the question is on the channel and before
-    // anybody has answered it.
-    std::thread::sleep(Duration::from_secs(2));
-    assert!(
-        asked
-            .try_wait()
-            .expect("the child is asked about")
-            .is_none(),
-        "the question did not block for its answer"
-    );
-
-    answer(&world, &run, &surface, "the wider one");
-    let mut stdout = String::new();
-    asked
-        .stdout
-        .as_mut()
-        .expect("stdout is piped")
-        .read_to_string(&mut stdout)
-        .expect("the answer is read");
-    assert!(
-        stdout.contains("\"reply\""),
-        "the answer did not arrive: {stdout:?}"
-    );
-    assert_eq!(asked.wait().expect("the question ends").code(), Some(0));
 }
 
 /// The environment's asker rides the frame when one is named, and no asker field

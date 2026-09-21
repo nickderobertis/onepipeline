@@ -189,12 +189,17 @@ pub enum Command {
     Watch(WatchArgs),
     /// Which of a session's runs has nothing watching it.
     Unwatched(UnwatchedArgs),
+    // llmlint: ignore-block[new_command_or_client_gets_its_own_project] two verbs of this one
+    // binary rather than a new command or client: each reads the run store and channel the
+    // engine owns, through the crate's private modules, and ships in the same artifact on
+    // the same three registries — the same shape as `unwatched` above.
     /// Whether a session's turn may end: one verdict over `unwatched`, for a
     /// harness's stop hook.
     StopGuard(StopGuardArgs),
     /// Ask the manager a blocking question over the run's planner channel, and
     /// answer with theirs.
     Ask(AskArgs),
+    // llmlint: ignore-end[new_command_or_client_gets_its_own_project]
     /// Per-node outcomes, with each node's own evidence.
     Results(RunArgs),
     /// What each run is for, and how far it has got.
@@ -849,11 +854,11 @@ pub struct AskArgs {
     /// control character.
     #[arg(long, value_name = "NODE")]
     pub about: Option<String>,
-    /// The reply window, in seconds. Omitted, the `reply_window_seconds` the
-    /// run's launch record's bus configuration names for the `surfaces` queue,
-    /// or the bus's own default when it names none.
+    /// The reply window, in whole seconds, at least one. Omitted, the
+    /// `reply_window_seconds` the run's launch record's bus configuration names
+    /// for the `surfaces` queue, or the bus's own default when it names none.
     #[arg(long, value_name = "SECONDS")]
-    pub timeout: Option<u64>,
+    pub timeout: Option<std::num::NonZeroU64>,
 }
 
 /// `onepipeline drive` — the retained driver a detached launch starts.

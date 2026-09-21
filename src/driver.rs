@@ -241,6 +241,11 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             // llmlint: ignore-end[cli_output_contract]
             Ok(unwatched.exit_code())
         }
+        // llmlint: ignore-block[cli_output_contract] exit 0 on every ending, `warn` and an
+        // unreadable input included, is this verb's contract (entry 85 and the task that
+        // specified it): a harness reads a stop hook's non-zero status as the hook failing,
+        // so a status would turn the guard's own failure into what refuses or garbles the
+        // stop. The failure is reported instead, in the `warn` object on standard output.
         Verb::StopGuard(args) => {
             // Every ending is exit 0 and one object on standard output, or
             // nothing: a harness reads this stream as its decision, and a status
@@ -253,14 +258,14 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 return Ok(EXIT_SUCCESS);
             };
             let (verdict, unresolved) = crate::stopguard::guard(&ledger::runs_root(), &asked);
-            // llmlint: ignore-block[cli_output_contract] what the ordinary `unwatched` writes
-            // on standard error for the same question, and nothing else there: the verdict
-            // is the whole of standard output, because that stream is the decision.
+            // Standard error carries what the ordinary `unwatched` writes there for
+            // the same question, and nothing else: the verdict is the whole of
+            // standard output, because that stream is the decision.
             eprint!("{}", unresolved.concat());
             print!("{}", verdict.render(args.format));
-            // llmlint: ignore-end[cli_output_contract]
             Ok(EXIT_SUCCESS)
         }
+        // llmlint: ignore-end[cli_output_contract]
         Verb::Ask(args) => {
             // Everything read from the environment is read here, and every
             // refusal is made before anything is raised: the question, the run,
@@ -286,6 +291,9 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             // token a manager answers by.
             if let Some(correlation) = raised.correlation() {
                 eprintln!("correlation: {correlation}");
+                // And the window it resolved to, so a caller can tell which of
+                // the flag, the launch record and the bus's default it waits.
+                eprintln!("waiting up to {} seconds for the reply", window.as_secs());
             }
             let asked = raised.answer();
             // llmlint: ignore-block[cli_output_contract] the bus's one-line answer is the

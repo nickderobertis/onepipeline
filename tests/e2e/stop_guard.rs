@@ -83,6 +83,69 @@ fn verdict(stdout: &str) -> Option<Value> {
     Some(serde_json::from_str(trimmed).expect("the verdict is one JSON object"))
 }
 
+/// `docs/stop-guard.md`, the page the neutral contract is stated on.
+fn page() -> String {
+    std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/stop-guard.md"),
+    )
+    .expect("the docs page ships")
+}
+
+/// The neutral input object the page documents, with `<ID>` naming `session`.
+///
+/// Read out of the page rather than restated, so the object a reader copies is
+/// the one these journeys feed: the page and the verb cannot drift apart.
+fn documented_input(session: &str) -> Value {
+    let contract = page()
+        .split("## The contract")
+        .nth(1)
+        .expect("the page states the contract")
+        .to_owned();
+    let block = contract
+        .split("```\n")
+        .find(|block| block.trim_start().starts_with("{\"session\""))
+        .expect("the contract carries the input object");
+    serde_json::from_str(&block.replace("<ID>", session)).expect("the input object is JSON")
+}
+
+/// The output object the page documents for `verdict`.
+fn documented_output(verdict: &str) -> Value {
+    let row = page()
+        .lines()
+        .find(|line| line.starts_with(&format!("| {verdict} |")))
+        .unwrap_or_else(|| panic!("the page has no `{verdict}` row"))
+        .to_owned();
+    let object = row
+        .split('`')
+        .nth(1)
+        .expect("the row carries its object in backticks");
+    serde_json::from_str(object).expect("the documented object is JSON")
+}
+
+/// Hold `told` to the shape the page documents for its verdict: the same
+/// verdict word and the same fields — the values beside it are what the run
+/// under test makes them.
+fn documented(told: &Value) {
+    let word = told["verdict"].as_str().expect("a verdict word");
+    let shape = documented_output(word);
+    let keys = |object: &Value| -> Vec<String> {
+        let mut keys: Vec<String> = object
+            .as_object()
+            .expect("an object")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(shape["verdict"], told["verdict"], "{told}");
+    assert_eq!(
+        keys(&shape),
+        keys(told),
+        "`{word}` is not the shape docs/stop-guard.md documents: {told}"
+    );
+}
+
 /// Feed one neutral input object to the guard.
 fn ask(world: &World, input: &Value) -> crate::harness::Run {
     world.run_with_stdin(&["stop-guard"], &input.to_string())
@@ -111,6 +174,7 @@ fn a_run_nothing_watches_blocks_once_per_condition_and_the_memory_says_which() {
     let told = verdict(&first.stdout).expect("a verdict");
     assert_eq!(told["verdict"], json!("block"), "{told}");
     assert_eq!(told["reason"], json!(report), "{told}");
+    documented(&told);
     assert!(told["reason"]
         .as_str()
         .is_some_and(|reason| reason.contains(&run)));
@@ -126,9 +190,12 @@ fn a_run_nothing_watches_blocks_once_per_condition_and_the_memory_says_which() {
         first.stderr
     );
 
-    // A continuation over the same report: the manager was told and did nothing,
-    // so nothing is said again, and the memory stands.
-    let again = ask(&world, &json!({"session": session, "continuation": true}));
+    // A continuation over the same report, asked with the very object the docs
+    // page documents: the manager was told and did nothing, so nothing is said
+    // again, and the memory stands.
+    let continuing = documented_input(&session);
+    assert_eq!(continuing["continuation"], json!(true), "{continuing}");
+    let again = ask(&world, &continuing);
     again.exited(0);
     assert_eq!(
         verdict(&again.stdout),
@@ -136,6 +203,7 @@ fn a_run_nothing_watches_blocks_once_per_condition_and_the_memory_says_which() {
         "{}",
         again.stdout
     );
+    documented(&verdict(&again.stdout).expect("a verdict"));
     assert!(memory(&world, &session).is_file(), "the memory was dropped");
 
     // The same continuation flag as `--continuation`, decided the same way.
@@ -274,6 +342,7 @@ fn a_question_that_cannot_be_asked_and_a_memory_that_cannot_be_kept_warn_and_nev
     refused.exited(0);
     let told = verdict(&refused.stdout).expect("a verdict");
     assert_eq!(told["verdict"], json!("warn"), "{told}");
+    documented(&told);
     let message = told["message"].as_str().expect("a message");
     assert!(
         message.contains(&format!("onepipeline unwatched --session {session}")),
@@ -402,10 +471,7 @@ fn the_documented_claude_code_wiring_reads_real_stop_payloads_and_answers_its_de
 
     // The command exactly as the docs page wires it, read out of the page so the
     // wiring driven here is the one a reader copies.
-    let page = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/stop-guard.md"),
-    )
-    .expect("the docs page ships");
+    let page = page();
     let settings: Value = serde_json::from_str(
         page.split("## Claude Code")
             .nth(1)
@@ -465,12 +531,11 @@ fn the_documented_claude_code_wiring_reads_real_stop_payloads_and_answers_its_de
     assert_eq!(again.stdout, "", "{}", again.stdout);
 
     // And Codex's rendering is the same presentation of the same verdict: the
-    // continuation is still silent, and with the memory gone the same payload
-    // blocks again in the same shape.
+    // continuation is still silent, and a stop that continues nothing — which
+    // consults no memory — blocks in the same shape.
     let codex = world.run_with_stdin(&["stop-guard", "--format", "codex"], &payload(true));
     codex.exited(0);
     assert_eq!(codex.stdout, "");
-    std::fs::remove_file(memory(&world, &session)).expect("the memory");
     let codex = world.run_with_stdin(&["stop-guard", "--format", "codex"], &payload(false));
     codex.exited(0);
     assert_eq!(

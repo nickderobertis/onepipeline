@@ -164,7 +164,7 @@ pub(crate) struct Request {
     /// The node the question is about, when one was named.
     pub about: Option<Address>,
     /// The reply window, when `--timeout` named one.
-    pub timeout: Option<u64>,
+    pub timeout: Option<std::num::NonZeroU64>,
 }
 
 /// A question raised on the channel, waiting for its answer — or one the bus
@@ -197,7 +197,7 @@ impl Question {
         let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
         let window = request
             .timeout
-            .map(Duration::from_secs)
+            .map(|seconds| Duration::from_secs(seconds.get()))
             .or_else(|| reply_window(launch.bus_config.as_ref()))
             .unwrap_or(onemessagebus::DEFAULT_REPLY_WINDOW);
         let channel = ChannelState::of_run(paths, &launch);

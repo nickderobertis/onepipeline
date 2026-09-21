@@ -45,11 +45,11 @@ pub(crate) fn lines(runs_root: &Path) -> String {
         Ok(root) => asked.push((WORKSPACES, root)),
         Err(why) => {
             return format!(
-                "{INDENT}{LEAD} {} could not be measured, because the linked onevcs could not \
-                 resolve its state root: {}\n{}",
-                WORKSPACES,
-                crate::views::one_line(&why),
-                lines_of(&asked)
+                "{}{INDENT}{LEAD} could not be read for the lifecycle workspaces, because the \
+                 linked onevcs could not resolve its state root: {}, so what is free there is \
+                 unknown\n",
+                lines_of(&asked),
+                crate::views::one_line(&why)
             )
         }
     }

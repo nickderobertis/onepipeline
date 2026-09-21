@@ -36,13 +36,51 @@ const MEMORY_DIR: &str = "onepipeline/stop-guard";
 /// command a person types.
 const ARM_A_WATCH: &str = "onepipeline watch";
 
-/// What this verb was asked: whose stop, and whether it continues a block.
+/// A session id that names somebody: not blank, and free of the NUL no
+/// argument vector could carry. Built only by [`Session::named`], so a session
+/// the guard asks about, keys a memory by, or names in a warning is one that
+/// was checked at the boundary it arrived over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Session(String);
+
+impl Session {
+    /// `text` as a session, or nothing when it names nobody.
+    fn named(text: String) -> Option<Self> {
+        (!text.trim().is_empty() && !text.contains('\0')).then_some(Self(text))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Which stop this is: the first of a turn, or one following a block this guard
+/// made — the one case the memory is consulted on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stop {
+    /// A stop nothing has refused yet.
+    First,
+    /// A stop following a block this guard made.
+    Continuation,
+}
+
+impl Stop {
+    const fn of(continuation: bool) -> Self {
+        if continuation {
+            Self::Continuation
+        } else {
+            Self::First
+        }
+    }
+}
+
+/// What this verb was asked: whose stop, and which stop it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Asked {
     /// The session whose stop this is.
-    pub session: String,
+    pub session: Session,
     /// Whether this stop follows a block this guard made.
-    pub continuation: bool,
+    pub stop: Stop,
 }
 
 /// The one neutral input object the verb reads off standard input when no
@@ -62,12 +100,19 @@ struct NeutralInput {
 /// Codex's own schema says it mirrors Claude's — so one reader serves both
 /// renderings. Every other field of the payload is ignored, because a payload
 /// that grows a field is not a reason to refuse a stop.
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] these two names are the
+// harnesses' own and exist in no machine-readable form this tree can reach: Claude Code
+// publishes its Stop payload only as prose, and Codex's schema is compiled into its
+// binary. The drift gate is `tests/e2e/stop_guard.rs`, which feeds full Stop payloads
+// through the wiring read out of `docs/stop-guard.md`, and that page records how the
+// names were read off `codex-cli 0.154.0` so the next reader can re-check them.
 #[derive(Debug, Deserialize)]
 struct HookInput {
     session_id: Option<String>,
     #[serde(default)]
     stop_hook_active: bool,
 }
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// What the guard decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +136,10 @@ impl Verdict {
                 json!({"verdict": "warn", "message": message})
             }
             (Format::Neutral, Self::None) => json!({"verdict": "none"}),
+            // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the decision
+            // shape is the harnesses', with no machine-readable source this tree can reach;
+            // held by the Claude Code journey in `tests/e2e/stop_guard.rs`, and read off
+            // Codex's compiled schema as `docs/stop-guard.md` records.
             (Format::ClaudeCode | Format::Codex, Self::Block(reason)) => {
                 json!({"decision": "block", "reason": reason})
             }
@@ -98,6 +147,7 @@ impl Verdict {
                 json!({"systemMessage": message})
             }
             (Format::ClaudeCode | Format::Codex, Self::None) => return String::new(),
+            // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
         };
         format!("{object}\n")
     }
@@ -143,9 +193,9 @@ pub(crate) fn asked(args: &StopGuardArgs) -> Option<Asked> {
 
 /// A session that names somebody, or nothing.
 fn named(session: String, continuation: bool) -> Option<Asked> {
-    (!session.trim().is_empty() && !session.contains('\0')).then_some(Asked {
-        session,
-        continuation,
+    Some(Asked {
+        session: Session::named(session)?,
+        stop: Stop::of(continuation),
     })
 }
 
@@ -156,15 +206,16 @@ fn named(session: String, continuation: bool) -> Option<Asked> {
 /// for the same question, handed back so the caller writes exactly that and
 /// nothing else there.
 pub(crate) fn guard(root: &Path, asked: &Asked) -> (Verdict, Vec<String>) {
-    let unwatched = match crate::unwatched::unwatched(root, &asked.session) {
+    let session = asked.session.as_str();
+    let unwatched = match crate::unwatched::unwatched(root, session) {
         Ok(unwatched) => unwatched,
         Err(error) => {
-            forget(&asked.session);
-            return (unguarded(&asked.session, &error), Vec::new());
+            forget(session);
+            return (unguarded(session, &error), Vec::new());
         }
     };
     if unwatched.reported.is_empty() {
-        forget(&asked.session);
+        forget(session);
         return (Verdict::None, unwatched.unresolved);
     }
     // The verb's own lines, byte for byte: they are what name the runs to watch
@@ -173,12 +224,12 @@ pub(crate) fn guard(root: &Path, asked: &Asked) -> (Verdict, Vec<String>) {
     let report = crate::verbs::render_unwatched(&unwatched);
     let unresolved = unwatched.unresolved;
     let digest = hex(&Sha256::digest(report.as_bytes()));
-    if asked.continuation {
-        match remembered(&asked.session) {
+    if asked.stop == Stop::Continuation {
+        match remembered(session) {
             Err(why) => {
                 return (
                     stood_aside(
-                        &asked.session,
+                        session,
                         &report,
                         &format!("could not read what it last blocked on ({why})"),
                     ),
@@ -197,10 +248,10 @@ pub(crate) fn guard(root: &Path, asked: &Asked) -> (Verdict, Vec<String>) {
     // safe to make: without it the next continuation cannot tell an unchanged
     // condition from a moved one, and would block again on the same answer for
     // ever.
-    if let Err(why) = remember(&asked.session, &digest) {
+    if let Err(why) = remember(session, &digest) {
         return (
             stood_aside(
-                &asked.session,
+                session,
                 &report,
                 &format!("could not record what it would block on ({why})"),
             ),
@@ -378,8 +429,8 @@ mod tests {
         assert_eq!(
             named("s-1".into(), true),
             Some(Asked {
-                session: "s-1".into(),
-                continuation: true
+                session: Session("s-1".into()),
+                stop: Stop::Continuation
             })
         );
     }
