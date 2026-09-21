@@ -7028,10 +7028,16 @@ point is too, and the consumer's recipes become passthroughs.
   where `recover` finds a preserved one. The worktree is removed **by path** with
   `git worktree remove --force` on every return and on a panic, never `prune`,
   which would sweep other stale entries that are not this verb's. The checkout
-  itself, its worktree list included, is left as it was found. A process ended by
-  a signal mid-draft does not run that cleanup. The worktree it leaves is named in
-  the checkout's worktree list for an operator to remove. That is the one exit path
-  not covered.
+  itself, its worktree list included, is left as it was found. That holds for a
+  landing ended by `SIGINT`, `SIGTERM` or `SIGHUP` mid-draft too, which no drop
+  reaches: for the drafting turn's lifetime alone the verb holds a handler
+  (`sys::on_interrupt`) that removes the worktree and the turn's directory,
+  restores the signal's default action and sends the process that same signal, so
+  it still ends of it with nothing landed. It is the only handler this crate
+  installs, and a run's processes hold none. A signal the process was started
+  ignoring stays ignored. On Windows nothing is held, so there a console's Ctrl-C
+  mid-draft leaves the worktree named in the checkout's list — the one catchable
+  ending not covered. `SIGKILL` cannot be caught on any platform.
 - **What it is asked.** The task the lifecycle composes, with one substitution.
   Where the run path appends the node's rendered task, this appends what the branch
   says about itself: its name, its base — the origin's default branch: the
@@ -7110,6 +7116,12 @@ doubled at `ONEVCS_GH`. The journeys:
   drafter that left something undeletable costs the landing nothing. Standard
   error names the worktree, the checkout, the command that removes it, and the
   directory left to remove by hand.
+- `a_landing_interrupted_mid_draft_takes_its_drafting_worktree_out_of_the_checkout`:
+  a landing whose drafter is still holding its worktree is sent `SIGINT` to its
+  whole group, as a terminal sends it, and `SIGTERM` and `SIGHUP` to itself alone.
+  Each time it ends of that signal with nothing landed, the checkout's worktree
+  list reads as it did before the landing, and the worktree and the turn's
+  directory are gone.
 - `the_synopsis_the_register_proposes_is_the_one_the_binary_prints`: the block
   above is each verb's `--help` usage line, byte for byte.
 - `every_argument_reaches_the_onevcs_verb_and_its_refusals_are_its_own`: an
@@ -7122,5 +7134,5 @@ Each journey was seen to fail for its own reason against a build that dropped th
 body, kept the worktree, ignored `local-direct` or the narrowed policy, kept a
 death to itself, lost a way of finding the base, dropped the empty-branch
 sentence, ignored a caller's body on `recover`, hid why a draft could not start,
-swallowed a worktree it could not remove, or printed a synopsis other than the
-one above.
+swallowed a worktree it could not remove, left an interrupted draft's worktree in
+the checkout's list, or printed a synopsis other than the one above.

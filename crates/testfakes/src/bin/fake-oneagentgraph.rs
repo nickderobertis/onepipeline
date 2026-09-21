@@ -579,6 +579,13 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     if persona.as_deref() == Some("pr-author") && dir.join("pr-author.records-tree").exists() {
         record_tree(args, dir);
     }
+    // A drafter still mid-turn when the landing is interrupted (`pr-author.holds`):
+    // it has recorded its tree — the journey's sign the turn is in flight — and
+    // then holds until the journey releases `pr-author.go`, bounded as every hold
+    // is so a landing that failed to end leaves a failing test, not a process.
+    if persona.as_deref() == Some("pr-author") && dir.join("pr-author.holds").exists() {
+        fake::wait_for(&dir.join("pr-author.go"));
+    }
     // A drafter that leaves behind something its worktree's owner cannot remove:
     // a directory it made unwritable, with a file in it (`pr-author.leaves-unremovable`).
     // What a journey needs to see how a landing reports a worktree it could not take

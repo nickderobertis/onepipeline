@@ -680,8 +680,10 @@ fn taskkill(pid: u32, reach: Reach) -> std::io::Result<std::process::ExitStatus>
     // Nothing is given up by asking forcefully. The polite mode's promise is
     // that a process may record its own abandonment first, and it is `SIGTERM`
     // that carries it — a signal whose default action is to terminate, which
-    // nothing in this crate installs a handler for. So the grace this drops is
-    // grace no process here was taking.
+    // nothing a run is made of installs a handler for (the one handler this
+    // crate has, [`on_interrupt`], is held across an out-of-band landing's
+    // drafting turn only, and ends the process of the signal all the same). So
+    // the grace this drops is grace no process here was taking.
     crate::rendercost::process_spawned("taskkill");
     let mut ask = std::process::Command::new("taskkill");
     ask.args(["/PID", &pid.to_string(), "/F"]);
@@ -1590,6 +1592,216 @@ fn platform_disown_standard_handles() {
     }
 }
 
+/// While held, a `SIGINT`, `SIGTERM` or `SIGHUP` runs `then` before it ends the
+/// process.
+///
+/// The one handler anything in this crate installs, and it is bounded: it is
+/// held across an out-of-band landing's drafting turn and nothing else, because
+/// that turn has cut a worktree into a checkout it does not own, and a person
+/// interrupting the landing from a terminal — or closing it — would otherwise
+/// leave that checkout's worktree list naming a directory nobody removes. A run's own
+/// processes still install none, which is what a `stop`'s `SIGTERM` relies on.
+///
+/// What the handler itself does is write the signal's number down a pipe — the
+/// one async-signal-safe thing it needs — and a thread of this guard's reads it,
+/// runs `then`, restores the default action and sends the process that same
+/// signal, so it ends exactly as it would have with no handler at all: the
+/// same status, seen by the same parent. A signal this process was started
+/// ignoring stays ignored, because it would not have ended the process either.
+/// Dropping the guard restores what was there before it.
+///
+/// On Windows the guard installs nothing: a console's Ctrl-C there is not a
+/// signal this seam can hold, and the landing's cleanup is its drop alone.
+pub(crate) struct OnInterrupt {
+    #[cfg(unix)]
+    held: Option<unix_interrupt::Held>,
+}
+
+/// Hold [`OnInterrupt`] until the guard is dropped, or say why it could not be.
+pub(crate) fn on_interrupt(
+    then: impl Fn() + Send + 'static,
+) -> std::result::Result<OnInterrupt, String> {
+    #[cfg(unix)]
+    {
+        unix_interrupt::hold(Box::new(then)).map(|held| OnInterrupt { held: Some(held) })
+    }
+    #[cfg(not(unix))]
+    {
+        drop(then);
+        Ok(OnInterrupt {})
+    }
+}
+
+impl Drop for OnInterrupt {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(held) = self.held.take() {
+            held.release();
+        }
+    }
+}
+
+#[cfg(unix)]
+mod unix_interrupt {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    /// The signals a guard holds.
+    const HELD: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+
+    /// The write end of the held guard's pipe, or `-1` while none is held — read
+    /// by the handler, which may touch nothing but an atomic.
+    static WAKE: AtomicI32 = AtomicI32::new(-1);
+
+    /// One held guard: the pipe, the thread reading it, and what each signal's
+    /// action was before, to put back.
+    pub(super) struct Held {
+        read: libc::c_int,
+        write: libc::c_int,
+        before: Vec<(libc::c_int, libc::sigaction)>,
+        reader: Option<std::thread::JoinHandle<()>>,
+    }
+
+    /// Write the signal's number down the pipe.
+    extern "C" fn relay(signal: libc::c_int) {
+        let fd = WAKE.load(Ordering::SeqCst);
+        if fd >= 0 {
+            // A signal number fits a byte on every platform this builds for, and
+            // zero is never one — it is what `release` wakes the reader with.
+            let byte = u8::try_from(signal).unwrap_or(u8::MAX);
+            // SAFETY: `write` is async-signal-safe, `fd` is the pipe's write end
+            // while `WAKE` names it, and the buffer is this frame's one byte.
+            unsafe { libc::write(fd, (&raw const byte).cast(), 1) };
+        }
+    }
+
+    pub(super) fn hold(then: Box<dyn Fn() + Send>) -> Result<Held, String> {
+        let mut ends = [0 as libc::c_int; 2];
+        // SAFETY: `ends` is two writable descriptors' worth of memory.
+        if unsafe { libc::pipe(ends.as_mut_ptr()) } != 0 {
+            return Err(format!(
+                "no pipe for the interrupt handler: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let [read, write] = ends;
+        for fd in ends {
+            // SAFETY: both descriptors are this call's own, just opened; a child
+            // this process starts must not inherit either.
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+        if WAKE
+            .compare_exchange(-1, write, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            close(read);
+            close(write);
+            return Err("an interrupt handler is already held".to_owned());
+        }
+        let reader = std::thread::Builder::new()
+            .name("onepipeline-interrupt".into())
+            .spawn(move || {
+                let Some(signal) = next_signal(read) else {
+                    return;
+                };
+                then();
+                // SAFETY: putting a signal's default action back and sending it
+                // to this process touch no memory; the default for every held
+                // signal is to terminate, which is the ending being restored.
+                unsafe {
+                    libc::signal(signal, libc::SIG_DFL);
+                    libc::kill(libc::getpid(), signal);
+                }
+                // Delivery to a process is asynchronous; this thread must not
+                // return into a program that has been told to end.
+                loop {
+                    std::thread::park();
+                }
+            });
+        let reader = match reader {
+            Ok(reader) => reader,
+            Err(error) => {
+                WAKE.store(-1, Ordering::SeqCst);
+                close(read);
+                close(write);
+                return Err(format!("no thread for the interrupt handler: {error}"));
+            }
+        };
+        let mut before = Vec::new();
+        for signal in HELD {
+            // SAFETY: `sigaction` with a null new action only reads the current
+            // one into memory this frame owns.
+            let mut was: libc::sigaction = unsafe { std::mem::zeroed() };
+            unsafe { libc::sigaction(signal, std::ptr::null(), &raw mut was) };
+            if was.sa_sigaction == libc::SIG_IGN {
+                continue;
+            }
+            // SAFETY: as above; the new action's handler is `relay`, which is
+            // async-signal-safe, and its mask is empty.
+            let mut now: libc::sigaction = unsafe { std::mem::zeroed() };
+            now.sa_sigaction = relay as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            now.sa_flags = libc::SA_RESTART;
+            unsafe {
+                libc::sigemptyset(&raw mut now.sa_mask);
+                libc::sigaction(signal, &raw const now, std::ptr::null_mut());
+            }
+            before.push((signal, was));
+        }
+        Ok(Held {
+            read,
+            write,
+            before,
+            reader: Some(reader),
+        })
+    }
+
+    impl Held {
+        /// Put every action back, then stop the reader and close the pipe.
+        ///
+        /// A signal that arrived before the actions went back has already been
+        /// written down the pipe, so the reader sees it before the zero this
+        /// wakes it with and the process still ends of it.
+        pub(super) fn release(mut self) {
+            for (signal, was) in &self.before {
+                // SAFETY: `was` is the action `hold` read for this signal.
+                unsafe { libc::sigaction(*signal, was, std::ptr::null_mut()) };
+            }
+            WAKE.store(-1, Ordering::SeqCst);
+            let zero = 0u8;
+            // SAFETY: `write` is this guard's own open descriptor.
+            unsafe { libc::write(self.write, (&raw const zero).cast(), 1) };
+            if let Some(reader) = self.reader.take() {
+                let _ = reader.join();
+            }
+            close(self.read);
+            close(self.write);
+        }
+    }
+
+    /// The next signal written down the pipe, or `None` once `release` wrote the
+    /// zero or the pipe could not be read.
+    fn next_signal(read: libc::c_int) -> Option<libc::c_int> {
+        loop {
+            let mut byte = 0u8;
+            // SAFETY: `read` is the guard's own read end, open until `release`
+            // has joined this thread, and the buffer is one byte this frame owns.
+            let got = unsafe { libc::read(read, (&raw mut byte).cast(), 1) };
+            if got == 1 {
+                return (byte != 0).then_some(libc::c_int::from(byte));
+            }
+            if got < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+            {
+                continue;
+            }
+            return None;
+        }
+    }
+
+    fn close(fd: libc::c_int) {
+        // SAFETY: `fd` is a descriptor this module opened and closes once.
+        unsafe { libc::close(fd) };
+    }
+}
+
 /// The session that launched a run, as the harness's environment reports it.
 ///
 /// Detected from the exported environment and never from process ancestry, and
@@ -1650,6 +1862,35 @@ pub(crate) fn reaped_pid() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One interrupt guard at a time, and releasing it puts back exactly the
+    /// action that was there before — the signal the landing is then sent ends
+    /// it as it would have with no guard at all.
+    #[cfg(unix)]
+    #[test]
+    fn an_interrupt_guard_is_held_once_and_released_to_what_was_there() {
+        let action = || {
+            // SAFETY: a null new action only reads the current one into memory
+            // this frame owns.
+            let mut was: libc::sigaction = unsafe { std::mem::zeroed() };
+            unsafe { libc::sigaction(libc::SIGTERM, std::ptr::null(), &raw mut was) };
+            was.sa_sigaction
+        };
+        let before = action();
+        let held = on_interrupt(|| {}).expect("the guard is held");
+        assert_ne!(action(), before, "holding the guard installed nothing");
+        let refused = on_interrupt(|| {})
+            .err()
+            .expect("a second guard is refused");
+        assert!(refused.contains("already held"), "{refused}");
+        drop(held);
+        assert_eq!(
+            action(),
+            before,
+            "releasing the guard left its handler behind"
+        );
+        drop(on_interrupt(|| {}).expect("a released guard can be held again"));
+    }
 
     #[test]
     fn the_epoch_renders_as_rfc3339_millis() {

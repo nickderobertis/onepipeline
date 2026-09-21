@@ -11,6 +11,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use clap::{CommandFactory, Parser};
 
@@ -274,7 +275,7 @@ fn draft(graph: &str, checkout: &Path, branch: &str) -> Drafted {
             "the drafting dispatch could not start: {why}"
         )))
     };
-    let mut scratch = match Scratch::new(checkout) {
+    let scratch = match Scratch::new(checkout) {
         Ok(scratch) => scratch,
         Err(why) => return could_not_start(why),
     };
@@ -367,12 +368,74 @@ fn death(envelope: &Envelope) -> Option<String> {
 /// are somebody else's — and then the directory. Either failing is said on
 /// standard error rather than swallowed, because the promise is that the checkout
 /// is left as it was found.
+///
+/// A drop is not every way out: a person interrupting the landing from a
+/// terminal ends the process with no unwind at all. So for as long as it lives
+/// it holds [`crate::sys::on_interrupt`], and a `SIGINT`, `SIGTERM` or `SIGHUP` removes the
+/// same two things before the process ends of that signal. What both paths remove
+/// is one [`Leftover`] behind one lock, so whichever comes second finds nothing
+/// left to do, and what is recorded there is only ever what was made.
 struct Scratch {
     dir: PathBuf,
     checkout: PathBuf,
+    left: Arc<Mutex<Leftover>>,
+    /// Declared last so it is released after [`Drop::drop`] has emptied `left`:
+    /// a signal in between finds nothing to remove and still ends the process.
+    _interrupts: crate::sys::OnInterrupt,
+}
+
+/// What a drafting turn has made and not yet removed.
+struct Leftover {
+    checkout: PathBuf,
+    /// The turn's directory, once it has been created.
+    dir: Option<PathBuf>,
     /// The worktree, once one has been cut — and only then, so what is removed is
     /// only ever what was added.
     worktree: Option<PathBuf>,
+}
+
+impl Leftover {
+    /// Remove whatever is left, saying on standard error what could not be.
+    fn remove(&mut self) {
+        if let Some(worktree) = self.worktree.take() {
+            let removed = git_in(
+                &self.checkout,
+                [
+                    OsStr::new("worktree"),
+                    OsStr::new("remove"),
+                    OsStr::new("--force"),
+                    worktree.as_os_str(),
+                ],
+            );
+            if let Err(why) = removed {
+                eprintln!(
+                    "onepipeline: the drafting worktree at {} could not be removed from {}: \
+                     {why}; remove it with `git -C {} worktree remove --force {}`",
+                    worktree.display(),
+                    self.checkout.display(),
+                    self.checkout.display(),
+                    worktree.display()
+                );
+            }
+        }
+        if let Some(dir) = self.dir.take() {
+            if let Err(error) = std::fs::remove_dir_all(&dir) {
+                eprintln!(
+                    "onepipeline: the drafting turn's directory {} could not be removed: \
+                     {error}; remove it by hand",
+                    dir.display()
+                );
+            }
+        }
+    }
+}
+
+/// The leftover behind its lock, whoever panicked while holding it: what it
+/// records is still exactly what was made.
+fn left(leftover: &Mutex<Leftover>) -> std::sync::MutexGuard<'_, Leftover> {
+    leftover
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// What the branch says about itself, read out of the checkout before the
@@ -389,6 +452,22 @@ struct Tree {
 impl Scratch {
     fn new(checkout: &Path) -> std::result::Result<Self, String> {
         static MINTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let leftover = Arc::new(Mutex::new(Leftover {
+            checkout: checkout.to_path_buf(),
+            dir: None,
+            worktree: None,
+        }));
+        // Held before anything is made, so there is no moment in which something
+        // exists that an interrupt would leave behind.
+        let interrupts = crate::sys::on_interrupt({
+            let leftover = Arc::clone(&leftover);
+            move || {
+                eprintln!(
+                    "onepipeline: interrupted while drafting; removing the drafting worktree"
+                );
+                left(&leftover).remove();
+            }
+        })?;
         let root = std::env::temp_dir();
         for _ in 0..64 {
             let dir = root.join(format!(
@@ -396,13 +475,17 @@ impl Scratch {
                 crate::sys::pid(),
                 MINTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
+            let mut made = left(&leftover);
             match std::fs::create_dir(&dir) {
                 Ok(()) => {
+                    made.dir = Some(dir.clone());
+                    drop(made);
                     return Ok(Self {
                         dir,
                         checkout: checkout.to_path_buf(),
-                        worktree: None,
-                    })
+                        left: leftover,
+                        _interrupts: interrupts,
+                    });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => {
@@ -422,7 +505,7 @@ impl Scratch {
     /// it does not — a preserved branch `recover` lands may be only there. The base
     /// is the origin's default branch, which is the base `onevcs` lands both verbs
     /// onto.
-    fn cut(&mut self, branch: &str) -> std::result::Result<Tree, String> {
+    fn cut(&self, branch: &str) -> std::result::Result<Tree, String> {
         let head = [
             format!("refs/heads/{branch}"),
             format!("refs/remotes/origin/{branch}"),
@@ -453,6 +536,10 @@ impl Scratch {
             "--",
         ])?;
         let worktree = self.dir.join("branch");
+        // Under the lock, so an interrupt arriving while git is adding the
+        // worktree waits for it and then removes it, rather than finding nothing
+        // recorded and leaving the entry git is about to write.
+        let mut made = left(&self.left);
         git_in(
             &self.checkout,
             [
@@ -463,7 +550,8 @@ impl Scratch {
                 OsStr::new(&head),
             ],
         )?;
-        self.worktree = Some(worktree.clone());
+        made.worktree = Some(worktree.clone());
+        drop(made);
         Ok(Tree {
             base,
             commits,
@@ -527,34 +615,7 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        if let Some(worktree) = &self.worktree {
-            let removed = git_in(
-                &self.checkout,
-                [
-                    OsStr::new("worktree"),
-                    OsStr::new("remove"),
-                    OsStr::new("--force"),
-                    worktree.as_os_str(),
-                ],
-            );
-            if let Err(why) = removed {
-                eprintln!(
-                    "onepipeline: the drafting worktree at {} could not be removed from {}: \
-                     {why}; remove it with `git -C {} worktree remove --force {}`",
-                    worktree.display(),
-                    self.checkout.display(),
-                    self.checkout.display(),
-                    worktree.display()
-                );
-            }
-        }
-        if let Err(error) = std::fs::remove_dir_all(&self.dir) {
-            eprintln!(
-                "onepipeline: the drafting turn's directory {} could not be removed: {error}; \
-                 remove it by hand",
-                self.dir.display()
-            );
-        }
+        left(&self.left).remove();
     }
 }
 

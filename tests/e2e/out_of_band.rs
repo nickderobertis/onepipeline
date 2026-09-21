@@ -846,3 +846,130 @@ fn a_drafting_worktree_that_cannot_be_removed_is_named_for_the_operator() {
         world.dump()
     );
 }
+
+/// A landing interrupted mid-draft — the moment a person at a terminal is most
+/// likely to give up on it — leaves the named checkout's worktree list as it
+/// was and the drafting worktree's directory gone, and still ends of the signal
+/// it was sent, with nothing landed.
+///
+/// Every way it is asked to end: `SIGINT` to its whole process group, as a
+/// terminal's Ctrl-C sends it, so the drafter dies of it too; and `SIGTERM` and
+/// `SIGHUP` to the landing alone, so the drafter is still holding its worktree
+/// when the landing goes.
+///
+/// `#[cfg(unix)]` because it signals by pid and group.
+#[cfg(unix)]
+#[test]
+fn a_landing_interrupted_mid_draft_takes_its_drafting_worktree_out_of_the_checkout() {
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    use std::process::Stdio;
+
+    for (signal, name, whole_group) in [
+        (libc::SIGINT, "sigint", true),
+        (libc::SIGTERM, "sigterm", false),
+        (libc::SIGHUP, "sighup", false),
+    ] {
+        // The drafting turn's directory under the world, so a landing that failed
+        // to remove it leaves it where the world is cleaned up.
+        let world = World::new(&format!("oob-interrupted-{name}"));
+        let tmp = world.root.join("tmp");
+        std::fs::create_dir_all(&tmp).expect("a temporary directory");
+        let world = world.with_env("TMPDIR", &tmp.to_string_lossy());
+        let repository = world.repository("change-open", &[]);
+        branch_with_work(&world, &repository);
+        world.script("pr-author.body", "## What\nA widget.\n");
+        world.script("pr-author.records-tree", "1");
+        world.script("pr-author.holds", "1");
+        let graph = world.pr_author_graph();
+        let before = state_of(&world, &repository.checkout);
+
+        let mut landing = world.cmd(&[
+            "publish-branch",
+            BRANCH,
+            "--repo",
+            "service",
+            "--title",
+            "feat: add the widget",
+            "--pr-author-graph",
+            &graph,
+        ]);
+        landing.process_group(0);
+        let landing = landing
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the landing starts");
+        let recorded = world.fakes.join("pr-author-tree.jsonl");
+        world.until("the drafting turn to be in flight", |_| {
+            std::fs::read_to_string(&recorded).is_ok_and(|said| said.ends_with('\n'))
+        });
+        let tree: Value = serde_json::from_str(
+            std::fs::read_to_string(&recorded)
+                .expect("the drafting turn recorded its tree")
+                .trim(),
+        )
+        .expect("a recorded tree");
+        let worktree =
+            Path::new(tree["dir"].as_str().expect("the tree names its directory")).to_path_buf();
+        assert!(
+            git(
+                &world,
+                &repository.checkout,
+                &["worktree", "list", "--porcelain"]
+            )
+            .contains(&worktree.display().to_string()),
+            "{name}: the drafting worktree is not in the checkout's list while it drafts"
+        );
+
+        let pid = i32::try_from(landing.id()).expect("a pid fits");
+        // SAFETY: `kill` and `killpg` take an id and a signal and touch no memory;
+        // the id is the landing's own, started in a group of its own, so the
+        // signal reaches nothing this journey did not start.
+        let sent = unsafe {
+            if whole_group {
+                libc::killpg(pid, signal)
+            } else {
+                libc::kill(pid, signal)
+            }
+        };
+        assert_eq!(sent, 0, "{name}: the landing could not be signalled");
+        let ended = landing.wait_with_output().expect("the landing ends");
+        // Released only now, so a drafter the signal did not reach goes too.
+        world.release("pr-author.go");
+
+        let stderr = String::from_utf8_lossy(&ended.stderr);
+        assert_eq!(
+            ended.status.signal(),
+            Some(signal),
+            "{name}: the landing did not end of the signal it was sent: {:?}\n{stderr}",
+            ended.status
+        );
+        assert_eq!(
+            state_of(&world, &repository.checkout).0,
+            before.0,
+            "{name}: the checkout's worktree list still names the drafting worktree\n{stderr}"
+        );
+        assert!(
+            !worktree.exists(),
+            "{name}: the drafting worktree outlived the landing: {}",
+            worktree.display()
+        );
+        let turn = worktree
+            .parent()
+            .expect("the worktree is inside its turn's directory");
+        assert!(
+            !turn.exists(),
+            "{name}: the drafting turn's directory outlived the landing: {}",
+            turn.display()
+        );
+        assert_eq!(
+            opened(&world),
+            Vec::new(),
+            "{name}: an interrupted landing landed"
+        );
+        assert!(
+            stderr.contains("interrupted while drafting; removing the drafting worktree"),
+            "{name}: {stderr}"
+        );
+    }
+}

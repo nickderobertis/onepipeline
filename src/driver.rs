@@ -54,11 +54,13 @@ const DRIVER_HANDOVER: Duration = Duration::from_secs(30);
 /// there.
 ///
 /// The polite signal is `SIGTERM` and nothing a run is made of installs a
-/// handler for it, so a process that has taken one is gone in milliseconds; what
-/// this waits out is a loaded host and the moment between a parent dying and
-/// `init` reaping what it left. Long enough that an ordinary teardown never
-/// reports a survivor it merely outran, short enough that an operator whose run
-/// really is wedged hears about it rather than watching a command hang.
+/// handler for it — the one handler this crate has is an out-of-band landing's,
+/// held across its drafting turn alone and never inside a run — so a process
+/// that has taken one is gone in milliseconds; what this waits out is a loaded
+/// host and the moment between a parent dying and `init` reaping what it left.
+/// Long enough that an ordinary teardown never reports a survivor it merely
+/// outran, short enough that an operator whose run really is wedged hears about
+/// it rather than watching a command hang.
 const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
 
 /// How many of a failed driver's last lines a refusal repeats.
