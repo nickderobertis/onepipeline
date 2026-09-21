@@ -140,6 +140,12 @@ fn is_false(value: &bool) -> bool {
 /// **whole queue** read as empty, or the surface dropped from the fold — either
 /// way a surface lost, which is a far worse answer to a name this crate never
 /// writes than simply not knowing whose it was.
+// llmlint: ignore-block[boundary_inputs_validated] these two read fields of records this
+// channel already holds rather than input at a boundary, and they read them as 0.28.2 and
+// the bus's copy of this layout did: refusing a malformed asker or correlation would refuse
+// the whole surface or queue around it, losing a question, where reading "nobody" loses one
+// field. A malformed asker is refused where it enters, by the bus's own `Asker`
+// constructor in the serving session that names it.
 pub(super) fn recorded_asker<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Asker>, D::Error> {
@@ -154,6 +160,7 @@ pub(super) fn recorded_correlation<'de, D: serde::Deserializer<'de>>(
 ) -> Result<Option<Correlation>, D::Error> {
     Ok(Option::<String>::deserialize(deserializer)?.and_then(|text| text.parse().ok()))
 }
+// llmlint: ignore-end[boundary_inputs_validated]
 
 /// One surface, as it sits in the durable queue.
 ///
