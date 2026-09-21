@@ -9,8 +9,8 @@
 //! is what keeps a hook from changing any of them.
 //!
 //! The paragraph's idempotency **epoch** is two of those halves: [`fired`] holds
-//! the marker against it, and [`live`] is the predicate the rule's "live again" is
-//! measured by.
+//! the marker against it, and [`ending`] is the predicate the rule's "live again"
+//! and "a different ending" are both measured by.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -455,9 +455,14 @@ fn mark(paths: &RunPaths, firing: &Firing, command: &str) -> Result<bool> {
 /// for an ending nobody edited.
 ///
 /// The graph is asked **on both sides** of the edit, because the rule is that the
-/// edit *made* the run live: a run already live when the edit arrived was made so
-/// by something else, and an inert edit landing after it would otherwise inherit an
-/// epoch it had nothing to do with.
+/// edit *changed* what the run is at: a run already live when the edit arrived was
+/// made so by something else, and an inert edit landing after it would otherwise
+/// inherit an epoch it had nothing to do with. What is compared is [`ending`] —
+/// live, complete or failed — so the two edits the contract names as epochs are one
+/// test: a `retry` takes an ended run to a live one, and a `settle` that moves the
+/// failed node straight to `done` takes a failed ending to a complete one without
+/// the graph ever being live in between. The second is the incident of #396: the
+/// failure's marker went on standing over an ending it never fired for.
 ///
 /// A fold that has lost a record — [`RunState::strict`] — retires nothing. An
 /// `edit-committed` whose operations this build cannot parse might have been the
@@ -493,17 +498,56 @@ fn epochs(events: &[Envelope]) -> Epochs {
     let mut ended_by = Vec::new();
     for (at, event) in events.iter().enumerate() {
         let kind = PipelineKind::from_wire(&event.kind);
-        let edit = kind == Some(PipelineKind::EditCommitted);
-        let was_live = edit && fired && live(&state);
+        // The ending in front of an edit arriving while a marker stands, and
+        // nothing otherwise: an edit that found the run live changed no ending,
+        // whatever it left behind.
+        let before = (kind == Some(PipelineKind::EditCommitted) && fired)
+            .then(|| ending(&state))
+            .flatten();
         crate::projection::fold_one(&mut state, event);
-        if edit && fired && !was_live && state.strict && live(&state) {
-            fired = false;
-            ended_by.push(at);
-        } else if kind == Some(PipelineKind::RunHookFired) {
-            fired = true;
+        match before {
+            Some(before) if state.strict && ending(&state) != Some(before) => {
+                fired = false;
+                ended_by.push(at);
+            }
+            _ if kind == Some(PipelineKind::RunHookFired) => fired = true,
+            _ => {}
         }
     }
     Epochs { fired, ended_by }
+}
+
+/// The two ways a graph has ended, as the epoch rule tells them apart: which hook
+/// a run at that graph fires.
+///
+/// Only the hook, and not the failure's reason: a `settle` that moves a parked
+/// node to `failed` has changed why the run failed and not that it did, and firing
+/// the failure hook again for it would be a second hook for one ending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    /// Every node is `done`.
+    Complete,
+    /// Some node is not, and none can still be carried out.
+    Failed,
+}
+
+/// What the graph is at, for the epoch rule: `None` while it is [`live`], and
+/// otherwise the hook it has ended under.
+///
+/// An edit is an epoch when this differs on its two sides and the side in front of
+/// it had ended: an ended run made live is the contract's "live again", and a
+/// failed ending made complete is its "a different ending". The graph with no
+/// nodes reads as `Complete` here and it does not matter: a marker stands only
+/// after a firing, and [`judge`] fires nothing for an empty graph.
+fn ending(state: &RunState) -> Option<Ended> {
+    let statuses = state.statuses();
+    if live(&statuses) {
+        None
+    } else if statuses.values().all(|status| *status == NodeStatus::Done) {
+        Some(Ended::Complete)
+    } else {
+        Some(Ended::Failed)
+    }
 }
 
 /// The two parts of an `edit-committed` record `results` names an edit by: the
@@ -574,7 +618,7 @@ fn edit_named(edit: &Envelope) -> String {
 
 /// Whether the run has work it can still carry out, on the graph as it stands.
 ///
-/// The contract's "live again", as a question about one graph. Two of the answers
+/// The contract's "live again", as a question about one graph's statuses. Two of the answers
 /// below cannot be checked against it by reading the match:
 ///
 /// * `pending` answers `false` and is not an oversight. A node is `pending` only
@@ -591,8 +635,8 @@ fn edit_named(edit: &Envelope) -> String {
 /// Exhaustive on purpose: a status added later has to decide this rather than
 /// inherit `false`, which would silently stop a run that reaches it from ever
 /// firing again.
-fn live(state: &RunState) -> bool {
-    state.statuses().values().any(|status| match status {
+fn live(statuses: &BTreeMap<String, NodeStatus>) -> bool {
+    statuses.values().any(|status| match status {
         NodeStatus::Ready | NodeStatus::Running => true,
         NodeStatus::Waiting | NodeStatus::CompleteDraft => true,
         NodeStatus::Pending
