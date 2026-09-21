@@ -274,8 +274,9 @@ jobs:
   # above never reaches — `just test` excludes the `release_channel` binary by
   # name, and `just release-compat` runs it and nothing else. The binary itself
   # is still compiled and linted by the gate (`--all-targets`). It needs no
-  # credential; what it needs is uv and the wheel, and the step below fails fast
-  # naming whichever is missing, so this job never passes without running.
+  # credential; what it needs is uv and the wheel, and the journeys' first act is
+  # to resolve both, failing fast naming whichever is missing, so this job never
+  # passes without running them.
   release-compat:
     needs: changes
     if: needs.changes.outputs.crate == 'true'
@@ -291,13 +292,6 @@ jobs:
       # `just bootstrap`, so it provisions that one binary as `smoke` does.
       - name: The onetaskgraph every plan is read through
         run: just _ensure-onetaskgraph
-      - name: The pinned 0.28.2 wheel is reachable
-        run: |
-          command -v uv >/dev/null || { echo "::error::release-compat needs uv on PATH to run the onepipeline-cli 0.28.2 wheel; astral-sh/setup-uv above provides it." >&2; exit 1; }
-          reported="$(uv tool run --from onepipeline-cli==0.28.2 onepipeline --version)" \
-            || { echo "::error::uv could not install onepipeline-cli==0.28.2 from its package index; the journeys compare this build against that wheel and cannot run without it." >&2; exit 1; }
-          [ "$reported" = "onepipeline 0.28.2" ] \
-            || { echo "::error::uv's onepipeline-cli==0.28.2 reports '$reported'; clear its cache with 'uv cache clean onepipeline-cli'." >&2; exit 1; }
       - name: The 0.28.2 wheel against this build
         run: just release-compat
 

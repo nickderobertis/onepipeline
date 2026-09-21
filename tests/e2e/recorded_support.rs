@@ -13,6 +13,12 @@ use serde_json::{json, Value};
 
 use crate::harness::World;
 
+/// The `onepipeline-cli` release every channel comparison is held to: the one
+/// whose answers `recorded_channel` checks in, and whose wheel `release_channel`
+/// drives. `docs/contract.md` names it, and `recorded_channel` holds the two to
+/// one another.
+pub(crate) const RELEASE: &str = "0.28.2";
+
 /// The run every recorded channel is read inside: the recorded run root's own id.
 pub(crate) const RUN: &str = "onemessagebus-repair-2";
 

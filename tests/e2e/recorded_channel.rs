@@ -29,10 +29,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::harness::{binary, World};
+use crate::harness::{binary, repo_file, World};
 use crate::recorded_support::{
     aged, answered, journalled_here, normalized, recorded, recorded_world, seeded_with,
-    without_the_reset_report, LAYOUT, RUN,
+    without_the_reset_report, LAYOUT, RELEASE, RUN,
 };
 
 /// The variable that turns these journeys from comparing into capturing.
@@ -99,9 +99,6 @@ fn answers_over(fixture: &str, program: &Path) -> Value {
     })
 }
 
-/// The version every answer under `tests/recorded/answers/` is the answer of.
-const RELEASE: &str = "onepipeline 0.28.2";
-
 /// The executable [`CAPTURE_ENV`] names, refused unless it runs and reports
 /// [`RELEASE`] — so an answer file is never overwritten with what some other
 /// program, or another release, answered.
@@ -117,8 +114,9 @@ fn the_release_named(program: &Path) -> PathBuf {
         });
     let version = String::from_utf8_lossy(&reported.stdout);
     assert!(
-        reported.status.success() && version.trim() == RELEASE,
-        "{CAPTURE_ENV} names {}, which reports {:?} rather than {RELEASE}; nothing was captured",
+        reported.status.success() && version.trim() == format!("onepipeline {RELEASE}"),
+        "{CAPTURE_ENV} names {}, which reports {:?} rather than onepipeline {RELEASE}; nothing \
+         was captured",
         program.display(),
         version.trim()
     );
@@ -261,5 +259,29 @@ fn normalizing_a_written_record_blanks_only_what_no_two_runs_share() {
     assert_eq!(
         normalized(r#"{"message":"queued_at is only a word here","id":1}"#),
         r#"{"message":"queued_at is only a word here","id":1}"#
+    );
+}
+
+/// The release the channel comparisons are held to is the one the contract says
+/// this build's channel stays byte-compatible with — so the pin the recorded
+/// answers and the wheel journeys share cannot move without the contract moving.
+#[test]
+fn the_release_the_channel_is_held_to_is_the_one_the_contract_names() {
+    let contract =
+        std::fs::read_to_string(repo_file("docs/contract.md")).expect("the contract ships");
+    let passage = contract
+        .lines()
+        .find(|line| line.starts_with("**The planner channel runs on `onemessagebus`"))
+        .expect("the contract states who owns the planner-channel layout");
+    assert!(
+        passage.contains(&format!("the `onepipeline-cli` {RELEASE} wheel wrote")),
+        "the contract does not name onepipeline-cli {RELEASE} as the release the channel is \
+         byte-compatible with"
+    );
+    let script = std::fs::read_to_string(repo_file("scripts/record-channel-answers.sh"))
+        .expect("the capture script ships");
+    assert!(
+        script.contains(&format!("release=\"${{1:-{RELEASE}}}\"")),
+        "scripts/record-channel-answers.sh captures another release by default"
     );
 }

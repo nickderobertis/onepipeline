@@ -45,16 +45,13 @@ use onepipeline::channel::layout::{
 use serde_json::{json, Map, Value};
 
 use harness::{binary, World};
-use recorded_support::{answered, normalized, recorded_world, seeded_with, LAYOUT, RUN};
+use recorded_support::{answered, normalized, recorded_world, seeded_with, LAYOUT, RELEASE, RUN};
 
 #[path = "../e2e/harness.rs"]
 mod harness;
 
 #[path = "../e2e/recorded_support.rs"]
 mod recorded_support;
-
-/// The release whose channel this build is held to.
-const RELEASE: &str = "0.28.2";
 
 /// The pinned wheel's `onepipeline`, resolved once through `uv tool run` and
 /// refused unless it reports [`RELEASE`].
