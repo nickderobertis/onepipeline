@@ -446,8 +446,7 @@ fn select(root: &Path, request: &ShutdownRequest) -> Result<Vec<RunView>> {
         // `Survey::of` is the enumeration `host` already reads every run on this
         // host through, refused roots and all — so a shutdown lists exactly what
         // that view lists rather than a second reading of the same root.
-        ShutdownScope::Mine => Ok(Survey::of(root)
-            .views
+        ShutdownScope::Mine => Ok(surveyed(root)
             .into_iter()
             .filter(|view| {
                 let mine = view.launch.owned_by(&request.session);
@@ -466,8 +465,28 @@ fn select(root: &Path, request: &ShutdownRequest) -> Result<Vec<RunView>> {
                 mine
             })
             .collect()),
-        ShutdownScope::Host => Ok(Survey::of(root).views),
+        ShutdownScope::Host => Ok(surveyed(root)),
     }
+}
+
+/// Every run `Survey::of` could read, having named on stderr each run root it
+/// could not.
+///
+/// A root the survey refused may hold a run whose dispatches are still live
+/// and whose branches exist only on this host, and this shutdown can neither
+/// signal nor push it. Dropping it would report a partial shutdown as the whole
+/// host's, so each one is named with the survey's own reason.
+fn surveyed(root: &Path) -> Vec<RunView> {
+    let survey = Survey::of(root);
+    for refused in &survey.skipped {
+        eprintln!(
+            "onepipeline: run root '{}' could not be read ({}); this shutdown signalled nothing \
+             in it and pushed none of its branches",
+            crate::views::one_line(&refused.path.display().to_string()),
+            crate::views::one_line(&refused.reason)
+        );
+    }
+    survey.views
 }
 
 /// The whole verb, for one run.

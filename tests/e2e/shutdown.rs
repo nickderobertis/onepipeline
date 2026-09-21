@@ -18,7 +18,7 @@
 // full rationale.
 
 // llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
-// assumed: the twenty-seven journeys here take between about 90 and 195 seconds summed and
+// assumed: the twenty-eight journeys here take between about 90 and 195 seconds summed and
 // 25 to 50 on the wall under nextest's parallelism, by the host's load — each waits out a real grace
 // against real dispatches and pushes to a real origin, because a bound on how long a worker
 // is given cannot be stated without a clock running it. What they exercise is the shutdown
@@ -733,6 +733,39 @@ fn only_host_acts_on_another_sessions_run() {
     assert_eq!(host_shutdown(&world, &run)["scope"], "host");
     world.release("theirs.go");
 }
+
+/// A run root `--host` and `--mine` cannot read is named on stderr as one this
+/// shutdown did not act on, and every run beside it is still shut down.
+///
+/// Such a root may hold live dispatches and branches that exist only on this
+/// host, so leaving it out without a word would report a partial shutdown as
+/// the whole host's.
+// llmlint: ignore-block[tests_mirror_real_usage] the one state set by hand is a run root with no launch record, exactly as `views.rs`'s `a_run_root_the_views_refuse_is_named_with_its_reason` plants it: it is a crash between the directory and the record, and no verb writes one. The run beside it and both shutdowns are the real binary.
+#[cfg(unix)]
+#[test]
+fn a_run_root_the_survey_refuses_is_named_and_the_rest_is_still_shut_down() {
+    let world = World::new("shutdown-refused-root");
+    held(&world, "build");
+    let run = launch(&world, "readable", vec![agent("build", &[])]);
+    until_in_flight(&world, &run, &["build"]);
+    std::fs::create_dir_all(world.runs.join("half-written")).expect("a run root with no launch");
+
+    for scope in ["--mine", "--host"] {
+        let shutdown = world.run(&["shutdown", scope, "--force"]);
+        shutdown.exited(0).err_has("half-written");
+        assert!(
+            shutdown
+                .stderr
+                .contains("this shutdown signalled nothing in it and pushed none of its branches"),
+            "{scope} did not say what it left undone in the root it could not read:\n{}",
+            shutdown.stderr
+        );
+    }
+    // The readable run was shut down by the first pass and read again by the second.
+    assert_eq!(world.events_of(&run, "host-shutdown").len(), 2);
+    world.release("build.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A node killed inside a publication of its own is named as such on the
 /// report, with the state that leaves and the verb that resumes it.
