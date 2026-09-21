@@ -105,5 +105,5 @@ threads-required = 4
 # cross-platform legs too. Asked of the runner rather than assumed: `cargo nextest
 # show-config test-groups --profile ci` reports `group: e2e (max threads = 4)`.
 [[profile.default.overrides]]
-filter = 'binary(e2e) or binary(note)'
+filter = 'binary(e2e) or binary(note) or binary(release_channel)'
 test-group = 'e2e'

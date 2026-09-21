@@ -231,7 +231,7 @@ _crate-lint:
 # twelve self-tests compile into it too — and they belong to the binary that
 # owns the file. Selecting them here would run one set of tests twice in one
 # tier for 4.8s and print every name twice.
-rest-tier := "not binary(smoke) and not binary(note)"
+rest-tier := "not binary(smoke) and not binary(note) and not binary(release_channel)"
 note-tier := "binary(note) and not test(/^harness::/)"
 
 # Their union, and the whole offline tier: what a runner that wants all of it
@@ -309,6 +309,13 @@ test-quick:
 # Real everything: onevcs, git, and the GitHub API, over one whole lifecycle.
 smoke-real:
     @cargo nextest run --locked -E 'binary(smoke)' --no-capture --status-level all
+
+# Outside `check` and `gate` because uv fetches the wheel from a package
+# registry; CI's `release-compat` job calls this, and without uv it fails naming
+# it. `harness::` is the shared harness's own self-tests, which `test` already runs.
+# The 0.28.2 channel journeys: this build's channel against the pinned wheel's.
+release-compat:
+    @RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(release_channel) and not test(/^harness::/)'
 
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`),

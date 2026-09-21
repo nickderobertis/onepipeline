@@ -211,6 +211,12 @@ fn results_names_every_skipped_node_and_the_dependency_that_skipped_it() {
 fn an_observer_this_host_cannot_ask_about_is_never_reported_dead() {
     let world = World::new("views-observer-unprovable");
     world.script("build.wait", "hold");
+    // The observer is held watching, which is the premise: a live observer this
+    // host has no record of. Left to exit, the double stops at once, the driver
+    // spends its whole restart bound in well under a second, and the view then
+    // truthfully says no observer is watching — a different journey, reached or
+    // not by how fast the read below happens to be.
+    world.script("observer.wait", "hold");
     let path = world.plan(
         "unprovable",
         &plan_of("unprovable", vec![agent("build", &[])]),
@@ -266,6 +272,7 @@ fn an_observer_this_host_cannot_ask_about_is_never_reported_dead() {
              watched: {line}"
         );
     }
+    world.release("observer.go");
     world.release("build.go");
 }
 

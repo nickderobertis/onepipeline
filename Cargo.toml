@@ -840,6 +840,15 @@ path = "tests/note/main.rs"
 name = "smoke"
 path = "tests/smoke/main.rs"
 
+# The 0.28.2 channel compatibility tier, in its own binary so the offline gate can
+# exclude it by name, as it does `smoke`: it drives the pinned `onepipeline-cli`
+# 0.28.2 wheel through `uv tool run`, which reaches a package registry. `just
+# release-compat` runs this and nothing else, and CI's `release-compat` job calls
+# that recipe; without uv it fails naming uv rather than skipping.
+[[test]]
+name = "release_channel"
+path = "tests/release_channel/main.rs"
+
 # A CLI binary: optimize for a small, fast-starting artifact.
 [profile.release]
 strip = true

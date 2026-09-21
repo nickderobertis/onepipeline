@@ -1,0 +1,75 @@
+{
+  "run_id": "otg-closed-state-writes-status",
+  "project": "plans:I_kwDOTXCWqs8AAAABRwk5Bg",
+  "dir": "/home/whoop/ai-orchestrator",
+  "graph": "/home/whoop/ai-orchestrator/graphs/dag-scope.yaml",
+  "graph_run": "dag-scope-1789679039197-3806230",
+  "observer_runs": [
+    "dag-scope-1789645401986-374701",
+    "dag-scope-1789657320446-2328459",
+    "dag-scope-1789679039197-3806230"
+  ],
+  "node_graph": "/home/whoop/ai-orchestrator/graphs/node-scope.yaml",
+  "pr_author_graph": "/home/whoop/ai-orchestrator/graphs/pr-author.yaml",
+  "launcher": "claude-code",
+  "session": "5e8cab39-417c-5bc6-bd9a-d53aa8bc7c3a",
+  "pid": 3806028,
+  "host": "shulgin",
+  "started": "linux-proc-stat:18830910",
+  "started_at": "2026-09-17T11:43:21.944Z",
+  "heartbeat_interval": 1800,
+  "writeback_item_budget": 10,
+  "success_hook": "/home/whoop/ai-orchestrator/scripts/run-ended.sh",
+  "failure_hook": "/home/whoop/ai-orchestrator/scripts/run-ended.sh",
+  "hook_timeout": 600,
+  "adoptions": 2,
+  "bus_config": {
+    "version": 1,
+    "transport": {
+      "kind": "local"
+    },
+    "profile": "planner-channel",
+    "authors": {
+      "monitor": {
+        "capabilities": [
+          "retry",
+          "requeue",
+          "cancel",
+          "finding",
+          "add"
+        ]
+      }
+    },
+    "validators": [
+      {
+        "on": "replies",
+        "when": {
+          "carries": "commands"
+        },
+        "kind": "command",
+        "command": [
+          "scripts/envelope-review.sh"
+        ],
+        "cache": {
+          "dir": ".cache/envelope-passes",
+          "bar_fingerprint": [
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "orchestrator.envelope_review",
+            "--bar-fingerprint"
+          ]
+        }
+      }
+    ],
+    "codecs": {
+      "onejudge": {
+        "queue": "surfaces",
+        "reply_window_seconds": 3000,
+        "session_env": "ONEPIPELINE_SERVE_SESSION_SECONDS",
+        "asker_env": "ONEPIPELINE_CHANNEL_ASKER"
+      }
+    }
+  }
+}

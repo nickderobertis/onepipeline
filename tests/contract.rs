@@ -5666,7 +5666,7 @@ const RULINGS: &[(&str, &str)] = &[
         "75.",
         "`onemessagebus`'s own `docs/contract.md` is the one source of their shape",
     ),
-    ("77.", "The planner channel is `onemessagebus`'s"),
+    ("77.", "The planner channel runs on `onemessagebus`"),
     ("78.", "Surface kinds are an open vocabulary"),
     ("79.", "edit-applied"),
     ("81.", "the CLI is argument parsing over them"),
@@ -7146,4 +7146,208 @@ fn the_grouped_listing_is_what_the_contract_states() {
         projects.groups[0].header(),
         format!("{GROUP_HEADER}plans:b — B\n")
     );
+}
+
+/// The paragraph that says this crate owns the `planner-channel` layout names
+/// what the layout at `onepipeline::channel::layout` declares — its queues, the
+/// asker variable, the ids it registers and the schema documents behind the
+/// reply envelope — and the three rulings it states are what the layout does.
+#[test]
+fn the_planner_channel_layout_is_this_crates_and_is_what_the_contract_states() {
+    use onemessagebus::{Layout as _, LocalTransport, Transport};
+    use onepipeline::channel::layout::{
+        self, source, Channel, PlannerChannel, Surface, ASKER_ENV, COMMANDS, PLANNER_CHANNEL,
+        REPLIES, REPLY_ENVELOPE_FAMILY, REPLY_ENVELOPE_VERSION, REPLY_ENVELOPE_VERSIONS_READ,
+    };
+
+    let passage = CONTRACT
+        .lines()
+        .find(|line| line.starts_with("**The planner channel runs on `onemessagebus`"))
+        .expect("the contract states who owns the planner-channel layout");
+    let named = backticked_in(passage);
+    assert!(named.contains("onepipeline::channel::layout"));
+    assert_eq!(PlannerChannel.name(), PLANNER_CHANNEL);
+    assert!(named.contains(PLANNER_CHANNEL) && named.contains(ASKER_ENV));
+    for file in layout::FILES {
+        assert!(
+            named.contains(file),
+            "the contract does not name the layout's file `{file}`"
+        );
+    }
+    for spec in layout::queues() {
+        assert!(
+            named.contains(&spec.name.to_string()),
+            "the contract does not name the layout's queue `{}`",
+            spec.name
+        );
+    }
+
+    // The ids it registers, and the reply envelope's documents.
+    let registry = layout::registry();
+    for id in [
+        layout::SURFACE_SCHEMA,
+        layout::QUEUED_REPLY_SCHEMA,
+        layout::QUEUED_COMMANDS_SCHEMA,
+        layout::COMMAND_OUTCOME_SCHEMA,
+    ] {
+        assert!(registry.schema(&id).is_some(), "{id} is not registered");
+        assert!(
+            named.contains(&id.to_string()),
+            "the contract does not name {id}"
+        );
+    }
+    assert!(named.contains(REPLY_ENVELOPE_FAMILY));
+    for version in REPLY_ENVELOPE_VERSIONS_READ {
+        let id = onemessagebus::SchemaId::literal("agent", "reply-envelope", *version);
+        assert!(registry.schema(&id).is_some(), "{id} is not registered");
+        let document = format!("schemas/reply-envelope-v{version}.schema.json");
+        assert!(
+            named.contains(&document),
+            "the contract does not name {document}"
+        );
+        assert!(
+            repo_root().join(&document).is_file(),
+            "{document} does not ship"
+        );
+    }
+
+    // An edit envelope requires version 3, refused in the contract's words.
+    let replies: onemessagebus::QueueName = REPLIES.parse().expect("a queue name");
+    let grants = PlannerChannel.allowlist();
+    let refused = PlannerChannel
+        .prepare(
+            &replies,
+            json!({"version": 1, "commands": [{"op": "finding", "message": "m"}]}),
+            &grants,
+        )
+        .expect_err("an edit envelope at version 1");
+    assert!(
+        named.contains(&refused),
+        "the contract does not quote `{refused}`"
+    );
+    assert_eq!(REPLY_ENVELOPE_VERSION, 3);
+
+    // A bare reply is routed by its halves.
+    let routed = |envelope: Value| -> Vec<String> {
+        PlannerChannel
+            .prepare(&replies, envelope, &grants)
+            .expect("the planner's reply is routed")
+            .into_iter()
+            .map(|(queue, _)| queue.to_string())
+            .collect()
+    };
+    let edit = json!([{"op": "finding", "message": "m"}]);
+    assert_eq!(
+        routed(json!({"version": 3, "message": "go on", "completion": false, "commands": edit})),
+        vec![COMMANDS, REPLIES]
+    );
+    assert_eq!(
+        routed(json!({"version": 3, "commands": edit})),
+        vec![COMMANDS]
+    );
+    assert_eq!(routed(json!({"message": "carry on"})), vec![REPLIES]);
+
+    // A waiting surface is superseded on `source == check-in`, not on `kind`.
+    assert!(named.contains("source == check-in"));
+    let dir = std::env::temp_dir().join(format!(
+        "onepipeline-contract-layout-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let transport: std::sync::Arc<dyn Transport> =
+        std::sync::Arc::new(LocalTransport::open(&dir).expect("the transport opens"));
+    let channel = Channel::open(&transport).expect("the channel opens");
+    let surface = |message: &str, from: &str| Surface {
+        id: 0,
+        kind: "check-in".to_owned(),
+        message: message.to_owned(),
+        source: from.to_owned(),
+        blocking: false,
+        queued_at: 1,
+        workstream: None,
+        abandoned: false,
+        asker: None,
+        correlation: None,
+    };
+    for (message, from) in [
+        ("an observer's first", source::PROPOSAL),
+        ("an observer's second", source::PROPOSAL),
+        ("a pacemaker's first", source::CHECK_IN),
+        ("a pacemaker's second", source::CHECK_IN),
+    ] {
+        channel.push(&surface(message, from)).expect("queued");
+    }
+    let mut handed = Vec::new();
+    while let Some(next) = channel.claim().expect("a claim") {
+        handed.push(next.message);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        handed,
+        vec![
+            "an observer's first",
+            "an observer's second",
+            "a pacemaker's second"
+        ]
+    );
+}
+
+/// The contract's best-effort reading of an older record's bus configuration
+/// names exactly the codec fields the linked bus requires, and quotes the
+/// refusals that bus's `serve` gives a codec whose fields were read empty.
+#[test]
+fn an_older_records_bus_config_is_read_best_effort_as_the_contract_states() {
+    let passage = CONTRACT
+        .split("**A launch record's bus configuration is read best-effort.**")
+        .nth(1)
+        .and_then(|rest| rest.split("**").next())
+        .expect("the contract states how an older record's bus configuration is read");
+    let named = backticked_in(passage);
+
+    // The fields it names are the ones the linked bus's codec requires.
+    let schema = schemars::schema_for!(onemessagebus::CodecConfig).to_value();
+    let required: BTreeSet<String> = schema["required"]
+        .as_array()
+        .expect("the codec schema requires fields")
+        .iter()
+        .map(|field| field.as_str().expect("a field name").to_owned())
+        .collect();
+    assert_eq!(
+        required,
+        BTreeSet::from(["select".to_owned(), "frames".to_owned()])
+    );
+    for field in &required {
+        assert!(
+            named.contains(field),
+            "the contract does not name `{field}`"
+        );
+    }
+
+    // A real older record's codec, with those fields read empty, is refused by
+    // the bus's own serve resolution in the contract's words, one field at a time.
+    let older: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            repo_root().join("tests/recorded/launch/otg-closed-state-writes-status.json"),
+        )
+        .expect("the older record ships"),
+    )
+    .expect("the older record is JSON");
+    let (name, codec) = older["bus_config"]["codecs"]
+        .as_object()
+        .and_then(|codecs| codecs.iter().next())
+        .expect("the older record names a codec");
+    let mut emptied = codec.clone();
+    emptied["select"] = json!("");
+    emptied["frames"] = json!({});
+    let refusal = |codec: Value| {
+        onemessagebus::ConfiguredCodec::new(
+            name.parse().expect("a codec name"),
+            serde_json::from_value(codec).expect("a codec configuration"),
+        )
+        .expect_err("a codec with an empty field")
+        .replace(&format!("codecs.{name}."), "codecs.<name>.")
+    };
+    assert!(named.contains(&refusal(emptied.clone())));
+    emptied["select"] = json!("op");
+    assert!(named.contains(&refusal(emptied)));
 }

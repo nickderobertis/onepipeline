@@ -365,7 +365,7 @@ fn a_host_named_author_is_enforced_at_reply_and_at_driver_apply() {
     // would never reach.
     let bus = onemessagebus::LocalTransport::open(world.run_file(RUN, "channel"))
         .expect("the host bus opens the channel");
-    let commands = onemessagebus::QueueName::try_from(onemessagebus_agent::channel::COMMANDS)
+    let commands = onemessagebus::QueueName::try_from(onepipeline::channel::layout::COMMANDS)
         .expect("the command queue's name");
     for payload in [
         json!({"id": 900, "author": "stranger", "commands": [

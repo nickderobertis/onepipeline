@@ -758,10 +758,7 @@ fn offer_to_validator(validator: Option<&str>, command: &Command, node: &Node) -
         .map_err(|e| refuse(format!("{op}: node '{}' does not serialize: {e}", node.id)))?;
     let hook = CommandValidator::new([validator])
         .map_err(|e| refuse(format!("{op}: the node validator names no command: {e}")))?;
-    match hook.judge(
-        &document,
-        &offered_on(onemessagebus_agent::channel::COMMANDS),
-    ) {
+    match hook.judge(&document, &offered_on(crate::channel::layout::COMMANDS)) {
         Verdict::Pass => Ok(()),
         Verdict::Refuse { reason } => Err(refuse(format!(
             "{op}: the node validator refused node '{}': {}",
@@ -1048,7 +1045,7 @@ fn offer_envelope_to_reviewer(
     let Some(review) = EnvelopeReview::of(reviewer, commands, edited, launched_with)? else {
         return Ok(());
     };
-    match review.verdict(&offered_on(onemessagebus_agent::channel::REPLIES)) {
+    match review.verdict(&offered_on(crate::channel::layout::REPLIES)) {
         Verdict::Pass => Ok(()),
         Verdict::Refuse { reason } | Verdict::Unjudged { reason } => Err(refuse(reason)),
     }

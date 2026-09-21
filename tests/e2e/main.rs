@@ -107,10 +107,12 @@ mod loopcost;
 // exist to catch. Same grounds as `mod dispatch_env_hook` above.
 mod maintenance;
 mod node_validator;
+mod older_launch_record;
 mod plan;
 mod plan_check;
 mod real_vcs;
 mod recorded_channel;
+mod recorded_support;
 mod run_end_hooks;
 mod scratch;
 mod session;

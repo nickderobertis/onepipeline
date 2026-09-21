@@ -30,7 +30,7 @@ use crate::harness::{
 };
 
 /// Where the fixture records what it was handed. Read by the fixture itself.
-const RECORD_ENV: &str = "ONEPIPELINE_E2E_HOOK_RECORD";
+pub(crate) const RECORD_ENV: &str = "ONEPIPELINE_E2E_HOOK_RECORD";
 
 /// The hook timeout every launch here names, in seconds.
 ///
@@ -41,7 +41,7 @@ const RECORD_ENV: &str = "ONEPIPELINE_E2E_HOOK_RECORD";
 /// is well inside that bound and above any hook here that is meant to finish; the
 /// one journey about the timeout itself names a shorter one, the one launch that
 /// asks what the default *is* names none, and the product default is untouched.
-const HOOK_TIMEOUT: &str = "120";
+pub(crate) const HOOK_TIMEOUT: &str = "120";
 
 fn both_hooks_under_timeout(hook: &str) -> [&str; 6] {
     [
@@ -75,13 +75,13 @@ fn hooked_world(name: &str) -> World {
     world.with_env(RECORD_ENV, &record)
 }
 
-fn records(world: &World) -> PathBuf {
+pub(crate) fn records(world: &World) -> PathBuf {
     world.root.join("hook-records")
 }
 
 /// The run-end hook fixture, placed in the world, as the command a launch names.
 #[cfg(unix)]
-fn hook(world: &World) -> String {
+pub(crate) fn hook(world: &World) -> String {
     use std::os::unix::fs::PermissionsExt;
     let path = world.root.join("run_end_hook.sh");
     std::fs::write(&path, include_str!("run_end_hook.sh")).expect("the hook is written");
@@ -95,7 +95,7 @@ fn hook(world: &World) -> String {
 /// Written with CRLF, for the reason `harness::write_hook_script` gives: cmd seeks
 /// a batch file by byte offset and assumes two bytes end a line.
 #[cfg(windows)]
-fn hook(world: &World) -> String {
+pub(crate) fn hook(world: &World) -> String {
     let path = world.root.join("run_end_hook.bat");
     std::fs::write(
         &path,
@@ -169,7 +169,7 @@ fn both_run_end_hook_halves_number_an_invocation_the_same_way() {
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// The hooks the fixture was run as for one run, in order.
-fn invocations(world: &World, run: &str) -> Vec<String> {
+pub(crate) fn invocations(world: &World, run: &str) -> Vec<String> {
     let path = records(world).join(run).join("invocations");
     // Absent is a hook never run, and nothing else is: this file is the only
     // witness to a firing, so an unreadable one is not "none".

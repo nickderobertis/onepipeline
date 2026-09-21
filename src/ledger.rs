@@ -534,6 +534,115 @@ fn unattributed_launcher() -> String {
     sys::UNKNOWN_LAUNCHER.to_string()
 }
 
+/// The `onemessagebus` configuration a launch record carries: the document as
+/// the record holds it, and the configuration this build runs the channel under.
+///
+/// The document is the linked bus's `Config`, and a later bus can require a
+/// field an earlier one did not have — `onemessagebus` 0.7 made every codec name
+/// its `select` and its `frames`. A record written before that is still the
+/// record of a run that happened, and every view, `results`, the run-end hooks
+/// and `adopt` have to read it. So a codec field the linked bus **requires**
+/// that the record does not carry is taken as **empty** — `""`, `{}`, `[]` by
+/// the type that bus's own schema gives it — when the runtime configuration is
+/// built, with no per-version migration: nothing this engine does with the
+/// configuration reads a codec, since interpreting one is a host's `serve`.
+/// A `serve` that resolves such a codec meets the empty field where the bus
+/// checks it, and is refused naming it (`codecs.<name>.select is not a
+/// dot-separated object path`, `codecs.<name>.frames is empty`).
+///
+/// What the record said is what it keeps saying: [`Serialize`] writes the
+/// recorded document byte for byte, so a record `adopt` rewrites for its own
+/// fields carries its bus configuration exactly as it was launched.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordedBusConfig {
+    recorded: serde_json::Value,
+    config: onemessagebus::Config,
+}
+
+impl RecordedBusConfig {
+    /// The configuration this build runs the channel under.
+    #[must_use]
+    pub fn config(&self) -> &onemessagebus::Config {
+        &self.config
+    }
+}
+
+impl From<onemessagebus::Config> for RecordedBusConfig {
+    fn from(config: onemessagebus::Config) -> Self {
+        let recorded = serde_json::to_value(&config)
+            .unwrap_or_else(|_| unreachable!("a bus configuration serializes"));
+        Self { recorded, config }
+    }
+}
+
+impl Serialize for RecordedBusConfig {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        self.recorded.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RecordedBusConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let recorded = serde_json::Value::deserialize(deserializer)?;
+        let mut completed = recorded.clone();
+        if let Some(codecs) = completed
+            .get_mut("codecs")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for codec in codecs
+                .values_mut()
+                .filter_map(serde_json::Value::as_object_mut)
+            {
+                for (field, empty) in codec_required_empties() {
+                    codec.entry(field.clone()).or_insert_with(|| empty.clone());
+                }
+            }
+        }
+        let config = serde_json::from_value(completed).map_err(serde::de::Error::custom)?;
+        Ok(Self { recorded, config })
+    }
+}
+
+/// Every field the linked bus's codec configuration requires, with the empty
+/// value of the type its JSON Schema gives it — read from that schema, so a field
+/// a later bus requires is covered without this crate naming it.
+fn codec_required_empties() -> &'static serde_json::Map<String, serde_json::Value> {
+    static EMPTIES: std::sync::OnceLock<serde_json::Map<String, serde_json::Value>> =
+        std::sync::OnceLock::new();
+    EMPTIES.get_or_init(|| {
+        let schema = schemars::schema_for!(onemessagebus::CodecConfig).to_value();
+        let resolved = |property: &serde_json::Value| -> Option<serde_json::Value> {
+            match property.get("$ref").and_then(serde_json::Value::as_str) {
+                Some(reference) => schema.pointer(reference.trim_start_matches('#')).cloned(),
+                None => Some(property.clone()),
+            }
+        };
+        let empty_of = |kind: &str| match kind {
+            "string" => Some(serde_json::Value::String(String::new())),
+            "object" => Some(serde_json::Value::Object(serde_json::Map::new())),
+            "array" => Some(serde_json::Value::Array(Vec::new())),
+            _ => None,
+        };
+        schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .filter_map(|field| {
+                let property = resolved(schema.pointer(&format!("/properties/{field}"))?)?;
+                let empty = empty_of(property.get("type")?.as_str()?)?;
+                Some((field.to_owned(), empty))
+            })
+            .collect()
+    })
+}
+
 /// What `start` recorded about a run, and what `adopt` replays it from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LaunchRecord {
@@ -858,8 +967,13 @@ pub struct LaunchRecord {
     /// run enforce the configuration the run was launched under rather than
     /// whatever that file says now. Omitted when absent, so a record written
     /// before this field existed reads as a run under the profile as declared.
+    ///
+    /// Read **best-effort** ([`RecordedBusConfig`]): a codec the record
+    /// describes without a field the linked bus requires only since the record
+    /// was written reads with that field empty, and the document is written back
+    /// exactly as it was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bus_config: Option<onemessagebus::Config>,
+    pub bus_config: Option<RecordedBusConfig>,
     /// The pool-maintenance schedule this run's idle driver sweeps on, when the
     /// launch named one.
     ///
@@ -4287,5 +4401,124 @@ mod tests {
         assert!(record.started.is_empty());
         let written = serde_json::to_string(&record).expect("it serializes");
         assert!(!written.contains("started"), "{written}");
+    }
+
+    /// A launch record an older build wrote, whose bus configuration's codec
+    /// predates `select` and `frames`: the real one under `tests/recorded/launch/`.
+    const OLDER_RECORD: &str =
+        include_str!("../tests/recorded/launch/otg-closed-state-writes-status.json");
+
+    fn older_record() -> (LaunchRecord, serde_json::Value) {
+        let recorded: serde_json::Value =
+            serde_json::from_str(OLDER_RECORD).expect("the older record is JSON");
+        let codec = &recorded["bus_config"]["codecs"]["onejudge"];
+        assert!(codec.get("select").is_none() && codec.get("frames").is_none());
+        let record: LaunchRecord =
+            serde_json::from_str(OLDER_RECORD).expect("the older record is read");
+        (record, recorded)
+    }
+
+    /// The codec fields the linked bus requires and the older record does not
+    /// carry are read as empty, and the record is written back as it was.
+    #[test]
+    fn an_older_records_bus_config_reads_with_its_missing_codec_fields_empty() {
+        let (record, recorded) = older_record();
+        let bus = record
+            .bus_config
+            .as_ref()
+            .expect("the record names a bus config");
+        let codec = &bus.config().codecs[&"onejudge".parse().expect("a codec name")];
+        assert_eq!(codec.select, "");
+        assert!(codec.frames.is_empty());
+        assert_eq!(codec.reply_window_seconds.map(NonZeroU64::get), Some(3000));
+        assert_eq!(bus.config().validators.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&record).expect("the record serializes")["bus_config"],
+            recorded["bus_config"],
+            "the bus configuration was not written back as recorded"
+        );
+        // A configuration this build launched is written as the bus writes it.
+        let launched = RecordedBusConfig::from(bus.config().clone());
+        assert_eq!(
+            serde_json::to_value(&launched).expect("it serializes"),
+            serde_json::to_value(bus.config()).expect("it serializes")
+        );
+    }
+
+    /// A record whose bus configuration is not one at all is still refused, and
+    /// says why: best-effort covers a field a later bus requires, not garbage.
+    #[test]
+    fn a_bus_config_that_is_not_one_is_still_refused() {
+        let mut recorded: serde_json::Value =
+            serde_json::from_str(OLDER_RECORD).expect("the older record is JSON");
+        recorded["bus_config"]["codecs"]["onejudge"]["select"] = serde_json::json!(7);
+        let refused = serde_json::from_value::<LaunchRecord>(recorded)
+            .expect_err("a codec whose select is not a string");
+        assert!(refused.to_string().contains("invalid type"), "{refused}");
+    }
+
+    /// A `serve` that resolves the older record's codec — the bus's own
+    /// `ConfiguredCodec::new`, which `Bus::serve` is driven through — is refused
+    /// naming the field the record did not carry, and the same codec with that
+    /// field described is served.
+    #[test]
+    fn a_serve_resolving_an_older_records_codec_is_refused_naming_the_field() {
+        let (record, _) = older_record();
+        let config = record.bus_config.expect("a bus config").config().clone();
+        let name: onemessagebus::CodecName = "onejudge".parse().expect("a codec name");
+        let codec = config.codecs[&name].clone();
+        let refused = onemessagebus::ConfiguredCodec::new(name.clone(), codec.clone())
+            .expect_err("a codec the record did not fully describe");
+        assert_eq!(
+            refused,
+            "codecs.onejudge.select is not a dot-separated object path"
+        );
+
+        let selected = onemessagebus::CodecConfig {
+            select: "op".to_owned(),
+            ..codec.clone()
+        };
+        let refused = onemessagebus::ConfiguredCodec::new(name.clone(), selected.clone())
+            .expect_err("a codec naming no frames");
+        assert_eq!(refused, "codecs.onejudge.frames is empty");
+
+        let described = onemessagebus::CodecConfig {
+            frames: [(
+                "judge".to_owned(),
+                onemessagebus::FrameConfig {
+                    schema: crate::channel::layout::SURFACE_SCHEMA,
+                    bindings: vec![onemessagebus::Binding {
+                        when: None,
+                        action: onemessagebus::BindingAction::Refuse {
+                            message: "not here".to_owned(),
+                        },
+                    }],
+                },
+            )]
+            .into(),
+            ..selected
+        };
+        let mut served = onemessagebus::ConfiguredCodec::new(name, described)
+            .expect("the codec, fully described, resolves");
+        let dir = scratch("older-codec-serve");
+        let bus = onemessagebus::Config::local(&dir, Some(crate::channel::layout::PLANNER_CHANNEL))
+            .resolve(
+                &onemessagebus::Layouts::new()
+                    .with(std::sync::Arc::new(crate::channel::layout::PlannerChannel)),
+                &onemessagebus::TransportKinds::builtin(),
+            )
+            .expect("the channel resolves");
+        let mut written = Vec::new();
+        bus.serve(
+            &crate::channel::layout::SURFACES
+                .parse()
+                .expect("a queue name"),
+            &mut served,
+            &onemessagebus::ServeOptions::default(),
+            Box::new(std::io::Cursor::new(Vec::new())),
+            &mut written,
+        )
+        .expect("the resolved codec is served");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
