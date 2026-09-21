@@ -315,7 +315,7 @@ smoke-real:
 # it. `harness::` is the shared harness's own self-tests, which `test` already runs.
 # The 0.28.2 channel journeys: this build's channel against the pinned wheel's.
 release-compat:
-    @cargo nextest run --locked -E 'binary(release_channel) and not test(/^harness::/)'
+    @RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(release_channel) and not test(/^harness::/)'
 
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`),
