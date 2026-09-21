@@ -211,6 +211,12 @@ fn results_names_every_skipped_node_and_the_dependency_that_skipped_it() {
 fn an_observer_this_host_cannot_ask_about_is_never_reported_dead() {
     let world = World::new("views-observer-unprovable");
     world.script("build.wait", "hold");
+    // The observer stays up, as a real one watching a run does. A double that
+    // exited at once would have the driver restart it until its bound is spent,
+    // and then the view would be about a spent bound — read before or after
+    // that, depending on how busy the host is — rather than about an observer
+    // this host cannot ask about.
+    world.script("observer.wait", "hold");
     let path = world.plan(
         "unprovable",
         &plan_of("unprovable", vec![agent("build", &[])]),
@@ -266,6 +272,14 @@ fn an_observer_this_host_cannot_ask_about_is_never_reported_dead() {
              watched: {line}"
         );
     }
+    // And the observer read about was the one launched: nothing restarted it in
+    // between, so the answer above is about that observer and no other.
+    assert_eq!(
+        world.run_json("unprovable", "launch.json")["graph_run"].as_str(),
+        Some(graph_run),
+        "the observer was replaced while the views were read"
+    );
+    world.release("observer.go");
     world.release("build.go");
 }
 
