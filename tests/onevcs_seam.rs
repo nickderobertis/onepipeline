@@ -82,6 +82,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             execution_checkout: None,
             pool: None,
             overflow: None,
+            labels: Default::default(),
         })
         .expect("the seam opens a session");
     assert_eq!(session.branch, "feature");
@@ -205,6 +206,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             execution_checkout: None,
             pool: None,
             overflow: None,
+            labels: Default::default(),
         })
         .expect("the seam opens a second session");
     let reason = onevcs::DraftReason::AwaitingRelease {

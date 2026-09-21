@@ -1947,6 +1947,9 @@ pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
         // types: what `pool: 0` and `overflow: unlimited` mean is its to say.
         pool: node.pool,
         overflow: node.overflow,
+        // Stamped where the session opens, which is where the run, the node and
+        // the launch that owns it are known: see `executor::SESSION_RUN_LABEL`.
+        labels: std::collections::BTreeMap::new(),
     })
 }
 

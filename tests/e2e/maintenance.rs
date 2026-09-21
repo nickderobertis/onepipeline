@@ -144,6 +144,7 @@ fn cut_a_slot(world: &World, checkout: &Path) {
                 execution_checkout: None,
                 pool: None,
                 overflow: None,
+                labels: Default::default(),
             })
             .expect("a session opens on the pooled identity");
         vcs.close_session(&session.token)

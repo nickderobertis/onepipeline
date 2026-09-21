@@ -469,6 +469,15 @@ resolver = "2"
 # exactly this `onevcs`, so the two requirements and the lock move together.
 # `tests/e2e/maintenance.rs` drives the sweep against the linked release.
 #
+# `onevcs` 0.30.0 is the floor because it carries `SessionRequest.labels`, stored
+# on the session record and reported by `session holders` and `recoverable`:
+# `src/executor.rs` stamps every node's session with the run, the node and the
+# launching session through it, and every literal here fills it — so a pin below
+# it does not compile. A **requirement**, because `^0.27` admits no 0.30.x; and
+# `onevcs-testing` 0.7.0 requires exactly this `onevcs`, so the two move together.
+# `tests/e2e/session_reuse.rs` reads the labels back through the linked release's
+# own `session holders --json`.
+#
 # `oneagentgraph` 0.4.6 is a **relink and nothing else** — `src/member.rs`
 # re-reads its two engines' channels and moves two version numbers in prose —
 # taken because it requires `oneharness-core` 0.17.0 and `onejudge` 0.13.3
@@ -498,7 +507,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.4.6"
-onevcs = "0.27.0"
+onevcs = "0.30.0"
 # The wire both siblings above now re-export: the envelope, its labels, sources
 # and phases, the filter grammar, the reader, the merge and the schema registry
 # are `onemessagebus-agent`'s over the `onemessagebus` core, and `src/event.rs`
@@ -617,7 +626,7 @@ oneharness-core = "0.17.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.6.8"
+onevcs-testing = "0.7.0"
 # **Test-support only**, and linked by `crates/testfakes` alone: the crate under test
 # still reads every plan by *driving* the `onetaskgraph` binary. These host the real
 # `local-md` plugin inside `label-strict-source`; that fake says why.

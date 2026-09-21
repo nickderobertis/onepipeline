@@ -37,6 +37,25 @@ use crate::controls::{NodeControls, WORKER_MEMBER};
 use crate::error::{Error, Result};
 use crate::event::{Envelope, Labels};
 
+/// The `onevcs` session label naming the run that opened a node's session.
+///
+/// Every session a node-scope dispatch opens carries this, [`SESSION_NODE_LABEL`]
+/// and [`SESSION_LAUNCHER_LABEL`] on its session record — the same run, node and
+/// launching session the dispatch's own events are stamped with — so a listing
+/// of the host's sessions and preserved branches says whose each one is without
+/// joining a run's journal. `docs/contract.md` states the three keys and
+/// `tests/contract.rs` reconciles them against these constants.
+pub const SESSION_RUN_LABEL: &str = "run";
+
+/// The `onevcs` session label naming the node that opened the session.
+pub const SESSION_NODE_LABEL: &str = "node";
+
+/// The `onevcs` session label naming the launching session — the one
+/// `ONEPIPELINE_LAUNCHER_SESSION` named at launch, which `runs --mine` and
+/// `unwatched --session` are keyed on. Omitted, never stamped empty, for a launch
+/// nothing attributed.
+pub const SESSION_LAUNCHER_LABEL: &str = "launcher";
+
 /// Where a node's dispatch runs.
 pub trait Executor {
     /// The name the [rules](crate::rules) file selects this executor by.
@@ -263,7 +282,11 @@ impl Executor for LocalExecutor {
         let (dir, session) = match &req.workspace {
             WorkspaceSpec::Path(path) => (path.clone(), None),
             WorkspaceSpec::VcsSession(request) => {
-                let session = crate::vcs::session_open(request)?;
+                let request = SessionRequest {
+                    labels: session_labels(&request.labels, &req.labels, launched.as_ref()),
+                    ..request.clone()
+                };
+                let session = crate::vcs::session_open(&request)?;
                 remember_worktree(&session);
                 (session.worktree.clone(), Some(session))
             }
@@ -664,6 +687,33 @@ fn launched_with(labels: &Labels) -> Result<Option<crate::ledger::LaunchRecord>>
     crate::ledger::read_json::<crate::ledger::LaunchRecord>(&paths.launch()).map(Some)
 }
 
+/// The labels a node's `onevcs` session is opened with.
+///
+/// Whatever the request already carries, with the engine's own keys put in over
+/// it: the run and the node off the dispatch's labels, and the launching session
+/// off the run's launch record when that launch was attributed to one. A dispatch
+/// built outside a run names neither run nor launch, and stamps only what it has.
+fn session_labels(
+    asked: &std::collections::BTreeMap<String, String>,
+    labels: &Labels,
+    launched: Option<&crate::ledger::LaunchRecord>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut stamped = asked.clone();
+    let launcher = launched
+        .map(|record| record.session.as_str())
+        .filter(|session| crate::ledger::attributed(session));
+    for (key, value) in [
+        (SESSION_RUN_LABEL, labels.run_id.as_deref()),
+        (SESSION_NODE_LABEL, labels.node.as_deref()),
+        (SESSION_LAUNCHER_LABEL, launcher),
+    ] {
+        if let Some(value) = value {
+            stamped.insert(key.to_owned(), value.to_owned());
+        }
+    }
+    stamped
+}
+
 /// One dispatch running on this machine.
 #[derive(Debug)]
 struct LocalDispatch {
@@ -841,6 +891,7 @@ mod tests {
                 execution_checkout: None,
                 pool: None,
                 overflow: None,
+                labels: Default::default(),
             }),
             cancel: CancellationToken::new(),
             attempt: NonZeroU32::MIN,
