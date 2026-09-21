@@ -1592,8 +1592,8 @@ fn platform_disown_standard_handles() {
     }
 }
 
-/// While held, a `SIGINT`, `SIGTERM` or `SIGHUP` runs `then` before it ends the
-/// process.
+/// While held, a terminating signal of the ones `unix_interrupt::HELD` names runs
+/// `then` before it ends the process.
 ///
 /// The one handler anything in this crate installs, and it is bounded: it is
 /// held across an out-of-band landing's drafting turn and nothing else, because
@@ -1645,7 +1645,9 @@ impl Drop for OnInterrupt {
 mod unix_interrupt {
     use std::sync::atomic::{AtomicI32, Ordering};
 
-    /// The signals a guard holds.
+    /// The endings a terminal, a closed session or a supervisor gives a landing.
+    /// Each must terminate by default, because ending the process of it again is
+    /// what [`hold`]'s reader restores the default action to do.
     const HELD: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
 
     /// The write end of the held guard's pipe, or `-1` while none is held — read
@@ -1676,6 +1678,11 @@ mod unix_interrupt {
 
     pub(super) fn hold(then: Box<dyn Fn() + Send>) -> Result<Held, String> {
         let mut ends = [0 as libc::c_int; 2];
+        // llmlint: ignore[changed_behavior_has_e2e] a pipe the kernel refuses has no
+        // seam a journey can reach — it takes exhausting this process's descriptors
+        // mid-landing. What it ends in is the ending a draft that cannot start
+        // reaches, a landing with no body and the reason on stderr, which
+        // `a_draft_that_cannot_start_hands_the_landing_to_onevcs_and_says_why` drives.
         // SAFETY: `ends` is two writable descriptors' worth of memory.
         if unsafe { libc::pipe(ends.as_mut_ptr()) } != 0 {
             return Err(format!(
@@ -1719,6 +1726,9 @@ mod unix_interrupt {
             });
         let reader = match reader {
             Ok(reader) => reader,
+            // llmlint: ignore[changed_behavior_has_e2e] a thread the host refuses to
+            // start has no seam a journey can reach either, and ends in the same
+            // could-not-start landing the journey named above drives.
             Err(error) => {
                 WAKE.store(-1, Ordering::SeqCst);
                 close(read);

@@ -371,7 +371,7 @@ fn death(envelope: &Envelope) -> Option<String> {
 ///
 /// A drop is not every way out: a person interrupting the landing from a
 /// terminal ends the process with no unwind at all. So for as long as it lives
-/// it holds [`crate::sys::on_interrupt`], and a `SIGINT`, `SIGTERM` or `SIGHUP` removes the
+/// it holds [`crate::sys::on_interrupt`], and a signal that guard holds removes the
 /// same two things before the process ends of that signal. What both paths remove
 /// is one [`Leftover`] behind one lock, so whichever comes second finds nothing
 /// left to do, and what is recorded there is only ever what was made.
@@ -432,7 +432,7 @@ impl Leftover {
 
 /// The leftover behind its lock, whoever panicked while holding it: what it
 /// records is still exactly what was made.
-fn left(leftover: &Mutex<Leftover>) -> std::sync::MutexGuard<'_, Leftover> {
+fn lock_leftover(leftover: &Mutex<Leftover>) -> std::sync::MutexGuard<'_, Leftover> {
     leftover
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -465,7 +465,7 @@ impl Scratch {
                 eprintln!(
                     "onepipeline: interrupted while drafting; removing the drafting worktree"
                 );
-                left(&leftover).remove();
+                lock_leftover(&leftover).remove();
             }
         })?;
         let root = std::env::temp_dir();
@@ -475,7 +475,7 @@ impl Scratch {
                 crate::sys::pid(),
                 MINTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
-            let mut made = left(&leftover);
+            let mut made = lock_leftover(&leftover);
             match std::fs::create_dir(&dir) {
                 Ok(()) => {
                     made.dir = Some(dir.clone());
@@ -539,7 +539,7 @@ impl Scratch {
         // Under the lock, so an interrupt arriving while git is adding the
         // worktree waits for it and then removes it, rather than finding nothing
         // recorded and leaving the entry git is about to write.
-        let mut made = left(&self.left);
+        let mut made = lock_leftover(&self.left);
         git_in(
             &self.checkout,
             [
@@ -615,7 +615,7 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        left(&self.left).remove();
+        lock_leftover(&self.left).remove();
     }
 }
 

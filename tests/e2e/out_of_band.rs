@@ -847,6 +847,133 @@ fn a_drafting_worktree_that_cannot_be_removed_is_named_for_the_operator() {
     );
 }
 
+/// A world whose drafting turns make their directories under its own root, so a
+/// landing that failed to remove one leaves it where the world is cleaned up.
+fn world_with_its_own_tmp(name: &str) -> World {
+    let world = World::new(name);
+    let tmp = world.root.join("tmp");
+    std::fs::create_dir_all(&tmp).expect("a temporary directory");
+    world.with_env("TMPDIR", &tmp.to_string_lossy())
+}
+
+/// Start `publish-branch` of [`BRANCH`] drafting through `graph`, in a process
+/// group of its own so a signal to that group reaches nothing else, behind
+/// `launcher` where one is given.
+#[cfg(unix)]
+fn start_landing(world: &World, graph: &str, launcher: Option<&str>) -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    let args = [
+        "publish-branch",
+        BRANCH,
+        "--repo",
+        "service",
+        "--title",
+        "feat: add the widget",
+        "--pr-author-graph",
+        graph,
+    ];
+    let mut landing = match launcher {
+        None => world.cmd(&args),
+        Some(launcher) => {
+            let binary = crate::harness::binary().display().to_string();
+            let mut words = vec![binary.as_str()];
+            words.extend(args);
+            world.cmd_on(Path::new(launcher), &words)
+        }
+    };
+    landing.process_group(0);
+    landing
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the landing starts")
+}
+
+/// The drafting worktree the double recorded once its turn was in flight.
+fn drafting_worktree(world: &World) -> std::path::PathBuf {
+    let recorded = world.fakes.join("pr-author-tree.jsonl");
+    world.until("the drafting turn to be in flight", |_| {
+        std::fs::read_to_string(&recorded).is_ok_and(|said| said.ends_with('\n'))
+    });
+    let tree: Value = serde_json::from_str(
+        std::fs::read_to_string(&recorded)
+            .expect("the drafting turn recorded its tree")
+            .trim(),
+    )
+    .expect("a recorded tree");
+    Path::new(tree["dir"].as_str().expect("the tree names its directory")).to_path_buf()
+}
+
+/// Send `signal` to the landing, or to its whole group.
+#[cfg(unix)]
+fn signal_landing(landing: &std::process::Child, signal: i32, whole_group: bool) {
+    let pid = i32::try_from(landing.id()).expect("a pid fits");
+    // SAFETY: `kill` and `killpg` take an id and a signal and touch no memory;
+    // the id is the landing's own, started in a group of its own, so the signal
+    // reaches nothing this journey did not start.
+    let sent = unsafe {
+        if whole_group {
+            libc::killpg(pid, signal)
+        } else {
+            libc::kill(pid, signal)
+        }
+    };
+    assert_eq!(sent, 0, "the landing could not be signalled");
+}
+
+/// That a signalled landing ended of `signal` with nothing landed, the checkout's
+/// worktree list as `before` had it, and neither the drafting worktree nor its
+/// turn's directory left behind.
+#[cfg(unix)]
+fn ended_leaving_nothing(
+    world: &World,
+    repository: &Repository,
+    ended: &std::process::Output,
+    signal: i32,
+    before: &str,
+    worktree: &Path,
+    name: &str,
+) {
+    use std::os::unix::process::ExitStatusExt;
+
+    let stderr = String::from_utf8_lossy(&ended.stderr);
+    assert_eq!(
+        ended.status.signal(),
+        Some(signal),
+        "{name}: the landing did not end of the signal it was sent: {:?}\n{stderr}",
+        ended.status
+    );
+    assert_eq!(
+        state_of(world, &repository.checkout).0,
+        before,
+        "{name}: the checkout's worktree list still names the drafting worktree\n{stderr}"
+    );
+    assert!(
+        !worktree.exists(),
+        "{name}: the drafting worktree outlived the landing: {}",
+        worktree.display()
+    );
+    let turn = worktree
+        .parent()
+        .expect("the worktree is inside its turn's directory");
+    assert!(
+        !turn.exists(),
+        "{name}: the drafting turn's directory outlived the landing: {}",
+        turn.display()
+    );
+    assert_eq!(
+        opened(world),
+        Vec::new(),
+        "{name}: an interrupted landing landed"
+    );
+    assert!(
+        stderr.contains("interrupted while drafting; removing the drafting worktree"),
+        "{name}: {stderr}"
+    );
+}
+
 /// A landing interrupted mid-draft — the moment a person at a terminal is most
 /// likely to give up on it — leaves the named checkout's worktree list as it
 /// was and the drafting worktree's directory gone, and still ends of the signal
@@ -861,20 +988,12 @@ fn a_drafting_worktree_that_cannot_be_removed_is_named_for_the_operator() {
 #[cfg(unix)]
 #[test]
 fn a_landing_interrupted_mid_draft_takes_its_drafting_worktree_out_of_the_checkout() {
-    use std::os::unix::process::{CommandExt, ExitStatusExt};
-    use std::process::Stdio;
-
     for (signal, name, whole_group) in [
         (libc::SIGINT, "sigint", true),
         (libc::SIGTERM, "sigterm", false),
         (libc::SIGHUP, "sighup", false),
     ] {
-        // The drafting turn's directory under the world, so a landing that failed
-        // to remove it leaves it where the world is cleaned up.
-        let world = World::new(&format!("oob-interrupted-{name}"));
-        let tmp = world.root.join("tmp");
-        std::fs::create_dir_all(&tmp).expect("a temporary directory");
-        let world = world.with_env("TMPDIR", &tmp.to_string_lossy());
+        let world = world_with_its_own_tmp(&format!("oob-interrupted-{name}"));
         let repository = world.repository("change-open", &[]);
         branch_with_work(&world, &repository);
         world.script("pr-author.body", "## What\nA widget.\n");
@@ -883,34 +1002,8 @@ fn a_landing_interrupted_mid_draft_takes_its_drafting_worktree_out_of_the_checko
         let graph = world.pr_author_graph();
         let before = state_of(&world, &repository.checkout);
 
-        let mut landing = world.cmd(&[
-            "publish-branch",
-            BRANCH,
-            "--repo",
-            "service",
-            "--title",
-            "feat: add the widget",
-            "--pr-author-graph",
-            &graph,
-        ]);
-        landing.process_group(0);
-        let landing = landing
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("the landing starts");
-        let recorded = world.fakes.join("pr-author-tree.jsonl");
-        world.until("the drafting turn to be in flight", |_| {
-            std::fs::read_to_string(&recorded).is_ok_and(|said| said.ends_with('\n'))
-        });
-        let tree: Value = serde_json::from_str(
-            std::fs::read_to_string(&recorded)
-                .expect("the drafting turn recorded its tree")
-                .trim(),
-        )
-        .expect("a recorded tree");
-        let worktree =
-            Path::new(tree["dir"].as_str().expect("the tree names its directory")).to_path_buf();
+        let landing = start_landing(&world, &graph, None);
+        let worktree = drafting_worktree(&world);
         assert!(
             git(
                 &world,
@@ -920,56 +1013,137 @@ fn a_landing_interrupted_mid_draft_takes_its_drafting_worktree_out_of_the_checko
             .contains(&worktree.display().to_string()),
             "{name}: the drafting worktree is not in the checkout's list while it drafts"
         );
-
-        let pid = i32::try_from(landing.id()).expect("a pid fits");
-        // SAFETY: `kill` and `killpg` take an id and a signal and touch no memory;
-        // the id is the landing's own, started in a group of its own, so the
-        // signal reaches nothing this journey did not start.
-        let sent = unsafe {
-            if whole_group {
-                libc::killpg(pid, signal)
-            } else {
-                libc::kill(pid, signal)
-            }
-        };
-        assert_eq!(sent, 0, "{name}: the landing could not be signalled");
+        signal_landing(&landing, signal, whole_group);
         let ended = landing.wait_with_output().expect("the landing ends");
         // Released only now, so a drafter the signal did not reach goes too.
         world.release("pr-author.go");
-
-        let stderr = String::from_utf8_lossy(&ended.stderr);
-        assert_eq!(
-            ended.status.signal(),
-            Some(signal),
-            "{name}: the landing did not end of the signal it was sent: {:?}\n{stderr}",
-            ended.status
-        );
-        assert_eq!(
-            state_of(&world, &repository.checkout).0,
-            before.0,
-            "{name}: the checkout's worktree list still names the drafting worktree\n{stderr}"
-        );
-        assert!(
-            !worktree.exists(),
-            "{name}: the drafting worktree outlived the landing: {}",
-            worktree.display()
-        );
-        let turn = worktree
-            .parent()
-            .expect("the worktree is inside its turn's directory");
-        assert!(
-            !turn.exists(),
-            "{name}: the drafting turn's directory outlived the landing: {}",
-            turn.display()
-        );
-        assert_eq!(
-            opened(&world),
-            Vec::new(),
-            "{name}: an interrupted landing landed"
-        );
-        assert!(
-            stderr.contains("interrupted while drafting; removing the drafting worktree"),
-            "{name}: {stderr}"
+        ended_leaving_nothing(
+            &world,
+            &repository,
+            &ended,
+            signal,
+            &before.0,
+            &worktree,
+            name,
         );
     }
+}
+
+/// A landing signalled while git is still adding its drafting worktree waits for
+/// that worktree and then takes it back out, rather than removing nothing and
+/// leaving the entry git goes on to write.
+///
+/// The add is held open by a real `post-checkout` hook, which `git worktree add`
+/// runs once the worktree is in the checkout's list; the landing is sent
+/// `SIGTERM` alone, so git and its hook outlive the signal, and the hook is
+/// released only after the landing has had time to act on it.
+#[cfg(unix)]
+#[test]
+fn a_landing_signalled_while_its_worktree_is_being_added_still_removes_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let world = world_with_its_own_tmp("oob-interrupted-adding");
+    let repository = world.repository("change-open", &[]);
+    branch_with_work(&world, &repository);
+    world.script("pr-author.body", "## What\nA widget.\n");
+    let hooks = world.root.join("adding-hooks");
+    std::fs::create_dir_all(&hooks).expect("a hooks directory");
+    let hook = hooks.join("post-checkout");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\n\
+             pwd > '{adding}'\n\
+             tries=0\n\
+             while [ ! -f '{go}' ] && [ \"$tries\" -lt 1200 ]; do sleep 0.05; tries=$((tries + 1)); done\n",
+            adding = world.fakes.join("adding").display(),
+            go = world.fakes.join("adding.go").display(),
+        ),
+    )
+    .expect("the hook is written");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+        .expect("the hook is executable");
+    git(
+        &world,
+        &repository.checkout,
+        &["config", "core.hooksPath", &hooks.to_string_lossy()],
+    );
+    let graph = world.pr_author_graph();
+    let before = state_of(&world, &repository.checkout);
+
+    let landing = start_landing(&world, &graph, None);
+    let adding = world.fakes.join("adding");
+    world.until("git to be adding the drafting worktree", |_| {
+        std::fs::read_to_string(&adding).is_ok_and(|said| said.ends_with('\n'))
+    });
+    let worktree = Path::new(
+        std::fs::read_to_string(&adding)
+            .expect("the hook said where")
+            .trim(),
+    )
+    .to_path_buf();
+    signal_landing(&landing, libc::SIGTERM, false);
+    // Long enough for the landing to have acted on the signal before git finishes,
+    // which is the ordering this journey is about.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    world.release("adding.go");
+    let ended = landing.wait_with_output().expect("the landing ends");
+    // Nothing to wait out after this: the landing waits on git's add before it
+    // records the worktree, so a landing that has ended is one whose git has.
+    ended_leaving_nothing(
+        &world,
+        &repository,
+        &ended,
+        libc::SIGTERM,
+        &before.0,
+        &worktree,
+        "adding",
+    );
+}
+
+/// A landing started with a signal ignored — under `nohup`, whose hangup the
+/// caller asked to survive — is not ended by that signal mid-draft: it drafts,
+/// lands with the drafted body, and removes its worktree as any landing does.
+#[cfg(unix)]
+#[test]
+fn a_landing_under_nohup_drafts_and_lands_through_a_hangup() {
+    let world = world_with_its_own_tmp("oob-nohup");
+    let repository = world.repository("change-open", &[]);
+    branch_with_work(&world, &repository);
+    world.script("pr-author.body", "## What\nA widget.\n");
+    world.script("pr-author.records-tree", "1");
+    world.script("pr-author.holds", "1");
+    let graph = world.pr_author_graph();
+    let before = state_of(&world, &repository.checkout);
+
+    let mut landing = start_landing(&world, &graph, Some("nohup"));
+    let worktree = drafting_worktree(&world);
+    signal_landing(&landing, libc::SIGHUP, false);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(
+        landing
+            .try_wait()
+            .expect("the landing is asked about")
+            .is_none(),
+        "a landing started ignoring SIGHUP was ended by one"
+    );
+    world.release("pr-author.go");
+    let ended = landing.wait_with_output().expect("the landing ends");
+    assert!(
+        ended.status.success(),
+        "{:?}\n{}",
+        ended.status,
+        String::from_utf8_lossy(&ended.stderr)
+    );
+    assert_eq!(
+        opened(&world),
+        vec![(
+            "feat: add the widget".to_owned(),
+            "## What\nA widget.".to_owned()
+        )],
+        "{}",
+        world.dump()
+    );
+    assert_eq!(state_of(&world, &repository.checkout), before);
+    assert!(!worktree.exists(), "{}", worktree.display());
 }
