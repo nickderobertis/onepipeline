@@ -260,6 +260,19 @@ pub struct DispatchOutcome {
 
 `WorkspaceSpec::VcsSession` means the machine running the dispatch opens the onevcs session there — so the request carries `onevcs::SessionRequest`, the *ask*, and never an opened `onevcs::Session`; v1 ships `LocalExecutor` only (supports both variants), the trait + rules grammar are shaped for WS dispatch-server and k8s executors. `DispatchOutcome` is `#[non_exhaustive]`: naming a further field later is additive.
 
+**Every session a node opens says whose it is, on `onevcs`'s own record.** Where the executing machine opens a `WorkspaceSpec::VcsSession`, it opens it with `SessionRequest.labels` carrying three keys that mirror the dispatch's own event labels: `run` (the dispatch's `run_id`), `node` (its `node`), and `launcher` (the launching session `ONEPIPELINE_LAUNCHER_SESSION` named at launch, as the launch record holds it — the identity `runs --mine` and `unwatched --session` are keyed on). A launch nothing attributed stamps `run` and `node` and **omits** `launcher` rather than stamping it empty or as `unknown`. That holds for every shape of session a node opens — a fresh one, one a retry onto the same branch takes up (whose `run` and `node` become the retry's), and a pooled slot — and the observer graph, which opens no session, stamps nothing. `onevcs` stores them and reports them on `session holders` and every `recoverable` row, and filters both by `--label`, so a listing of a host's preserved branches says whose each is without joining a run's journal. The keys are a contract three parties hold to — this crate stamping, `onevcs` storing and filtering, and a consuming host reading — and they are the constants `onepipeline::executor::{SESSION_RUN_LABEL, SESSION_NODE_LABEL, SESSION_LAUNCHER_LABEL}`, which `tests/contract.rs` reconciles against this block:
+
+```json
+{
+  "onevcs_session_labels": {
+    "keys": {"run": "run", "node": "node", "launcher": "launcher"},
+    "mirrors": {"run": "run_id", "node": "node"},
+    "attributed": {"run": "demo-1", "node": "service", "launcher": "session-a"},
+    "unattributed": {"run": "demo-1", "node": "service"}
+  }
+}
+```
+
 Executor rules (YAML, ordered predicates over capacity + node labels):
 
 ```yaml

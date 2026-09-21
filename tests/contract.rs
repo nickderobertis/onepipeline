@@ -2906,6 +2906,54 @@ fn the_run_end_hooks_surface_is_what_the_contract_names() {
     }
 }
 
+/// The labels a node's `onevcs` session is opened with: the three keys are the
+/// block's and the crate's constants are held to them in both directions, and the
+/// event labels they mirror are reserved keys the dispatch really carries.
+#[test]
+fn the_session_labels_are_what_the_contract_names() {
+    use onepipeline::executor::{SESSION_LAUNCHER_LABEL, SESSION_NODE_LABEL, SESSION_RUN_LABEL};
+
+    let block: Value = serde_json::from_str(&fenced_block_naming("json", "onevcs_session_labels"))
+        .expect("the session-labels block is JSON");
+    let labels = &block["onevcs_session_labels"];
+    let keys = labels["keys"].as_object().expect("keys is an object");
+    let constants = [
+        ("run", SESSION_RUN_LABEL),
+        ("node", SESSION_NODE_LABEL),
+        ("launcher", SESSION_LAUNCHER_LABEL),
+    ];
+    assert_eq!(
+        keys.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+        constants
+            .iter()
+            .map(|(role, _)| *role)
+            .collect::<BTreeSet<_>>(),
+        "the block and the crate name different session labels"
+    );
+    for (role, constant) in constants {
+        assert_eq!(keys[role], constant, "keys.{role}");
+    }
+    // What each mirrors is a reserved event label a dispatch is stamped with.
+    let stamped = serde_json::to_value(Labels {
+        run_id: Some("demo-1".into()),
+        node: Some("service".into()),
+        ..Labels::default()
+    })
+    .expect("labels serialise");
+    for (role, event_label) in labels["mirrors"].as_object().expect("mirrors is an object") {
+        let event_label = event_label.as_str().expect("a mirrored label is named");
+        assert_eq!(
+            labels["attributed"][keys[role].as_str().expect("a key")],
+            stamped[event_label],
+            "{role} does not carry the dispatch's {event_label}"
+        );
+    }
+    // The launcher is the one key a launch may not have, and it is omitted then.
+    let unattributed = labels["unattributed"].as_object().expect("an object");
+    assert!(!unattributed.contains_key(SESSION_LAUNCHER_LABEL));
+    assert!(labels["attributed"][SESSION_LAUNCHER_LABEL].is_string());
+}
+
 /// The dispatch-env hook, as the contract's own block names it, is what this
 /// build takes and reads.
 ///
