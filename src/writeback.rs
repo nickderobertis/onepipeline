@@ -2553,12 +2553,32 @@ impl CopyReport {
     /// lineage under is neither. The store's copy-report vocabulary is not extended for it:
     /// an action word an older build has not heard of makes it drop the whole report and then
     /// re-create items.
+    ///
+    /// A destination the copy `updated` is never also counted `orphaned`. An item an older
+    /// build wrote can still carry that build's origin after an adoption reuses it for a
+    /// lineage, so the store reports it once as the lineage it rewrote and again as a
+    /// counterpart the source no longer holds — one item, and the second report is not true
+    /// of it: it was rewritten, not left as it was.
     fn actions(&self, snapshot: &Snapshot, before: &BTreeMap<String, Origin>) -> ProjectionActions {
         let lineages = snapshot.lineages();
         let members = shadow_members(snapshot, &lineages);
+        let rewritten: BTreeSet<&str> = self
+            .items
+            .iter()
+            .filter(|item| item.action == CopiedAction::Updated)
+            .filter_map(|item| item.destination.as_ref().map(QualifiedId::as_str))
+            .collect();
         let mut actions = ProjectionActions::default();
         for item in &self.items {
             let count = match item.action {
+                CopiedAction::Orphaned
+                    if item
+                        .destination
+                        .as_ref()
+                        .is_some_and(|destination| rewritten.contains(destination.as_str())) =>
+                {
+                    continue;
+                }
                 CopiedAction::Created => &mut actions.created,
                 CopiedAction::Updated => &mut actions.updated,
                 CopiedAction::Unchanged => &mut actions.unchanged,
@@ -4834,6 +4854,38 @@ mod tests {
             }))
             .is_err(),
             "a report naming an action this build does not know was read"
+        );
+    }
+
+    /// A destination the store reports both `updated` and `orphaned` in one copy — an item an
+    /// older build wrote, reused for a lineage while it still carried that build's origin — is
+    /// counted under `updated` alone. An orphan at a destination the copy did not rewrite still
+    /// counts, and so does one the store names no destination for.
+    #[test]
+    fn a_destination_the_copy_updated_is_not_also_counted_orphaned() {
+        let fixture = Fixture::new("reused");
+        let snapshot = &fixture.snapshot;
+        let report: CopyReport = serde_json::from_value(json!({
+            "items": [
+                {"source": member_id(snapshot, "build"), "action": "updated",
+                 "destination": "plans:board/002-build"},
+                {"source": "onepipeline-writeback:older/build-2", "action": "orphaned",
+                 "destination": "plans:board/002-build"},
+                {"source": "elsewhere:board/gone", "action": "orphaned",
+                 "destination": "plans:board/009-gone"},
+                {"source": "elsewhere:board/unplaced", "action": "orphaned"},
+            ],
+        }))
+        .expect("the store's own report reads");
+        assert_eq!(
+            report.actions(snapshot, &fixture.origins),
+            ProjectionActions {
+                created: 0,
+                updated: 1,
+                unchanged: 0,
+                orphaned: 2,
+                reopened: 0,
+            }
         );
     }
 
