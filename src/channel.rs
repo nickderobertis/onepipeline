@@ -165,7 +165,7 @@ fn valid_word(word: &str) -> bool {
 
 /// The `planner-channel` layout's allowlist as the layout declares it, before
 /// any configuration narrows it.
-fn profile_allowlist() -> &'static Allowlist<OpWord> {
+fn layout_allowlist() -> &'static Allowlist<OpWord> {
     static ALLOWLIST: std::sync::OnceLock<Allowlist<OpWord>> = std::sync::OnceLock::new();
     ALLOWLIST.get_or_init(|| layout::allowlist().words())
 }
@@ -178,7 +178,7 @@ fn profile_allowlist() -> &'static Allowlist<OpWord> {
 /// decision however it is spelled, which is why the profile grants or refuses
 /// it exactly as it grants or refuses `complete`.
 pub fn allows_completion(author: Author, completion: Option<bool>) -> crate::Result<()> {
-    completion_allowed_by(profile_allowlist(), author, completion)
+    completion_allowed_by(layout_allowlist(), author, completion)
 }
 
 /// [`allows_completion`], under an allowlist a run's configuration narrowed.
@@ -199,7 +199,7 @@ pub(crate) fn completion_allowed_by(
 /// reason it is refused with, and `docs/contract.md` states each of those
 /// refusals.
 pub fn allows(author: Author, command: &Command) -> crate::Result<()> {
-    allowed_by(profile_allowlist(), author, command)
+    allowed_by(layout_allowlist(), author, command)
 }
 
 /// [`allows`], under an allowlist a run's configuration narrowed.
@@ -1202,7 +1202,7 @@ impl ChannelState {
     /// configuration narrowed.
     pub(crate) fn allows(&self, author: Author, command: &Command) -> crate::Result<()> {
         match &self.config {
-            None => allowed_by(profile_allowlist(), author, command),
+            None => allowed_by(layout_allowlist(), author, command),
             Some(_) => allowed_by(self.bus()?.allowlist(), author, command),
         }
     }
@@ -1210,7 +1210,7 @@ impl ChannelState {
     pub(crate) fn declares(&self, author: &Author) -> crate::Result<()> {
         let configured;
         let allowlist = match &self.config {
-            None => profile_allowlist(),
+            None => layout_allowlist(),
             Some(_) => {
                 configured = self.bus()?;
                 configured.allowlist()
@@ -1239,7 +1239,7 @@ impl ChannelState {
         completion: Option<bool>,
     ) -> crate::Result<()> {
         match &self.config {
-            None => completion_allowed_by(profile_allowlist(), author, completion),
+            None => completion_allowed_by(layout_allowlist(), author, completion),
             Some(_) => completion_allowed_by(self.bus()?.allowlist(), author, completion),
         }
     }
