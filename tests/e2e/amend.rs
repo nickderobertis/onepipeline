@@ -34,6 +34,7 @@
 // manager reads before replacing it — is asserted through the CLI.
 
 use crate::harness::{agent, plan_of, World, REFUSED};
+use onepipeline::plan::{AMENDMENT_HEADING, AMENDMENT_PRECEDENCE};
 use serde_json::{json, Value};
 
 /// The ruling a manager issues mid-dispatch, and the correction that replaces it.
@@ -162,10 +163,7 @@ fn an_amendment_binds_every_later_dispatch_and_a_second_one_replaces_it() {
         first[0]
     );
     assert!(
-        first[0].contains("## Amendment")
-            && first[0].contains(
-                "Where this section and the operational notes below disagree, this section wins."
-            ),
+        first[0].contains(AMENDMENT_HEADING) && first[0].contains(AMENDMENT_PRECEDENCE),
         "the ruling reached the task without its authority: {}",
         first[0]
     );
@@ -418,7 +416,7 @@ fn a_plan_may_state_an_amendment_and_every_step_of_an_amended_node_is_handed_it(
     assert_eq!(dispatched.len(), 2, "{dispatched:?}");
     for task in &dispatched {
         assert!(
-            task.contains(RULING) && task.contains("this section wins"),
+            task.contains(RULING) && task.contains(AMENDMENT_PRECEDENCE),
             "a step of an amended node was dispatched without its bar: {task}"
         );
     }
@@ -428,7 +426,7 @@ fn a_plan_may_state_an_amendment_and_every_step_of_an_amended_node_is_handed_it(
         .find(|task| task.starts_with("## What\nimplement"))
         .expect("the implementing step ran");
     assert!(
-        implement.find("## Amendment") < implement.find("## Additional info"),
+        implement.find(AMENDMENT_HEADING) < implement.find("## Additional info"),
         "{implement}"
     );
 
@@ -438,6 +436,162 @@ fn a_plan_may_state_an_amendment_and_every_step_of_an_amended_node_is_handed_it(
         .exited(0)
         .out_has(RULING);
 }
+
+/// However a manager spells an amendment, the dispatch is handed it as clauses
+/// of the one acceptance section: every bullet marker and numbered-item spelling
+/// is one clause, a paragraph wrapped over lines is one clause, and a heading is
+/// kept as a label, since a heading inside the section would end it.
+#[test]
+fn every_spelling_of_an_amendment_is_handed_over_as_clauses_of_the_criteria() {
+    let world = World::new("amend-spellings");
+    let mut node = agent("shape", &[]);
+    node["task"] = json!(
+        "## What\nDo shape.\n\n## Acceptance criteria\n\n- shape is done.\n\n\
+         ## Additional info\n\nRun the gate once.\n"
+    );
+    node["amendment"] = json!(
+        "## Scope\n\n- dash\n* star\n+ plus\n1. dotted\n2) parenthesised\n\n\
+         A ruling wrapped\nover two lines.\n"
+    );
+    let path = world.plan("amendspell", &plan_of("amendspell", vec![node]));
+    world.run(&["start", &path, "--attach"]).exited(0).settled();
+
+    let dispatched = tasks_dispatched(&world, "shape");
+    assert_eq!(dispatched.len(), 1, "{dispatched:?}");
+    assert_eq!(
+        dispatched[0],
+        format!(
+            "## What\nDo shape.\n\n## Acceptance criteria\n\n- shape is done.\n\n\
+             {AMENDMENT_HEADING}\n{AMENDMENT_PRECEDENCE}\n\n\
+             **Scope**\n\n- dash\n- star\n- plus\n- dotted\n- parenthesised\n\
+             - A ruling wrapped over two lines.\n\n\
+             ## Additional info\n\nRun the gate once."
+        ),
+        "the amendment was not handed over as clauses of the one criteria section"
+    );
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what this journey proves is
+// what the real `oneagentgraph` and `onejudge` hand a node's judge from the task this crate
+// renders, so its edge is this crate's rendering plus those two linked engines; the one
+// separately edged test project's input begins at `{workspaceRoot}/src/**/*`, so a project of
+// its own would declare the same dependency and skip nothing. It is one supervised turn, and it
+// sits beside the other amend journeys, which is where a reader looks for one.
+/// The verdict regression: a node whose original criteria carry a file allowlist
+/// and whose binding amendment relaxes it is judged against **one** acceptance
+/// section, in which the relaxed rule is stated as a criterion taking precedence
+/// over the whole task — and the judge is never handed the amendment as a peer
+/// section beside the allowlist it relaxes.
+///
+/// The failure this closes: rendered as its own `## Amendment` claiming
+/// precedence over the operational notes alone, an amendment admitting a script
+/// the original criteria excluded was read by the node's judge beside that
+/// criterion, and a gate-green node was failed for touching the script the
+/// in-force ruling admitted. So this drives the whole path the judge's reading
+/// is composed on — this crate's `start`, the real `oneagentgraph`, and the real
+/// `onejudge` composing the supervisor's prompt from the one `--task` both
+/// parties are handed — with the harness double below onejudge recording what
+/// the judge was actually asked, and reads the section off that prompt.
+#[test]
+fn a_judge_is_handed_one_acceptance_section_in_which_the_relaxing_amendment_wins() {
+    let world = World::new("amend-judge-allowlist");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+
+    let allowlist = "Only `src/lib.rs` changes; nothing under `scripts/` is touched.";
+    let relaxed =
+        "`scripts/release-probe.sh` may change as well: the fix needs it, and touching it is \
+         within this node's scope.";
+    let mut node = agent("build", &[]);
+    node["task"] = json!(format!(
+        "## What\nDo build.\n\n## Why\nSo the run can settle.\n\n## Acceptance criteria\n\n\
+         - build is done.\n- {allowlist}\n\n## Additional info\n\nRun the gate once.\n"
+    ));
+    node["amendment"] = json!(relaxed);
+    let path = world.plan("amendjudge", &plan_of("amendjudge", vec![node]));
+    // This crate's own `onepipeline start`, dispatching through the real
+    // `oneagentgraph` rather than the double every other journey here puts on
+    // its path: the harness below onejudge is the only thing stood in for.
+    world
+        .run_on_agentgraph(&["start", &path, "--attach"])
+        .exited(0)
+        .settled();
+
+    let prompts: Vec<String> = world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] == "oneharness-config")
+        .filter_map(|call| call["args"][0].as_str().map(str::to_string))
+        .filter(|prompt| prompt.contains(SUPERVISOR_OPENING))
+        .collect();
+    assert!(
+        !prompts.is_empty(),
+        "the node's judge was never asked, so nothing here is proven: {:?}",
+        world.invocations()
+    );
+    for whole in &prompts {
+        // The task as onejudge states it to the judge. The transcript below it
+        // quotes the worker's turn, which opens on the same task, so the section
+        // is read off the judge's own statement of it rather than counted twice.
+        let prompt = whole
+            .split_once(TASK_OPENING)
+            .and_then(|(_, rest)| rest.split_once(PERSONA_OPENING))
+            .map(|(task, _)| task)
+            .unwrap_or_else(|| panic!("the judge was not handed the task:\n{whole}"));
+        let at = |needle: &str| {
+            prompt
+                .find(needle)
+                .unwrap_or_else(|| panic!("the judge was not handed {needle:?}:\n{prompt}"))
+        };
+        // One acceptance section, and the amendment inside it — after the
+        // original criteria, above the operational notes — never a `## Amendment`
+        // of its own beside them.
+        assert_eq!(
+            prompt.matches("## Acceptance criteria").count(),
+            1,
+            "the judge was handed more than one acceptance section:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("\n## Amendment\n"),
+            "the judge was handed the amendment as a section beside the criteria:\n{prompt}"
+        );
+        assert!(
+            at("## Acceptance criteria") < at(&format!("- {allowlist}"))
+                && at(&format!("- {allowlist}")) < at(AMENDMENT_HEADING)
+                && at(AMENDMENT_HEADING) < at("## Additional info"),
+            "the amendment is not inside the criteria and above the notes:\n{prompt}"
+        );
+        // The relaxed rule is a criterion, under the sentence that says it takes
+        // precedence over the whole task — the allowlist above it included.
+        assert!(
+            prompt.contains(&format!(
+                "{AMENDMENT_HEADING}\n{AMENDMENT_PRECEDENCE}\n\n- {relaxed}\n"
+            )),
+            "the relaxed rule is not the criterion stated under the precedence sentence:\n{prompt}"
+        );
+        assert!(
+            AMENDMENT_PRECEDENCE.contains("takes precedence over the whole task")
+                && AMENDMENT_PRECEDENCE.contains("contradicts a criterion above it")
+                && AMENDMENT_PRECEDENCE.contains("the contradicted one no longer binds"),
+            "the precedence sentence does not resolve the allowlist against the ruling: \
+             {AMENDMENT_PRECEDENCE}"
+        );
+        // And it claims precedence over the task, not over the notes alone.
+        assert!(
+            !prompt.contains("operational notes below disagree, this section wins"),
+            "the amendment still claims precedence over the notes alone:\n{prompt}"
+        );
+    }
+}
+
+/// The brief onejudge opens every supervisor prompt on, which is what tells a
+/// judge's prompt from the worker's among everything the harness was handed.
+const SUPERVISOR_OPENING: &str = "You are the simulated USER and completion supervisor";
+
+/// The label onejudge states the judged task under, and the one that follows it.
+const TASK_OPENING: &str = "Original task:\n";
+const PERSONA_OPENING: &str = "Supervisor persona:\n";
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A plan stating an amendment that says nothing is refused by that field's name,
 /// exactly as the op refuses a blank ruling.

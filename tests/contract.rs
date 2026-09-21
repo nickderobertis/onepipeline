@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use clap::{CommandFactory, Parser};
 use oneagentgraph::config::{ConfigRef, GraphConfig, JudgeSide, Member};
 use oneagentgraph::persona::{merge, Persona};
-use onepipeline::channel::{allows, Author, Command as Edit, Dependents, Reply, SurfaceKind};
+use onepipeline::channel::{
+    allows, Author, Command as Edit, Dependents, Reply, Surface, SurfaceKind,
+};
 use onepipeline::cli::{
     Cli, Command, DAG_GRAPH_OFF, DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS,
     DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_HOOK_TIMEOUT_SECONDS,
@@ -47,8 +49,8 @@ use onepipeline::note::{Addressee, Delivered, Note, Party, Reached};
 use onepipeline::plan::{
     adoption_instructions, arrival_note, CrossRepoReference, Node, NodeKind, Plan, RepoType,
     Resume, Step, Workflow, ADOPTION_INSTRUCTION_VARIABLES, AMENDMENT_HEADING,
-    CROSS_REPO_REFERENCES_HEADING, DEFAULT_ADOPTION_INSTRUCTION, OBSERVED_STATE,
-    PLANNER_CONTEXT_HEADING, PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
+    AMENDMENT_PRECEDENCE, CROSS_REPO_REFERENCES_HEADING, DEFAULT_ADOPTION_INSTRUCTION,
+    OBSERVED_STATE, PLANNER_CONTEXT_HEADING, PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
 };
 use onepipeline::report::{
     retain, ACCEPTED_REPORT_FILE, MAX_REPORT_BYTES, MEMBER_SETTLED, REPORT_PATH,
@@ -1646,6 +1648,63 @@ fn the_release_adoption_surface_is_what_the_divergence_record_names() {
         "entry 40 names a different heading than this crate publishes"
     );
     assert_ne!(CROSS_REPO_REFERENCES_HEADING, PLANNER_CONTEXT_HEADING);
+
+    // The wait surface and the rule that withholds a stale one: the kind is one
+    // the entry's own kinds carry, what fixes its epoch is a field every surface
+    // carries, and each record named as ending a hold is a kind this crate
+    // emits. The rule itself is driven through the binary by the adoption
+    // journey the entry names; what is held here is that the entry's words and
+    // the types cannot drift apart.
+    let wait = &block["wait_surface"];
+    assert_eq!(wait["kind"].as_str(), Some("release-wait"));
+    assert!(kinds.contains(&"release-wait".to_string()));
+    assert_eq!(wait["epoch"].as_str(), Some("queued_at"));
+    let queued = serde_json::to_value(Surface {
+        id: 1,
+        kind: "release-wait".into(),
+        message: "held".into(),
+        source: "proposal".into(),
+        blocking: false,
+        queued_at: 7,
+        abandoned: false,
+        asker: None,
+        workstream: Some("consumer".into()),
+        correlation: None,
+    })
+    .expect("a surface serializes");
+    assert_eq!(
+        queued["queued_at"],
+        json!(7),
+        "the field the entry says fixes a wait's epoch is not one a surface carries"
+    );
+    // Which kinds they are is reconciled against the set `wait_outlived` reads
+    // by `src/release.rs`'s own test of this block, since that set is private.
+    let ending: Vec<String> = serde_json::from_value(wait["withheld_after"].clone())
+        .expect("entry 40 names the records that end a hold");
+    assert!(
+        !ending.is_empty(),
+        "entry 40 names no record that ends a hold"
+    );
+    for kind in &ending {
+        assert!(
+            PipelineKind::from_wire(&EventKind(kind.clone())).is_some(),
+            "`{kind}` is not a kind this crate emits"
+        );
+    }
+    let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergence record ships");
+    let prose = record.split_whitespace().collect::<Vec<_>>().join(" ");
+    for said in [
+        "fixed by the instant it was queued",
+        "at or after that instant",
+        "is **withheld**, never handed out",
+        "recorded neither as `planner-surfaced`",
+    ] {
+        assert!(
+            prose.contains(said),
+            "entry 40 no longer states the rule that withholds a stale wait: {said:?}"
+        );
+    }
 }
 
 /// The placement overrides, the hold, the surface and the requeue this build
@@ -2097,32 +2156,68 @@ fn the_amendment_and_validator_surface_is_what_the_divergence_record_names() {
         "a node naming no amendment gained one on the way out"
     );
 
-    // The heading, which is a published constant, and the rendering it opens:
-    // the amendment states its own authority over the notes it sits above.
+    // The heading and the precedence sentence, which are published constants,
+    // and the rendering they open: the amendment's clauses are criteria of the
+    // one section the entry names, above the notes, opening with the sentence
+    // that states their precedence over the whole task — and never a section of
+    // their own beside the criteria they override.
     assert_eq!(
         block["heading"].as_str(),
         Some(AMENDMENT_HEADING),
         "entry 41 names a different heading than this crate publishes"
     );
+    assert_eq!(
+        block["precedence"].as_str(),
+        Some(AMENDMENT_PRECEDENCE),
+        "entry 41 states a different precedence sentence than this crate publishes"
+    );
     assert_ne!(AMENDMENT_HEADING, PLANNER_CONTEXT_HEADING);
-    let rendered = Node {
-        task: Some("## What\nship it\n\n## Additional info\n\nrun the gate.\n".into()),
-        ..node.clone()
+    let section = block["rendered_into"]
+        .as_str()
+        .expect("entry 41 names the section the amendment is rendered into");
+    assert!(
+        section.starts_with("## ") && AMENDMENT_HEADING.starts_with("### "),
+        "the amendment's heading is not a sub-heading of the section it is rendered into"
+    );
+    for task in [
+        // A task stating the section: the amendment joins it, above the notes.
+        "## What\nship it\n\n## Acceptance criteria\n\n- it ships\n\n## Additional info\n\nrun the gate.\n",
+        // A task stating none: one is opened for it, above the notes.
+        "## What\nship it\n\n## Additional info\n\nrun the gate.\n",
+    ] {
+        let rendered = Node {
+            task: Some(task.into()),
+            ..node.clone()
+        }
+        .rendered_task();
+        let at = |needle: &str| {
+            rendered
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} is not rendered: {rendered}"))
+        };
+        assert!(
+            at(section) < at(AMENDMENT_HEADING) && at(AMENDMENT_HEADING) < at("## Additional info"),
+            "the amendment is not inside the criteria and above the notes: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches(section).count(),
+            1,
+            "the amendment made a second acceptance section: {rendered}"
+        );
+        assert!(
+            !rendered.contains("\n## Amendment"),
+            "the amendment is a section of its own beside the criteria: {rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("{AMENDMENT_HEADING}\n{AMENDMENT_PRECEDENCE}\n\n- {text}\n")),
+            "the amendment's clause is not a criterion under the sentence stating its \
+             precedence: {rendered}"
+        );
+        assert!(
+            AMENDMENT_PRECEDENCE.contains("takes precedence over the whole task"),
+            "the amendment does not state its precedence over the whole task"
+        );
     }
-    .rendered_task();
-    let (heading, notes) = (
-        rendered.find(AMENDMENT_HEADING).expect("it is rendered"),
-        rendered.find("## Additional info").expect("the notes are"),
-    );
-    assert!(
-        heading < notes,
-        "the amendment is below the notes: {rendered}"
-    );
-    assert!(rendered.contains(&text), "{rendered}");
-    assert!(
-        rendered.contains("this section wins"),
-        "the amendment does not state its authority: {rendered}"
-    );
 
     // The validator, named three ways, with the config key at the version the
     // entry states.

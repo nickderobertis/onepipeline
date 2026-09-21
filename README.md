@@ -396,9 +396,12 @@ declaration a consumer reads rather than a second copy here that could drift fro
 it.
 
 An `amend` **does** change that: its text becomes part of the node's effective
-task, rendered under `## Amendment` above the task's operational notes and claiming
-precedence over them, so the worker and the judge reviewing it read the same ruling
-— on the dispatch that follows it and on every later one, until another `amend`
+task, rendered into the task's own `## Acceptance criteria` under `### Amendment`
+— one acceptance section, above the task's operational notes, its clauses stated
+as criteria that take precedence over the whole task and over any original
+criterion they contradict, never a section of its own beside the criteria it
+overrides — so the worker and the judge reviewing it read the same ruling — on
+the dispatch that follows it and on every later one, until another `amend`
 replaces it. A turn already in flight is not reached: its task was composed before
 the ruling existed, and so was the one its judge reads. A node's current amendment
 is readable from `status` and from `results` before anything replaces it. That is
