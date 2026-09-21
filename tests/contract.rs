@@ -283,6 +283,7 @@ fn the_dispatch_request_carries_every_field_the_contract_declares() {
             execution_checkout: None,
             pool: None,
             overflow: None,
+            labels: Default::default(),
         }),
         cancel: CancellationToken::new(),
         attempt: NonZeroU32::new(2).expect("two is an attempt"),

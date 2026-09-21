@@ -2052,15 +2052,24 @@ impl World {
     /// server, and the line it answers with is the planner's reply or the bus's
     /// own word for a wait that ended without one.
     ///
+    /// The layout it serves is the document this crate publishes, linked by
+    /// path as a host's configuration links it — generated here from the
+    /// compiled-in layout, which `tests/contract.rs` holds the committed copy
+    /// to — so the server links no code of this crate's.
+    ///
     /// The one author of a *blocking* surface these journeys have: `surface` is
     /// a report and holds nothing back. Its stdio is the caller's to pipe. The
     /// asker this suite's own dispatch carries is dropped for the reason
     /// [`cmd`](World::cmd) drops it — a journey that means two sessions as one
     /// asker sets it on the command itself.
     pub fn host_channel(&self, run: &str) -> Command {
+        let bundle = self.root.join("planner-channel.json");
+        std::fs::write(&bundle, onepipeline::channel::layout::bundle_json())
+            .expect("the layout document is written");
         let mut command = Command::new(double("host-channel-server"));
         command
             .arg(self.run_file(run, "channel"))
+            .arg(&bundle)
             .env_remove(onepipeline::channel::ASKER_ENV);
         command
     }

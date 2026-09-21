@@ -601,6 +601,7 @@ mod tests {
             execution_checkout: None,
             pool: None,
             overflow: None,
+            labels: Default::default(),
         };
         // Held on the refusal's reading, with no read made: the request names
         // an identity no registry holds, which a read would have refused.
