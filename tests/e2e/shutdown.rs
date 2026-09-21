@@ -793,3 +793,46 @@ fn a_shutdown_names_exactly_one_scope_or_is_refused_before_it_signals_anything()
     assert!(!world.run_file(&run, "shutting-down.json").exists());
     world.release("build.go");
 }
+
+/// A node whose change already landed has no branch left to preserve, and the
+/// work still in flight beside it does.
+///
+/// The landed node's work is on its base, on the origin, before the shutdown
+/// begins — the line `onevcs recoverable` draws too — so offering its finished
+/// session branch would only risk a refusal over work nobody could lose.
+#[test]
+fn a_landed_nodes_branch_is_not_offered_and_the_work_in_flight_is() {
+    let world = World::new("shutdown-landed");
+    let repository = world.repository("local-direct", &[]);
+    world.script("done.work", "the finished worker wrote this\n");
+    held(&world, "live");
+    let run = launch(
+        &world,
+        "landed",
+        vec![lifecycle("done", &[]), lifecycle("live", &[])],
+    );
+    world.until("the finished node to land", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "done")
+    });
+    until_in_flight(&world, &run, &["live"]);
+    assert!(
+        repository.base_file("done.md").is_some(),
+        "the node did not land"
+    );
+    let live = session_branch(&world, &run, "live");
+
+    let shutdown = world.run(&["shutdown", &run, "--force"]);
+    shutdown.exited(0);
+    let branches = host_shutdown(&world, &run)["branches"].clone();
+    assert_eq!(
+        branches.as_array().map(Vec::len),
+        Some(1),
+        "the shutdown offered a landed node's branch: {branches}"
+    );
+    assert_eq!(branches[0]["branch"], json!(live), "{branches}");
+    assert_eq!(branches[0]["result"], "pushed", "{branches}");
+    assert!(on_origin(&world, &repository.origin, &live).is_some());
+}

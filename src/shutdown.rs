@@ -1005,19 +1005,22 @@ fn preserve_every_branch(view: &RunView) -> Vec<BranchPreserved> {
 
 /// Every (identity, branch) pair this run's own records name, once each.
 ///
-/// Three records, one question. `sessions` is where each node's current dispatch
-/// is working, `abandoned` is where a dispatch an adoption cleared was working,
-/// and `branches` is what each settled node's dispatch left behind — which for
-/// an unpinned lifecycle node is the only record of where the work is.
+/// Three records, one question. `sessions` is the session each node's latest
+/// dispatch opened, in flight or closed; `abandoned` is where a dispatch an
+/// adoption cleared was working; and `branches` is what each settled node's
+/// dispatch left behind — which for an unpinned lifecycle node is the only
+/// record of where the work is.
+///
+/// A node no longer in flight whose change **landed** is left out of all three:
+/// its work is on its base, on the origin, already — the same line
+/// `onevcs::recoverable` draws — and a session branch its publication has
+/// finished with may no longer be anywhere to push from, which would report a
+/// refusal over work nobody could lose. Work in flight is always offered.
 fn branches_of(view: &RunView) -> Vec<(String, String)> {
-    let mut found: Vec<(String, String)> = Vec::new();
-    let mut add = |repo: Option<String>, branch: String| {
-        if let Some(repo) = repo {
-            let pair = (repo, branch);
-            if !found.contains(&pair) {
-                found.push(pair);
-            }
-        }
+    let statuses = view.state.statuses();
+    let finished_landing = |node: &str| {
+        view.state.landings.get(node) == Some(&crate::graph::Landing::Landed)
+            && statuses.get(node) != Some(&crate::graph::NodeStatus::Running)
     };
     let repo_of = |node: &str| {
         view.state
@@ -1025,16 +1028,29 @@ fn branches_of(view: &RunView) -> Vec<(String, String)> {
             .get(node)
             .and_then(|node| node.repo.clone())
     };
-    for (node, session) in view
+    let named = view
         .state
         .sessions
         .iter()
         .chain(view.state.abandoned.iter())
-    {
-        add(repo_of(node), session.branch().as_str().to_string());
-    }
-    for (node, branch) in &view.state.branches {
-        add(repo_of(node), branch.clone());
+        .map(|(node, session)| (node, session.branch().as_str().to_string()))
+        .chain(
+            view.state
+                .branches
+                .iter()
+                .map(|(node, branch)| (node, branch.clone())),
+        );
+    let mut found: Vec<(String, String)> = Vec::new();
+    for (node, branch) in named {
+        if finished_landing(node) {
+            continue;
+        }
+        if let Some(repo) = repo_of(node) {
+            let pair = (repo, branch);
+            if !found.contains(&pair) {
+                found.push(pair);
+            }
+        }
     }
     found
 }

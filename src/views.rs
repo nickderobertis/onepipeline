@@ -200,7 +200,7 @@ const OUTLIVED_THE_STOP: &str = "worker may still be running: the stop could not
 /// The same rule [`RunState::stop_recorded`] keeps for a stop, read off the
 /// merged store rather than folded, because the two views that answer for it are
 /// the two that already hold it.
-pub(crate) struct HostShutdown<'a> {
+struct HostShutdown<'a> {
     /// When the shutdown was recorded.
     at: &'a str,
     /// What became of each dispatch it acted on, by node.
@@ -211,7 +211,7 @@ pub(crate) struct HostShutdown<'a> {
 
 impl<'a> HostShutdown<'a> {
     /// The shutdown this run is under, or `None` for a run that is not.
-    pub(crate) fn of(view: &'a RunView) -> Option<Self> {
+    fn of(view: &'a RunView) -> Option<Self> {
         let mut dispatches = BTreeMap::new();
         let mut found: Option<(&str, &serde_json::Map<String, serde_json::Value>)> = None;
         for event in &view.events {
@@ -282,7 +282,7 @@ impl<'a> HostShutdown<'a> {
             .and_then(|row| row.get("result"))
             .and_then(serde_json::Value::as_str)
         {
-            Some("pushed") => "on its origin unproven: pushed without that repository\'s own \
+            Some("pushed") => "on its origin unproven: pushed without that repository's own \
                                hook or merge path having run"
                 .to_string(),
             Some("already-on-origin") => "already on its origin at this commit".to_string(),
@@ -3962,6 +3962,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch root");
         dir
+    }
+
+    /// Each word a `host-shutdown` records for a branch reads back as where
+    /// that branch is, and a branch it never offered is not called safe.
+    ///
+    /// `pushed` is the one a journey drives end to end, off a real preserving
+    /// push in `tests/e2e/shutdown.rs`; the rest are the sibling's other three
+    /// answers and the absence of one, which is what a node whose session opened
+    /// after the shutdown ran reads as.
+    #[test]
+    fn a_shut_down_branch_reads_as_where_its_preserving_push_left_it() {
+        let rows: Vec<serde_json::Value> = ["pushed", "already-on-origin", "no-remote", "refused"]
+            .iter()
+            .map(|result| json!({"branch": *result, "result": result}))
+            .collect();
+        let stopped = serde_json::Map::from_iter([
+            ("ended".to_string(), json!("graceful")),
+            ("interrupt".to_string(), json!("delivered")),
+        ]);
+        let shutdown = HostShutdown {
+            at: "not a timestamp",
+            dispatches: BTreeMap::from([("build", &stopped)]),
+            branches: rows
+                .iter()
+                .map(|row| (row["branch"].as_str().expect("named"), row))
+                .collect(),
+        };
+        for (branch, says) in [
+            ("pushed", "on its origin unproven"),
+            ("already-on-origin", "already on its origin"),
+            ("no-remote", "not on any origin"),
+            ("refused", "the preserving push was refused"),
+            ("never-offered", "not offered to a preserving push"),
+        ] {
+            let read = shutdown.reached_its_origin(branch);
+            assert!(read.contains(says), "{branch}: {read}");
+        }
+        assert_eq!(
+            shutdown.became_of("build"),
+            "worker graceful by the host shutdown (interrupt delivered)"
+        );
+        assert_eq!(
+            shutdown.became_of("later"),
+            "no live dispatch when the host shutdown ran"
+        );
+        // An instant this build cannot place is left out rather than guessed.
+        let line = shutdown.line("run-1");
+        assert!(line.starts_with("  HOST SHUTDOWN: this run was put down by a host shutdown;"));
+        assert!(
+            line.contains("onepipeline adopt run-1 resumes it"),
+            "{line}"
+        );
     }
 
     /// Each of the four answers `onevcs` gives reads back as one of the three
