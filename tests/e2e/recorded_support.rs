@@ -127,6 +127,16 @@ pub(crate) fn without_the_reset_report(text: &str) -> String {
     text.replace(RESET_REPORT_OF_0_28_2, "")
 }
 
+/// `text` without the `free space:` lines `status` and `host` write since 0.28.2:
+/// each reads the disk the view runs on, not the recorded channel, so no two
+/// hosts share one. Entry 86 of `docs/contract-divergences.md` records the line,
+/// and `views.rs` holds it; every other line either binary writes is still held.
+pub(crate) fn without_the_free_space(text: &str) -> String {
+    text.split_inclusive('\n')
+        .filter(|line| !line.starts_with("  free space: "))
+        .collect()
+}
+
 /// `text` with how long each update has been unread taken out: a view counts
 /// what is unread and says for how long, and the second half is wall-clock.
 pub(crate) fn aged(text: &str) -> String {
@@ -217,7 +227,7 @@ pub(crate) fn answered(world: &World, program: &Path, args: &[&str]) -> Value {
     json!({
         "args": args,
         "exit": output.status.code(),
-        "stdout": scrubbed(&output.stdout),
+        "stdout": without_the_free_space(&scrubbed(&output.stdout)),
         "stderr": without_the_reset_report(&scrubbed(&output.stderr)),
     })
 }

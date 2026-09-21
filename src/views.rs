@@ -2446,6 +2446,17 @@ pub(crate) fn status_of(view: &RunView) -> String {
         // run wants to know the idle capacity is being spent on something.
         out.push_str(&crate::maintenance::status_line(view));
         out.push_str(&journal_loss_line(view));
+        // What the run is running *in*, above the provider block: a supervisor's
+        // watch guidance cuts this view at that line, and a reading below it
+        // would be one no watch following that guidance could see. The root is
+        // the run's own parent, because a run opened by name was resolved
+        // under it.
+        out.push_str(&crate::freespace::lines(
+            view.paths
+                .dir
+                .parent()
+                .unwrap_or_else(|| Path::new(ledger::DEFAULT_RUNS_DIR)),
+        ));
         if let Some(health) = crate::agentgraph::health() {
             out.push_str(&format!("  providers: {health}\n"));
         }
@@ -3219,6 +3230,10 @@ pub fn host(survey: &Survey) -> String {
         "  reading {}\n",
         one_line(&survey.root.display().to_string())
     ));
+    // And what that root, and the worktrees the runs under it work in, are on:
+    // the resource whose exhaustion stops everything, beside the scope line so a
+    // reader of a quiet host meets it first.
+    out.push_str(&crate::freespace::lines(&survey.root));
     let mut rendered = false;
     let mut ignored: Vec<String> = Vec::new();
     for view in &survey.views {

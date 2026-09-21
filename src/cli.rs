@@ -202,6 +202,17 @@ pub enum Command {
     Watch(WatchArgs),
     /// Which of a session's runs has nothing watching it.
     Unwatched(UnwatchedArgs),
+    // llmlint: ignore-block[new_command_or_client_gets_its_own_project] two verbs of this one
+    // binary rather than a new command or client: each reads the run store and channel the
+    // engine owns, through the crate's private modules, and ships in the same artifact on
+    // the same three registries — the same shape as `unwatched` above.
+    /// Whether a session's turn may end: one verdict over `unwatched`, for a
+    /// harness's stop hook.
+    StopGuard(StopGuardArgs),
+    /// Ask the manager a blocking question over the run's planner channel, and
+    /// answer with theirs.
+    Ask(AskArgs),
+    // llmlint: ignore-end[new_command_or_client_gets_its_own_project]
     /// Per-node outcomes, with each node's own evidence.
     Results(RunArgs),
     /// What each run is for, and how far it has got.
@@ -794,6 +805,73 @@ pub struct UnwatchedArgs {
     /// `ONEPIPELINE_LAUNCHER_SESSION` names.
     #[arg(long, value_name = "ID")]
     pub session: Option<String>,
+}
+
+/// `onepipeline stop-guard`.
+///
+/// The general stop guard: the session whose stop this is and whether the stop
+/// continues a block the guard made, as flags or as fields of one object on
+/// standard input, and the shape the verdict is rendered in. What it decides
+/// and how, and why the session is never read from the environment, is entry 85
+/// of `docs/contract-divergences.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct StopGuardArgs {
+    /// The session whose stop this is. Omitted, it is read from the object on
+    /// standard input the format names — never from the environment.
+    #[arg(long, value_name = "ID")]
+    pub session: Option<String>,
+    /// This stop follows a block this guard made: answer `none` where the
+    /// report it would block on is the one it last blocked this session on.
+    #[arg(long)]
+    pub continuation: bool,
+    /// How the input is read and the verdict rendered.
+    #[arg(long, value_enum, default_value_t = StopGuardFormat::Neutral)]
+    pub format: StopGuardFormat,
+}
+
+/// How the verdict is rendered: the neutral object, or a harness's own shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum StopGuardFormat {
+    /// `{"verdict":"block","reason":…}`, `{"verdict":"warn","message":…}` or
+    /// `{"verdict":"none"}`; the input is `--session`/`--continuation`, or one
+    /// object `{"session":…,"continuation":…}` on standard input.
+    #[default]
+    Neutral,
+    /// Claude Code's `Stop` hook: the payload's `session_id` and
+    /// `stop_hook_active` are read off standard input, and the verdict is
+    /// `{"decision":"block","reason":…}`, `{"systemMessage":…}` or nothing.
+    ClaudeCode,
+    /// Codex's `Stop` hook, which reads and answers the same shape Claude
+    /// Code's does.
+    Codex,
+}
+
+/// `onepipeline ask`.
+///
+/// The question in one of three forms — the argument words, a file, or standard
+/// input when neither is given — and what rides beside it. The run is
+/// `ONEPIPELINE_RUN_ID`'s and the asker `ONEPIPELINE_CHANNEL_ASKER`'s, read in
+/// the binary's arm; entry 87 of `docs/contract-divergences.md` states the
+/// verb.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct AskArgs {
+    /// The question, as words joined by one space. Omitted, it is read from
+    /// `--file`, or from standard input when neither is given.
+    #[arg(value_name = "TEXT", conflicts_with = "file")]
+    pub text: Vec<String>,
+    /// The file the question is read from.
+    #[arg(long, value_name = "PATH")]
+    pub file: Option<PathBuf>,
+    /// The node the question is about: at most 512 bytes, not blank, with no
+    /// control character.
+    #[arg(long, value_name = "NODE")]
+    pub about: Option<String>,
+    /// The reply window, in whole seconds, at least one. Omitted, the
+    /// `reply_window_seconds` the run's launch record's bus configuration names
+    /// for the `surfaces` queue, or the bus's own default when it names none.
+    #[arg(long, value_name = "SECONDS")]
+    pub timeout: Option<std::num::NonZeroU64>,
 }
 
 /// `onepipeline drive` — the retained driver a detached launch starts.

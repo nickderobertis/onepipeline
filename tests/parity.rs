@@ -253,6 +253,41 @@ fn line(rendered: String) -> String {
     format!("{rendered}\n")
 }
 
+/// A view with its free-space reading held still.
+///
+/// `host` and `status RUN` each carry one line per filesystem saying what is
+/// free on it, and the two sides of a comparison measure it moments apart on a
+/// host other work is writing to — so the numbers on that line are the one thing
+/// in either view that can honestly differ between the binary and the SDK. The
+/// line's shape, its roots and its place in the view are held; the measurement
+/// is not.
+fn steady(view: &str) -> String {
+    view.lines()
+        .map(|line| match line.strip_prefix("  free space: ") {
+            Some(rest) if rest.contains(" on the filesystem holding ") => {
+                let (_, roots) = rest
+                    .split_once(" on the filesystem holding ")
+                    .expect("split once on the phrase it contains");
+                format!("  free space: <measured> on the filesystem holding {roots}\n")
+            }
+            _ => format!("{line}\n"),
+        })
+        .collect()
+}
+
+/// Hold the binary's answer to the SDK's rendering of a view that carries a
+/// free-space reading: the same bytes once that reading is held still, and the
+/// same exit code.
+fn same_view(what: &str, output: &Output, rendered: &str, code: i32) {
+    assert_eq!(
+        steady(&stdout(output)),
+        steady(rendered),
+        "{what}: the binary's stdout is not the SDK's rendering\n--- stderr ---\n{}",
+        stderr(output)
+    );
+    assert_eq!(exit(output), code, "{what}: the exit codes differ");
+}
+
 #[test]
 fn runs_lists_grouped_by_default_flat_on_request_and_narrowed_to_a_session() {
     let fixture = Fixture::new("runs");
@@ -304,7 +339,7 @@ fn status_lists_every_run_details_one_and_refuses_one_that_is_not_there() {
         EXIT_SUCCESS,
     );
     let detail = verbs::status(&fixture.root, Some(RUN)).expect("the run reads");
-    same(
+    same_view(
         "status RUN",
         &fixture.binary(&["status", RUN]),
         &verbs::render_status(&detail),
@@ -329,7 +364,7 @@ fn host_reports_the_live_dispatches_under_the_root() {
     let fixture = Fixture::new("host");
     let _env = fixture.enter();
 
-    same(
+    same_view(
         "host",
         &fixture.binary(&["host"]),
         &verbs::render_host(&verbs::host(&fixture.root)),
