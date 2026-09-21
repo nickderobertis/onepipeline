@@ -94,7 +94,8 @@ pub(crate) enum Answer {
     /// The running turn took the redirection. Ranked highest, because what a
     /// reader has to know is whether *anything* took the ask.
     Delivered,
-    /// The `--force` path, where nothing was asked at all.
+    /// Nothing was asked at all: the `--force` path, or a run the hold could not
+    /// be written for, which is given no grace.
     NotAsked,
 }
 
@@ -330,6 +331,7 @@ impl Shutdown {
     /// identity has no origin at all, and a run with nothing live to interrupt
     /// are facts this reports at exit 0.
     pub fn exit_code(&self) -> i32 {
+        // llmlint: ignore[cli_output_contract] the approved contract fixes this verb's exit status exhaustively — refused when a dispatch was killed at the deadline, a teardown was not clean, or a push was refused, success otherwise — and states the host's other unpublished branches as "a fact, never a failure", whose unreadable enumeration the report says rather than reporting none; exiting refused on that read is the contract owner's decision to make, not this site's.
         if self.runs.iter().all(RunShutdown::clean) {
             EXIT_SUCCESS
         } else {
@@ -487,12 +489,16 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
     }
 
     // Before anything is signalled: the driver goes on scheduling for as long as
-    // the grace lasts.
-    if let Err(why) = hold_the_run(paths) {
+    // the grace lasts, so a run the hold could not be written for is given no
+    // grace — waiting it out would be the window a new dispatch starts in.
+    let held = hold_the_run(paths);
+    let asks = request.asks() && held.is_ok();
+    if let Err(why) = &held {
         // llmlint: ignore[cli_output_contract] the approved contract fixes this verb's exit status exhaustively — refused when a dispatch was killed at the deadline, a teardown was not clean, or a push was refused, success otherwise — and a record that could not be written is none of those; changing that rule is the contract owner's decision. The failure is said on stderr where it happens, and what the record would have carried is on the report.
         eprintln!(
             "onepipeline: run '{}': the hold that stops it dispatching could not be written — \
-             {why}; its driver goes on scheduling until the teardown ends it",
+             {why}; so that its driver starts nothing new, nothing of it is asked or waited \
+             for and it goes straight to the teardown",
             paths.run
         );
     }
@@ -523,6 +529,15 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
                  straight to the teardown and whatever its turn had not committed is gone"
                     .to_string(),
             )
+        } else if !asks {
+            (
+                Answer::NotAsked,
+                "nothing was asked of this dispatch: the hold that stops its run dispatching \
+                 could not be written, and waiting out the grace without it would have let the \
+                 run's driver start new work, so it went straight to the teardown and whatever \
+                 its turn had not committed is gone"
+                    .to_string(),
+            )
         } else if dispatch.in_the_driver {
             (
                 Answer::NoTurn,
@@ -547,7 +562,7 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
     }
 
     let asked_at = Instant::now();
-    let waited = wait_for_them(paths, from, &asked, asked_at, request);
+    let waited = wait_for_them(paths, from, &asked, asked_at, asks, request.grace);
 
     let teardown = tear_the_run_down(paths, view);
 
@@ -562,8 +577,8 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
                 .as_ref()
                 .is_some_and(|now| publishing_phase(now, &record.node).is_some());
             let (how, waited) = match (
-                waited.ended.get(&record.node),
-                waited.exited.get(&record.node),
+                waited.ended.get(&Waited::key(&record)),
+                waited.exited.get(&Waited::key(&record)),
             ) {
                 (Some(after), _) => (DispatchEnding::Graceful, *after),
                 // Its process went of its own accord and nothing of it was left
@@ -857,7 +872,7 @@ fn ask_it_to_stop(
 
 /// Watch the dispatches until they are gone or the grace runs out.
 ///
-/// Answers, per node whose work ended, how long after the ask it was observed
+/// Answers, per dispatch whose work ended, how long after the ask it was observed
 /// to. A dispatch with a process of its own has ended when the registry's claim
 /// on that process is over — and, where its driver is alive to carry it on,
 /// when its node has also left flight: a lifecycle node whose agent exits goes
@@ -865,23 +880,24 @@ fn ask_it_to_stop(
 /// work, bounded by the same grace. One whose work was the driver's all along
 /// has ended when its node settles.
 ///
-/// Nothing is watched at all on the forced path: there was no ask, so there is
-/// no deadline to wait out.
+/// Nothing is watched at all on the forced path, or for a run the hold could
+/// not be written for: there was no ask, so there is no deadline to wait out.
 fn wait_for_them(
     paths: &RunPaths,
     from: u64,
     asked: &[(Watched, String, String)],
     asked_at: Instant,
-    request: &ShutdownRequest,
+    asks: bool,
+    grace: Duration,
 ) -> Waited {
     let mut waited = Waited::default();
-    if !request.asks() {
+    if !asks {
         return waited;
     }
     // Refused in `shutdown` where it could not be counted to; the wait started
     // after that check, so the only difference is the moments between them.
     let deadline = asked_at
-        .checked_add(request.grace)
+        .checked_add(grace)
         .unwrap_or_else(|| asked_at + Duration::from_secs(u64::from(u32::MAX)));
     let driven = asked.iter().any(|(dispatch, ..)| dispatch.in_the_driver)
         || RunView::open(paths)
@@ -898,7 +914,7 @@ fn wait_for_them(
         let mut standing = false;
         for (dispatch, ..) in asked {
             let record = &dispatch.record;
-            if waited.ended.contains_key(&record.node) {
+            if waited.ended.contains_key(&Waited::key(record)) {
                 continue;
             }
             let process_over =
@@ -906,11 +922,11 @@ fn wait_for_them(
             if process_over && !dispatch.in_the_driver {
                 waited
                     .exited
-                    .entry(record.node.clone())
+                    .entry(Waited::key(record))
                     .or_insert_with(|| asked_at.elapsed());
             }
             if process_over && (!driven || left_flight.contains(&record.node)) {
-                waited.ended.insert(record.node.clone(), asked_at.elapsed());
+                waited.ended.insert(Waited::key(record), asked_at.elapsed());
             } else {
                 standing = true;
             }
@@ -922,16 +938,23 @@ fn wait_for_them(
     }
 }
 
-/// What the wait saw, per node.
+/// What the wait saw, per dispatch: its node and pid together, so two
+/// dispatches of one node are never read as one.
 #[derive(Default)]
 struct Waited {
     /// The node's work ended — its process and whatever the driver went on to
     /// do with it — and how long after the ask.
-    ended: BTreeMap<String, Duration>,
+    ended: BTreeMap<(String, u32), Duration>,
     /// The dispatch's own process exited on its own, and how long after the
     /// ask, whether or not the driver had finished with the node by the
     /// deadline.
-    exited: BTreeMap<String, Duration>,
+    exited: BTreeMap<(String, u32), Duration>,
+}
+
+impl Waited {
+    fn key(record: &DispatchRecord) -> (String, u32) {
+        (record.node.clone(), record.pid)
+    }
 }
 
 /// Every node the run's own record has taken out of flight since `from`: settled,

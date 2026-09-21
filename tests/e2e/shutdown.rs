@@ -17,6 +17,16 @@
 // here is real git against a real origin. `harness.rs` carries the same suppression and the
 // full rationale.
 
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
+// assumed: the twenty-three journeys here take about 195 seconds summed and about 50 on
+// the wall under nextest's parallelism, the longest about 38 — each waits out a real grace
+// against real dispatches and pushes to a real origin, because a bound on how long a worker
+// is given cannot be stated without a clock running it. What they exercise is the shutdown
+// verb over `driver`'s teardown, `engine`'s interrupt, `views` and the linked `onevcs`
+// together, which any change under `src/` can move, so a project edged narrower than the
+// crate would drop them out of `nx affected` for the very changes they exist to catch. Same
+// grounds as `driver.rs`, `cancellation.rs` and `listing.rs`.
+
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -1098,6 +1108,80 @@ fn a_run_whose_records_refuse_a_write_is_still_shut_down_and_says_so() {
     );
     assert!(world.events_of(&run, "host-shutdown").is_empty());
     world.release("service.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A run whose hold could not be written is given no grace, so nothing new starts
+/// in it.
+///
+/// The hold is what stops the driver dispatching, and waiting out a grace without
+/// one is the window a new dispatch starts in: the node in front would take the ask
+/// and settle, and what waited behind it would go. So only the hold is refused here
+/// — the run's directory takes no new file while its journal still takes a line —
+/// and the shutdown goes straight to the teardown, asking nothing.
+// llmlint: ignore-block[tests_mirror_real_usage] the one thing set by hand is the mode of
+// the run's own directory, and no product surface sets it: a directory that will not take
+// a new file is a host's disk refusing, not anything a user types. Everything else is the
+// real binary against a real run.
+#[cfg(unix)]
+#[test]
+fn a_run_the_hold_cannot_be_written_for_is_given_no_grace_and_starts_nothing_new() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new("shutdown-unheld");
+    held(&world, "first");
+    world.script("first.stops-when-interrupted", "");
+    held(&world, "holder");
+    held(&world, "second");
+    let run = launch(
+        &world,
+        "unheld",
+        vec![
+            agent("first", &[]),
+            agent("holder", &[]),
+            agent("second", &["first"]),
+        ],
+    );
+    until_in_flight(&world, &run, &["first", "holder"]);
+    let dir = world.run_file(&run, "");
+    let set = |mode: u32| {
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode))
+            .expect("the mode is set");
+    };
+    set(0o555);
+
+    let began = Instant::now();
+    let shutdown = world.run(&["shutdown", &run, "--grace", "60"]);
+    let took = began.elapsed();
+    set(0o755);
+
+    shutdown
+        .exited(0)
+        .err_has("the hold that stops it dispatching could not be written")
+        .err_has("nothing of it is asked or waited for and it goes straight to the teardown");
+    assert!(
+        took < Duration::from_secs(30),
+        "a run with no hold waited out its grace ({took:?}):\n{}",
+        shutdown.stdout
+    );
+    for node in ["first", "holder"] {
+        assert_eq!(
+            stopped_for(&world, &run, node)["payload"]["interrupt"],
+            "not-asked"
+        );
+        assert!(
+            line_for(&shutdown.stdout, node).contains("could not be written"),
+            "{}",
+            shutdown.stdout
+        );
+    }
+    assert!(
+        world
+            .events_of(&run, "node-dispatched")
+            .iter()
+            .all(|event| event["labels"]["node"] != "second"),
+        "a node was dispatched in a run the hold could not be written for: {}",
+        world.dump()
+    );
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
