@@ -6843,6 +6843,12 @@ fn the_planner_channel_layout_is_this_crates_and_is_what_the_contract_states() {
     assert!(named.contains("onepipeline::channel::layout"));
     assert_eq!(PlannerChannel.name(), PLANNER_CHANNEL);
     assert!(named.contains(PLANNER_CHANNEL) && named.contains(ASKER_ENV));
+    for file in layout::FILES {
+        assert!(
+            named.contains(file),
+            "the contract does not name the layout's file `{file}`"
+        );
+    }
     for spec in layout::queues() {
         assert!(
             named.contains(&spec.name.to_string()),

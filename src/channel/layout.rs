@@ -67,6 +67,20 @@ pub const COMMAND_OUTCOMES: &str = "command-outcomes";
 /// The surfaces queue's projection document: `queue.json`.
 pub const PROJECTION: &str = "queue.json";
 
+/// Every file a channel directory of this layout holds, in the order a
+/// comparison reports them: each queue's log, the surfaces queue's
+/// [`PROJECTION`], and a cursor for each queue a single reader claims from.
+/// Held to what the queues actually write by this module's tests.
+pub const FILES: [&str; 7] = [
+    "surfaces.jsonl",
+    PROJECTION,
+    "replies.jsonl",
+    "replies-cursor.json",
+    "commands.jsonl",
+    "commands-cursor.json",
+    "command-outcomes.jsonl",
+];
+
 /// The environment variable a serving session's asker is read from.
 ///
 /// A serving process is a listener a side rents, and never that side itself: an
@@ -1261,5 +1275,88 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The files the layout declares are exactly the files its queues write:
+    /// a channel driven through every queue leaves those seven and no other.
+    #[test]
+    fn the_declared_files_are_the_files_the_queues_write() {
+        let dir =
+            std::env::temp_dir().join(format!("onepipeline-layout-files-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let transport: Arc<dyn Transport> =
+            Arc::new(onemessagebus::LocalTransport::open(&dir).expect("the transport opens"));
+        let channel = Channel::open(&transport).expect("the channel opens");
+        channel
+            .push(&Surface {
+                id: 0,
+                kind: "planner-question".to_owned(),
+                message: "m".to_owned(),
+                source: source::PROPOSAL.to_owned(),
+                blocking: true,
+                queued_at: 1,
+                workstream: None,
+                abandoned: false,
+                asker: None,
+                correlation: None,
+            })
+            .expect("queued");
+        channel.claim().expect("a claim").expect("the surface");
+        channel
+            .answer(
+                &ReplyEnvelope {
+                    message: Some("go".to_owned()),
+                    ..ReplyEnvelope::default()
+                },
+                2,
+            )
+            .expect("answered");
+        channel.claim_reply().expect("a claim").expect("the reply");
+        let mut command = Map::new();
+        command.insert("op".to_owned(), Value::from("finding"));
+        command.insert("message".to_owned(), Value::from("m"));
+        channel.submit(planner(), vec![command]).expect("submitted");
+        assert_eq!(channel.claim_commands().expect("claimed").len(), 1);
+        channel
+            .answer_commands(&CommandOutcome {
+                id: 0,
+                applied: true,
+                reason: None,
+                results: Vec::new(),
+            })
+            .expect("answered");
+        let mut written: Vec<String> = std::fs::read_dir(&dir)
+            .expect("the channel directory")
+            .flatten()
+            .filter(|entry| entry.path().is_file())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        written.sort();
+        let mut declared: Vec<String> = FILES.iter().map(|file| (*file).to_owned()).collect();
+        declared.sort();
+        assert_eq!(written, declared);
+    }
+
+    /// The layout's ops are exactly the ops the engine's `Command` reads, word
+    /// for word, so an op added to either cannot be missing from the other's
+    /// allowlist.
+    #[test]
+    fn the_layouts_ops_are_the_engines_command_ops() {
+        let schema = schemars::schema_for!(crate::channel::Command).to_value();
+        let mut commands: Vec<&str> = schema["oneOf"]
+            .as_array()
+            .expect("the command schema is a union of its ops")
+            .iter()
+            .map(|op| {
+                op["properties"]["op"]["const"]
+                    .as_str()
+                    .expect("each op names its word")
+            })
+            .collect();
+        commands.sort_unstable();
+        let mut ops: Vec<&str> = Op::ALL.iter().map(|op| op.word()).collect();
+        ops.sort_unstable();
+        assert_eq!(ops, commands);
     }
 }

@@ -22,20 +22,10 @@ pub(crate) const RELEASE: &str = "0.28.2";
 /// The run every recorded channel is read inside: the recorded run root's own id.
 pub(crate) const RUN: &str = "onemessagebus-repair-2";
 
-/// The files of the channel layout, in the order an answer records them.
-///
-/// The one list of them: the write-side journey fails on a channel file either
-/// binary writes that this does not name, and the recorded directories' README
-/// points here rather than restating it.
-pub(crate) const LAYOUT: [&str; 7] = [
-    "surfaces.jsonl",
-    "queue.json",
-    "replies.jsonl",
-    "replies-cursor.json",
-    "commands.jsonl",
-    "commands-cursor.json",
-    "command-outcomes.jsonl",
-];
+/// The files of the channel layout, in the order an answer records them: the
+/// layout's own declaration, so the write-side journey fails on a channel file
+/// either binary writes that the layout does not name.
+pub(crate) const LAYOUT: [&str; 7] = onepipeline::channel::layout::FILES;
 
 pub(crate) fn recorded(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -36,16 +36,8 @@ const RECORDED: &[&str] = &[
     "waiting-updates",
 ];
 
-/// The files of the channel layout.
-const LAYOUT: &[&str] = &[
-    "surfaces.jsonl",
-    "queue.json",
-    "replies.jsonl",
-    "replies-cursor.json",
-    "commands.jsonl",
-    "commands-cursor.json",
-    "command-outcomes.jsonl",
-];
+/// The files of the channel layout, as the layout declares them.
+const LAYOUT: &[&str] = &onepipeline::channel::layout::FILES;
 
 /// A scratch directory of this process's own, removed when it is dropped.
 struct Scratch(PathBuf);

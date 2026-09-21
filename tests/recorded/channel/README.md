@@ -25,7 +25,7 @@ node started from (its last change, `bbee552`, first shipped in v0.28.0), so eac
 directory is exactly what the 0.28.2 release writes.
 
 Only the files of the channel layout are copied, where the run has them — the
-files `LAYOUT` in `tests/e2e/recorded_channel.rs` names, which that journey fails
+files `onepipeline::channel::layout::FILES` names, which the write-side journey fails
 on a channel file it does not name. Each run's channel
 directory also held an empty `handover/` directory. That is the ownership
 handover gate, not the channel layout, so it is left out.
