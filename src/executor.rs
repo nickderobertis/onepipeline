@@ -841,6 +841,7 @@ mod tests {
                 execution_checkout: None,
                 pool: None,
                 overflow: None,
+                labels: Default::default(),
             }),
             cancel: CancellationToken::new(),
             attempt: NonZeroU32::MIN,

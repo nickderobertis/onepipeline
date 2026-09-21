@@ -1947,6 +1947,9 @@ pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
         // types: what `pool: 0` and `overflow: unlimited` mean is its to say.
         pool: node.pool,
         overflow: node.overflow,
+        // This crate asks for no session labels: what a key means is the
+        // caller's to declare, and no reader here filters by one.
+        labels: Default::default(),
     })
 }
 

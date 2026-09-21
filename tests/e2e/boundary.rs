@@ -316,6 +316,87 @@ fn a_provider_failure_nothing_could_classify_raises_a_finding_naming_where_the_c
         .out_has("stopped at fake-provider/claude-code");
 }
 
+/// A chain that ran out of candidates is a chain that stopped: the producer's
+/// `fallback_chain_exhausted` death is raised as the finding an unclassified one
+/// is, and every candidate it attempted — identity, failure kind and detail, in
+/// attempt order — reaches both that finding and the node's settlement.
+///
+/// Each candidate is the only record of why its subscription could not serve
+/// the turn, so one dropped on the way is a subscription a reader cannot know
+/// to restore.
+#[test]
+fn an_exhausted_fallback_chain_raises_a_finding_carrying_every_candidate_it_attempted() {
+    let world = World::new("boundary-exhausted");
+    world.script(
+        "build.died-as",
+        "provider-failure fallback_chain_exhausted every candidate in the chain was \
+         attempted and none ran\n",
+    );
+    world.script(
+        "build.exhausted",
+        "claude-code:work quota out of extra usage until 5pm\n\
+         codex auth 401 Unauthorized: token expired\n\
+         gemini - \n",
+    );
+    let run = settle(&world, "exhausted", vec![agent("build", &[])]);
+
+    let findings: Vec<serde_json::Value> = world
+        .events_of(&run, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| event["payload"]["kind"] == "finding")
+        .collect();
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let finding = &findings[0]["payload"];
+    assert_eq!(finding["blocking"], false, "{finding}");
+    assert_eq!(finding["source"], "proposal", "{finding}");
+    assert_eq!(findings[0]["labels"]["node"], "build", "{finding}");
+    let message = finding["message"]
+        .as_str()
+        .expect("a finding says something");
+    for named in [
+        "node 'build' (member 'worker'",
+        "its identity chain was exhausted",
+        // Every candidate, in attempt order, each with its own kind and words;
+        // one the harness could not classify is named as that.
+        "attempted, in order:\n\
+         - claude-code:work [quota]: out of extra usage until 5pm\n\
+         - codex [auth]: 401 Unauthorized: token expired\n\
+         - gemini [unclassified]\n",
+        "detail: every candidate in the chain was attempted and none ran",
+        "Nothing was failed on this",
+    ] {
+        assert!(
+            message.contains(named),
+            "the finding does not say {named:?}:\n{message}"
+        );
+    }
+
+    // The node settles as a provider death does, under the producer's own word,
+    // and the settlement's detail names every candidate the chain attempted.
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["outcome"], "provider-failed", "{node}");
+    assert_eq!(node["cause"], "fallback_chain_exhausted", "{node}");
+    let settled = world.events_of(&run, "node-settled")[0].clone();
+    assert_eq!(
+        settled["payload"]["cause"], "fallback_chain_exhausted",
+        "{settled}"
+    );
+    let detail = settled["payload"]["detail"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the settlement says why: {settled}"));
+    assert!(
+        detail.contains(
+            "attempted: claude-code:work [quota]: out of extra usage until 5pm; \
+             codex [auth]: 401 Unauthorized: token expired; gemini [unclassified]"
+        ),
+        "the settlement does not carry every attempted candidate: {detail}"
+    );
+    world
+        .run(&["next", &run])
+        .exited(0)
+        .out_has("- codex [auth]: 401 Unauthorized: token expired");
+}
+
 /// A classified provider death raises nothing: the chain moved on, or it stopped
 /// on a cause a supervisor can already read off the settlement.
 #[test]

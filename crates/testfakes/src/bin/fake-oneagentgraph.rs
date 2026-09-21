@@ -535,7 +535,8 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
             if let Some(refused) = fake::node_script(dir, "observer", "refused") {
                 refuse_candidates_under(&labels, &refused);
             }
-            if publish_deaths(&labels, &script).is_none() {
+            let exhausted = fake::node_script(dir, "observer", "exhausted");
+            if publish_deaths(&labels, &script, exhausted.as_deref()).is_none() {
                 fake::fail("an `observer.died-as` script names no death at all");
             }
         }
@@ -840,9 +841,12 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // fired and the classified cause. Scripted `<key>.died-as`, one
     // `RULE CAUSE [DETAIL...]` line. Apart from `<key>.died` because that one is
     // a producer that publishes *nothing* of the sort and leaves a reader its
-    // stderr — which is the older shape, and still the degrade path.
+    // stderr — which is the older shape, and still the degrade path. A
+    // `fallback_chain_exhausted` death carries the candidates its chain
+    // attempted, scripted `<key>.exhausted` on [`attempted_candidates`]'s grammar.
     if let Some(script) = fake::node_script(dir, &key, "died-as") {
-        return died_as(args, &node, step.as_deref(), &script);
+        let exhausted = fake::node_script(dir, &key, "exhausted");
+        return died_as(args, &node, step.as_deref(), &script, exhausted.as_deref());
     }
 
     // The same death, after a turn that ran: a worker that wrote its work, said
@@ -980,12 +984,69 @@ fn died(reason: &str) -> ExitCode {
 /// [`MemberDied`]: oneagentgraph::event::MemberDied
 /// [`Rule`]: oneagentgraph::member::Rule
 /// [`Cause`]: oneagentgraph::event::Cause
-fn died_as(args: &[String], node: &str, step: Option<&str>, script: &str) -> ExitCode {
+fn died_as(
+    args: &[String],
+    node: &str,
+    step: Option<&str>,
+    script: &str,
+    exhausted: Option<&str>,
+) -> ExitCode {
     let labels = member_labels(args, node, step);
-    let Some(said) = publish_deaths(&labels, script) else {
+    let Some(said) = publish_deaths(&labels, script, exhausted) else {
         fake::fail("a `.died-as` script names no death at all");
     };
     died(&said)
+}
+
+/// The candidates an exhausted chain attempted, one `IDENTITY KIND [DETAIL...]`
+/// line each in attempt order, with `-` for a kind oneharness could not name.
+///
+/// Composed through the sibling's own [`AttemptedCandidate`], and the kind read
+/// through oneharness's own `FailureKind`, so a script cannot state a kind no
+/// harness classifies. An empty script is refused: the real library publishes
+/// this cause only for a chain that attempted something.
+///
+/// [`AttemptedCandidate`]: oneagentgraph::event::AttemptedCandidate
+fn attempted_candidates(script: &str) -> Vec<oneagentgraph::event::AttemptedCandidate> {
+    let candidates: Vec<_> = script
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let mut columns = line.splitn(3, char::is_whitespace);
+            let (Some(identity), Some(kind)) = (columns.next(), columns.next()) else {
+                fake::fail(&format!(
+                    "an `.exhausted` line reads {line:?}, which is not `IDENTITY KIND [DETAIL...]`"
+                ));
+            };
+            let failure_kind = match kind {
+                "-" => None,
+                word => Some(
+                    serde_json::from_value::<oneharness_core::domain::signals::FailureKind>(
+                        word.into(),
+                    )
+                    .map(|_| word.to_owned())
+                    .unwrap_or_else(|error| {
+                        fake::fail(&format!(
+                            "an `.exhausted` line names the failure kind {word:?}: {error}"
+                        ))
+                    }),
+                ),
+            };
+            let (detail, truncated) =
+                oneagentgraph::event::bound_text(columns.next().unwrap_or("").trim());
+            oneagentgraph::event::AttemptedCandidate {
+                identity: identity.to_owned(),
+                failure_kind,
+                detail,
+                truncated,
+            }
+        })
+        .collect();
+    if candidates.is_empty() {
+        fake::fail("an `.exhausted` script names no candidate at all");
+    }
+    candidates
 }
 
 /// Publish one `member-died` per line of a `died-as` script under these labels,
@@ -994,9 +1055,15 @@ fn died_as(args: &[String], node: &str, step: Option<&str>, script: &str) -> Exi
 /// Shared by a node's dispatch and the observer graph, because the envelope is
 /// the same one and the labels are the only thing that differs: a dispatch's
 /// name its node, the observer's name none.
+///
+/// `exhausted` is the `.exhausted` script, the candidates a
+/// `fallback_chain_exhausted` death carries: required for that cause and refused
+/// beside any other, because the real library carries candidates on exactly
+/// that death and on no other.
 fn publish_deaths(
     labels: &serde_json::Map<String, serde_json::Value>,
     script: &str,
+    exhausted: Option<&str>,
 ) -> Option<String> {
     let mut first = None;
     for (offset, line) in script
@@ -1041,8 +1108,21 @@ fn publish_deaths(
             exit_code: None,
             disposition: None,
             stderr_tail: None,
-            // No fallback chain runs here, so none was exhausted.
-            candidates: Vec::new(),
+            candidates: match (cause, exhausted) {
+                (oneagentgraph::event::Cause::FallbackChainExhausted, Some(script)) => {
+                    attempted_candidates(script)
+                }
+                (oneagentgraph::event::Cause::FallbackChainExhausted, None) => fake::fail(
+                    "a `fallback_chain_exhausted` death carries the candidates its chain \
+                     attempted, and no `.exhausted` script names them",
+                ),
+                (_, Some(_)) => fake::fail(&format!(
+                    "an `.exhausted` script names candidates for a `{}` death, which carries \
+                     none",
+                    cause.as_str()
+                )),
+                (_, None) => Vec::new(),
+            },
         };
         let envelope = oneagentgraph::event::Envelope {
             v: oneagentgraph::event::ENVELOPE_VERSION,
