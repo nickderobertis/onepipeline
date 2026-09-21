@@ -28,6 +28,12 @@
 // grounds as `driver.rs`, `cancellation.rs` and `listing.rs`.
 
 use std::path::Path;
+// Every journey that times a grace or reads a dispatch's report line is
+// `#[cfg(unix)]` — it signals real processes — so the clock types and the two
+// helpers only those journeys call are gated on the same terms. Ungated, each is
+// dead code under `-D warnings` for a Windows target, which this host's own gate
+// never compiles.
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -72,6 +78,7 @@ fn hooks(world: &World) -> [String; 6] {
     ]
 }
 
+#[cfg(unix)]
 fn hook_fired(world: &World) -> bool {
     world.root.join("run-end-hook.log").exists()
 }
@@ -145,6 +152,7 @@ fn host_shutdown(world: &World, run: &str) -> Value {
 }
 
 /// The report line for one node's dispatch.
+#[cfg(unix)]
 fn line_for<'a>(report: &'a str, node: &str) -> &'a str {
     report
         .lines()
