@@ -6959,3 +6959,63 @@ fn the_planner_channel_layout_is_this_crates_and_is_what_the_contract_states() {
         ]
     );
 }
+
+/// The contract's best-effort reading of an older record's bus configuration
+/// names exactly the codec fields the linked bus requires, and quotes the
+/// refusals that bus's `serve` gives a codec whose fields were read empty.
+#[test]
+fn an_older_records_bus_config_is_read_best_effort_as_the_contract_states() {
+    let passage = CONTRACT
+        .split("**A launch record's bus configuration is read best-effort.**")
+        .nth(1)
+        .and_then(|rest| rest.split("**").next())
+        .expect("the contract states how an older record's bus configuration is read");
+    let named = backticked_in(passage);
+
+    // The fields it names are the ones the linked bus's codec requires.
+    let schema = schemars::schema_for!(onemessagebus::CodecConfig).to_value();
+    let required: BTreeSet<String> = schema["required"]
+        .as_array()
+        .expect("the codec schema requires fields")
+        .iter()
+        .map(|field| field.as_str().expect("a field name").to_owned())
+        .collect();
+    assert_eq!(
+        required,
+        BTreeSet::from(["select".to_owned(), "frames".to_owned()])
+    );
+    for field in &required {
+        assert!(
+            named.contains(field),
+            "the contract does not name `{field}`"
+        );
+    }
+
+    // A real older record's codec, with those fields read empty, is refused by
+    // the bus's own serve resolution in the contract's words, one field at a time.
+    let older: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            repo_root().join("tests/recorded/launch/otg-closed-state-writes-status.json"),
+        )
+        .expect("the older record ships"),
+    )
+    .expect("the older record is JSON");
+    let (name, codec) = older["bus_config"]["codecs"]
+        .as_object()
+        .and_then(|codecs| codecs.iter().next())
+        .expect("the older record names a codec");
+    let mut emptied = codec.clone();
+    emptied["select"] = json!("");
+    emptied["frames"] = json!({});
+    let refusal = |codec: Value| {
+        onemessagebus::ConfiguredCodec::new(
+            name.parse().expect("a codec name"),
+            serde_json::from_value(codec).expect("a codec configuration"),
+        )
+        .expect_err("a codec with an empty field")
+        .replace(&format!("codecs.{name}."), "codecs.<name>.")
+    };
+    assert!(named.contains(&refusal(emptied.clone())));
+    emptied["select"] = json!("op");
+    assert!(named.contains(&refusal(emptied)));
+}

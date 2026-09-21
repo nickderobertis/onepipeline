@@ -678,7 +678,7 @@ fn start(args: &StartArgs) -> Result<i32> {
             .filter(|path| !path.trim().is_empty())
             .map(PathBuf::from)
     }) {
-        Some(path) => Some(crate::channel::launch_bus_config(&launch_dir.join(path))?),
+        Some(path) => Some(crate::channel::launch_bus_config(&launch_dir.join(path))?.into()),
         None => None,
     };
 

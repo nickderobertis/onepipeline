@@ -1098,7 +1098,10 @@ impl ChannelState {
         launch: &crate::ledger::LaunchRecord,
     ) -> Self {
         Self {
-            config: launch.bus_config.clone().map(Arc::new),
+            config: launch
+                .bus_config
+                .as_ref()
+                .map(|recorded| Arc::new(recorded.config().clone())),
             ..Self::new(paths)
         }
     }
