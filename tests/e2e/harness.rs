@@ -4152,8 +4152,7 @@ pub fn onetaskgraph_binary() -> PathBuf {
 /// nothing at all on a host without an install of its own.
 pub fn onevcs_binary() -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    let held =
-        BUILT.get_or_init(|| build(&["--package", "onevcs", "--bin", "onevcs", "--locked"]));
+    let held = BUILT.get_or_init(|| build(&["--package", "onevcs", "--bin", "onevcs", "--locked"]));
     held_alias(held, "onevcs")
 }
 
