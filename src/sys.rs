@@ -1648,7 +1648,7 @@ mod unix_interrupt {
     /// The endings a terminal, a closed session or a supervisor gives a landing.
     /// Each must terminate by default, because ending the process of it again is
     /// what [`hold`]'s reader restores the default action to do.
-    const HELD: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+    pub(super) const HELD: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
 
     /// The write end of the held guard's pipe, or `-1` while none is held — read
     /// by the handler, which may touch nothing but an atomic.
@@ -1874,6 +1874,37 @@ pub(crate) fn reaped_pid() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The signals entry 88 of the divergence register says an interrupted
+    /// landing's cleanup covers are exactly the ones the guard holds — the drift
+    /// gate between that sentence and `HELD`.
+    #[cfg(unix)]
+    #[test]
+    fn the_register_names_exactly_the_signals_the_interrupt_guard_holds() {
+        let register = include_str!("../docs/contract-divergences.md");
+        let entry = &register[register
+            .find("\n## 88. ")
+            .expect("the register has entry 88")..];
+        let said = entry
+            .split_once("landing ended by ")
+            .and_then(|(_, rest)| rest.split_once(" mid-draft"))
+            .expect("entry 88 says which signals end a landing mid-draft")
+            .0;
+        let named: Vec<&str> = said
+            .split('`')
+            .filter(|word| word.starts_with("SIG"))
+            .collect();
+        let held: Vec<&str> = unix_interrupt::HELD
+            .iter()
+            .map(|signal| match *signal {
+                libc::SIGINT => "SIGINT",
+                libc::SIGTERM => "SIGTERM",
+                libc::SIGHUP => "SIGHUP",
+                other => panic!("the guard holds signal {other}, which this gate cannot name"),
+            })
+            .collect();
+        assert_eq!(named, held, "entry 88 says {said:?}");
+    }
 
     /// One interrupt guard at a time, and releasing it puts back exactly the
     /// action that was there before — the signal the landing is then sent ends

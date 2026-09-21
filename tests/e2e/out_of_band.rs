@@ -974,6 +974,12 @@ fn ended_leaving_nothing(
     );
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge these journeys
+// need is the crate under test itself — its own interrupt handler, a real `onevcs`-registered
+// checkout, real git and the drafting double — and the one separately edged test project's
+// input begins at `{workspaceRoot}/src/**/*`, so a project of their own would declare the same
+// dependency and skip nothing. They live beside the other landing journeys in this file, which
+// is where a reader looks for one.
 /// A landing interrupted mid-draft — the moment a person at a terminal is most
 /// likely to give up on it — leaves the named checkout's worktree list as it
 /// was and the drafting worktree's directory gone, and still ends of the signal
@@ -1147,3 +1153,4 @@ fn a_landing_under_nohup_drafts_and_lands_through_a_hangup() {
     assert_eq!(state_of(&world, &repository.checkout), before);
     assert!(!worktree.exists(), "{}", worktree.display());
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
