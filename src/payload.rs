@@ -601,6 +601,7 @@ pub(crate) struct HostShutdown {
     /// Which scope selected this run.
     pub(crate) scope: ScopeWord,
     /// Who owns it.
+    // llmlint: ignore[invalid_states_unrepresentable] a rendering rather than an identity — `LaunchRecord::owner_label`'s `[mine]`, `[<launcher>:<digest>]` or `[unknown]`, written for a reader — carried exactly as `run-stopped`'s own `owner` has always been, and the approved contract spells this record's field `"owner": string`; nothing reads it back to decide anything.
     pub(crate) owner: String,
     /// Whether the interrupt and the wait were skipped.
     // llmlint: ignore[invalid_states_unrepresentable] the approved contract spells this record's field as `"forced": bool`, and this document is held to what writers already write; a closed mode word here would be a second wire shape for the same fact.
