@@ -27,12 +27,10 @@
 //! Three rulings the bus's `docs/queues.md` recorded, each now this crate's and
 //! stated in `docs/contract.md`:
 //!
-//! - **Supersede on `source`, not `kind`.** The contract's wording is
-//!   `kind == check-in`, and this layout supersedes a waiting surface on
+//! - **Supersede on `source`, not `kind`.** A waiting surface is superseded on
 //!   **`source == check-in`**, because that is what 0.28.2's channel did: an
 //!   observer's frame of kind `check-in` carries source `proposal` and is not
-//!   superseded. Byte compatibility wins over the wording; the
-//!   `Supersede { key, when }` shape is unchanged.
+//!   superseded.
 //! - **A bare reply is routed by its halves**: its commands to [`COMMANDS`], its
 //!   verdict to [`REPLIES`], and an envelope carrying commands and no verdict to
 //!   [`COMMANDS`] alone.
