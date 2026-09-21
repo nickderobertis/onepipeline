@@ -191,6 +191,108 @@ const ENDED_BY_THE_STOP: &str = "worker ended when the run was stopped";
 /// and "ended" there is the false completion `stop` itself refuses to report.
 const OUTLIVED_THE_STOP: &str = "worker may still be running: the stop could not reach it";
 
+/// What a run's own record says a host shutdown did to it, where one stands.
+///
+/// The last `host-shutdown`, with the `dispatch-stopped` records beside it, and
+/// **nothing if a `driver-adopted` follows**: an adoption is what takes the run
+/// up again, so a run adopted since was shut down and then resumed, and calling
+/// it shut down would send an operator to intervene in work that is running.
+/// The same rule [`RunState::stop_recorded`] keeps for a stop, read off the
+/// merged store rather than folded, because the two views that answer for it are
+/// the two that already hold it.
+pub(crate) struct HostShutdown<'a> {
+    /// When the shutdown was recorded.
+    at: &'a str,
+    /// What became of each dispatch it acted on, by node.
+    dispatches: BTreeMap<&'a str, &'a serde_json::Map<String, serde_json::Value>>,
+    /// What became of each branch it offered to `onevcs`, by branch name.
+    branches: BTreeMap<&'a str, &'a serde_json::Value>,
+}
+
+impl<'a> HostShutdown<'a> {
+    /// The shutdown this run is under, or `None` for a run that is not.
+    pub(crate) fn of(view: &'a RunView) -> Option<Self> {
+        let mut dispatches = BTreeMap::new();
+        let mut found: Option<(&str, &serde_json::Map<String, serde_json::Value>)> = None;
+        for event in &view.events {
+            match PipelineKind::from_wire(&event.kind) {
+                Some(PipelineKind::DriverAdopted) => {
+                    dispatches.clear();
+                    found = None;
+                }
+                Some(PipelineKind::DispatchStopped) => {
+                    if let Some(node) = event.labels.node.as_deref() {
+                        dispatches.insert(node, &event.payload);
+                    }
+                }
+                Some(PipelineKind::HostShutdown) => found = Some((&event.ts, &event.payload)),
+                _ => {}
+            }
+        }
+        let (at, payload) = found?;
+        let branches = payload
+            .get("branches")
+            .and_then(serde_json::Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| Some((row.get("branch")?.as_str()?, row)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(Self {
+            at,
+            dispatches,
+            branches,
+        })
+    }
+
+    /// The run-level line: that it was a host shutdown rather than a stop, when,
+    /// and the verb that resumes it.
+    fn line(&self, run: &str) -> String {
+        format!(
+            "  HOST SHUTDOWN: this run was put down by a host shutdown{}; it has not ended \
+             and nothing was settled by it — onepipeline adopt {run} resumes it\n",
+            crate::projection::millis_of(self.at)
+                .map(|at| format!(
+                    " {} ago",
+                    crate::telemetry::duration(sys::now_millis().saturating_sub(at))
+                ))
+                .unwrap_or_default()
+        )
+    }
+
+    /// What became of one node's dispatch, in the words the shutdown recorded.
+    fn became_of(&self, node: &str) -> String {
+        let Some(payload) = self.dispatches.get(node) else {
+            return "no live dispatch when the host shutdown ran".to_string();
+        };
+        let said = |key: &str| payload.get(key).and_then(serde_json::Value::as_str);
+        format!(
+            "worker {} by the host shutdown (interrupt {})",
+            said("ended").unwrap_or("not recorded"),
+            said("interrupt").unwrap_or("not recorded")
+        )
+    }
+
+    /// Whether one branch reached its origin, in the shutdown's own words.
+    fn reached_its_origin(&self, branch: &str) -> String {
+        match self
+            .branches
+            .get(branch)
+            .and_then(|row| row.get("result"))
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("pushed") => "on its origin unproven: pushed without that repository\'s own \
+                               hook or merge path having run"
+                .to_string(),
+            Some("already-on-origin") => "already on its origin at this commit".to_string(),
+            Some("no-remote") => "not on any origin: this identity has none to push to".to_string(),
+            Some("refused") => "not on its origin: the preserving push was refused".to_string(),
+            _ => "not offered to a preserving push, so nothing says it is on an origin".to_string(),
+        }
+    }
+}
+
 /// Which of the two a stopped run's in-flight node gets.
 fn became_of_the_worker(state: &crate::projection::RunState) -> &'static str {
     match state.stop {
@@ -2097,6 +2199,13 @@ pub(crate) fn status_of(view: &RunView) -> String {
             &view.summary(),
             &view.unread(),
         ));
+        // Before anything about a node, because it is what every node line
+        // under it has to be read against: a run under a host shutdown is not a
+        // wedged run to intervene in, it is one waiting to be picked up.
+        let shutdown = HostShutdown::of(view);
+        if let Some(shutdown) = &shutdown {
+            out.push_str(&shutdown.line(&view.paths.run));
+        }
         let statuses = view.state.statuses();
         for (id, node_status) in &statuses {
             if *node_status != NodeStatus::Running {
@@ -2108,6 +2217,10 @@ pub(crate) fn status_of(view: &RunView) -> String {
                 .get(id)
                 .map(|at| sys::now_millis().saturating_sub(*at));
             let age = crate::telemetry::duration(age.unwrap_or(0));
+            if let Some(shutdown) = &shutdown {
+                out.push_str(&format!("  {id}: {}, {age} in\n", shutdown.became_of(id)));
+                continue;
+            }
             if view.state.stop_recorded() {
                 // What this node last did stays on the record and is
                 // deliberately not repeated here — see [`ENDED_BY_THE_STOP`].
@@ -3366,6 +3479,7 @@ pub fn results(view: &RunView) -> String {
         view.paths.run,
         graph::state_of(&view.state.statuses()).as_str()
     );
+    let shut_down = HostShutdown::of(view);
     let statuses = view.state.statuses();
     for node in view.state.graph.iter() {
         let status = statuses
@@ -3402,6 +3516,23 @@ pub fn results(view: &RunView) -> String {
         }
         if status == NodeStatus::Running && view.state.stop_recorded() {
             out.push_str(&format!(" — {}", became_of_the_worker(&view.state)));
+        }
+        // A node a host shutdown left in flight. Its branch and whether that
+        // branch reached an origin are the two things a reader deciding what to
+        // do with this host needs, and the node's own status word carries
+        // neither: it still reads `running`, because the shutdown settled
+        // nothing.
+        if status == NodeStatus::Running {
+            if let Some(shutdown) = &shut_down {
+                out.push_str(&format!(" — {}", shutdown.became_of(&node.id)));
+                if let Some(session) = view.state.sessions.get(&node.id) {
+                    out.push_str(&format!(
+                        "; its work is on {} ({})",
+                        session.branch(),
+                        shutdown.reached_its_origin(session.branch().as_str())
+                    ));
+                }
+            }
         }
         // What the dispatch reported, before what the plan asked for: an
         // unpinned lifecycle node's branch is named by the sibling that cut it,

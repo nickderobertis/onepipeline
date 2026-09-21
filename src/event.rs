@@ -241,6 +241,26 @@ pub enum PipelineKind {
     /// was maintained on and the sibling's own `outcome` — per slot, what ran and
     /// how it ended — or the `error` that stood in for one.
     PoolMaintenance,
+    /// One live dispatch a host shutdown acted on: what its interrupt was
+    /// answered with, and how it ended.
+    ///
+    /// Labelled with the node, one per dispatch the shutdown found running.
+    /// `interrupt` is `delivered`, `no-turn` or `failed` — the three answers
+    /// `oneagentgraph interrupt` gives, none of which is a failure — or
+    /// `not-asked`, which is the `--force` path, where nothing was asked and no
+    /// deadline was waited out. `ended` tells a dispatch that stopped on its own
+    /// terms from one the deadline reaped, which is the distinction a later
+    /// reader cannot recover from anything else.
+    DispatchStopped,
+    /// A host shutdown put this run down mid-flight, after its teardown and its
+    /// preserving pushes.
+    ///
+    /// **Not a `run-stopped`.** The run has not ended: nothing was settled, no
+    /// claim was released, and no run-end hook fired — `onepipeline adopt` picks
+    /// it up again. Carries the scope that selected it, the run's owner, the
+    /// grace, the dispatch tallies, the teardown `run-stopped` would have
+    /// carried, and one entry per branch the shutdown offered to `onevcs`.
+    HostShutdown,
 }
 
 impl PipelineKind {
@@ -280,6 +300,8 @@ impl PipelineKind {
             Self::RunHookFinished => "run-hook-finished",
             Self::RunHookWithheld => "run-hook-withheld",
             Self::PoolMaintenance => "pool-maintenance",
+            Self::DispatchStopped => "dispatch-stopped",
+            Self::HostShutdown => "host-shutdown",
         }
     }
 
@@ -342,6 +364,8 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::RunHookFinished,
     PipelineKind::RunHookWithheld,
     PipelineKind::PoolMaintenance,
+    PipelineKind::DispatchStopped,
+    PipelineKind::HostShutdown,
 ];
 
 /// The id of a stored artifact.

@@ -26,6 +26,16 @@ pub const DAG_GRAPH_OFF: &str = "off";
 /// none.
 pub const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u64 = 1_800;
 
+/// How long a dispatch has to end itself after a `shutdown` asks it to, when
+/// the command names no `--grace`.
+///
+/// Ten minutes: long enough for a worker mid-file to finish it and commit, and
+/// deliberately longer than the cooperative cancel's own grace, which bounds a
+/// supervisor watching one runaway node rather than a person waiting for a
+/// machine to be safe to stop. There is no environment rung under
+/// it: a host shutdown is typed by the person doing it.
+pub const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 600;
+
 /// The write-back's per-item budget, in seconds, when a launch names none.
 ///
 /// The bottom rung of four: `--writeback-item-budget` beats
@@ -177,6 +187,9 @@ pub enum Command {
     Attest(AttestArgs),
     /// End a run and its whole dispatch tree.
     Stop(StopArgs),
+    /// End the running work on this host: ask every live dispatch to wrap up
+    /// and commit, wait, stop what is left, and put every branch on its origin.
+    Shutdown(ShutdownArgs),
     /// List recorded runs.
     Runs(RunsArgs),
     /// A run's live state: what is driving it, and what is running.
@@ -890,6 +903,33 @@ pub struct StopArgs {
     /// The run id.
     pub run: String,
     /// Stop a run this session does not own. The owner is named either way.
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// `onepipeline shutdown`.
+///
+/// Exactly one scope, and it is required: the positional run, `--mine`, or
+/// `--host`. Naming none, or naming two, is a usage error — refused before
+/// anything is signalled.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(group = clap::ArgGroup::new("scope").required(true).args(["run", "mine", "host"]))]
+pub struct ShutdownArgs {
+    /// The run id. One run, which this session must own.
+    pub run: Option<String>,
+    /// Every run this session owns, as `runs --mine` selects them.
+    #[arg(long)]
+    pub mine: bool,
+    /// Every run under this runs root, whoever owns it. Shutting a host down is
+    /// a decision about the host, so this one does not refuse another session's
+    /// run — the report names every run's owner instead.
+    #[arg(long)]
+    pub host: bool,
+    /// How long a dispatch has to end itself after it is asked, in seconds.
+    /// `0` is the same path as `--force`.
+    #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_SHUTDOWN_GRACE_SECONDS)]
+    pub grace: u64,
+    /// Skip the interrupt and the wait and go straight to the teardown.
     #[arg(long)]
     pub force: bool,
 }

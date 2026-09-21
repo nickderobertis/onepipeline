@@ -89,6 +89,7 @@ mod projection;
 mod refusal;
 mod release;
 mod rendercost;
+mod shutdown;
 mod summary;
 mod sys;
 mod taskgraph;

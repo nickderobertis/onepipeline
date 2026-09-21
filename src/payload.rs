@@ -529,6 +529,149 @@ pub(crate) struct RunStopped {
     pub(crate) teardown: Option<String>,
 }
 
+/// `dispatch-stopped`: one live dispatch a host shutdown acted on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct DispatchStopped {
+    /// The process the dispatch was running in.
+    pub(crate) pid: u64,
+    /// What the interrupt was answered with.
+    pub(crate) interrupt: InterruptWord,
+    /// The answer in the words a reader is shown.
+    pub(crate) detail: String,
+    /// How the dispatch ended.
+    pub(crate) ended: DispatchEndingWord,
+    /// How long it was watched for, from the moment it was asked.
+    pub(crate) waited_ms: u64,
+}
+
+/// What one dispatch's interrupt was answered with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum InterruptWord {
+    /// `delivered`.
+    Delivered,
+    /// `no-turn`.
+    NoTurn,
+    /// `failed`.
+    Failed,
+    /// `not-asked`: the `--force` path, where nothing was asked at all.
+    NotAsked,
+}
+
+/// How a dispatch a host shutdown acted on ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum DispatchEndingWord {
+    /// `graceful`.
+    Graceful,
+    /// `killed`.
+    Killed,
+    /// `still-running`.
+    StillRunning,
+}
+
+impl From<crate::shutdown::DispatchEnding> for DispatchEndingWord {
+    fn from(ending: crate::shutdown::DispatchEnding) -> Self {
+        use crate::shutdown::DispatchEnding as E;
+        match ending {
+            E::Graceful => Self::Graceful,
+            E::Killed => Self::Killed,
+            E::StillRunning => Self::StillRunning,
+        }
+    }
+}
+
+/// `host-shutdown`: the run was put down mid-flight by a host shutdown.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct HostShutdown {
+    /// Which scope selected this run.
+    pub(crate) scope: ScopeWord,
+    /// Who owns it.
+    pub(crate) owner: String,
+    /// Whether the interrupt and the wait were skipped.
+    pub(crate) forced: bool,
+    /// The grace a dispatch had to end itself.
+    pub(crate) grace_seconds: u64,
+    /// How many live dispatches the shutdown acted on.
+    pub(crate) dispatches: u32,
+    /// How many of them ended within the grace.
+    pub(crate) graceful: u32,
+    /// How many were killed at the deadline.
+    pub(crate) killed: u32,
+    /// What the teardown established, in `run-stopped`'s own vocabulary.
+    pub(crate) teardown: String,
+    /// The runs root the shutdown read.
+    pub(crate) root: String,
+    /// One entry per branch the run's records named.
+    pub(crate) branches: Vec<BranchPreserved>,
+}
+
+/// Which scope a host shutdown selected a run under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ScopeWord {
+    /// `run`: the positional run id.
+    Run,
+    /// `mine`: every run this session owns.
+    Mine,
+    /// `host`: every run under the runs root.
+    Host,
+}
+
+impl From<&crate::shutdown::ShutdownScope> for ScopeWord {
+    fn from(scope: &crate::shutdown::ShutdownScope) -> Self {
+        use crate::shutdown::ShutdownScope as S;
+        match scope {
+            S::Run(_) => Self::Run,
+            S::Mine => Self::Mine,
+            S::Host => Self::Host,
+        }
+    }
+}
+
+/// One branch a host shutdown offered to `onevcs::preserve`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct BranchPreserved {
+    /// The repository identity it belongs to.
+    pub(crate) identity: String,
+    /// The branch, under the name it already had.
+    pub(crate) branch: String,
+    /// What preserving it found to do.
+    pub(crate) result: PreservedWord,
+    /// The origin it went to, where there was one.
+    pub(crate) remote: Option<String>,
+    /// The commit it stands at, where the preservation read one.
+    pub(crate) commit: Option<String>,
+    /// What the sibling said, in the words a reader is shown.
+    pub(crate) detail: String,
+}
+
+/// What preserving one branch found to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum PreservedWord {
+    /// `pushed`.
+    Pushed,
+    /// `already-on-origin`.
+    AlreadyOnOrigin,
+    /// `no-remote`.
+    NoRemote,
+    /// `refused`.
+    Refused,
+}
+
+impl From<crate::shutdown::Preserved> for PreservedWord {
+    fn from(preserved: crate::shutdown::Preserved) -> Self {
+        use crate::shutdown::Preserved as P;
+        match preserved {
+            P::Pushed => Self::Pushed,
+            P::AlreadyOnOrigin => Self::AlreadyOnOrigin,
+            P::NoRemote => Self::NoRemote,
+            P::Refused => Self::Refused,
+        }
+    }
+}
+
 /// `quiet-worker`: a dispatch silent past the threshold.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct QuietWorker {
@@ -946,6 +1089,8 @@ payload_messages! {
     RunHookFinished => "run-hook-finished";
     RunHookWithheld => "run-hook-withheld";
     PoolMaintenance => "pool-maintenance";
+    DispatchStopped => "dispatch-stopped";
+    HostShutdown => "host-shutdown";
 }
 
 #[cfg(test)]
@@ -1117,6 +1262,28 @@ mod tests {
         ] {
             assert_eq!(word(&AuthorWord::from(author.clone())), author.as_str());
             assert_eq!(word(&AuthorWord::from(author.clone())), word(&author));
+        }
+        for ending in [
+            crate::shutdown::DispatchEnding::Graceful,
+            crate::shutdown::DispatchEnding::Killed,
+            crate::shutdown::DispatchEnding::StillRunning,
+        ] {
+            assert_eq!(word(&DispatchEndingWord::from(ending)), ending.as_str());
+        }
+        for preserved in [
+            crate::shutdown::Preserved::Pushed,
+            crate::shutdown::Preserved::AlreadyOnOrigin,
+            crate::shutdown::Preserved::NoRemote,
+            crate::shutdown::Preserved::Refused,
+        ] {
+            assert_eq!(word(&PreservedWord::from(preserved)), preserved.as_str());
+        }
+        for scope in [
+            crate::shutdown::ShutdownScope::Run(String::new()),
+            crate::shutdown::ShutdownScope::Mine,
+            crate::shutdown::ShutdownScope::Host,
+        ] {
+            assert_eq!(word(&ScopeWord::from(&scope)), scope.as_str());
         }
         for style in [
             onevcs::releases::ReleaseStyle::Automated,

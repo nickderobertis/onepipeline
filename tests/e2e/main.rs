@@ -116,6 +116,12 @@ mod scratch;
 mod session;
 mod session_reuse;
 mod shipped;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] each journey waits out a
+// real grace against real dispatches and a real origin, and what they exercise is the
+// shutdown verb over `driver`'s teardown, `engine`'s interrupt, `views` and the linked
+// `onevcs` together — so the narrowest edge they can honestly sit behind is the crate
+// itself, which is this target's. Same grounds as `mod driver` and `mod cancellation`.
+mod shutdown;
 mod store;
 mod summary;
 mod surface;

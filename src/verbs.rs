@@ -57,6 +57,10 @@ use crate::views::{self, Listing, Projects, RunView, Survey};
 pub use crate::agents::{AgentRun, AgentScope, AgentSession, Agents};
 pub use crate::driver::{Retained, Settlement};
 pub use crate::journal::StopTeardown;
+pub use crate::shutdown::{
+    BranchPreserved, DispatchEnding, DispatchStopped, Preserved, RunShutdown, Shutdown,
+    ShutdownRequest, ShutdownScope,
+};
 pub use crate::unwatched::{Unwatched, UnwatchedRun};
 pub use crate::watch::{
     Ending as WatchEnding, Frame as WatchFrame, Lines as WatchLines, Monitored,
@@ -1095,46 +1099,62 @@ impl Stopped {
     /// a tree that refused this user's signal is one to end as the user that
     /// owns it.
     pub fn refusal(&self) -> Option<String> {
-        let run = &self.run;
-        match self.teardown {
-            StopTeardown::NotAttempted => Some(format!(
-                "run '{run}' was not stopped: this host gave no answer its tree could be \
-                 read from — no process listing, or nothing that says whether a pid it \
-                 recorded is still the process it named, each said above — so the \
-                 processes the run started could not be found, and ending its driver \
-                 alone would have orphaned them. The run is untouched — run \
-                 `onepipeline stop {run}` again once this host answers"
-            )),
-            StopTeardown::PartlySignalled => Some(format!(
-                "run '{run}' was only partly stopped: part of its process tree was \
-                 signalled and at least one process in it is still running — one this \
-                 session could not signal, or one that took the ask and stayed. Find it \
-                 in this host's process list and end it as the user that owns it"
-            )),
-            StopTeardown::IdentityDeclined => Some(format!(
-                "run '{run}' was not stopped: live processes were found, but every recorded \
-                 identity disagreed with the process now holding its pid, so none was safe \
-                 to signal. This is distinct from a run with nothing left to stop; inspect \
-                 the declined claims above and retry only after correcting the run records"
-            )),
-            // llmlint: ignore-block[changed_behavior_has_e2e] this arm has no journey and
-            // cannot have one: reaching it takes a run every process of which refuses this
-            // user's signal, and a process this user may not signal is not a thing for a
-            // suite to go and make — the same reason `sys::established` is a fold driven
-            // from the answers a round of signalling gives rather than from signals. What the
-            // arm is built from is proved there, at
-            // `a_teardown_refused_by_everything_it_aimed_at_reports_no_signal_at_all` and
-            // `a_stop_that_could_signal_nothing_it_aimed_at_says_so`; every other outcome
-            // this match renders is driven end to end in `tests/e2e/driver.rs`.
-            StopTeardown::Refused => Some(format!(
-                "run '{run}' was not stopped: its process tree was found and every \
-                 process in it refused this session's signal, so nothing was signalled \
-                 and all of it is still running. Running `onepipeline stop {run}` again \
-                 as this user will be refused the same way — find the tree in this \
-                 host's process list and end it as the user that owns it"
-            )), // llmlint: ignore-end[changed_behavior_has_e2e]
-            StopTeardown::Signalled | StopTeardown::NothingToStop | StopTeardown::Elsewhere => None,
-        }
+        teardown_refusal(&self.run, self.teardown)
+    }
+}
+
+/// Why a teardown that was not clean is not a stop, in the words the binary
+/// refuses with.
+///
+/// Apart from [`Stopped::refusal`] because two verbs report one teardown —
+/// `stop`, which is what this is, and `shutdown`, whose report says the teardown
+/// in `stop`'s own words rather than in a second wording of the same six
+/// outcomes. A `Stopped` is assembled in exactly one place, `driver::stop_run`,
+/// and this is how the other reader reaches the sentences without assembling
+/// one.
+///
+/// Each teardown says something different because it leaves the operator in a
+/// different place: a host that gave no answer is a stop to run again, and a
+/// tree that refused this user's signal is one to end as the user that owns it.
+pub(crate) fn teardown_refusal(run: &str, teardown: StopTeardown) -> Option<String> {
+    match teardown {
+        StopTeardown::NotAttempted => Some(format!(
+            "run '{run}' was not stopped: this host gave no answer its tree could be \
+             read from — no process listing, or nothing that says whether a pid it \
+             recorded is still the process it named, each said above — so the \
+             processes the run started could not be found, and ending its driver \
+             alone would have orphaned them. The run is untouched — run \
+             `onepipeline stop {run}` again once this host answers"
+        )),
+        StopTeardown::PartlySignalled => Some(format!(
+            "run '{run}' was only partly stopped: part of its process tree was \
+             signalled and at least one process in it is still running — one this \
+             session could not signal, or one that took the ask and stayed. Find it \
+             in this host's process list and end it as the user that owns it"
+        )),
+        StopTeardown::IdentityDeclined => Some(format!(
+            "run '{run}' was not stopped: live processes were found, but every recorded \
+             identity disagreed with the process now holding its pid, so none was safe \
+             to signal. This is distinct from a run with nothing left to stop; inspect \
+             the declined claims above and retry only after correcting the run records"
+        )),
+        // llmlint: ignore-block[changed_behavior_has_e2e] this arm has no journey and
+        // cannot have one: reaching it takes a run every process of which refuses this
+        // user's signal, and a process this user may not signal is not a thing for a
+        // suite to go and make — the same reason `sys::established` is a fold driven
+        // from the answers a round of signalling gives rather than from signals. What the
+        // arm is built from is proved there, at
+        // `a_teardown_refused_by_everything_it_aimed_at_reports_no_signal_at_all` and
+        // `a_stop_that_could_signal_nothing_it_aimed_at_says_so`; every other outcome
+        // this match renders is driven end to end in `tests/e2e/driver.rs`.
+        StopTeardown::Refused => Some(format!(
+            "run '{run}' was not stopped: its process tree was found and every \
+             process in it refused this session's signal, so nothing was signalled \
+             and all of it is still running. Running `onepipeline stop {run}` again \
+             as this user will be refused the same way — find the tree in this \
+             host's process list and end it as the user that owns it"
+        )), // llmlint: ignore-end[changed_behavior_has_e2e]
+        StopTeardown::Signalled | StopTeardown::NothingToStop | StopTeardown::Elsewhere => None,
     }
 }
 
@@ -1165,6 +1185,38 @@ pub fn render_stopped(stopped: &Stopped) -> String {
         journal::STOP_TEARDOWN: stopped.teardown,
     })
     .to_string()
+}
+
+/// `onepipeline shutdown [RUN] [--mine] [--host]`: end the running work on this
+/// host the way a person would want it ended.
+///
+/// Per run: nothing new starts, every live dispatch is asked to stop with the
+/// lever a `cancel` already pulls, the grace is waited out, whatever is still
+/// standing and then the run's own driver are ended the way `stop` ends them,
+/// and every branch the run's records name is put on its identity's origin with
+/// `onevcs::preserve`. The pushes are attempted whether or not the teardown
+/// ended everything.
+///
+/// **It is not a stop.** No `run-stopped` is journalled and no run-end hook
+/// fires: the run has not ended, nothing is parked or settled, nothing is
+/// written back to the plan store, and `onepipeline adopt RUN` picks it up
+/// again. What it journals instead is one `dispatch-stopped` per live dispatch
+/// and one `host-shutdown` per run.
+///
+/// # Errors
+///
+/// [`Error::NotOwned`] for a run another session owns under the two scopes that
+/// keep `stop`'s ownership rule — `--host` deliberately does not keep it —
+/// [`Error::NoSuchRun`] for a run id this root does not hold, and
+/// [`Error::Refused`] for a run whose dispatch registry cannot be read. Each is
+/// refused before anything is signalled.
+pub fn shutdown(root: &Path, request: ShutdownRequest) -> Result<Shutdown> {
+    crate::shutdown::shutdown(root, request)
+}
+
+/// The report `onepipeline shutdown` prints.
+pub fn render_shutdown(shutdown: &Shutdown) -> String {
+    crate::shutdown::render_shutdown(shutdown)
 }
 
 /// The program a detached adoption retains as the run's driver, and its
