@@ -43,7 +43,14 @@ use serde_json::{json, Value};
 
 /// A grace a journey can wait out, and long enough that a worker that takes
 /// the ask has ended well inside it on a loaded host.
+#[cfg(unix)]
 const GRACE: &str = "4";
+
+/// A grace for a worker that takes the ask and then publishes: its last commit
+/// goes through a real publication before it exits, which a Windows runner has
+/// been measured taking longer than four seconds over. The wait ends the moment
+/// the worker does, so this lengthens nothing but a failure.
+const PUBLISHING_GRACE: &str = "120";
 
 /// A launch's run-end hooks, both pointed at one script that records it ran.
 ///
@@ -869,7 +876,7 @@ fn a_worker_that_ends_on_its_interrupt_has_its_branch_on_the_origin_afterwards()
     until_in_flight(&world, &run, &["service"]);
     let branch = session_branch(&world, &run, "service");
 
-    let shutdown = world.run(&["shutdown", &run, "--grace", GRACE]);
+    let shutdown = world.run(&["shutdown", &run, "--grace", PUBLISHING_GRACE]);
     shutdown.exited(0);
     let stopped = stopped_for(&world, &run, "service");
     assert_eq!(stopped["payload"]["interrupt"], "delivered", "{stopped}");
