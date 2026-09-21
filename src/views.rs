@@ -223,23 +223,31 @@ impl<'a> HostShutdown<'a> {
         let decoded = |payload: &serde_json::Map<String, serde_json::Value>| {
             serde_json::Value::Object(payload.clone())
         };
+        // A shutdown writes its `dispatch-stopped` records and then its
+        // `host-shutdown`, so the records since the last `host-shutdown` are the
+        // next one's — and a later shutdown's dispatches replace an earlier's
+        // whole, rather than a node the second found nothing live for reading as
+        // what the first did to it.
+        let mut pending = BTreeMap::new();
         let mut dispatches = BTreeMap::new();
         let mut found: Option<(&str, Option<crate::payload::HostShutdown>)> = None;
         for event in &view.events {
             match PipelineKind::from_wire(&event.kind) {
                 Some(PipelineKind::DriverAdopted) => {
+                    pending.clear();
                     dispatches.clear();
                     found = None;
                 }
                 Some(PipelineKind::DispatchStopped) => {
                     if let Some(node) = event.labels.node.as_deref() {
-                        dispatches.insert(
+                        pending.insert(
                             node.to_string(),
                             serde_json::from_value(decoded(&event.payload)).ok(),
                         );
                     }
                 }
                 Some(PipelineKind::HostShutdown) => {
+                    dispatches = std::mem::take(&mut pending);
                     found = Some((
                         &event.ts,
                         serde_json::from_value(decoded(&event.payload)).ok(),

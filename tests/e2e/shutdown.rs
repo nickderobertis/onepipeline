@@ -1166,6 +1166,13 @@ fn status_and_results_read_the_latest_shutdown_and_name_an_unreadable_one() {
     world.run(&["shutdown", &run, "--force"]).exited(0);
     world.run(&["shutdown", &run, "--force"]).exited(0);
     assert_eq!(world.events_of(&run, "host-shutdown").len(), 2);
+    // The first shutdown killed the worker and the second found nothing live:
+    // what is read is the second's account, not the first's carried over.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("service: no live dispatch when the host shutdown ran")
+        .out_lacks("service: worker killed by the host shutdown");
     world.run(&["results", &run]).exited(0).out_has(&format!(
         "its work is on {branch} (already on its origin at this commit)"
     ));
