@@ -1570,7 +1570,12 @@ as loudly as one that drops one.
     "consumes": {"engine": "crate"}
   },
   "event_kinds": ["release-wait", "release-arrived", "release-adopted"],
-  "heading": "## Cross-repository references"
+  "heading": "## Cross-repository references",
+  "wait_surface": {
+    "kind": "release-wait",
+    "epoch": "queued_at",
+    "withheld_after": ["node-unheld", "release-adopted", "node-dispatched"]
+  }
 }
 ```
 
@@ -1627,6 +1632,36 @@ about that dependency again, and the clock the wait was measured on is dropped
 when it arrives rather than left running under a later hold. Held end to end by
 `tests/e2e/adoption.rs`'s
 `a_release_that_arrived_is_not_awaited_again_when_its_probe_stops_answering`.
+
+*A wait surface that has outlived its hold is **withheld**, never handed out.*
+A surface is written in the present tense and handed out whenever a reader gets
+to it, and the queue holds a backlog — so a `release-wait` queued about a hold is
+still waiting to be read after the hold has cleared, and one queued by the very
+pass that then cleared it is the same thing at its shortest. Measured: a node's
+journal recorded `release-arrived`, `node-unheld` and `node-dispatched`, and a
+surface still saying it was held, `waited 0s, last answer: no-answer-yet`, was
+read four and a half minutes after the dispatch and sent an operator after a hold
+that no longer existed. **The rule:** the hold epoch a `release-wait` surface
+belongs to is fixed by the instant it was queued — its `queued_at`, stamped by the
+driver that raised it from the clock its journal is stamped from — and the
+surface is discarded at the hand-out, by `onepipeline next`, when the node's own
+record carries, *at or after that instant*, any of the three records that end a
+release hold: a `node-unheld`, a `release-adopted`, or a `node-dispatched`. At or
+after, because the record the same pass writes is milliseconds behind the surface
+and may share its millisecond; and nothing earlier counts, because a record from
+before the wait was queued belongs to an earlier hold of the same node — a
+requeue, or a fresh driver re-asking — and says nothing about this one. A
+withheld surface is claimed, so the queue moves past it, and is said on stderr
+naming the record that ended the hold; it is recorded neither as
+`planner-surfaced`, which it was not, nor by restarting any check-in clock, which
+a reading nobody made does not, and the `planner-surface-queued` that recorded
+its queuing stands. A genuine hold still raises its wait and goes on raising it
+on its interval, and each of those reaches the reader while the hold is on. The
+block above names the kind, what fixes its epoch, and the three kinds that end
+it; `src/release.rs`'s `wait_outlived` is the one reading of the rule, and
+`tests/e2e/adoption.rs`'s
+`a_wait_queued_about_a_hold_that_has_since_cleared_is_withheld_from_the_reader`
+drives it through the binary, delaying the reader across the unhold.
 
 **One thing that is held by a fold test rather than by a journey, and why.** A
 fresh driver takes up what its predecessor already said, out of the journal,

@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use clap::{CommandFactory, Parser};
 use oneagentgraph::config::{ConfigRef, GraphConfig, JudgeSide, Member};
 use oneagentgraph::persona::{merge, Persona};
-use onepipeline::channel::{allows, Author, Command as Edit, Dependents, Reply, SurfaceKind};
+use onepipeline::channel::{
+    allows, Author, Command as Edit, Dependents, Reply, Surface, SurfaceKind,
+};
 use onepipeline::cli::{
     Cli, Command, DAG_GRAPH_OFF, DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS,
     DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_HOOK_TIMEOUT_SECONDS,
@@ -1646,6 +1648,63 @@ fn the_release_adoption_surface_is_what_the_divergence_record_names() {
         "entry 40 names a different heading than this crate publishes"
     );
     assert_ne!(CROSS_REPO_REFERENCES_HEADING, PLANNER_CONTEXT_HEADING);
+
+    // The wait surface and the rule that withholds a stale one: the kind is one
+    // the entry's own kinds carry, what fixes its epoch is a field every surface
+    // carries, and each record named as ending a hold is a kind this crate
+    // emits. The rule itself is driven through the binary by the adoption
+    // journey the entry names; what is held here is that the entry's words and
+    // the types cannot drift apart.
+    let wait = &block["wait_surface"];
+    assert_eq!(wait["kind"].as_str(), Some("release-wait"));
+    assert!(kinds.contains(&"release-wait".to_string()));
+    assert_eq!(wait["epoch"].as_str(), Some("queued_at"));
+    let queued = serde_json::to_value(Surface {
+        id: 1,
+        kind: "release-wait".into(),
+        message: "held".into(),
+        source: "proposal".into(),
+        blocking: false,
+        queued_at: 7,
+        abandoned: false,
+        asker: None,
+        workstream: Some("consumer".into()),
+        correlation: None,
+    })
+    .expect("a surface serializes");
+    assert_eq!(
+        queued["queued_at"],
+        json!(7),
+        "the field the entry says fixes a wait's epoch is not one a surface carries"
+    );
+    // Which kinds they are is reconciled against the set `wait_outlived` reads
+    // by `src/release.rs`'s own test of this block, since that set is private.
+    let ending: Vec<String> = serde_json::from_value(wait["withheld_after"].clone())
+        .expect("entry 40 names the records that end a hold");
+    assert!(
+        !ending.is_empty(),
+        "entry 40 names no record that ends a hold"
+    );
+    for kind in &ending {
+        assert!(
+            PipelineKind::from_wire(&EventKind(kind.clone())).is_some(),
+            "`{kind}` is not a kind this crate emits"
+        );
+    }
+    let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergence record ships");
+    let prose = record.split_whitespace().collect::<Vec<_>>().join(" ");
+    for said in [
+        "fixed by the instant it was queued",
+        "at or after that instant",
+        "is **withheld**, never handed out",
+        "recorded neither as `planner-surfaced`",
+    ] {
+        assert!(
+            prose.contains(said),
+            "entry 40 no longer states the rule that withholds a stale wait: {said:?}"
+        );
+    }
 }
 
 /// The placement overrides, the hold, the surface and the requeue this build

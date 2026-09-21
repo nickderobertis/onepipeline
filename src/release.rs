@@ -100,6 +100,87 @@ pub const DEFAULT_SURFACE_SECONDS: u64 = 900;
 /// The kind a held node's wait is surfaced under.
 pub const WAIT_SURFACE_KIND: &str = "release-wait";
 
+/// What ended the hold a queued wait surface reports, when something has.
+///
+/// The three records that clear a release hold on the run's own record — the
+/// same three [`views`](crate::views) reads the hold's span off — each named so a
+/// reader is told which one it was rather than only that the wait is stale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WaitCleared {
+    /// The record's kind: `node-unheld`, `release-adopted` or `node-dispatched`.
+    pub(crate) kind: &'static str,
+    /// When it was recorded, as the envelope stamps it.
+    pub(crate) at: String,
+}
+
+impl WaitCleared {
+    /// One line saying what ended the hold, for the reader the surface was
+    /// withheld from.
+    pub(crate) fn said(&self, node: &str) -> String {
+        let what = match self.kind {
+            "node-unheld" => "its hold cleared",
+            "release-adopted" => "the releases it awaited were adopted",
+            _ => "it was dispatched",
+        };
+        format!(
+            "node '{node}' is not held any more: {what} (`{}` at {})",
+            self.kind, self.at
+        )
+    }
+}
+
+/// The records that end a release hold, and so the records a queued wait is
+/// withheld after — `docs/contract-divergences.md` entry 40 names the same
+/// three, and a test below holds the two together.
+const WAIT_CLEARED_BY: [journal::PipelineKind; 3] = [
+    journal::PipelineKind::NodeUnheld,
+    journal::PipelineKind::ReleaseAdopted,
+    journal::PipelineKind::NodeDispatched,
+];
+
+/// Whether a queued release-wait surface has outlived the hold it reports, and
+/// what ended that hold.
+///
+/// A surface is written in the present tense and handed out whenever a reader
+/// gets to it, and the queue holds a backlog: a wait queued about a hold is still
+/// waiting to be read after the hold has cleared, and one queued by the very pass
+/// that then cleared it is the same thing at its shortest. Handed out, it sends a
+/// reader after a hold that no longer exists. So the hold **epoch** a wait belongs
+/// to is fixed by the instant it was queued — [`Surface::queued_at`], stamped by
+/// the driver that raised it from the clock its journal is stamped from — and the
+/// wait is discarded at the hand-out when the node's own record carries, at or
+/// after that instant, any of the [`WAIT_CLEARED_BY`] records that end a
+/// release hold. At or after,
+/// because the record the same pass writes is milliseconds behind the surface
+/// and may share its millisecond.
+///
+/// Nothing earlier counts: a record from before the wait was queued belongs to
+/// an earlier hold of the same node — a requeue, or a fresh driver re-asking —
+/// and says nothing about this one. A record whose stamp this build cannot read
+/// is no evidence either way, and a surface of any other kind is never withheld.
+pub(crate) fn wait_outlived(
+    events: &[crate::event::Envelope],
+    surface: &Surface,
+) -> Option<WaitCleared> {
+    if surface.kind != WAIT_SURFACE_KIND {
+        return None;
+    }
+    let node = surface.workstream.as_deref()?;
+    events
+        .iter()
+        .filter(|event| event.labels.node.as_deref() == Some(node))
+        .filter_map(|event| {
+            let kind = journal::PipelineKind::from_wire(&event.kind)
+                .filter(|kind| WAIT_CLEARED_BY.contains(kind))?;
+            let at = crate::projection::millis_of(&event.ts)?;
+            (at >= surface.queued_at).then(|| WaitCleared {
+                kind: kind.as_str(),
+                at: event.ts.clone(),
+            })
+        })
+        .next()
+}
+
 /// What one awaited release is tracked by: the node waiting, and the dependency
 /// it is waiting on.
 type Key = (String, String);
@@ -944,6 +1025,12 @@ impl Watch {
             // raised second, that is the previous one, carrying the previous
             // answer about a probe that has since stopped answering. This way
             // round the surface is never older than the record beside it.
+            //
+            // Queued, not delivered: the surface waits in the channel until a
+            // reader claims it, and a hold cleared before then — by this very
+            // pass, or by any later one — makes it a wait about nothing. What
+            // fixes the hold it belongs to is its `queued_at`, and
+            // [`wait_outlived`] is what the hand-out reads it against.
             crate::engine::raise(paths, journal, self.wait_surface(node))?;
             let awaiting = self.awaiting(node);
             journal.emit(
@@ -3252,6 +3339,155 @@ mod tests {
             copied, DEFAULT_POLL_SECONDS,
             "tests/e2e/adoption.rs holds a real build to a probe interval of {copied}s, but this \
              build ships {DEFAULT_POLL_SECONDS}s"
+        );
+    }
+
+    fn record(kind: &str, node: &str, ts: &str) -> crate::event::Envelope {
+        serde_json::from_value(json!({
+            "v": 1,
+            "ts": ts,
+            "stream": "driver",
+            "seq": 0,
+            "source": "pipeline",
+            "kind": kind,
+            "labels": {"run_id": "held", "node": node},
+            "payload": {},
+        }))
+        .expect("a well-formed envelope")
+    }
+
+    fn wait_queued_at(node: &str, queued_at: u64) -> Surface {
+        Surface {
+            id: 7,
+            kind: WAIT_SURFACE_KIND.to_owned(),
+            message: format!("node '{node}' is held"),
+            source: crate::channel::source::PROPOSAL.to_owned(),
+            blocking: false,
+            queued_at,
+            abandoned: false,
+            asker: None,
+            workstream: Some(node.to_owned()),
+            correlation: None,
+        }
+    }
+
+    /// A wait is outlived by exactly the three records that end a release hold,
+    /// recorded at or after the instant it was queued, about its own node.
+    ///
+    /// The clearing records are driven end to end by `tests/e2e/adoption.rs`'s
+    /// `a_wait_queued_about_a_hold_that_has_since_cleared_is_withheld_from_the_reader`.
+    /// The boundary on either side of the queuing instant is held here instead,
+    /// because the run's clock cannot be pinned there: a record of an earlier
+    /// hold of the same node would take a hold, a clearing and a fresh hold
+    /// through the reconcile loop, and the millisecond each lands on is the
+    /// loop's to choose rather than the journey's.
+    #[test]
+    fn a_wait_is_outlived_by_a_clearing_record_at_or_after_the_instant_it_was_queued() {
+        // 2026-08-24T00:00:10.000Z, in epoch milliseconds.
+        let queued_at = 1_787_529_610_000;
+        let before = "2026-08-24T00:00:09.999Z";
+        let same = "2026-08-24T00:00:10.000Z";
+        let after = "2026-08-24T00:00:10.001Z";
+        let wait = wait_queued_at("consumer", queued_at);
+
+        for kind in WAIT_CLEARED_BY.map(journal::PipelineKind::as_str) {
+            for at in [same, after] {
+                let cleared = wait_outlived(&[record(kind, "consumer", at)], &wait)
+                    .unwrap_or_else(|| panic!("a `{kind}` at {at} did not end the hold"));
+                assert_eq!(cleared.kind, kind);
+                assert_eq!(cleared.at, at);
+                assert!(
+                    cleared.said("consumer").contains(kind)
+                        && cleared.said("consumer").contains(at),
+                    "{}",
+                    cleared.said("consumer")
+                );
+            }
+            // Before the wait was queued is an earlier hold of the same node.
+            assert_eq!(
+                wait_outlived(&[record(kind, "consumer", before)], &wait),
+                None,
+                "a `{kind}` from before the wait was queued ended it"
+            );
+            // Another node's record says nothing about this one.
+            assert_eq!(
+                wait_outlived(&[record(kind, "other", after)], &wait),
+                None,
+                "another node's `{kind}` ended this node's hold"
+            );
+        }
+        // A record that opens or restates a hold, or that is not about holds at
+        // all, ends nothing — nor does a sibling's kind under a name of its own.
+        for kind in [
+            "node-held",
+            "release-wait",
+            "release-arrived",
+            "session-opened",
+        ] {
+            assert_eq!(
+                wait_outlived(&[record(kind, "consumer", after)], &wait),
+                None,
+                "a `{kind}` ended the hold"
+            );
+        }
+        // The first clearing record is the one named, in the store's order.
+        let events = [
+            record("node-held", "consumer", same),
+            record("node-unheld", "consumer", after),
+            record("node-dispatched", "consumer", after),
+        ];
+        assert_eq!(
+            wait_outlived(&events, &wait).map(|cleared| cleared.kind),
+            Some("node-unheld")
+        );
+    }
+
+    /// A stamp this build cannot read is no evidence, and a surface of any other
+    /// kind — or one naming no node — is never withheld.
+    ///
+    /// Held here rather than by a journey because the binary never writes an
+    /// unreadable stamp: every record it journals is stamped by its own clock, so
+    /// that store exists only where something other than this build wrote it.
+    #[test]
+    fn an_unreadable_stamp_and_a_surface_that_is_not_a_wait_are_never_outlived() {
+        let wait = wait_queued_at("consumer", 1_787_529_610_000);
+        let unreadable = record("node-dispatched", "consumer", "later on");
+        assert_eq!(wait_outlived(&[unreadable], &wait), None);
+
+        let dispatched = record("node-dispatched", "consumer", "2026-08-24T00:00:11.000Z");
+        let mut finding = wait_queued_at("consumer", 1_787_529_610_000);
+        finding.kind = crate::channel::SurfaceKind::FINDING.to_owned();
+        assert_eq!(
+            wait_outlived(std::slice::from_ref(&dispatched), &finding),
+            None,
+            "a finding about a dispatched node was withheld as a stale wait"
+        );
+        let mut nobody = wait_queued_at("consumer", 1_787_529_610_000);
+        nobody.workstream = None;
+        assert_eq!(wait_outlived(&[dispatched], &nobody), None);
+    }
+
+    /// The records a stale wait is withheld after are the ones entry 40's block
+    /// names, both directions, so the record and the rule cannot drift apart.
+    #[test]
+    fn the_records_a_wait_is_withheld_after_are_the_ones_entry_40_names() {
+        let record = include_str!("../docs/contract-divergences.md");
+        let block = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("40."))
+            .and_then(|entry| entry.split("```json").nth(1))
+            .and_then(|rest| rest.split("```").next())
+            .expect("entry 40 carries its json block");
+        let block: serde_json::Value =
+            serde_json::from_str(block).expect("entry 40's block is JSON");
+        assert_eq!(
+            block["wait_surface"]["kind"].as_str(),
+            Some(WAIT_SURFACE_KIND)
+        );
+        assert_eq!(
+            block["wait_surface"]["withheld_after"],
+            json!(WAIT_CLEARED_BY.map(journal::PipelineKind::as_str)),
+            "entry 40 names different records as ending a hold than `wait_outlived` reads"
         );
     }
 

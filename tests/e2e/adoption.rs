@@ -2418,6 +2418,169 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
     }
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs
+// is the crate under test itself — its own release watch raising the wait, its own `next`
+// withholding it, a real probe subprocess and a real `onevcs` publication — and the one
+// separately edged test project's input begins at `{workspaceRoot}/src/**/*`, so a project of
+// its own would declare the same dependency and skip nothing. It lives beside the hold journeys
+// in this file, which is where a reader looks for one.
+/// A wait surface queued about a hold is handed out while the hold is on, and
+/// **withheld** once the hold has cleared — whether the pass that queued it or a
+/// later one cleared it — so a reader is never sent after a hold that ended
+/// before they got to the queue.
+///
+/// The defect this closes: a surface is written in the present tense and handed
+/// out whenever a reader gets to it, and the queue holds a backlog. A wait queued
+/// before a release arrived was still waiting after the node it described had
+/// been unheld and dispatched, and a reader handed it minutes later went looking
+/// for a hold that no longer existed. So delivery is **delayed across the
+/// unhold** here: one wait is read while the node is held, the rest are left in
+/// the queue while the release arrives and the node starts, and only then is the
+/// queue drained.
+#[test]
+fn a_wait_queued_about_a_hold_that_has_since_cleared_is_withheld_from_the_reader() {
+    let world = watching("adoption-stale-wait");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+
+    let run = start(
+        &world,
+        "adoption-stale-wait",
+        vec![engine(), consumer(Some("published"))],
+    );
+    world.until("the probe's answer to reach the wait", |world| {
+        answered(world, &run, "consumer") == Some("not-released".to_owned())
+    });
+    assert!(!dispatched(&world, &run, "consumer"));
+
+    // A genuine hold raises its wait and the wait reaches a reader: the first
+    // claim hands out the wait, recorded as delivered.
+    let read = world.run(&["next", &run]);
+    read.exited(0);
+    assert_eq!(read.json()["status"], json!("surface"), "{}", read.stdout);
+    assert_eq!(
+        read.json()["surface"]["kind"],
+        json!("release-wait"),
+        "a held node's wait was not what the reader was handed: {}",
+        read.stdout
+    );
+    assert_eq!(read.json()["surface"]["workstream"], json!("consumer"));
+    assert!(
+        !read.stderr.contains("withheld"),
+        "a wait about a hold still on was withheld: {}",
+        read.stderr
+    );
+    assert_eq!(
+        delivered_waits(&world, &run).len(),
+        1,
+        "the delivered wait was not recorded as delivered"
+    );
+
+    // And goes on raising it: the recurring waits queue up behind that read,
+    // unread, while the node stays held.
+    let read_after = queued_waits(&world, &run).len();
+    world.until("the wait to be queued again after the read", |world| {
+        queued_waits(world, &run).len() >= read_after + 2
+    });
+    assert!(!dispatched(&world, &run, "consumer"));
+
+    // The release arrives while those waits sit unread; the hold clears and the
+    // node starts. Every wait in the queue is now about a hold that is over.
+    releases_at(&answer, "0.2.0");
+    world.until("the held node to be unheld and dispatched", |world| {
+        world
+            .events_of(&run, "node-unheld")
+            .iter()
+            .any(|event| event["labels"]["node"] == "consumer")
+            && dispatched(world, &run, "consumer")
+    });
+    let queued_before_the_start = queued_waits(&world, &run).len();
+    assert!(
+        queued_before_the_start >= read_after + 2,
+        "the recurring waits were not in the queue when the hold cleared"
+    );
+
+    // Drained only now. Not one of the stale waits reaches the reader, and each
+    // one withheld is said on stderr naming the record that ended the hold; what
+    // else the run queued in the meantime is handed out exactly as before.
+    let mut withheld = String::new();
+    loop {
+        let read = world.run(&["next", &run]);
+        read.exited(0);
+        withheld.push_str(&read.stderr);
+        if read.json()["status"] != json!("surface") {
+            break;
+        }
+        assert_ne!(
+            read.json()["surface"]["kind"],
+            json!("release-wait"),
+            "a wait about a hold that had cleared was handed to the reader:\n{}",
+            read.stdout
+        );
+    }
+    assert!(
+        withheld.contains("withheld a stale `release-wait` surface")
+            && withheld.contains("node 'consumer' is not held any more")
+            && (withheld.contains("`node-unheld`") || withheld.contains("`node-dispatched`")),
+        "the withheld waits were not said, or not said with what ended the hold:\n{withheld}"
+    );
+    assert_eq!(
+        withheld
+            .matches("withheld a stale `release-wait` surface")
+            .count(),
+        queued_before_the_start - 1,
+        "not every wait queued before the hold cleared was withheld:\n{withheld}"
+    );
+    // The record agrees: the one wait delivered while the node was held is the
+    // only one ever delivered, the withheld ones stand as queued and nothing
+    // more, and nothing is left waiting for a reader.
+    assert_eq!(
+        delivered_waits(&world, &run).len(),
+        1,
+        "a stale wait was recorded as delivered: {:?}",
+        delivered_waits(&world, &run)
+    );
+    assert!(
+        !world
+            .run(&["runs"])
+            .exited(0)
+            .stdout
+            .contains("planner update(s) waiting"),
+        "the withheld waits are still counted as unread"
+    );
+
+    world.until("the run to settle", |world| {
+        world.events_of(&run, "node-settled").len() == 2
+    });
+    for event in world.events_of(&run, "node-settled") {
+        assert_ne!(event["payload"]["status"], json!("failed"), "{event}");
+    }
+}
+
+fn queued_waits(world: &World, run: &str) -> Vec<Value> {
+    world
+        .events_of(run, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| {
+            event["payload"]["kind"] == "release-wait" && event["labels"]["node"] == "consumer"
+        })
+        .collect()
+}
+
+fn delivered_waits(world: &World, run: &str) -> Vec<Value> {
+    world
+        .events_of(run, "planner-surfaced")
+        .into_iter()
+        .filter(|event| {
+            event["payload"]["kind"] == "release-wait" && event["labels"]["node"] == "consumer"
+        })
+        .collect()
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this asks
 // for does not exist here, for the reason `driver.rs` and `views.rs` give: the one
 // separately edged test project's input begins at `{workspaceRoot}/src/**/*`, so a journey
