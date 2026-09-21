@@ -1663,7 +1663,9 @@ mod unix_interrupt {
         reader: Option<std::thread::JoinHandle<()>>,
     }
 
-    /// Write the signal's number down the pipe.
+    /// The handler proper, and all it does is hand the signal to the reader: a
+    /// handler may call only async-signal-safe functions, and removing a worktree
+    /// runs git.
     extern "C" fn relay(signal: libc::c_int) {
         let fd = WAKE.load(Ordering::SeqCst);
         if fd >= 0 {
