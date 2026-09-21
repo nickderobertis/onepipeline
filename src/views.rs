@@ -200,18 +200,22 @@ const OUTLIVED_THE_STOP: &str = "worker may still be running: the stop could not
 /// The same rule [`RunState::stop_recorded`] keeps for a stop, read off the
 /// merged store rather than folded, because the two views that answer for it are
 /// the two that already hold it.
-struct HostShutdown<'a> {
-    /// When the shutdown was recorded.
-    at: &'a str,
+struct HostShutdown {
+    /// When the shutdown was recorded, in epoch milliseconds, or `None` for a
+    /// timestamp this build cannot place — which is left out rather than guessed.
+    at: Option<u64>,
     /// What became of each dispatch it acted on, by node — decoded through the
     /// record's registered payload, or `None` for a record that does not decode.
+    // llmlint: ignore[invalid_states_unrepresentable] keyed by the node id exactly as the record's `labels.node` carries it and as every other per-node map of a run is — `RunState::sessions`, `branches` and `landings` among them — and looked up only with a graph node's own `id`, so a node newtype here alone would be a conversion at one call site rather than a narrower set of values.
     dispatches: BTreeMap<String, Option<crate::payload::DispatchStopped>>,
-    /// What became of each branch it offered to `onevcs`, by branch name, or
-    /// `None` where the `host-shutdown` record itself does not decode.
-    branches: Option<BTreeMap<String, crate::payload::PreservedWord>>,
+    /// What became of each branch it offered to `onevcs`, by identity and branch
+    /// together, or `None` where the `host-shutdown` record itself does not
+    /// decode. The identity is part of the key because two repositories may carry
+    /// one branch name, and what became of it in one says nothing of the other.
+    branches: Option<BTreeMap<(String, String), crate::payload::PreservedWord>>,
 }
 
-impl<'a> HostShutdown<'a> {
+impl HostShutdown {
     /// The shutdown this run is under, or `None` for a run that is not.
     ///
     /// Each record is read through the payload type its kind is registered
@@ -219,7 +223,7 @@ impl<'a> HostShutdown<'a> {
     /// decode is **not** dropped and not defaulted: the kind alone says a
     /// shutdown happened, and what it did is then said to be unreadable rather
     /// than guessed at.
-    fn of(view: &'a RunView) -> Option<Self> {
+    fn of(view: &RunView) -> Option<Self> {
         let decoded = |payload: &serde_json::Map<String, serde_json::Value>| {
             serde_json::Value::Object(payload.clone())
         };
@@ -258,13 +262,13 @@ impl<'a> HostShutdown<'a> {
         }
         let (at, recorded) = found?;
         Some(Self {
-            at,
+            at: crate::projection::millis_of(at),
             dispatches,
             branches: recorded.map(|recorded| {
                 recorded
                     .branches
                     .into_iter()
-                    .map(|row| (row.branch, row.result))
+                    .map(|row| ((row.identity, row.branch), row.result))
                     .collect()
             }),
         })
@@ -276,7 +280,7 @@ impl<'a> HostShutdown<'a> {
         format!(
             "  HOST SHUTDOWN: this run was put down by a host shutdown{}; it has not ended \
              and nothing was settled by it — onepipeline adopt {run} resumes it\n",
-            crate::projection::millis_of(self.at)
+            self.at
                 .map(|at| format!(
                     " {} ago",
                     crate::telemetry::duration(sys::now_millis().saturating_sub(at))
@@ -308,23 +312,53 @@ impl<'a> HostShutdown<'a> {
         }
     }
 
-    /// Whether one branch reached its origin, in the shutdown's own words.
+    /// Whether one branch reached its origin, in the shutdown's own words, in
+    /// every repository the shutdown recorded that branch name for.
+    ///
+    /// A node's plan names its repository by whatever spelling the plan used,
+    /// and the record carries the identity `onevcs` resolved that to; this
+    /// build cannot resolve one into the other, so a name the shutdown recorded
+    /// in several repositories is answered for each of them by identity rather
+    /// than with one verdict that may belong to another repository's branch.
     fn reached_its_origin(&self, branch: &str) -> String {
-        use crate::payload::PreservedWord as P;
         let Some(branches) = &self.branches else {
             return "unknown: the host-shutdown record could not be read".to_string();
         };
-        match branches.get(branch) {
-            Some(P::Pushed) => "on its origin unproven: pushed without that repository's own \
-                                hook or merge path having run"
-                .to_string(),
-            Some(P::AlreadyOnOrigin) => "already on its origin at this commit".to_string(),
-            Some(P::NoRemote) => "not on any origin: this identity has none to push to".to_string(),
-            Some(P::Refused) => "not on its origin: the preserving push was refused".to_string(),
-            None => {
+        let recorded: Vec<(&str, crate::payload::PreservedWord)> = branches
+            .iter()
+            .filter(|((_, name), _)| name == branch)
+            .map(|((identity, _), result)| (identity.as_str(), *result))
+            .collect();
+        match recorded.as_slice() {
+            [] => {
                 "not offered to a preserving push, so nothing says it is on an origin".to_string()
             }
+            [(_, result)] => preserved_words(*result).to_string(),
+            several => format!(
+                "recorded under this name in {} repositories — {}",
+                several.len(),
+                several
+                    .iter()
+                    .map(|(identity, result)| format!("{identity}: {}", preserved_words(*result)))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
         }
+    }
+}
+
+/// What one preserving push's answer means for whether its branch is on an
+/// origin.
+const fn preserved_words(result: crate::payload::PreservedWord) -> &'static str {
+    use crate::payload::PreservedWord as P;
+    match result {
+        P::Pushed => {
+            "on its origin unproven: pushed without that repository's own hook or merge path \
+             having run"
+        }
+        P::AlreadyOnOrigin => "already on its origin at this commit",
+        P::NoRemote => "not on any origin: this identity has none to push to",
+        P::Refused => "not on its origin: the preserving push was refused",
     }
 }
 
@@ -4010,7 +4044,7 @@ mod tests {
     fn a_shut_down_branch_reads_as_where_its_preserving_push_left_it() {
         use crate::payload::{DispatchEndingWord, DispatchStopped, InterruptWord, PreservedWord};
         let shutdown = HostShutdown {
-            at: "not a timestamp",
+            at: crate::projection::millis_of("not a timestamp"),
             dispatches: BTreeMap::from([
                 (
                     "build".to_string(),
@@ -4025,13 +4059,31 @@ mod tests {
                 ("garbled".to_string(), None),
             ]),
             branches: Some(BTreeMap::from([
-                ("pushed".to_string(), PreservedWord::Pushed),
                 (
-                    "already-on-origin".to_string(),
+                    ("repo".to_string(), "pushed".to_string()),
+                    PreservedWord::Pushed,
+                ),
+                (
+                    ("repo".to_string(), "already-on-origin".to_string()),
                     PreservedWord::AlreadyOnOrigin,
                 ),
-                ("no-remote".to_string(), PreservedWord::NoRemote),
-                ("refused".to_string(), PreservedWord::Refused),
+                (
+                    ("repo".to_string(), "no-remote".to_string()),
+                    PreservedWord::NoRemote,
+                ),
+                (
+                    ("repo".to_string(), "refused".to_string()),
+                    PreservedWord::Refused,
+                ),
+                // One name in two repositories, with different answers.
+                (
+                    ("one".to_string(), "shared".to_string()),
+                    PreservedWord::Pushed,
+                ),
+                (
+                    ("two".to_string(), "shared".to_string()),
+                    PreservedWord::Refused,
+                ),
             ])),
         };
         for (branch, says) in [
@@ -4044,6 +4096,14 @@ mod tests {
             let read = shutdown.reached_its_origin(branch);
             assert!(read.contains(says), "{branch}: {read}");
         }
+        // A name recorded in two repositories is answered for each, by identity,
+        // and never with one of the two verdicts alone.
+        assert_eq!(
+            shutdown.reached_its_origin("shared"),
+            "recorded under this name in 2 repositories — one: on its origin unproven: pushed \
+             without that repository's own hook or merge path having run; two: not on its \
+             origin: the preserving push was refused"
+        );
         assert_eq!(
             shutdown.became_of("build"),
             "worker graceful by the host shutdown (interrupt delivered)"

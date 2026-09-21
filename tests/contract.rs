@@ -903,6 +903,77 @@ fn the_contract_declares_the_host_shutdown_seam_this_crate_publishes() {
         );
     }
 
+    // Every field the block spells, with its type, is exactly the set the
+    // exhaustive literals below name — so a field the document adds, drops,
+    // renames or retypes fails here, and one the crate adds or drops fails
+    // those literals to compile.
+    for (name, fields) in [
+        (
+            "ShutdownRequest",
+            &[
+                ("scope", "ShutdownScope"),
+                ("session", "String"),
+                ("grace", "Duration"),
+                ("force", "bool"),
+            ][..],
+        ),
+        (
+            "DispatchStopped",
+            &[
+                ("node", "String"),
+                ("pid", "u32"),
+                ("interrupt", "String"),
+                ("detail", "String"),
+                ("ended", "DispatchEnding"),
+                ("waited", "Duration"),
+            ][..],
+        ),
+        (
+            "BranchPreserved",
+            &[
+                ("identity", "String"),
+                ("branch", "String"),
+                ("outcome", "Preserved"),
+                ("remote", "Option<String>"),
+                ("commit", "Option<String>"),
+                ("detail", "String"),
+            ][..],
+        ),
+        (
+            "RunShutdown",
+            &[
+                ("run", "String"),
+                ("owner", "String"),
+                ("forced_over_owner", "bool"),
+                ("dispatches", "Vec<DispatchStopped>"),
+                ("teardown", "journal::StopTeardown"),
+                ("branches", "Vec<BranchPreserved>"),
+            ][..],
+        ),
+        (
+            "Shutdown",
+            &[
+                ("root", "PathBuf"),
+                ("scope", "ShutdownScope"),
+                ("grace", "Duration"),
+                ("forced", "bool"),
+                ("runs", "Vec<RunShutdown>"),
+                ("not_pushed", "Vec<(String, String)>"),
+                ("not_pushed_unread", "Option<String>"),
+            ][..],
+        ),
+    ] {
+        let expected: Vec<(String, String)> = fields
+            .iter()
+            .map(|(field, ty)| ((*field).to_string(), (*ty).to_string()))
+            .collect();
+        assert_eq!(
+            sketch_struct_fields(&sketch, name),
+            expected,
+            "the contract's `{name}` fields have drifted from the type this crate publishes"
+        );
+    }
+
     // The values the block names, built here so a variant renamed or dropped
     // fails to compile rather than leaving the document promising it.
     let stopped = DispatchStopped {
@@ -981,6 +1052,45 @@ fn the_contract_declares_the_host_shutdown_seam_this_crate_publishes() {
             "on its origin *unproven*",
         ],
     );
+}
+
+/// The `pub name: Type` fields a sketched `pub struct` spells, in order, with
+/// each type's whitespace collapsed and the block's doc comments left out.
+fn sketch_struct_fields(sketch: &str, name: &str) -> Vec<(String, String)> {
+    let code: String = sketch
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("///"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let open = format!("pub struct {name} {{");
+    let start = code
+        .find(&open)
+        .unwrap_or_else(|| panic!("the contract's shutdown block declares no `{open}`"))
+        + open.len();
+    // The body ends at the brace that closes it; a field type such as
+    // `Vec<(String, String)>` nests parentheses and angles but never braces.
+    let body = &code[start..start + code[start..].find('}').expect("the struct closes")];
+    let mut fields = Vec::new();
+    let mut depth = 0_i32;
+    let mut field = String::new();
+    for ch in body.chars().chain(std::iter::once(',')) {
+        match ch {
+            '<' | '(' => depth += 1,
+            '>' | ')' => depth -= 1,
+            _ => {}
+        }
+        if ch == ',' && depth == 0 {
+            let spelled = field.split_whitespace().collect::<Vec<_>>().join(" ");
+            if let Some(rest) = spelled.strip_prefix("pub ") {
+                let (field_name, ty) = rest.split_once(':').expect("a field has a type");
+                fields.push((field_name.trim().to_string(), ty.trim().to_string()));
+            }
+            field.clear();
+        } else {
+            field.push(ch);
+        }
+    }
+    fields
 }
 
 /// A plan exercising every node shape the contract names.

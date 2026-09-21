@@ -18,7 +18,7 @@
 // full rationale.
 
 // llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
-// assumed: the twenty-six journeys here take between about 90 and 195 seconds summed and
+// assumed: the twenty-seven journeys here take between about 90 and 195 seconds summed and
 // 25 to 50 on the wall under nextest's parallelism, by the host's load — each waits out a real grace
 // against real dispatches and pushes to a real origin, because a bound on how long a worker
 // is given cannot be stated without a clock running it. What they exercise is the shutdown
@@ -536,6 +536,77 @@ fn a_teardown_that_leaves_a_survivor_still_preserves_every_branch() {
     // The one process this journey's run left that no `World` takes with it.
     end_process(worker);
     world.release("service.go");
+}
+
+/// One branch name in two repositories is read back for each of them, and never
+/// as the one verdict another repository's push got.
+///
+/// Two lifecycle nodes, in two repositories, are pinned to the same branch name.
+/// Somebody else's commit sits under that name on the first repository's origin,
+/// so that push is refused, while the second repository's goes through: the two
+/// branches share a name and nothing else, and `results` has to say so.
+#[test]
+fn one_branch_name_in_two_repositories_is_read_back_for_each() {
+    const SHARED: &str = "feature/shared";
+    let world = World::new("shutdown-shared-name");
+    let service = world.repository("local-direct", &[]);
+    let tool = world.extra_repository("tool");
+    for node in ["alpha", "beta"] {
+        held(&world, node);
+    }
+    let mut alpha = lifecycle("alpha", &[]);
+    alpha["branch"] = json!(SHARED);
+    let mut beta = lifecycle("beta", &[]);
+    beta["repo"] = json!("tool");
+    beta["branch"] = json!(SHARED);
+    let run = launch(&world, "sharedname", vec![alpha, beta]);
+    until_in_flight(&world, &run, &["alpha", "beta"]);
+    for node in ["alpha", "beta"] {
+        assert_eq!(session_branch(&world, &run, node), SHARED);
+    }
+
+    // Somebody else's commit, on the first origin only, under the shared name.
+    let elsewhere = world.root.join("elsewhere");
+    git(
+        &world,
+        &world.root,
+        &["clone", &service.origin.to_string_lossy(), "elsewhere"],
+    );
+    std::fs::write(elsewhere.join("theirs.md"), "somebody else's work\n").expect("a file");
+    git(&world, &elsewhere, &["checkout", "-b", SHARED]);
+    git(&world, &elsewhere, &["add", "-A"]);
+    git(
+        &world,
+        &elsewhere,
+        &["commit", "-m", "chore: somebody else's"],
+    );
+    git(&world, &elsewhere, &["push", "origin", SHARED]);
+
+    world.run(&["shutdown", &run, "--force"]).exited(REFUSED);
+    assert!(
+        on_origin(&world, &tool.origin, SHARED).is_some(),
+        "the second repository's branch was not pushed"
+    );
+
+    let results = world.run(&["results", &run]).exited(0).stdout.clone();
+    for node in ["alpha", "beta"] {
+        let line = results
+            .lines()
+            .find(|line| line.trim_start().starts_with(node))
+            .unwrap_or_else(|| panic!("results name no {node}:\n{results}"));
+        assert!(
+            line.contains("recorded under this name in 2 repositories"),
+            "{line}"
+        );
+        assert!(
+            line.contains("service: not on its origin: the preserving push was refused"),
+            "{line}"
+        );
+        assert!(line.contains("tool: on its origin unproven"), "{line}");
+    }
+    for node in ["alpha", "beta"] {
+        world.release(&format!("{node}.go"));
+    }
 }
 
 /// A push the origin refuses is reported, and the branches after it are still

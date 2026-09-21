@@ -118,7 +118,7 @@ mod session_reuse;
 mod shipped;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the head of
 // `tests/e2e/shutdown.rs`, and is carried here too because this declaration is the other
-// site the rule reads: twenty-six journeys, 90 to 195 seconds summed and 25 to 50 on the wall,
+// site the rule reads: twenty-seven journeys, 90 to 195 seconds summed and 25 to 50 on the wall,
 // each waiting out a real grace against real dispatches and a real origin, over `driver`'s
 // teardown, `engine`'s interrupt, `views` and the linked `onevcs` together — so the
 // narrowest edge they can honestly sit behind is the crate itself, which is this target's.
