@@ -7122,6 +7122,13 @@ doubled at `ONEVCS_GH`. The journeys:
   Each time it ends of that signal with nothing landed, the checkout's worktree
   list reads as it did before the landing, and the worktree and the turn's
   directory are gone.
+- `a_landing_signalled_while_its_worktree_is_being_added_still_removes_it`: a
+  real `post-checkout` hook holds `git worktree add` open while the landing alone
+  is sent `SIGTERM`. The landing waits for git's add to finish, then takes the
+  worktree back out, rather than removing nothing and leaving the entry git writes.
+- `a_landing_under_nohup_drafts_and_lands_through_a_hangup`: started ignoring
+  `SIGHUP`, a landing sent one mid-draft keeps drafting, lands with the drafted
+  body, and leaves the checkout as it found it.
 - `the_synopsis_the_register_proposes_is_the_one_the_binary_prints`: the block
   above is each verb's `--help` usage line, byte for byte.
 - `every_argument_reaches_the_onevcs_verb_and_its_refusals_are_its_own`: an
@@ -7135,4 +7142,5 @@ body, kept the worktree, ignored `local-direct` or the narrowed policy, kept a
 death to itself, lost a way of finding the base, dropped the empty-branch
 sentence, ignored a caller's body on `recover`, hid why a draft could not start,
 swallowed a worktree it could not remove, left an interrupted draft's worktree in
-the checkout's list, or printed a synopsis other than the one above.
+the checkout's list, released its lock before git's add finished, handled a
+signal it was started ignoring, or printed a synopsis other than the one above.
