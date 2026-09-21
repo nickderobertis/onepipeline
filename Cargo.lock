@@ -1407,7 +1407,6 @@ dependencies = [
  "oneharness-core",
  "onejudge",
  "onemessagebus",
- "onemessagebus-agent",
  "onetaskgraph-core",
  "onetaskgraph-local-md",
  "onevcs",
