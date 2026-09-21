@@ -1,15 +1,14 @@
 # `onepipeline stop-guard`
 
 The stop guard is one general command that answers whether a session's turn
-may end: it asks [`onepipeline unwatched`](contract-divergences.md#68-nothing-on-disk-says-a-run-is-being-watched-so-nothing-can-ask-which-run-is-not--open)
-about the session and answers with one verdict. It is not a feature of any
-harness. A harness's stop hook is a *wiring* of it, stated per harness below,
-and the decision is made in the command alone.
+may end: it asks `onepipeline unwatched` about the session and answers with one
+verdict. It is not a feature of any harness. A harness's stop hook is a *wiring*
+of it, stated per harness below, and the decision is made in the command alone.
 
-Why it exists is the measured failure entry 68 records: a manager forgets to arm
-`watch`, and dispatched work sits for hours with nothing looking at it. Prose is
-remembered by the model or it is not; a stop hook runs whether or not anybody
-remembered, and may refuse to let the turn end.
+It exists because a manager forgets to arm `watch`, and dispatched work then
+sits for hours with nothing looking at it. Prose is remembered by the model or
+it is not; a stop hook runs whether or not anybody remembered, and may refuse to
+let the turn end.
 
 ## The contract
 
@@ -68,6 +67,14 @@ payload off standard input and render the same verdict in the harness's
 decision shape. They are presentation over the one verdict — the decision path
 is the same — and they are the whole of the harness-specific text in this crate.
 
+<!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the two harness
+sections below restate contracts owned by Claude Code and Codex, neither of which publishes
+its Stop hook schema in a form this repository's offline gate can read: Claude Code's is
+prose, and Codex's is compiled into its binary. The drift that can be gated is gated —
+`tests/e2e/stop_guard.rs` parses the Claude Code `settings.json` entry out of this page and
+drives full Stop payloads through it — and "What was verified, and how" at the foot of this
+page records the one-time reading of `codex-cli 0.154.0` so a reader can re-run it against
+their own Codex. -->
 ## Claude Code
 
 Claude Code runs `Stop` hooks when the main agent has finished responding,
@@ -174,6 +181,7 @@ then no mechanism that can refuse a stop, and a manager arms `onepipeline watch
 <run>` by hand, asking `onepipeline unwatched --session <ID>` which runs need
 one.
 
+<!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
 ## Any other harness
 
 Feed the neutral contract: hand the verb the session and the continuation as

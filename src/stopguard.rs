@@ -77,9 +77,7 @@ impl Stop {
 /// What this verb was asked: whose stop, and which stop it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Asked {
-    /// The session whose stop this is.
     pub session: Session,
-    /// Whether this stop follows a block this guard made.
     pub stop: Stop,
 }
 

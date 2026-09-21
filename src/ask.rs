@@ -167,16 +167,12 @@ pub(crate) fn about(args: &AskArgs) -> Result<Option<Address>> {
         .transpose()
 }
 
-/// What one question carries beside its text.
+/// One question: its text, and what rides beside it.
 #[derive(Debug)]
 pub(crate) struct Request {
-    /// The question.
     pub message: Text,
-    /// Who asks, when the environment named one.
     pub asker: Option<Asker>,
-    /// The node the question is about, when one was named.
     pub about: Option<Address>,
-    /// The reply window, when `--timeout` named one.
     pub timeout: Option<std::num::NonZeroU64>,
 }
 
@@ -188,7 +184,6 @@ pub(crate) enum Question {
         /// The bus's handle, boxed: it is two queues and their transport, and
         /// the refused arm beside it is one sentence.
         pending: Box<Pending<Value>>,
-        /// How long the wait is.
         window: Duration,
     },
     /// The bus refused the question; nothing was raised.
