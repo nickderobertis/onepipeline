@@ -313,11 +313,15 @@ fn memory(session: &str) -> Result<PathBuf, String> {
 }
 
 /// The home directory the state root is derived from when nothing names one.
+///
+/// Absolute only, on the same ground as `XDG_STATE_HOME`: a relative home would
+/// put the memory under whatever directory the harness ran this in.
 fn home() -> Option<PathBuf> {
     ["HOME", "USERPROFILE"]
         .iter()
-        .find_map(|key| std::env::var_os(key).filter(|value| !value.is_empty()))
+        .filter_map(std::env::var_os)
         .map(PathBuf::from)
+        .find(|path| path.is_absolute())
 }
 
 /// What this last blocked `session` on: `None` when nothing did, and an error

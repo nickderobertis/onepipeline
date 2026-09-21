@@ -449,6 +449,35 @@ fn a_run_whose_event_store_cannot_be_read_is_still_decided_from_its_watch_state(
     assert!(told["reason"]
         .as_str()
         .is_some_and(|reason| reason.contains(&run)));
+
+    // What `unwatched` could not resolve about a run it still reports — here a
+    // file where the run's watch records go — the guard writes on standard error
+    // exactly as `unwatched` does, and nothing else there.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] the substitution
+    // `unwatched.rs` makes for the same state: no verb puts a file where the watch records
+    // go, and what it stands in for is a runs root the guard may not read a directory of,
+    // a permission this crate cannot set portably. What follows is read off the binary.
+    std::fs::write(world.run_file(&run, "watchers"), "not a directory")
+        .expect("something where the records go");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let plain = owner.run(&["unwatched", "--session", &session]);
+    plain
+        .exited(RUNS_UNWATCHED)
+        .err_has(&run)
+        .err_has("watcher directory");
+    let guarded = ask(&world, &json!({"session": session}));
+    guarded.exited(0);
+    assert_eq!(
+        verdict(&guarded.stdout).expect("a verdict")["verdict"],
+        json!("block"),
+        "{}",
+        guarded.stdout
+    );
+    assert_eq!(
+        guarded.stderr, plain.stderr,
+        "the guard's standard error is not what `unwatched` writes for the same question"
+    );
     owner.release("build.go");
 }
 

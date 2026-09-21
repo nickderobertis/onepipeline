@@ -14,6 +14,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use onemessagebus::sdk_schema::Asked as Wire;
 use onemessagebus::{Address, Answer, Asker, Correlation, Pending};
 use serde_json::{json, Value};
 
@@ -46,6 +47,18 @@ impl Form {
     }
 }
 
+/// A question that can be asked: not blank, and free of the NUL no frame can
+/// carry. Built only by [`question`], so a [`Request`] holds one that was
+/// checked at the boundary it arrived over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Text(String);
+
+impl Text {
+    fn into_inner(self) -> String {
+        self.0
+    }
+}
+
 /// The question, from whichever of the three forms carried it: the argument
 /// words joined by one space, the named file, or standard input when neither
 /// is given.
@@ -55,7 +68,7 @@ impl Form {
 /// A blank question, one carrying a NUL byte — which no frame can carry — and
 /// a file that cannot be read, each named with the form it came in, and
 /// refused before anything is raised.
-pub(crate) fn question(args: &AskArgs) -> Result<String> {
+pub(crate) fn question(args: &AskArgs) -> Result<Text> {
     let (form, text) = match (&args.file, args.text.is_empty()) {
         (Some(path), _) => (Form::File, read_file(path)?),
         (None, false) => (Form::Arguments, args.text.join(" ")),
@@ -85,7 +98,7 @@ pub(crate) fn question(args: &AskArgs) -> Result<String> {
             form.as_str()
         )));
     }
-    Ok(text)
+    Ok(Text(text))
 }
 
 fn read_file(path: &PathBuf) -> Result<String> {
@@ -158,7 +171,7 @@ pub(crate) fn about(args: &AskArgs) -> Result<Option<Address>> {
 #[derive(Debug)]
 pub(crate) struct Request {
     /// The question.
-    pub message: String,
+    pub message: Text,
     /// Who asks, when the environment named one.
     pub asker: Option<Asker>,
     /// The node the question is about, when one was named.
@@ -204,7 +217,7 @@ impl Question {
         let question = Surface {
             id: 0,
             kind: QUESTION_KIND.to_owned(),
-            message: request.message,
+            message: request.message.into_inner(),
             source: source::PROPOSAL.to_owned(),
             blocking: true,
             queued_at: crate::sys::now_millis(),
@@ -247,13 +260,10 @@ impl Question {
     /// listening for the answer now, and a later listener of the same asker
     /// takes it back. An elapsed wait is never a ruling.
     pub(crate) fn answer(self) -> Asked {
-        match self {
-            Self::Refused(reason) => Asked {
-                answer: Answer::Refused(onemessagebus::ask::Refusal {
-                    kind: onemessagebus::RefusalKind::Capability,
-                    reason,
-                }),
+        Asked(match self {
+            Self::Refused(reason) => Wire::Refused {
                 correlation: None,
+                reason,
             },
             Self::Pending { pending, window } => {
                 let answer = pending.wait(window);
@@ -263,12 +273,18 @@ impl Question {
                     // still elapsed.
                     let _ = pending.abandon();
                 }
-                Asked {
-                    answer,
-                    correlation: Some(pending.correlation().clone()),
+                let correlation = pending.correlation().clone();
+                match answer {
+                    Answer::Reply(reply) => Wire::Reply { correlation, reply },
+                    Answer::Timeout => Wire::Timeout { correlation },
+                    Answer::Abandoned => Wire::Abandoned { correlation },
+                    Answer::Refused(refusal) => Wire::Refused {
+                        correlation: Some(correlation),
+                        reason: refusal.reason,
+                    },
                 }
             }
-        }
+        })
     }
 }
 
@@ -294,62 +310,48 @@ fn reply_window(config: Option<&onemessagebus::Config>) -> Option<Duration> {
         .max()
 }
 
-/// What `onepipeline ask` answered: the bus's answer, and the correlation of
-/// the question it answers.
+/// What `onepipeline ask` answered: the bus's own answer object, the one its
+/// command line prints, so the correlation is carried exactly where the bus
+/// says an answer has one and the line is the bus's rendering rather than a
+/// restatement of it.
 #[derive(Debug)]
-pub(crate) struct Asked {
-    /// The bus's answer.
-    pub answer: Answer<Value>,
-    /// The question's correlation, once it was raised.
-    pub correlation: Option<Correlation>,
-}
+pub(crate) struct Asked(Wire);
 
 impl Asked {
     /// `0` for a reply; `1` for a timeout, an abandoned listener, or a refusal.
     pub(crate) const fn exit_code(&self) -> i32 {
-        match self.answer {
-            Answer::Reply(_) => EXIT_SUCCESS,
-            Answer::Timeout | Answer::Abandoned | Answer::Refused(_) => EXIT_QUEUED,
+        match self.0 {
+            Wire::Reply { .. } => EXIT_SUCCESS,
+            Wire::Timeout { .. } | Wire::Abandoned { .. } | Wire::Refused { .. } => EXIT_QUEUED,
         }
     }
 
-    /// The bus's one-line answer, in the shape its command line prints:
-    /// `{"answer":"reply","correlation":…,"reply":…}`, or `timeout`,
-    /// `abandoned` and `refused` naming the correlation where there is one and
-    /// the reason where there is one.
+    /// The bus's one-line answer: `{"answer":"reply","correlation":…,"reply":…}`,
+    /// or `timeout`, `abandoned` and `refused` naming the correlation where
+    /// there is one and the reason where there is one.
     pub(crate) fn render(&self) -> String {
-        let mut object = json!({"answer": self.answer.word()});
-        if let Some(correlation) = &self.correlation {
-            object["correlation"] = json!(correlation);
-        }
-        match &self.answer {
-            Answer::Reply(reply) => object["reply"] = reply.clone(),
-            Answer::Refused(refusal) => object["reason"] = json!(refusal.reason),
-            Answer::Timeout | Answer::Abandoned => {}
-        }
-        object.to_string()
+        serde_json::to_string(&self.0).unwrap_or_else(|error| {
+            // Unreachable for a type of strings and JSON values; said as a
+            // refusal in the bus's own shape rather than as nothing.
+            json!({"answer": "refused", "reason": format!("the answer could not be rendered: {error}")})
+                .to_string()
+        })
     }
 
     /// What to do next, for standard error, where the answer is not a reply.
     pub(crate) fn advice(&self, run: &str, window: Duration) -> Option<String> {
-        let correlation = self
-            .correlation
-            .as_ref()
-            .map_or_else(|| "<correlation>".to_owned(), ToString::to_string);
-        match &self.answer {
-            Answer::Reply(_) => None,
-            Answer::Timeout => Some(format!(
+        match &self.0 {
+            Wire::Reply { .. } => None,
+            Wire::Timeout { correlation } => Some(format!(
                 "no reply echoing {correlation} arrived within {} seconds; the question stands \
                  on the channel, marked abandoned, and a manager may still answer it with \
                  `onepipeline reply {run} --correlation {correlation}`",
                 window.as_secs()
             )),
-            Answer::Abandoned => Some(format!(
+            Wire::Abandoned { correlation } => Some(format!(
                 "the question {correlation} was abandoned and nobody re-attended it; ask again"
             )),
-            Answer::Refused(refusal) => {
-                Some(format!("the question was refused: {}", refusal.reason))
-            }
+            Wire::Refused { reason, .. } => Some(format!("the question was refused: {reason}")),
         }
     }
 }
@@ -358,55 +360,45 @@ impl Asked {
 mod tests {
     use super::*;
 
-    /// The rendering is the bus command line's own shape for each of the four
-    /// answers, and the status is `0` for a reply alone.
+    /// The rendering is the bus's own answer object for each of the four
+    /// answers — read back as that type — and the status is `0` for a reply
+    /// alone.
     #[test]
     fn each_answer_renders_as_the_bus_prints_it() {
         let correlation: Correlation = "c-1".parse().expect("a correlation");
-        let reply = Asked {
-            answer: Answer::Reply(json!({"id": 1, "reply": {"completion": false}})),
-            correlation: Some(correlation.clone()),
-        };
-        assert_eq!(
-            reply.render(),
-            r#"{"answer":"reply","correlation":"c-1","reply":{"id":1,"reply":{"completion":false}}}"#
-        );
-        assert_eq!(reply.exit_code(), EXIT_SUCCESS);
-        assert!(reply.advice("r", Duration::from_secs(1)).is_none());
-
-        let timeout = Asked {
-            answer: Answer::Timeout,
-            correlation: Some(correlation.clone()),
-        };
-        assert_eq!(
-            timeout.render(),
-            r#"{"answer":"timeout","correlation":"c-1"}"#
-        );
-        assert_eq!(timeout.exit_code(), EXIT_QUEUED);
-        assert!(timeout
+        let answers = [
+            Wire::Reply {
+                correlation: correlation.clone(),
+                reply: json!({"id": 1, "reply": {"completion": false}}),
+            },
+            Wire::Timeout {
+                correlation: correlation.clone(),
+            },
+            Wire::Abandoned {
+                correlation: correlation.clone(),
+            },
+            Wire::Refused {
+                correlation: None,
+                reason: "no".into(),
+            },
+        ];
+        for wire in answers {
+            let asked = Asked(wire.clone());
+            let line = asked.render();
+            assert!(!line.contains('\n'), "{line}");
+            let read: Wire = serde_json::from_str(&line).expect("the bus reads its own answer");
+            assert_eq!(read, wire, "{line}");
+            let reply = matches!(wire, Wire::Reply { .. });
+            assert_eq!(
+                asked.exit_code(),
+                if reply { EXIT_SUCCESS } else { EXIT_QUEUED }
+            );
+            assert_eq!(asked.advice("r", Duration::from_secs(7)).is_none(), reply);
+        }
+        assert!(Asked(Wire::Timeout { correlation })
             .advice("r", Duration::from_secs(7))
             .expect("advice")
             .contains("within 7 seconds"));
-
-        let abandoned = Asked {
-            answer: Answer::Abandoned,
-            correlation: Some(correlation),
-        };
-        assert_eq!(
-            abandoned.render(),
-            r#"{"answer":"abandoned","correlation":"c-1"}"#
-        );
-        assert_eq!(abandoned.exit_code(), EXIT_QUEUED);
-
-        let refused = Asked {
-            answer: Answer::Refused(onemessagebus::ask::Refusal {
-                kind: onemessagebus::RefusalKind::Validator,
-                reason: "no".into(),
-            }),
-            correlation: None,
-        };
-        assert_eq!(refused.render(), r#"{"answer":"refused","reason":"no"}"#);
-        assert_eq!(refused.exit_code(), EXIT_QUEUED);
     }
 
     /// The reply window is the longest a codec on the `surfaces` queue names,
