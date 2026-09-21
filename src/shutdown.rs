@@ -517,6 +517,7 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
     let watched = in_flight(view, live);
     // Where the record stood when the shutdown began, so the wait reads only
     // what the run has written since rather than the whole of its history.
+    // llmlint: ignore[changed_behavior_has_e2e] this read fails only when the journal this same process read whole a moment earlier, through `RunView::open`, stops answering between the two — a host's disk failing mid-verb, which no journey can place deterministically: a mode or a missing file that fails it fails that earlier read first, and the run is then never shut down at all. The arm says what it cost on stderr rather than standing in silently as offset zero.
     let from = match std::fs::metadata(paths.journal()) {
         Ok(held) => held.len(),
         Err(why) if why.kind() == std::io::ErrorKind::NotFound => 0,
@@ -581,6 +582,7 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
 
     // Read again, because what a publication had reached is what the report
     // names, and one may have begun after the shutdown did.
+    // llmlint: ignore[changed_behavior_has_e2e] this re-read fails only when the run this same process opened at the start of its shutdown stops being readable during it — a host's disk failing mid-verb, which no journey can place deterministically: anything that fails it from the start fails the first read instead, and the run is then never shut down at all. The fallback is the reading the shutdown already began from, and it is said on stderr.
     let now = RunView::open(paths)
         .map_err(|why| {
             eprintln!(

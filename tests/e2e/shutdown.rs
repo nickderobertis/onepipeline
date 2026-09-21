@@ -18,7 +18,7 @@
 // full rationale.
 
 // llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
-// assumed: the twenty-five journeys here take between about 90 and 195 seconds summed and
+// assumed: the twenty-six journeys here take between about 90 and 195 seconds summed and
 // 25 to 50 on the wall under nextest's parallelism, by the host's load — each waits out a real grace
 // against real dispatches and pushes to a real origin, because a bound on how long a worker
 // is given cannot be stated without a clock running it. What they exercise is the shutdown
@@ -1142,6 +1142,48 @@ fn a_run_whose_records_refuse_a_write_is_still_shut_down_and_says_so() {
     );
     assert!(world.events_of(&run, "host-shutdown").is_empty());
     world.release("service.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// An interrupt whose record the journal refuses is still delivered, and the
+/// shutdown carries on and says what it could not write.
+///
+/// The run's directory still takes the hold, so the worker is asked; only the
+/// journal refuses a line — which is what a journal the host will no longer
+/// append to looks like to the one writer that has to go on anyway.
+// llmlint: ignore-block[tests_mirror_real_usage] the one thing set by hand is the mode of
+// the run's own journal, and no product surface sets it: a journal that will not take a
+// line is a host's disk refusing, not anything a user types. Everything else is the real
+// binary against a real run.
+#[cfg(unix)]
+#[test]
+fn an_interrupt_the_journal_cannot_record_is_still_delivered_and_says_so() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new("shutdown-unrelayed");
+    held(&world, "build");
+    world.script("build.stops-when-interrupted", "");
+    let run = launch(&world, "unrelayed", vec![agent("build", &[])]);
+    until_in_flight(&world, &run, &["build"]);
+    let journal = world.run_file(&run, "events.jsonl");
+    let set = |mode: u32| {
+        std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(mode))
+            .expect("the mode is set");
+    };
+    set(0o444);
+
+    let shutdown = world.run(&["shutdown", &run, "--grace", GRACE]);
+    set(0o644);
+
+    shutdown
+        .err_has("the record of its interrupt could not be written to the run's journal")
+        .err_has("dispatch-stopped record could not be written");
+    let line = line_for(&shutdown.stdout, "build");
+    assert!(line.contains("interrupt delivered"), "{line}");
+    assert!(
+        world.events_of(&run, "host-shutdown").is_empty(),
+        "the journal took a line it was set to refuse, so this journey proves nothing: {}",
+        world.dump()
+    );
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
