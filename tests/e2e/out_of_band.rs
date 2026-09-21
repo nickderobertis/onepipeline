@@ -479,3 +479,39 @@ fn every_argument_reaches_the_onevcs_verb_and_its_refusals_are_its_own() {
         world.dump()
     );
 }
+
+/// The synopsis entry 88 of `docs/contract-divergences.md` proposes is what each
+/// verb's `--help` prints, byte for byte — so the register and the binary cannot
+/// come to describe two different commands.
+#[test]
+fn the_synopsis_the_register_proposes_is_the_one_the_binary_prints() {
+    let register = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
+    )
+    .expect("the register ships");
+    let entry = register
+        .split("\n## 88. ")
+        .nth(1)
+        .expect("the register carries entry 88");
+    let proposed: Vec<&str> = entry
+        .split("```")
+        .nth(1)
+        .expect("entry 88 states its synopsis in a fenced block")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let world = World::new("oob-synopsis");
+    let printed: Vec<String> = ["publish-branch", "repo-recover"]
+        .into_iter()
+        .map(|verb| {
+            let help = world.run(&[verb, "--help"]);
+            help.exited(0);
+            help.stdout
+                .lines()
+                .find_map(|line| line.strip_prefix("Usage: "))
+                .unwrap_or_else(|| panic!("`{verb} --help` prints no usage: {}", help.stdout))
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(proposed, printed);
+}
