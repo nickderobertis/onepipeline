@@ -651,6 +651,119 @@ fn a_bar_stated_in_an_amendment_or_in_a_step_is_read_and_read_once() {
     assert_eq!(findings(&world, &run).len(), 2);
 }
 
+/// A criterion the node's amendment supersedes is read as the amendment states
+/// it, and not beside it: what the engine answers about a node is what its judge
+/// was handed.
+///
+/// The bar names one value in the work file and the manager's ruling — written
+/// as a manager writes one, a sentence with no heading and no bullet — moves it.
+/// The dispatch writes the value the ruling names, so the one comparison the run
+/// makes on that file is the ruling's and it matches; read beside the ruling,
+/// the original would have been a mismatch, and the finding it raised would
+/// have held the node to a bar its judge no longer does.
+#[test]
+fn a_criterion_the_amendment_supersedes_is_read_as_the_amendment_states_it() {
+    let world = writing("criteria-amended", "rows: 4\n");
+    let mut node = node_bounded_by(&[
+        "the row in `service.md` is `rows: 3`",
+        "the seed row in `README.md` is `the repository under test`",
+    ]);
+    node["amendment"] = json!("The bar moved: the row in `service.md` is `rows: 4` now.");
+    let run = settle(&world, "amended", vec![node]);
+
+    let compared = comparisons(&world, &run);
+    let on_work: Vec<&Value> = compared
+        .iter()
+        .filter(|payload| payload["file"] == WORK)
+        .collect();
+    assert_eq!(
+        on_work.len(),
+        1,
+        "the superseded criterion was read beside the ruling that replaced it: {compared:?}"
+    );
+    assert_eq!(on_work[0]["expected"], "rows: 4", "{compared:?}");
+    assert_eq!(on_work[0]["answer"], "match", "{compared:?}");
+    assert_eq!(
+        on_work[0]["criterion"], "The bar moved: the row in `service.md` is `rows: 4` now.",
+        "the comparison does not quote the ruling as the manager wrote it: {compared:?}"
+    );
+    // The criterion the ruling did not touch is still read, on its own file.
+    assert!(
+        compared
+            .iter()
+            .any(|payload| payload["file"] == "README.md" && payload["answer"] == "match"),
+        "{compared:?}"
+    );
+    assert_eq!(findings(&world, &run), Vec::<String>::new());
+}
+
+/// The same resolution holds over a node's **steps** and over an amendment
+/// written as a task states its bar, under a heading with a numbered clause.
+///
+/// Both steps restate the original criterion on the file the first step writes,
+/// and the ruling moves it. Read as peers, the two restatements would be one
+/// mismatch and one finding; resolved as the judge is handed them, the ruling's
+/// clause is the one comparison on that file and it matches. The heading is kept
+/// as a label and the numbered item is one clause, so the criterion the
+/// comparison quotes is the item's own words.
+#[test]
+fn a_criterion_every_step_restates_is_superseded_by_a_numbered_amendment_clause() {
+    let world = World::new("criteria-amended-steps");
+    world.repository("local-direct", &[]);
+    world.script("service.implement.work", "rows: 4\n");
+    world.script("service.verify.work", "checked: yes\n");
+    let original = "the row in `service-implement.md` is `rows: 3`";
+    let untouched = "the row in `README.md` is `the repository under test`";
+    let bar = |criteria: &[&str]| {
+        format!(
+            "## What\nWork.\n\n## Acceptance criteria\n\n{}\n",
+            criteria
+                .iter()
+                .map(|criterion| format!("- {criterion}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+    let ruling = "the row in `service-implement.md` is `rows: 4` now";
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "title": "feat: ship the row",
+        "amendment": format!("## The bar moved\n\n1. {ruling}\n"),
+        "steps": [
+            {"id": "implement", "persona": "engineer", "task": bar(&[original, untouched])},
+            {
+                "id": "verify",
+                "persona": "reviewer",
+                "deps": ["implement"],
+                "task": bar(&[original]),
+            },
+        ],
+    });
+    let run = settle(&world, "amendedsteps", vec![node]);
+
+    let compared = comparisons(&world, &run);
+    let on_work: Vec<&Value> = compared
+        .iter()
+        .filter(|payload| payload["file"] == "service-implement.md")
+        .collect();
+    assert_eq!(
+        on_work.len(),
+        1,
+        "a step's superseded criterion was read beside the ruling: {compared:?}"
+    );
+    assert_eq!(on_work[0]["expected"], "rows: 4", "{compared:?}");
+    assert_eq!(on_work[0]["answer"], "match", "{compared:?}");
+    assert_eq!(on_work[0]["criterion"], ruling, "{compared:?}");
+    assert!(
+        compared
+            .iter()
+            .any(|payload| payload["file"] == "README.md" && payload["answer"] == "match"),
+        "the criterion the ruling did not touch was not read: {compared:?}"
+    );
+    assert_eq!(findings(&world, &run), Vec::<String>::new());
+}
+
 #[test]
 fn a_node_that_failed_its_dispatch_is_still_read_against_its_bar() {
     let world = writing("criteria-failed", "complete_dataset: false\n");

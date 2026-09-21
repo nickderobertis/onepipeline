@@ -165,34 +165,65 @@ const MAX_FILE_BYTES: u64 = 1 << 20;
 ///
 /// A section named nearly this is not the bar the worker and its judge were
 /// handed, and reading one as if it were would invent criteria nobody agreed to
-/// — which is the failure this whole module is bounded to avoid.
-const CRITERIA_HEADING: &str = "## Acceptance criteria";
+/// — which is the failure this whole module is bounded to avoid. The constant is
+/// `plan`'s, because that is the section an amendment is rendered into: one
+/// heading, so the section the judge reads and the section this reads cannot be
+/// two.
+const CRITERIA_HEADING: &str = crate::plan::CRITERIA_HEADING;
 
-/// Every criterion of one node this module can answer.
+/// Every criterion of one node this module can answer, **as the node's judge is
+/// handed them**.
 ///
-/// The node's own task, the amendment binding it — which `plan` documents as
-/// part of the bar rather than as advice — and each step's task, because the
-/// steps of one lifecycle node all work on the one branch this reads.
+/// The node's own task, the amendment binding it, and each step's task, because
+/// the steps of one lifecycle node all work on the one branch this reads. The
+/// amendment is read through the same resolution `plan` renders it under: its
+/// clauses are criteria, read by [`plan::amendment_clauses`], and they **take
+/// precedence** over any original criterion they contradict. What this module
+/// can tell is a contradiction is a file both name — the original saying the
+/// file holds one thing and the amendment another is the case, and the two
+/// naming one file for different lines is one it cannot tell from that — so an
+/// original criterion naming a file the amendment names is superseded here and
+/// not read. Declining a check is the safe side, as it is everywhere in this
+/// module: the check that was dropped is a finding nobody gets, and the one the
+/// judge no longer holds the node to must not be one the engine still raises.
+///
+/// [`plan::amendment_clauses`]: crate::plan::amendment_clauses
 pub(crate) fn checkable_of(node: &Node) -> Vec<Checkable> {
+    let amended: Vec<Checkable> = node
+        .amendment
+        .as_deref()
+        .map(|amendment| {
+            checkable(&format!(
+                "{CRITERIA_HEADING}\n\n{}",
+                crate::plan::amendment_clauses(amendment)
+            ))
+        })
+        .unwrap_or_default();
+    let superseded = |check: &Checkable| amended.iter().any(|ruling| ruling.file == check.file);
     let steps = node
         .steps
         .iter()
         .flatten()
         .filter_map(|step| step.task.as_deref());
     let mut found: Vec<Checkable> = Vec::new();
-    for task in node
-        .task
-        .as_deref()
-        .into_iter()
-        .chain(node.amendment.as_deref())
-        .chain(steps)
-    {
-        for check in checkable(task) {
-            // A node and its steps can restate one criterion, and a criterion
-            // compared twice is two findings for one thing said once.
-            if !found.contains(&check) {
-                found.push(check);
-            }
+    let mut take = |check: Checkable| {
+        // A node and its steps can restate one criterion, and a criterion
+        // compared twice is two findings for one thing said once.
+        if !found.contains(&check) {
+            found.push(check);
+        }
+    };
+    for check in node.task.as_deref().map(checkable).unwrap_or_default() {
+        if !superseded(&check) {
+            take(check);
+        }
+    }
+    for check in amended.iter().cloned() {
+        take(check);
+    }
+    for check in steps.flat_map(checkable) {
+        if !superseded(&check) {
+            take(check);
         }
     }
     found
@@ -296,8 +327,13 @@ fn criteria_in(task: &str) -> Vec<String> {
     let mut open = false;
     for line in task.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("##") {
-            inside = trimmed == CRITERIA_HEADING;
+        // A level-two heading opens a section; a deeper one — the amendment's
+        // own `### Amendment` is one — belongs to the section it is in, and only
+        // ends the bullet above it.
+        if trimmed.starts_with('#') {
+            if crate::plan::is_section_heading(trimmed) {
+                inside = trimmed == CRITERIA_HEADING;
+            }
             open = false;
             continue;
         }
@@ -515,6 +551,51 @@ mod tests {
             .map(|check| check.file.as_str().to_string())
             .collect();
         assert_eq!(files, ["notes.md", "version.txt", "rows.csv"]);
+    }
+
+    /// A deeper heading inside the criteria section — the amendment's own — does
+    /// not end the section: the clauses under it are criteria, and the bullet
+    /// above it is closed rather than stitched onto.
+    #[test]
+    fn a_sub_heading_inside_the_criteria_section_does_not_end_it() {
+        let task = "## Acceptance criteria\n\n- `notes.md` holds\n\n### Amendment\n\
+                    Every clause below is a criterion.\n\n- `version.txt` holds `v: 2`\n\n\
+                    ## Additional info\n\n- `other.md` holds `state: done`\n";
+        let files: Vec<String> = checkable(task)
+            .into_iter()
+            .map(|check| check.file.as_str().to_string())
+            .collect();
+        assert_eq!(files, ["version.txt"]);
+    }
+
+    /// An amendment's clauses are read exactly as the judge is handed them —
+    /// through `plan`'s one rendering of them — and an original criterion naming
+    /// a file the amendment names is superseded rather than read beside it.
+    #[test]
+    fn an_amendment_is_read_as_rendered_and_supersedes_the_original_on_a_file_it_names() {
+        let node = Node {
+            id: "service".into(),
+            task: Some(task("`version.txt` holds `v: 1`")),
+            // As a manager writes one: a sentence, no heading and no bullet.
+            amendment: Some("The bar moved: `version.txt` holds `v: 2` now.".into()),
+            steps: Some(vec![crate::plan::Step {
+                id: "one".into(),
+                task: Some(task("`version.txt` holds `v: 1`")),
+                ..crate::plan::Step::default()
+            }]),
+            ..Node::default()
+        };
+        let found = checkable_of(&node);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].file.as_str(), "version.txt");
+        assert_eq!(
+            found[0].literal, "v: 2",
+            "the superseded criterion was read beside the ruling that replaced it: {found:?}"
+        );
+        assert_eq!(
+            found[0].criterion, "The bar moved: `version.txt` holds `v: 2` now.",
+            "the finding would not quote the ruling as the manager wrote it"
+        );
     }
 
     #[test]
