@@ -639,6 +639,24 @@ impl StopTeardown {
             Some(value) => serde_json::from_value(value.clone()).unwrap_or(Self::NotAttempted),
         }
     }
+
+    /// The word this outcome travels as, for a reader shown it rather than a
+    /// record carrying it.
+    ///
+    /// An exhaustive match rather than a serialization, for the reason
+    /// `payload`'s words are matched: a variant added here cannot reach a report
+    /// unnamed.
+    pub(crate) const fn word(self) -> &'static str {
+        match self {
+            Self::Signalled => "signalled",
+            Self::NothingToStop => "nothing-to-stop",
+            Self::IdentityDeclined => "identity-declined",
+            Self::NotAttempted => "not-attempted",
+            Self::PartlySignalled => "partly-signalled",
+            Self::Refused => "refused",
+            Self::Elsewhere => "elsewhere",
+        }
+    }
 }
 
 /// The `node-settled` payload field saying whether the node's change reached

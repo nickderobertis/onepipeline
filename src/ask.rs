@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 use crate::channel::{source, ChannelState, Surface};
 use crate::cli::AskArgs;
 use crate::error::{Error, Result, EXIT_QUEUED, EXIT_SUCCESS};
-use crate::ledger::{self, LaunchRecord, RunPaths};
+use crate::ledger::{self, LaunchRecord, RecordedBusConfig, RunPaths};
 
 /// The kind every question this verb raises carries.
 pub(crate) const QUESTION_KIND: &str = "planner-question";
@@ -219,7 +219,7 @@ impl Question {
         let window = request
             .timeout
             .map(|seconds| Duration::from_secs(seconds.get()))
-            .or_else(|| reply_window(launch.bus_config.as_ref()))
+            .or_else(|| reply_window(launch.bus_config.as_ref().map(RecordedBusConfig::config)))
             .unwrap_or(onemessagebus::DEFAULT_REPLY_WINDOW);
         let channel = ChannelState::of_run(paths, &launch);
         let question = Surface {

@@ -1279,9 +1279,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneagentgraph"
-version = "0.4.6"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd26b3cee8e500791d44bfaf7328067f6d72d707cef222693e4ea668b60f1772"
+checksum = "4fba445a63948e220ee8d9bc2e25070e2988e42e7f1ee6931e86b5c16cbed99c"
 dependencies = [
  "clap",
  "libc",
@@ -1373,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "onepipeline"
-version = "0.41.1"
+version = "0.42.0"
 dependencies = [
  "clap",
  "fs4",
@@ -1519,9 +1519,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.27.0"
+version = "0.29.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5aa724a5daac8696a94900e5cb90939013234502320b736d4f6ca4740c57db46"
+checksum = "f455be75e786c95459cf6828850220ef7e1ccfc7d201d722c46b6e700395289f"
 dependencies = [
  "clap",
  "dunce",
@@ -1547,9 +1547,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.6.8"
+version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc2b35aaa6c88e2ab7bfda94cb53ea849a0166ea4b14d78b35bd40160bf6a340"
+checksum = "4b2615b86b3572014797f65421d3f274c8129d0059c1fd8d94699a5dbcdfe11d"
 dependencies = [
  "onemessagebus-agent",
  "onevcs",

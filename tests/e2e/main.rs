@@ -114,16 +114,26 @@ mod loopcost;
 // exist to catch. Same grounds as `mod dispatch_env_hook` above.
 mod maintenance;
 mod node_validator;
+mod older_launch_record;
 mod plan;
 mod plan_check;
 mod real_vcs;
 mod recorded_channel;
+mod recorded_support;
 mod run_end_hooks;
 mod scratch;
 mod session;
 mod session_reuse;
 mod shipped;
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] `stop-guard` is a verb of
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the head of
+// `tests/e2e/shutdown.rs`, and is carried here too because this declaration is the other
+// site the rule reads: twenty-seven journeys, 90 to 195 seconds summed and 25 to 50 on the wall,
+// each waiting out a real grace against real dispatches and a real origin, over `driver`'s
+// teardown, `engine`'s interrupt, `views` and the linked `onevcs` together — so the
+// narrowest edge they can honestly sit behind is the crate itself, which is this target's.
+// The block form because a line-scoped directive reaches only the line right below it.
+mod shutdown;
+// And `stop-guard`, under the same block: it is a verb of
 // this binary over `src/stopguard.rs` and `src/unwatched.rs`, and it answers off the run
 // store every launch writes, so any change under `src/` can move what it decides: the crate
 // is the narrowest edge it can honestly sit behind, as for `mod unwatched` beside it.

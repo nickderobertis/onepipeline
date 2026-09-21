@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.0](https://github.com/nickderobertis/onepipeline/compare/v0.41.2...v0.42.0) - 2026-09-21
+
+### Added
+
+- *(shutdown)* stop running work gracefully and preserve every branch it leaves ([#435](https://github.com/nickderobertis/onepipeline/pull/435))
+
+## [0.41.2](https://github.com/nickderobertis/onepipeline/compare/v0.41.1...v0.41.2) - 2026-09-21
+
+### Fixed
+
+- *(node)* discard a release-wait surface its hold has outlived, and render an amendment as the criteria it replaces ([#434](https://github.com/nickderobertis/onepipeline/pull/434))
+
 ## [0.41.1](https://github.com/nickderobertis/onepipeline/compare/v0.41.0...v0.41.1) - 2026-09-21
 
 ### Fixed
