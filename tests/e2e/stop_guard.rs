@@ -480,6 +480,25 @@ fn a_question_that_cannot_be_asked_and_a_memory_that_cannot_be_kept_warn_and_nev
     cleared.exited(0);
     assert_eq!(verdict(&cleared.stdout), Some(json!({"verdict": "none"})));
 
+    // And no state root to keep a memory under at all — no `XDG_STATE_HOME`
+    // and no home directory — is the same `warn` before a block.
+    let mut rootless = world.cmd(&["stop-guard", "--session", &session]);
+    rootless
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("HOME")
+        .env_remove("USERPROFILE");
+    let rootless = world.run_on(rootless, "stop-guard with no state root");
+    rootless.exited(0);
+    let told = verdict(&rootless.stdout).expect("a verdict");
+    assert_eq!(told["verdict"], json!("warn"), "{told}");
+    assert!(
+        told["message"].as_str().is_some_and(|message| {
+            message.contains("could not record what it would block on")
+                && message.contains("XDG_STATE_HOME")
+        }),
+        "{told}"
+    );
+
     // With the way clear, the same stop blocks — so the warnings above were
     // about the memory and nothing else.
     let blocked = ask(&world, &json!({"session": session}));

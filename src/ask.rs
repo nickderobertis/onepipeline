@@ -111,16 +111,29 @@ fn read_file(path: &PathBuf) -> Result<String> {
     })
 }
 
+/// A run id as `ONEPIPELINE_RUN_ID` named it: present and not blank. Built
+/// only by [`run_id`]; whether a run by that name exists is the resolver's to
+/// say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunId(String);
+
+impl RunId {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// The run to ask on, from `ONEPIPELINE_RUN_ID`.
 ///
 /// # Errors
 ///
 /// A variable that is absent or blank, named: a question with no run to ask on
 /// is refused before anything is raised.
-pub(crate) fn run_id() -> Result<String> {
+pub(crate) fn run_id() -> Result<RunId> {
     std::env::var(RUN_ID_ENV)
         .ok()
         .filter(|run| !run.trim().is_empty())
+        .map(RunId)
         .ok_or_else(|| {
             Error::Invalid(format!(
                 "{RUN_ID_ENV} is not set, so there is no run whose channel to ask on; run this \
@@ -275,6 +288,8 @@ impl Question {
                 let wire = match answer {
                     Answer::Reply(reply) => Wire::Reply { correlation, reply },
                     Answer::Timeout => Wire::Timeout { correlation },
+                    // Only a third party abandons a question, which no verb here
+                    // does: held by `each_answer_renders_as_the_bus_prints_it`.
                     Answer::Abandoned => Wire::Abandoned { correlation },
                     Answer::Refused(refusal) => Wire::Refused {
                         correlation: Some(correlation),
@@ -361,6 +376,7 @@ impl Asked {
                     )
                 )
             )),
+            // Unreachable end to end, for the reason at `answer`'s arm.
             Wire::Abandoned { correlation } => Some(format!(
                 "the question {correlation} was abandoned and nobody re-attended it; ask again"
             )),
@@ -376,6 +392,13 @@ mod tests {
     /// The rendering is the bus's own answer object for each of the four
     /// answers — read back as that type — and the status is `0` for a reply
     /// alone.
+    ///
+    /// `abandoned` is held here and not end to end, deliberately: it is the
+    /// bus's answer to an asker whose question something *else* abandoned, and
+    /// no verb of this crate abandons a third party's question, so no journey
+    /// through the binary can reach it (entry 87 of
+    /// `docs/contract-divergences.md` says the same). The other three are
+    /// driven by `tests/e2e/ask.rs` as well.
     #[test]
     fn each_answer_renders_as_the_bus_prints_it() {
         let correlation: Correlation = "c-1".parse().expect("a correlation");

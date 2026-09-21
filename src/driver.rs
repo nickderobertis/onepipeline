@@ -272,7 +272,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             let run = crate::ask::run_id()?;
             let asker = crate::ask::asker()?;
             let about = crate::ask::about(&args)?;
-            let paths = resolve(&run)?;
+            let paths = resolve(run.as_str())?;
             let raised = crate::ask::Question::raise(
                 &paths,
                 crate::ask::Request {

@@ -726,10 +726,11 @@ thiserror = "2"
 # and a fingerprint of the report a continuation is compared against. Already in
 # the graph through `onemessagebus`, so it adds nothing to what this build
 # resolves; the same crate the session-reuse journey spells a lease name with.
-# llmlint: ignore[new_command_or_client_gets_its_own_project] a dependency of two verbs of
-# this one binary, not a new command or client: both read the engine's own run store and
+# llmlint: ignore-block[new_command_or_client_gets_its_own_project] a dependency of two verbs
+# of this one binary, not a new command or client: both read the engine's own run store and
 # channel through this crate's private modules and ship in its one artifact.
 sha2 = "0.10"
+# llmlint: ignore-end[new_command_or_client_gets_its_own_project]
 
 # The siblings this crate composes, at the workspace's own pins. See
 # `[workspace.dependencies]` for what each pin's floor is a requirement of, and

@@ -576,6 +576,41 @@ fn every_refusal_names_its_cause_at_exit_two_and_raises_nothing_on_the_channel()
         .exited(REFUSED)
         .err_has("the question from standard input is blank");
 
+    // Standard input that is not text: named as the form it came in, rather
+    // than guessed at.
+    let mut bytes = world.cmd(&["ask"]);
+    bytes.env("ONEPIPELINE_RUN_ID", &run);
+    let mut child = bytes
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the binary starts");
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(b"which \xff\xfe bound?")
+            .expect("the bytes are written");
+    }
+    let undecoded = waited(child);
+    assert_eq!(undecoded.code, REFUSED, "{}", undecoded.stderr);
+    assert!(
+        undecoded
+            .stderr
+            .contains("the question on standard input could not be read"),
+        "{}",
+        undecoded.stderr
+    );
+
+    // A run id that names no run under the runs root.
+    let nowhere = waited(asking(&world, "no-such-run", &["which bound?"], &[]));
+    assert_eq!(nowhere.code, REFUSED, "{}", nowhere.stderr);
+    assert!(nowhere.stdout.is_empty(), "{}", nowhere.stdout);
+    assert!(nowhere.stderr.contains("no-such-run"), "{}", nowhere.stderr);
+
     // A question no frame can carry.
     let mut nul = world.cmd(&["ask"]);
     nul.env("ONEPIPELINE_RUN_ID", &run);
