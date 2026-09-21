@@ -1190,6 +1190,14 @@ fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item(
             "the whole projection carried other than one item per lineage: {whole}"
         );
         assert_eq!(whole["actions"]["created"], 0, "{whole}");
+        // The reused item may still carry the older build's origin when the copy rewrites it,
+        // so the store can report it once as the lineage it updated and again as an orphan of
+        // that origin: it is one item, rewritten, and counts under `updated` alone.
+        assert_eq!(whole["actions"]["orphaned"], 0, "{whole}");
+        assert!(
+            whole["actions"]["updated"].as_u64() >= Some(1),
+            "the reused item was not counted as rewritten: {whole}"
+        );
         assert_eq!(
             std::fs::read(&root_file).expect("the root item reads"),
             older_root,
