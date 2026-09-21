@@ -40,6 +40,10 @@
 
 use std::sync::Arc;
 
+mod document;
+
+pub use document::{bundle, bundle_json, document, prepare, DOCUMENT_PATH, DOCUMENT_VERSION};
+
 use onemessagebus::{
     Allowlist, Asker, Author, ConsumerName, Correlation, Layout, Message, OpWord, Operation,
     Policy, Position, Predicate, Pushed, Queue, QueueError, QueueName, QueueSpec, Registry, Router,
@@ -122,6 +126,13 @@ pub const QUEUED_COMMANDS_SCHEMA: SchemaId = SchemaId::literal("agent", "queued-
 
 /// `agent.command-outcome@1`: [`CommandOutcome`].
 pub const COMMAND_OUTCOME_SCHEMA: SchemaId = SchemaId::literal("agent", "command-outcome", 1);
+
+/// `agent.planner-reply-envelope@1`: [`ReplyEnvelope`], the envelope as this
+/// layout reads one — what a reply is checked against before it is routed,
+/// generated from the type the compiled-in layout parses it with, so the
+/// published document accepts exactly what the engine does.
+pub const READ_REPLY_ENVELOPE_SCHEMA: SchemaId =
+    SchemaId::literal("agent", "planner-reply-envelope", 1);
 
 const REPLY_ENVELOPE_V2: &str = include_str!("../../schemas/reply-envelope-v2.schema.json");
 const REPLY_ENVELOPE_V3: &str = include_str!("../../schemas/reply-envelope-v3.schema.json");
@@ -297,6 +308,10 @@ pub struct ReplyEnvelope {
     /// The graph edits, each an object naming its `op`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<Map<String, Value>>,
+}
+
+impl Message for ReplyEnvelope {
+    const SCHEMA: SchemaId = READ_REPLY_ENVELOPE_SCHEMA;
 }
 
 impl Default for ReplyEnvelope {
@@ -731,6 +746,9 @@ pub fn registry() -> Registry {
     registry
         .register::<CommandOutcome>()
         .expect("the command outcome schema registers");
+    registry
+        .register::<ReplyEnvelope>()
+        .expect("the read reply envelope schema registers");
     for (version, document) in [(2, REPLY_ENVELOPE_V2), (3, REPLY_ENVELOPE_V3)] {
         let schema: Value = serde_json::from_str(document).expect("a committed schema is JSON");
         registry

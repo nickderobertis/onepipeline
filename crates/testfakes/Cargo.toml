@@ -31,7 +31,6 @@ serde_json = "1"
 # reserves — a copy is a list that goes stale the round after the sibling adds one.
 oneagentgraph = { workspace = true }
 onemessagebus = { workspace = true }
-onemessagebus-agent = { workspace = true }
 # The session stream's own envelope, so a double writing a record to one writes
 # the shape `onevcs` declares — a restatement here would keep parsing after that
 # library changed it, and the journey would pass having proved the fixture.
