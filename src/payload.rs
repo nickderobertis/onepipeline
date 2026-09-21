@@ -601,6 +601,7 @@ pub(crate) struct HostShutdown {
     /// Who owns it.
     pub(crate) owner: String,
     /// Whether the interrupt and the wait were skipped.
+    // llmlint: ignore[invalid_states_unrepresentable] the approved contract spells this record's field as `"forced": bool`, and this document is held to what writers already write; a closed mode word here would be a second wire shape for the same fact.
     pub(crate) forced: bool,
     /// The grace a dispatch had to end itself.
     pub(crate) grace_seconds: u64,

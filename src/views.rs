@@ -203,17 +203,28 @@ const OUTLIVED_THE_STOP: &str = "worker may still be running: the stop could not
 struct HostShutdown<'a> {
     /// When the shutdown was recorded.
     at: &'a str,
-    /// What became of each dispatch it acted on, by node.
-    dispatches: BTreeMap<&'a str, &'a serde_json::Map<String, serde_json::Value>>,
-    /// What became of each branch it offered to `onevcs`, by branch name.
-    branches: BTreeMap<&'a str, &'a serde_json::Value>,
+    /// What became of each dispatch it acted on, by node — decoded through the
+    /// record's registered payload, or `None` for a record that does not decode.
+    dispatches: BTreeMap<String, Option<crate::payload::DispatchStopped>>,
+    /// What became of each branch it offered to `onevcs`, by branch name, or
+    /// `None` where the `host-shutdown` record itself does not decode.
+    branches: Option<BTreeMap<String, crate::payload::PreservedWord>>,
 }
 
 impl<'a> HostShutdown<'a> {
     /// The shutdown this run is under, or `None` for a run that is not.
+    ///
+    /// Each record is read through the payload type its kind is registered
+    /// under, which is the boundary a journal line crosses. One that does not
+    /// decode is **not** dropped and not defaulted: the kind alone says a
+    /// shutdown happened, and what it did is then said to be unreadable rather
+    /// than guessed at.
     fn of(view: &'a RunView) -> Option<Self> {
+        let decoded = |payload: &serde_json::Map<String, serde_json::Value>| {
+            serde_json::Value::Object(payload.clone())
+        };
         let mut dispatches = BTreeMap::new();
-        let mut found: Option<(&str, &serde_json::Map<String, serde_json::Value>)> = None;
+        let mut found: Option<(&str, Option<crate::payload::HostShutdown>)> = None;
         for event in &view.events {
             match PipelineKind::from_wire(&event.kind) {
                 Some(PipelineKind::DriverAdopted) => {
@@ -222,27 +233,32 @@ impl<'a> HostShutdown<'a> {
                 }
                 Some(PipelineKind::DispatchStopped) => {
                     if let Some(node) = event.labels.node.as_deref() {
-                        dispatches.insert(node, &event.payload);
+                        dispatches.insert(
+                            node.to_string(),
+                            serde_json::from_value(decoded(&event.payload)).ok(),
+                        );
                     }
                 }
-                Some(PipelineKind::HostShutdown) => found = Some((&event.ts, &event.payload)),
+                Some(PipelineKind::HostShutdown) => {
+                    found = Some((
+                        &event.ts,
+                        serde_json::from_value(decoded(&event.payload)).ok(),
+                    ));
+                }
                 _ => {}
             }
         }
-        let (at, payload) = found?;
-        let branches = payload
-            .get("branches")
-            .and_then(serde_json::Value::as_array)
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|row| Some((row.get("branch")?.as_str()?, row)))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let (at, recorded) = found?;
         Some(Self {
             at,
             dispatches,
-            branches,
+            branches: recorded.map(|recorded| {
+                recorded
+                    .branches
+                    .into_iter()
+                    .map(|row| (row.branch, row.result))
+                    .collect()
+            }),
         })
     }
 
@@ -263,32 +279,43 @@ impl<'a> HostShutdown<'a> {
 
     /// What became of one node's dispatch, in the words the shutdown recorded.
     fn became_of(&self, node: &str) -> String {
-        let Some(payload) = self.dispatches.get(node) else {
-            return "no live dispatch when the host shutdown ran".to_string();
-        };
-        let said = |key: &str| payload.get(key).and_then(serde_json::Value::as_str);
-        format!(
-            "worker {} by the host shutdown (interrupt {})",
-            said("ended").unwrap_or("not recorded"),
-            said("interrupt").unwrap_or("not recorded")
-        )
+        use crate::payload::{DispatchEndingWord as E, InterruptWord as I};
+        match self.dispatches.get(node) {
+            None => "no live dispatch when the host shutdown ran".to_string(),
+            Some(None) => "its dispatch-stopped record could not be read".to_string(),
+            Some(Some(stopped)) => format!(
+                "worker {} by the host shutdown (interrupt {})",
+                match stopped.ended {
+                    E::Graceful => "graceful",
+                    E::Killed => "killed",
+                    E::StillRunning => "still-running",
+                },
+                match stopped.interrupt {
+                    I::Delivered => "delivered",
+                    I::NoTurn => "no-turn",
+                    I::Failed => "failed",
+                    I::NotAsked => "not-asked",
+                }
+            ),
+        }
     }
 
     /// Whether one branch reached its origin, in the shutdown's own words.
     fn reached_its_origin(&self, branch: &str) -> String {
-        match self
-            .branches
-            .get(branch)
-            .and_then(|row| row.get("result"))
-            .and_then(serde_json::Value::as_str)
-        {
-            Some("pushed") => "on its origin unproven: pushed without that repository's own \
-                               hook or merge path having run"
+        use crate::payload::PreservedWord as P;
+        let Some(branches) = &self.branches else {
+            return "unknown: the host-shutdown record could not be read".to_string();
+        };
+        match branches.get(branch) {
+            Some(P::Pushed) => "on its origin unproven: pushed without that repository's own \
+                                hook or merge path having run"
                 .to_string(),
-            Some("already-on-origin") => "already on its origin at this commit".to_string(),
-            Some("no-remote") => "not on any origin: this identity has none to push to".to_string(),
-            Some("refused") => "not on its origin: the preserving push was refused".to_string(),
-            _ => "not offered to a preserving push, so nothing says it is on an origin".to_string(),
+            Some(P::AlreadyOnOrigin) => "already on its origin at this commit".to_string(),
+            Some(P::NoRemote) => "not on any origin: this identity has none to push to".to_string(),
+            Some(P::Refused) => "not on its origin: the preserving push was refused".to_string(),
+            None => {
+                "not offered to a preserving push, so nothing says it is on an origin".to_string()
+            }
         }
     }
 }
@@ -3973,21 +4000,31 @@ mod tests {
     /// after the shutdown ran reads as.
     #[test]
     fn a_shut_down_branch_reads_as_where_its_preserving_push_left_it() {
-        let rows: Vec<serde_json::Value> = ["pushed", "already-on-origin", "no-remote", "refused"]
-            .iter()
-            .map(|result| json!({"branch": *result, "result": result}))
-            .collect();
-        let stopped = serde_json::Map::from_iter([
-            ("ended".to_string(), json!("graceful")),
-            ("interrupt".to_string(), json!("delivered")),
-        ]);
+        use crate::payload::{DispatchEndingWord, DispatchStopped, InterruptWord, PreservedWord};
         let shutdown = HostShutdown {
             at: "not a timestamp",
-            dispatches: BTreeMap::from([("build", &stopped)]),
-            branches: rows
-                .iter()
-                .map(|row| (row["branch"].as_str().expect("named"), row))
-                .collect(),
+            dispatches: BTreeMap::from([
+                (
+                    "build".to_string(),
+                    Some(DispatchStopped {
+                        pid: 1,
+                        interrupt: InterruptWord::Delivered,
+                        detail: String::new(),
+                        ended: DispatchEndingWord::Graceful,
+                        waited_ms: 0,
+                    }),
+                ),
+                ("garbled".to_string(), None),
+            ]),
+            branches: Some(BTreeMap::from([
+                ("pushed".to_string(), PreservedWord::Pushed),
+                (
+                    "already-on-origin".to_string(),
+                    PreservedWord::AlreadyOnOrigin,
+                ),
+                ("no-remote".to_string(), PreservedWord::NoRemote),
+                ("refused".to_string(), PreservedWord::Refused),
+            ])),
         };
         for (branch, says) in [
             ("pushed", "on its origin unproven"),
@@ -4007,6 +4044,19 @@ mod tests {
             shutdown.became_of("later"),
             "no live dispatch when the host shutdown ran"
         );
+        // A record that does not decode is said to be unreadable, never guessed.
+        assert_eq!(
+            shutdown.became_of("garbled"),
+            "its dispatch-stopped record could not be read"
+        );
+        let unread = HostShutdown {
+            branches: None,
+            dispatches: BTreeMap::new(),
+            at: shutdown.at,
+        };
+        assert!(unread
+            .reached_its_origin("pushed")
+            .contains("could not be read"));
         // An instant this build cannot place is left out rather than guessed.
         let line = shutdown.line("run-1");
         assert!(line.starts_with("  HOST SHUTDOWN: this run was put down by a host shutdown;"));

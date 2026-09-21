@@ -3,6 +3,7 @@
 # the programs this stack spawns: `oneagentgraph`, and the `gh` behind `onevcs`.
 # Members are listed explicitly so a new one joins the graph deliberately rather
 # than by changing what `--workspace` means.
+# llmlint: ignore[new_command_or_client_gets_its_own_project] no new command or client binary joins this workspace: `onepipeline shutdown` is one more verb of the existing `onepipeline` CLI, which `docs/contract.md` states as one command surface over `onepipeline::verbs`, and this repository is one Rust build unit (the directive further down says the same for the whole crate).
 members = [".", "crates/testfakes"]
 resolver = "2"
 

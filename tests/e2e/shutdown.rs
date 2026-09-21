@@ -1006,3 +1006,139 @@ fn clone_of(workspaces: &Path, token: &str) -> Option<std::path::PathBuf> {
         .map(|identity| identity.path().join("runs").join(token).join("clone"))
         .find(|clone| clone.is_dir())
 }
+
+/// `--mine` shuts down every run this session owns, exactly as `RUN` does, and
+/// records the scope that selected it.
+#[cfg(unix)]
+#[test]
+fn mine_shuts_down_every_run_this_session_owns() {
+    let world = World::new("shutdown-mine");
+    held(&world, "first");
+    held(&world, "second");
+    let one = launch(&world, "one", vec![agent("first", &[])]);
+    until_in_flight(&world, &one, &["first"]);
+    let two = launch(&world, "two", vec![agent("second", &[])]);
+    until_in_flight(&world, &two, &["second"]);
+
+    let shutdown = world.run(&["shutdown", "--mine", "--force"]);
+    shutdown.exited(0);
+    for (run, node) in [(&one, "first"), (&two, "second")] {
+        assert!(
+            shutdown
+                .stdout
+                .contains(&format!("{run}  owner [mine]  selected by --mine")),
+            "{}",
+            shutdown.stdout
+        );
+        assert_eq!(host_shutdown(&world, run)["scope"], "mine");
+        assert_eq!(stopped_for(&world, run, node)["payload"]["ended"], "killed");
+    }
+    for node in ["first", "second"] {
+        world.release(&format!("{node}.go"));
+    }
+}
+
+/// A run whose own records will not take a write is still shut down: the hold
+/// and the journal lines that could not be written are said on stderr, and the
+/// dispatch is still torn down and its branch still pushed.
+///
+/// The records are made unwritable with the file mode — the run directory for
+/// the hold, the journal for the two kinds — which is what a full or read-only
+/// mount looks like to the one writer that has to go on anyway.
+// llmlint: ignore-block[tests_mirror_real_usage] the one thing set by hand is the mode of
+// the run's own directory and journal, and no product surface sets it: a record that will
+// not take a write is a host's disk refusing, not anything a user types. Everything else is
+// the real binary against a real run and a real origin.
+#[cfg(unix)]
+#[test]
+fn a_run_whose_records_refuse_a_write_is_still_shut_down_and_says_so() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new("shutdown-unwritable");
+    let repository = world.repository("local-direct", &[]);
+    held(&world, "service");
+    let run = launch(&world, "unwritable", vec![lifecycle("service", &[])]);
+    until_in_flight(&world, &run, &["service"]);
+    let branch = session_branch(&world, &run, "service");
+    let dir = world.run_file(&run, "");
+    let journal = world.run_file(&run, "events.jsonl");
+    assert!(
+        journal.is_file(),
+        "the run keeps no journal at {}",
+        journal.display()
+    );
+    let set = |path: &Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .expect("the mode is set");
+    };
+    set(&journal, 0o444);
+    set(&dir, 0o555);
+
+    let shutdown = world.run(&["shutdown", &run, "--force"]);
+    set(&dir, 0o755);
+    set(&journal, 0o644);
+
+    shutdown
+        .exited(0)
+        .err_has("the hold that stops it dispatching could not be written")
+        .err_has("dispatch-stopped record could not be written")
+        .err_has("host-shutdown record could not be written");
+    assert!(
+        line_for(&shutdown.stdout, "service").contains("ended killed"),
+        "{}",
+        shutdown.stdout
+    );
+    assert!(
+        on_origin(&world, &repository.origin, &branch).is_some(),
+        "a run whose journal refused a write lost its branch:\n{}",
+        shutdown.stdout
+    );
+    assert!(world.events_of(&run, "host-shutdown").is_empty());
+    world.release("service.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The report's last section names, by count and by branch, every other
+/// unpublished branch on this host that the shutdown did not push.
+///
+/// The other branch is one a publication preserved when the repository's own
+/// merge path refused it — work nothing has landed, in a run the shutdown was not
+/// asked about.
+#[cfg(unix)]
+#[test]
+fn the_last_section_names_every_other_unpublished_branch_on_the_host() {
+    let world = World::new("shutdown-others").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "1");
+    world.repository("local-direct", &["false"]);
+    world.script("service.work", "the worker wrote this\n");
+    let refused = launch(&world, "refused", vec![lifecycle("service", &[])]);
+    world.until("the refused publication to settle", |world| {
+        world.run_file(&refused, "result.json").is_file()
+    });
+    let left = world.run_json(&refused, "result.json")["nodes"][0]["branch"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("the refused node names no branch: {}", world.dump()));
+    held(&world, "build");
+    let run = launch(&world, "other", vec![agent("build", &[])]);
+    until_in_flight(&world, &run, &["build"]);
+
+    let shutdown = world.run(&["shutdown", &run, "--force"]);
+    shutdown.exited(0);
+    let last = shutdown
+        .stdout
+        .split("other unpublished branches on this host, which this shutdown did not push (")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no section naming other branches:\n{}", shutdown.stdout));
+    assert!(
+        last.starts_with("1):"),
+        "the count is not stated:\n{}",
+        shutdown.stdout
+    );
+    assert!(
+        last.lines()
+            .nth(1)
+            .is_some_and(|line| line.trim().ends_with(&format!("@{left}"))),
+        "the section does not name {left}:\n{}",
+        shutdown.stdout
+    );
+    world.release("build.go");
+}

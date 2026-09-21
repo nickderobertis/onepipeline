@@ -148,6 +148,7 @@ pub struct ShutdownRequest {
     pub grace: Duration,
     /// Skip the interrupt and the wait and go straight to the teardown. A grace
     /// of zero takes the same path.
+    // llmlint: ignore[invalid_states_unrepresentable] the contract's host-shutdown seam spells this field as a `bool`, verbatim, and `onepipeline-ui` is written against that seam, so its type is not this module's to change; `asks()` is the one place the flag and a zero grace are read together.
     pub force: bool,
 }
 
@@ -253,6 +254,7 @@ pub struct RunShutdown {
     pub owner: String,
     /// Whether this acted on a run another session owns, which only `--host`
     /// does.
+    // llmlint: ignore[invalid_states_unrepresentable] the contract's host-shutdown seam spells this field as a `bool`, verbatim, and `onepipeline-ui` is written against that seam, so its type is not this module's to change; it is written in one place, `shut_one_down`, from the scope and the launch record together.
     pub forced_over_owner: bool,
     /// One entry per live dispatch the shutdown acted on.
     pub dispatches: Vec<DispatchStopped>,
@@ -297,6 +299,7 @@ pub struct Shutdown {
     pub grace: Duration,
     /// Whether the interrupt and the wait were skipped — by `--force`, or by a
     /// grace of zero, which is the same path.
+    // llmlint: ignore[invalid_states_unrepresentable] the contract's host-shutdown seam spells this field as a `bool`, verbatim, and `onepipeline-ui` is written against that seam, so its type is not this module's to change; it is derived in one place, `shutdown`, from the request's own `asks()`, so it cannot disagree with the request that produced it.
     pub forced: bool,
     /// One entry per run acted on.
     pub runs: Vec<RunShutdown>,
