@@ -591,6 +591,14 @@ fn every_refusal_names_its_cause_at_exit_two_and_raises_nothing_on_the_channel()
     assert_eq!(over.code, REFUSED, "{}", over.stderr);
     assert!(over.stderr.contains("--about"), "{}", over.stderr);
 
+    let blank_about = waited(asking(&world, &run, &["--about", "   ", "which?"], &[]));
+    assert_eq!(blank_about.code, REFUSED, "{}", blank_about.stderr);
+    assert!(
+        blank_about.stderr.contains("--about"),
+        "{}",
+        blank_about.stderr
+    );
+
     let control = waited(asking(
         &world,
         &run,

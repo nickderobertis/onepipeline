@@ -343,9 +343,20 @@ fn home() -> Option<PathBuf> {
 fn remembered(session: &str) -> Result<Option<String>, String> {
     let path = memory(session)?;
     match std::fs::read(&path) {
+        // Only what `remember` writes — one SHA-256 digest in lowercase hex — is
+        // a memory; anything else is a record this guard cannot vouch for, and
+        // comparing a report against it would be a guess.
         Ok(bytes) => String::from_utf8(bytes)
-            .map(|text| Some(text.trim().to_owned()))
-            .map_err(|error| format!("{}: {error}", path.display())),
+            .ok()
+            .map(|text| text.trim().to_owned())
+            .filter(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .map(Some)
+            .ok_or_else(|| format!("{}: not a digest this guard wrote", path.display())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("{}: {error}", path.display())),
     }

@@ -215,6 +215,47 @@ fn a_run_nothing_watches_blocks_once_per_condition_and_the_memory_says_which() {
         .exited(0)
         .out_has("\"none\"");
 
+    // And the whole input as flags, nothing on standard input: a first stop
+    // blocks on the same report, and its continuation is silent.
+    let flagged = world.run(&["stop-guard", "--session", &session]);
+    flagged.exited(0);
+    assert_eq!(
+        verdict(&flagged.stdout),
+        Some(json!({"verdict": "block", "reason": report})),
+        "{}",
+        flagged.stdout
+    );
+    world
+        .run(&["stop-guard", "--session", &session, "--continuation"])
+        .exited(0)
+        .out_has("\"none\"");
+
+    // A relative `XDG_STATE_HOME` is ignored rather than resolved against
+    // wherever the hook happened to run: the memory lands under the home
+    // directory's state root instead.
+    let home = owner.root.join("home");
+    let mut relative = world.cmd(&["stop-guard", "--session", &session]);
+    relative
+        .env("XDG_STATE_HOME", "relative-state")
+        .env("HOME", &home)
+        .current_dir(&owner.root);
+    let relative = world.run_on(relative, "stop-guard under a relative XDG_STATE_HOME");
+    relative.exited(0);
+    assert_eq!(
+        verdict(&relative.stdout).expect("a verdict")["verdict"],
+        json!("block")
+    );
+    assert!(
+        home.join(".local/state/onepipeline/stop-guard")
+            .join(hex(&Sha256::digest(session.as_bytes())))
+            .is_file(),
+        "the memory is not under the home directory's state root"
+    );
+    assert!(
+        !owner.root.join("relative-state").exists(),
+        "a relative XDG_STATE_HOME was resolved against the working directory"
+    );
+
     // The condition moved — a second run of the session is unwatched — so the
     // report changed and a continuation blocks again. A memory holding only
     // "blocked before" would have stayed silent here.
@@ -358,13 +399,35 @@ fn a_question_that_cannot_be_asked_and_a_memory_that_cannot_be_kept_warn_and_nev
         refused.stderr
     );
 
+    // A memory holding something other than a digest this guard wrote, on a
+    // continuation: not compared against, because it vouches for nothing.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] nothing user-facing writes a memory
+    // but the guard; this stands in for a record damaged by something else on the host.
+    let path = memory(&world, &session);
+    std::fs::create_dir_all(path.parent().expect("the memory's directory"))
+        .expect("the memory's directory");
+    std::fs::write(&path, "not a digest\n").expect("a damaged memory");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let damaged = ask(&world, &json!({"session": session, "continuation": true}));
+    damaged.exited(0);
+    let told = verdict(&damaged.stdout).expect("a verdict");
+    assert_eq!(told["verdict"], json!("warn"), "{told}");
+    assert!(
+        told["message"].as_str().is_some_and(|message| {
+            message.contains("could not read what it last blocked on")
+                && message.contains("not a digest this guard wrote")
+        }),
+        "{told}"
+    );
+    std::fs::remove_file(&path).expect("the damaged memory");
+
     // A memory this guard cannot read, on a continuation: a directory where the
     // file goes.
     //
     // llmlint: ignore-block[tests_mirror_real_usage] nothing writes a directory at a memory's
     // path; it stands in for a record this process cannot read back — a permission, a
     // filesystem refusing — in the one form every platform refuses to read as a file.
-    let path = memory(&world, &session);
     std::fs::create_dir_all(&path).expect("something unreadable at the memory's path");
     // llmlint: ignore-end[tests_mirror_real_usage]
     let unread = ask(&world, &json!({"session": session, "continuation": true}));

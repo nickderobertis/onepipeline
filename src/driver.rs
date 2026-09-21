@@ -247,12 +247,8 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         // so a status would turn the guard's own failure into what refuses or garbles the
         // stop. The failure is reported instead, in the `warn` object on standard output.
         Verb::StopGuard(args) => {
-            // Every ending is exit 0 and one object on standard output, or
-            // nothing: a harness reads this stream as its decision, and a status
-            // it reads as an error would make the guard's own failure the thing
-            // that refused the stop. An input naming no session is the silent
-            // ending — see `stopguard::asked` for why it is not filled from the
-            // environment.
+            // `stopguard::asked` says why an input naming no session is silent
+            // rather than filled from the environment.
             let Some(asked) = crate::stopguard::asked(&args) else {
                 print!("{}", crate::stopguard::Verdict::None.render(args.format));
                 return Ok(EXIT_SUCCESS);
