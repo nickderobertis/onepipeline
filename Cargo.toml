@@ -766,6 +766,17 @@ serde_norway = "0.9"
 # nested `steps` entry is a sentence nobody can act on; this carries the path.
 serde_path_to_error = "0.1"
 thiserror = "2"
+# The digest the stop guard keys its per-session memory by and remembers a
+# block under — a name a stranger's session id is never joined onto a path as,
+# and a fingerprint of the report a continuation is compared against. Already in
+# the graph through `onemessagebus`, so it adds nothing to what this build
+# resolves; the same crate the session-reuse journey spells a lease name with.
+# llmlint: ignore-block[new_command_or_client_gets_its_own_project] a dependency of two verbs
+# of this one binary, not a new command or client: both read the engine's own run store and
+# channel through this crate's private modules and ship in its one artifact.
+# llmlint: ignore[crates_stay_in_one_cargo_workspace] `[workspace.dependencies]` holds the sibling engines both members build against, and `just engines-current` reads every pin there as an engine floor; `sha2` is neither, and is pinned beside `serde` and `thiserror` as every root-only dependency is.
+sha2 = "0.10"
+# llmlint: ignore-end[new_command_or_client_gets_its_own_project]
 
 # The siblings this crate composes, at the workspace's own pins. See
 # `[workspace.dependencies]` for what each pin's floor is a requirement of, and
@@ -822,15 +833,16 @@ windows-sys = { version = "0.61", features = [
 # and must stay so: what they implement must never be reachable from a release
 # binary.
 #
-# `fs4` and `sha2` are one journey's tools, not a second implementation of
-# anything: `tests/e2e/session_reuse.rs` has to make a run root *occupied* —
-# taken exclusively, which is the one answer that stops `onevcs` reusing a
-# session — and no verb of that sibling's holds an occupancy lease past its own
-# exit, because the lease is deliberately one the OS releases with the process.
-# So that journey takes the advisory lock itself, on the file the sibling names
-# the lease after: `fs4` is the lock (the same crate, and the same lock, `onevcs`
-# uses) and `sha2` spells the name. Both are already in the graph through the
-# siblings, so neither adds anything to what this build resolves.
+# `fs4` is one journey's tool, not a second implementation of anything:
+# `tests/e2e/session_reuse.rs` has to make a run root *occupied* — taken
+# exclusively, which is the one answer that stops `onevcs` reusing a session —
+# and no verb of that sibling's holds an occupancy lease past its own exit,
+# because the lease is deliberately one the OS releases with the process. So
+# that journey takes the advisory lock itself, on the file the sibling names the
+# lease after: `fs4` is the lock (the same crate, and the same lock, `onevcs`
+# uses), and `sha2` — a regular dependency above, for the stop guard — spells the
+# name. Already in the graph through the siblings, so it adds nothing to what
+# this build resolves.
 #
 # `oneharness-core` is a regular dependency, below, for its config reader; the
 # suite also reads it for its **types**: `tests/e2e/dispatch.rs` reads the
@@ -842,7 +854,6 @@ windows-sys = { version = "0.61", features = [
 fs4 = "0.13"
 onepipeline-testfakes = { path = "crates/testfakes" }
 onevcs-testing = { workspace = true }
-sha2 = "0.10"
 # `tests/patch_pin.rs` holds this manifest's patch block equal to `deny.toml`'s
 # allow-git list, and what it compares are pins — so both sides are parsed as the
 # TOML they are rather than scanned for a substring that might not be one.

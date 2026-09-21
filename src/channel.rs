@@ -1631,13 +1631,18 @@ impl ChannelState {
     /// Raise `question` as one the bus answers by correlation, and hand back
     /// the handle its answer arrives on.
     ///
-    /// Stamped by the bus with its correlation, its blocking flag and its
-    /// asker, and judged, validated and appended as any surface is.
-    pub(crate) fn ask(&self, question: Surface) -> crate::Result<Pending<Value>> {
+    /// Stamped by the bus with its correlation, its blocking flag, its asker
+    /// and what it is `about` — which the layout records as the surface's
+    /// `workstream` — and judged, validated and appended as any surface is.
+    pub(crate) fn ask(
+        &self,
+        question: Surface,
+        about: Option<onemessagebus::Address>,
+    ) -> crate::Result<Pending<Value>> {
         let options = AskOptions {
             blocking: question.blocking,
             asker: question.asker.clone(),
-            about: None,
+            about,
         };
         self.judging_bus()?
             .ask::<Surface, Value>(&queue_name(SURFACES), question, options)
@@ -2180,18 +2185,21 @@ mod tests {
         /// A question raised through the host bus.
         fn asked(&self, message: &str, blocking: bool) -> Correlation {
             self.channel
-                .ask(Surface {
-                    id: 0,
-                    kind: "planner-question".to_owned(),
-                    message: message.to_owned(),
-                    source: source::PROPOSAL.to_owned(),
-                    blocking,
-                    queued_at: 1,
-                    workstream: None,
-                    abandoned: false,
-                    asker: None,
-                    correlation: None,
-                })
+                .ask(
+                    Surface {
+                        id: 0,
+                        kind: "planner-question".to_owned(),
+                        message: message.to_owned(),
+                        source: source::PROPOSAL.to_owned(),
+                        blocking,
+                        queued_at: 1,
+                        workstream: None,
+                        abandoned: false,
+                        asker: None,
+                        correlation: None,
+                    },
+                    None,
+                )
                 .expect("the question is asked")
                 .correlation()
                 .clone()
