@@ -509,6 +509,11 @@ resolver = "2"
 #   `Cause` — so below it the variant does not compile. `^0.4.6` admitted the
 #   release, but not the bus it requires beside the old pins.
 #
+# Those two releases also carry each sibling's `sweep --format json` report,
+# which `ai-orchestrator` adopts only once an engine links them, because it holds
+# its CLI pins equal to this engine's SBOM. Nothing here calls `sweep`, so that
+# needs no requirement or lock entry beyond the relink above.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
