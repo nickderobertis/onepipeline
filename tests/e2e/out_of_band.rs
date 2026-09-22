@@ -739,7 +739,12 @@ fn a_draft_that_cannot_start_hands_the_landing_to_onevcs_and_says_why() {
                 .join("no-such-tmp")
                 .to_string_lossy()
                 .into_owned();
-            world.with_env("TMPDIR", &nowhere)
+            // `std::env::temp_dir` reads `TMPDIR` on Unix and `TMP`, then
+            // `TEMP`, on Windows; the host names none that exists on either.
+            world
+                .with_env("TMPDIR", &nowhere)
+                .with_env("TMP", &nowhere)
+                .with_env("TEMP", &nowhere)
         } else {
             world
         };
