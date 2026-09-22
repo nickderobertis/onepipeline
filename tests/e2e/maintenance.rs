@@ -414,12 +414,26 @@ fn two_drivers_idle_at_once_maintain_the_slot_once_between_them() {
         .exited(0)
         .out_has("claimed — another pool maintain (pid");
 
+    // Until the first driver's command exits — which on a slow host is a pace
+    // or more after the hold is released — each sweep of the second meets the
+    // claim again, and is answered `claimed` again. None of them ran anything.
+    // Two sweeps more let one that met the claim just before it ended record.
+    let swept = sweeps(&world);
+    until_sweeps(&world, swept + 2);
+    let met = records(&world, "two");
+    assert!(
+        met.iter()
+            .all(|record| record["payload"]["identities"][0]["outcome"]["claimed"].is_object()),
+        "{}",
+        world.dump()
+    );
+
     // Every further sweep of either driver is answered not-due.
     let swept = sweeps(&world);
     until_sweeps(&world, swept + 3);
     assert_eq!(marker_lines(&world), 1);
     assert_eq!(records(&world, "one").len(), 1, "{}", world.dump());
-    assert_eq!(records(&world, "two").len(), 1, "{}", world.dump());
+    assert_eq!(records(&world, "two").len(), met.len(), "{}", world.dump());
     release(&world, "one");
     release(&world, "two");
 }
