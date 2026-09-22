@@ -2237,15 +2237,12 @@ fn task_document(
     Ok((Value::Object(front), content))
 }
 
-/// Write one shadow document so no reader can observe it half-written.
+/// Write one shadow document.
 ///
-/// The shadow store is a directory a reader *lists*: the `project copy` below reads it as
-/// a `local-md` source, and so does anything else pointed at the run's directory. A
-/// document replaced in place is truncated before it is rewritten, so a listing that
-/// arrives inside that window parses an empty file or a torn one and reports the run's own
-/// board as malformed. Written through [`crate::ledger::write_atomic`] — the same helper
-/// every other write a live reader could catch goes through — the destination carries the
-/// old document or the whole new one and nothing in between.
+/// Atomic because the shadow store is a directory a reader *lists* while this writes it:
+/// the `project copy` below reads it as a `local-md` source, and a document replaced in
+/// place is truncated first, so a listing arriving in that window parses an empty file and
+/// reports the run's own board as malformed.
 fn document(path: &Path, front: &Value, body: &str) -> Result<(), String> {
     let yaml = serde_norway::to_string(front).map_err(|e| e.to_string())?;
     crate::ledger::write_atomic(path, format!("---\n{yaml}---\n{body}").as_bytes())

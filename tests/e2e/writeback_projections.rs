@@ -1425,3 +1425,4 @@ fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
         );
     }
 }
+// llmlint: ignore-end[tests_mirror_real_usage]

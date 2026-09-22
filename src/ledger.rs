@@ -1311,20 +1311,11 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     // The temporary carries this process's pid so two writers racing the same
     // target cannot truncate each other's partial file before the rename.
     let temp = path.with_extension(format!("tmp.{}", sys::pid()));
-    // Written and flushed *before* the rename, and the file is closed before it
-    // too: the rename is what publishes the name, so every byte has to be in the
-    // host's hands by then or the name would point at a file the writer has not
-    // finished — the half-written document the rename exists to prevent a reader
-    // seeing. Flushed explicitly, because a write left to a drop discards its
-    // error and this is the one write whose failure the caller must hear.
-    //
-    // **Not** `sync_all`, deliberately: what the reader beyond this rename needs
-    // is the host's own page cache, which the write above already put the bytes
-    // in, and a projection replaces every document of a run's board at once —
-    // `write_shadow` writes one per node — so a disk sync per document would
-    // make a hundred-node run's every pass wait on a hundred of them. Durability
-    // across a *host* failure is not what any reader of these files is promised;
-    // a run whose machine died is relaunched from its journal.
+    // Flushed before the rename rather than at a drop, which discards its error.
+    // Deliberately not `sync_all`: a reader past the rename needs the page cache
+    // the write already filled, and `writeback::write_shadow` replaces one
+    // document per node, so a disk sync each would make a hundred-node run's
+    // every pass wait on a hundred of them.
     {
         use io::Write as _;
         let mut file = fs::File::create(&temp).map_err(ledger)?;
