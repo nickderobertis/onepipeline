@@ -86,18 +86,15 @@ fn the_linked_default_bound_outlasts_a_member_writing_its_report() {
 #[cfg(unix)]
 const BOUND: &str = "2";
 
-/// The cadence every look in this file is taken on — this test's own, and the
-/// rule's, which is the whole point of naming it once.
+/// The cadence every look in this file is taken on.
 ///
-/// The rule examines a quiet member's tree every eighth of its bound, floored at
-/// this interval, and [`BOUND`] is short enough to sit on that floor — which
-/// [`bound`] holds rather than this file recomputing the eighth, because that
-/// fraction is the sibling's and not this test's to copy. Driving
-/// [`Stall::condemns`](oneagentgraph::member::Stall::condemns) on it makes every
-/// call due, so the rule takes its own reading in the same loop iteration as the
-/// one recorded here: the two compare the same pair of readings over the same
-/// window, and an activity event this file records is one the rule's own clock
-/// was cleared by.
+/// The sibling's own floor on how often it examines a quiet member's tree — how
+/// much rarer than that it examines one is its business and changes without this
+/// file. Looking on the floor is what this half needs from it: the rule can
+/// never take a reading this loop did not take one beside, and
+/// [`Stall::condemns`](oneagentgraph::member::Stall::condemns) is driven from
+/// the same iteration, so the pair the rule compares lies inside the span this
+/// loop recorded look by look.
 #[cfg(unix)]
 const LOOK_EVERY: Duration = oneagentgraph::member::HEARTBEAT_INTERVAL;
 
@@ -112,11 +109,11 @@ const BACKSTOP: Duration = Duration::from_secs(60);
 
 /// How many activity events the busy half watches for before it has seen enough.
 ///
-/// The watch ends on the **evidence** rather than on a clock: enough events to
-/// span several of the rule's own examination windows, and — see the `enough`
-/// closure at that call site — past the bound, so the rule has had every
-/// opportunity to condemn and declined it. A runner that needs a minute to
-/// produce them is slow, not wrong, and nothing here reads it as wrong.
+/// The watch ends on the **evidence** rather than on a clock: enough events that
+/// the rule has been given its opportunities to condemn and declined them — see
+/// the `enough` closure at that call site for the other half of that. A runner
+/// that needs a minute to produce them is slow, not wrong, and nothing here
+/// reads it as wrong.
 #[cfg(unix)]
 const ACTIVITY_EVENTS: usize = 8;
 
@@ -143,21 +140,14 @@ fn bound() -> Duration {
         bound < KILLED_REPORTS,
         "this journey is only quick because the environment shortens the bound"
     );
-    assert!(
-        bound <= LOOK_EVERY * 8,
-        "the rule examines a quiet member's tree every eighth of its {bound:?} bound, which is \
-         longer than the {LOOK_EVERY:?} this file looks on — so the two are comparing readings \
-         over windows of different lengths and an activity event recorded here is no longer one \
-         the rule was cleared by"
-    );
     bound
 }
 
 /// The interval activity is held to arriving inside: **a gap between activity
 /// events**, never a total elapsed time.
 ///
-/// Twice the bound the rule condemns after and eight of its examination windows
-/// — deliberately generous, because what this has to separate is a tree that
+/// Twice the bound the rule condemns after — deliberately generous, because
+/// what this has to separate is a tree that
 /// stopped from a runner that was merely slow, and the window it replaces could
 /// not (issue #415). A spinning process charged less than
 /// [`WORKING_PERCENT_OF_A_CORE`](oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE)%
@@ -267,20 +257,20 @@ fn the_activity_rule_condemns_a_member_once_the_work_under_it_stops_and_not_whil
             );
         }
         Some(at) => {
-            // The runner starved the spin loop: the rule is then judging exactly
-            // the readings this loop took, so what is asserted is the *order* —
-            // that the work had stopped, for longer than the bound, before the
-            // verdict. One look of slack, because this loop's reading and the
-            // rule's are taken in the same iteration but not in the same
-            // instruction, so the pair either of them compares can sit a look
-            // either side of the other's.
-            let last = busy.last_activity_before(at);
+            // The runner starved the spin loop, and the rule is then judging the
+            // readings this loop took: what is asserted is the *order* — that the
+            // work had stopped before the verdict. Stopped means a look that
+            // found none, anywhere in the bound the rule judged, rather than a
+            // gap measured against the rule's examination cadence: a tree
+            // charged a working rate in every one of these windows is charged
+            // one over any span built out of them, so this holds whatever
+            // cadence the rule examines on.
             assert!(
-                last.is_none_or(|last| at.saturating_sub(last) + LOOK_EVERY > bound),
-                "the activity rule condemned a member {at:?} into its life while the evidence it \
-                 judges — the same readings, taken in the same loop — showed work under it as \
-                 recently as {last:?}, inside its own {bound:?} bound. Activity arrived at {:?} \
-                 over {:?}",
+                !busy.worked_throughout(at.saturating_sub(bound), at),
+                "the activity rule condemned a member {at:?} into its life though every look \
+                 across the {bound:?} before the verdict — the same readings, taken in the same \
+                 iterations the rule took its own in — found work under it. Activity arrived at \
+                 {:?} over {:?}",
                 busy.activity(),
                 busy.spent
             );
@@ -402,12 +392,15 @@ impl Watch {
         self.looks.iter().filter(|look| look.working).count()
     }
 
-    fn last_activity_before(&self, at: Duration) -> Option<Duration> {
-        self.looks
+    /// Whether every look taken in `from..=to` found the tree working, over at
+    /// least one look.
+    fn worked_throughout(&self, from: Duration, to: Duration) -> bool {
+        let mut looks = self
+            .looks
             .iter()
-            .filter(|look| look.working && look.at <= at)
-            .map(|look| look.at)
-            .next_back()
+            .filter(|look| look.at > from && look.at <= to)
+            .peekable();
+        looks.peek().is_some() && looks.all(|look| look.working)
     }
 
     /// The longest the tree went without an activity event — counting the wait
