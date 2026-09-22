@@ -40,19 +40,13 @@
 //! has stopped is condemned once the bound elapses. It does not judge how long
 //! the host took to get there.
 //!
-//! It used to. The original assertion held a spinning tree to *never condemned
-//! within three bounds* — an absolute elapsed-time window — and GitHub-hosted
-//! macOS runners starve a spin loop badly enough under ordinary load to cross
-//! it: runs 35489916521, 35499148935 and 35501051077 all condemned one 5.3–5.45
-//! seconds in, and each cost a valid change a manual rerun of the cross-platform
-//! gate (issue #415). A starved tree is charged no CPU, the rule reads exactly
-//! that, and condemning it is the rule *working* — so the window was measuring
-//! the runner and reporting it as this crate's defect.
-//!
-//! The readings that window used to assert are not lost: they are
-//! [`the_timings_the_old_gate_asserted_are_measured_and_never_judged`], which
-//! prints them beside the windows the old gate held them to and asserts nothing
-//! at all.
+//! It used to, against absolute elapsed-time windows, and a GitHub-hosted macOS
+//! runner starves a spin loop past them under ordinary load: three such runs
+//! condemned a spinning tree 5.3–5.45 s in and each cost a valid change a manual
+//! rerun (issue #415). A starved tree is charged no CPU and the rule reads
+//! exactly that, so the window was measuring the runner and reporting it as this
+//! crate's defect. Those readings survive as
+//! [`the_timings_the_old_gate_asserted_are_measured_and_never_judged`].
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -176,27 +170,18 @@ fn watchdog(bound: Duration) -> Duration {
 
 /// What that bound is a bound *on*: work stopping, and only past the bound.
 ///
-/// The rule's own seam, over a real process tree and real elapsed time. A
-/// member writing a report is silent **and idle** — it is waiting on a model,
-/// so nothing under it is charged CPU — which is exactly the reading this drives
-/// and exactly the one that used to be fatal. Both directions, because the
-/// sparing half alone would pass against a watchdog switched off:
+/// A member writing a report is silent **and idle** — it waits on a model, so
+/// nothing under it is charged CPU — which is the reading this drives. Both
+/// directions, because the sparing half alone would pass against a watchdog
+/// switched off: a stamped tree doing nothing is condemned and not before its
+/// bound elapses, and a stamped tree whose work keeps arriving inside the
+/// watchdog interval is never condemned.
 ///
-/// * a stamped tree doing nothing is condemned, and **not before its bound
-///   elapses** — which is what makes the bound the whole of the judgement, and
-///   therefore what makes the number above decide whether a report survives;
-/// * a stamped tree whose work keeps arriving inside the watchdog interval is
-///   never condemned, however long its member has published nothing.
-///
-/// Neither direction reads a clock the host controls. The first compares the
-/// member's silence at the verdict against the rule's *own* bound, which load
-/// can only lengthen — a runner cannot make a verdict arrive earlier than the
-/// rule's arithmetic allows, so that direction has no flake in it. The second is
-/// a gap between observed activity events. And where a runner starves the
-/// spinning tree past the watchdog, the rule is judging precisely the evidence
-/// this test read: what is asserted then is that the work had stopped before the
-/// verdict, which is the rule behaving, rather than an elapsed time, which is
-/// the runner behaving.
+/// Neither direction reads a clock the host controls. The idle verdict is held
+/// against the rule's *own* bound, which load can only lengthen. The busy one is
+/// a gap between activity events — and where a runner starves the spin loop past
+/// the watchdog, the rule is judging precisely the readings this test took, so
+/// what is asserted is that the work had stopped before the verdict.
 ///
 /// POSIX only, because the evidence is: a member's tree is the [`SCRATCH_ENV`]
 /// stamp the kernel fixes at `exec`, and on Windows it is a job object, which
@@ -306,24 +291,15 @@ fn the_activity_rule_condemns_a_member_once_the_work_under_it_stops_and_not_whil
 /// The timings the gate above used to assert, kept as a measurement and never as
 /// a judgement.
 ///
-/// Which three windows those were, and why a runner rather than this crate is
-/// what moves the readings inside them, is the module documentation above. What
-/// this adds is the shape: every reading is printed beside the window the old
-/// gate held it to and whether it fell inside, a starved runner is *reported*
-/// rather than blamed, and a host that cannot start a tree says so and stops.
-/// `.config/nextest.toml` prints this binary's output on success, so the numbers
-/// reach whoever reads a green run as well as a red one.
-// llmlint: ignore-block[tests_assert_real_behavior] this is the one site in the
-// suite that deliberately asserts nothing, and the rule is right about every
-// other: what stands here is a *measurement* rather than a test of behaviour.
-// The behaviour — the rule condemning a tree whose work stopped and sparing one
-// whose work keeps arriving — is asserted immediately above, over the same two
-// trees and the same helper, so nothing is left unproven by this being silent.
-// What is left here is three readings whose value moves with the runner's load
-// rather than with this crate, which is exactly what made them a flaky gate
-// (issue #415): asserting on any of them puts that flake straight back, and
-// asserting instead on the apparatus would fail this tier a second time on a
-// host whose real failure the gate above has already named.
+/// Each reading is printed beside the window the old gate held it to and whether
+/// it fell inside; a host that cannot start a tree says so and stops.
+/// `.config/nextest.toml` prints this binary's output on success, so a green run
+/// carries the numbers too.
+// llmlint: ignore-block[tests_assert_real_behavior] this asserts nothing by
+// design: what its readings move with is the runner's load rather than this
+// crate, which is what made them a flaky gate (issue #415), so any assertion on
+// one puts that flake back. The behaviour the two trees demonstrate is asserted
+// in full immediately above, over the same helper and the same trees.
 #[cfg(unix)]
 #[test]
 fn the_timings_the_old_gate_asserted_are_measured_and_never_judged() {
@@ -384,25 +360,17 @@ fn the_timings_the_old_gate_asserted_are_measured_and_never_judged() {
 }
 // llmlint: ignore-end[tests_assert_real_behavior]
 
-/// One look at a member's tree, and what the rule made of the member at it.
 #[cfg(unix)]
 struct Look {
-    /// How far into the member's life the look was taken.
     at: Duration,
-    /// Whether the tree was charged enough CPU since the look before to count as
-    /// working — [`Work::worked`](oneagentgraph::scratch::Work::worked), the
-    /// sibling's own rate test, over the evidence the rule judges and at the
-    /// cadence it judges on. This is the activity event the whole gate is
-    /// written in terms of.
+    /// The activity event this whole gate is written in terms of: the tree was
+    /// charged enough CPU since the look before to count as working by
+    /// [`Work::worked`](oneagentgraph::scratch::Work::worked), the sibling's own
+    /// rate test, over the evidence the rule judges and at its cadence.
     working: bool,
-    /// Whether the rule condemned the member at this look.
     condemned: bool,
 }
 
-/// Everything a watch observed, in the order it observed it.
-///
-/// A record rather than a verdict: what ends a watch is stated by its caller,
-/// and every question the two halves ask is asked of this afterwards.
 #[cfg(unix)]
 struct Watch {
     looks: Vec<Look>,
@@ -422,7 +390,6 @@ impl Watch {
             .map(|look| look.at)
     }
 
-    /// When each activity event arrived.
     fn activity(&self) -> Vec<Duration> {
         self.looks
             .iter()
@@ -431,12 +398,10 @@ impl Watch {
             .collect()
     }
 
-    /// How many activity events arrived.
     fn events(&self) -> usize {
         self.looks.iter().filter(|look| look.working).count()
     }
 
-    /// The last activity event at or before `at`.
     fn last_activity_before(&self, at: Duration) -> Option<Duration> {
         self.looks
             .iter()

@@ -108,16 +108,18 @@ threads-required = 4
 filter = 'binary(e2e) or binary(note) or binary(release_channel)'
 test-group = 'e2e'
 
-# The liveness binary's measurement prints the timings the activity rule reached
-# its verdicts in, and prints them whatever they are — nothing asserts on them,
-# because what moves them is the runner's load rather than this crate. Captured
-# output a passing test produced reaches nobody, so a measurement nothing can
-# fail is also a measurement nobody reads. `final` prints this binary's output
-# after the run, where the person reading a green cross-platform leg sees the
-# numbers that used to be an assertion (issue #415).
+# A measurement nothing can fail is a measurement nobody reads, because captured
+# output from a passing test reaches no one. This binary's liveness measurement
+# prints the timings that used to be an assertion (issue #415), so its output is
+# kept on success too — on `default`, inherited by `ci`, so the legs that
+# reported the flake are the legs that report the readings.
 #
-# Declared on `default` and inherited by `ci`, so the legs that reported the
-# flake are the legs that report the readings.
+# llmlint: ignore-block[changed_behavior_has_e2e] what changes here is how much
+# of a nextest run reaches its log, which no consumer of this crate can observe
+# and no test of this crate can assert without running nextest inside nextest.
+# What is assertable is that the key exists: nextest refuses a key it does not
+# know, so a typo fails every recipe at once rather than silently printing less.
 [[profile.default.overrides]]
 filter = 'binary(oneagentgraph_liveness)'
 success-output = "final"
+# llmlint: ignore-end[changed_behavior_has_e2e]
