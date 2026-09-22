@@ -718,6 +718,62 @@ describe("the judged tier's computation cache", () => {
     }
   });
 
+  // Every way llmlint can end a judged run non-zero, and what the operator is
+  // owed for each: the findings to clear, the toolchain failure to repair, or the
+  // command that shows what a silent judge did. The judge's streams reach the
+  // recipe only through Nx, so each is driven twice — once with Nx forwarding
+  // them, once with them reaching nobody at all.
+  for (const [what, env, diagnostics] of [
+    ["findings", { FAKE_LLMLINT_EXIT: "1" }, [FINDING, FAIL_VERDICT, "clear the findings above"]],
+    [
+      "a toolchain that never reached a verdict",
+      { FAKE_LLMLINT_EXIT: "2" },
+      [FINDING, "without judging this diff"],
+    ],
+    [
+      "a judge that failed without reporting anything",
+      { FAKE_LLMLINT_EXIT: "1", FAKE_LLMLINT_SILENT: "1" },
+      ["exited 1 without reporting anything"],
+    ],
+  ]) {
+    it(`relays the report behind ${what} when none of the judge's output is forwarded`, (t) => {
+      // A red tier with no reason attached is one nobody can correct or retry
+      // without rerunning the judge by hand outside Nx — a paid run spent only to
+      // read an error message that already existed. The judge records every
+      // non-zero report beside the verdict, and the recipe relays that record
+      // when Nx forwarded none of it.
+      const ws = workspace(t);
+      const base = ws.head();
+
+      const forwarded = ws.lint(base, { env });
+      ws.judgeUnheard();
+      const unheard = ws.lint(base, { env });
+
+      for (const result of [forwarded, unheard]) {
+        assert.notEqual(result.status, 0, report(result));
+        for (const diagnostic of diagnostics) {
+          // Exactly once, whether it arrived through Nx's pipes or from the
+          // record: relaying a report Nx already forwarded would say it twice.
+          assert.equal(
+            report(result).split(diagnostic).length,
+            2,
+            `expected ${JSON.stringify(diagnostic)} exactly once in\n${report(result)}`,
+          );
+        }
+      }
+      // What the relay read: this run's own report, since the recipe clears the
+      // record before every judgement and Nx stores successful tasks only.
+      const recorded = readFileSync(join(ws.root, ".lint-llm-diff", "report"), "utf8");
+      for (const diagnostic of diagnostics) {
+        assert.ok(recorded.includes(diagnostic), `${diagnostic} is missing from\n${recorded}`);
+      }
+      // Never stored, so the unheard run asked the judge again rather than
+      // replaying a red.
+      assert.equal(ws.judgeRuns().length, 2, report(unheard));
+      assert.match(unheard.stderr, new RegExp(`${CACHE_MISS} ${base}`), report(unheard));
+    });
+  }
+
   it("caches the green that replaced a red", (t) => {
     // The path a worker actually walks: judge, clear the finding, judge again,
     // then settle without paying for a third roll.
