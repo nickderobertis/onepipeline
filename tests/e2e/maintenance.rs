@@ -414,26 +414,27 @@ fn two_drivers_idle_at_once_maintain_the_slot_once_between_them() {
         .exited(0)
         .out_has("claimed — another pool maintain (pid");
 
-    // Until the first driver's command exits — which on a slow host is a pace
-    // or more after the hold is released — each sweep of the second meets the
-    // claim again, and is answered `claimed` again. None of them ran anything.
-    // Two sweeps more let one that met the claim just before it ended record.
-    let swept = sweeps(&world);
-    until_sweeps(&world, swept + 2);
-    let met = records(&world, "two");
-    assert!(
-        met.iter()
-            .all(|record| record["payload"]["identities"][0]["outcome"]["claimed"].is_object()),
-        "{}",
-        world.dump()
-    );
-
     // Every further sweep of either driver is answered not-due.
     let swept = sweeps(&world);
     until_sweeps(&world, swept + 3);
     assert_eq!(marker_lines(&world), 1);
     assert_eq!(records(&world, "one").len(), 1, "{}", world.dump());
-    assert_eq!(records(&world, "two").len(), met.len(), "{}", world.dump());
+
+    // Until the first driver's command exits — on a slow host a pace or more
+    // after the hold is released — a sweep of the second meets the claim again
+    // and is answered `claimed` again. So its records may be several, but each
+    // is `claimed`, from a sweep started before the first driver recorded.
+    let settled = ran["ts"].as_str().expect("a record's timestamp");
+    for met in records(&world, "two") {
+        let started = met["payload"]["started_at"]
+            .as_str()
+            .expect("a sweep's start");
+        assert!(
+            met["payload"]["identities"][0]["outcome"]["claimed"].is_object() && started < settled,
+            "{}",
+            world.dump()
+        );
+    }
     release(&world, "one");
     release(&world, "two");
 }
