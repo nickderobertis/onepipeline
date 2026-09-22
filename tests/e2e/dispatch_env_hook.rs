@@ -1065,6 +1065,108 @@ fn a_missing_env_from_source_refuses_the_launch_naming_the_file_the_variant_and_
     }
 }
 
+/// A member config whose harness identity lives in an `extends` parent is read
+/// through the chain the sibling's loader follows: the **parent's** `env_from`
+/// source is this launch's, so a dispatch whose environment lacks it is refused
+/// naming the config the graph names, the parent's variant and the parent's key
+/// — and a hook that supplies it lets the same launch through.
+///
+/// The failure this guards is silent. A preflight that read the one document it
+/// was handed would find a role file with no variants at all, collect no
+/// sources, and pass every dispatch whose environment is missing exactly the
+/// indirection the check exists to catch — a credential directory absent, which
+/// reads from outside as an identity that quietly did nothing.
+#[test]
+fn a_config_whose_identity_lives_in_an_extends_parent_is_read_through_the_chain() {
+    /// The source the **parent** names, which no file the graph names states.
+    const PARENT_SOURCE: &str = "ONEPIPELINE_E2E_PARENT_SOURCE";
+
+    let world = hooked_world("dispatch-env-extends");
+    let hook = hook(&world);
+    let outcome = contract_block()["refusal_outcome"]
+        .as_str()
+        .expect("the block names the outcome")
+        .to_string();
+    // The parent a host states once: the identity, the binary it runs — for the
+    // reason `hooked_worker_config` gives — and the indirection.
+    std::fs::write(
+        world.graphs().join("oneharness-shared.toml"),
+        format!(
+            "[harness.claude-code]\nbin = {:?}\n\n\
+             [harness.claude-code.variant.hooked.env_from]\n{HANDED} = \"{PARENT_SOURCE}\"\n",
+            double("fake-claude").to_string_lossy()
+        ),
+    )
+    .expect("the shared parent config is written");
+    // The role file the graph names, refactored onto it: the chain, and nothing
+    // the parent already says.
+    let worker = world.graphs().join("oneharness-worker.toml");
+    std::fs::write(
+        &worker,
+        "extends = \"./oneharness-shared.toml\"\nrun_mode = \"fallback\"\n\
+         harnesses = [\"claude-code:hooked\"]\n\n[env]\n\
+         ONEPIPELINE_FAKE_MEMBER = \"worker\"\n",
+    )
+    .expect("the worker config is written");
+    world.script("dispatch.report-env", &format!("{PARENT_SOURCE}\n"));
+
+    // A hook printing something that is not the parent's source leaves it
+    // missing, and the launch is refused by the file, the variant and the key.
+    prints(&world, "lacking", &adding(SUPPLIED, "supplied"));
+    attached(
+        &world,
+        "lacking",
+        vec![agent("build", &[])],
+        &["--dispatch-env-hook", &hook],
+    )
+    .settled();
+    let settled = settlement(&world, "lacking", "build");
+    assert_eq!(settled["payload"]["outcome"], outcome, "{settled}");
+    let detail = settled["payload"]["detail"].as_str().unwrap_or_default();
+    for named in [
+        worker.to_string_lossy().as_ref(),
+        "claude-code:hooked",
+        PARENT_SOURCE,
+    ] {
+        assert!(
+            detail.contains(named),
+            "the refusal does not name {named:?}: {detail}"
+        );
+    }
+    assert!(
+        !world.was_invoked("oneagentgraph", &["--label", "onepipeline.node=build"]),
+        "a launch missing an env_from source its parent names was dispatched anyway: {:?}",
+        world.invocations()
+    );
+
+    // Supplied, the same launch goes ahead and the child holds it.
+    let sentinel = "parent-sentinel-1d7b93";
+    prints(&world, "supplied", &adding(PARENT_SOURCE, sentinel));
+    attached(
+        &world,
+        "supplied",
+        vec![agent("build", &[])],
+        &["--dispatch-env-hook", &hook],
+    )
+    .exited(0)
+    .settled();
+    assert_eq!(
+        settlement(&world, "supplied", "build")["payload"]["status"],
+        "done",
+        "{}",
+        world.dump()
+    );
+    assert!(
+        dispatch_env(&world)
+            .iter()
+            .any(|(who, name, state, value)| {
+                who == "build" && name == PARENT_SOURCE && state == "set" && value == sentinel
+            }),
+        "the dispatch was not handed what the parent's source names: {:?}",
+        dispatch_env(&world)
+    );
+}
+
 /// Against the **real** `oneagentgraph`: a node whose oneharness config names an
 /// `env_from` variable absent from the driver's environment and supplied only
 /// by the hook dispatches, and the harness process — where an `env_from` target
