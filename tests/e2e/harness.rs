@@ -36,7 +36,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use onepipeline_testfakes::{rendezvous_script, segment, CLI_BIN_ENV, MEMBER_ENV, SCRIPT_DIR_ENV};
+use onepipeline_testfakes::{
+    rendezvous_script, segment, CLI_BIN_ENV, EVALUATOR_OPENING, MEMBER_ENV, SCRIPT_DIR_ENV,
+};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -396,23 +398,25 @@ fn the_harness_double_takes_the_json_report_by_name_and_refuses_a_view_it_does_n
 }
 
 /// The harness double selects what the **real** CLI selects out of a config that
-/// `extends` another: the chain its parent declares, and a parent the config
-/// names and nothing wrote is that config's own error.
+/// `extends` another: the chain its parent declares, the **model** its parent
+/// asks a candidate for, and a parent the config names and nothing wrote is that
+/// config's own error.
+///
+/// Both halves of what `--config` resolves, because `Selection` reads both out
+/// of the loaded config — the identity chain and each `[harness.<id>].model` —
+/// and a double that inherited one but not the other would answer a turn under
+/// an identity the graph chose and a model nobody asked for.
 ///
 /// `--config <path>` resolves an `extends` chain from `oneharness-core` 0.18.0
 /// on, and `oneagentgraph` anchors a member config's `extends` into the copy it
 /// composes, so the double is handed chains to follow. Reading the text alone
-/// would find a role file naming no chain and *discover* one — a turn attributed
-/// to an identity nobody in the graph chose, which is a double answering more
-/// than the sibling would. Driven as the process onejudge spawns, at the argv
-/// onejudge sends, against the compiled double.
+/// would find a role file naming no chain and *discover* one, and a candidate
+/// asked for no model where its parent asks for one — a turn attributed to an
+/// identity nobody in the graph chose, and one never stepped past though its
+/// server serves the wrong model. Driven as the process onejudge spawns, at the
+/// argv onejudge sends, against the compiled double.
 #[test]
 fn the_harness_double_selects_the_chain_an_extends_parent_declares() {
-    // The evaluator's own opening, which is what makes this a judge turn the
-    // double answers rather than one it refuses. Restated as `dispatch.rs`,
-    // `amend.rs` and `tests/note` restate the supervisor's.
-    const EVALUATOR_OPENING: &str = "You are a strict, careful evaluator";
-
     let fakes = std::env::temp_dir().join(format!("onepipeline-extends-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&fakes);
     std::fs::create_dir_all(&fakes).expect("a scratch directory for the double");
@@ -435,6 +439,9 @@ fn the_harness_double_selects_the_chain_an_extends_parent_declares() {
                 // on. `--no-history` is how the real CLI is told, and the
                 // double ranks it over the environment as the CLI does.
                 "--no-history",
+                // The evaluator's own opening, taken from the double's own
+                // source rather than restated, which is what makes this a judge
+                // turn the double answers rather than one it refuses.
                 "--prompt",
                 EVALUATOR_OPENING,
             ])
@@ -497,6 +504,83 @@ fn the_harness_double_selects_the_chain_an_extends_parent_declares() {
         "{said}"
     );
     assert!(said.contains("gone.toml"), "{said}");
+
+    // The other half the loader changed: a `model` the parent states is the
+    // model the candidate is *asked* for, so the mismatch against what its
+    // server says it would serve is only reachable by following the chain. The
+    // identity chain sits in the child and the model in the parent, so what
+    // this turns on is the inherited model alone — read the one document and
+    // `[harness.codex].model` is unstated, which makes the served model
+    // agreeable and runs codex rather than stepping past it.
+    //
+    // Driven on the **agent** side, at the argv `oneagentgraph` spawns it with:
+    // the chain is stepped where the turn does the work, and a judge turn never
+    // reaches it.
+    const REQUESTED: &str = "gpt-5.5";
+    const SERVED: &str = "gpt-5.5-mini";
+    let worktree = fakes.join("worktree");
+    std::fs::create_dir_all(&worktree).expect("the agent side's worktree");
+    let model_parent = write(
+        "model-parent.toml",
+        &format!("[harness.codex]\nmodel = {REQUESTED:?}\n"),
+    );
+    // What the first candidate's server says the thread would run under.
+    write("harness.serves", SERVED);
+    let config = write(
+        "model-role.toml",
+        &format!(
+            "extends = {:?}\nrun_mode = \"fallback\"\nharnesses = [\"codex\", \"claude-code\"]\n",
+            model_parent.to_string_lossy()
+        ),
+    );
+    let stepped = Command::new(double("fake-oneharness"))
+        .args([
+            "run",
+            "--format",
+            "json",
+            "--stream",
+            "--events",
+            "--config",
+            config.to_string_lossy().as_ref(),
+            "--cwd",
+            worktree.to_string_lossy().as_ref(),
+            "--no-history",
+            "--prompt",
+            "do the work",
+        ])
+        .env(SCRIPT_DIR_ENV, &fakes)
+        .stdin(Stdio::null())
+        .output()
+        .expect("the compiled double runs");
+    assert_eq!(
+        stepped.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&stepped.stderr)
+    );
+    // The agent side streams, so the report is the envelope that terminates it.
+    let report = String::from_utf8_lossy(&stepped.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find_map(|envelope| envelope.get("report").cloned())
+        .expect("the stream ends on a report");
+    assert_eq!(
+        (
+            report["results"][0]["harness"].as_str(),
+            report["results"][0]["model"].as_str(),
+            report["results"][0]["observed_model"].as_str(),
+            report["results"][1]["harness"].as_str(),
+        ),
+        (
+            Some("codex"),
+            Some(REQUESTED),
+            Some(SERVED),
+            Some("claude-code")
+        ),
+        "the double did not hold the parent's model against what the server serves, so a \
+         model stated in an `extends` parent is not the model the candidate is asked for: \
+         {report}"
+    );
     let _ = std::fs::remove_dir_all(&fakes);
 }
 
