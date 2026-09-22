@@ -1373,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "onepipeline"
-version = "0.44.0"
+version = "0.44.1"
 dependencies = [
  "clap",
  "fs4",
