@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.1](https://github.com/nickderobertis/onepipeline/compare/v0.43.0...v0.43.1) - 2026-09-21
+
+### Fixed
+
+- *(deps)* relink onevcs, oneagentgraph, onejudge and the bus onto the bus 0.8.0 ([#445](https://github.com/nickderobertis/onepipeline/pull/445))
+
 ## [0.43.0](https://github.com/nickderobertis/onepipeline/compare/v0.42.1...v0.43.0) - 2026-09-21
 
 ### Added
