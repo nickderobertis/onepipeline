@@ -121,6 +121,12 @@ mod loopcost;
 mod maintenance;
 mod node_validator;
 mod older_launch_record;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
+// exercise is `land`, `lifecycle`'s drafter and `destination`'s resolution together, against
+// the linked `onevcs` over a real origin — so the narrowest edge they can honestly sit
+// behind is the crate itself, which is this target's. Same grounds as `mod lifecycle` above.
+mod out_of_band;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod plan;
 mod plan_check;
 mod real_vcs;

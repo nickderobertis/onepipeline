@@ -572,6 +572,30 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // (`dispatch.report-env`), under the key its scripts go by — so a journey
     // about the dispatch-env hook reads the child's environment off the child.
     fake::report_env(dir, "dispatch", &key);
+    // Which tree a drafting dispatch was handed, where a journey asks
+    // (`pr-author.records-tree`): the commit its directory has checked out and
+    // whether that checkout is detached. Read while the dispatch runs, because a
+    // drafter landing a branch out of band is given a worktree that is removed the
+    // moment it returns — so afterwards there is nothing left to look at.
+    if persona.as_deref() == Some("pr-author") && dir.join("pr-author.records-tree").exists() {
+        record_tree(args, dir);
+    }
+    // A drafter still mid-turn when the landing is interrupted (`pr-author.holds`):
+    // it has recorded its tree — the journey's sign the turn is in flight — and
+    // then holds until the journey releases `pr-author.go`, bounded as every hold
+    // is so a landing that failed to end leaves a failing test, not a process.
+    if persona.as_deref() == Some("pr-author") && dir.join("pr-author.holds").exists() {
+        fake::wait_for(&dir.join("pr-author.go"));
+    }
+    // A drafter that leaves behind something its worktree's owner cannot remove:
+    // a directory it made unwritable, with a file in it (`pr-author.leaves-unremovable`).
+    // What a journey needs to see how a landing reports a worktree it could not take
+    // back out of the checkout — the one failure its cleanup can meet.
+    #[cfg(unix)]
+    if persona.as_deref() == Some("pr-author") && dir.join("pr-author.leaves-unremovable").exists()
+    {
+        leave_unremovable(args);
+    }
 
     // A dispatch scripted to produce *nothing* produces nothing at all — not
     // even the announcement a turn opens with. That is the whole case boundary
@@ -857,6 +881,58 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         return ExitCode::from(code);
     }
     ExitCode::SUCCESS
+}
+
+/// Make `locked/kept` under the dispatch's `--dir`, and then make `locked`
+/// read-only, so nothing but its owner restoring the permission can delete it.
+#[cfg(unix)]
+fn leave_unremovable(args: &[String]) {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(worktree) = fake::flag(args, "--dir") else {
+        fake::fail("a drafting dispatch was given no --dir to leave anything in");
+    };
+    let locked = std::path::Path::new(&worktree).join("locked");
+    let made = std::fs::create_dir_all(&locked)
+        .and_then(|()| std::fs::write(locked.join("kept"), "left by the drafter\n"))
+        .and_then(|()| std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)));
+    if let Err(error) = made {
+        fake::fail(&format!(
+            "{} could not be left behind: {error}",
+            locked.display()
+        ));
+    }
+}
+
+/// Record the tree a dispatch's `--dir` has checked out into
+/// `pr-author-tree.jsonl`: its directory, its `HEAD` commit, and whether `HEAD`
+/// is detached — `git symbolic-ref` answers nothing for a detached one.
+fn record_tree(args: &[String], dir: &std::path::Path) {
+    let Some(worktree) = fake::flag(args, "--dir") else {
+        fake::fail("a drafting dispatch was given no --dir to record the tree of");
+    };
+    let git = |words: &[&str]| {
+        std::process::Command::new("git")
+            .args(words)
+            .current_dir(&worktree)
+            .output()
+            .unwrap_or_else(|error| fake::fail(&format!("git will not run: {error}")))
+    };
+    let head = git(&["rev-parse", "HEAD"]);
+    if !head.status.success() {
+        fake::fail(&format!("{worktree} has no HEAD to record"));
+    }
+    let detached = !git(&["symbolic-ref", "--quiet", "HEAD"]).status.success();
+    fake::append(
+        &dir.join("pr-author-tree.jsonl"),
+        &serde_json::json!({
+            "dir": worktree,
+            "head": String::from_utf8(head.stdout)
+                .unwrap_or_else(|error| fake::fail(&format!("git answered a HEAD that is not UTF-8: {error}")))
+                .trim(),
+            "detached": detached,
+        })
+        .to_string(),
+    );
 }
 
 /// A dispatch that ended for a reason that is **not this agent's verdict on its

@@ -202,16 +202,25 @@ pub enum Command {
     Watch(WatchArgs),
     /// Which of a session's runs has nothing watching it.
     Unwatched(UnwatchedArgs),
-    // llmlint: ignore-block[new_command_or_client_gets_its_own_project] two verbs of this one
+    // llmlint: ignore-block[new_command_or_client_gets_its_own_project] verbs of this one
     // binary rather than a new command or client: each reads the run store and channel the
-    // engine owns, through the crate's private modules, and ships in the same artifact on
-    // the same three registries — the same shape as `unwatched` above.
+    // engine owns, or runs its drafter in front of the `onevcs` library it already links,
+    // through the crate's private modules, and ships in the same artifact on the same three
+    // registries — the same shape as `unwatched` above.
     /// Whether a session's turn may end: one verdict over `unwatched`, for a
     /// harness's stop hook.
     StopGuard(StopGuardArgs),
     /// Ask the manager a blocking question over the run's planner channel, and
     /// answer with theirs.
     Ask(AskArgs),
+    /// Land a completed branch through the linked onevcs `publish-branch`,
+    /// drafting its change request's body first.
+    #[command(override_usage = LAND_USAGE_PUBLISH_BRANCH)]
+    PublishBranch(LandArgs),
+    /// Land a preserved branch through the linked onevcs `recover`, drafting its
+    /// change request's body first.
+    #[command(override_usage = LAND_USAGE_REPO_RECOVER)]
+    RepoRecover(LandArgs),
     // llmlint: ignore-end[new_command_or_client_gets_its_own_project]
     /// Per-node outcomes, with each node's own evidence.
     Results(RunArgs),
@@ -872,6 +881,40 @@ pub struct AskArgs {
     /// for the `surfaces` queue, or the bus's own default when it names none.
     #[arg(long, value_name = "SECONDS")]
     pub timeout: Option<std::num::NonZeroU64>,
+}
+
+/// How `onepipeline publish-branch` is spelled.
+const LAND_USAGE_PUBLISH_BRANCH: &str = "onepipeline publish-branch <BRANCH> --repo \
+     <CHECKOUT|ALIAS> [--pr-author-graph <PATH>] [--no-draft] [ONEVCS-ARGS]...";
+
+/// How `onepipeline repo-recover` is spelled.
+const LAND_USAGE_REPO_RECOVER: &str = "onepipeline repo-recover <BRANCH> --repo \
+     <CHECKOUT|ALIAS> [--pr-author-graph <PATH>] [--no-draft] [ONEVCS-ARGS]...";
+
+/// `onepipeline publish-branch` and `onepipeline repo-recover`.
+///
+/// One list, read in order, because every argument but two is the linked
+/// `onevcs` verb's, forwarded unchanged and judged by its own parser — the
+/// branch, `--repo`, `--title`, `--body`, `--body-file`, and whatever else that
+/// verb takes. The two are this crate's, and may sit anywhere before a `--`:
+/// `--pr-author-graph <PATH>`, the graph the change request's body is drafted by —
+/// required wherever a body would be drafted — and `--no-draft`, which lands with
+/// no drafting turn spent. Nothing is drafted where the caller brought a body or
+/// the identity's rules publish `local-direct`, which opens no change request.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct LandArgs {
+    /// The branch, `--repo <CHECKOUT|ALIAS>`, and every other argument, in order.
+    /// All but two go to the onevcs verb unchanged; `--pr-author-graph <PATH>`
+    /// names the graph the body is drafted by, and `--no-draft` lands with no
+    /// drafting turn spent.
+    #[arg(
+        value_name = "ARGS",
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        num_args = 0..,
+        value_parser = clap::value_parser!(std::ffi::OsString)
+    )]
+    pub args: Vec<std::ffi::OsString>,
 }
 
 /// `onepipeline drive` — the retained driver a detached launch starts.

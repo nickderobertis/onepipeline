@@ -1470,12 +1470,15 @@ fn diagnosis(
     note
 }
 
-/// The task a drafting dispatch is given, ahead of the node's own.
+/// The task a drafting dispatch is given, ahead of the node's own — or, drafted
+/// out of band, ahead of what the branch says about itself.
 ///
-/// Byte for byte what it has always been: the consumer host reads it out of this
-/// binary to hold its own out-of-band drafter to the same prompt, and so does it
-/// read each of the four literals below, which is why every one of them is a
-/// constant on a line of its own rather than a piece of a format string.
+/// Byte for byte what it has always been. The consumer host used to read it, and
+/// each of the literals below, out of this binary to hold an out-of-band drafter of
+/// its own to the same prompt; `onepipeline publish-branch` and `repo-recover` are
+/// that drafter now, composing it in [`out_of_band_drafting_task`], so nothing
+/// reads it from outside. Each stays a constant on a line of its own because
+/// `tests/contract.rs` holds them to entry 69 of `docs/contract-divergences.md`.
 const DRAFTING_TASK: &str = "Read this branch's diff and write the change request's body, \
      following the repository's own template. The task this branch delivered:";
 
@@ -1537,12 +1540,52 @@ fn drafting_task(node: &Node, run: &str, held: Option<&onevcs::SessionChange>) -
     task
 }
 
+/// The whole task a drafting dispatch is given **out of band**, by `onepipeline
+/// publish-branch` or `repo-recover` rather than by a run's closeout.
+///
+/// [`drafting_task`]'s composition with the one thing a landing outside a run
+/// does not have replaced. The run path appends the node's rendered task, an
+/// operator's own statement of what the work is for; there is no node here, so
+/// what is appended instead is what the branch says about itself — its name, its
+/// base, and the full commit messages of `<base>..<branch>`, oldest first — and
+/// the text says those are a record of what was done rather than of why it
+/// mattered, because a drafter told to source `## Why` from the task would
+/// otherwise invent one. There is no `## Change request` section and no `##
+/// Worker transcript` section: there is no session and no run to read either from.
+pub(crate) fn out_of_band_drafting_task(branch: &str, base: &str, commits: &str) -> String {
+    let mut task = format!(
+        "{DRAFTING_TASK}\n\n\
+         This branch is `{branch}`, and its base is `{base}`. It is being drafted out of band, \
+         away from any run that could hand you the task it was dispatched under, so what \
+         follows is not an operator's statement of what the work is for. It is what the branch \
+         says about its own work: the full commit messages of `{base}..{branch}`, oldest \
+         first, as their authors wrote them.\n\n\
+         Read them as a record of what was done. Write `## What` honestly from the diff, \
+         whatever those messages hold. Take `## Why` only from what they actually say about \
+         why the work mattered; where they say nothing about that, let `## Why` be thin — one \
+         honest sentence, or the plain fact that the branch's own record does not say. A thin \
+         `## Why` is a correct outcome here. A `## Why` you invented is not.\n\n"
+    );
+    if commits.trim().is_empty() {
+        task.push_str(
+            "The branch carries no commit its base does not, so its diff is the only record \
+             there is of what it did.\n",
+        );
+    } else {
+        task.push_str(&format!(
+            "The commit messages of `{base}..{branch}`, oldest first:\n\n{}\n",
+            commits.trim_end()
+        ));
+    }
+    task
+}
+
 /// What one drafting dispatch ended as.
 ///
 /// A body or an ending that is not one, because **every** ending here leaves the
 /// publication to proceed with no body: the two are what a change request opens
 /// with, not whether it opens.
-enum Drafted {
+pub(crate) enum Drafted {
     /// It drafted the change request's body.
     Body(String),
     /// It ended with none, and which of the three endings it was.
@@ -1657,27 +1700,78 @@ fn drafted(
         );
         return Some(Drafted::Undrafted(Undrafted::Dispatch(why.to_owned())));
     };
-    let dispatch = executor.dispatch(DispatchRequest {
-        graph: oneagentgraph::config::ConfigRef(graph.to_owned()),
-        task: drafting_task(node, &paths.run, held),
-        labels: engine::dispatch_labels(&paths.run, &node.id, None, Some(PR_AUTHOR_PERSONA)),
-        // None of the node's own: the drafting dispatch is not the node's work,
-        // and a turn budget written for that work would be spent twice — once on
-        // it and once here — if this dispatch inherited it.
-        controls: NodeControls::default(),
-        workspace: WorkspaceSpec::Path(worktree.to_path_buf()),
-        cancel: cancel.clone(),
-        // The node's own attempt: the drafting is part of it, and the record
-        // holds no `node-dispatched` of the drafting's own.
-        attempt,
-    });
-    let mut handle = match dispatch {
+    let (drafted, handle) = draft(
+        executor,
+        DispatchRequest {
+            graph: oneagentgraph::config::ConfigRef(graph.to_owned()),
+            task: drafting_task(node, &paths.run, held),
+            labels: engine::dispatch_labels(&paths.run, &node.id, None, Some(PR_AUTHOR_PERSONA)),
+            // None of the node's own: the drafting dispatch is not the node's work,
+            // and a turn budget written for that work would be spent twice — once on
+            // it and once here — if this dispatch inherited it.
+            controls: NodeControls::default(),
+            workspace: WorkspaceSpec::Path(worktree.to_path_buf()),
+            cancel: cancel.clone(),
+            // The node's own attempt: the drafting is part of it, and the record
+            // holds no `node-dispatched` of the drafting's own.
+            attempt,
+        },
+        paths,
+        &mut |envelope| {
+            let _ = tx.send(Message::Event(Box::new(envelope)));
+        },
+    );
+    // Kept until the node settles, for the reason `EndedDispatches` gives: this
+    // dispatch registered itself under the node like any other.
+    if let Some(handle) = handle {
+        ended.keep(handle);
+    }
+    // Out loud for every dispatch ending rather than one of them, because the
+    // reason does not distinguish between them: a launch that named a drafting
+    // graph and silently drafted nothing is indistinguishable from one that named
+    // none, and the change request it opens carries no sign of it either way.
+    // Which ending a given failure takes depends on where the dispatch runs — a
+    // graph the runner refuses is a refusal to the caller that launched it in its
+    // own process and a settlement to the one that gave it a process of its own —
+    // and an operator reading stderr must not be told only on the arms one
+    // deployment happens to reach.
+    if let Drafted::Undrafted(Undrafted::Dispatch(why)) = &drafted {
+        eprintln!(
+            "onepipeline: node '{}': {why}, so it publishes with no body",
+            node.id
+        );
+    }
+    Some(drafted)
+}
+
+/// Run one drafting dispatch and read the body it drafted — the one drafter this
+/// crate has, reached from a run's closeout and from the out-of-band landing verbs
+/// alike.
+///
+/// Every envelope the dispatch relays is **ingested** here — its report retained
+/// under `paths` — and then handed to `relay`, which is the caller's to put
+/// wherever its stream goes. The body is the first retained member result that
+/// both conformed to the schema and is non-empty ([`crate::report::drafted`]), and
+/// every other ending is one of the three [`Undrafted`] ones, said by nothing
+/// here: which words a failure is reported in belongs to the caller.
+///
+/// The handle comes back — `None` only where the dispatch never started — so a
+/// caller whose run registered it can keep it until its node settles.
+pub(crate) fn draft(
+    executor: &dyn Executor,
+    request: DispatchRequest,
+    paths: &RunPaths,
+    relay: &mut dyn FnMut(Envelope),
+) -> (Drafted, Option<Box<dyn crate::executor::DispatchHandle>>) {
+    let mut handle = match executor.dispatch(request) {
         Ok(handle) => handle,
         Err(error) => {
-            return Some(undrafted(
-                &node.id,
-                format!("the drafting dispatch could not start: {error}"),
-            ))
+            return (
+                Drafted::Undrafted(Undrafted::Dispatch(format!(
+                    "the drafting dispatch could not start: {error}"
+                ))),
+                None,
+            )
         }
     };
     let mut retained = Vec::new();
@@ -1707,7 +1801,7 @@ fn drafted(
         {
             retained.push(paths.report_for(&envelope.stream, envelope.seq));
         }
-        let _ = tx.send(Message::Event(Box::new(envelope)));
+        relay(envelope);
     }
     // llmlint: ignore-block[changed_behavior_has_e2e] the last arm below is reached by a
     // dispatch that failed and by one that was cancelled; the first has a journey of its
@@ -1718,10 +1812,7 @@ fn drafted(
     // published anyway" would be asserting the opposite of what a stop means. Deleting the
     // arm is not the alternative either: it is the same `_` a failed settlement takes.
     let waited = handle.wait();
-    // Kept until the node settles, for the reason `EndedDispatches` gives: this
-    // dispatch registered itself under the node like any other.
-    ended.keep(handle);
-    match waited {
+    let drafted = match waited {
         Ok(outcome) if outcome.succeeded => {
             // Every report the dispatch retained, read as **one** answer: a
             // fallback chain records a candidate per identity it tried, and
@@ -1730,43 +1821,23 @@ fn drafted(
                 .iter()
                 .filter_map(|kept| crate::report::read(kept))
                 .collect();
-            Some(match crate::report::drafted(&kept) {
+            match crate::report::drafted(&kept) {
                 crate::report::Drafted::Body(body) => Drafted::Body(body),
                 crate::report::Drafted::SchemaRefused => {
                     Drafted::Undrafted(Undrafted::SchemaRefused)
                 }
                 crate::report::Drafted::Bodyless => Drafted::Undrafted(Undrafted::Bodyless),
-            })
+            }
         }
-        Ok(outcome) => Some(undrafted(
-            &node.id,
-            format!(
-                "the drafting dispatch settled without succeeding: {}",
-                first_line(&outcome.detail)
-            ),
-        )),
-        Err(error) => Some(undrafted(
-            &node.id,
-            format!("the drafting dispatch could not be waited on: {error}"),
-        )),
-    } // llmlint: ignore-end[changed_behavior_has_e2e]
-}
-
-/// A drafting dispatch that produced no body because the **dispatch** failed,
-/// said out loud and then recorded.
-///
-/// Out loud for every one of those endings rather than one of them, because the
-/// reason does not distinguish between them: a launch that named a drafting graph
-/// and silently drafted nothing is indistinguishable from one that named none,
-/// and the change request it opens carries no sign of it either way. Which
-/// ending a given failure takes depends on where the dispatch runs — a graph the
-/// runner refuses is a refusal to the caller that launched it in its own process
-/// and a settlement to the one that gave it a process of its own — and an
-/// operator reading stderr must not be told only on the arms one deployment
-/// happens to reach.
-fn undrafted(node: &str, why: String) -> Drafted {
-    eprintln!("onepipeline: node '{node}': {why}, so it publishes with no body");
-    Drafted::Undrafted(Undrafted::Dispatch(why))
+        Ok(outcome) => Drafted::Undrafted(Undrafted::Dispatch(format!(
+            "the drafting dispatch settled without succeeding: {}",
+            first_line(&outcome.detail)
+        ))),
+        Err(error) => Drafted::Undrafted(Undrafted::Dispatch(format!(
+            "the drafting dispatch could not be waited on: {error}"
+        ))),
+    }; // llmlint: ignore-end[changed_behavior_has_e2e]
+    (drafted, Some(handle))
 }
 
 /// A dispatch's own words, as one bounded line of a settlement detail.

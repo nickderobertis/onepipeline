@@ -54,11 +54,13 @@ const DRIVER_HANDOVER: Duration = Duration::from_secs(30);
 /// there.
 ///
 /// The polite signal is `SIGTERM` and nothing a run is made of installs a
-/// handler for it, so a process that has taken one is gone in milliseconds; what
-/// this waits out is a loaded host and the moment between a parent dying and
-/// `init` reaping what it left. Long enough that an ordinary teardown never
-/// reports a survivor it merely outran, short enough that an operator whose run
-/// really is wedged hears about it rather than watching a command hang.
+/// handler for it — the one handler this crate has is an out-of-band landing's,
+/// held across its drafting turn alone and never inside a run — so a process
+/// that has taken one is gone in milliseconds; what this waits out is a loaded
+/// host and the moment between a parent dying and `init` reaping what it left.
+/// Long enough that an ordinary teardown never reports a survivor it merely
+/// outran, short enough that an operator whose run really is wedged hears about
+/// it rather than watching a command hang.
 const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
 
 /// How many of a failed driver's last lines a refusal repeats.
@@ -321,6 +323,8 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             // llmlint: ignore-end[cli_output_contract]
             Ok(asked.exit_code())
         }
+        Verb::PublishBranch(args) => crate::land::land(crate::land::Verb::PublishBranch, args.args),
+        Verb::RepoRecover(args) => crate::land::land(crate::land::Verb::Recover, args.args),
         Verb::Results(args) => {
             print!(
                 "{}",
@@ -473,7 +477,7 @@ fn recorded_dir(record: &LaunchRecord) -> Result<PathBuf> {
 // oneagentgraph's transparent ConfigRef are already string-valued. A second newtype would
 // duplicate the sibling type without adding an invariant: relative references are made
 // absolute here, and the nonempty launch-record invariant is checked before every run.
-fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
+pub(crate) fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
     // Refused before anything is joined or opened, because a blank reference
     // resolves to `base` itself — the launch directory — and what happens next
     // is whatever the host's file API answers for opening a directory, which is

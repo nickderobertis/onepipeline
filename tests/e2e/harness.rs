@@ -4143,14 +4143,17 @@ pub fn onetaskgraph_binary() -> PathBuf {
 }
 
 /// The released `onevcs` executable whose holders verb the launcher consumes.
+///
+/// The build is remembered and the alias is not, as for
+/// [`oneagentgraph_binary`]: the last world a process drops removes the
+/// directory the alias lives in, so a test that opens a second world must place
+/// it again. Remembered, it would name a file that is gone, and every `onevcs`
+/// a later world spawns would resolve to whatever the host's `PATH` holds —
+/// nothing at all on a host without an install of its own.
 pub fn onevcs_binary() -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    BUILT
-        .get_or_init(|| {
-            let held = build(&["--package", "onevcs", "--bin", "onevcs", "--locked"]);
-            held_alias(&held, "onevcs")
-        })
-        .clone()
+    let held = BUILT.get_or_init(|| build(&["--package", "onevcs", "--bin", "onevcs", "--locked"]));
+    held_alias(held, "onevcs")
 }
 
 /// A pid this host can prove is gone: a real process, started and reaped.
