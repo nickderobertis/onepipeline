@@ -720,9 +720,11 @@ describe("the judged tier's computation cache", () => {
 
   // Every way llmlint can end a judged run non-zero, and what the operator is
   // owed for each: the findings to clear, the toolchain failure to repair, or the
-  // command that shows what a silent judge did. The judge's streams reach the
-  // recipe only through Nx, so each is driven twice — once with Nx forwarding
-  // them, once with them reaching nobody at all.
+  // command that shows what a silent judge did. A red tier with none of that
+  // attached is one nobody can correct or retry without rerunning the judge by
+  // hand outside Nx — a paid run spent only to read an error message that already
+  // existed. The judge's report reaches the recipe only through Nx, so each way is
+  // driven twice: once with Nx forwarding it, once with it reaching nobody at all.
   for (const [what, env, diagnostics] of [
     ["findings", { FAKE_LLMLINT_EXIT: "1" }, [FINDING, FAIL_VERDICT, "clear the findings above"]],
     [
@@ -737,11 +739,6 @@ describe("the judged tier's computation cache", () => {
     ],
   ]) {
     it(`relays the report behind ${what} when none of the judge's output is forwarded`, (t) => {
-      // A red tier with no reason attached is one nobody can correct or retry
-      // without rerunning the judge by hand outside Nx — a paid run spent only to
-      // read an error message that already existed. The judge records every
-      // non-zero report beside the verdict, and the recipe relays that record
-      // when Nx forwarded none of it.
       const ws = workspace(t);
       const base = ws.head();
 
@@ -1023,6 +1020,39 @@ describe("the judged tier's refusals", () => {
     assert.equal(result.status, 3, report(result));
     assert.match(result.stderr, /could not record that refusal/, report(result));
     assert.match(result.stderr, /without reporting a verdict for this diff/, report(result));
+  });
+
+  it("says what to free when the judge cannot record its report", (t) => {
+    const ws = workspace(t);
+    // The same file where the record's directory belongs, met by a judge llmlint
+    // ruled against: the report is still said, since it is what the operator acts
+    // on, and the status stays llmlint's — a checkout that cannot hold the record
+    // has not changed what was ruled about this diff, and reporting a findings
+    // exit as a broken host would send the operator to repair the wrong thing.
+    writeFileSync(join(ws.root, ".lint-llm-diff"), "", "utf8");
+
+    const result = ws.judge({
+      env: { LLMLINT_DIFF_BASE_SHA: ws.head(), FAKE_LLMLINT_EXIT: "1" },
+    });
+
+    assert.equal(result.status, 1, report(result));
+    assert.match(result.stderr, new RegExp(FINDING), report(result));
+    assert.match(result.stderr, /clear the findings above/, report(result));
+    assert.match(result.stderr, /could not record that report/, report(result));
+  });
+
+  it("says what to repair when an earlier report record cannot be cleared", (t) => {
+    // A report an earlier run left that this one cannot remove would be relayed
+    // as this run's reason, so the judge is not paid for a report the tier could
+    // not tell apart from the stale one.
+    const ws = workspace(t);
+    mkdirSync(join(ws.root, ".lint-llm-diff", "report", "stuck"), { recursive: true });
+
+    const result = ws.lint(ws.head());
+
+    assert.equal(result.status, 3, report(result));
+    assert.match(result.stderr, /the refusal and report records beside it/, report(result));
+    assert.equal(ws.judgeRuns().length, 0, report(result));
   });
 
   it("says what to repair when an earlier verdict record cannot be cleared", (t) => {
