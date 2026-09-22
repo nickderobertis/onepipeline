@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.1](https://github.com/nickderobertis/onepipeline/compare/v0.44.0...v0.44.1) - 2026-09-22
+
+### Fixed
+
+- *(deps)* relink the onevcs and oneagentgraph releases carrying the JSON sweep reports ([#452](https://github.com/nickderobertis/onepipeline/pull/452))
+
 ## [0.44.0](https://github.com/nickderobertis/onepipeline/compare/v0.43.1...v0.44.0) - 2026-09-22
 
 ### Added
