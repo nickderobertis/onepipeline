@@ -236,7 +236,7 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         Ok(text) => text,
         Err(error) => return fake::refuse(&format!("cannot read --config {config}: {error}")),
     };
-    let selection = match selection(&config_text) {
+    let selection = match selection(&config) {
         Ok(selection) => selection,
         Err(refusal) => return fake::refuse(&format!("--config {config}: {refusal}")),
     };
@@ -399,17 +399,27 @@ impl Selection {
     }
 }
 
-/// What a turn under `config` selects.
+/// What a turn under the config at `path` selects.
 ///
-/// Read through oneharness's **own** config reader, so a config the sibling
-/// composed that the real CLI would refuse — an unknown key, an unknown harness
-/// id — is refused here rather than answered around, and the `[harness.<id>]`
-/// section is that library's declaration rather than a copy of it. What makes a
-/// chain resolvable at all is [`Chain`]'s — what is left here is the one case a
-/// chain cannot answer.
-fn selection(config: &str) -> Result<Selection, String> {
-    let config = oneharness_core::domain::config::parse(config)
-        .map_err(|error| format!("this is not a config oneharness could run: {error}"))?;
+/// Read through oneharness's **own** config *loader*, by path and not by text,
+/// for both halves of what the real CLI does with `--config`: a config the
+/// sibling composed that the real CLI would refuse — an unknown key, an unknown
+/// harness id — is refused here rather than answered around, and a config whose
+/// chain or model lives in an `extends` parent selects what the real CLI selects
+/// rather than what the one document says. Reading the text alone would discover
+/// a chain for a role file that names one in its parent — a double answering a
+/// turn nothing prepared. The `[harness.<id>]` section is that library's
+/// declaration rather than a copy of it; what makes a chain resolvable at all is
+/// [`Chain`]'s — what is left here is the one case a chain cannot answer.
+fn selection(path: &str) -> Result<Selection, String> {
+    let path = std::path::Path::new(path);
+    let config = oneharness_core::io::config::load(
+        Some(path),
+        false,
+        path.parent().unwrap_or(std::path::Path::new("")),
+    )
+    .map_err(|error| format!("this is not a config oneharness could run: {error}"))?
+    .config;
     let chain = match &config.harnesses {
         Some(candidates) => Chain::of(candidates)?,
         // What oneharness does with a config that names no chain: discover one.
