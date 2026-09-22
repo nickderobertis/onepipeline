@@ -262,6 +262,14 @@ fn token_of(world: &World, run: &str) -> String {
         .to_owned()
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey lives
+// beside the other session journeys in this file, which is where a reader looks for one
+// and what `just test-e2e` already runs on its own. What it exercises is the seam in
+// `src/executor.rs` that opens a node's session and the `onevcs` calls behind
+// `src/vcs.rs`, both of which any change under `src/` can move — the stamping it asserts
+// on is four lines at that seam — so a project edged narrower than the crate would drop
+// it out of `nx affected` for the very changes it exists to catch, which is the ground
+// `tests/e2e/unwatched.rs` and the blocks in `tests/e2e/views.rs` carry for their own.
 /// Every session a node opens says whose it is on the sibling's own record: the
 /// run, the node, and the session that launched the run — fresh, in a pooled
 /// slot, and from a launch nothing attributed, which names no launcher at all
@@ -347,6 +355,7 @@ fn a_nodes_session_names_its_run_its_node_and_the_session_that_launched_it() {
         "a session opened for something other than a node: {printed}"
     );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// How long the publication under a stopped run is given to leave.
 ///
