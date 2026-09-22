@@ -306,18 +306,24 @@ fn the_activity_rule_condemns_a_member_once_the_work_under_it_stops_and_not_whil
 /// The timings the gate above used to assert, kept as a measurement and never as
 /// a judgement.
 ///
-/// Three numbers were asserted: a silent tree condemned after its bound and
-/// inside eight of them, and a spinning tree not condemned inside three. They
-/// are worth reading — a rule that condemns a report-writing member in half a
-/// bound is a rule nobody should ship — and they are not worth failing a gate
-/// over, because what moves them is the runner's load rather than this crate
-/// (issue #415, and the module docs above for the three runs that crossed one).
-///
-/// So this asserts nothing at all. Every reading is printed beside the window
-/// the old gate held it to and whether it fell inside, a starved runner is
-/// *reported* rather than blamed, and a host that cannot start a tree says so
-/// and stops. `.config/nextest.toml` prints this binary's output on success, so
-/// the numbers reach whoever reads a green run as well as a red one.
+/// Which three windows those were, and why a runner rather than this crate is
+/// what moves the readings inside them, is the module documentation above. What
+/// this adds is the shape: every reading is printed beside the window the old
+/// gate held it to and whether it fell inside, a starved runner is *reported*
+/// rather than blamed, and a host that cannot start a tree says so and stops.
+/// `.config/nextest.toml` prints this binary's output on success, so the numbers
+/// reach whoever reads a green run as well as a red one.
+// llmlint: ignore-block[tests_assert_real_behavior] this is the one site in the
+// suite that deliberately asserts nothing, and the rule is right about every
+// other: what stands here is a *measurement* rather than a test of behaviour.
+// The behaviour — the rule condemning a tree whose work stopped and sparing one
+// whose work keeps arriving — is asserted immediately above, over the same two
+// trees and the same helper, so nothing is left unproven by this being silent.
+// What is left here is three readings whose value moves with the runner's load
+// rather than with this crate, which is exactly what made them a flaky gate
+// (issue #415): asserting on any of them puts that flake straight back, and
+// asserting instead on the apparatus would fail this tier a second time on a
+// host whose real failure the gate above has already named.
 #[cfg(unix)]
 #[test]
 fn the_timings_the_old_gate_asserted_are_measured_and_never_judged() {
@@ -376,6 +382,7 @@ fn the_timings_the_old_gate_asserted_are_measured_and_never_judged() {
         }
     }
 }
+// llmlint: ignore-end[tests_assert_real_behavior]
 
 /// One look at a member's tree, and what the rule made of the member at it.
 #[cfg(unix)]
