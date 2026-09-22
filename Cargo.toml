@@ -478,6 +478,17 @@ resolver = "2"
 # `tests/e2e/session_reuse.rs` reads the labels back through the linked release's
 # own `session holders --json`.
 #
+# **0.30.1 is held back here, and `just engines-current` cannot see that it is.**
+# Its source is byte-identical to 0.30.0 — the whole release is its own wire
+# requirement moving to `onemessagebus{,-agent}` 0.8 — so it carries no labels
+# behaviour this stamps against, and taking it resolves that wire *twice*, which
+# is four type errors in `src/vcs.rs` rather than a version skew. Compiling it
+# would move five further packages, this manifest's wire pins and the two engines
+# that share them. The check names a holdback only from `SIBLINGS` in
+# `scripts/linked-engines.sh`, which `onemessagebus` is not in, so it reports this
+# lock as merely behind and offers `cargo update -p onevcs@0.30.0` — an update
+# that does not build. Take 0.30.1 with the wire, or not at all.
+#
 # `oneagentgraph` 0.4.6 is a **relink and nothing else** — `src/member.rs`
 # re-reads its two engines' channels and moves two version numbers in prose —
 # taken because it requires `oneharness-core` 0.17.0 and `onejudge` 0.13.3
