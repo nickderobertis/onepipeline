@@ -242,10 +242,27 @@ offline-tiers := "(" + rest-tier + ") or (" + note-tier + ")"
 # AGENTS.md. It is measured over the **whole** offline tier, which is why the two
 # runs below report nothing and one merge reports both: the note journeys are
 # their own Nx project, and splitting the run must not split the floor.
-# `--profraw-only` clears the profile set they share without touching the build
-# artifacts they also share.
+
+# The directory `cargo llvm-cov` builds the instrumented tree into and writes the
+# profiles beside, spelled the way cargo-llvm-cov resolves it: its own
+# `CARGO_LLVM_COV_TARGET_DIR` where the environment carries one, and otherwise
+# `llvm-cov-target` under the clone's target directory, which `.cargo/config.toml`
+# pins to `<clone>/target` and `tests/build_config.rs` holds there. Reading
+# `CARGO_TARGET_DIR` as well is not decoration: it outranks that file, so a run
+# carrying one builds somewhere this path would not name, and a clean that missed
+# it would empty a directory nothing had written to while reporting success.
+llvm-cov-target-dir := env("CARGO_LLVM_COV_TARGET_DIR", env("CARGO_TARGET_DIR", justfile_directory() / "target") / "llvm-cov-target")
+
+# Remove that directory whole, before the first instrumented run. Clearing only
+# the profiles — `--profraw-only`, what this did — left every instrumented binary
+# an earlier run had built, and the report reads the objects it *finds* under that
+# directory rather than the ones this run produced: a test binary whose source has
+# since moved on is still an object carrying a coverage map, so every line of it
+# counts as missed and the 95% floor fails over code this run covered. That is a
+# false failure on every iterative run after the first, and an investigation into
+# covered code costs more than the instrumented rebuild this now pays for.
 _crate-coverage-clean:
-    @cargo llvm-cov clean --workspace --profraw-only
+    @rm -rf '{{llvm-cov-target-dir}}'
 
 # The crate's own half of the offline suite, instrumented, reporting nothing.
 _crate-test-rest:
