@@ -424,13 +424,14 @@ fn two_drivers_idle_at_once_maintain_the_slot_once_between_them() {
     // after the hold is released — a sweep of the second meets the claim again
     // and is answered `claimed` again. So its records may be several, but each
     // is `claimed`, from a sweep started before the first driver recorded.
-    let settled = ran["ts"].as_str().expect("a record's timestamp");
+    let recorded_at = ran["ts"].as_str().expect("a record's timestamp");
     for met in records(&world, "two") {
         let started = met["payload"]["started_at"]
             .as_str()
             .expect("a sweep's start");
         assert!(
-            met["payload"]["identities"][0]["outcome"]["claimed"].is_object() && started < settled,
+            met["payload"]["identities"][0]["outcome"]["claimed"].is_object()
+                && started < recorded_at,
             "{}",
             world.dump()
         );
