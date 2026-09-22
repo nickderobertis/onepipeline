@@ -395,6 +395,111 @@ fn the_harness_double_takes_the_json_report_by_name_and_refuses_a_view_it_does_n
     let _ = std::fs::remove_dir_all(&fakes);
 }
 
+/// The harness double selects what the **real** CLI selects out of a config that
+/// `extends` another: the chain its parent declares, and a parent the config
+/// names and nothing wrote is that config's own error.
+///
+/// `--config <path>` resolves an `extends` chain from `oneharness-core` 0.18.0
+/// on, and `oneagentgraph` anchors a member config's `extends` into the copy it
+/// composes, so the double is handed chains to follow. Reading the text alone
+/// would find a role file naming no chain and *discover* one — a turn attributed
+/// to an identity nobody in the graph chose, which is a double answering more
+/// than the sibling would. Driven as the process onejudge spawns, at the argv
+/// onejudge sends, against the compiled double.
+#[test]
+fn the_harness_double_selects_the_chain_an_extends_parent_declares() {
+    // The evaluator's own opening, which is what makes this a judge turn the
+    // double answers rather than one it refuses. Restated as `dispatch.rs`,
+    // `amend.rs` and `tests/note` restate the supervisor's.
+    const EVALUATOR_OPENING: &str = "You are a strict, careful evaluator";
+
+    let fakes = std::env::temp_dir().join(format!("onepipeline-extends-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fakes);
+    std::fs::create_dir_all(&fakes).expect("a scratch directory for the double");
+    let write = |name: &str, text: &str| -> PathBuf {
+        let path = fakes.join(name);
+        std::fs::write(&path, text).expect("the config is written");
+        path
+    };
+    let judge = |config: &Path| -> Output {
+        Command::new(double("fake-oneharness"))
+            .args([
+                "run",
+                "--format",
+                "json",
+                "--compact",
+                "--config",
+                config.to_string_lossy().as_ref(),
+                // Selection is the subject; a history record is not, and this
+                // suite runs inside a dispatch whose own environment turns one
+                // on. `--no-history` is how the real CLI is told, and the
+                // double ranks it over the environment as the CLI does.
+                "--no-history",
+                "--prompt",
+                EVALUATOR_OPENING,
+            ])
+            .env(SCRIPT_DIR_ENV, &fakes)
+            .stdin(Stdio::null())
+            .output()
+            .expect("the compiled double runs")
+    };
+
+    // A parent stating the chain, and a role file that states only that it
+    // extends it — the shape a host refactoring ten configs onto six shared
+    // identities leaves behind.
+    let parent = write(
+        "shared.toml",
+        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
+    );
+    let child = write(
+        "role.toml",
+        &format!("extends = {:?}\n", parent.to_string_lossy()),
+    );
+    let ran = judge(&child);
+    assert_eq!(
+        ran.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let report: Value = serde_json::from_slice(&ran.stdout).expect("the double prints one report");
+    assert_eq!(
+        report["results"][0]["harness"], "codex",
+        "the double ran an identity the parent does not name: {report}"
+    );
+
+    // The parent is where the config is refused too: an identity chain naming
+    // something oneharness has no harness for is the real CLI's refusal, and it
+    // is only reachable by following the chain.
+    let unknown = write("unknown-parent.toml", "harnesses = [\"no-such-harness\"]\n");
+    let refused = judge(&write(
+        "unknown-role.toml",
+        &format!("extends = {:?}\n", unknown.to_string_lossy()),
+    ));
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(
+        refused.status.code(),
+        Some(i32::from(onepipeline_testfakes::USAGE)),
+        "{said}"
+    );
+    assert!(
+        said.contains("no-such-harness") && said.contains("not a config oneharness could run"),
+        "{said}"
+    );
+
+    // And a parent nothing wrote is the config's own error, naming both files,
+    // rather than a turn under a chain the double discovered for itself.
+    let orphan = judge(&write("orphan.toml", "extends = \"./gone.toml\"\n"));
+    let said = String::from_utf8_lossy(&orphan.stderr);
+    assert_eq!(
+        orphan.status.code(),
+        Some(i32::from(onepipeline_testfakes::USAGE)),
+        "{said}"
+    );
+    assert!(said.contains("gone.toml"), "{said}");
+    let _ = std::fs::remove_dir_all(&fakes);
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum StoreEdgeKind {

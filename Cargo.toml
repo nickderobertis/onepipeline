@@ -514,12 +514,8 @@ resolver = "2"
 # its CLI pins equal to this engine's SBOM. Nothing here calls `sweep`, so that
 # needs no requirement or lock entry beyond the relink above.
 #
-# `oneagentgraph` 0.4.10, `onejudge` 0.13.5 and `oneharness-core` 0.18.0 are
-# **one engine**, moved together onto the core that resolves an `extends` chain:
-# 0.4.10 is that relink and nothing else — nothing here reads anything new from
-# it — and it requires the other two exactly, so a lock holding any of the three
-# behind resolves the core twice. What this crate needs from the move is in the
-# `oneharness-core` block below.
+# `oneagentgraph` 0.4.10 is the relink onto the `oneharness-core` 0.18.0 that
+# block asks for, and nothing else: nothing here reads anything new from it.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
@@ -617,10 +613,7 @@ onemessagebus-agent = "0.8.0"
 # requirements move together or the lock resolves the bus twice.
 #
 # 0.13.5 is that release relinked onto the `oneharness-core` 0.18.0 below.
-# Nothing here reads anything new from it; it moves because `oneagentgraph`
-# 0.4.10 requires exactly it and because a lock holding it on 0.13.4 would
-# resolve the core twice — and one core is the property the host adopting this
-# engine asserts off the published wheel's bill of materials.
+# Nothing here reads anything new from it.
 onejudge = "0.13.5"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is

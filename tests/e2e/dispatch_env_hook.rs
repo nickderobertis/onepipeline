@@ -1165,6 +1165,34 @@ fn a_config_whose_identity_lives_in_an_extends_parent_is_read_through_the_chain(
         "the dispatch was not handed what the parent's source names: {:?}",
         dispatch_env(&world)
     );
+
+    // And a config naming a parent this tree does not carry is refused naming
+    // both files: a config that names its parent has asserted it exists, so the
+    // launch stops rather than reading the child as a config that sources
+    // nothing.
+    std::fs::write(
+        &worker,
+        "extends = \"./oneharness-gone.toml\"\nrun_mode = \"fallback\"\n\
+         harnesses = [\"claude-code\"]\n",
+    )
+    .expect("the worker config names a parent that is not there");
+    prints(&world, "orphan", &adding(PARENT_SOURCE, sentinel));
+    attached(
+        &world,
+        "orphan",
+        vec![agent("build", &[])],
+        &["--dispatch-env-hook", &hook],
+    )
+    .settled();
+    let settled = settlement(&world, "orphan", "build");
+    assert_eq!(settled["payload"]["outcome"], outcome, "{settled}");
+    let detail = settled["payload"]["detail"].as_str().unwrap_or_default();
+    for named in [worker.to_string_lossy().as_ref(), "oneharness-gone.toml"] {
+        assert!(
+            detail.contains(named),
+            "the refusal does not name {named:?}: {detail}"
+        );
+    }
 }
 
 /// Against the **real** `oneagentgraph`: a node whose oneharness config names an
