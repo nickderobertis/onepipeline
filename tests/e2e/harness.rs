@@ -745,13 +745,7 @@ impl World {
                 ),
                 "local-md",
             )
-            .env(
-                format!(
-                    "ONETASKGRAPH_SOURCES__{}__CONFIG__ROOT",
-                    STORE_SOURCE.to_uppercase()
-                ),
-                self.store(),
-            )
+            .env(store_root_env(), self.store())
             .env(
                 "ONEPIPELINE_ONEAGENTGRAPH_BIN",
                 double("fake-oneagentgraph"),
@@ -896,13 +890,7 @@ impl World {
                 ),
                 "local-md",
             )
-            .env(
-                format!(
-                    "ONETASKGRAPH_SOURCES__{}__CONFIG__ROOT",
-                    STORE_SOURCE.to_uppercase()
-                ),
-                self.store(),
-            )
+            .env(store_root_env(), self.store())
             // Only what onetaskgraph's own settings layer reads, and last, so a journey
             // that declared a second source reads through it here. `ONETASKGRAPH_BIN` is
             // deliberately not forwarded: it is *onepipeline*'s key for naming this
@@ -2157,6 +2145,39 @@ impl World {
         self.root.join("plan-store")
     }
 
+    /// A `local-md` source root of this world's own, named for one plan.
+    ///
+    /// For a journey that has **two runs live at once**. Both project their board back as
+    /// they go, and the store's own writer replaces a document in place, so two runs
+    /// sharing one root have each one's write-back landing in the other's fixture — which
+    /// is the journey's own setup rather than anything the engine did, and it fails as a
+    /// document read between a truncate and a rewrite. Rooted apart, each run reads and
+    /// writes only what it was given, and what the journey measures is the two runs.
+    ///
+    /// The pair of it is [`run_in`](World::run_in): this says where the plan is written,
+    /// and that points a run at the same place. A world's own [`store`](World::store)
+    /// stays what every single-run journey uses.
+    pub fn store_apart(&self, name: &str) -> PathBuf {
+        self.root.join(format!("plan-store-{name}"))
+    }
+
+    /// Run a command to completion against a source root of this world's own.
+    ///
+    /// Everything [`cmd`](World::cmd) gives the binary, with the one setting that says
+    /// where the source is rooted pointed at `store` instead — so the run reads its plan
+    /// out of that root and projects its board back into it. A detached run's driver
+    /// inherits it, which is what makes the projection land there too.
+    pub fn run_in(&self, store: &Path, args: &[&str]) -> Run {
+        Run::of(
+            self.cmd(args)
+                .env(store_root_env(), store)
+                .output()
+                .expect("the binary runs"),
+            args,
+            self,
+        )
+    }
+
     /// Write a plan into this world's store and return the project id that
     /// launches it.
     ///
@@ -2173,6 +2194,14 @@ impl World {
     /// about a refusal states the plan it means and this writes it faithfully,
     /// so what refuses it is the reader under test rather than the fixture.
     pub fn plan(&self, name: &str, plan: &Value) -> String {
+        self.plan_in(&self.store(), name, plan)
+    }
+
+    /// The same, into a source root of this world's own rather than the shared one.
+    ///
+    /// Written by [`store_apart`](World::store_apart), read by
+    /// [`run_in`](World::run_in): the two halves of one run's own board.
+    pub fn plan_in(&self, store: &Path, name: &str, plan: &Value) -> String {
         let plan = plan.as_object().expect("a plan is a mapping");
         let mut metadata = serde_json::Map::new();
         for (key, value) in plan {
@@ -2184,13 +2213,10 @@ impl World {
         let title = plan.get("name").and_then(Value::as_str).unwrap_or(name);
         let identifier = project_id(name);
         // A second project, so that "which project did it read?" is a question a
-        // fixture can answer. Only once per world.
-        self.decoy_project();
+        // fixture can answer. Only once per root.
+        self.decoy_project(store);
         self.write_item(
-            &self
-                .store()
-                .join("projects")
-                .join(format!("{identifier}.md")),
+            &store.join("projects").join(format!("{identifier}.md")),
             &[("title", json!(title)), ("metadata", json!(metadata))],
             "",
         );
@@ -2220,7 +2246,7 @@ impl World {
             .filter_map(|(node, file)| Some((node.get("id")?.as_str()?, file.as_str())))
             .collect();
         for (node, file) in nodes.iter().zip(&files) {
-            self.task(&identifier, node, file, &named);
+            self.task(store, &identifier, node, file, &named);
         }
         // Asked of the two documents this writer put there, not of the whole store.
         // A board an earlier run of this world was projecting onto when it was
@@ -2230,7 +2256,7 @@ impl World {
         // wait settles. That is the product's state, not this fixture's, and it
         // failed a sound fixture on the gate as `has no front matter`.
         if let Some(missing) =
-            undiscriminating_among(&self.store(), Some(&[identifier.as_str(), DECOY_PROJECT]))
+            undiscriminating_among(store, Some(&[identifier.as_str(), DECOY_PROJECT]))
         {
             panic!("{missing}");
         }
@@ -2243,11 +2269,8 @@ impl World {
     /// Its task carries the node id this suite's plans use most, so a read that
     /// dropped `--project` does not quietly succeed: it comes back holding two
     /// tasks for one node, which is a refusal rather than a silent extra.
-    fn decoy_project(&self) {
-        let path = self
-            .store()
-            .join("projects")
-            .join(format!("{DECOY_PROJECT}.md"));
+    fn decoy_project(&self, store: &Path) {
+        let path = store.join("projects").join(format!("{DECOY_PROJECT}.md"));
         if path.exists() {
             return;
         }
@@ -2261,8 +2284,7 @@ impl World {
         );
         for (file, node) in [("000-work", "work"), ("001-elsewhere", "elsewhere")] {
             self.write_item(
-                &self
-                    .store()
+                &store
                     .join("tasks")
                     .join(DECOY_PROJECT)
                     .join(format!("{file}.md")),
@@ -2277,7 +2299,14 @@ impl World {
     }
 
     /// One node of a plan, as the task carrying it.
-    fn task(&self, project: &str, node: &Value, file: &str, named: &BTreeMap<&str, &str>) {
+    fn task(
+        &self,
+        store: &Path,
+        project: &str,
+        node: &Value,
+        file: &str,
+        named: &BTreeMap<&str, &str>,
+    ) {
         let node = node.as_object().expect("a node is a mapping");
         let id = node.get("id").and_then(Value::as_str);
         let mut metadata = serde_json::Map::new();
@@ -2361,11 +2390,7 @@ impl World {
         }
         front.push(("metadata", json!(metadata)));
         self.write_item(
-            &self
-                .store()
-                .join("tasks")
-                .join(project)
-                .join(format!("{file}.md")),
+            &store.join("tasks").join(project).join(format!("{file}.md")),
             &front,
             node.get("task").and_then(Value::as_str).unwrap_or_default(),
         );
@@ -4100,6 +4125,18 @@ pub const STORE_BINARY_ENV: &str = "ONETASKGRAPH_BIN";
 /// every id a journey launches. A source name may not contain an underscore,
 /// which is what makes `onetaskgraph`'s environment layer unambiguous.
 pub const STORE_SOURCE: &str = "plans";
+
+/// The `onetaskgraph` setting that says where this world's one source is rooted.
+///
+/// One source for the three places that set it — the binary under test, the real store a
+/// journey reads back through, and a run pointed at a root of its own — because a journey
+/// that set a key one of the others spells differently would read a store nobody wrote.
+pub fn store_root_env() -> String {
+    format!(
+        "ONETASKGRAPH_SOURCES__{}__CONFIG__ROOT",
+        STORE_SOURCE.to_uppercase()
+    )
+}
 
 /// The **real** `onetaskgraph` executable every journey reads its plan through.
 ///

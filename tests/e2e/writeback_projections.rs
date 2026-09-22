@@ -20,7 +20,7 @@
 // report stand in only for what an offline store cannot be made to answer. `harness.rs` carries
 // the same suppression and the full rationale.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -1252,4 +1252,176 @@ fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item(
     };
     reused_by_a_whole_projection(&world, "the adopted driver's whole projection");
     reused_by_a_whole_projection(&world, "a second whole projection over the rewritten board");
+}
+
+/// How many nodes each run of the concurrency journey below carries.
+///
+/// The shadow store is rewritten whole on every projection, so this is how many documents
+/// one write-back phase replaces — twelve tasks and the project item. It is not a bound
+/// anything asserts: what decides whether the reader below ever lands inside a rewrite is
+/// how fast it reads, not how much there is to read.
+const CONCURRENT_NODES: usize = 12;
+
+/// One shadow document read the way a `local-md` source reads one, or why it could not be.
+///
+/// The reader the projection's own `project copy` is: front matter between the document's
+/// first two `---` lines, parsed as YAML. A document replaced in place is truncated before
+/// it is rewritten, so this is what a reader arriving inside that window gets — an empty
+/// file, or a front matter that stops mid-key.
+fn shadow_document(path: &Path) -> Result<Value, String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        // Absent is not torn: the projection removes a shadow task no snapshot wrote, and
+        // a listing taken a moment before the removal names a file that has since gone.
+        return Ok(Value::Null);
+    };
+    let front = text
+        .strip_prefix("---\n")
+        .ok_or_else(|| format!("{} opens no front matter: {text:?}", path.display()))?
+        .split_once("---\n")
+        .ok_or_else(|| format!("{} closes no front matter: {text:?}", path.display()))?
+        .0;
+    let parsed: Value = serde_norway::from_str(front)
+        .map_err(|error| format!("{} is not YAML ({error}): {text:?}", path.display()))?;
+    if parsed.get("title").is_none() {
+        return Err(format!(
+            "{} carries no title, so it is not a whole document: {text:?}",
+            path.display()
+        ));
+    }
+    Ok(parsed)
+}
+
+/// Every `.md` document under `dir`, in path order.
+///
+/// `.md` and nothing else, because that is what a `local-md` source lists: an atomic write
+/// leaves a temporary beside its destination until the rename publishes it, and a reader
+/// that took one of those for a document would be reading a file nobody published.
+fn shadow_documents(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("md") {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Two runs projecting at once never show a reader a half-written shadow document.
+///
+/// The shadow store a projection builds is a directory a reader *lists*: `project copy`
+/// reads it as a `local-md` source, and so does anything else pointed at the run. Replaced
+/// in place, each document is truncated before it is rewritten, and a reader arriving in
+/// that window parses an empty file — the run's own board reported as malformed, from a
+/// run that did nothing wrong.
+///
+/// So this drives two real runs at once, each rooted in a source of its own, and reads
+/// both shadow stores as fast as the host allows for as long as either is projecting.
+/// Every document read has to be whole. The journey also counts the rewrites it read
+/// *across*, so a loop that raced nothing cannot pass by reading two settled stores over
+/// and over.
+// llmlint: ignore-block[tests_mirror_real_usage] the claim is about a file a reader can
+// catch mid-write, and no CLI output reports one: what a torn read produces is the store's
+// own refusal, in another process, on a document this crate wrote — nondeterministically,
+// which is the defect. Everything driven here is real: the shipped binary, two real plan
+// stores, real dispatches, the real projection. The direct read is the one observation of
+// the property, it is the same read `local-md` performs, and a window microseconds wide is
+// caught by rate or not at all — a pass that listed a directory or spawned a process per
+// look would pass over a torn tree by never arriving inside one.
+#[test]
+fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
+    let world = World::new("writeback-concurrent-shadow");
+    let runs = ["left", "right"];
+    let shadows: Vec<PathBuf> = runs
+        .iter()
+        .map(|run| {
+            let store = world.store_apart(run);
+            let nodes = (0..CONCURRENT_NODES)
+                .map(|n| agent(&format!("{run}{n}"), &[]))
+                .collect();
+            let project = world.plan_in(&store, run, &plan_of(run, nodes));
+            world
+                .run_in(&store, &["start", &project, "--detach"])
+                .exited(0);
+            world.run_file(run, "writeback")
+        })
+        .collect();
+
+    // The paths, once, off the first projection that built them. Listing them again every
+    // pass is what a reader cannot afford here: the window a replaced document is
+    // truncated in is microseconds wide, so what decides whether this ever lands inside
+    // one is how often it reads *the same file*, and a directory walk between two reads of
+    // one document is the whole of that interval spent elsewhere.
+    world.until("both runs to project a shadow store", |_| {
+        shadows
+            .iter()
+            .all(|shadow| shadow_documents(shadow).len() > CONCURRENT_NODES)
+    });
+    let watched: Vec<Vec<PathBuf>> = shadows
+        .iter()
+        .map(|shadow| shadow_documents(shadow))
+        .collect();
+
+    let mut passes = 0_usize;
+    let mut rewrites = 0_usize;
+    let mut last: Vec<Vec<Value>> = vec![Vec::new(); runs.len()];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        passes += 1;
+        for (nth, documents) in watched.iter().enumerate() {
+            let mut seen = Vec::with_capacity(documents.len());
+            for document in documents {
+                match shadow_document(document) {
+                    Ok(read) => seen.push(read),
+                    Err(torn) => panic!(
+                        "a reader caught a shadow document half-written, {passes} passes and \
+                         {rewrites} rewrites in: {torn}"
+                    ),
+                }
+            }
+            if seen != last[nth] {
+                rewrites += 1;
+                last[nth] = seen;
+            }
+        }
+        // Asked every so often rather than every pass: two stats between two reads of one
+        // document is the same interval spent elsewhere the listing was.
+        if passes.is_multiple_of(200) {
+            if runs
+                .iter()
+                .all(|run| world.run_file(run, "result.json").is_file())
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the two runs did not settle; the runs root held:\n{}",
+                world.dump()
+            );
+        }
+    }
+
+    // Both halves, because either alone is passable by a journey that raced nothing: a
+    // reader that read across no rewrite saw one settled state, and a run that published
+    // nothing gave it none to read.
+    assert!(
+        rewrites >= 10,
+        "the reader never overlapped the projections it is about: {rewrites} rewrites read \
+         across {passes} passes"
+    );
+    for run in runs {
+        assert!(
+            records(&world, run).len() >= 2,
+            "{run} published no board while the reader was reading it"
+        );
+    }
 }
