@@ -509,6 +509,16 @@ resolver = "2"
 #   `Cause` — so below it the variant does not compile. `^0.4.6` admitted the
 #   release, but not the bus it requires beside the old pins.
 #
+# The same two releases are also each sibling's `sweep --format json` report
+# (onevcs 0.30.1, oneagentgraph 0.4.9), and they are the reason a host holds its
+# CLI pins to them: `ai-orchestrator` sets its `onevcs` and `oneagentgraph`
+# CLI versions **equal** to what this engine links, reading them off the wheel's
+# SBOM, so neither JSON report is in force there until an engine release links
+# it. Nothing here calls either sweep — the reports add a `--format` to each
+# sibling's `sweep` verb and a decimal age floor to one, not to a seam this
+# crate composes. So the relink above is the only move either needs: no second
+# requirement, and no second lock entry.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
