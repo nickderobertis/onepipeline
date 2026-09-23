@@ -251,6 +251,18 @@ pub(crate) fn answer_requested(paths: &RunPaths, operations: &[edits::Operation]
 /// Matched on the command rather than on what it compiled to, because the caller
 /// is the submitting process and the compile belongs to whichever writer took the
 /// envelope.
+// llmlint: ignore[changed_behavior_has_e2e] two of the three ways this says `false` are
+// driven end to end by `lifecycle::a_finding_nobody_read_is_answered_by_the_retry_the_reconciler_commits`,
+// which sends a later envelope carrying the same `retry` and one carrying an edit of its
+// own, and holds both refused with nothing appended. The third — an edit **accepted and
+// then turned away**, which reaches the verdict half with the finding unanswered — is not a
+// state any journey can put a run into: `submit_envelope` validates every command against
+// the projected graph before anything is queued, so the only way the reconciler's second
+// judgement differs is a graph two writers moved between the two, and there is no input to
+// either CLI that arranges that. `driver::take_the_run_over_and_answer` carries the same
+// suppression on the same grounds. It is held by
+// `the_exception_is_this_envelopes_own_edit_and_nothing_else` below, which drives that state
+// directly.
 pub(crate) fn answered_alongside(
     paths: &RunPaths,
     correlation: &Correlation,
@@ -526,6 +538,65 @@ mod tests {
             1,
             "the record left the queue rather than being answered on it"
         );
+    }
+
+    /// The exception a bound verdict takes is its **own** edit's, and nothing
+    /// else's: all three of its conditions have to hold.
+    ///
+    /// The middle one is the one a journey drives, and the last one is the one
+    /// no journey can — an envelope's commands are validated before anything is
+    /// queued, so a command accepted and then turned away by the reconciler is a
+    /// graph two writers moved between the two judgements. It is the state that
+    /// matters most, because getting it wrong would append a verdict beside an
+    /// edit that never landed, so it is driven here directly.
+    #[test]
+    fn the_exception_is_this_envelopes_own_edit_and_nothing_else() {
+        let scratch = Scratch::new("alongside");
+        let raised = scratch.conflicted("service");
+        // Parsed from the wire rather than built, because what a manager types is
+        // what reaches this predicate.
+        let asked = |id: &str| {
+            serde_json::from_value::<Command>(serde_json::json!({
+                "op": "retry",
+                "id": id,
+                "node": {"id": format!("{id}-again")},
+            }))
+            .expect("a retry parses")
+        };
+
+        // Accepted and then turned away: the envelope carries the very edit the
+        // finding asked for, and nothing answered it, so there is nothing to
+        // append beside.
+        assert!(
+            !answered_alongside(&scratch.paths, &raised, &[asked("service")]),
+            "a verdict took the exception beside an edit that never landed"
+        );
+
+        // An envelope carrying some other edit takes it no more once the finding
+        // is answered: that is a later reply naming an answered question.
+        answer_requested(&scratch.paths, &retried("service")).expect("the commit answers it");
+        assert!(!answered_alongside(
+            &scratch.paths,
+            &raised,
+            &[asked("other")]
+        ));
+        assert!(!answered_alongside(&scratch.paths, &raised, &[]));
+
+        // And a finding the run recorded no request for is not one an envelope
+        // can have answered.
+        let stranger = correlation(FindingKind::SessionConflict, "never-raised").expect("a key");
+        assert!(!answered_alongside(
+            &scratch.paths,
+            &stranger,
+            &[asked("never-raised")]
+        ));
+
+        // All three together, which is the one case that appends.
+        assert!(answered_alongside(
+            &scratch.paths,
+            &raised,
+            &[asked("service")]
+        ));
     }
 
     /// A committed edit that is not the one the finding asked for answers

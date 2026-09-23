@@ -3421,6 +3421,44 @@ fn a_finding_nobody_read_is_answered_by_the_retry_the_reconciler_commits() {
         .exited(0)
         .out_lacks("waiting for planner decision");
 
+    // And the exception is the *answering* reply's alone. A later envelope naming
+    // the answered finding is refused whatever it carries — the same `retry`
+    // command that answered it included, which is the one an exception keyed on
+    // the command rather than on the envelope would have let through. Both are
+    // refused, and neither appends anything to the question.
+    let standing = answers_to(&world, &run, &key).len();
+    for (carrying, commands) in [
+        (
+            "the same retry again",
+            json!([{
+                "op": "retry",
+                "id": "service",
+                "node": {"id": "service-thrice", "repo": "service", "persona": "engineer",
+                         "title": "feat: ship service", "deps": ["holder"],
+                         "task": "## What\nShip service.\n\n## Why\nUsers need it.\n\n\
+                                  ## Acceptance criteria\n- service is published."}
+            }]),
+        ),
+        (
+            "an edit of its own",
+            json!([{"op": "amend", "id": "holder", "text": "still holding"}]),
+        ),
+    ] {
+        world
+            .run_with_stdin(
+                &["reply", &run, "--correlation", &key],
+                &json!({"version": 2, "message": "and once more", "commands": commands})
+                    .to_string(),
+            )
+            .exited(REFUSED);
+        assert_eq!(
+            answers_to(&world, &run, &key).len(),
+            standing,
+            "a later reply {carrying} appended to a finding an earlier one answered\n{}",
+            why(&world, &run)
+        );
+    }
+
     // The run is still being driven throughout — which is what put the retry on
     // the durable queue rather than making `reply` the writer.
     world.run(&["stop", &run, "--force"]).exited(0);
