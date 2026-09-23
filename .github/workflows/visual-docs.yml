@@ -68,18 +68,12 @@ jobs:
       #
       # The reusable workflow exports $SHOTS_OUT as shots/current/<arch>;
       # screenshots/capture.sh writes captures.json and the SVGs there.
-      # llmlint: ignore-block[work_goes_through_command_surface] this block runs inside a
-      # bare `rust:1-bookworm` container that has neither `just` nor Node, so neither
-      # `just screenshots-tools` (which also needs Go) nor `just bootstrap` (which
-      # installs rustup components, cargo-nextest, cargo-llvm-cov and strace, none of
-      # which a capture uses, and which fans out through Nx) can be called here. Each
-      # line is the body of the recipe that owns it, reading its version from that
-      # recipe's own single source, so the command surface still decides what is
-      # installed — `just screenshots-tools` installs this same `freeze` and
-      # `_ensure-onetaskgraph` this same release.
       capture-command: |
         export RUSTUP_TOOLCHAIN="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+        # llmlint: ignore[work_goes_through_command_surface] this container is a bare `rust:1-bookworm` with no `just`; this is the body of `just screenshots-tools`, which additionally needs Go, and it reads the same `freeze-version` line that recipe does
         bash screenshots/install-freeze.sh
+        # llmlint: ignore[work_goes_through_command_surface] the body of `_ensure-onetaskgraph`, reading the same `onetaskgraph-version` line; `just bootstrap` is the recipe that owns it and it additionally installs rustup components, cargo-nextest, cargo-llvm-cov and strace, none of which a capture uses, through Nx, which this container has no Node for
         cargo install onetaskgraph --locked \
           --version "$(sed -n 's/^onetaskgraph-version *:= *"\([^"]*\)".*/\1/p' justfile)"
+        # llmlint: ignore[work_goes_through_command_surface] no `just` in this container; `just screenshots` wraps exactly this line
         bash screenshots/capture.sh
