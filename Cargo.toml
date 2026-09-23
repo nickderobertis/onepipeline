@@ -499,10 +499,11 @@ resolver = "2"
 # crate composes, so each was moved onto that bus before this one and a lock
 # holding any of them on 0.7 would resolve the bus twice.
 #
-# - `onevcs` 0.30.1 is that library on the bus 0.8.0. Its 0.30.0 adds
-#   `SessionRequest.labels`, which every literal here fills empty. A
-#   **requirement**, because `^0.29` admits no 0.30.x; `onevcs-testing` 0.7.1
-#   requires exactly it, so the two move together.
+# - `onevcs` 0.30.1 was that library on the bus 0.8.0, and 0.30.0 is where
+#   `SessionRequest.labels` arrived, which every literal here fills empty. The
+#   pin has since moved past it — see the block below — so what this bullet
+#   records is why the bus carried the pair over that step, not what the manifest
+#   names today.
 # - `oneagentgraph` 0.4.9 reports an exhausted single-sided fallback chain as
 #   `fallback_chain_exhausted` rather than `unclassified`, which
 #   `src/engine.rs` reads as a chain that stopped through that library's own

@@ -1237,7 +1237,6 @@ fn a_non_empty_command_runs_with_the_program_and_argument_the_document_named() {
     assert_eq!(marker_lines(&world), 0);
     assert!(records(&world, "argv").is_empty(), "{}", world.dump());
 
-    // Released by writing exactly the path the document named.
     std::fs::write(&hold, "go").expect("the hold is released");
     world.until("the record of the run", |world| {
         !records(world, "argv").is_empty()
