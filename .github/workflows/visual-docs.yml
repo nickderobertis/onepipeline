@@ -48,12 +48,7 @@ jobs:
     uses: nickderobertis/screencomp/.github/workflows/visual-docs-reusable.yml@v0.4.8
     with:
       screencomp-version: v0.4.8
-      # Strict: this FAILS when the capture drifts from the committed baseline
-      # (shots/baseline/<arch>.json). Regenerate it with `just screenshots-bless`
-      # — the pre-push guard does it for you — and commit it with the images.
       fail-on-drift: true
-      # Keep the gh-pages gallery bounded: delete this PR's preview on close and
-      # prune history on the monthly schedule above.
       gh-pages-maintenance: true
       gh-pages-history-versions: 20
       # The capture-command runs INSIDE this container (the reusable workflow's

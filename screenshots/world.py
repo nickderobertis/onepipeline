@@ -35,8 +35,24 @@ def repo_root() -> Path:
 # is only *which* plan of that store this capture is about, by the role it plays
 # — the multi-node one and the smallest one — and each is resolved below.
 
-#: Where the shipped example store lives, relative to the repository root.
 STORE = Path("examples/plan-store")
+
+#: What a plan, node or step may be called. Every one of these becomes a command
+#: argument, a path under the runs root, and a filename the doubles are scripted
+#: from, so a document that had grown a space, a separator or a quote would
+#: otherwise put it into all three.
+NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _named(value: str, what: str, where: Path) -> str:
+    """One identifier read out of a fixture, or a refusal naming where it came from."""
+    if not NAME.match(value):
+        raise SystemExit(
+            f"screenshots: {where} names the {what} {value!r}, which is not a plain "
+            "identifier. This capture turns it into a command argument, a run "
+            "directory and a script filename, so fix the document."
+        )
+    return value
 
 
 def _source() -> str:
@@ -49,10 +65,9 @@ def _source() -> str:
             "capture qualifies its plan ids with exactly one. Name which to use "
             "here, or restore the store to a single source."
         )
-    return names[0]
+    return _named(names[0], "store source", document)
 
 
-#: The source every plan id below is qualified by.
 SOURCE = _source()
 
 
@@ -66,7 +81,7 @@ def _plan_named(name: str) -> str:
             "capture cannot say which run it is about. Restore it, or point this "
             "capture at a plan that has one."
         )
-    return found.group(1)
+    return _named(found.group(1), "plan", document)
 
 
 def _nodes_of(plan: str) -> dict[str, list[str]]:
@@ -77,7 +92,10 @@ def _nodes_of(plan: str) -> dict[str, list[str]]:
         node = re.search(r'"onepipeline\.id":\s*"([^"]+)"', text)
         if not node:
             continue
-        nodes[node.group(1)] = re.findall(r'^\s*-\s*"id":\s*"([^"]+)"', text, re.M)
+        nodes[_named(node.group(1), "node", task)] = [
+            _named(step, "step", task)
+            for step in re.findall(r'^\s*-\s*"id":\s*"([^"]+)"', text, re.M)
+        ]
     if not nodes:
         raise SystemExit(
             f"screenshots: no task under {STORE}/tasks/{plan} declares an "
@@ -101,14 +119,17 @@ def _lifecycle_keys(plan: str) -> list[str]:
         node = re.search(r'"onepipeline\.id":\s*"([^"]+)"', text)
         if not node or "repositories:" not in text:
             continue
-        steps = re.findall(r'^\s*-\s*"id":\s*"([^"]+)"', text, re.M)
-        keys.append(f"{node.group(1)}.{steps[0]}" if steps else node.group(1))
+        node = _named(node.group(1), "node", task)
+        steps = [
+            _named(step, "step", task)
+            for step in re.findall(r'^\s*-\s*"id":\s*"([^"]+)"', text, re.M)
+        ]
+        keys.append(f"{node}.{steps[0]}" if steps else node)
     return keys
 
 
-#: The multi-node plan — six nodes, two human approvals, a lifecycle node with a
-#: human step — and the smallest one, which the capture also drives so the
-#: listing has a second project to group.
+#: The multi-node plan the scenes are of, and the smallest one, which the
+#: capture also drives so the listing has a second project to group.
 PLAN = _plan_named("tracked-release")
 SMALL = _plan_named("single-node")
 PLAN_PROJECT = f"{SOURCE}:{PLAN}"
@@ -121,7 +142,6 @@ SMALL_RUN = SMALL
 #: return on, and — because they are released one at a time — fixes the order
 #: they settle in, which a host would otherwise decide per run.
 HELD = _lifecycle_keys(PLAN)
-#: Every node of the smallest plan, whose dispatches are scripted the same way.
 SMALL_KEYS = _lifecycle_keys(SMALL)
 
 #: The launching session and the host name every command runs under. Fixed
@@ -160,7 +180,6 @@ def _deadline() -> float:
 
 DEADLINE_SECONDS = _deadline()
 
-#: How often a wait re-reads the file it is watching.
 POLL_SECONDS = 0.02
 
 
@@ -610,14 +629,17 @@ def _pending_attestations(journal: Path) -> list[str]:
             continue
         payload = _mapping(record, "payload")
         kind = record.get("kind")
+        # Only a string is a reference: this value becomes the argument of an
+        # `attest` the journey then runs, and the journal is what the binary
+        # under test wrote rather than something this capture composed.
         if kind == "decision-pending" and payload.get("kind") == "attestation":
             reference = payload.get("reference")
-            if reference and reference not in raised:
+            if isinstance(reference, str) and reference and reference not in raised:
                 raised.append(reference)
         elif kind == "human-attested":
             labels = _mapping(record, "labels")
             for name in (payload.get("reference"), labels.get("node")):
-                if name:
+                if isinstance(name, str) and name:
                     answered.add(name)
     return [name for name in raised if name not in answered]
 

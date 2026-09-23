@@ -338,23 +338,30 @@ def telemetry_scene(scratch: Path, binaries: Path, normalise) -> str:
     (run / "README.md").unlink(missing_ok=True)
     (run / "dispatches").mkdir(exist_ok=True)
     launch = run / "launch.json"
-    record = json.loads(launch.read_text())
     try:
-        host = record["host"]
-        session = record["session"]
-        driver = f'"pid": {record["pid"]},'
-    except (KeyError, TypeError) as missing:
+        record = json.loads(launch.read_text())
+    except json.JSONDecodeError as broken:
         raise SystemExit(
-            f"screenshots: {source}/launch.json no longer names the host, the "
-            f"launching session and the driver's pid ({missing}), which is what "
-            "lets this capture read the run as finished on any machine. "
-            "`tests/parity.rs` reads the same record — update both together."
-        ) from missing
+            f"screenshots: {source}/launch.json is not readable JSON ({broken}), "
+            "so the recorded run cannot be read as finished here. Restore it from "
+            "git — it is a checked-in recording, not something a run rewrites."
+        ) from broken
+    host = record.get("host") if isinstance(record, dict) else None
+    session = record.get("session") if isinstance(record, dict) else None
+    pid = record.get("pid") if isinstance(record, dict) else None
+    if not isinstance(host, str) or not isinstance(session, str) or not isinstance(pid, int):
+        raise SystemExit(
+            f"screenshots: {source}/launch.json does not name a host, a launching "
+            "session and a driver pid of the types this capture puts into a "
+            "subprocess environment. `tests/parity.rs` reads the same three — "
+            "update both together."
+        )
+    driver = f'"pid": {pid},'
     text = launch.read_text()
     if text.count(driver) != 1:
         raise SystemExit(
             f"screenshots: {source}/launch.json names its driver's pid "
-            f"{record['pid']} {text.count(driver)} times, and exactly "
+            f"{pid} {text.count(driver)} times, and exactly "
             "one is what can be rewritten to a pid no platform issues. Re-record "
             "the run, or read it the way `tests/parity.rs` does."
         )
