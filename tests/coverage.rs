@@ -511,15 +511,32 @@ fn profile_directory() -> Option<PathBuf> {
     dir.is_dir().then(|| dir.to_path_buf())
 }
 
+/// A file this account may run: on unix, one with an execute bit set; elsewhere
+/// there is no such bit, and a file is as much as can be asked of it.
+fn is_executable(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        meta.is_file()
+    }
+}
+
 /// `llvm-profdata`, found the way `cargo llvm-cov` finds it: an explicit override
 /// first, then the llvm-tools shipped beside the active toolchain's target libdir.
 fn llvm_profdata() -> Option<PathBuf> {
     if let Some(explicit) = env::var_os("LLVM_PROFDATA") {
         let explicit = PathBuf::from(explicit);
         assert!(
-            explicit.is_file(),
-            "$LLVM_PROFDATA is {:?}, which is not a file; point it at an \
-             llvm-profdata executable, or unset it to use the toolchain's own",
+            is_executable(&explicit),
+            "$LLVM_PROFDATA is {:?}, which is not an executable file; point it at \
+             an llvm-profdata executable, or unset it to use the toolchain's own",
             explicit
         );
         return Some(explicit);
