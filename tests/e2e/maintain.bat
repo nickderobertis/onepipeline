@@ -30,8 +30,21 @@ if errorlevel 1 (
   exit /b 1
 )
 echo maintain: wrote maintained.log in %CD%
-if defined ONEPIPELINE_E2E_MAINTAIN_EXIT if not "%ONEPIPELINE_E2E_MAINTAIN_EXIT%"=="0" (
-  echo maintain: ONEPIPELINE_E2E_MAINTAIN_EXIT=%ONEPIPELINE_E2E_MAINTAIN_EXIT% asks for a maintenance that fails after writing maintained.log, so this exits %ONEPIPELINE_E2E_MAINTAIN_EXIT% and the sibling records a command that failed. Unset it for one that succeeds 1>&2
-  exit /b %ONEPIPELINE_E2E_MAINTAIN_EXIT%
-)
-exit /b 0
+rem The status this fixture is asked to exit with, checked before it reaches
+rem `exit /b`. `maintain.sh` says why it is refused rather than clamped, and why a
+rem leading zero is refused with the rest; the length test is the flat spelling of
+rem that half's four-character case, because `set /a` and `if GTR` are 32-bit here
+rem and a number longer than the range could be compared as something else.
+set "asked=0"
+if defined ONEPIPELINE_E2E_MAINTAIN_EXIT set "asked=%ONEPIPELINE_E2E_MAINTAIN_EXIT%"
+if "!asked!"=="0" exit /b 0
+if not "!asked:~3!"=="" goto badexit
+echo !asked!|findstr /r /c:"^[1-9][0-9]*$" >nul
+if errorlevel 1 goto badexit
+if !asked! GTR 255 goto badexit
+echo maintain: ONEPIPELINE_E2E_MAINTAIN_EXIT=!asked! asks for a maintenance that fails after writing maintained.log, so this exits !asked! and the sibling records a command that failed. Unset it for one that succeeds 1>&2
+exit /b !asked!
+
+:badexit
+echo maintain: ONEPIPELINE_E2E_MAINTAIN_EXIT holds '!asked!', which is not a status this fixture can exit with. Set it to a whole number between 1 and 255 with no leading zero, or unset it for a maintenance that succeeds 1>&2
+exit /b 64

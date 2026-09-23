@@ -37,7 +37,27 @@ if ! printf 'maintained in %s at %s with [%s]\n' "$(pwd)" "$(date +%s)" "$*" >>m
   exit 1
 fi
 echo "maintain: wrote maintained.log in $(pwd)"
-if [ "${ONEPIPELINE_E2E_MAINTAIN_EXIT:-0}" != "0" ]; then
-  echo "maintain: ONEPIPELINE_E2E_MAINTAIN_EXIT=$ONEPIPELINE_E2E_MAINTAIN_EXIT asks for a maintenance that fails after writing maintained.log, so this exits $ONEPIPELINE_E2E_MAINTAIN_EXIT and the sibling records a command that failed. Unset it for one that succeeds" >&2
-  exit "$ONEPIPELINE_E2E_MAINTAIN_EXIT"
+# `ONEPIPELINE_E2E_MAINTAIN_EXIT` reaches `exit`, so it is checked before it gets
+# there. A value that is not a status is a fixture exiting on something the shell
+# invented rather than on what a journey asked for: `exit 300` wraps round to 44,
+# and a word exits 2 with a message from the shell. Refused rather than clamped or
+# defaulted, and with no leading zero, for the reason `hook.sh`'s own ceiling
+# gives — `maintain.bat` counts with `set /a`, which reads one as octal, so the two
+# halves would exit differently on the same `010`. 64 is `sysexits.h`'s EX_USAGE,
+# which is what the other fixture answers a caller it does not understand with.
+asked=${ONEPIPELINE_E2E_MAINTAIN_EXIT:-0}
+if [ "$asked" != "0" ]; then
+  refused="maintain: ONEPIPELINE_E2E_MAINTAIN_EXIT holds '$asked', which is not a status this fixture can exit with. Set it to a whole number between 1 and 255 with no leading zero, or unset it for a maintenance that succeeds"
+  case "$asked" in
+    '' | 0* | *[!0-9]* | ????*)
+      echo "$refused" >&2
+      exit 64
+      ;;
+  esac
+  if [ "$asked" -gt 255 ]; then
+    echo "$refused" >&2
+    exit 64
+  fi
+  echo "maintain: ONEPIPELINE_E2E_MAINTAIN_EXIT=$asked asks for a maintenance that fails after writing maintained.log, so this exits $asked and the sibling records a command that failed. Unset it for one that succeeds" >&2
+  exit "$asked"
 fi

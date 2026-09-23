@@ -1364,7 +1364,8 @@ fn a_sweep_reports_an_identity_whose_sessions_the_sibling_could_not_survey() {
 /// reads the arguments back out of one, so a half that rendered the line
 /// differently would answer those two on one platform and not the other. The
 /// tokens both halves have to spell — the prefix, and the bracketed argv — are on
-/// the list below beside the file and the environment variable.
+/// the list below beside the file and the environment variable, and so is the range
+/// both halves hold that variable to before it reaches an `exit`.
 // llmlint: ignore-block[tests_mirror_real_usage] the subject is the suite's own
 // scaffolding — that its two halves agree — which no platform can execute both sides
 // of; the fixtures themselves are run the way their callers run them, by `onevcs`
@@ -1379,6 +1380,7 @@ fn both_halves_of_each_fixture_take_the_same_arguments() {
             "ONEPIPELINE_E2E_MAINTAIN_EXIT",
             "maintained in ",
             " with [",
+            "between 1 and 255 with no leading zero",
         ],
     )];
     for (sh, bat, marks) in fixtures {
