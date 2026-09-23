@@ -151,9 +151,14 @@ binary prints, so the disagreement is between the binary and the document.
   is installed separately; see its README. CI installs both itself.
 - `just screenshots` — capture. Builds the release binaries, drives the journey,
   writes `shots/current/<arch>/` and the committed copies in `images/`. Quiet on
-  success. It is an Nx target (`onepipeline:screenshots`) so that every path that
-  can change a rendered shot is declared in `nx.json`'s `visualDocsSource` named
-  input rather than being a command nothing knows the inputs of.
+  success. It is the `onepipeline-visual-docs` Nx project's own target, so that
+  every path that can change a rendered shot is declared in `nx.json`'s
+  `visualDocsSource` named input rather than being a command nothing knows the
+  inputs of — and so that a slow check needing two third-party tools sits behind
+  its own edge rather than inside the CLI application's dependency surface. That
+  project declares no `check`, `build` or `test` target, because it has none: a
+  project that declared the uniform set and ran nothing of its own would drop out
+  of every repo-wide verb while appearing to be covered by it.
 - `just screenshots-gif` — regenerate `images/demo.gif` (needs Python 3 +
   Pillow). Drives the same journey and renders the attached stream frame by frame
   with the same vendored font, Pillow only — no `ttyd`, no `ffmpeg`.

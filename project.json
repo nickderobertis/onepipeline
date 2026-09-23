@@ -82,16 +82,6 @@
         "test",
         "doc"
       ]
-    },
-    "screenshots": {
-      "command": "just _crate-screenshots",
-      "inputs": [
-        "visualDocsSource"
-      ],
-      "outputs": [
-        "{workspaceRoot}/shots/current",
-        "{workspaceRoot}/screenshots/images"
-      ]
     }
   },
   "implicitDependencies": [

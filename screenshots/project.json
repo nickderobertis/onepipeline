@@ -1,0 +1,31 @@
+{
+  "name": "onepipeline-visual-docs",
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "screenshots",
+  "tags": [
+    "scope:docs",
+    "lang:shell"
+  ],
+  "targets": {
+    "screenshots": {
+      "command": "just _visual-docs-capture",
+      "inputs": [
+        "visualDocsSource"
+      ],
+      "outputs": [
+        "{workspaceRoot}/shots/current",
+        "{workspaceRoot}/screenshots/images"
+      ]
+    },
+    "screenshots-bless": {
+      "command": "just _visual-docs-bless",
+      "dependsOn": [
+        "screenshots"
+      ]
+    }
+  },
+  "implicitDependencies": [
+    "onepipeline"
+  ]
+}

@@ -140,6 +140,9 @@
       "inputs": [
         "visualDocsSource"
       ]
+    },
+    "screenshots-bless": {
+      "cache": false
     }
   }
 }

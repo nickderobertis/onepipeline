@@ -429,7 +429,7 @@ screenshots-tools:
 # offline fixtures, render each scene to shots/current/<arch>/ and
 # screenshots/images/. Needs `freeze` on PATH (`just screenshots-tools`).
 screenshots:
-    @bash scripts/nx.sh run onepipeline:screenshots
+    @bash scripts/nx.sh run onepipeline-visual-docs:screenshots
 
 # Regenerate the animated README hero (screenshots/images/demo.gif): the same
 # real binary against the same offline fixtures, rendered frame by frame with
@@ -447,16 +447,22 @@ screenshots-gif:
 # output change. Rewrites this host's lane only (scripts/host-arch.sh names it,
 # and the pre-push guard classifies the same one); commit shots/baseline/ and
 # screenshots/images/ together.
-screenshots-bless: screenshots
+screenshots-bless:
+    @bash scripts/nx.sh run onepipeline-visual-docs:screenshots-bless
+
+# The `onepipeline-visual-docs` project's own target bodies. The capture is its
+# own project rather than a target of the CLI application: it is slow, it needs
+# two third-party tools the gate does not install, and hanging it off the
+# application would put it behind that project's whole dependency surface.
+# Through Nx so its inputs are declared in the build graph — `visualDocsSource`
+# in nx.json enumerates every path that can change a rendered shot — rather than
+# being a command nothing knows the inputs of.
+_visual-docs-capture:
+    @bash scripts/screenshots.sh
+
+_visual-docs-bless:
     @bash scripts/bless-baseline.sh
     @echo "baseline refreshed for the $(bash scripts/host-arch.sh) lane; commit shots/baseline/ + screenshots/images/"
-
-# The `onepipeline:screenshots` target's body. Through Nx so the capture is
-# declared in the build graph — `visualDocsSource` in nx.json enumerates every
-# path that can change a rendered shot — rather than being a command nothing
-# knows the inputs of.
-_crate-screenshots:
-    @bash scripts/screenshots.sh
 
 # Kept OUT of `check` on purpose: the deterministic gate stays offline and
 # credential-free. Config is the composed `llmlint.yml`.
