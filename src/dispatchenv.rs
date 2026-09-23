@@ -7,9 +7,10 @@
 //! bounded wait and the check, called by the executor before anything of a
 //! launch begins; [`Document`] reads the hook's stdout in two steps so that no
 //! refusal can quote a value it printed; and [`validate`] reads the oneharness
-//! configs through the sibling's own parser, resolved against the graph exactly
-//! as the sibling resolves them. Nothing here emits an event or writes a
-//! settlement: a refusal is an error the executor's caller settles.
+//! configs through the sibling's own loader — `extends` chain and all — resolved
+//! against the graph exactly as the sibling resolves them. Nothing here emits an
+//! event or writes a settlement: a refusal is an error the executor's caller
+//! settles.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
@@ -361,7 +362,8 @@ struct EnvFromSource {
 }
 
 /// Check that every `env_from` source the launch's oneharness configs name is
-/// in `refreshed`, reading each config **as the file is on disk now**.
+/// in `refreshed`, reading each config — and every `extends` parent it names —
+/// **as the files are on disk now**.
 ///
 /// The configs are the ones the launch is about to read and no others: the
 /// graph document, with the launch's overrides applied through the sibling's
@@ -395,9 +397,11 @@ fn validate(
 /// Every `env_from` source the launch's configs name, each once, in a stable
 /// order.
 // llmlint: ignore-block[code_lands_in_the_domain_that_owns_it] the harness model is
-// consumed, never restated: each config is read through `oneharness_core`'s own parser
-// into its own typed `FileConfig`, and what is walked below is that public type's
-// `harness` → `variant` → `env_from` fields — the same three the sibling's identity
+// consumed, never restated: each config is read by [`member_config`] through
+// `oneharness_core`'s own loader — which follows the config's `extends` chain and folds
+// it through the sibling's own merge, so a parent's identities are this walk's too —
+// into that library's typed `FileConfig`, and what is walked below is the public type's
+// `harness` → `variant` → `env_from` fields, the same three the sibling's identity
 // resolver walks. oneharness publishes no query for "every env_from source a config
 // names", so the walk lives with the one caller that asks it; the day it publishes one,
 // this becomes that call, and a field the sibling renames fails here at compile time
@@ -430,11 +434,7 @@ fn env_from_sources(
     let mut named = BTreeSet::new();
     for reference in refs {
         let file = config_file(reference, graph_dir.as_deref());
-        let resolved = resolver
-            .resolve(reference, graph_dir.as_deref())
-            .map_err(|error| format!("{file} could not be read: {error}"))?;
-        let config = oneharness_core::domain::config::parse(&resolved.content)
-            .map_err(|error| format!("{file} is not an oneharness config: {error}"))?;
+        let config = member_config(&mut resolver, reference, graph_dir.as_deref(), &file)?;
         for (id, harness) in &config.harness {
             for (name, variant) in &harness.variant {
                 for source in variant.env_from.values() {
@@ -449,6 +449,72 @@ fn env_from_sources(
     }
     Ok(named)
 } // llmlint: ignore-end[code_lands_in_the_domain_that_owns_it]
+
+/// One member's oneharness config, with every `extends` parent it names already
+/// folded under it.
+///
+/// Resolving a chain has exactly one owner — `oneharness_core::io::config::load`,
+/// the loader the sibling's own `--config <path>` goes through — and nothing here
+/// walks, merges or reads a parent itself. That loader takes a **path**, because
+/// `extends` resolves against the directory the declaring file sits in, so a local
+/// reference is handed its path rather than its text: a config whose identities
+/// live in a parent then contributes the parent's `env_from` sources, where
+/// parsing the one document would have contributed none at all.
+///
+/// A remote reference has no directory to resolve a parent against, so it stays on
+/// the one-document parser — and a fetched config that declares `extends` is
+/// refused here, naming the config, rather than read as though its parent said
+/// nothing. That is the rule the loader itself applies to a config with no
+/// location; what this adds is the sentence saying so.
+fn member_config(
+    resolver: &mut Resolver,
+    reference: &ConfigRef,
+    graph_dir: Option<&Path>,
+    file: &str,
+) -> std::result::Result<oneharness_core::domain::config::FileConfig, String> {
+    if resolve::is_remote(reference) {
+        let resolved = resolver
+            .resolve(reference, graph_dir)
+            .map_err(|error| format!("{file} could not be read: {error}"))?;
+        return fetched_config(&resolved.content, file);
+    }
+    let path = resolve::local_path(reference, graph_dir);
+    let start = path.parent().unwrap_or(Path::new("")).to_path_buf();
+    oneharness_core::io::config::load(Some(&path), false, &start)
+        .map(|loaded| loaded.config)
+        .map_err(|error| match error {
+            oneharness_core::errors::OneharnessError::ConfigRead { .. } => {
+                format!("{file} could not be read: {error}")
+            }
+            error => format!("{file} is not an oneharness config: {error}"),
+        })
+}
+
+/// The config a *fetched* reference carries: the one document it is, and no
+/// parent.
+///
+/// `extends` names a parent relative to the directory the declaring file sits
+/// in, and a document read from a URL sits in none — so one that declares a
+/// parent is refused here, naming the config, rather than read as though the
+/// parent had said nothing. The loader refuses a config with no location for
+/// the same reason; what this adds is the sentence, because the fetched text
+/// never reaches it.
+fn fetched_config(
+    content: &str,
+    file: &str,
+) -> std::result::Result<oneharness_core::domain::config::FileConfig, String> {
+    let config = oneharness_core::domain::config::parse(content)
+        .map_err(|error| format!("{file} is not an oneharness config: {error}"))?;
+    if let Some(extends) = &config.extends {
+        return Err(format!(
+            "{file} declares `extends = \"{}\"`, which names a parent relative to the \
+             directory the config file sits in — and this one was fetched rather than read \
+             from a file, so there is no such directory to resolve it against",
+            extends.as_str()
+        ));
+    }
+    Ok(config)
+}
 
 /// The graph document, with the launch's overrides applied the way the sibling
 /// applies them, as the graph the sibling will run.
@@ -513,6 +579,145 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a scratch root");
         root
+    }
+
+    /// A member config whose harness identities live in an `extends` parent
+    /// contributes the **parent's** `env_from` sources: the preflight follows
+    /// the chain the sibling's loader follows, so a dispatch whose environment
+    /// lacks a parent-declared source is refused by the same sentence a
+    /// child-declared one is refused by.
+    ///
+    /// Real files on disk and the real loader: nothing here stands in for the
+    /// chain, so a preflight that read the one document it was handed fails
+    /// this test by finding no variants at all.
+    #[test]
+    fn the_parent_a_member_config_extends_names_this_launchs_sources_too() {
+        let root = scratch("extends");
+        let write = |name: &str, text: &str| {
+            std::fs::write(root.join(name), text).expect("the fixture is written");
+        };
+        // The six identities a host states once, as a parent; the role file
+        // beneath it names the chain and one source of its own.
+        write(
+            "shared.toml",
+            "[harness.claude-code.variant.work.env_from]\n\
+             CLAUDE_CONFIG_DIR = \"HOST_SHARED_HOME\"\n\
+             [harness.codex.variant.review.env_from]\nCODEX_HOME = \"HOST_SHARED_CODEX\"\n",
+        );
+        write(
+            "worker.toml",
+            "extends = \"./shared.toml\"\nrun_mode = \"fallback\"\n\
+             harnesses = [\"claude-code:work\"]\n\
+             [harness.claude-code.variant.work.env_from]\n\
+             ANTHROPIC_API_KEY = \"HOST_WORKER_KEY\"\n",
+        );
+        write(
+            "graph.yaml",
+            "version: 1\nname: node-scope\nmembers:\n  worker:\n    kind: oneharness\n    \
+             oneharness_config: ./worker.toml\n",
+        );
+        let graph = graph_at(&root.join("graph.yaml"));
+        let file = root.join("worker.toml").display().to_string();
+
+        // The parent's two sources and the child's own, all named by the file
+        // the launch reads.
+        let seen: Vec<(String, String, String)> = env_from_sources(&graph, &[])
+            .expect("the sources read")
+            .into_iter()
+            .map(|named| (named.file, named.variant, named.source))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (
+                    file.clone(),
+                    "claude-code:work".into(),
+                    "HOST_SHARED_HOME".into()
+                ),
+                (
+                    file.clone(),
+                    "claude-code:work".into(),
+                    "HOST_WORKER_KEY".into()
+                ),
+                (
+                    file.clone(),
+                    "codex:review".into(),
+                    "HOST_SHARED_CODEX".into()
+                ),
+            ]
+        );
+
+        // And held against an environment: every source present passes, and a
+        // parent-declared one missing is refused by today's sentence.
+        let mut refreshed = BTreeMap::new();
+        for present in ["HOST_SHARED_HOME", "HOST_SHARED_CODEX", "HOST_WORKER_KEY"] {
+            refreshed.insert(present.to_string(), "set".to_string());
+        }
+        validate(&graph, &[], &refreshed).expect("every source is present");
+        refreshed.remove("HOST_SHARED_HOME");
+        let why = validate(&graph, &[], &refreshed).expect_err("the parent's source is missing");
+        assert_eq!(
+            why,
+            format!(
+                "{file} names harness variant 'claude-code:work' whose env_from source \
+                 'HOST_SHARED_HOME' is not in the environment this dispatch would be launched \
+                 with"
+            )
+        );
+
+        // A parent a config names and this tree does not carry is the config's
+        // own error, named by the file the launch reads.
+        write("orphan.toml", "extends = \"./gone.toml\"\n");
+        write(
+            "graph-orphan.yaml",
+            "version: 1\nname: g\nmembers:\n  worker:\n    kind: oneharness\n    \
+             oneharness_config: ./orphan.toml\n",
+        );
+        let why = validate(&graph_at(&root.join("graph-orphan.yaml")), &[], &refreshed)
+            .expect_err("a parent that cannot be read is refused");
+        assert!(
+            why.contains(&root.join("orphan.toml").display().to_string())
+                && why.contains("gone.toml"),
+            "{why}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A config that came from a URL has no directory for `extends` to resolve
+    /// against, so one declaring a parent is refused by name rather than read
+    /// as though the parent said nothing.
+    ///
+    /// Driven at [`fetched_config`] with the real parser and real config text:
+    /// the resolver fetches over `https` only, and no offline test can mint a
+    /// certificate chain a real fetch would accept, so this is the seam the
+    /// fetched bytes actually arrive at.
+    #[test]
+    fn a_fetched_config_that_declares_a_parent_is_refused_by_name() {
+        let why = fetched_config(
+            "extends = \"./shared.toml\"\nharnesses = [\"claude-code:work\"]\n",
+            "https://example.invalid/worker.toml",
+        )
+        .expect_err("a fetched config cannot resolve a parent");
+        assert!(
+            why.contains("https://example.invalid/worker.toml")
+                && why.contains("extends = \"./shared.toml\"")
+                && why.contains("fetched rather than read"),
+            "{why}"
+        );
+
+        // A fetched config naming no parent is read exactly as it was.
+        let config = fetched_config(
+            "[harness.claude-code.variant.work.env_from]\nCLAUDE_CONFIG_DIR = \"HOST_HOME\"\n",
+            "https://example.invalid/plain.toml",
+        )
+        .expect("a fetched config with no parent reads");
+        assert_eq!(
+            config.harness["claude-code"].variant["work"]
+                .env_from
+                .get("CLAUDE_CONFIG_DIR")
+                .map(String::as_str),
+            Some("HOST_HOME")
+        );
     }
 
     /// Every way the document is malformed is named by the member that made it
