@@ -5,7 +5,7 @@
 //! object it finds there, so one whose source has moved on is measured with no
 //! profile to its name and every line counted as missed, failing the 95% floor
 //! over code this run covered. `_crate-coverage-clean` removes that tree whole
-//! before the first instrumented run, and the four tests below drive it.
+//! before the first instrumented run, and the five tests below drive it.
 //!
 //! This run's own is a *truncated profile*, left by a cancellation journey that
 //! killed an instrumented process while the profiling runtime was still flushing.
@@ -15,7 +15,7 @@
 //! `--failure-mode all` out of the justfile and it fails again.
 
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::{env, fs};
 
@@ -144,8 +144,9 @@ fn the_clean_step_passes_over_a_tree_that_was_never_built() {
 ///
 /// Everything here that reaches anything reaches a fixture this test made, so
 /// were the check gone the journey would delete its own fixtures and nothing
-/// else. That is why `<clone>/target` itself is absent though the step refuses
-/// it: the tier running this test is inside it.
+/// else. That is why `<clone>/target` itself is absent from this list though the
+/// step refuses it too — the tier running this test is inside it — and why the
+/// test below reaches that case from a stand-in clone instead.
 #[test]
 fn the_clean_step_refuses_what_does_not_reach_this_clones_build_directory() {
     let outside = env::temp_dir().join(format!(
@@ -221,6 +222,79 @@ fn the_clean_step_refuses_what_does_not_reach_this_clones_build_directory() {
         .unwrap_or_else(|e| panic!("could not remove {}: {e}", outside.display()));
 }
 
+/// And it refuses a build directory *whole*, which is the one case the journey
+/// above leaves out: the bound is what sits under that directory, because it
+/// holds every build in a clone and not only the instrumented one.
+///
+/// The recipe reads that bound off its own working directory, so this drives it
+/// from a stand-in clone rather than from this one. The build directory it
+/// refuses is then the fixture's, and were the check gone the removal would take
+/// the fixture instead of the tree this tier's own binaries and profiles are in.
+/// The stand-in carries a copy of this clone's `Cargo.toml` because the justfile
+/// reads `rust-version` out of one before it runs any recipe at all.
+///
+/// The second half is what keeps the first honest: from that same working
+/// directory the instrumented tree one level under is removed, so a bound that
+/// had come to refuse everything could not pass the refusal alone.
+#[test]
+fn the_clean_step_refuses_a_build_directory_whole() {
+    let clone = env::temp_dir().join(format!(
+        "onepipeline-coverage-clean-clone-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&clone);
+    let build = clone.join("target");
+    let instrumented = build.join("llvm-cov-target");
+    fs::create_dir_all(instrumented.join("debug/deps"))
+        .unwrap_or_else(|e| panic!("could not create {}: {e}", instrumented.display()));
+    fs::copy(repo_root().join("Cargo.toml"), clone.join("Cargo.toml"))
+        .unwrap_or_else(|e| panic!("could not give the stand-in clone a manifest: {e}"));
+
+    let refused = just_from(
+        &clone,
+        &["_crate-coverage-clean".as_ref(), build.as_os_str()],
+    );
+    assert!(
+        !refused.status.success(),
+        "the clean step accepted {} — a whole build directory — as a tree to \
+         remove: {}",
+        build.display(),
+        said(&refused)
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("refusing to remove"),
+        "the refusal does not say what it refused, so a run that set it wrong is \
+         left to guess: {}",
+        said(&refused)
+    );
+    assert!(
+        build.is_dir(),
+        "{} was removed by a step that had refused to remove it",
+        build.display()
+    );
+
+    let cleaned = just_from(
+        &clone,
+        &["_crate-coverage-clean".as_ref(), instrumented.as_os_str()],
+    );
+    assert!(
+        cleaned.status.success(),
+        "{} sits one level under that same build directory and was refused too, \
+         so the bound refuses everything: {}",
+        instrumented.display(),
+        said(&cleaned)
+    );
+    assert!(
+        !instrumented.exists(),
+        "{} survived the clean step: {}",
+        instrumented.display(),
+        said(&cleaned)
+    );
+
+    fs::remove_dir_all(&clone)
+        .unwrap_or_else(|e| panic!("could not remove {}: {e}", clone.display()));
+}
+
 /// `INSTR_PROF_RAW_MAGIC_64` little-endian and not one byte more: as far into its
 /// header as a killed child got. Racing the real thing instead yields profiles cut
 /// off at a page boundary, but LLVM rejects both with the same "file header is
@@ -274,7 +348,18 @@ fn repo_root() -> PathBuf {
 /// directory, so this runs from the repository root, as the `coverage-clean` Nx
 /// target does.
 fn just(args: &[&OsStr]) -> Output {
+    just_from(&repo_root(), args)
+}
+
+/// The same recipes against a working directory of the caller's choosing, which
+/// is how a test reaches the branch that refuses a build directory whole without
+/// naming the one this tier is running out of.
+fn just_from(working: &Path, args: &[&OsStr]) -> Output {
     Command::new("just")
+        .arg("--justfile")
+        .arg(repo_root().join("justfile"))
+        .arg("--working-directory")
+        .arg(working)
         .args(args)
         .current_dir(repo_root())
         .output()
