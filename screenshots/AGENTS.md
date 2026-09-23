@@ -112,3 +112,12 @@ say:
   (`clear_inherited_settings` in `world.py`), and the recipe runs the real hook
   with the real refs on its stdin, pushing nothing. A defect reachable only
   under a hook is reachable from neither `just screenshots` nor `just gate`.
+- **A failed step reports both streams.** `world.run` quoting `stderr` alone is
+  how the push above failed with *no diagnostic at all*: `git commit` with
+  nothing staged exits non-zero having written its whole message to **stdout**,
+  so the refusal read "Fix what its own error below names" and then stopped.
+  `world.said` reports either stream, each named. Keep new steps going through
+  it rather than quoting one stream.
+- **Neither of those two needs `freeze` or `screencomp`**, so neither is excused
+  from the offline tier: `tests/visual_docs.rs` drives `world.py` against real
+  `git` for both, and is where a regression in either is caught without a push.

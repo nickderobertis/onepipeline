@@ -7,10 +7,14 @@ file rather than a clock, are `AGENTS.md` beside it. Shared by `capture.py` and
 they photographed.
 """
 
-# llmlint: ignore-file[changed_behavior_has_e2e] the capture's every step is a
+# llmlint: ignore-file[changed_behavior_has_e2e] what this file *renders through* is a
 # third-party tool `just check` does not install (`freeze`, `screencomp`), so a journey
-# could only assert against stubs of those two. What it produces is checked instead: the
-# visual-docs workflow re-derives the committed baseline on every pull request.
+# over a scene could only assert against stubs of those two; what it produces is checked
+# instead, by the visual-docs workflow re-deriving the committed baseline on every pull
+# request. The part that needs neither tool is journeyed rather than excused:
+# `tests/visual_docs.rs` drives this file against real `git` for the two properties a
+# rejected push turned up — which repository `clear_inherited_settings` leaves the world's
+# git commands acting on, and that `run`'s refusal carries what the failing command said.
 
 from __future__ import annotations
 
@@ -489,13 +493,34 @@ def example_repositories() -> list[str]:
     return sorted(found)
 
 
+def said(done: subprocess.CompletedProcess) -> str:
+    """Everything a failing command said, on whichever stream it said it.
+
+    A diagnostic that quotes `stderr` alone arrives **empty** for a command that
+    reports on stdout, and `git` is one of those: `git commit` with nothing
+    staged exits non-zero having written `nothing to commit` to *stdout*. That
+    is not hypothetical — it is how a capture once failed, under the `GIT_DIR`
+    defect `clear_inherited_settings` now closes, with the words "Fix what its
+    own error below names" followed by nothing at all. A reader given no
+    diagnostic cannot tell a silent command from a message that was thrown away,
+    so both streams are reported, each named, and a command that genuinely said
+    nothing says so in words.
+    """
+    parts = [
+        f"{stream}:\n{text.rstrip()}"
+        for stream, text in (("stdout", done.stdout or ""), ("stderr", done.stderr or ""))
+        if text.strip()
+    ]
+    return "\n".join(parts) or "(the command wrote nothing to stdout or to stderr)"
+
+
 def run(argv: list[str], env: dict) -> None:
     done = subprocess.run(argv, env=env, capture_output=True, text=True)
     if done.returncode != 0:
         raise SystemExit(
             f"screenshots: building the capture's world failed at "
             f"`{' '.join(argv)}` ({done.returncode}). Fix what its own error "
-            f"below names, then re-run `just screenshots`:\n{done.stderr}"
+            f"below names, then re-run `just screenshots`:\n{said(done)}"
         )
 
 
@@ -696,7 +721,7 @@ def _expect(done: subprocess.CompletedProcess, code: int, what: str) -> None:
     if done.returncode != code:
         raise SystemExit(
             f"screenshots: `{what}` exited {done.returncode}, expected {code}. "
-            f"{REPAIR}\n{done.stdout}\n{done.stderr}"
+            f"{REPAIR}\n{said(done)}"
         )
 
 

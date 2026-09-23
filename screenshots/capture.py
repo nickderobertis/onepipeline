@@ -378,7 +378,7 @@ def help_scene(binaries: Path) -> str:
             f"screenshots: `onepipeline --help` exited {done.returncode}, which "
             "means the built binary refuses its own help. Rebuild it "
             "(`cargo build --release --locked --bin onepipeline`) and re-run:\n"
-            f"{done.stderr}"
+            f"{world_module.said(done)}"
         )
     if "\033[" not in done.stdout:
         raise SystemExit(
@@ -465,7 +465,7 @@ def telemetry_scene(scratch: Path, binaries: Path, normalise) -> str:
             f"{done.returncode}. The recorded run is read exactly as "
             "`tests/parity.rs` reads it, so run that suite "
             "(`cargo nextest run -E 'binary(parity)'`) to see which half moved:\n"
-            f"{done.stderr}"
+            f"{world_module.said(done)}"
         )
     return normalise(done.stdout)
 
