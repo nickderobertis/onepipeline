@@ -321,7 +321,9 @@ fn a_nodes_session_names_its_run_its_node_and_the_session_that_launched_it() {
         "the pooled slot's session does not say which run, node and launch opened it"
     );
 
-    // A launch made where nothing names a launching session.
+    // A launch made where nothing names a launching session: the binary records a
+    // blank `ONEPIPELINE_LAUNCHER_SESSION` as `unknown`, so this is the arm that
+    // `ledger::attributed` refuses on that word rather than on an empty string.
     let anonymous = world
         .as_session("ignored")
         .with_env("ONEPIPELINE_LAUNCHER_SESSION", "");
