@@ -45,9 +45,6 @@ use onemessagebus::{
     Lifetime, LocalTransport, Message, OpWord, Pending, QueueError, QueueName, QueueSpec, RawQueue,
     Read, Registry, SchemaId, Transport, TransportConfig, TransportKinds,
 };
-use onemessagebus_agent::channel::{
-    PlannerChannel, COMMANDS, COMMAND_OUTCOMES, PLANNER_CHANNEL, REPLIES, SURFACES,
-};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -55,39 +52,24 @@ use serde_json::{Map, Value};
 use crate::note::{Addressee, Criterion, NoteText};
 use crate::plan::Node;
 
-/// The reply envelope version this crate **writes**, and the newest it reads.
-///
-/// The profile's number, read rather than restated: `agent.reply-envelope` is a
-/// family `onemessagebus-agent` registers, and the version this crate writes is
-/// the newest that registry holds.
-pub const REPLY_ENVELOPE_VERSION: u32 = onemessagebus_agent::channel::REPLY_ENVELOPE_VERSION;
+pub mod layout;
 
-/// Every envelope version this crate **reads**, newest first.
-///
-/// The bump to 3 is additive the way the plan schema's and the launch config's
-/// are: version 3 adds one optional field — a `settle`'s `landing` — and takes
-/// nothing away, so an envelope written against 2 is a complete envelope at 3 and
-/// this build reads it as one. Entry 57 of `docs/contract-divergences.md` records
-/// it, and `tests/golden/reply-envelope-v2.json` is an envelope at the older
-/// version, kept beside the current one so what this build reads is checked in
-/// rather than asserted.
-///
-/// The set is the profile registry's: which versions of the family are read is
-/// `onemessagebus`'s `Registry::read_set`, and how a declared one is read is its
-/// `Registry::read_at`.
-///
-/// A number outside this set is refused where an edit envelope's version has
-/// always been checked, naming the version an edit requires.
-pub const REPLY_ENVELOPE_VERSIONS_READ: &[u32] =
-    onemessagebus_agent::registry::REPLY_ENVELOPE_READS;
+use layout::{
+    recorded_correlation, PlannerChannel, COMMANDS, COMMAND_OUTCOMES, PLANNER_CHANNEL, REPLIES,
+    SURFACES,
+};
+pub use layout::{
+    source, CommandOutcome, CommandResult, CommandVerdict, Surface, ASKER_ENV,
+    REPLY_ENVELOPE_VERSION, REPLY_ENVELOPE_VERSIONS_READ,
+};
 
-/// Every schema the agent profile registers, built once per process.
+/// Every schema the `planner-channel` layout registers, built once per process.
 ///
 /// Building it compiles each document, so it is paid for the first time a reply
 /// is read or a queue is written rather than on every read.
 fn registry() -> &'static std::sync::Arc<Registry> {
     static REGISTRY: std::sync::OnceLock<std::sync::Arc<Registry>> = std::sync::OnceLock::new();
-    REGISTRY.get_or_init(|| std::sync::Arc::new(onemessagebus_agent::registry()))
+    REGISTRY.get_or_init(|| std::sync::Arc::new(layout::registry()))
 }
 
 /// Carry an envelope written against a version this build still reads forward to
@@ -107,12 +89,12 @@ where
     D: serde::Deserializer<'de>,
 {
     let declared = Option::<u32>::deserialize(deserializer)?;
-    Ok(declared.map(|version| {
-        match registry().read_at(onemessagebus_agent::REPLY_ENVELOPE_FAMILY, version) {
+    Ok(declared.map(
+        |version| match registry().read_at(layout::REPLY_ENVELOPE_FAMILY, version) {
             Read::At(read) => read,
             Read::Unknown(_) => version,
-        }
-    }))
+        },
+    ))
 }
 
 /// Who wrote a reply, and therefore which ops it may carry.
@@ -181,11 +163,11 @@ fn valid_word(word: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-/// The `planner-channel` layout's allowlist as the profile declares it, before
+/// The `planner-channel` layout's allowlist as the layout declares it, before
 /// any configuration narrows it.
-fn profile_allowlist() -> &'static Allowlist<OpWord> {
+fn layout_allowlist() -> &'static Allowlist<OpWord> {
     static ALLOWLIST: std::sync::OnceLock<Allowlist<OpWord>> = std::sync::OnceLock::new();
-    ALLOWLIST.get_or_init(|| onemessagebus_agent::channel::allowlist().words())
+    ALLOWLIST.get_or_init(|| layout::allowlist().words())
 }
 
 /// Whether one author may declare the run finished, or a refusal saying why not.
@@ -196,7 +178,7 @@ fn profile_allowlist() -> &'static Allowlist<OpWord> {
 /// decision however it is spelled, which is why the profile grants or refuses
 /// it exactly as it grants or refuses `complete`.
 pub fn allows_completion(author: Author, completion: Option<bool>) -> crate::Result<()> {
-    completion_allowed_by(profile_allowlist(), author, completion)
+    completion_allowed_by(layout_allowlist(), author, completion)
 }
 
 /// [`allows_completion`], under an allowlist a run's configuration narrowed.
@@ -205,8 +187,7 @@ pub(crate) fn completion_allowed_by(
     author: Author,
     completion: Option<bool>,
 ) -> crate::Result<()> {
-    onemessagebus_agent::channel::allows_completion(allowlist, &author.word(), completion)
-        .map_err(crate::Error::Refused)
+    layout::allows_completion(allowlist, &author.word(), completion).map_err(crate::Error::Refused)
 }
 
 /// The ops one author may issue, or a refusal naming what it may not.
@@ -218,7 +199,7 @@ pub(crate) fn completion_allowed_by(
 /// reason it is refused with, and `docs/contract.md` states each of those
 /// refusals.
 pub fn allows(author: Author, command: &Command) -> crate::Result<()> {
-    allowed_by(profile_allowlist(), author, command)
+    allowed_by(layout_allowlist(), author, command)
 }
 
 /// [`allows`], under an allowlist a run's configuration narrowed.
@@ -227,8 +208,7 @@ pub(crate) fn allowed_by(
     author: Author,
     command: &Command,
 ) -> crate::Result<()> {
-    onemessagebus_agent::channel::allows(allowlist, &author.word(), op_of(command))
-        .map_err(crate::Error::Refused)
+    layout::allows(allowlist, &author.word(), op_of(command)).map_err(crate::Error::Refused)
 }
 
 /// The wire word for one command's op.
@@ -837,21 +817,6 @@ pub const REPLY_TIMEOUT_ENV: &str = "ONEPIPELINE_REPLY_TIMEOUT_SECONDS";
 /// it.
 pub const DEFAULT_REPLY_TIMEOUT_SECONDS: u64 = 30;
 
-/// The environment variable naming which asker a host-owned bus listener acts
-/// for.
-///
-/// A serving process is a listener a side rents, and never that side itself: an
-/// asker may raise one question through one session and wait for the verdict
-/// through a succession of them. Two sessions carrying the same value are one
-/// asker, and the later takes back over what the earlier left outstanding — see
-/// `ChannelState::attend`, which is where that is spelled out.
-///
-/// The value is **opaque and compared for equality only**. Every dispatch this
-/// crate makes carries one of its own, composed in
-/// `executor::prepare_dispatch_env`. A session carrying none listens on its own:
-/// it adopts nothing and nothing adopts what it raised.
-pub const ASKER_ENV: &str = "ONEPIPELINE_CHANNEL_ASKER";
-
 /// One asker's name: the word by which two serving sessions are one side.
 ///
 /// The bus's own type, whose two refusals — a **blank** value, which every
@@ -859,103 +824,6 @@ pub const ASKER_ENV: &str = "ONEPIPELINE_CHANNEL_ASKER";
 /// collapses onto every other such value when it is read — are the words this
 /// crate refused them with, named by where the value came from.
 pub(crate) use onemessagebus::Asker;
-
-/// Read the asker a queue recorded, reading a name that names nobody as none.
-///
-/// The one lenient boundary in this file, and the leniency is the point. A
-/// surface is read out of a whole projection or out of one line of the log, and
-/// a refusal here would refuse the record around it rather than one field: the
-/// **whole queue** read as empty, or the surface dropped from the fold — either
-/// way a surface lost, which is a far worse answer to a name this crate never
-/// writes than simply not knowing whose it was.
-fn recorded_asker<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Asker>, D::Error> {
-    Ok(Option::<String>::deserialize(deserializer)?
-        .and_then(|name| Asker::new(&name, "the recorded asker").ok()))
-}
-
-/// Read the correlation a record carries, reading one that is not a correlation
-/// as none, for the reason [`recorded_asker`] reads a blank asker as none.
-fn recorded_correlation<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Correlation>, D::Error> {
-    Ok(Option::<String>::deserialize(deserializer)?.and_then(|text| text.parse().ok()))
-}
-
-/// What raised a surface.
-///
-/// A check-in update and a worker's proposal are the same wire shape and
-/// different facts, so a journal reader can tell "nothing was sent" from
-/// "updates were sent and nobody read them". The words are the profile's.
-pub(crate) use onemessagebus_agent::channel::source;
-
-/// One surface, as it sits in the durable queue.
-///
-/// The record the `surfaces` queue holds, registered as the profile's
-/// `agent.planner-surface@1` and written in this field order — which is the
-/// order 0.28.2 wrote, and the order the bus reshapes every line it writes to.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, JsonSchema)]
-pub struct Surface {
-    /// Monotonic within the run, so a consumer can report which one it read.
-    pub id: u64,
-    /// What the surface is asking about.
-    pub kind: String,
-    /// Its text.
-    pub message: String,
-    /// What raised it — see [`source`].
-    pub source: String,
-    /// Whether the run is waiting on the answer. A **blocking** surface is a
-    /// decision point and holds the subtree that depends on
-    /// [`workstream`](Self::workstream); a non-blocking one holds nothing.
-    pub blocking: bool,
-    /// When it was queued, in epoch milliseconds.
-    pub queued_at: u64,
-    /// The node that provoked it, when one did.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workstream: Option<String>,
-    /// Whether anybody is listening for the answer.
-    ///
-    /// Set by the channel's `abandon` when the process serving this surface
-    /// exited without an answer, and lifted by its `attend` when a later
-    /// listener of the same asker
-    /// takes it back over — a listener ending is not the asker going. While it
-    /// stands, the surface keeps its text and its place: what it gives up is its
-    /// claim on the unread count, on the subtree a blocking surface holds, and on
-    /// being reported as a question the run awaits a verdict on. Omitted from the
-    /// wire while it is false, so a queue nothing has abandoned serializes
-    /// exactly as it always did.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub abandoned: bool,
-    /// Who raised it, when the session that did named an asker.
-    ///
-    /// The key the channel's `attend` matches on: a later session of
-    /// the same asker takes this surface back over, and a session of any other
-    /// asker leaves it exactly where it is. `None` is a surface nobody named an
-    /// asker for — every one an older build wrote, and every one raised outside a
-    /// serving session — and nothing ever adopts one of those. Omitted from the
-    /// wire while it is absent, so a queue no asker was named on serializes
-    /// exactly as it always did.
-    #[serde(
-        default,
-        deserialize_with = "recorded_asker",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub asker: Option<Asker>,
-    /// The correlation a reply echoes to answer it, when it was raised as a
-    /// question through the bus's `ask`. Omitted while absent, so a surface raised any other way is
-    /// written byte for byte as 0.28.2 wrote it.
-    #[serde(
-        default,
-        deserialize_with = "recorded_correlation",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub correlation: Option<Correlation>,
-}
-
-impl Message for Surface {
-    const SCHEMA: SchemaId = onemessagebus_agent::channel::SURFACE_SCHEMA;
-}
 
 /// The durable channel state for one run.
 ///
@@ -1039,91 +907,6 @@ pub struct QueuedCommands {
     pub author: Author,
     /// The commands, reconciled in order.
     pub commands: Vec<Command>,
-}
-
-/// The reconciler's answer to one submitted envelope.
-///
-/// An envelope is all-or-nothing, so [`applied`](Self::applied) is still the
-/// whole envelope's answer and every reader that predates
-/// [`results`](Self::results) keeps reading exactly what it read. What that
-/// boolean could never say is *which* command decided it, which is what left a
-/// manager believing a node's bar had changed when the command that would have
-/// changed it was never compiled.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct CommandOutcome {
-    /// The envelope this answers.
-    pub id: u64,
-    /// Whether every command in it was applied.
-    pub applied: bool,
-    /// Why not, when it was not.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// One entry per command the envelope carried, in the order it carried them.
-    ///
-    /// Omitted when empty, so a record this build writes for an envelope with no
-    /// commands is byte-for-byte the record an older build wrote.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub results: Vec<CommandResult>,
-}
-
-/// What became of **one** command of an envelope.
-///
-/// Every command is evaluated, whatever the ones before it said, so each entry is
-/// that command's **own** answer. The envelope is still atomic — a refusal
-/// anywhere in it applies none of it — and the four words below are what tells
-/// apart the facts a single boolean could not: which commands were wrong, which
-/// were fine and went down with them, and which of those had already been read by
-/// a conversation that cannot unread it. A manager reading them knows which to
-/// fix, which to resend unchanged, and which not to resend at all.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct CommandResult {
-    /// Where in the envelope's `commands` this one sat, from zero.
-    pub index: usize,
-    /// The command's op, as the envelope spelled it.
-    ///
-    /// Carried so an entry names the command it belongs to rather than leaving a
-    /// reader to count positions in the envelope it sent.
-    pub op: String,
-    /// What became of it.
-    pub outcome: CommandVerdict,
-    /// Why it refused, or what refused around it, when either happened.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-/// The four things that can become of one command of an envelope.
-///
-/// One field rather than a boolean and a sentence, because "not applied" was two
-/// facts wearing one word: a command that was wrong and a command that was fine.
-/// A reader that cannot tell them apart resends the wrong one and fixes the right
-/// one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CommandVerdict {
-    /// It was validated and committed.
-    Applied,
-    /// It was validated and nothing was wrong with it, and **nothing of it
-    /// happened**: no conversation was offered anything on its behalf, no graph
-    /// moved, and no record was written for it. Something else in the envelope
-    /// refused, and an envelope applies all of its commands or none. Resending it
-    /// on its own is what gets it in, and resending it costs nothing, because it
-    /// had no effect to repeat.
-    Validated,
-    /// A `note` whose conversation **took it**, in an envelope refused after that.
-    ///
-    /// Nothing of this command was committed — the same nothing
-    /// [`Validated`](Self::Validated) reports — but a conversation has no undo, so
-    /// resending the envelope hands that party the note a second time.
-    /// `engine::deliver_envelope` states the one window this is reachable through.
-    // llmlint: ignore[changed_behavior_has_e2e] no journey can arrange that
-    // window: it takes a live conversation accepting a note and, in the same run
-    // and envelope, a second node whose member has settled — and the harness
-    // double holds every turn of a run on one shared gate. Its two sides are
-    // driven end to end in `tests/note/main.rs` and the word itself by
-    // `engine::tests::a_refused_envelope_answers_a_delivered_note_differently_from_an_untouched_command`.
-    Delivered,
-    /// It refused, and [`reason`](CommandResult::reason) is what it said.
-    Refused,
 }
 
 /// The one layout a run's channel is kept under.
@@ -1219,7 +1002,7 @@ fn queue_name(text: &str) -> QueueName {
 
 /// The layout's own declaration of one of its queues.
 fn declared(text: &str) -> QueueSpec {
-    onemessagebus_agent::channel::queues()
+    layout::queues()
         .into_iter()
         .find(|spec| spec.name.as_str() == text)
         .unwrap_or_else(|| unreachable!("the planner-channel layout declares {text}"))
@@ -1315,7 +1098,10 @@ impl ChannelState {
         launch: &crate::ledger::LaunchRecord,
     ) -> Self {
         Self {
-            config: launch.bus_config.clone().map(Arc::new),
+            config: launch
+                .bus_config
+                .as_ref()
+                .map(|recorded| Arc::new(recorded.config().clone())),
             ..Self::new(paths)
         }
     }
@@ -1416,7 +1202,7 @@ impl ChannelState {
     /// configuration narrowed.
     pub(crate) fn allows(&self, author: Author, command: &Command) -> crate::Result<()> {
         match &self.config {
-            None => allowed_by(profile_allowlist(), author, command),
+            None => allowed_by(layout_allowlist(), author, command),
             Some(_) => allowed_by(self.bus()?.allowlist(), author, command),
         }
     }
@@ -1424,7 +1210,7 @@ impl ChannelState {
     pub(crate) fn declares(&self, author: &Author) -> crate::Result<()> {
         let configured;
         let allowlist = match &self.config {
-            None => profile_allowlist(),
+            None => layout_allowlist(),
             Some(_) => {
                 configured = self.bus()?;
                 configured.allowlist()
@@ -1453,7 +1239,7 @@ impl ChannelState {
         completion: Option<bool>,
     ) -> crate::Result<()> {
         match &self.config {
-            None => completion_allowed_by(profile_allowlist(), author, completion),
+            None => completion_allowed_by(layout_allowlist(), author, completion),
             Some(_) => completion_allowed_by(self.bus()?.allowlist(), author, completion),
         }
     }
@@ -1845,13 +1631,18 @@ impl ChannelState {
     /// Raise `question` as one the bus answers by correlation, and hand back
     /// the handle its answer arrives on.
     ///
-    /// Stamped by the bus with its correlation, its blocking flag and its
-    /// asker, and judged, validated and appended as any surface is.
-    pub(crate) fn ask(&self, question: Surface) -> crate::Result<Pending<Value>> {
+    /// Stamped by the bus with its correlation, its blocking flag, its asker
+    /// and what it is `about` — which the layout records as the surface's
+    /// `workstream` — and judged, validated and appended as any surface is.
+    pub(crate) fn ask(
+        &self,
+        question: Surface,
+        about: Option<onemessagebus::Address>,
+    ) -> crate::Result<Pending<Value>> {
         let options = AskOptions {
             blocking: question.blocking,
             asker: question.asker.clone(),
-            about: None,
+            about,
         };
         self.judging_bus()?
             .ask::<Surface, Value>(&queue_name(SURFACES), question, options)
@@ -2194,7 +1985,7 @@ mod tests {
         let mut own = onemessagebus::Registry::new();
         own.register::<Reply>()
             .expect("this crate's envelope schema registers");
-        let profile = onemessagebus_agent::registry();
+        let profile = layout::registry();
         let at = |version: u32| SchemaId::literal("agent", "reply-envelope", version);
         for (golden, version) in [(ENVELOPE_GOLDEN, 3), (ENVELOPE_GOLDEN_BEFORE, 2)] {
             let document: Value = serde_json::from_str(golden).expect("the golden is JSON");
@@ -2394,18 +2185,21 @@ mod tests {
         /// A question raised through the host bus.
         fn asked(&self, message: &str, blocking: bool) -> Correlation {
             self.channel
-                .ask(Surface {
-                    id: 0,
-                    kind: "planner-question".to_owned(),
-                    message: message.to_owned(),
-                    source: source::PROPOSAL.to_owned(),
-                    blocking,
-                    queued_at: 1,
-                    workstream: None,
-                    abandoned: false,
-                    asker: None,
-                    correlation: None,
-                })
+                .ask(
+                    Surface {
+                        id: 0,
+                        kind: "planner-question".to_owned(),
+                        message: message.to_owned(),
+                        source: source::PROPOSAL.to_owned(),
+                        blocking,
+                        queued_at: 1,
+                        workstream: None,
+                        abandoned: false,
+                        asker: None,
+                        correlation: None,
+                    },
+                    None,
+                )
                 .expect("the question is asked")
                 .correlation()
                 .clone()

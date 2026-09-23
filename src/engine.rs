@@ -3532,6 +3532,15 @@ fn start_ready(
     releases: &crate::release::Watch,
     workspaces: &mut crate::pool::Workspaces,
 ) -> Result<bool> {
+    // Nothing new starts once this run's shutdown has begun. Asked here rather
+    // than left to the teardown that is coming: the driver goes on scheduling
+    // for as long as the grace lasts, and a node it dispatched into a host that
+    // is going away is a worker with nowhere to put its work. The hold outlives
+    // this process — a run whose teardown left a driver standing goes on
+    // dispatching nothing — and an `adopt` is what lifts it.
+    if crate::shutdown::begun(paths) {
+        return Ok(false);
+    }
     let concurrency = state.graph.concurrency as usize;
     // Two things become actionable here. A `ready` node is dispatched, and a
     // human action that has just become ready is *recorded* as waiting — the
@@ -4645,6 +4654,112 @@ struct MemberDeath {
     /// [`stopped_a_chain`](Self::stopped_a_chain) — because for that death the
     /// detail is the whole of the evidence: the cause names nothing.
     detail: String,
+    /// Every candidate an exhausted chain attempted, in attempt order, each with
+    /// its own identity, failure kind and detail — what the producer carries on
+    /// a `fallback_chain_exhausted` death and on no other, so empty for every
+    /// other death.
+    attempted: Vec<AttemptedCandidate>,
+}
+
+/// One candidate an exhausted fallback chain attempted, as the producer's
+/// `member-died` carries it (`oneagentgraph::event::AttemptedCandidate`):
+/// the identity that selects it again, oneharness's own failure kind for it —
+/// `None` where oneharness could not classify one — and what it said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AttemptedCandidate {
+    pub identity: String,
+    pub failure_kind: Option<String>,
+    pub detail: String,
+}
+
+/// One entry of a `member-died`'s `candidates`, as its shape is checked where it
+/// crosses into this crate: an identity and a detail that are text, and a kind
+/// that is text or null. Deliberately not the producer's own
+/// `AttemptedCandidate`, which is `deny_unknown_fields`, for the reason
+/// [`MemberDeath::of`] reads the death by field: a field a newer producer adds
+/// must not make every candidate unreadable.
+#[derive(Deserialize)]
+struct CandidateWire {
+    identity: String,
+    failure_kind: Option<String>,
+    #[serde(default)]
+    detail: String,
+}
+
+impl AttemptedCandidate {
+    /// The candidates an exhausted chain's `payload` carries, in order, each
+    /// bounded to one line — read only for that cause, the one the producer
+    /// carries them on.
+    ///
+    /// An entry that is not a candidate's shape, or names no identity, is kept
+    /// in its place and named as that — the refusal as its detail — rather than
+    /// dropped or read as blank, so the finding says a candidate went unread
+    /// instead of misreporting how many the chain attempted; and a death of that
+    /// cause carrying no list at all is named the same way, as one unread entry.
+    /// A kind that is not a classification reads as none: it is another
+    /// process's word, and none is rendered `unclassified`.
+    // llmlint: ignore[changed_behavior_has_e2e] the unread arms are not reachable from any
+    // producer in this tree: `oneagentgraph` writes each candidate through its own typed
+    // `AttemptedCandidate`, exactly when the cause is this one, and the fake producer does
+    // the same, so a malformed entry or a missing list is a stream something else wrote.
+    // Reaching it end to end would mean hand-writing that envelope, which proves the
+    // fixture. This module's unit test drives every shape past the real reading, and
+    // `boundary::an_exhausted_fallback_chain_raises_a_finding_carrying_every_candidate_it_attempted`
+    // is the journey for the arm a producer does reach.
+    fn all_of(payload: &serde_json::Map<String, Value>) -> Vec<Self> {
+        let line = |text: &str| bounded(&crate::views::one_line(text));
+        let unread = |why: &str| Self {
+            identity: UNREAD_CANDIDATE.to_owned(),
+            failure_kind: None,
+            detail: line(why),
+        };
+        let Some(Value::Array(candidates)) = payload.get("candidates") else {
+            return vec![unread(match payload.get("candidates") {
+                None => "the death carried no candidates",
+                Some(_) => "the death's candidates are not a list",
+            })];
+        };
+        if candidates.is_empty() {
+            return vec![unread("the death carried no candidates")];
+        }
+        candidates
+            .iter()
+            .map(
+                |candidate| match serde_json::from_value::<CandidateWire>(candidate.clone()) {
+                    Ok(wire) if !wire.identity.trim().is_empty() => Self {
+                        identity: line(&wire.identity),
+                        failure_kind: wire.failure_kind.filter(|kind| is_a_classification(kind)),
+                        detail: line(&wire.detail),
+                    },
+                    Ok(_) => unread("the candidate names no identity"),
+                    Err(failure) => unread(&format!("the candidate did not read: {failure}")),
+                },
+            )
+            .collect()
+    }
+}
+
+const UNREAD_CANDIDATE: &str = "(unreadable candidate)";
+
+/// The candidates an exhausted chain attempted, as one line: each identity with
+/// its failure kind in brackets — `unclassified` where oneharness named none —
+/// and its own detail, in attempt order.
+pub(crate) fn attempted_line(attempted: &[AttemptedCandidate]) -> String {
+    attempted
+        .iter()
+        .map(|candidate| {
+            let kind = candidate
+                .failure_kind
+                .as_deref()
+                .unwrap_or(oneagentgraph::event::Cause::Unclassified.as_str());
+            if candidate.detail.is_empty() {
+                format!("{} [{kind}]", candidate.identity)
+            } else {
+                format!("{} [{kind}]: {}", candidate.identity, candidate.detail)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 impl MemberDeath {
@@ -4689,19 +4804,38 @@ impl MemberDeath {
                 .and_then(Value::as_str)
                 .map(|detail| bounded(&crate::views::one_line(detail)))
                 .unwrap_or_default(),
+            attempted: if cause == oneagentgraph::event::Cause::FallbackChainExhausted.as_str() {
+                AttemptedCandidate::all_of(&envelope.payload)
+            } else {
+                Vec::new()
+            },
         })
     }
 
-    /// Whether this death is the provider rule firing on a cause the producer
-    /// **could not classify** — which is where an identity chain stops.
+    /// Whether this death is the provider rule firing where an identity chain
+    /// **stopped**: on a cause the producer could not classify, or on the chain
+    /// running out of candidates.
     ///
     /// A candidate that refuses to run is stepped past, and the producer says so
     /// on a `fallback-advanced`. A candidate that ran and produced no usable
     /// result is not: the chain stops there, the identities behind it are never
-    /// tried, and the only record is this death. That is a decision a supervisor
-    /// should see, so it is raised as a finding rather than only relayed.
+    /// tried, and the only record is this death — `unclassified`. A chain that
+    /// stepped past every candidate it named reached none of them, and the
+    /// producer says so as `fallback_chain_exhausted`, carrying each attempted
+    /// candidate's own failure. Either is a decision a supervisor should see, so
+    /// it is raised as a finding rather than only relayed.
+    ///
+    /// Read through the linked producer's own `Cause`, so a variant renamed
+    /// there is a compile error here rather than a word that silently stops
+    /// matching; a word this build's `Cause` does not know stopped no chain it
+    /// can name.
     fn stopped_a_chain(&self) -> bool {
-        self.from_provider && self.cause == oneagentgraph::event::Cause::Unclassified.as_str()
+        use oneagentgraph::event::Cause;
+        self.from_provider
+            && matches!(
+                serde_json::from_value::<Cause>(Value::from(self.cause.as_str())),
+                Ok(Cause::Unclassified | Cause::FallbackChainExhausted)
+            )
     }
 }
 
@@ -4820,6 +4954,7 @@ impl ChainRecords {
             candidate: chain.served_by,
             stepped_past: chain.stepped_past,
             detail: death.detail,
+            attempted: death.attempted,
             member,
         })
     }
@@ -4855,6 +4990,9 @@ pub(crate) struct ChainStopped {
     pub stepped_past: Vec<(String, String)>,
     /// What the death said, which is the whole of the evidence.
     pub detail: String,
+    /// Every candidate the chain attempted, where it was exhausted rather than
+    /// stopped at one; empty otherwise.
+    pub attempted: Vec<AttemptedCandidate>,
 }
 
 /// The finding a stopped chain raises on the planner channel.
@@ -4897,10 +5035,11 @@ pub(crate) fn chain_stopped_finding(stopped: &ChainStopped) -> Surface {
     } else {
         stopped.detail.clone()
     };
-    Surface {
-        id: 0,
-        kind: crate::channel::SurfaceKind::FINDING.into(),
-        message: bounded(&format!(
+    // An exhausted chain stopped at no one candidate: every one it named was
+    // attempted and none ran, and the producer carries each one's own failure,
+    // which is the whole of what a reader restoring one of them acts on.
+    let message = if stopped.attempted.is_empty() {
+        format!(
             "{whose} ({member}): its identity chain {candidate}, which ran and produced \
              no usable result. The provider failure could not be classified, so the chain \
              did not move on and no identity behind that candidate was tried.\n\
@@ -4910,7 +5049,28 @@ pub(crate) fn chain_stopped_finding(stopped: &ChainStopped) -> Surface {
              and the observer is restarted as it always is. It is the decision the \
              classifier could not make, for you to rule on — whether that candidate is one \
              to keep in the chain."
-        )),
+        )
+    } else {
+        let attempted = stopped
+            .attempted
+            .iter()
+            .map(|candidate| format!("- {}", attempted_line(std::slice::from_ref(candidate))))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "{whose} ({member}): its identity chain was exhausted — every candidate it \
+             named was attempted and none ran, so no identity was left to try.\n\
+             attempted, in order:\n{attempted}\n\
+             detail: {detail}\n\
+             Nothing was failed on this: a node settles on its dispatch as it always would, \
+             and the observer is restarted as it always is. It is the decision the chain \
+             could not make, for you to rule on — which of those candidates to restore."
+        )
+    };
+    Surface {
+        id: 0,
+        kind: crate::channel::SurfaceKind::FINDING.into(),
+        message: bounded(&message),
         source: crate::channel::source::PROPOSAL.into(),
         blocking: false,
         queued_at: sys::now_millis(),
@@ -5216,6 +5376,19 @@ fn failed_task(
             },
         ),
         Death::Unstated => (dispatch_death_cause(&outcome.detail), DISPATCH_DIED),
+    };
+    // An exhausted chain's cause names the chain, and each candidate's own
+    // failure is what says why: carried beside the dispatch's own detail rather
+    // than left in the journal, so the settlement a view renders names them.
+    let detail = match death {
+        Death::Published(published) if !published.attempted.is_empty() => {
+            let attempted = format!("attempted: {}", attempted_line(&published.attempted));
+            Some(match detail {
+                Some(detail) => format!("{detail}; {attempted}"),
+                None => attempted,
+            })
+        }
+        _ => detail,
     };
     let Some(cause) = cause else {
         return Settlement {
@@ -6912,6 +7085,7 @@ mod tests {
                 stepped_past: vec![("j/first".into(), "quota".into())],
                 // One line, as every rendered relayed value is.
                 detail: "no usable result; see `raw_response`".into(),
+                attempted: Vec::new(),
             }
         );
         // Had the member died before its judge side ran, the agent side's chain
@@ -6955,6 +7129,7 @@ mod tests {
             candidate: Some("j/second".into()),
             stepped_past: vec![("j/first".into(), "quota".into())],
             detail: "no usable result; see `raw_response`".into(),
+            attempted: Vec::new(),
         });
         assert_eq!(finding.kind, crate::channel::SurfaceKind::FINDING);
         assert!(!finding.blocking);
@@ -7059,6 +7234,7 @@ mod tests {
             exit_code: None,
             disposition: None,
             stderr_tail: None,
+            candidates: Vec::new(),
         })
         .expect("the sibling's death serializes");
         let published = Envelope {
@@ -7086,6 +7262,169 @@ mod tests {
             "the detail the producer wrote did not come back as the one a finding carries"
         );
         assert!(read.stopped_a_chain());
+    }
+
+    /// An exhausted chain's candidates are read off the fields the linked
+    /// producer writes them under, in attempt order, and the death is read as a
+    /// chain that stopped only under the provider rule.
+    ///
+    /// The drift gate for [`AttemptedCandidate::all_of`], for the reason the
+    /// test above is [`MemberDeath::of`]'s: written through the producer's own
+    /// `AttemptedCandidate`, read back through this crate's field reading.
+    #[test]
+    fn an_exhausted_chains_candidates_are_read_as_the_producer_writes_them() {
+        use oneagentgraph::event::{AttemptedCandidate as Written, Cause};
+        let died = |rule: &str, cause: Cause, candidates: Vec<Written>| Envelope {
+            v: crate::event::ENVELOPE_VERSION,
+            ts: "2026-09-10T00:00:00.000Z".into(),
+            stream: "oneagentgraph-1".into(),
+            seq: 0,
+            source: crate::event::Source::Agentgraph,
+            kind: crate::event::EventKind(
+                oneagentgraph::event::EventKind::MemberDied.as_str().into(),
+            ),
+            dimensions: Default::default(),
+            labels: Labels::default(),
+            payload: serde_json::to_value(oneagentgraph::event::MemberDied {
+                rule: rule.to_owned(),
+                cause,
+                detail: "every candidate was attempted".into(),
+                truncated: false,
+                exit_code: None,
+                disposition: None,
+                stderr_tail: None,
+                candidates,
+            })
+            .expect("the sibling's death serializes")
+            .as_object()
+            .cloned()
+            .expect("an object"),
+            artifacts: Vec::new(),
+        };
+        let candidates = vec![
+            Written {
+                identity: "claude-code:work".into(),
+                failure_kind: Some("quota".into()),
+                detail: "out of extra usage\nuntil 5pm".into(),
+                truncated: false,
+            },
+            Written {
+                identity: "codex".into(),
+                failure_kind: None,
+                detail: String::new(),
+                truncated: false,
+            },
+        ];
+        let provider = oneagentgraph::member::Rule::ProviderFailure.as_str();
+        let read = MemberDeath::of(&died(
+            provider,
+            Cause::FallbackChainExhausted,
+            candidates.clone(),
+        ))
+        .expect("a death this build reads");
+        assert_eq!(read.cause, Cause::FallbackChainExhausted.as_str());
+        assert!(read.stopped_a_chain());
+        assert_eq!(
+            read.attempted,
+            vec![
+                AttemptedCandidate {
+                    identity: "claude-code:work".into(),
+                    failure_kind: Some("quota".into()),
+                    detail: "out of extra usage until 5pm".into(),
+                },
+                AttemptedCandidate {
+                    identity: "codex".into(),
+                    failure_kind: None,
+                    detail: String::new(),
+                },
+            ],
+            "the candidates did not come back as the producer wrote them"
+        );
+        assert_eq!(
+            attempted_line(&read.attempted),
+            "claude-code:work [quota]: out of extra usage until 5pm; codex [unclassified]"
+        );
+        // Under another rule the same cause stopped no chain this crate raises.
+        assert!(!MemberDeath::of(&died(
+            "heartbeat",
+            Cause::FallbackChainExhausted,
+            candidates
+        ))
+        .expect("read")
+        .stopped_a_chain());
+        // Candidates are read for that cause alone, and a death of it carrying
+        // none is named as one unread entry rather than read as an empty chain.
+        let mut beside = died(provider, Cause::Unclassified, Vec::new());
+        beside.payload.insert(
+            "candidates".into(),
+            json!([{"identity": "x", "failure_kind": null, "detail": ""}]),
+        );
+        assert!(MemberDeath::of(&beside).expect("read").attempted.is_empty());
+        for (payload, why) in [
+            (None, "the death carried no candidates"),
+            (Some(json!([])), "the death carried no candidates"),
+            (
+                Some(json!("codex")),
+                "the death's candidates are not a list",
+            ),
+        ] {
+            let mut bare = died(provider, Cause::FallbackChainExhausted, Vec::new());
+            match payload {
+                Some(value) => bare.payload.insert("candidates".into(), value),
+                None => bare.payload.shift_remove("candidates"),
+            };
+            let read = MemberDeath::of(&bare).expect("read");
+            assert_eq!(
+                read.attempted,
+                vec![AttemptedCandidate {
+                    identity: UNREAD_CANDIDATE.into(),
+                    failure_kind: None,
+                    detail: why.into(),
+                }]
+            );
+        }
+        // And the `unclassified` reading stands, carrying no candidates.
+        let unclassified =
+            MemberDeath::of(&died(provider, Cause::Unclassified, Vec::new())).expect("read");
+        assert!(unclassified.stopped_a_chain());
+        assert!(unclassified.attempted.is_empty());
+        // A classified provider death stopped nothing.
+        assert!(!MemberDeath::of(&died(provider, Cause::Quota, Vec::new()))
+            .expect("read")
+            .stopped_a_chain());
+
+        // An entry that is not a candidate's shape keeps its place, named as
+        // unread, and a field a newer producer adds reads past.
+        let mut odd = died(provider, Cause::FallbackChainExhausted, Vec::new());
+        odd.payload.insert(
+            "candidates".into(),
+            json!([
+                {"identity": "codex", "failure_kind": "auth", "detail": "401", "added": 1},
+                {"identity": 7, "failure_kind": null, "detail": ""},
+                {"identity": " ", "failure_kind": "quota", "detail": "blank"},
+            ]),
+        );
+        let read = MemberDeath::of(&odd).expect("read");
+        assert_eq!(read.attempted.len(), 3, "{:?}", read.attempted);
+        assert_eq!(
+            read.attempted[0],
+            AttemptedCandidate {
+                identity: "codex".into(),
+                failure_kind: Some("auth".into()),
+                detail: "401".into(),
+            }
+        );
+        for (unread, why) in [
+            (
+                &read.attempted[1],
+                "the candidate did not read: invalid type: integer `7`",
+            ),
+            (&read.attempted[2], "the candidate names no identity"),
+        ] {
+            assert_eq!(unread.identity, UNREAD_CANDIDATE);
+            assert_eq!(unread.failure_kind, None);
+            assert!(unread.detail.starts_with(why), "{unread:?}");
+        }
     }
 
     /// A death is reconciled against the record of the turn it names, and only a
@@ -7231,6 +7570,7 @@ mod tests {
                 cause: "quota".into(),
                 from_provider: true,
                 detail: String::new(),
+                attempted: Vec::new(),
             })),
             PROVIDER_FAILED
         );
@@ -7239,6 +7579,7 @@ mod tests {
                 cause: "timeout".into(),
                 from_provider: false,
                 detail: String::new(),
+                attempted: Vec::new(),
             })),
             DISPATCH_DIED
         );

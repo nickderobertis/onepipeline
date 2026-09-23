@@ -54,11 +54,13 @@ const DRIVER_HANDOVER: Duration = Duration::from_secs(30);
 /// there.
 ///
 /// The polite signal is `SIGTERM` and nothing a run is made of installs a
-/// handler for it, so a process that has taken one is gone in milliseconds; what
-/// this waits out is a loaded host and the moment between a parent dying and
-/// `init` reaping what it left. Long enough that an ordinary teardown never
-/// reports a survivor it merely outran, short enough that an operator whose run
-/// really is wedged hears about it rather than watching a command hang.
+/// handler for it — the one handler this crate has is an out-of-band landing's,
+/// held across its drafting turn alone and never inside a run — so a process
+/// that has taken one is gone in milliseconds; what this waits out is a loaded
+/// host and the moment between a parent dying and `init` reaping what it left.
+/// Long enough that an ordinary teardown never reports a survivor it merely
+/// outran, short enough that an operator whose run really is wedged hears about
+/// it rather than watching a command hang.
 const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
 
 /// How many of a failed driver's last lines a refusal repeats.
@@ -172,6 +174,25 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             println!("{}", verbs::render_stopped(&stopped));
             Ok(stopped.exit_code())
         }
+        Verb::Shutdown(args) => {
+            let shutdown = verbs::shutdown(
+                &ledger::runs_root(),
+                verbs::ShutdownRequest {
+                    scope: match (args.run, args.mine) {
+                        (Some(run), _) => verbs::ShutdownScope::Run(run),
+                        (None, true) => verbs::ShutdownScope::Mine,
+                        // `--host`, which the parser's required group is what
+                        // makes the only remaining answer.
+                        (None, false) => verbs::ShutdownScope::Host,
+                    },
+                    session: sys::launching_session(),
+                    grace: std::time::Duration::from_secs(args.grace),
+                    force: args.force,
+                },
+            )?;
+            print!("{}", verbs::render_shutdown(&shutdown));
+            Ok(shutdown.exit_code())
+        }
         Verb::Runs(args) => {
             let session = sys::launching_session();
             let projects = verbs::runs(&ledger::runs_root(), &session, args.mine);
@@ -241,6 +262,69 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             // llmlint: ignore-end[cli_output_contract]
             Ok(unwatched.exit_code())
         }
+        // llmlint: ignore-block[cli_output_contract] exit 0 on every ending, `warn` and an
+        // unreadable input included, is this verb's contract (entry 85 and the task that
+        // specified it): a harness reads a stop hook's non-zero status as the hook failing,
+        // so a status would turn the guard's own failure into what refuses or garbles the
+        // stop. The failure is reported instead, in the `warn` object on standard output.
+        Verb::StopGuard(args) => {
+            // `stopguard::asked` says why an input naming no session is silent
+            // rather than filled from the environment.
+            let Some(asked) = crate::stopguard::asked(&args) else {
+                print!("{}", crate::stopguard::Verdict::None.render(args.format));
+                return Ok(EXIT_SUCCESS);
+            };
+            let (verdict, unresolved) = crate::stopguard::guard(&ledger::runs_root(), &asked);
+            // Standard error carries what the ordinary `unwatched` writes there for
+            // the same question, and nothing else: the verdict is the whole of
+            // standard output, because that stream is the decision.
+            eprint!("{}", unresolved.concat());
+            print!("{}", verdict.render(args.format));
+            Ok(EXIT_SUCCESS)
+        }
+        // llmlint: ignore-end[cli_output_contract]
+        Verb::Ask(args) => {
+            // Everything read from the environment is read here, and every
+            // refusal is made before anything is raised: the question, the run,
+            // the asker and what the question is about are each checked, and a
+            // run that is not there or whose launch record cannot be read is
+            // refused with nothing on its channel.
+            let question = crate::ask::question(&args)?;
+            let run = crate::ask::run_id()?;
+            let asker = crate::ask::asker()?;
+            let about = crate::ask::about(&args)?;
+            let paths = resolve(run.as_str())?;
+            let raised = crate::ask::Question::raise(
+                &paths,
+                crate::ask::Request {
+                    message: question,
+                    asker,
+                    about,
+                    timeout: args.timeout,
+                },
+            )?;
+            let window = raised.window();
+            // Named before the wait, so a caller ended mid-wait still holds the
+            // token a manager answers by.
+            if let Some(correlation) = raised.correlation() {
+                eprintln!("correlation: {correlation}");
+                // And the window it resolved to, so a caller can tell which of
+                // the flag, the launch record and the bus's default it waits.
+                eprintln!("waiting up to {} seconds for the reply", window.as_secs());
+            }
+            let asked = raised.answer();
+            // llmlint: ignore-block[cli_output_contract] the bus's one-line answer is the
+            // whole of standard output, by contract, and the advice beside it goes on standard
+            // error where it changes nothing an asker parses.
+            println!("{}", asked.render());
+            if let Some(advice) = asked.advice(&paths.run, window) {
+                eprintln!("onepipeline: {advice}");
+            }
+            // llmlint: ignore-end[cli_output_contract]
+            Ok(asked.exit_code())
+        }
+        Verb::PublishBranch(args) => crate::land::land(crate::land::Verb::PublishBranch, args.args),
+        Verb::RepoRecover(args) => crate::land::land(crate::land::Verb::Recover, args.args),
         Verb::Results(args) => {
             print!(
                 "{}",
@@ -393,7 +477,7 @@ fn recorded_dir(record: &LaunchRecord) -> Result<PathBuf> {
 // oneagentgraph's transparent ConfigRef are already string-valued. A second newtype would
 // duplicate the sibling type without adding an invariant: relative references are made
 // absolute here, and the nonempty launch-record invariant is checked before every run.
-fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
+pub(crate) fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
     // Refused before anything is joined or opened, because a blank reference
     // resolves to `base` itself — the launch directory — and what happens next
     // is whatever the host's file API answers for opening a directory, which is
@@ -678,7 +762,7 @@ fn start(args: &StartArgs) -> Result<i32> {
             .filter(|path| !path.trim().is_empty())
             .map(PathBuf::from)
     }) {
-        Some(path) => Some(crate::channel::launch_bus_config(&launch_dir.join(path))?),
+        Some(path) => Some(crate::channel::launch_bus_config(&launch_dir.join(path))?.into()),
         None => None,
     };
 
@@ -1947,6 +2031,10 @@ fn validate_and_displace_for_adoption(paths: &RunPaths) -> Result<(LaunchRecord,
 /// after adopting, and truncating it would lose the account of the driver that
 /// died.
 fn take_the_run_over(paths: &RunPaths, record: &mut LaunchRecord) -> Result<()> {
+    // An adoption is the deliberate decision to run this run again, and it is
+    // the only thing that lifts a host shutdown's hold: until it happens the
+    // run dispatches nothing, whatever survived the teardown.
+    crate::shutdown::adopted(paths)?;
     record.adoptions += 1;
     record.driven_by_this_process();
     // A record an earlier build wrote names no pointer file; the dispatches
@@ -2088,17 +2176,7 @@ pub(crate) fn stop_run(
             paths.run, paths.run
         ))
     })?;
-    let established = match teardown {
-        None => journal::StopTeardown::Elsewhere,
-        Some(sys::Teardown::Signalled) => journal::StopTeardown::Signalled,
-        Some(sys::Teardown::NothingToStop) => journal::StopTeardown::NothingToStop,
-        Some(sys::Teardown::IdentityDeclined) => journal::StopTeardown::IdentityDeclined,
-        Some(sys::Teardown::NotAttempted) => journal::StopTeardown::NotAttempted,
-        Some(sys::Teardown::PartlySignalled) => journal::StopTeardown::PartlySignalled,
-        // Unix-only, as the variant is: no Windows teardown establishes it.
-        #[cfg(unix)]
-        Some(sys::Teardown::Refused) => journal::StopTeardown::Refused,
-    };
+    let established = established(teardown);
     let mut journal = Journal::open(paths);
     journal.emit(
         journal::PipelineKind::RunStopped,
@@ -2136,6 +2214,26 @@ pub(crate) fn stop_run(
     Ok(stopped)
 }
 
+/// What one host's teardown established, as the journal records it.
+///
+/// Apart from [`stop_run`] because two verbs record one teardown — `stop`, and
+/// the host shutdown, whose `host-shutdown` carries the word `run-stopped`
+/// already carries. One mapping or two to drift, and a drifted one would have a
+/// reader call the same outcome by two names.
+pub(crate) fn established(teardown: Option<sys::Teardown>) -> journal::StopTeardown {
+    match teardown {
+        None => journal::StopTeardown::Elsewhere,
+        Some(sys::Teardown::Signalled) => journal::StopTeardown::Signalled,
+        Some(sys::Teardown::NothingToStop) => journal::StopTeardown::NothingToStop,
+        Some(sys::Teardown::IdentityDeclined) => journal::StopTeardown::IdentityDeclined,
+        Some(sys::Teardown::NotAttempted) => journal::StopTeardown::NotAttempted,
+        Some(sys::Teardown::PartlySignalled) => journal::StopTeardown::PartlySignalled,
+        // Unix-only, as the variant is: no Windows teardown establishes it.
+        #[cfg(unix)]
+        Some(sys::Teardown::Refused) => journal::StopTeardown::Refused,
+    }
+}
+
 /// Ask everything driving this run on this host to stop, and watch it go.
 ///
 /// Politely: a driver takes the ask first so it records its own abandonment
@@ -2163,7 +2261,7 @@ pub(crate) fn stop_run(
 // single-writer lock, so one run has one driver, and the pair a stop can meet — the pid a
 // stale record names beside the pid the lock stamps — is what the first of those walks over
 // one listing.
-fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
+pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
     let Aim::Here {
         roots,
         unproven,

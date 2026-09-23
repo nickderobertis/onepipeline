@@ -268,6 +268,40 @@ jobs:
           # repository, and naming it here again would be a second place for it
           # to be wrong. Set it only to point a run somewhere else.
 
+  # The 0.28.2 channel compatibility tier: a channel this build writes, read by
+  # the pinned `onepipeline-cli` 0.28.2 wheel, and the other way round. Its own job
+  # because uv fetches that wheel from a package registry, which the offline gate
+  # above never reaches — `just test` excludes the `release_channel` binary by
+  # name, and `just release-compat` runs it and nothing else. The binary itself
+  # is still compiled and linted by the gate (`--all-targets`). It needs no
+  # credential; what it needs is uv and the wheel, and the journeys' first act is
+  # to resolve both, failing fast naming whichever is missing, so this job never
+  # passes without running them.
+  # llmlint: ignore-block[live_tier_compiles_and_requires_credential] this tier has no
+  # credential to require: what it reaches is PyPI's public copy of one pinned wheel,
+  # read anonymously. The two things the rule protects still hold — the binary is
+  # compiled and linted by `gate` through `--all-targets`, and the job cannot pass
+  # having run nothing, because the journeys `just release-compat` runs resolve uv and
+  # the wheel first and fail naming whichever is missing.
+  release-compat:
+    needs: changes
+    if: needs.changes.outputs.crate == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,nextest
+      - uses: astral-sh/setup-uv@v6
+      # The store every world reads its plan through; this job runs no
+      # `just bootstrap`, so it provisions that one binary as `smoke` does.
+      - name: The onetaskgraph every plan is read through
+        run: just _ensure-onetaskgraph
+      - name: The 0.28.2 wheel against this build
+        run: just release-compat
+  # llmlint: ignore-end[live_tier_compiles_and_requires_credential]
+
   # Advisory + license audit and unused-dependency check. Its own Linux-only job:
   # it needs a network advisory DB and must not be duplicated across the matrix.
   deny:

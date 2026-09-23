@@ -26,6 +26,16 @@ pub const DAG_GRAPH_OFF: &str = "off";
 /// none.
 pub const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u64 = 1_800;
 
+/// How long a dispatch has to end itself after a `shutdown` asks it to, when
+/// the command names no `--grace`.
+///
+/// Ten minutes: long enough for a worker mid-file to finish it and commit, and
+/// deliberately longer than the cooperative cancel's own grace, which bounds a
+/// supervisor watching one runaway node rather than a person waiting for a
+/// machine to be safe to stop. There is no environment rung under
+/// it: a host shutdown is typed by the person doing it.
+pub const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 600;
+
 /// The write-back's per-item budget, in seconds, when a launch names none.
 ///
 /// The bottom rung of four: `--writeback-item-budget` beats
@@ -177,6 +187,9 @@ pub enum Command {
     Attest(AttestArgs),
     /// End a run and its whole dispatch tree.
     Stop(StopArgs),
+    /// End the running work on this host: ask every live dispatch to wrap up
+    /// and commit, wait, stop what is left, and put every branch on its origin.
+    Shutdown(ShutdownArgs),
     /// List recorded runs.
     Runs(RunsArgs),
     /// A run's live state: what is driving it, and what is running.
@@ -189,6 +202,26 @@ pub enum Command {
     Watch(WatchArgs),
     /// Which of a session's runs has nothing watching it.
     Unwatched(UnwatchedArgs),
+    // llmlint: ignore-block[new_command_or_client_gets_its_own_project] verbs of this one
+    // binary rather than a new command or client: each reads the run store and channel the
+    // engine owns, or runs its drafter in front of the `onevcs` library it already links,
+    // through the crate's private modules, and ships in the same artifact on the same three
+    // registries — the same shape as `unwatched` above.
+    /// Whether a session's turn may end: one verdict over `unwatched`, for a
+    /// harness's stop hook.
+    StopGuard(StopGuardArgs),
+    /// Ask the manager a blocking question over the run's planner channel, and
+    /// answer with theirs.
+    Ask(AskArgs),
+    /// Land a completed branch through the linked onevcs `publish-branch`,
+    /// drafting its change request's body first.
+    #[command(override_usage = LAND_USAGE_PUBLISH_BRANCH)]
+    PublishBranch(LandArgs),
+    /// Land a preserved branch through the linked onevcs `recover`, drafting its
+    /// change request's body first.
+    #[command(override_usage = LAND_USAGE_REPO_RECOVER)]
+    RepoRecover(LandArgs),
+    // llmlint: ignore-end[new_command_or_client_gets_its_own_project]
     /// Per-node outcomes, with each node's own evidence.
     Results(RunArgs),
     /// What each run is for, and how far it has got.
@@ -783,6 +816,107 @@ pub struct UnwatchedArgs {
     pub session: Option<String>,
 }
 
+/// `onepipeline stop-guard`.
+///
+/// The general stop guard: the session whose stop this is and whether the stop
+/// continues a block the guard made, as flags or as fields of one object on
+/// standard input, and the shape the verdict is rendered in. What it decides
+/// and how, and why the session is never read from the environment, is entry 85
+/// of `docs/contract-divergences.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct StopGuardArgs {
+    /// The session whose stop this is. Omitted, it is read from the object on
+    /// standard input the format names — never from the environment.
+    #[arg(long, value_name = "ID")]
+    pub session: Option<String>,
+    /// This stop follows a block this guard made: answer `none` where the
+    /// report it would block on is the one it last blocked this session on.
+    #[arg(long)]
+    pub continuation: bool,
+    /// How the input is read and the verdict rendered.
+    #[arg(long, value_enum, default_value_t = StopGuardFormat::Neutral)]
+    pub format: StopGuardFormat,
+}
+
+/// How the verdict is rendered: the neutral object, or a harness's own shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum StopGuardFormat {
+    /// `{"verdict":"block","reason":…}`, `{"verdict":"warn","message":…}` or
+    /// `{"verdict":"none"}`; the input is `--session`/`--continuation`, or one
+    /// object `{"session":…,"continuation":…}` on standard input.
+    #[default]
+    Neutral,
+    /// Claude Code's `Stop` hook: the payload's `session_id` and
+    /// `stop_hook_active` are read off standard input, and the verdict is
+    /// `{"decision":"block","reason":…}`, `{"systemMessage":…}` or nothing.
+    ClaudeCode,
+    /// Codex's `Stop` hook, which reads and answers the same shape Claude
+    /// Code's does.
+    Codex,
+}
+
+/// `onepipeline ask`.
+///
+/// The question in one of three forms — the argument words, a file, or standard
+/// input when neither is given — and what rides beside it. The run is
+/// `ONEPIPELINE_RUN_ID`'s and the asker `ONEPIPELINE_CHANNEL_ASKER`'s, read in
+/// the binary's arm; entry 87 of `docs/contract-divergences.md` states the
+/// verb.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct AskArgs {
+    /// The question, as words joined by one space. Omitted, it is read from
+    /// `--file`, or from standard input when neither is given.
+    #[arg(value_name = "TEXT", conflicts_with = "file")]
+    pub text: Vec<String>,
+    /// The file the question is read from.
+    #[arg(long, value_name = "PATH")]
+    pub file: Option<PathBuf>,
+    /// The node the question is about: at most 512 bytes, not blank, with no
+    /// control character.
+    #[arg(long, value_name = "NODE")]
+    pub about: Option<String>,
+    /// The reply window, in whole seconds, at least one. Omitted, the
+    /// `reply_window_seconds` the run's launch record's bus configuration names
+    /// for the `surfaces` queue, or the bus's own default when it names none.
+    #[arg(long, value_name = "SECONDS")]
+    pub timeout: Option<std::num::NonZeroU64>,
+}
+
+/// How `onepipeline publish-branch` is spelled.
+const LAND_USAGE_PUBLISH_BRANCH: &str = "onepipeline publish-branch <BRANCH> --repo \
+     <CHECKOUT|ALIAS> [--pr-author-graph <PATH>] [--no-draft] [ONEVCS-ARGS]...";
+
+/// How `onepipeline repo-recover` is spelled.
+const LAND_USAGE_REPO_RECOVER: &str = "onepipeline repo-recover <BRANCH> --repo \
+     <CHECKOUT|ALIAS> [--pr-author-graph <PATH>] [--no-draft] [ONEVCS-ARGS]...";
+
+/// `onepipeline publish-branch` and `onepipeline repo-recover`.
+///
+/// One list, read in order, because every argument but two is the linked
+/// `onevcs` verb's, forwarded unchanged and judged by its own parser — the
+/// branch, `--repo`, `--title`, `--body`, `--body-file`, and whatever else that
+/// verb takes. The two are this crate's, and may sit anywhere before a `--`:
+/// `--pr-author-graph <PATH>`, the graph the change request's body is drafted by —
+/// required wherever a body would be drafted — and `--no-draft`, which lands with
+/// no drafting turn spent. Nothing is drafted where the caller brought a body or
+/// the identity's rules publish `local-direct`, which opens no change request.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct LandArgs {
+    /// The branch, `--repo <CHECKOUT|ALIAS>`, and every other argument, in order.
+    /// All but two go to the onevcs verb unchanged; `--pr-author-graph <PATH>`
+    /// names the graph the body is drafted by, and `--no-draft` lands with no
+    /// drafting turn spent.
+    #[arg(
+        value_name = "ARGS",
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        num_args = 0..,
+        value_parser = clap::value_parser!(std::ffi::OsString)
+    )]
+    pub args: Vec<std::ffi::OsString>,
+}
+
 /// `onepipeline drive` — the retained driver a detached launch starts.
 ///
 /// The arguments a graph run needs and no more, spelled as `oneagentgraph run`
@@ -890,6 +1024,33 @@ pub struct StopArgs {
     /// The run id.
     pub run: String,
     /// Stop a run this session does not own. The owner is named either way.
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// `onepipeline shutdown`.
+///
+/// Exactly one scope, and it is required: the positional run, `--mine`, or
+/// `--host`. Naming none, or naming two, is a usage error — refused before
+/// anything is signalled.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(group = clap::ArgGroup::new("scope").required(true).args(["run", "mine", "host"]))]
+pub struct ShutdownArgs {
+    /// The run id. One run, which this session must own.
+    pub run: Option<String>,
+    /// Every run this session owns, as `runs --mine` selects them.
+    #[arg(long)]
+    pub mine: bool,
+    /// Every run under this runs root, whoever owns it. Shutting a host down is
+    /// a decision about the host, so this one does not refuse another session's
+    /// run — the report names every run's owner instead.
+    #[arg(long)]
+    pub host: bool,
+    /// How long a dispatch has to end itself after it is asked, in seconds.
+    /// `0` is the same path as `--force`.
+    #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_SHUTDOWN_GRACE_SECONDS)]
+    pub grace: u64,
+    /// Skip the interrupt and the wait and go straight to the teardown.
     #[arg(long)]
     pub force: bool,
 }

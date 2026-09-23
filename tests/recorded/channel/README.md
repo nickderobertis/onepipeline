@@ -1,12 +1,21 @@
 # Recorded planner-channel directories
 
 Whole `runs/<run>/channel/` directories as `onepipeline` 0.28.2's channel code
-wrote them. `tests/e2e/recorded_channel.rs` substitutes each one into the
+wrote them — this crate's own recordings, and the one recording `onemessagebus`
+held that is not byte for byte one of them (see
+`onemessagebus-repair-2-pending-bus/`). `tests/channel_layout.rs` reads each one
+through this crate's `planner-channel` layout and re-applies its history into an
+empty directory, byte for byte; `tests/release_channel/` (`just release-compat`) holds a channel
+this build writes to the live 0.28.2 wheel and the other way round; and
+`tests/e2e/recorded_channel.rs` substitutes each one into the
 recorded run root beside it, drives this build's `status`, `runs`, `results` and
 `next` over it, re-derives its `queue.json`, and holds every answer and every
 channel byte to what the 0.28.2 binary answered over the same directory. Those
 answers are checked in under `../answers/`, and `scripts/record-channel-answers.sh`
-is how they were captured.
+is how they were captured. `tests/layout_document.rs` offers every record each one
+holds through a bus of the compiled-in layout and one of the published
+`schemas/planner-channel.json`, and holds the two directories they write to one
+another.
 
 Every file here is byte for byte what was on disk. Nothing was edited or
 redacted. The journeys edit one thing in their *copy* of the recorded run root,
@@ -19,7 +28,7 @@ node started from (its last change, `bbee552`, first shipped in v0.28.0), so eac
 directory is exactly what the 0.28.2 release writes.
 
 Only the files of the channel layout are copied, where the run has them — the
-files `LAYOUT` in `tests/e2e/recorded_channel.rs` names, which that journey fails
+files `onepipeline::channel::layout::FILES` names, which the write-side journey fails
 on a channel file it does not name. Each run's channel
 directory also held an empty `handover/` directory. That is the ownership
 handover gate, not the channel layout, so it is left out.
@@ -85,6 +94,21 @@ recorded `onemessagebus-repair-2` run root and channel:
 The four files are the copy after those two commands, unedited. `surfaces.jsonl`
 is the recorded log with surface `3`'s `queued` and `claimed` records appended,
 and `queue.json` holds surface `3` pending, not abandoned, with `next_id` 4.
+
+## `onemessagebus-repair-2-pending-bus/` (produced by the 0.28.2 binary, recorded in the bus)
+
+The same state as `onemessagebus-repair-2-pending/`, produced the same way by the
+same 0.28.2 binary, and recorded in `onemessagebus` rather than here: it was
+`crates/onemessagebus-agent/tests/recorded/channel/onemessagebus-repair-2-pending/`
+at that repository's commit `07b2f2c`, the last the bus carried the
+`planner-channel` layout at (onemessagebus#126 moved the layout into this crate,
+and the bus's fixtures came with it). Its two other recorded directories,
+`domain-driven-modularity-2/` and `onemessagebus-repair-2/`, were byte for byte
+the copies above and are not repeated. This one differs from the copy above in
+the frame the serving session was fed — its message reads `Recorded for the
+onemessagebus channel fixtures: …` — and so in surface `3`'s `queued_at` and the
+projection's `accounted` and `seal`, so it is held beside it as a second recording
+of that state. Unedited, as every directory here is.
 
 ## `waiting-updates/` (produced by the 0.28.2 binary)
 

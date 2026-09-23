@@ -19,6 +19,12 @@
 # in full — and records that same line as this target's declared output, which is
 # what Nx stores and restores for a replay. A run with findings says everything
 # llmlint said, since nobody replays it and the operator has to clear it.
+#
+# Every run that ends non-zero also *records* what it said, under
+# `.lint-llm-diff/report`. Saying it is not enough on its own: this task's streams
+# reach `scripts/llmlint-diff.sh` only through Nx, which has forwarded its wrapper
+# and nothing else on a loaded host, and a judged tier that fails with no reason
+# attached is one a developer can only act on by paying for the run again by hand.
 set -euo pipefail
 
 # Every caller runs this from the repository root: `just` from the justfile's own
@@ -61,13 +67,36 @@ if ((status != 0)); then
   # What to do about it differs, and what llmlint left behind says which: nothing
   # at all is a judge that said nothing to act on, 1 is a verdict against the diff,
   # and anything above it is a judge that never reached one.
-  cat "$report" >&2
   if [ ! -s "$report" ]; then
-    echo "lint-llm-diff: llmlint exited $status without reporting anything; run 'llmlint --diff --diff-base $base_sha -v' by hand to see what it did, then retry" >&2
+    advice="lint-llm-diff: llmlint exited $status without reporting anything; run 'llmlint --diff --diff-base $base_sha -v' by hand to see what it did, then retry"
   elif ((status == 1)); then
-    echo "lint-llm-diff: clear the findings above with 'just lint-llm-diff <base>' alone, then run the gate once to confirm" >&2
+    advice="lint-llm-diff: clear the findings above with 'just lint-llm-diff <base>' alone, then run the gate once to confirm"
   else
-    echo "lint-llm-diff: llmlint exited $status without judging this diff; run 'llmlint doctor', or 'just setup-llmlint' to reinstall the toolchain, then retry" >&2
+    advice="lint-llm-diff: llmlint exited $status without judging this diff; run 'llmlint doctor', or 'just setup-llmlint' to reinstall the toolchain, then retry"
+  fi
+  # Recorded as well as said, for the reason the refusal below is: what this says
+  # reaches `scripts/llmlint-diff.sh` only through Nx's pipes, and on a loaded host
+  # has arrived there as nothing at all — which leaves the judged tier red with no
+  # reason attached, and a developer rerunning this script by hand outside Nx to
+  # read an error message the paid run already produced. Every non-zero report is
+  # recorded, findings and toolchain failure and silence alike, because which of
+  # the three happened is exactly what the missing diagnostic would have said.
+  #
+  # Not a declared output, so Nx neither stores nor restores it: Nx caches
+  # successful tasks only, and this record exists only for runs that failed. It is
+  # this run's — written before this process exits, and cleared by the driver
+  # before the next.
+  if mkdir -p "$root/.lint-llm-diff" &&
+    { cat "$report" && printf '%s\n' "$advice"; } >"$root/.lint-llm-diff/report"; then
+    cat "$root/.lint-llm-diff/report" >&2
+  else
+    # The report is still said, since it is what the operator acts on, and the
+    # status stays llmlint's: a checkout that cannot hold the record has not
+    # changed what the judge ruled about this diff, and reporting a findings exit
+    # as a broken host would send the operator to repair the wrong thing.
+    cat "$report" >&2
+    printf '%s\n' "$advice" >&2
+    echo "lint-llm-diff: could not record that report in .lint-llm-diff/report, so a caller Nx forwards nothing to will see no reason for this failure; free disk space and retry" >&2
   fi
   exit "$status"
 fi

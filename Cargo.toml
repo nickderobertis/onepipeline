@@ -3,6 +3,7 @@
 # the programs this stack spawns: `oneagentgraph`, and the `gh` behind `onevcs`.
 # Members are listed explicitly so a new one joins the graph deliberately rather
 # than by changing what `--workspace` means.
+# llmlint: ignore[new_command_or_client_gets_its_own_project] no new command or client binary joins this workspace: `onepipeline shutdown` is one more verb of the existing `onepipeline` CLI, which `docs/contract.md` states as one command surface over `onepipeline::verbs`, and this repository is one Rust build unit (the directive further down says the same for the whole crate).
 members = [".", "crates/testfakes"]
 resolver = "2"
 
@@ -469,25 +470,17 @@ resolver = "2"
 # exactly this `onevcs`, so the two requirements and the lock move together.
 # `tests/e2e/maintenance.rs` drives the sweep against the linked release.
 #
-# `onevcs` 0.30.0 is the floor because it carries `SessionRequest.labels`, stored
-# on the session record and reported by `session holders` and `recoverable`:
-# `src/executor.rs` stamps every node's session with the run, the node and the
-# launching session through it, and every literal here fills it — so a pin below
-# it does not compile. A **requirement**, because `^0.27` admits no 0.30.x; and
-# `onevcs-testing` 0.7.0 requires exactly this `onevcs`, so the two move together.
-# `tests/e2e/session_reuse.rs` reads the labels back through the linked release's
-# own `session holders --json`.
-#
-# **0.30.1 is held back here, and `just engines-current` cannot see that it is.**
-# Its source is byte-identical to 0.30.0 — the whole release is its own wire
-# requirement moving to `onemessagebus{,-agent}` 0.8 — so it carries no labels
-# behaviour this stamps against, and taking it resolves that wire *twice*, which
-# is four type errors in `src/vcs.rs` rather than a version skew. Compiling it
-# would move five further packages, this manifest's wire pins and the two engines
-# that share them. The check names a holdback only from `SIBLINGS` in
-# `scripts/linked-engines.sh`, which `onemessagebus` is not in, so it reports this
-# lock as merely behind and offers `cargo update -p onevcs@0.30.0` — an update
-# that does not build. Take 0.30.1 with the wire, or not at all.
+# `onevcs` 0.29.0 is the floor because it carries the **preserving push** as a
+# library call: `preserve`/`PreserveRequest`/`Preserved`, which puts an
+# unpublished branch on its identity's origin under its own name without opening
+# a change request or running a merge path, and `recoverable`, the enumeration of
+# every preserved-but-unpublished branch on this host. `src/shutdown.rs` calls
+# both — they are the last two steps of `onepipeline shutdown` — and neither
+# exists below it, so a pin under this floor does not compile. A **requirement**,
+# because `^0.27` admits no 0.29.x; 0.28.0 in the gap adds nothing this crate
+# links, and `onevcs-testing` 0.6.10 requires exactly this `onevcs`, so the two
+# requirements and the lock move together. `tests/e2e/shutdown.rs` drives the
+# preservation against a real origin.
 #
 # `oneagentgraph` 0.4.6 is a **relink and nothing else** — `src/member.rs`
 # re-reads its two engines' channels and moves two version numbers in prose —
@@ -497,6 +490,32 @@ resolver = "2"
 # admitted the release and the lock alone could have taken it — but the two pins
 # beside it could not, so the three move as one engine or the lock resolves the
 # core twice.
+#
+# `onevcs` 0.30.1, `oneagentgraph` 0.4.9, `onejudge` 0.13.4 and the bus 0.8.0
+# are **one relink**, and none of them can move alone: the bus release
+# (onemessagebus #126) drops the planner-channel module it carried for this
+# crate and publishes a layout as a data document instead, and `onevcs`,
+# `oneagentgraph` and `onejudge` each re-export bus types across the seams this
+# crate composes, so each was moved onto that bus before this one and a lock
+# holding any of them on 0.7 would resolve the bus twice.
+#
+# - `onevcs` 0.30.1 is that library on the bus 0.8.0. Its 0.30.0 adds
+#   `SessionRequest.labels`, which every literal here fills empty. A
+#   **requirement**, because `^0.29` admits no 0.30.x; `onevcs-testing` 0.7.1
+#   requires exactly it, so the two move together.
+# - `oneagentgraph` 0.4.9 reports an exhausted single-sided fallback chain as
+#   `fallback_chain_exhausted` rather than `unclassified`, which
+#   `src/engine.rs` reads as a chain that stopped through that library's own
+#   `Cause` — so below it the variant does not compile. `^0.4.6` admitted the
+#   release, but not the bus it requires beside the old pins.
+#
+# Those two releases also carry each sibling's `sweep --format json` report,
+# which `ai-orchestrator` adopts only once an engine links them, because it holds
+# its CLI pins equal to this engine's SBOM. Nothing here calls `sweep`, so that
+# needs no requirement or lock entry beyond the relink above.
+#
+# `oneagentgraph` 0.4.10 is the relink onto the `oneharness-core` 0.18.0 that
+# block asks for, and nothing else: nothing here reads anything new from it.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
@@ -517,16 +536,23 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.4.6"
-onevcs = "0.30.0"
+oneagentgraph = "0.4.10"
+onevcs = "0.30.1"
 # The wire both siblings above now re-export: the envelope, its labels, sources
 # and phases, the filter grammar, the reader, the merge and the schema registry
 # are `onemessagebus-agent`'s over the `onemessagebus` core, and `src/event.rs`
 # and `src/filter.rs` re-export them rather than keeping a copy. One copy or
 # none: the sibling requirements must resolve these packages once, because a
 # lock carrying a second copy would make a relayed envelope two different types.
-onemessagebus = "0.7.0"
-onemessagebus-agent = "0.7.0"
+#
+# 0.8.0 is the release the relink below the floors list names: it no longer
+# carries the planner-channel module — the layout is this crate's own,
+# `src/channel/layout.rs` — and defines a layout as a data document a host's bus
+# links (`LayoutDocument`, `SchemaBundle`), which is what `schemas/planner-channel.json`
+# is written through. A **requirement**, because `^0.7` admits no 0.8.x, and the
+# four siblings that re-export the bus require exactly it.
+onemessagebus = "0.8.0"
+onemessagebus-agent = "0.8.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -581,7 +607,14 @@ onemessagebus-agent = "0.7.0"
 # here reads anything new from it — it is taken because `oneagentgraph` 0.4.6
 # requires exactly it, and the three requirements move together or the lock
 # resolves the core twice.
-onejudge = "0.13.3"
+#
+# 0.13.4 is that release relinked onto the bus 0.8.0: nothing here reads
+# anything new from it, and `oneagentgraph` 0.4.9 required exactly it, so the
+# requirements move together or the lock resolves the bus twice.
+#
+# 0.13.5 is that release relinked onto the `oneharness-core` 0.18.0 below.
+# Nothing here reads anything new from it.
+onejudge = "0.13.5"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
@@ -626,7 +659,23 @@ onejudge = "0.13.3"
 # release's writer, and `tests/e2e/agents.rs` drives both member kinds to the
 # run's pointer file against the linked releases, so a pin below the floor fails
 # there rather than reading differently.
-oneharness-core = "0.17.0"
+#
+# **0.18.0 is the release this crate reads a config through**: one config may
+# `extends` another, and the loader — `io::config::load`, the one `--config
+# <path>` goes through — folds the chain against each declaring file's own
+# directory. No text-level resolver is published, on purpose, so a reader
+# follows a chain by handing that loader a **path**. Two readers here do:
+# `src/dispatchenv.rs`'s preflight, which asks whether the dispatch's
+# environment carries every `env_from` source its harness identities name, and
+# `crates/testfakes`'s `fake-oneharness`, whose selection is the real CLI's or
+# it is an oracle for a build nothing runs. Below this release neither
+# compiles against the loader, and a role config whose identities live in a
+# parent reads as one naming *none* — a preflight answering "yes, all zero of
+# them" and a double discovering a chain nothing chose. A **requirement** for
+# the same pre-1.0 reason as every raise above: `^0.17` admits no 0.18.x.
+# `oneagentgraph` 0.4.10 and `onejudge` 0.13.5 each require it exactly, so the
+# three move together or the lock resolves the core twice.
+oneharness-core = "0.18.0"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
 # from one commit, each release of this crate requiring the exact `onevcs` it was
@@ -637,7 +686,7 @@ oneharness-core = "0.17.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.7.0"
+onevcs-testing = "0.7.1"
 # **Test-support only**, and linked by `crates/testfakes` alone: the crate under test
 # still reads every plan by *driving* the `onetaskgraph` binary. These host the real
 # `local-md` plugin inside `label-strict-source`; that fake says why.
@@ -654,7 +703,7 @@ onetaskgraph-local-md = "=0.2.32"
 
 [package]
 name = "onepipeline"
-version = "0.41.1"
+version = "0.44.2"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
@@ -685,6 +734,9 @@ include = [
   # time — the telemetry document, and one launch config per schema version this
   # build reads. Without them the packaged crate does not build, let alone test.
   "tests/golden/*.json",
+  # The planner-channel envelope schemas `src/channel/layout.rs` reads at compile
+  # time; without them `cargo publish`'s verification build of the crate fails.
+  "/schemas/**",
   "Cargo.toml",
   "README.md",
   "LICENSE",
@@ -741,6 +793,17 @@ serde_norway = "0.9"
 # nested `steps` entry is a sentence nobody can act on; this carries the path.
 serde_path_to_error = "0.1"
 thiserror = "2"
+# The digest the stop guard keys its per-session memory by and remembers a
+# block under — a name a stranger's session id is never joined onto a path as,
+# and a fingerprint of the report a continuation is compared against. Already in
+# the graph through `onemessagebus`, so it adds nothing to what this build
+# resolves; the same crate the session-reuse journey spells a lease name with.
+# llmlint: ignore-block[new_command_or_client_gets_its_own_project] a dependency of two verbs
+# of this one binary, not a new command or client: both read the engine's own run store and
+# channel through this crate's private modules and ship in its one artifact.
+# llmlint: ignore[crates_stay_in_one_cargo_workspace] `[workspace.dependencies]` holds the sibling engines both members build against, and `just engines-current` reads every pin there as an engine floor; `sha2` is neither, and is pinned beside `serde` and `thiserror` as every root-only dependency is.
+sha2 = "0.10"
+# llmlint: ignore-end[new_command_or_client_gets_its_own_project]
 
 # The siblings this crate composes, at the workspace's own pins. See
 # `[workspace.dependencies]` for what each pin's floor is a requirement of, and
@@ -797,15 +860,16 @@ windows-sys = { version = "0.61", features = [
 # and must stay so: what they implement must never be reachable from a release
 # binary.
 #
-# `fs4` and `sha2` are one journey's tools, not a second implementation of
-# anything: `tests/e2e/session_reuse.rs` has to make a run root *occupied* —
-# taken exclusively, which is the one answer that stops `onevcs` reusing a
-# session — and no verb of that sibling's holds an occupancy lease past its own
-# exit, because the lease is deliberately one the OS releases with the process.
-# So that journey takes the advisory lock itself, on the file the sibling names
-# the lease after: `fs4` is the lock (the same crate, and the same lock, `onevcs`
-# uses) and `sha2` spells the name. Both are already in the graph through the
-# siblings, so neither adds anything to what this build resolves.
+# `fs4` is one journey's tool, not a second implementation of anything:
+# `tests/e2e/session_reuse.rs` has to make a run root *occupied* — taken
+# exclusively, which is the one answer that stops `onevcs` reusing a session —
+# and no verb of that sibling's holds an occupancy lease past its own exit,
+# because the lease is deliberately one the OS releases with the process. So
+# that journey takes the advisory lock itself, on the file the sibling names the
+# lease after: `fs4` is the lock (the same crate, and the same lock, `onevcs`
+# uses), and `sha2` — a regular dependency above, for the stop guard — spells the
+# name. Already in the graph through the siblings, so it adds nothing to what
+# this build resolves.
 #
 # `oneharness-core` is a regular dependency, below, for its config reader; the
 # suite also reads it for its **types**: `tests/e2e/dispatch.rs` reads the
@@ -817,7 +881,6 @@ windows-sys = { version = "0.61", features = [
 fs4 = "0.13"
 onepipeline-testfakes = { path = "crates/testfakes" }
 onevcs-testing = { workspace = true }
-sha2 = "0.10"
 # `tests/patch_pin.rs` holds this manifest's patch block equal to `deny.toml`'s
 # allow-git list, and what it compares are pins — so both sides are parsed as the
 # TOML they are rather than scanned for a substring that might not be one.
@@ -846,6 +909,15 @@ path = "tests/note/main.rs"
 [[test]]
 name = "smoke"
 path = "tests/smoke/main.rs"
+
+# The 0.28.2 channel compatibility tier, in its own binary so the offline gate can
+# exclude it by name, as it does `smoke`: it drives the pinned `onepipeline-cli`
+# 0.28.2 wheel through `uv tool run`, which reaches a package registry. `just
+# release-compat` runs this and nothing else, and CI's `release-compat` job calls
+# that recipe; without uv it fails naming uv rather than skipping.
+[[test]]
+name = "release_channel"
+path = "tests/release_channel/main.rs"
 
 # A CLI binary: optimize for a small, fast-starting artifact.
 [profile.release]

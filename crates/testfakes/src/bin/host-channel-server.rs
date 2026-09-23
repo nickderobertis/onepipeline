@@ -4,14 +4,17 @@
 //! bus's library server drives, and what it reads off its stdin is a surface to
 //! raise or a correlation to listen for again. The kind is data chosen by each
 //! test; every surface it raises carries source `proposal`, as a watcher's does.
+//!
+//! It links no layout as code, as a host's bus does not: the layout is the one
+//! schema bundle it is handed, linked as a configuration's `schemas` key links
+//! one, and the queue it serves is the one that layout answers questions on.
 
-use std::{io, path::PathBuf, sync::Arc, time::Duration};
+use std::{io, path::PathBuf, time::Duration};
 
 use onemessagebus::{
-    Answer, Asker, Codec, CodecFailure, CodecName, Config, Correlation, Layouts, Lifetime,
-    QueueName, ServeOptions, ServeSession, TransportKinds,
+    Answer, Asker, Codec, CodecFailure, CodecName, Config, Correlation, Freshness, Layouts,
+    Lifetime, LinkResolver, ServeOptions, ServeSession, TransportKinds,
 };
-use onemessagebus_agent::channel::{PlannerChannel, PLANNER_CHANNEL, SURFACES};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -150,16 +153,38 @@ fn seconds(name: &str, word: &str) -> Result<Duration, String> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    const USAGE: &str = "usage: host-channel-server CHANNEL_DIR LAYOUT_BUNDLE";
     let mut args = std::env::args_os().skip(1);
-    let channel = PathBuf::from(
-        args.next()
-            .ok_or("usage: host-channel-server CHANNEL_DIR")?,
-    );
+    let channel = PathBuf::from(args.next().ok_or(USAGE)?);
+    let link_text = args
+        .next()
+        .ok_or(USAGE)?
+        .into_string()
+        .map_err(|link| format!("the layout bundle's link {link:?} is not UTF-8"))?;
     if args.next().is_some() {
-        return Err("usage: host-channel-server CHANNEL_DIR".into());
+        return Err(USAGE.into());
     }
-    let config = Config::local(channel, Some(PLANNER_CHANNEL));
-    let layouts = Layouts::new().with(Arc::new(PlannerChannel));
+    let link = onemessagebus::SchemaLink::parse(&link_text)?;
+    let resolved = LinkResolver::new(None).resolve(&link, Freshness::CachedFirst)?;
+    let [layout] = resolved.bundle().layouts() else {
+        return Err(format!("{link_text} declares no one layout to serve").into());
+    };
+    let answering: Vec<_> = layout
+        .queues()
+        .iter()
+        .filter(|queue| queue.answers.is_some())
+        .map(|queue| queue.name.clone())
+        .collect();
+    let [queue] = answering.as_slice() else {
+        return Err(format!(
+            "{link_text}'s layout answers questions on {} queues, and this server serves one",
+            answering.len()
+        )
+        .into());
+    };
+    let mut config = Config::local(channel, Some(layout.name().as_str()));
+    config.schemas.push(link);
+    let layouts = Layouts::new().with_linked(std::slice::from_ref(&resolved))?;
     let bus = config.resolve(&layouts, &TransportKinds::builtin())?;
     let mut codec = SurfaceCodec("host-surface".parse()?);
     // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] These names are
@@ -181,9 +206,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         reply_window,
     };
     // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
-    let queue: QueueName = SURFACES.parse()?;
     bus.serve(
-        &queue,
+        queue,
         &mut codec,
         &options,
         Box::new(io::BufReader::new(io::stdin())),

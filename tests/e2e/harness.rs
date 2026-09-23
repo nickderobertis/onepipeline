@@ -36,7 +36,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use onepipeline_testfakes::{rendezvous_script, segment, CLI_BIN_ENV, MEMBER_ENV, SCRIPT_DIR_ENV};
+use onepipeline_testfakes::{
+    rendezvous_script, segment, CLI_BIN_ENV, EVALUATOR_OPENING, MEMBER_ENV, SCRIPT_DIR_ENV,
+};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -392,6 +394,193 @@ fn the_harness_double_takes_the_json_report_by_name_and_refuses_a_view_it_does_n
         "the double refused the format the real CLI takes: {said}"
     );
     assert!(said.contains("requires --config"), "{said}");
+    let _ = std::fs::remove_dir_all(&fakes);
+}
+
+/// The harness double selects what the **real** CLI selects out of a config that
+/// `extends` another: the chain its parent declares, the **model** its parent
+/// asks a candidate for, and a parent the config names and nothing wrote is that
+/// config's own error.
+///
+/// Both halves of what `--config` resolves, because `Selection` reads both out
+/// of the loaded config — the identity chain and each `[harness.<id>].model` —
+/// and a double that inherited one but not the other would answer a turn under
+/// an identity the graph chose and a model nobody asked for.
+///
+/// `--config <path>` resolves an `extends` chain from `oneharness-core` 0.18.0
+/// on, and `oneagentgraph` anchors a member config's `extends` into the copy it
+/// composes, so the double is handed chains to follow. Reading the text alone
+/// would find a role file naming no chain and *discover* one, and a candidate
+/// asked for no model where its parent asks for one — a turn attributed to an
+/// identity nobody in the graph chose, and one never stepped past though its
+/// server serves the wrong model. Driven as the process onejudge spawns, at the
+/// argv onejudge sends, against the compiled double.
+#[test]
+fn the_harness_double_selects_the_chain_an_extends_parent_declares() {
+    let fakes = std::env::temp_dir().join(format!("onepipeline-extends-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fakes);
+    std::fs::create_dir_all(&fakes).expect("a scratch directory for the double");
+    let write = |name: &str, text: &str| -> PathBuf {
+        let path = fakes.join(name);
+        std::fs::write(&path, text).expect("the config is written");
+        path
+    };
+    let judge = |config: &Path| -> Output {
+        Command::new(double("fake-oneharness"))
+            .args([
+                "run",
+                "--format",
+                "json",
+                "--compact",
+                "--config",
+                config.to_string_lossy().as_ref(),
+                // Selection is the subject; a history record is not, and this
+                // suite runs inside a dispatch whose own environment turns one
+                // on. `--no-history` is how the real CLI is told, and the
+                // double ranks it over the environment as the CLI does.
+                "--no-history",
+                // The evaluator's own opening, taken from the double's own
+                // source rather than restated, which is what makes this a judge
+                // turn the double answers rather than one it refuses.
+                "--prompt",
+                EVALUATOR_OPENING,
+            ])
+            .env(SCRIPT_DIR_ENV, &fakes)
+            .stdin(Stdio::null())
+            .output()
+            .expect("the compiled double runs")
+    };
+
+    // A parent stating the chain, and a role file that states only that it
+    // extends it — the shape a host refactoring ten configs onto six shared
+    // identities leaves behind.
+    let parent = write(
+        "shared.toml",
+        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
+    );
+    let child = write(
+        "role.toml",
+        &format!("extends = {:?}\n", parent.to_string_lossy()),
+    );
+    let ran = judge(&child);
+    assert_eq!(
+        ran.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let report: Value = serde_json::from_slice(&ran.stdout).expect("the double prints one report");
+    assert_eq!(
+        report["results"][0]["harness"], "codex",
+        "the double ran an identity the parent does not name: {report}"
+    );
+
+    // The parent is where the config is refused too: an identity chain naming
+    // something oneharness has no harness for is the real CLI's refusal, and it
+    // is only reachable by following the chain.
+    let unknown = write("unknown-parent.toml", "harnesses = [\"no-such-harness\"]\n");
+    let refused = judge(&write(
+        "unknown-role.toml",
+        &format!("extends = {:?}\n", unknown.to_string_lossy()),
+    ));
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(
+        refused.status.code(),
+        Some(i32::from(onepipeline_testfakes::USAGE)),
+        "{said}"
+    );
+    assert!(
+        said.contains("no-such-harness") && said.contains("not a config oneharness could run"),
+        "{said}"
+    );
+
+    // And a parent nothing wrote is the config's own error, naming both files,
+    // rather than a turn under a chain the double discovered for itself.
+    let orphan = judge(&write("orphan.toml", "extends = \"./gone.toml\"\n"));
+    let said = String::from_utf8_lossy(&orphan.stderr);
+    assert_eq!(
+        orphan.status.code(),
+        Some(i32::from(onepipeline_testfakes::USAGE)),
+        "{said}"
+    );
+    assert!(said.contains("gone.toml"), "{said}");
+
+    // The other half the loader changed: a `model` the parent states is the
+    // model the candidate is *asked* for, so the mismatch against what its
+    // server says it would serve is only reachable by following the chain. The
+    // identity chain sits in the child and the model in the parent, so what
+    // this turns on is the inherited model alone — read the one document and
+    // `[harness.codex].model` is unstated, which makes the served model
+    // agreeable and runs codex rather than stepping past it.
+    //
+    // Driven on the **agent** side, at the argv `oneagentgraph` spawns it with:
+    // the chain is stepped where the turn does the work, and a judge turn never
+    // reaches it.
+    const REQUESTED: &str = "gpt-5.5";
+    const SERVED: &str = "gpt-5.5-mini";
+    let worktree = fakes.join("worktree");
+    std::fs::create_dir_all(&worktree).expect("the agent side's worktree");
+    let model_parent = write(
+        "model-parent.toml",
+        &format!("[harness.codex]\nmodel = {REQUESTED:?}\n"),
+    );
+    // What the first candidate's server says the thread would run under.
+    write("harness.serves", SERVED);
+    let config = write(
+        "model-role.toml",
+        &format!(
+            "extends = {:?}\nrun_mode = \"fallback\"\nharnesses = [\"codex\", \"claude-code\"]\n",
+            model_parent.to_string_lossy()
+        ),
+    );
+    let stepped = Command::new(double("fake-oneharness"))
+        .args([
+            "run",
+            "--format",
+            "json",
+            "--stream",
+            "--events",
+            "--config",
+            config.to_string_lossy().as_ref(),
+            "--cwd",
+            worktree.to_string_lossy().as_ref(),
+            "--no-history",
+            "--prompt",
+            "do the work",
+        ])
+        .env(SCRIPT_DIR_ENV, &fakes)
+        .stdin(Stdio::null())
+        .output()
+        .expect("the compiled double runs");
+    assert_eq!(
+        stepped.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&stepped.stderr)
+    );
+    // The agent side streams, so the report is the envelope that terminates it.
+    let report = String::from_utf8_lossy(&stepped.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find_map(|envelope| envelope.get("report").cloned())
+        .expect("the stream ends on a report");
+    assert_eq!(
+        (
+            report["results"][0]["harness"].as_str(),
+            report["results"][0]["model"].as_str(),
+            report["results"][0]["observed_model"].as_str(),
+            report["results"][1]["harness"].as_str(),
+        ),
+        (
+            Some("codex"),
+            Some(REQUESTED),
+            Some(SERVED),
+            Some("claude-code")
+        ),
+        "the double did not hold the parent's model against what the server serves, so a \
+         model stated in an `extends` parent is not the model the candidate is asked for: \
+         {report}"
+    );
     let _ = std::fs::remove_dir_all(&fakes);
 }
 
@@ -2052,15 +2241,24 @@ impl World {
     /// server, and the line it answers with is the planner's reply or the bus's
     /// own word for a wait that ended without one.
     ///
+    /// The layout it serves is the document this crate publishes, linked by
+    /// path as a host's configuration links it — generated here from the
+    /// compiled-in layout, which `tests/contract.rs` holds the committed copy
+    /// to — so the server links no code of this crate's.
+    ///
     /// The one author of a *blocking* surface these journeys have: `surface` is
     /// a report and holds nothing back. Its stdio is the caller's to pipe. The
     /// asker this suite's own dispatch carries is dropped for the reason
     /// [`cmd`](World::cmd) drops it — a journey that means two sessions as one
     /// asker sets it on the command itself.
     pub fn host_channel(&self, run: &str) -> Command {
+        let bundle = self.root.join("planner-channel.json");
+        std::fs::write(&bundle, onepipeline::channel::layout::bundle_json())
+            .expect("the layout document is written");
         let mut command = Command::new(double("host-channel-server"));
         command
             .arg(self.run_file(run, "channel"))
+            .arg(&bundle)
             .env_remove(onepipeline::channel::ASKER_ENV);
         command
     }
@@ -4134,14 +4332,17 @@ pub fn onetaskgraph_binary() -> PathBuf {
 }
 
 /// The released `onevcs` executable whose holders verb the launcher consumes.
+///
+/// The build is remembered and the alias is not, as for
+/// [`oneagentgraph_binary`]: the last world a process drops removes the
+/// directory the alias lives in, so a test that opens a second world must place
+/// it again. Remembered, it would name a file that is gone, and every `onevcs`
+/// a later world spawns would resolve to whatever the host's `PATH` holds —
+/// nothing at all on a host without an install of its own.
 pub fn onevcs_binary() -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    BUILT
-        .get_or_init(|| {
-            let held = build(&["--package", "onevcs", "--bin", "onevcs", "--locked"]);
-            held_alias(&held, "onevcs")
-        })
-        .clone()
+    let held = BUILT.get_or_init(|| build(&["--package", "onevcs", "--bin", "onevcs", "--locked"]));
+    held_alias(held, "onevcs")
 }
 
 /// A pid this host can prove is gone: a real process, started and reaped.

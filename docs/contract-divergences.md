@@ -11,14 +11,14 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80 and 84 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80 and 84–88 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80 and 84 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80 and 84 to 88 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -5209,8 +5209,11 @@ it renders every tool call the worker made and what each returned, that
 `ONEPIPELINE_RUN_ID` and `ONEPIPELINE_RUNS_DIR` in the dispatch's environment are
 what that command reads, and that the drafter may read it to find evidence the
 worker produced. The literals are each a constant on a line of its own beside
-`DRAFTING_TASK`, because the consumer host reads them out of this binary to hold
-its out-of-band drafter to the same prompt.
+`DRAFTING_TASK`. They were that because the consumer host read them out of this
+binary to hold an out-of-band drafter of its own to the same prompt — an
+arrangement **retired by entry 88**, which makes the out-of-band drafter this
+crate's own: nothing outside it reads a literal of the drafting task any more,
+and they stay constants because the block below is held to them.
 
 **The `draft` node field.** `draft: bool` on a lifecycle node — `onepipeline.draft`
 in a task's metadata — default `false`, omitted when false: the change request
@@ -6098,6 +6101,15 @@ byte for byte with 0.28.2's; a verdict is bound to one question, as entry 63 now
 records; and the envelope reviewer takes a bar under which its passes are kept,
 while the node validator keeps none.**
 
+**Since: the layout is this crate's.** onemessagebus#126, accepted by that
+repository's owner, moves the `planner-channel` layout out of `onemessagebus-agent`,
+and the planner's task that carries the engine's half of that move
+brought it here as `onepipeline::channel::layout`, over the core's public `Layout`
+trait, with the same queues, policies, grants, preparation and schema ids, and the
+bus's recorded channel directories and its 0.28.2 journey beside it. Everything this
+entry rules still holds; only whose crate declares the layout moved, and
+`docs/contract.md` says so.
+
 What moved. The channel directory's queues, cursors, projection and exclusive
 sections are the bus's `Queue` over `LocalTransport`. A question the retired onemessagebus server
 raises is asked with `Bus::ask` under a durable `Asker` and waited on with
@@ -6691,3 +6703,444 @@ the read still succeeds; and `onepipeline agents` lists per run, per node and pe
 project across two runs of one project, each entry resolving through `find_session_path`
 to the file its line names. `tests/parity.rs` holds the verb's rendering byte-equal to
 the SDK call, and `agents::tests` holds the merge rule and the reader against the types.
+
+## 85. A stop hook is the only thing enforcing the watch invariant, and it lives in the consumer as a harness-specific adapter — OPEN
+
+**Proposal (for the planner who owns the contract): add `onepipeline stop-guard
+[--session <ID>] [--continuation] [--format neutral|claude-code|codex]` to the
+Views line beside `unwatched`, as a verb whose contract is one verdict object
+and exit `0` always.**
+
+<!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] a register entry states
+the surface it proposes so the planner who owns `docs/contract.md` can rule on it — that is
+what AGENTS.md requires this file to be — and it is not a second source of the build. The
+proposed synopsis is held to the verb's `--help` by `tests/e2e/stop_guard.rs`; the neutral
+contract and the memory's path are held by the same journeys, read out of
+`docs/stop-guard.md`; and the harness field names are the harnesses' own, gated as that
+page's own suppression records. -->
+Entry 68 added `onepipeline unwatched`, which answers `6` for a run a session
+owns that nothing is watching. What it did not add is anything that *asks* it.
+Prose is remembered by the model or it is not, and the measured failure 68
+records — a manager forgets to arm `watch`, and dispatched work sits for hours
+with nothing looking at it — is a failure of remembering rather than of
+knowing. What closes it is a hook that runs whether or not anybody remembered,
+and that may refuse to let a turn end.
+
+The consumer built one: `ai-orchestrator/scripts/stop-unwatched-guard.py`, 427
+lines of Python wired as a claude-code `Stop` hook, whose module docstring is
+the specification of every ending below. That file is the only thing enforcing
+this repository's own watch invariant, and it is a fact about a run — which is
+what makes it the engine's. The user's direction is explicit that it is **not a
+Claude Code feature**: *"the stop hook in onepipeline should not be specific to
+Claude Code. It should be a general command and it has docs on how to wire it
+into Claude Code and Codex."*
+
+**What this build does.** One general verb, harness-neutral in and out.
+
+*Input* is the session whose stop this is and whether the stop continues a block
+the guard itself made — as `--session`/`--continuation`, or as one object
+`{"session": …, "continuation": …}` on standard input, read closed, whose two
+field names are this verb's own. *Output* is one object on standard output —
+`{"verdict":"block","reason":…}`, `{"verdict":"warn","message":…}` or
+`{"verdict":"none"}` — and exit `0` always, because a harness reads that stream
+as its decision and a status it read as an error would make the guard's own
+failure the thing that refused the stop. No harness's field name appears in that
+contract.
+
+Three decisions in it are worth stating on their own.
+
+**Only a positively determined unwatched run blocks, and only once the block has
+been written down.** For *reporting* a run, every unknown resolves toward
+reporting it, because being wrong there costs one re-armed watch. For
+*blocking*, the irreversible act is the block itself — it holds the caller's own
+session open — so every unknown resolves toward standing aside: a question that
+could not be asked, a runs root that could not be read, a memory that could not
+be kept, an engine error in place of an answer. Each of those is a `warn`,
+never a block and never silence, because a guard that fails silent is worse than
+none. The cost is `unwatched`'s: no run's merged event store is read.
+
+**The memory is keyed by a digest of the report, never by a boolean.** A block
+is recorded before it is made, in one file per session at
+`${XDG_STATE_HOME:-$HOME/.local/state}/onepipeline/stop-guard/<sha256(session)>`
+— a relative `XDG_STATE_HOME` ignored, which is a boundary check as well as the
+specification's rule, and the session digested rather than joined onto a path,
+because it is a stranger's string arriving on standard input. On a continuation
+whose remembered digest equals the current report's, the verdict is `none`: the
+manager was told and did nothing, and a second identical block would hold the
+session open for ever. A continuation whose report has *changed* blocks again,
+which a memory holding only "blocked before" could not do. A session with
+nothing to report has its memory removed, and a memory that cannot be removed is
+a `warn` rather than silence.
+
+**The session asked about is the input's, never the environment's.** A
+dispatched worker inherits its manager's `ONEPIPELINE_LAUNCHER_SESSION`, and the
+worker's own session owns no run — which is what keeps the guard silent inside a
+dispatch. So the verb never falls through to the environment, and a blank or
+absent session is `none` rather than an answer about whoever the process happens
+to be running under.
+
+**A harness's shape is a rendering, decided in one place.** `--format
+claude-code` and `--format codex` read the harness's own `Stop` payload —
+`session_id` and `stop_hook_active`, and nothing else of it — and render the same
+verdict as `{"decision":"block","reason":…}`, `{"systemMessage":…}` or nothing.
+They are presentation over the one verdict produced by `stopguard::guard`, which
+is the only place the decision is made. One reader serves both because the two
+harnesses share those field names: Codex's own compiled `stop.command.input` and
+`stop.command.output` schemas carry `session_id`, `stop_hook_active`,
+`decision: "block"`, `reason` and `systemMessage`, and its schema annotates the
+last as Claude's rule.
+
+`docs/stop-guard.md` states the neutral contract and then the wiring for each
+harness, so a reader wires either without reading this crate's source. Both
+harnesses' claims on that page were verified against the installed Codex CLI
+0.154.0 rather than assumed — see that page's own note on what was read and how.
+
+Driven end to end by `tests/e2e/stop_guard.rs` against the compiled binary, in
+an environment whose `ONEPIPELINE_LAUNCHER_SESSION` always names *another*
+session, so an answer about the right one is one the environment could not have
+given: a run nothing watches blocks once and records a digest of exactly that
+report; the same as a continuation is `none`; a continuation whose report has
+moved blocks again; a session with nothing to report is `none` with its memory
+removed; unreadable input and a blank session are `none`; an unreadable runs
+root, an unreadable or unwritable memory, a refused question and an engine error
+are each exactly one `warn` and never a block; a run whose event store cannot be
+read is still decided from its watch state; and the documented Claude Code
+wiring is driven over real `Stop` payloads and read back in that harness's
+decision shape.
+
+<!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
+
+## 86. Two views report what is running and nothing about what it is running in — OPEN
+
+**Proposal (for the planner who owns the contract): amend the Views line so that
+`host` and `status RUN` each carry, above the provider-health block, one `free
+space:` line per distinct filesystem among the runs root and the linked
+`onevcs`'s workspaces root.**
+
+`onepipeline host` and `onepipeline status <run>` say what is running and say
+nothing about the resource whose exhaustion stops all of it. The consumer pipes
+both through `ai-orchestrator/scripts/supervision-readings.py` to add it, and
+that file's docstring records the incident: a host at 197G/197G surfaced as two
+unrelated test failures — a five-second timeout and a browser remote that never
+came up — both written up as flakes, until the next attempt said `No space left
+on device` outright. A full disk does not announce itself to a test runner; it
+announces itself as an unrelated test failing. That is a fact about the host a
+run is on, which is what makes it the engine's rather than a filter a consumer
+keeps.
+
+**What this build does.** Both views carry, per distinct filesystem:
+
+```
+  free space: 41.2 GiB of 196.9 GiB (21% free) on the filesystem holding the runs root <path> and the lifecycle workspaces under <path>
+```
+
+Four decisions in it are worth stating.
+
+**Above the provider block, in both views.** A supervisor's watch guidance cuts
+the report at `providers:` and reads only what is above it, so a reading below
+that line is one no watch following that guidance could see.
+
+**Two roots, deduplicated by device.** The runs root every view already reads,
+and the directory the linked `onevcs` cuts every per-run clone and isolated
+worktree under — `$ONEVCS_HOME/workspaces`, `~/.onevcs/workspaces` by default.
+The state root is resolved through that sibling's own published resolution
+rather than restated here; the sibling publishes no path for the `workspaces`
+directory inside it, so that one name is held to what the linked `onevcs` does
+by a journey that drives a real lifecycle node and fails when the checkout it
+cut is not under the root the line names. The workspaces root is the one that
+filled. A filesystem holding both is
+**one line naming both**, keyed on the device rather than on the free space,
+because two lines for one device read as two answers about two resources and
+matching numbers would collapse two genuinely different filesystems.
+
+**A root that is not there yet is measured at its nearest existing ancestor, and
+the line says which.** A fresh checkout whose `runs/` has never been written is
+not a host whose free space is unknown; the walk up is the answer rather than a
+fallback.
+
+**A filesystem that cannot be read says so on its own line** rather than being
+left out, and so does a workspaces root the sibling could not resolve. Silence
+is the one answer a reading of this resource may not give — that is the whole of
+the incident above. The share is integer arithmetic, so a host at 197G/197G
+reads `0%` rather than rounding up to something that is not full.
+
+Everything here **reads**, and a reading is never acted on: the space is
+host-wide on a host several managers share, and clearing it belongs to whoever
+owns what is filling it.
+
+Driven by `tests/e2e/views.rs` against the compiled binary: `status RUN` and
+`host` each carry one line for the one filesystem both roots are on, naming both
+roots — the workspaces root being the one the linked `onevcs` cut that run's
+lifecycle checkout under — with `status`'s sitting above the provider block and `host`'s beside the
+scope line; two roots on two filesystems are two lines, each naming its own
+root — on Unix, where `/dev` is always a filesystem of its own; a runs root that does not exist yet is measured at its nearest
+existing ancestor and the line says so; and a root the host refuses to answer
+about says that on its own line while the other root is still measured, as does
+a workspaces root the linked `onevcs` refuses to resolve.
+`tests/parity.rs` holds the binary's rendering byte-equal to the SDK's with the
+measurement alone held still — it is the one thing in either view that can
+honestly differ between two reads moments apart on a busy host.
+
+## 87. A dispatched agent's one way to ask its manager anything is a consumer's shim — OPEN
+
+**Proposal (for the planner who owns the contract): add `onepipeline ask
+[TEXT…] [--file <PATH>] [--about <NODE>] [--timeout <SECONDS>]` to the dispatch
+surface, as the verb a dispatched agent asks its manager a blocking question
+with over the run's own planner channel.**
+
+The channel is already this crate's: the `planner-channel` layout itself, the
+surface kinds, the reply envelope and its ops, which question a verdict is
+addressed to, and the bytes of every record the channel directory holds. What was not this crate's is the one thing a
+dispatched worker does with it. `ai-orchestrator/scripts/ask-manager.sh` is 190
+lines that JSON-encode a plain-text question into a `planner-question` frame
+with bash builtins and exec `onemessagebus ask` with the run's channel, its
+asker and its bus policy — every one of which the engine already knows, and none
+of which a consumer should be re-deriving. It is the one way a dispatch asks its
+manager anything, which under the user's direction for that repository —
+*"everything else in the repo should be very light or no wrapper on CLI tools"* —
+makes it a gap in this library rather than a script.
+
+<!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] a register entry states
+the surface it proposes so the planner who owns `docs/contract.md` can rule on it — that is
+what AGENTS.md requires this file to be — and it is not a second source of the build: the
+frame's source and queue are the `planner-channel` layout's vocabulary, which this crate
+declares at `onepipeline::channel::layout` (entry 77's *Since*), re-used by name; the
+answer object is `onemessagebus::sdk_schema::Asked`, serialised; and the proposed synopsis is
+held to the verb's `--help` by `tests/e2e/ask.rs`, which drives every answer, exit status and
+refusal this entry names through the compiled binary. -->
+**What this build does.** One frame of kind `planner-question`, source
+`proposal`, carrying the text, raised on the run's `surfaces` queue at
+`<runs>/<run>/channel` **under the bus policy the run's launch record carries**
+(`bus_config` in `launch.json`) — the same policy the manager's reply verbs read
+— blocking, through the **linked** `onemessagebus` rather than a spawned command
+line.
+
+Four decisions in it are worth stating.
+
+**Three input forms, and the refusal names which one it came in.** The argument
+words joined by one space, `--file`, or standard input when neither is given —
+the invocation contract every task the consumer dispatches already spells out. A
+blank question, and one carrying a NUL byte no frame can carry, are refused at
+exit `2` naming the form, because a worker that piped an empty heredoc and one
+that passed a blank argument look identical from the other side.
+
+**Every refusal is made before anything is raised.** The question, the run
+(`ONEPIPELINE_RUN_ID`, required), the asker (`ONEPIPELINE_CHANNEL_ASKER` —
+unset means nobody, set and blank is a caller that meant to name one), what the
+question is `about`, and the launch record whose policy it would be raised
+under, are each checked first. A refused `ask` leaves the channel untouched.
+
+**The reply window resolves in three steps**: `--timeout`, then the
+`reply_window_seconds` the launch record's bus configuration names for the
+`surfaces` queue — the longest, where several codecs serve it, so the question
+waits at least as long as any listener the configuration expects a manager to
+answer — then the bus's own default. `--timeout 0` is refused: no wait at all
+is not a window. The window resolved is named on standard error beside the
+correlation, before the wait, as `waiting up to <N> seconds for the reply`.
+
+**An elapsed wait is never a ruling.** Standard output is the bus's one-line
+answer verbatim and nothing else, because that is what an asker parses:
+`{"answer":"reply",…}` at exit `0`; `timeout`, `abandoned` or `refused` at exit
+`1`. A wait that elapses leaves the question standing and marks it abandoned,
+exactly as the bus's own command line does, so a later listener of the same
+asker takes it back; the correlation is named on standard error *before* the
+wait, so a caller ended mid-wait still holds the token a manager answers by.
+
+Driven end to end by `tests/e2e/ask.rs` against the compiled binary over a real
+channel, with the manager's side played by this crate's own `next` and `reply`
+verbs rather than by a double: a listener reads the frame's kind, source,
+message, `blocking`, the asker the environment named and what it is `about`;
+each of the three input forms raises the same question; each of the three
+window resolutions is driven by a listener answering after a shorter window
+would have elapsed, and held to the window the verb names — the flag's, the
+longer of two `surfaces` codecs', and the bus's own default; an elapsed wait answers `timeout` at exit `1`
+with the question still on the channel and marked abandoned; a question a real
+validator declines answers `refused` at exit `1` carrying that validator's own
+words; and every refusal — a missing `ONEPIPELINE_RUN_ID`, a blank asker, a
+blank question in each of the three forms, a question file that cannot be read,
+a NUL byte, an `--about` over 512 bytes or carrying a control character, a
+`--timeout` of zero, and a launch record that cannot be read — exits `2` naming its cause over a channel that stayed empty.
+
+One answer is **not** reachable through the binary and is named here rather than
+left to be discovered: `abandoned`. It is the bus's answer to an asker whose
+question was abandoned by something other than itself, and no verb of this
+crate's abandons a third party's question — so there is no journey that can
+produce it without a second implementation of the bus. Its exit code and its
+rendering are held by `ask::tests::each_answer_renders_as_the_bus_prints_it`,
+which reads each rendered line back as the bus's own `sdk_schema::Asked`. Should the channel grow a verb that abandons a
+pending question, the journey that verb makes possible belongs here.
+<!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
+
+## 88. A branch landed by hand had its body drafted by a second drafter in the consumer — OPEN
+
+**Proposal (for the planner who owns the contract): add `onepipeline
+publish-branch` and `onepipeline repo-recover` to the command surface — the
+engine's drafter in front of the linked `onevcs` verbs an operator lands a branch
+with outside a run — and retire entry 69's arrangement under which the consumer
+host read the drafting task's literals out of this binary.**
+
+```
+onepipeline publish-branch <BRANCH> --repo <CHECKOUT|ALIAS> [--pr-author-graph <PATH>] [--no-draft] [ONEVCS-ARGS]...
+onepipeline repo-recover <BRANCH> --repo <CHECKOUT|ALIAS> [--pr-author-graph <PATH>] [--no-draft] [ONEVCS-ARGS]...
+```
+
+A lifecycle node's closeout drafts its change request's body by running the
+`--pr-author-graph` graph in the node's worktree and reading the body out of the
+graph's retained member reports. `onevcs publish-branch` and `onevcs recover` — the
+two verbs a branch is landed with outside a run — take `--body` / `--body-file`
+and nothing that drafts one, so the consumer host re-implemented the drafter out of
+band in 820 lines of shell (`ai-orchestrator/scripts/draft-pr-body.sh` and
+`land-branch.sh`), reading this engine's opening sentence and ending vocabulary out
+of the binary to stay in step. Two drafters reconciled by convention is the defect.
+The drafter is this engine's — it owns the graph, the schema reading and the task
+composition, and `onevcs` knows nothing of agent graphs — so the out-of-band entry
+point is too, and the consumer's recipes become passthroughs.
+
+**What this build does.** Both verbs live in `src/land.rs`.
+
+- **The passthrough comes first.** Every argument but `--pr-author-graph` and
+  `--no-draft` — which may sit anywhere before a `--` — reaches the linked
+  `onevcs` verb unchanged and in order, and is parsed by that verb's own
+  `onevcs::cli::Cli`. The verb is **called** through the library this crate
+  already publishes through, never spawned. The report, the verdict and the exit
+  status are that verb's, and a refused argument is its refusal, with its usage, at
+  its code. Which options carry a separate value is read off the sibling's parser,
+  so a `--title` reading `--no-draft` stays a title. This is the one place this
+  binary exits with a code the contract does not assign: it is `onevcs`'s code,
+  passed through unchanged, because the verb's answer *is* this command's answer.
+- **`--repo` takes a registered alias or a path.** The drafter needs a directory
+  and the verb accepts an alias, so a value that is not a directory is resolved to
+  its publication checkout through `onevcs resolve` — the resolution the loader
+  already asks for a lifecycle node's repository (`src/destination.rs`, and why it
+  is spawned there).
+- **When a body is drafted.** Never for `--no-draft`, never where the caller
+  passed `--body` or `--body-file`, and never where the identity publishes
+  `local-direct`, which opens no change request for a body to describe. That
+  workflow is read from the identity's **rules** (`onevcs rules check`), never
+  from `resolve`'s registration field, or from the `--policy` a `publish-branch`
+  was narrowed to. Rules this build could not read are drafted for: missing a body
+  somebody wanted is the worse way to be wrong. Where a body would be drafted and
+  no `--pr-author-graph` is named, the verb refuses at exit `2` before anything
+  runs.
+- **Where it is drafted.** In a **temporary detached worktree of the branch**,
+  cut from the named checkout under the host's temporary directory. It is the
+  checkout's own branch, or its origin's where only the origin carries it, which is
+  where `recover` finds a preserved one. The worktree is removed **by path** with
+  `git worktree remove --force` on every return and on a panic, never `prune`,
+  which would sweep other stale entries that are not this verb's. The checkout
+  itself, its worktree list included, is left as it was found. That holds for a
+  landing ended by `SIGINT`, `SIGTERM` or `SIGHUP` mid-draft too, which no drop
+  reaches: for the drafting turn's lifetime alone the verb holds a handler
+  (`sys::on_interrupt`) that removes the worktree and the turn's directory,
+  restores the signal's default action and sends the process that same signal, so
+  it still ends of it with nothing landed. It is the only handler this crate
+  installs, and a run's processes hold none. A signal the process was started
+  ignoring stays ignored. On Windows nothing is held, so there a console's Ctrl-C
+  mid-draft leaves the worktree named in the checkout's list — the one catchable
+  ending not covered. `SIGKILL` cannot be caught on any platform.
+- **What it is asked.** The task the lifecycle composes, with one substitution.
+  Where the run path appends the node's rendered task, this appends what the branch
+  says about itself: its name, its base — the origin's default branch: the
+  checkout's record of the origin's `HEAD`, then what the origin advertises, then
+  the one branch the checkout tracks there — and the full commit messages of
+  `<base>..<branch>`, oldest first. It says those are a record of what was done
+  rather than of why, so a thin `## Why` is correct and an invented one is not.
+  There is no `## Change request` section and no `## Worker transcript` section,
+  because there is no session and no run. The opening sentence is `DRAFTING_TASK`,
+  byte for byte.
+- **How it is read.** Through the same function the closeout runs,
+  `lifecycle::draft`. One dispatch goes through the local executor, labelled with
+  the `pr-author` persona and nothing of a run's. Every relayed report is retained
+  under the drafting turn's own directory. The body is the first retained member
+  result that both conformed to the schema and is non-empty. It is handed to the
+  verb as its body.
+- **A draft that cannot run never blocks the landing.** Whichever of the three
+  endings the graph reaches — it could not run or did not succeed, the schema
+  refused every answer, or an answer had nothing in it — standard error names it in
+  the run path's own words: `the change request's body was not drafted: … (<ending>),
+  so <branch> lands with no body`. Where a member died, a line per death comes
+  first, giving `oneagentgraph`'s own `rule`, `cause` and `detail` and saying when
+  it truncated the detail. The verb then runs with no body. There is no retry of
+  this crate's own; the graph's schema retry budget is the only one.
+- **The turn is spent before the push**, as the consumer's implementation accepts
+  and its `docs/repo-lifecycle.md` explains: the body is an argument to the verb,
+  and the verb is what pushes, so a branch the merge path then refuses has paid for
+  a body nothing used.
+
+**What the consumer reads out of this binary afterwards: nothing, for drafting.**
+Its `just publish-branch` and `just repo-recover` become `onepipeline
+publish-branch "$@" --pr-author-graph graphs/pr-author.yaml` under its
+`config/onepipeline.version`, and entry 69's literals stop being a reader contract.
+
+Driven end to end by `tests/e2e/out_of_band.rs`. Each journey runs the compiled
+binary against a real repository registered with the real linked `onevcs`, over a
+real origin on disk. The drafting graph is the document a closeout drafts with, run
+by the deterministic `oneagentgraph` double the lifecycle journeys use, and `gh` is
+doubled at `ONEVCS_GH`. The journeys:
+
+- `publish_branch_lands_a_change_request_with_the_body_its_branch_was_drafted`,
+  with `--repo` naming the alias. The change request opens with the drafted body
+  and the caller's title. There is exactly one drafting turn, through the named
+  graph, on a task holding the opening sentence, the branch, its base and its
+  commit messages and neither run-only section. The turn ran in a detached worktree
+  at the branch's own commit — recorded by the double while the turn ran — that is
+  gone afterwards. The checkout's worktree list, status and `HEAD` are unchanged.
+- `repo_recover_lands_a_preserved_branch_with_the_body_it_was_drafted`: the same
+  through `recover`, for a branch `onevcs preserve` put on the origin.
+- `repo_recover_drafts_only_where_publish_branch_would_and_lands_through_a_dead_draft`:
+  through `recover`, `--no-draft`, a caller's `--body` and a `local-direct`
+  identity spend no turn. A missing graph is refused. A member that died lands
+  with no body and its ending named.
+- `a_policy_narrowed_to_open_a_change_request_is_drafted_for`: a `local-direct`
+  identity narrowed with `--policy change-open` is drafted for, because the
+  narrowed policy opens a change request.
+- `the_base_is_found_however_the_checkout_knows_its_origins_default`: the task
+  names `origin/main` whether the checkout records the origin's `HEAD`, only the
+  origin advertises it, or neither does and the checkout tracks one branch there.
+- `a_branch_with_nothing_past_its_base_is_drafted_from_its_diff_alone`: the task
+  says the diff is the only record, instead of listing no commits.
+- `a_local_direct_identity_lands_with_no_drafting_turn_spent`: with and without a
+  graph named, the branch lands on the base and no turn is spent.
+- `no_draft_and_a_callers_own_body_land_with_no_drafting_turn_spent`: `--no-draft`,
+  `--body` and `--body-file` each land with the caller's body, or none.
+- `a_drafting_graph_that_ends_without_a_body_still_lands_the_branch`: a member
+  that died, every answer schema-refused, and an empty answer each land with no
+  body. Each names its ending on standard error, the death with its
+  classification. No retry, and the checkout is unchanged.
+- `a_draft_that_cannot_start_hands_the_landing_to_onevcs_and_says_why`: a
+  `--repo` nothing resolves, a branch the checkout lacks, and a temporary
+  directory the host refuses each spend no turn. Each names why on standard error
+  and leaves the landing to `onevcs`, which refuses the first two and lands the
+  third with no body.
+- `a_drafting_worktree_that_cannot_be_removed_is_named_for_the_operator`: a
+  drafter that left something undeletable costs the landing nothing. Standard
+  error names the worktree, the checkout, the command that removes it, and the
+  directory left to remove by hand.
+- `a_landing_interrupted_mid_draft_takes_its_drafting_worktree_out_of_the_checkout`:
+  a landing whose drafter is still holding its worktree is sent `SIGINT` to its
+  whole group, as a terminal sends it, and `SIGTERM` and `SIGHUP` to itself alone.
+  Each time it ends of that signal with nothing landed, the checkout's worktree
+  list reads as it did before the landing, and the worktree and the turn's
+  directory are gone.
+- `a_landing_signalled_while_its_worktree_is_being_added_still_removes_it`: a
+  real `post-checkout` hook holds `git worktree add` open while the landing alone
+  is sent `SIGTERM`. The landing waits for git's add to finish, then takes the
+  worktree back out, rather than removing nothing and leaving the entry git writes.
+- `a_landing_under_nohup_drafts_and_lands_through_a_hangup`: started ignoring
+  `SIGHUP`, a landing sent one mid-draft keeps drafting, lands with the drafted
+  body, and leaves the checkout as it found it.
+- `the_synopsis_the_register_proposes_is_the_one_the_binary_prints`: the block
+  above is each verb's `--help` usage line, byte for byte.
+- `every_argument_reaches_the_onevcs_verb_and_its_refusals_are_its_own`: an
+  unknown argument and an unknown `--policy` value are refused by `onevcs`'s own
+  parser at exit `2` with nothing drafted. A landing that would draft with no graph
+  named is refused. A line interleaving both crates' arguments lands with the
+  caller's title verbatim.
+
+Each journey was seen to fail for its own reason against a build that dropped the
+body, kept the worktree, ignored `local-direct` or the narrowed policy, kept a
+death to itself, lost a way of finding the base, dropped the empty-branch
+sentence, ignored a caller's body on `recover`, hid why a draft could not start,
+swallowed a worktree it could not remove, left an interrupted draft's worktree in
+the checkout's list, released its lock before git's add finished, handled a
+signal it was started ignoring, or printed a synopsis other than the one above.

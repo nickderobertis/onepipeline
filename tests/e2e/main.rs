@@ -33,6 +33,13 @@ mod adoption;
 mod agents;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod amend;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] `ask` is a verb of this
+// binary over `src/ask.rs`, `src/channel.rs` and `src/driver.rs`, each of which any change
+// under `src/` can move, so the narrowest edge it can honestly sit behind is the crate's.
+// Its waits are the behaviour under test — a reply arriving after a shorter window would
+// have elapsed — and are a few seconds in all.
+mod ask;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod boundary;
 mod bus_config;
 mod cancellation;
@@ -80,6 +87,12 @@ mod journal;
 // project edged narrower than the crate would drop it out of `nx affected` for the very
 // changes it exists to catch.
 mod landing;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] two journeys, about ten
+// seconds together — one detached run and a handful of `onemessagebus` invocations, the
+// shape and cost of `channel` and `boundary` in this same target — and what they hold is
+// the document this crate publishes against the binary it builds, so the narrowest edge
+// they can honestly sit behind is the crate itself, which is this target's.
+mod layout_document;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
 // exercise is `lifecycle`, `vcs`, `pool` and `engine` together against the linked `onevcs`
 // over a real origin — the session, the publication, the pool's hold and its refusal — so
@@ -107,15 +120,37 @@ mod loopcost;
 // exist to catch. Same grounds as `mod dispatch_env_hook` above.
 mod maintenance;
 mod node_validator;
+mod older_launch_record;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
+// exercise is `land`, `lifecycle`'s drafter and `destination`'s resolution together, against
+// the linked `onevcs` over a real origin — so the narrowest edge they can honestly sit
+// behind is the crate itself, which is this target's. Same grounds as `mod lifecycle` above.
+mod out_of_band;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod plan;
 mod plan_check;
 mod real_vcs;
 mod recorded_channel;
+mod recorded_support;
 mod run_end_hooks;
 mod scratch;
 mod session;
 mod session_reuse;
 mod shipped;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the head of
+// `tests/e2e/shutdown.rs`, and is carried here too because this declaration is the other
+// site the rule reads: twenty-seven journeys, 90 to 195 seconds summed and 25 to 50 on the wall,
+// each waiting out a real grace against real dispatches and a real origin, over `driver`'s
+// teardown, `engine`'s interrupt, `views` and the linked `onevcs` together — so the
+// narrowest edge they can honestly sit behind is the crate itself, which is this target's.
+// The block form because a line-scoped directive reaches only the line right below it.
+mod shutdown;
+// And `stop-guard`, under the same block: it is a verb of
+// this binary over `src/stopguard.rs` and `src/unwatched.rs`, and it answers off the run
+// store every launch writes, so any change under `src/` can move what it decides: the crate
+// is the narrowest edge it can honestly sit behind, as for `mod unwatched` beside it.
+mod stop_guard;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod store;
 mod summary;
 mod surface;

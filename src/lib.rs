@@ -67,6 +67,7 @@ pub mod views;
 // public item it does not name is a promise this crate did not make. The binary
 // reaches them through [`run`](crate::run).
 mod agentgraph;
+mod ask;
 mod checkpoint;
 mod concurrency;
 mod criteria;
@@ -76,9 +77,11 @@ mod dispatchenv;
 mod driver;
 mod edits;
 mod engine;
+mod freespace;
 mod graph;
 mod hooks;
 mod journal;
+mod land;
 mod ledger;
 mod lifecycle;
 mod loopstats;
@@ -89,6 +92,8 @@ mod projection;
 mod refusal;
 mod release;
 mod rendercost;
+mod shutdown;
+mod stopguard;
 mod summary;
 mod sys;
 mod taskgraph;

@@ -108,18 +108,6 @@ fn fenced_blocks(language: &str) -> Vec<String> {
     blocks
 }
 
-/// The one fenced block in the contract carrying the given info string.
-fn fenced_block(language: &str) -> String {
-    let blocks = fenced_blocks(language);
-    assert_eq!(
-        blocks.len(),
-        1,
-        "expected exactly one ```{language} block in docs/contract.md, found {}",
-        blocks.len()
-    );
-    blocks.into_iter().next().expect("one block")
-}
-
 /// The one fenced block of that language whose body names `needle`.
 ///
 /// The contract carries more than one example in a given language, so a fixture
@@ -796,6 +784,95 @@ fn the_marked_copy_of_the_bus_contract_is_reconciled_against_the_released_bus() 
     );
 }
 
+/// The contract's statement of a chain-stopping death names the linked
+/// producer's own words for the rule and both causes, so a variant renamed
+/// there fails here rather than leaving the paragraph describing a word nothing
+/// publishes. `tests/e2e/boundary.rs` drives both causes through the binary.
+#[test]
+fn the_contract_names_the_producers_words_for_a_chain_that_stopped() {
+    use oneagentgraph::event::Cause;
+    let passage = CONTRACT
+        .split_once("**A chain that stopped raises a finding.**")
+        .and_then(|(_, rest)| rest.split_once("\n\n"))
+        .map(|(passage, _)| passage)
+        .expect("the contract states which death is a chain that stopped");
+    let named = backticked_in(passage);
+    for word in [
+        oneagentgraph::member::Rule::ProviderFailure.as_str(),
+        Cause::Unclassified.as_str(),
+        Cause::FallbackChainExhausted.as_str(),
+        "finding",
+        "proposal",
+    ] {
+        assert!(
+            named.contains(word),
+            "the chain-stopping paragraph does not name `{word}`: {passage}"
+        );
+    }
+}
+
+/// The committed planner-channel document is the one this build generates
+/// from its compiled-in layout, through the bus's own document types: a change
+/// to the layout that is not regenerated here fails, and so does a hand edit.
+///
+/// `ONEPIPELINE_WRITE_LAYOUT_DOCUMENT=1` writes the generated document in place
+/// of the committed one instead — how it is regenerated, and never set by a
+/// check.
+#[test]
+fn the_committed_planner_channel_document_is_the_compiled_in_layout() {
+    use onepipeline::channel::layout::{bundle_json, DOCUMENT_PATH};
+    let path = repo_root().join(DOCUMENT_PATH);
+    let generated = bundle_json();
+    if std::env::var_os("ONEPIPELINE_WRITE_LAYOUT_DOCUMENT").is_some() {
+        std::fs::write(&path, &generated).expect("the document is written");
+    }
+    let committed = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{DOCUMENT_PATH} is committed: {error}"));
+    assert!(
+        committed == generated,
+        "{DOCUMENT_PATH} is not what the compiled-in layout generates. If the layout \
+         changed on purpose, raise `DOCUMENT_VERSION` and regenerate it with \
+         `ONEPIPELINE_WRITE_LAYOUT_DOCUMENT=1 cargo test --test contract \
+         the_committed_planner_channel_document_is_the_compiled_in_layout`; never edit it \
+         by hand.\n--- committed\n{committed}\n--- generated\n{generated}"
+    );
+}
+
+/// The contract states where the document is, the version it declares and
+/// that the compiled-in layout is its source — and each of those is true of the
+/// committed document, read back through the bus's own bundle type.
+#[test]
+fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
+    use onepipeline::channel::layout::{document, DOCUMENT_PATH, DOCUMENT_VERSION};
+    let passage = CONTRACT
+        .split_once("**The planner-channel layout is published as a document.**")
+        .and_then(|(_, rest)| rest.split_once("\n\n"))
+        .map(|(passage, _)| passage)
+        .expect("the contract states the published layout document");
+    let named = backticked_in(passage);
+    for word in [
+        DOCUMENT_PATH,
+        DOCUMENT_VERSION,
+        "LayoutDocument",
+        "SchemaBundle",
+    ] {
+        assert!(
+            named.contains(word),
+            "the layout-document paragraph does not name `{word}`: {passage}"
+        );
+    }
+    assert!(
+        passage.contains("compiled-in layout is its one source"),
+        "the paragraph does not say where the document comes from: {passage}"
+    );
+    let committed = std::fs::read_to_string(repo_root().join(DOCUMENT_PATH))
+        .expect("the document is committed");
+    let bundle =
+        onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
+    assert_eq!(bundle.version().to_string(), DOCUMENT_VERSION);
+    assert_eq!(bundle.layouts(), [document()]);
+}
+
 /// `exclude` wins, an absent `include` admits everything, and a glob is `*`.
 #[test]
 fn the_grammar_matches_the_way_the_contract_says_it_does() {
@@ -861,7 +938,7 @@ fn a_dispatch_is_cancelled_the_two_ways_the_contract_names() {
 
 #[test]
 fn the_contract_declares_the_seams_traits_and_methods() {
-    let sketch = fenced_block("rust");
+    let sketch = fenced_block_naming("rust", "pub trait Executor");
     for item in [
         "pub trait Executor",
         "fn name(",
@@ -879,6 +956,233 @@ fn the_contract_declares_the_seams_traits_and_methods() {
             "the contract's Rust block no longer declares `{item}`"
         );
     }
+}
+
+/// The host-shutdown seam the contract spells, held to the types the crate
+/// publishes.
+///
+/// The block is a **sketch** — the contract writes the seam as a consumer reads
+/// it — so what is held here is that every item it names exists under that name,
+/// and the signatures are held by the coercions in
+/// `the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other`,
+/// which is the drift gate this file uses everywhere. A type added to the block
+/// and not to `verbs` fails to compile here before the document can promise it.
+#[test]
+fn the_contract_declares_the_host_shutdown_seam_this_crate_publishes() {
+    use onepipeline::verbs::{
+        BranchPreserved, DispatchEnding, DispatchStopped, Preserved, RunShutdown, Shutdown,
+        ShutdownRequest, ShutdownScope, StopTeardown,
+    };
+    let sketch = fenced_block_naming("rust", "pub enum ShutdownScope");
+    for item in [
+        "pub enum ShutdownScope { Run(String), Mine, Host }",
+        "pub struct ShutdownRequest",
+        "pub enum DispatchEnding { Graceful, Killed, StillRunning }",
+        "pub enum Preserved { Pushed, AlreadyOnOrigin, NoRemote, Refused }",
+        "pub struct DispatchStopped",
+        "pub struct BranchPreserved",
+        "pub struct RunShutdown",
+        "pub struct Shutdown",
+        "pub fn shutdown(root: &Path, request: ShutdownRequest) -> Result<Shutdown>;",
+        "pub fn render_shutdown(shutdown: &Shutdown) -> String;",
+        "impl Shutdown { pub fn exit_code(&self) -> i32; }",
+        "pub not_pushed: Vec<(String, String)>",
+        "pub not_pushed_unread: Option<String>",
+    ] {
+        assert!(
+            sketch.contains(item),
+            "the contract's shutdown block no longer declares `{item}`"
+        );
+    }
+
+    // Every field the block spells, with its type, is exactly the set the
+    // exhaustive literals below name — so a field the document adds, drops,
+    // renames or retypes fails here, and one the crate adds or drops fails
+    // those literals to compile.
+    for (name, fields) in [
+        (
+            "ShutdownRequest",
+            &[
+                ("scope", "ShutdownScope"),
+                ("session", "String"),
+                ("grace", "Duration"),
+                ("force", "bool"),
+            ][..],
+        ),
+        (
+            "DispatchStopped",
+            &[
+                ("node", "String"),
+                ("pid", "u32"),
+                ("interrupt", "String"),
+                ("detail", "String"),
+                ("ended", "DispatchEnding"),
+                ("waited", "Duration"),
+            ][..],
+        ),
+        (
+            "BranchPreserved",
+            &[
+                ("identity", "String"),
+                ("branch", "String"),
+                ("outcome", "Preserved"),
+                ("remote", "Option<String>"),
+                ("commit", "Option<String>"),
+                ("detail", "String"),
+            ][..],
+        ),
+        (
+            "RunShutdown",
+            &[
+                ("run", "String"),
+                ("owner", "String"),
+                ("forced_over_owner", "bool"),
+                ("dispatches", "Vec<DispatchStopped>"),
+                ("teardown", "journal::StopTeardown"),
+                ("branches", "Vec<BranchPreserved>"),
+            ][..],
+        ),
+        (
+            "Shutdown",
+            &[
+                ("root", "PathBuf"),
+                ("scope", "ShutdownScope"),
+                ("grace", "Duration"),
+                ("forced", "bool"),
+                ("runs", "Vec<RunShutdown>"),
+                ("not_pushed", "Vec<(String, String)>"),
+                ("not_pushed_unread", "Option<String>"),
+            ][..],
+        ),
+    ] {
+        let expected: Vec<(String, String)> = fields
+            .iter()
+            .map(|(field, ty)| ((*field).to_string(), (*ty).to_string()))
+            .collect();
+        assert_eq!(
+            sketch_struct_fields(&sketch, name),
+            expected,
+            "the contract's `{name}` fields have drifted from the type this crate publishes"
+        );
+    }
+
+    // The values the block names, built here so a variant renamed or dropped
+    // fails to compile rather than leaving the document promising it.
+    let stopped = DispatchStopped {
+        node: "build".into(),
+        pid: 4_242,
+        interrupt: "delivered".into(),
+        detail: "the running turn took the redirection".into(),
+        ended: DispatchEnding::Graceful,
+        waited: std::time::Duration::from_secs(3),
+    };
+    let preserved = BranchPreserved {
+        identity: "github.com/owner/service".into(),
+        branch: "feat/thing".into(),
+        outcome: Preserved::Pushed,
+        remote: Some("https://github.com/owner/service.git".into()),
+        commit: Some("abc1234".into()),
+        detail: String::new(),
+    };
+    let run = RunShutdown {
+        run: "run-1".into(),
+        owner: "[mine]".into(),
+        forced_over_owner: false,
+        dispatches: vec![stopped],
+        teardown: StopTeardown::Signalled,
+        branches: vec![preserved],
+    };
+    let shutdown = Shutdown {
+        root: PathBuf::from("/runs"),
+        scope: ShutdownScope::Host,
+        grace: std::time::Duration::from_secs(600),
+        forced: false,
+        runs: vec![run],
+        not_pushed: vec![("github.com/owner/other".into(), "feat/left".into())],
+        not_pushed_unread: None,
+    };
+    // Everything went as it was asked to, so this is exit 0 — and the report
+    // still names the branch nobody pushed, which is a fact rather than a
+    // failure.
+    assert_eq!(shutdown.exit_code(), 0);
+    let report = onepipeline::verbs::render_shutdown(&shutdown);
+    assert!(report.contains("/runs"), "{report}");
+    assert!(
+        report.contains("github.com/owner/other@feat/left"),
+        "{report}"
+    );
+    assert!(report.contains("on its origin unproven"), "{report}");
+
+    // And a dispatch the deadline reaped is the refusal the contract assigns.
+    let killed = Shutdown {
+        runs: vec![RunShutdown {
+            dispatches: vec![DispatchStopped {
+                ended: DispatchEnding::Killed,
+                ..shutdown.runs[0].dispatches[0].clone()
+            }],
+            ..shutdown.runs[0].clone()
+        }],
+        ..shutdown
+    };
+    assert_eq!(killed.exit_code(), EXIT_REFUSED);
+
+    // The three scopes and the default grace are the document's own.
+    assert_ne!(ShutdownScope::Mine, ShutdownScope::Host);
+    let _: ShutdownRequest = ShutdownRequest {
+        scope: ShutdownScope::Run("run-1".into()),
+        session: "s".into(),
+        grace: std::time::Duration::from_secs(onepipeline::cli::DEFAULT_SHUTDOWN_GRACE_SECONDS),
+        force: false,
+    };
+    assert_eq!(onepipeline::cli::DEFAULT_SHUTDOWN_GRACE_SECONDS, 600);
+    assert_contract_names(
+        "shutdown paragraph's",
+        &[
+            "`onepipeline shutdown [RUN] [--mine] [--host] [--grace SECONDS] [--force]`",
+            "**default 600**",
+            "A shutdown journals no `run-stopped` and fires no run-end hook",
+            "on its origin *unproven*",
+        ],
+    );
+}
+
+/// The `pub name: Type` fields a sketched `pub struct` spells, in order, with
+/// each type's whitespace collapsed and the block's doc comments left out.
+fn sketch_struct_fields(sketch: &str, name: &str) -> Vec<(String, String)> {
+    let code: String = sketch
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("///"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let open = format!("pub struct {name} {{");
+    let start = code
+        .find(&open)
+        .unwrap_or_else(|| panic!("the contract's shutdown block declares no `{open}`"))
+        + open.len();
+    // The body ends at the brace that closes it; a field type such as
+    // `Vec<(String, String)>` nests parentheses and angles but never braces.
+    let body = &code[start..start + code[start..].find('}').expect("the struct closes")];
+    let mut fields = Vec::new();
+    let mut depth = 0_i32;
+    let mut field = String::new();
+    for ch in body.chars().chain(std::iter::once(',')) {
+        match ch {
+            '<' | '(' => depth += 1,
+            '>' | ')' => depth -= 1,
+            _ => {}
+        }
+        if ch == ',' && depth == 0 {
+            let spelled = field.split_whitespace().collect::<Vec<_>>().join(" ");
+            if let Some(rest) = spelled.strip_prefix("pub ") {
+                let (field_name, ty) = rest.split_once(':').expect("a field has a type");
+                fields.push((field_name.trim().to_string(), ty.trim().to_string()));
+            }
+            field.clear();
+        } else {
+            field.push(ch);
+        }
+    }
+    fields
 }
 
 /// A plan exercising every node shape the contract names.
@@ -4522,7 +4826,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 33, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 35, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -5057,6 +5361,17 @@ fn every_command_the_contract_names_parses() {
         ("attest", &["attest", "run-1", "approve"]),
         ("stop", &["stop", "run-1"]),
         ("stop --force", &["stop", "run-1", "--force"]),
+        ("shutdown RUN", &["shutdown", "run-1"]),
+        ("shutdown --mine", &["shutdown", "--mine"]),
+        ("shutdown --host", &["shutdown", "--host"]),
+        (
+            "shutdown --host --grace",
+            &["shutdown", "--host", "--grace", "60"],
+        ),
+        (
+            "shutdown --mine --force",
+            &["shutdown", "--mine", "--force"],
+        ),
         ("runs", &["runs"]),
         ("runs --mine", &["runs", "--mine"]),
         ("status", &["status"]),
@@ -5489,7 +5804,7 @@ const RULINGS: &[(&str, &str)] = &[
         "75.",
         "`onemessagebus`'s own `docs/contract.md` is the one source of their shape",
     ),
-    ("77.", "The planner channel is `onemessagebus`'s"),
+    ("77.", "The planner channel runs on `onemessagebus`"),
     ("78.", "Surface kinds are an open vocabulary"),
     ("79.", "edit-applied"),
     ("81.", "the CLI is argument parsing over them"),
@@ -6776,8 +7091,8 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
     use onepipeline::filter::EventFilter;
     use onepipeline::verbs::{
         Adopt, Adopted, ChannelQueue, Goals, Grouping, Host, Monitored, Next, Receipt, Results,
-        Retained, Status, StopRequest, Stopped, Surfaced, Transcript, Unwatched, WatchFrame,
-        WatchLines, WatchOutcome, WatchRequest,
+        Retained, Shutdown, ShutdownRequest, Status, StopRequest, Stopped, Surfaced, Transcript,
+        Unwatched, WatchFrame, WatchLines, WatchOutcome, WatchRequest,
     };
     use onepipeline::views::{DriverLiveness, Projects};
     use onepipeline::Result;
@@ -6817,6 +7132,8 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
     let _: fn(&Surfaced) -> String = verbs::render_surfaced;
     let _: fn(&RunPaths, StopRequest<'_>) -> Result<Stopped> = verbs::stop;
     let _: fn(&Stopped) -> String = verbs::render_stopped;
+    let _: fn(&Path, ShutdownRequest) -> Result<Shutdown> = verbs::shutdown;
+    let _: fn(&Shutdown) -> String = verbs::render_shutdown;
     let _: fn(&RunPaths, Adopt) -> Result<Adopted> = verbs::adopt;
     let _: fn(&Adopted) -> String = verbs::render_adopted;
     let _: fn(&RunPaths, Retained) -> Result<i32> = verbs::drive_run;
@@ -6839,6 +7156,8 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
         "surface",
         "attest",
         "stop",
+        "shutdown",
+        "render_shutdown",
         "adopt",
         "drive_run",
         "watch",
@@ -6965,4 +7284,208 @@ fn the_grouped_listing_is_what_the_contract_states() {
         projects.groups[0].header(),
         format!("{GROUP_HEADER}plans:b — B\n")
     );
+}
+
+/// The paragraph that says this crate owns the `planner-channel` layout names
+/// what the layout at `onepipeline::channel::layout` declares — its queues, the
+/// asker variable, the ids it registers and the schema documents behind the
+/// reply envelope — and the three rulings it states are what the layout does.
+#[test]
+fn the_planner_channel_layout_is_this_crates_and_is_what_the_contract_states() {
+    use onemessagebus::{Layout as _, LocalTransport, Transport};
+    use onepipeline::channel::layout::{
+        self, source, Channel, PlannerChannel, Surface, ASKER_ENV, COMMANDS, PLANNER_CHANNEL,
+        REPLIES, REPLY_ENVELOPE_FAMILY, REPLY_ENVELOPE_VERSION, REPLY_ENVELOPE_VERSIONS_READ,
+    };
+
+    let passage = CONTRACT
+        .lines()
+        .find(|line| line.starts_with("**The planner channel runs on `onemessagebus`"))
+        .expect("the contract states who owns the planner-channel layout");
+    let named = backticked_in(passage);
+    assert!(named.contains("onepipeline::channel::layout"));
+    assert_eq!(PlannerChannel.name(), PLANNER_CHANNEL);
+    assert!(named.contains(PLANNER_CHANNEL) && named.contains(ASKER_ENV));
+    for file in layout::FILES {
+        assert!(
+            named.contains(file),
+            "the contract does not name the layout's file `{file}`"
+        );
+    }
+    for spec in layout::queues() {
+        assert!(
+            named.contains(&spec.name.to_string()),
+            "the contract does not name the layout's queue `{}`",
+            spec.name
+        );
+    }
+
+    // The ids it registers, and the reply envelope's documents.
+    let registry = layout::registry();
+    for id in [
+        layout::SURFACE_SCHEMA,
+        layout::QUEUED_REPLY_SCHEMA,
+        layout::QUEUED_COMMANDS_SCHEMA,
+        layout::COMMAND_OUTCOME_SCHEMA,
+    ] {
+        assert!(registry.schema(&id).is_some(), "{id} is not registered");
+        assert!(
+            named.contains(&id.to_string()),
+            "the contract does not name {id}"
+        );
+    }
+    assert!(named.contains(REPLY_ENVELOPE_FAMILY));
+    for version in REPLY_ENVELOPE_VERSIONS_READ {
+        let id = onemessagebus::SchemaId::literal("agent", "reply-envelope", *version);
+        assert!(registry.schema(&id).is_some(), "{id} is not registered");
+        let document = format!("schemas/reply-envelope-v{version}.schema.json");
+        assert!(
+            named.contains(&document),
+            "the contract does not name {document}"
+        );
+        assert!(
+            repo_root().join(&document).is_file(),
+            "{document} does not ship"
+        );
+    }
+
+    // An edit envelope requires version 3, refused in the contract's words.
+    let replies: onemessagebus::QueueName = REPLIES.parse().expect("a queue name");
+    let grants = PlannerChannel.allowlist();
+    let refused = PlannerChannel
+        .prepare(
+            &replies,
+            json!({"version": 1, "commands": [{"op": "finding", "message": "m"}]}),
+            &grants,
+        )
+        .expect_err("an edit envelope at version 1");
+    assert!(
+        named.contains(&refused),
+        "the contract does not quote `{refused}`"
+    );
+    assert_eq!(REPLY_ENVELOPE_VERSION, 3);
+
+    // A bare reply is routed by its halves.
+    let routed = |envelope: Value| -> Vec<String> {
+        PlannerChannel
+            .prepare(&replies, envelope, &grants)
+            .expect("the planner's reply is routed")
+            .into_iter()
+            .map(|(queue, _)| queue.to_string())
+            .collect()
+    };
+    let edit = json!([{"op": "finding", "message": "m"}]);
+    assert_eq!(
+        routed(json!({"version": 3, "message": "go on", "completion": false, "commands": edit})),
+        vec![COMMANDS, REPLIES]
+    );
+    assert_eq!(
+        routed(json!({"version": 3, "commands": edit})),
+        vec![COMMANDS]
+    );
+    assert_eq!(routed(json!({"message": "carry on"})), vec![REPLIES]);
+
+    // A waiting surface is superseded on `source == check-in`, not on `kind`.
+    assert!(named.contains("source == check-in"));
+    let dir = std::env::temp_dir().join(format!(
+        "onepipeline-contract-layout-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let transport: std::sync::Arc<dyn Transport> =
+        std::sync::Arc::new(LocalTransport::open(&dir).expect("the transport opens"));
+    let channel = Channel::open(&transport).expect("the channel opens");
+    let surface = |message: &str, from: &str| Surface {
+        id: 0,
+        kind: "check-in".to_owned(),
+        message: message.to_owned(),
+        source: from.to_owned(),
+        blocking: false,
+        queued_at: 1,
+        workstream: None,
+        abandoned: false,
+        asker: None,
+        correlation: None,
+    };
+    for (message, from) in [
+        ("an observer's first", source::PROPOSAL),
+        ("an observer's second", source::PROPOSAL),
+        ("a pacemaker's first", source::CHECK_IN),
+        ("a pacemaker's second", source::CHECK_IN),
+    ] {
+        channel.push(&surface(message, from)).expect("queued");
+    }
+    let mut handed = Vec::new();
+    while let Some(next) = channel.claim().expect("a claim") {
+        handed.push(next.message);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        handed,
+        vec![
+            "an observer's first",
+            "an observer's second",
+            "a pacemaker's second"
+        ]
+    );
+}
+
+/// The contract's best-effort reading of an older record's bus configuration
+/// names exactly the codec fields the linked bus requires, and quotes the
+/// refusals that bus's `serve` gives a codec whose fields were read empty.
+#[test]
+fn an_older_records_bus_config_is_read_best_effort_as_the_contract_states() {
+    let passage = CONTRACT
+        .split("**A launch record's bus configuration is read best-effort.**")
+        .nth(1)
+        .and_then(|rest| rest.split("**").next())
+        .expect("the contract states how an older record's bus configuration is read");
+    let named = backticked_in(passage);
+
+    // The fields it names are the ones the linked bus's codec requires.
+    let schema = schemars::schema_for!(onemessagebus::CodecConfig).to_value();
+    let required: BTreeSet<String> = schema["required"]
+        .as_array()
+        .expect("the codec schema requires fields")
+        .iter()
+        .map(|field| field.as_str().expect("a field name").to_owned())
+        .collect();
+    assert_eq!(
+        required,
+        BTreeSet::from(["select".to_owned(), "frames".to_owned()])
+    );
+    for field in &required {
+        assert!(
+            named.contains(field),
+            "the contract does not name `{field}`"
+        );
+    }
+
+    // A real older record's codec, with those fields read empty, is refused by
+    // the bus's own serve resolution in the contract's words, one field at a time.
+    let older: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            repo_root().join("tests/recorded/launch/otg-closed-state-writes-status.json"),
+        )
+        .expect("the older record ships"),
+    )
+    .expect("the older record is JSON");
+    let (name, codec) = older["bus_config"]["codecs"]
+        .as_object()
+        .and_then(|codecs| codecs.iter().next())
+        .expect("the older record names a codec");
+    let mut emptied = codec.clone();
+    emptied["select"] = json!("");
+    emptied["frames"] = json!({});
+    let refusal = |codec: Value| {
+        onemessagebus::ConfiguredCodec::new(
+            name.parse().expect("a codec name"),
+            serde_json::from_value(codec).expect("a codec configuration"),
+        )
+        .expect_err("a codec with an empty field")
+        .replace(&format!("codecs.{name}."), "codecs.<name>.")
+    };
+    assert!(named.contains(&refusal(emptied.clone())));
+    emptied["select"] = json!("op");
+    assert!(named.contains(&refusal(emptied)));
 }

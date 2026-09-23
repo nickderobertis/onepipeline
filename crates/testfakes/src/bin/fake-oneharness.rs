@@ -236,7 +236,7 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         Ok(text) => text,
         Err(error) => return fake::refuse(&format!("cannot read --config {config}: {error}")),
     };
-    let selection = match selection(&config_text) {
+    let selection = match selection(&config) {
         Ok(selection) => selection,
         Err(refusal) => return fake::refuse(&format!("--config {config}: {refusal}")),
     };
@@ -399,17 +399,27 @@ impl Selection {
     }
 }
 
-/// What a turn under `config` selects.
+/// What a turn under the config at `path` selects.
 ///
-/// Read through oneharness's **own** config reader, so a config the sibling
-/// composed that the real CLI would refuse — an unknown key, an unknown harness
-/// id — is refused here rather than answered around, and the `[harness.<id>]`
-/// section is that library's declaration rather than a copy of it. What makes a
-/// chain resolvable at all is [`Chain`]'s — what is left here is the one case a
-/// chain cannot answer.
-fn selection(config: &str) -> Result<Selection, String> {
-    let config = oneharness_core::domain::config::parse(config)
-        .map_err(|error| format!("this is not a config oneharness could run: {error}"))?;
+/// Read through oneharness's **own** config *loader*, by path and not by text,
+/// for both halves of what the real CLI does with `--config`: a config the
+/// sibling composed that the real CLI would refuse — an unknown key, an unknown
+/// harness id — is refused here rather than answered around, and a config whose
+/// chain or model lives in an `extends` parent selects what the real CLI selects
+/// rather than what the one document says. Reading the text alone would discover
+/// a chain for a role file that names one in its parent — a double answering a
+/// turn nothing prepared. The `[harness.<id>]` section is that library's
+/// declaration rather than a copy of it; what makes a chain resolvable at all is
+/// [`Chain`]'s — what is left here is the one case a chain cannot answer.
+fn selection(path: &str) -> Result<Selection, String> {
+    let path = std::path::Path::new(path);
+    let config = oneharness_core::io::config::load(
+        Some(path),
+        false,
+        path.parent().unwrap_or(std::path::Path::new("")),
+    )
+    .map_err(|error| format!("this is not a config oneharness could run: {error}"))?
+    .config;
     let chain = match &config.harnesses {
         Some(candidates) => Chain::of(candidates)?,
         // What oneharness does with a config that names no chain: discover one.
@@ -527,7 +537,7 @@ fn work(
                 let status = std::process::Command::new(&this)
                     .args(["run", "--format", "json", "--compact", "--config", config])
                     .args(extra.split_whitespace())
-                    .args(["--prompt", EVALUATOR_OPENING])
+                    .args(["--prompt", fake::EVALUATOR_OPENING])
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .status()
@@ -897,13 +907,14 @@ fn judge_turn(
 ) -> ExitCode {
     let answer = if prompt.contains(SUPERVISOR_OPENING) {
         supervision(dir)
-    } else if prompt.contains(EVALUATOR_OPENING) {
+    } else if prompt.contains(fake::EVALUATOR_OPENING) {
         verdict(dir)
     } else {
         Err(format!(
             "the judge side was asked something this double does not answer; it speaks the \
-             supervisor decision ({SUPERVISOR_OPENING:?}) and the boolean verdict \
-             ({EVALUATOR_OPENING:?}), and nothing else"
+             supervisor decision ({SUPERVISOR_OPENING:?}) and the boolean verdict ({:?}), \
+             and nothing else",
+            fake::EVALUATOR_OPENING
         ))
     };
     // A judgement is `Answered` whatever it decided: the turn that reached the
@@ -1038,17 +1049,6 @@ const SUPERVISOR_OPENING: &str = "You are the simulated USER and completion supe
 // `tests/e2e/turns.rs` naming the protocol failure.
 const SUPERVISED_COMPLETE: &str =
     "{\"completion\":true,\"reason\":\"the turn did what the task asked\"}";
-
-/// How onejudge opens the prompt it hands its **evaluator**: the boolean verdict
-/// that scores a criterion over the finished transcript, which is what a member's
-/// `done_when` is re-judged as once the conversation ends.
-///
-/// A different question from the supervisor's, asked at a different point and
-/// answered in a different shape, so it is matched separately rather than folded
-/// into one "the judge side" case.
-// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same prompt contract as
-// `SUPERVISOR_OPENING` above, gated the same way.
-const EVALUATOR_OPENING: &str = "You are a strict, careful evaluator";
 
 /// The evaluator's verdict over the finished conversation: the criterion holds,
 /// unless a journey scripted `judge.unmet` with the reason it does not.

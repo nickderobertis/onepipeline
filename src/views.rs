@@ -191,6 +191,177 @@ const ENDED_BY_THE_STOP: &str = "worker ended when the run was stopped";
 /// and "ended" there is the false completion `stop` itself refuses to report.
 const OUTLIVED_THE_STOP: &str = "worker may still be running: the stop could not reach it";
 
+/// What a run's own record says a host shutdown did to it, where one stands.
+///
+/// The last `host-shutdown`, with the `dispatch-stopped` records beside it, and
+/// **nothing if a `driver-adopted` follows**: an adoption is what takes the run
+/// up again, so a run adopted since was shut down and then resumed, and calling
+/// it shut down would send an operator to intervene in work that is running.
+/// The same rule [`RunState::stop_recorded`] keeps for a stop, read off the
+/// merged store rather than folded, because the two views that answer for it are
+/// the two that already hold it.
+struct HostShutdown {
+    /// When the shutdown was recorded, in epoch milliseconds, or `None` for a
+    /// timestamp this build cannot place — which is left out rather than guessed.
+    at: Option<u64>,
+    /// What became of each dispatch it acted on, by node — decoded through the
+    /// record's registered payload, or `None` for a record that does not decode.
+    // llmlint: ignore[invalid_states_unrepresentable] keyed by the node id exactly as the record's `labels.node` carries it and as every other per-node map of a run is — `RunState::sessions`, `branches` and `landings` among them — and looked up only with a graph node's own `id`, so a node newtype here alone would be a conversion at one call site rather than a narrower set of values.
+    dispatches: BTreeMap<String, Option<crate::payload::DispatchStopped>>,
+    /// What became of each branch it offered to `onevcs`, by identity and branch
+    /// together, or `None` where the `host-shutdown` record itself does not
+    /// decode. The identity is part of the key because two repositories may carry
+    /// one branch name, and what became of it in one says nothing of the other.
+    branches: Option<BTreeMap<(String, String), crate::payload::PreservedWord>>,
+}
+
+impl HostShutdown {
+    /// The shutdown this run is under, or `None` for a run that is not.
+    ///
+    /// Each record is read through the payload type its kind is registered
+    /// under, which is the boundary a journal line crosses. One that does not
+    /// decode is **not** dropped and not defaulted: the kind alone says a
+    /// shutdown happened, and what it did is then said to be unreadable rather
+    /// than guessed at.
+    fn of(view: &RunView) -> Option<Self> {
+        let decoded = |payload: &serde_json::Map<String, serde_json::Value>| {
+            serde_json::Value::Object(payload.clone())
+        };
+        // A shutdown writes its `dispatch-stopped` records and then its
+        // `host-shutdown`, so the records since the last `host-shutdown` are the
+        // next one's — and a later shutdown's dispatches replace an earlier's
+        // whole, rather than a node the second found nothing live for reading as
+        // what the first did to it.
+        let mut pending = BTreeMap::new();
+        let mut dispatches = BTreeMap::new();
+        let mut found: Option<(&str, Option<crate::payload::HostShutdown>)> = None;
+        for event in &view.events {
+            match PipelineKind::from_wire(&event.kind) {
+                Some(PipelineKind::DriverAdopted) => {
+                    pending.clear();
+                    dispatches.clear();
+                    found = None;
+                }
+                Some(PipelineKind::DispatchStopped) => {
+                    if let Some(node) = event.labels.node.as_deref() {
+                        pending.insert(
+                            node.to_string(),
+                            serde_json::from_value(decoded(&event.payload)).ok(),
+                        );
+                    }
+                }
+                Some(PipelineKind::HostShutdown) => {
+                    dispatches = std::mem::take(&mut pending);
+                    found = Some((
+                        &event.ts,
+                        serde_json::from_value(decoded(&event.payload)).ok(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        let (at, recorded) = found?;
+        Some(Self {
+            at: crate::projection::millis_of(at),
+            dispatches,
+            branches: recorded.map(|recorded| {
+                recorded
+                    .branches
+                    .into_iter()
+                    .map(|row| ((row.identity, row.branch), row.result))
+                    .collect()
+            }),
+        })
+    }
+
+    /// The run-level line: that it was a host shutdown rather than a stop, when,
+    /// and the verb that resumes it.
+    fn line(&self, run: &str) -> String {
+        format!(
+            "  HOST SHUTDOWN: this run was put down by a host shutdown{}; it has not ended \
+             and nothing was settled by it — onepipeline adopt {run} resumes it\n",
+            self.at
+                .map(|at| format!(
+                    " {} ago",
+                    crate::telemetry::duration(sys::now_millis().saturating_sub(at))
+                ))
+                .unwrap_or_default()
+        )
+    }
+
+    /// What became of one node's dispatch, in the words the shutdown recorded.
+    fn became_of(&self, node: &str) -> String {
+        use crate::payload::{DispatchEndingWord as E, InterruptWord as I};
+        match self.dispatches.get(node) {
+            None => "no live dispatch when the host shutdown ran".to_string(),
+            Some(None) => "its dispatch-stopped record could not be read".to_string(),
+            Some(Some(stopped)) => format!(
+                "worker {} by the host shutdown (interrupt {})",
+                match stopped.ended {
+                    E::Graceful => "graceful",
+                    E::Killed => "killed",
+                    E::StillRunning => "still-running",
+                },
+                match stopped.interrupt {
+                    I::Delivered => "delivered",
+                    I::NoTurn => "no-turn",
+                    I::Failed => "failed",
+                    I::NotAsked => "not-asked",
+                }
+            ),
+        }
+    }
+
+    /// Whether one branch reached its origin, in the shutdown's own words, in
+    /// every repository the shutdown recorded that branch name for.
+    ///
+    /// A node's plan names its repository by whatever spelling the plan used,
+    /// and the record carries the identity `onevcs` resolved that to; this
+    /// build cannot resolve one into the other, so a name the shutdown recorded
+    /// in several repositories is answered for each of them by identity rather
+    /// than with one verdict that may belong to another repository's branch.
+    fn reached_its_origin(&self, branch: &str) -> String {
+        let Some(branches) = &self.branches else {
+            return "unknown: the host-shutdown record could not be read".to_string();
+        };
+        let recorded: Vec<(&str, crate::payload::PreservedWord)> = branches
+            .iter()
+            .filter(|((_, name), _)| name == branch)
+            .map(|((identity, _), result)| (identity.as_str(), *result))
+            .collect();
+        match recorded.as_slice() {
+            [] => {
+                "not offered to a preserving push, so nothing says it is on an origin".to_string()
+            }
+            [(_, result)] => preserved_words(*result).to_string(),
+            several => format!(
+                "recorded under this name in {} repositories — {}",
+                several.len(),
+                several
+                    .iter()
+                    .map(|(identity, result)| format!("{identity}: {}", preserved_words(*result)))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        }
+    }
+}
+
+/// What one preserving push's answer means for whether its branch is on an
+/// origin.
+const fn preserved_words(result: crate::payload::PreservedWord) -> &'static str {
+    use crate::payload::PreservedWord as P;
+    match result {
+        P::Pushed => {
+            "on its origin unproven: pushed without that repository's own hook or merge path \
+             having run"
+        }
+        P::AlreadyOnOrigin => "already on its origin at this commit",
+        P::NoRemote => "not on any origin: this identity has none to push to",
+        P::Refused => "not on its origin: the preserving push was refused",
+    }
+}
+
 /// Which of the two a stopped run's in-flight node gets.
 fn became_of_the_worker(state: &crate::projection::RunState) -> &'static str {
     match state.stop {
@@ -2097,6 +2268,13 @@ pub(crate) fn status_of(view: &RunView) -> String {
             &view.summary(),
             &view.unread(),
         ));
+        // Before anything about a node, because it is what every node line
+        // under it has to be read against: a run under a host shutdown is not a
+        // wedged run to intervene in, it is one waiting to be picked up.
+        let shutdown = HostShutdown::of(view);
+        if let Some(shutdown) = &shutdown {
+            out.push_str(&shutdown.line(&view.paths.run));
+        }
         let statuses = view.state.statuses();
         for (id, node_status) in &statuses {
             if *node_status != NodeStatus::Running {
@@ -2108,6 +2286,10 @@ pub(crate) fn status_of(view: &RunView) -> String {
                 .get(id)
                 .map(|at| sys::now_millis().saturating_sub(*at));
             let age = crate::telemetry::duration(age.unwrap_or(0));
+            if let Some(shutdown) = &shutdown {
+                out.push_str(&format!("  {id}: {}, {age} in\n", shutdown.became_of(id)));
+                continue;
+            }
             if view.state.stop_recorded() {
                 // What this node last did stays on the record and is
                 // deliberately not repeated here — see [`ENDED_BY_THE_STOP`].
@@ -2264,6 +2446,17 @@ pub(crate) fn status_of(view: &RunView) -> String {
         // run wants to know the idle capacity is being spent on something.
         out.push_str(&crate::maintenance::status_line(view));
         out.push_str(&journal_loss_line(view));
+        // What the run is running *in*, above the provider block: a supervisor's
+        // watch guidance cuts this view at that line, and a reading below it
+        // would be one no watch following that guidance could see. The root is
+        // the run's own parent, because a run opened by name was resolved
+        // under it.
+        out.push_str(&crate::freespace::lines(
+            view.paths
+                .dir
+                .parent()
+                .unwrap_or_else(|| Path::new(ledger::DEFAULT_RUNS_DIR)),
+        ));
         if let Some(health) = crate::agentgraph::health() {
             out.push_str(&format!("  providers: {health}\n"));
         }
@@ -3037,6 +3230,10 @@ pub fn host(survey: &Survey) -> String {
         "  reading {}\n",
         one_line(&survey.root.display().to_string())
     ));
+    // And what that root, and the worktrees the runs under it work in, are on:
+    // the resource whose exhaustion stops everything, beside the scope line so a
+    // reader of a quiet host meets it first.
+    out.push_str(&crate::freespace::lines(&survey.root));
     let mut rendered = false;
     let mut ignored: Vec<String> = Vec::new();
     for view in &survey.views {
@@ -3366,6 +3563,7 @@ pub fn results(view: &RunView) -> String {
         view.paths.run,
         graph::state_of(&view.state.statuses()).as_str()
     );
+    let shut_down = HostShutdown::of(view);
     let statuses = view.state.statuses();
     for node in view.state.graph.iter() {
         let status = statuses
@@ -3402,6 +3600,23 @@ pub fn results(view: &RunView) -> String {
         }
         if status == NodeStatus::Running && view.state.stop_recorded() {
             out.push_str(&format!(" — {}", became_of_the_worker(&view.state)));
+        }
+        // A node a host shutdown left in flight. Its branch and whether that
+        // branch reached an origin are the two things a reader deciding what to
+        // do with this host needs, and the node's own status word carries
+        // neither: it still reads `running`, because the shutdown settled
+        // nothing.
+        if status == NodeStatus::Running {
+            if let Some(shutdown) = &shut_down {
+                out.push_str(&format!(" — {}", shutdown.became_of(&node.id)));
+                if let Some(session) = view.state.sessions.get(&node.id) {
+                    out.push_str(&format!(
+                        "; its work is on {} ({})",
+                        session.branch(),
+                        shutdown.reached_its_origin(session.branch().as_str())
+                    ));
+                }
+            }
         }
         // What the dispatch reported, before what the plan asked for: an
         // unpinned lifecycle node's branch is named by the sibling that cut it,
@@ -3831,6 +4046,107 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch root");
         dir
+    }
+
+    /// Each word a `host-shutdown` records for a branch reads back as where
+    /// that branch is, and a branch it never offered is not called safe.
+    ///
+    /// `pushed` is the one a journey drives end to end, off a real preserving
+    /// push in `tests/e2e/shutdown.rs`; the rest are the sibling's other three
+    /// answers and the absence of one, which is what a node whose session opened
+    /// after the shutdown ran reads as.
+    #[test]
+    fn a_shut_down_branch_reads_as_where_its_preserving_push_left_it() {
+        use crate::payload::{DispatchEndingWord, DispatchStopped, InterruptWord, PreservedWord};
+        let shutdown = HostShutdown {
+            at: crate::projection::millis_of("not a timestamp"),
+            dispatches: BTreeMap::from([
+                (
+                    "build".to_string(),
+                    Some(DispatchStopped {
+                        pid: 1,
+                        interrupt: InterruptWord::Delivered,
+                        detail: String::new(),
+                        ended: DispatchEndingWord::Graceful,
+                        waited_ms: 0,
+                    }),
+                ),
+                ("garbled".to_string(), None),
+            ]),
+            branches: Some(BTreeMap::from([
+                (
+                    ("repo".to_string(), "pushed".to_string()),
+                    PreservedWord::Pushed,
+                ),
+                (
+                    ("repo".to_string(), "already-on-origin".to_string()),
+                    PreservedWord::AlreadyOnOrigin,
+                ),
+                (
+                    ("repo".to_string(), "no-remote".to_string()),
+                    PreservedWord::NoRemote,
+                ),
+                (
+                    ("repo".to_string(), "refused".to_string()),
+                    PreservedWord::Refused,
+                ),
+                // One name in two repositories, with different answers.
+                (
+                    ("one".to_string(), "shared".to_string()),
+                    PreservedWord::Pushed,
+                ),
+                (
+                    ("two".to_string(), "shared".to_string()),
+                    PreservedWord::Refused,
+                ),
+            ])),
+        };
+        for (branch, says) in [
+            ("pushed", "on its origin unproven"),
+            ("already-on-origin", "already on its origin"),
+            ("no-remote", "not on any origin"),
+            ("refused", "the preserving push was refused"),
+            ("never-offered", "not offered to a preserving push"),
+        ] {
+            let read = shutdown.reached_its_origin(branch);
+            assert!(read.contains(says), "{branch}: {read}");
+        }
+        // A name recorded in two repositories is answered for each, by identity,
+        // and never with one of the two verdicts alone.
+        assert_eq!(
+            shutdown.reached_its_origin("shared"),
+            "recorded under this name in 2 repositories — one: on its origin unproven: pushed \
+             without that repository's own hook or merge path having run; two: not on its \
+             origin: the preserving push was refused"
+        );
+        assert_eq!(
+            shutdown.became_of("build"),
+            "worker graceful by the host shutdown (interrupt delivered)"
+        );
+        assert_eq!(
+            shutdown.became_of("later"),
+            "no live dispatch when the host shutdown ran"
+        );
+        // A record that does not decode is said to be unreadable, never guessed.
+        assert_eq!(
+            shutdown.became_of("garbled"),
+            "its dispatch-stopped record could not be read"
+        );
+        let unread = HostShutdown {
+            branches: None,
+            dispatches: BTreeMap::new(),
+            at: shutdown.at,
+        };
+        assert!(unread
+            .reached_its_origin("pushed")
+            .contains("could not be read"));
+        // An instant this build cannot place is left out rather than guessed.
+        let line = shutdown.line("run-1");
+        assert!(line.starts_with("  HOST SHUTDOWN: this run was put down by a host shutdown;"));
+        assert!(
+            line.contains("onepipeline adopt run-1 resumes it"),
+            "{line}"
+        );
     }
 
     /// Each of the four answers `onevcs` gives reads back as one of the three

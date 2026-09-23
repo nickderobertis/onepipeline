@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.2](https://github.com/nickderobertis/onepipeline/compare/v0.44.1...v0.44.2) - 2026-09-22
+
+### Added
+
+- *(dispatch)* resolve an extends chain when reading a member's harness config ([#469](https://github.com/nickderobertis/onepipeline/pull/469))
+
+## [0.44.1](https://github.com/nickderobertis/onepipeline/compare/v0.44.0...v0.44.1) - 2026-09-22
+
+### Fixed
+
+- *(deps)* relink the onevcs and oneagentgraph releases carrying the JSON sweep reports ([#452](https://github.com/nickderobertis/onepipeline/pull/452))
+
+## [0.44.0](https://github.com/nickderobertis/onepipeline/compare/v0.43.1...v0.44.0) - 2026-09-22
+
+### Added
+
+- *(lifecycle)* publish-branch and repo-recover verbs that draft the body the run path drafts ([#448](https://github.com/nickderobertis/onepipeline/pull/448))
+
+## [0.43.1](https://github.com/nickderobertis/onepipeline/compare/v0.43.0...v0.43.1) - 2026-09-21
+
+### Fixed
+
+- *(deps)* relink onevcs, oneagentgraph, onejudge and the bus onto the bus 0.8.0 ([#445](https://github.com/nickderobertis/onepipeline/pull/445))
+
+## [0.43.0](https://github.com/nickderobertis/onepipeline/compare/v0.42.1...v0.43.0) - 2026-09-21
+
+### Added
+
+- *(views)* a harness-neutral stop guard, free space on host and status, and an ask verb ([#437](https://github.com/nickderobertis/onepipeline/pull/437))
+
+### Fixed
+
+- *(package)* ship the planner-channel envelope schemas in the published crate ([#443](https://github.com/nickderobertis/onepipeline/pull/443))
+
+## [0.42.1](https://github.com/nickderobertis/onepipeline/compare/v0.42.0...v0.42.1) - 2026-09-21
+
+### Fixed
+
+- *(channel)* own the planner-channel layout and its journeys, and read an older record's bus config ([#439](https://github.com/nickderobertis/onepipeline/pull/439))
+
+## [0.42.0](https://github.com/nickderobertis/onepipeline/compare/v0.41.2...v0.42.0) - 2026-09-21
+
+### Added
+
+- *(shutdown)* stop running work gracefully and preserve every branch it leaves ([#435](https://github.com/nickderobertis/onepipeline/pull/435))
+
+## [0.41.2](https://github.com/nickderobertis/onepipeline/compare/v0.41.1...v0.41.2) - 2026-09-21
+
+### Fixed
+
+- *(node)* discard a release-wait surface its hold has outlived, and render an amendment as the criteria it replaces ([#434](https://github.com/nickderobertis/onepipeline/pull/434))
+
 ## [0.41.1](https://github.com/nickderobertis/onepipeline/compare/v0.41.0...v0.41.1) - 2026-09-21
 
 ### Fixed

@@ -68,6 +68,25 @@ pub const MEMBER_ENV: &str = "ONEPIPELINE_FAKE_MEMBER";
 pub const CODEX_SERVER_OVERLOADED: &str =
     r#"{"type":"turn.failed","error":{"codex_error_info":"server_overloaded"}}"#;
 
+/// How onejudge opens the prompt it hands its **evaluator**: the boolean verdict
+/// that scores a criterion over the finished transcript, which is what a member's
+/// `done_when` is re-judged as once the conversation ends.
+///
+/// A different question from the supervisor's, asked at a different point and
+/// answered in a different shape, so `fake-oneharness` matches it separately
+/// rather than folding it into one "the judge side" case.
+///
+/// Named here rather than in the double because a journey that needs a turn the
+/// double *answers* has to open its prompt with this exact line, so the double
+/// and the journeys print one line rather than each their own copy.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] onejudge composes this
+// prompt in a private function and declares no constant for it, so there is nothing
+// upstream to share with. Its gate is `fake-oneharness`'s own refusal: the real
+// onejudge builds the prompt and that process reads it, so an opening it stops
+// writing is a loud refusal in `tests/e2e/turns.rs` rather than a double that
+// quietly answers the wrong question.
+pub const EVALUATOR_OPENING: &str = "You are a strict, careful evaluator";
+
 /// The directory this double reads its script from and records into.
 ///
 /// A double with no script directory has nothing to act out, which is a
