@@ -1418,6 +1418,15 @@ fn the_posix_maintain_fixture_exits_with_the_status_asked_for_and_refuses_the_re
 // scaffolding — that its two halves agree — which no platform can execute both sides
 // of; the fixtures themselves are run the way their callers run them, by `onevcs`
 // and by the engine, in every journey of this module.
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this **is** the drift
+// gate, and comparing the words the two halves spell is the most any gate here can do: no
+// platform runs both, so nothing on either leg can execute the other and compare answers.
+// The half a leg *can* run is gated by behaviour instead —
+// `the_posix_maintain_fixture_exits_with_the_status_asked_for_and_refuses_the_rest` above
+// runs `maintain.sh` over every value a journey could set — and the Windows leg runs its
+// half through every journey of this module. That there are two halves at all is a
+// decision `Cargo.toml` records against one compiled artifact, so collapsing them is that
+// decision's to revisit rather than this gate's; a follow-up is drafted for it.
 #[test]
 fn both_halves_of_each_fixture_take_the_same_arguments() {
     let fixtures: [(&str, &str, &[&str]); 1] = [(
@@ -1441,4 +1450,6 @@ fn both_halves_of_each_fixture_take_the_same_arguments() {
             assert!(batch.contains(mark), "{bat} no longer names {mark:?}");
         }
     }
-} // llmlint: ignore-end[tests_mirror_real_usage]
+}
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
+// llmlint: ignore-end[tests_mirror_real_usage]
