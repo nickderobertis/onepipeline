@@ -243,51 +243,28 @@ offline-tiers := "(" + rest-tier + ") or (" + note-tier + ")"
 # runs below report nothing and one merge reports both: the note journeys are
 # their own Nx project, and splitting the run must not split the floor.
 
-# Where `cargo llvm-cov` builds the instrumented tree and writes the profiles
-# beside it: `llvm-cov-target` under this clone's target directory, which
-# `.cargo/config.toml` pins to `<clone>/target` and `tests/build_config.rs` holds
-# there.
-#
-# Where the tree really is stays cargo-llvm-cov's to decide, so this is not taken
-# on trust: `tests/coverage.rs` holds this value against the directory
-# `LLVM_PROFILE_FILE` points the profiling runtime at, and the tier fails rather
-# than cleaning the wrong tree if the two ever part — which is what a run
-# configured to build somewhere else, through `CARGO_LLVM_COV_TARGET_DIR` or
-# `CARGO_TARGET_DIR`, would do to this line.
+# Where `cargo llvm-cov` builds the instrumented tree and writes the profiles:
+# `llvm-cov-target` under the directory `.cargo/config.toml` pins every build in
+# this clone to. Where it *really* is stays cargo-llvm-cov's to say, so
+# `tests/coverage.rs` holds this against where `LLVM_PROFILE_FILE` points — a run
+# configured to build elsewhere fails there rather than cleaning the wrong tree.
 llvm-cov-target-dir := justfile_directory() / "target" / "llvm-cov-target"
 
-# Remove that directory whole, before the first instrumented run. Clearing only
-# the profiles — `--profraw-only`, what this did — left every instrumented binary
-# an earlier run had built, and the report measures the objects it *finds* under
-# that directory rather than the ones this run produced: a test binary whose
-# source has since moved on is still an object carrying a coverage map, so every
-# line of it counts as missed and the 95% floor fails over code this run covered.
-# That is a false failure on every iterative run after the first, and an
-# investigation into covered code costs more than the instrumented rebuild this
-# now pays for.
+# Remove that tree whole, before the first instrumented run. Clearing only the
+# profiles — `--profraw-only`, what this did — left the instrumented binaries an
+# earlier run had built, and the report measures the objects it *finds* there: a
+# test binary whose source has moved on still carries a coverage map, so every
+# line of it counts as missed and the 95% floor fails over code this run covered,
+# on every iterative run after the first.
 #
-# What to remove is a parameter with that default, rather than something this
-# recipe reads for itself, so a caller — `tests/coverage.rs`, the only one — can
-# point it at a scratch tree instead of the one the run is being measured from.
-# It is read as `$1` and never interpolated into this shell source, for the reason
-# `set positional-arguments` is on at all: a quote in it is then a character in a
-# path rather than a change to how these lines parse. The tier calls this with no
-# argument, so the default is what every run of the gate exercises.
-#
-# `rm -rf` is handed the directory the argument *reaches* rather than its
-# spelling, and only after that is checked: `cd -P`/`pwd -P` follow `..` and
-# symlinks to the end — `/tmp/..` reaches `/`, and a link inside the clone reaches
-# wherever it points — and what they reach has to sit under the build directory
-# `.cargo/config.toml` pins every build in this clone to. That bound is the build
-# tree rather than the clone, because the clone also holds `src`, `.git` and this
-# file, and none of them is ever a tree to remove whole. `just` runs a recipe from
-# the justfile's own directory, so the bound is read off that rather than written
-# out, and nothing but the literal `target` is interpolated into these lines.
-# Anything outside it is refused by name with nothing removed. A value that
-# reaches nothing is the ordinary first run, whose tree does not exist yet: it is
-# checked as written and removing it does nothing. The `|| reached=` is
-# load-bearing under this justfile's `-e` — without it that first run dies on the
-# failed `cd` before the check can say anything.
+# What to remove is a parameter, read as `$1` and never interpolated into these
+# lines, which is what `set positional-arguments` is for; the tier passes none, so
+# the default is what every run of the gate exercises. `cd -P`/`pwd -P` then
+# answer with what the argument *reaches* through `..` and symlinks, and that
+# answer rather than its spelling has to sit under the build directory above —
+# narrower than the clone, which also holds `src` and `.git`. `|| reached=` keeps
+# a value that reaches nothing, which is the first run of a fresh clone, from
+# dying on `-e` before the check can pass it as written.
 _crate-coverage-clean dir=llvm-cov-target-dir:
     @built="$(pwd -P)/target"; \
       reached="$(cd -P -- "$1" 2>/dev/null && pwd -P)" || reached=; \

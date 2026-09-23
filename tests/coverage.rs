@@ -1,23 +1,17 @@
-//! The gate's coverage tier, held against the two artifacts it finds in the
-//! directory it measures — one left by the run before this one, one left by this
-//! one.
+//! The gate's coverage tier, held against the two artifacts it finds in the tree
+//! it measures — one left by the run before this one, one left by this one.
 //!
-//! The earlier run's is an instrumented *binary*. `llvm-cov report` walks that
-//! directory and measures every object it finds there, not the ones this run
-//! built, so a test binary whose source has since moved on is measured too, with
-//! no profile to its name and every line of it counted as missed — and the 95%
-//! floor fails over code this run covered. `_crate-coverage-clean` is what stops
-//! it, by removing that directory whole before the first instrumented run, and
-//! the four tests below drive that recipe.
+//! The earlier run's is an instrumented *binary*: the report measures every
+//! object it finds there, so one whose source has moved on is measured with no
+//! profile to its name and every line counted as missed, failing the 95% floor
+//! over code this run covered. `_crate-coverage-clean` removes that tree whole
+//! before the first instrumented run, and the four tests below drive it.
 //!
-//! This run's own is a *truncated profile*. The cancellation journeys kill
-//! instrumented processes, and one killed while the profiling runtime is still
-//! flushing leaves a truncated profile in the set `_crate-coverage` merges.
-//! `llvm-profdata` rejects the whole merge over a single one of those, which the
-//! recipe reports as a test failure.
-//!
-//! So the last test plants that artifact, on every coverage run, in the directory
-//! the recipe merges from — and the recipe is the assertion. Take
+//! This run's own is a *truncated profile*, left by a cancellation journey that
+//! killed an instrumented process while the profiling runtime was still flushing.
+//! `llvm-profdata` rejects the whole merge over one of those, which
+//! `_crate-coverage` reports as a test failure — so the last test plants one, on
+//! every coverage run, in the directory that recipe merges from. Take
 //! `--failure-mode all` out of the justfile and it fails again.
 
 use std::ffi::OsStr;
@@ -139,27 +133,19 @@ fn the_clean_step_passes_over_a_tree_that_was_never_built() {
     );
 }
 
-/// And it refuses what does not reach this clone's build directory, rather than
-/// removing it.
+/// And it refuses what does not reach this clone's build directory.
 ///
-/// `.cargo/config.toml` puts every build in this clone under `<clone>/target`, so
-/// a tree to clean that reaches anywhere else is a misconfiguration rather than a
-/// tree to remove — and the bound is that directory rather than the clone,
-/// because the clone also holds `src` and `.git`.
+/// `.cargo/config.toml` pins every build in this clone under `<clone>/target`, so
+/// a tree reaching anywhere else is a misconfiguration rather than a tree to
+/// remove; the bound is that directory and not the clone, which also holds `src`
+/// and `.git`. The empty and relative cases reach nothing at all — the shape a
+/// mistyped argument takes, which the step has to refuse rather than fall back on
+/// a tree of its own.
 ///
-/// Each case is one a step that checked the *spelling* of what it was handed
-/// would accept: a path beside the build tree but inside the clone, an absolute
-/// path outside the clone, that same path reached through `..`, a symlink inside
-/// the build tree pointing out of it, and a name carrying a quote. The empty and
-/// relative ones are there for a different reason — they reach nothing at all,
-/// which is the shape a mistyped argument takes, and the step has to refuse them
-/// rather than fall back to some tree of its own.
-///
-/// Every case that reaches anything reaches a fixture this test made, so were the
-/// check gone the journey would delete its own fixtures and nothing else — it
-/// cannot be the accident it guards against. That is also why `<clone>/target`
-/// itself is not among them, though the step refuses it: the tier running this
-/// test is inside it.
+/// Everything here that reaches anything reaches a fixture this test made, so
+/// were the check gone the journey would delete its own fixtures and nothing
+/// else. That is why `<clone>/target` itself is absent though the step refuses
+/// it: the tier running this test is inside it.
 #[test]
 fn the_clean_step_refuses_what_does_not_reach_this_clones_build_directory() {
     let outside = env::temp_dir().join(format!(
