@@ -596,7 +596,7 @@ esac
         // And what git *resolves* for that clone, rather than only what the
         // config says: a value naming a directory git would not run is a guard
         // that is configured and inert.
-        let resolved = clone.join(String::from_utf8_lossy(&after.stdout).trim().to_string());
+        let resolved = clone.join(String::from_utf8_lossy(&after.stdout).trim());
         assert!(
             resolved.join("pre-push").is_file(),
             "the activated hooks path has no pre-push hook in it: {}",
