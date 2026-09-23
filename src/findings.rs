@@ -64,7 +64,8 @@ pub(crate) struct RequestedEdit {
     pub node: String,
 }
 
-/// The correlation a finding of `kind` about `node` is raised under.
+/// The correlation a finding of `kind` about `node` is raised under, where one
+/// can be spelled for it.
 ///
 /// **Stable**: the same finding about the same node yields the same key however
 /// often it is raised, which is what lets a manager bind a reply to it with
@@ -73,7 +74,15 @@ pub(crate) struct RequestedEdit {
 /// it is, and digested at the back because a node id is arbitrary text and a
 /// correlation is a bounded alphabet: two ids that sanitize alike still differ
 /// here.
-pub(crate) fn correlation(kind: &str, node: &str) -> Correlation {
+///
+/// `None` for a `kind` no correlation can carry — one outside that alphabet or
+/// past its bound, which every kind this crate raises is inside. The node is
+/// sanitized and cut and so can never be the reason, and a finding this cannot
+/// spell a key for is raised exactly as it was before it had one: readable,
+/// blocking, and answered by a reply rather than by an edit. Said rather than
+/// panicked because a key that could not be built is not a reason to end the
+/// loop that is reporting a conflict.
+pub(crate) fn correlation(kind: &str, node: &str) -> Option<Correlation> {
     let mut digest = Sha256::new();
     digest.update(kind.as_bytes());
     // A separator no side of the pair can contain, so ("a", "bc") and ("ab",
@@ -97,10 +106,7 @@ pub(crate) fn correlation(kind: &str, node: &str) -> Correlation {
         })
         .take(READABLE)
         .collect();
-    let key = format!("finding.{kind}.{readable}.{digest}");
-    key.parse().unwrap_or_else(|_| {
-        unreachable!("'{key}' is built from a correlation's own alphabet and is under its bound")
-    })
+    format!("finding.{kind}.{readable}.{digest}").parse().ok()
 }
 
 /// Record that the finding `correlation` names asks for `op` on `node`.
@@ -119,7 +125,7 @@ pub(crate) fn requests(
 ) -> Result<()> {
     let mut recorded = recorded(paths);
     recorded.insert(
-        correlation.as_str().to_owned(),
+        correlation.clone(),
         RequestedEdit {
             op: op.word().to_owned(),
             node: node.to_owned(),
@@ -150,11 +156,8 @@ pub(crate) fn answer_requested(paths: &RunPaths, operations: &[edits::Operation]
     }
     let channel = ChannelState::new(paths);
     let answered = channel.answered();
-    for (key, request) in &recorded {
-        let Ok(correlation) = key.parse::<Correlation>() else {
-            continue;
-        };
-        if answered.contains(&correlation) {
+    for (correlation, request) in &recorded {
+        if answered.contains(correlation) {
             continue;
         }
         if !operations
@@ -163,7 +166,7 @@ pub(crate) fn answer_requested(paths: &RunPaths, operations: &[edits::Operation]
         {
             continue;
         }
-        channel.answer_bound(&answer(request), Some(&correlation))?;
+        channel.answer_bound(&answer(request), Some(correlation))?;
     }
     Ok(())
 }
@@ -199,12 +202,23 @@ fn answer(request: &RequestedEdit) -> Reply {
     }
 }
 
-/// The run's record of what each of its findings asked for.
+/// The run's record of what each of its findings asked for, keyed by the
+/// correlation each was raised under.
 ///
 /// Read leniently, as every side record is: a run whose file is absent or
 /// unreadable has asked for nothing, and the findings it holds stay pending
-/// rather than the commit that answers them failing.
-fn recorded(paths: &RunPaths) -> BTreeMap<String, RequestedEdit> {
+/// rather than the commit that answers them failing. Keyed by the validated
+/// correlation and not by text, so a key this run could not have written is
+/// refused by the read rather than carried to the channel.
+// llmlint: ignore[changed_behavior_has_e2e] the lenient read has no interface that
+// can induce it: this file is written only by the single writer that raises a
+// finding, through `ledger::write_json`, which is atomic — so an absent or
+// truncated one is a run root somebody else corrupted, and no journey can reach
+// that state through the binary. `views.rs`'s read of the channel is lenient on the
+// same grounds and carries the same note. The two states it resolves — a run that
+// recorded nothing, and a record this build cannot read — are driven by
+// `a_run_with_no_recorded_request_answers_nothing_and_an_unreadable_one_refuses_nothing`.
+fn recorded(paths: &RunPaths) -> BTreeMap<Correlation, RequestedEdit> {
     crate::ledger::read_json_opt(&file(paths)).unwrap_or_default()
 }
 
@@ -237,7 +251,7 @@ mod tests {
         /// Raise the session-open finding about `node`, with the `retry` it asks
         /// for recorded against it, exactly as the engine raises it.
         fn conflicted(&self, node: &str) -> Correlation {
-            let correlation = correlation(SESSION_CONFLICT, node);
+            let correlation = correlation(SESSION_CONFLICT, node).expect("a key");
             requests(&self.paths, &correlation, Op::Retry, node).expect("the request records");
             ChannelState::new(&self.paths)
                 .push(Surface {
@@ -279,35 +293,38 @@ mod tests {
     /// same readable prefix must still be two correlations.
     #[test]
     fn a_findings_key_is_stable_and_one_per_kind_and_node() {
+        let key = |kind: &str, node: &str| correlation(kind, node).expect("a key");
         assert_eq!(
-            correlation(SESSION_CONFLICT, "service"),
-            correlation(SESSION_CONFLICT, "service"),
+            key(SESSION_CONFLICT, "service"),
+            key(SESSION_CONFLICT, "service"),
             "the same finding raised again carries a different key"
         );
         assert_ne!(
-            correlation(SESSION_CONFLICT, "service"),
-            correlation(SESSION_CONFLICT, "other")
+            key(SESSION_CONFLICT, "service"),
+            key(SESSION_CONFLICT, "other")
         );
-        assert_ne!(
-            correlation(SESSION_CONFLICT, "service"),
-            correlation("check-in", "service")
-        );
-        assert!(correlation(SESSION_CONFLICT, "service")
+        assert_ne!(key(SESSION_CONFLICT, "service"), key("check-in", "service"));
+        assert!(key(SESSION_CONFLICT, "service")
             .as_str()
             .contains("session-conflict.service."));
 
-        // Two ids no correlation alphabet can spell, and no length bounds.
-        let odd = correlation(SESSION_CONFLICT, "ship it/now (please)");
-        assert_ne!(odd, correlation(SESSION_CONFLICT, "ship it/now (please!)"));
-        let long = "n".repeat(4096);
-        assert_eq!(
-            correlation(SESSION_CONFLICT, &long),
-            correlation(SESSION_CONFLICT, &long)
-        );
+        // Two ids no correlation alphabet can spell, and no length bounds: the
+        // node is sanitized and cut, and the digest is what keeps them apart.
         assert_ne!(
-            correlation(SESSION_CONFLICT, &long),
-            correlation(SESSION_CONFLICT, &format!("{long}n"))
+            key(SESSION_CONFLICT, "ship it/now (please)"),
+            key(SESSION_CONFLICT, "ship it/now (please!)")
         );
+        let long = "n".repeat(4096);
+        assert_eq!(key(SESSION_CONFLICT, &long), key(SESSION_CONFLICT, &long));
+        assert_ne!(
+            key(SESSION_CONFLICT, &long),
+            key(SESSION_CONFLICT, &format!("{long}n"))
+        );
+
+        // And a kind no correlation can carry spells no key at all, rather than
+        // ending the loop that is raising the finding.
+        assert_eq!(correlation("not a kind", "service"), None);
+        assert_eq!(correlation(&"k".repeat(200), "service"), None);
     }
 
     /// Committing the edit a finding asked for answers that finding — once — and
@@ -396,8 +413,16 @@ mod tests {
         answer_requested(&scratch.paths, &retried("service")).expect("nothing to answer");
         assert!(ChannelState::new(&scratch.paths).replies().is_empty());
 
-        std::fs::write(file(&scratch.paths), "{ this is not json").expect("the record is written");
-        answer_requested(&scratch.paths, &retried("service")).expect("an unreadable record holds");
-        assert!(ChannelState::new(&scratch.paths).replies().is_empty());
+        // Unreadable both ways a record can be: not a document at all, and a
+        // document whose key is not a correlation this build would have written.
+        for written in [
+            "{ this is not json",
+            r#"{"not a key": {"op": "retry", "node": "x"}}"#,
+        ] {
+            std::fs::write(file(&scratch.paths), written).expect("the record is written");
+            answer_requested(&scratch.paths, &retried("service"))
+                .expect("an unreadable record holds");
+            assert!(ChannelState::new(&scratch.paths).replies().is_empty());
+        }
     }
 }

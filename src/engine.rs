@@ -4255,10 +4255,10 @@ fn session_conflict_surface(conflict: &SessionConflict) -> Surface {
         abandoned: false,
         asker: None,
         workstream: Some(conflict.node.as_str().to_owned()),
-        correlation: Some(crate::findings::correlation(
+        correlation: crate::findings::correlation(
             crate::findings::SESSION_CONFLICT,
             conflict.node.as_str(),
-        )),
+        ),
     }
 }
 

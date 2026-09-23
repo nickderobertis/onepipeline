@@ -1430,6 +1430,18 @@ impl ChannelState {
     /// A named correlation is the whole of the binding: nothing pending holding
     /// it is refused naming it, with nothing appended, and a slot holding some
     /// other question is left holding it.
+    ///
+    /// **A question this run has already answered is the one exception**, and it
+    /// is not the refusal's case. The refusal exists for a correlation no
+    /// question ever carried — a typo, which answers nothing and must say so.
+    /// A correlation an answer on the reply log already carries was asked and is
+    /// answered, and the reply naming it is still about it: the one way to reach
+    /// that is a reconciler finding answered by the very edit the verdict rode
+    /// with, since an envelope's commands are committed before its verdict half
+    /// is delivered. Refusing that would report a failure for a reply whose edit
+    /// has already landed, so it is appended carrying that correlation — the
+    /// question it is about — and the pending slot is released as any answer
+    /// releases it.
     pub(crate) fn answer_bound(
         &self,
         reply: &Reply,
@@ -1438,6 +1450,9 @@ impl ChannelState {
         let bus = self.bus()?;
         let framed = serde_json::json!({"id": 0, "reply": reply, "at": crate::sys::now_millis()});
         if let Some(correlation) = named {
+            if self.answered().contains(correlation) {
+                return self.append_to_an_answered(correlation, framed);
+            }
             return Self::bound_through(&bus, correlation, framed);
         }
         let id = match self.binding_for(&bus, reply)? {
@@ -1463,6 +1478,45 @@ impl ChannelState {
                     .unwrap_or_default()
             }
         };
+        self.surfaces()?
+            .raw()
+            .answer_pending()
+            .map_err(queue_failure)?;
+        Ok(id)
+    }
+
+    /// Append a verdict about a question the run has already answered, carrying
+    /// that question's correlation, and answer the reply's id.
+    ///
+    /// The bus's reply binding is not the path here — it answers an *outstanding*
+    /// question and this one is not — so the record is stamped and appended the
+    /// way [`answer_bound`](Self::answer_bound) appends a verdict bound to
+    /// nothing, judged first and with the pending slot released after, in that
+    /// order for that method's reason.
+    fn append_to_an_answered(
+        &self,
+        correlation: &Correlation,
+        mut framed: Value,
+    ) -> crate::Result<u64> {
+        if let Some(fields) = framed.as_object_mut() {
+            // Last, which is where `QueuedReply` declares it and where the bus's
+            // own stamp puts it, so the line is the line either writer writes.
+            fields.insert("correlation".to_owned(), Value::from(correlation.as_str()));
+        }
+        let replies = queue_name(REPLIES);
+        QueueError::of_verdict(
+            &replies,
+            self.bus()?
+                .validate(&replies, framed.clone())
+                .map_err(bus_failure)?,
+        )
+        .map_err(queue_failure)?;
+        let id = self
+            .plain(REPLIES)?
+            .push(framed)
+            .map_err(queue_failure)?
+            .id
+            .unwrap_or_default();
         self.surfaces()?
             .raw()
             .answer_pending()
@@ -2294,6 +2348,56 @@ mod tests {
             scratch.channel.replies().len(),
             1,
             "a refused reply was appended"
+        );
+    }
+
+    /// A verdict naming a question the run has already answered is appended
+    /// carrying that correlation rather than refused, and the pending slot is
+    /// released with it.
+    ///
+    /// The one way to reach it: an envelope's commands are committed before its
+    /// verdict half is delivered, so a manager who binds a reply to a reconciler
+    /// finding *and* carries the edit that finding asked for has the edit answer
+    /// it first. Refusing the verdict then would report a failure for a reply
+    /// whose edit has already landed. A correlation nothing ever asked is still
+    /// refused — that is what the refusal is for — which
+    /// `a_verdict_bound_to_nothing_is_queued_as_it_was_and_a_named_stranger_is_refused`
+    /// holds.
+    #[test]
+    fn a_verdict_naming_a_question_the_run_already_answered_is_appended_not_refused() {
+        let scratch = Scratch::new("answered-twice");
+        let asked = scratch.asked("a decision\nask-manager-token:cccc", true);
+        scratch.channel.claim().expect("the question is claimed");
+        scratch
+            .channel
+            .answer_bound(&Scratch::verdict("the first answer"), Some(&asked))
+            .expect("the question is answered");
+        assert_eq!(scratch.channel.held(), None, "the slot was not released");
+
+        let id = scratch
+            .channel
+            .answer_bound(&Scratch::verdict("and the verdict beside it"), Some(&asked))
+            .expect("a verdict about an answered question is appended");
+        let replies = scratch.channel.replies();
+        assert_eq!(replies.len(), 2, "{replies:?}");
+        assert_eq!(replies[1].id, id);
+        assert_eq!(
+            replies[1].correlation.as_ref(),
+            Some(&asked),
+            "the verdict was not recorded as being about the question it named"
+        );
+        assert_eq!(
+            replies[1].reply.message.as_deref(),
+            Some("and the verdict beside it")
+        );
+        // And the line is the line the bus's own stamp writes: the correlation
+        // last, after `at`.
+        let log = std::fs::read_to_string(scratch.root.join("bound/channel/replies.jsonl"))
+            .expect("the reply log");
+        let written = log.lines().last().expect("the second reply");
+        assert!(
+            written.rfind("\"correlation\"") > written.rfind("\"at\""),
+            "the appended reply is not in the field order the bus writes: {written}"
         );
     }
 

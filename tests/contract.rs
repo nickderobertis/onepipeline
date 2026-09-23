@@ -4440,6 +4440,11 @@ fn a_reconciler_finding_that_asks_for_an_edit_is_answered_by_that_edit() {
         "the finding leaves both what is waiting and what is pending",
         "A committed edit that is not the one the finding asked for answers nothing",
         "a finding an earlier reply already answered is not answered twice",
+        "A `--correlation C` naming a question the run has **already answered** is the one \
+         case the refusal above does not cover",
+        "that verdict is appended carrying the correlation it names, releasing the pending \
+         slot as any answer does",
+        "A correlation no question ever carried is refused exactly as it was.",
     ] {
         assert!(
             CONTRACT.contains(states),
