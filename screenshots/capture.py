@@ -66,7 +66,7 @@ WINDOW_WIDTH = 60 + round(WRAP_COLUMNS * 8.42)
 WORKFLOW = Path(".github/workflows/visual-docs.yml")
 
 
-def screencomp_pins_agree() -> str | None:
+def screencomp_pin_refusal() -> str | None:
     """The refusal, when the workflow's two screencomp versions have parted."""
     text = (REPO / WORKFLOW).read_text()
     # `findall`, not `search`: a second declaration of either would leave one of
@@ -108,7 +108,7 @@ def screencomp_pins_agree() -> str | None:
 NAMED_INPUTS = Path("nx.json")
 
 
-def covered_by_named_inputs() -> str | None:
+def uncovered_guard_path_refusal() -> str | None:
     """The refusal, when a guard path is under no declared named input."""
     document = json.loads((REPO / NAMED_INPUTS).read_text())
     entries = None
@@ -147,7 +147,7 @@ def covered_by_named_inputs() -> str | None:
 
 def main() -> int:
     world_module.clear_inherited_settings()
-    for refusal in (screencomp_pins_agree(), covered_by_named_inputs()):
+    for refusal in (screencomp_pin_refusal(), uncovered_guard_path_refusal()):
         if refusal is not None:
             print(refusal, file=sys.stderr)
             return 1

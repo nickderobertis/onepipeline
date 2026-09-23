@@ -102,22 +102,17 @@ say:
   per-clone state `just bootstrap` sets; `tests/provisioning.rs` holds that.
   The directory carries the visual guard **and nothing else** — `just gate` stays
   unhooked, as it already was.
-- **Rehearse the guard before a push that will run it: `just screenshots-guard`.**
-  It is the one caller that runs the capture inside a *git hook*, and a hook's
-  environment is not a shell's — git exports `GIT_DIR` and `GIT_WORK_TREE`
-  naming the repository being pushed, and `GIT_DIR` beats `-C` and beats
-  discovery, so an inherited one lands the world's own seed commits in the
-  repository under push. The capture therefore clears the whole `GIT_*` prefix
-  with the stack's `ONE*_` settings and states the git environment it wants
-  (`clear_inherited_settings` in `world.py`), and the recipe runs the real hook
-  with the real refs on its stdin, pushing nothing. A defect reachable only
-  under a hook is reachable from neither `just screenshots` nor `just gate`.
-- **A failed step reports both streams.** `world.run` quoting `stderr` alone is
-  how the push above failed with *no diagnostic at all*: `git commit` with
-  nothing staged exits non-zero having written its whole message to **stdout**,
-  so the refusal read "Fix what its own error below names" and then stopped.
-  `world.said` reports either stream, each named. Keep new steps going through
-  it rather than quoting one stream.
-- **Neither of those two needs `freeze` or `screencomp`**, so neither is excused
-  from the offline tier: `tests/visual_docs.rs` drives `world.py` against real
-  `git` for both, and is where a regression in either is caught without a push.
+- **A hook's environment is not a shell's.** Git runs the guard with `GIT_DIR`
+  and `GIT_WORK_TREE` naming the repository being pushed, and `GIT_DIR` beats
+  `-C` and beats discovery — so an inherited one seeds the world's throwaway
+  repositories into the repository under push. The world states its whole git
+  environment and inherits none of it (`clear_inherited_settings` in
+  `world.py`). Rehearse with `just screenshots-guard`, which runs the real hook
+  with real refs on its stdin and pushes nothing: neither `just screenshots` nor
+  `just gate` reaches what only a hook reaches.
+- **A failed step reports both streams** — `world.said`, which every step goes
+  through. `git` writes `nothing to commit` to *stdout*, so a refusal quoting
+  `stderr` alone arrives blank.
+- Neither of those needs `freeze` or `screencomp`, so neither is excused from
+  the offline tier: `tests/visual_docs.rs` drives `world.py` against real `git`
+  for both.
