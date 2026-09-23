@@ -1347,6 +1347,57 @@ fn a_sweep_reports_an_identity_whose_sessions_the_sibling_could_not_survey() {
     }
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// What the POSIX half of the maintain fixture *does* with the status it is asked
+/// to exit with — run, rather than read.
+///
+/// The structural gate below is what holds the two halves together, and all it can
+/// compare is the words they spell: no platform runs both, which is the whole
+/// reason there are two. What it cannot show is that either half behaves the way
+/// those words claim — so the half this platform can run is run, across every
+/// value a journey could set it to, and its answers are asserted rather than
+/// inferred from its source.
+///
+/// Unix-only for the reason [`interpreted_script`] is two scripts at all: the
+/// Windows half is not executable here, and a journey that read it instead would
+/// be the structural gate again under another name.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is the suite's own fixture,
+// which no journey can assert about from outside: what a journey sees is `onevcs`
+// recording the status the fixture exited with, and it cannot tell one the fixture
+// refused from one it was asked for. The fixture is otherwise run exactly as its caller
+// runs it — as a subprocess, out of the world's own scratch, with the same variable set.
+#[cfg(unix)]
+#[test]
+fn the_posix_maintain_fixture_exits_with_the_status_asked_for_and_refuses_the_rest() {
+    /// What the fixture answers a value it cannot exit with: `sysexits.h`'s
+    /// EX_USAGE, which is what `hook.sh` answers a caller it does not understand.
+    const REFUSED_STATUS: i32 = 64;
+
+    let world = World::new("maintain-exit-status");
+    let maintain = interpreted_script(&world, "maintain");
+    let answered = |value: &str| -> i32 {
+        std::process::Command::new(&maintain)
+            .current_dir(&world.root)
+            .env("ONEPIPELINE_E2E_MAINTAIN_EXIT", value)
+            .output()
+            .expect("the fixture runs")
+            .status
+            .code()
+            .expect("the fixture exits rather than being ended by a signal")
+    };
+
+    // A status it can exit with, including the two ends of the range and the two
+    // spellings of "do not fail".
+    for (value, code) in [("", 0), ("0", 0), ("1", 1), ("3", 3), ("255", 255)] {
+        assert_eq!(answered(value), code, "asked for {value:?}");
+    }
+    // And everything else refused rather than clamped or wrapped: unchecked,
+    // `exit 300` answers 44 and a word answers whatever the shell makes of it, so
+    // a journey would read a status nobody asked for as the maintenance's own.
+    for value in ["256", "300", "abc", "010", "1e3", "99999", " 3", "-1"] {
+        assert_eq!(answered(value), REFUSED_STATUS, "asked for {value:?}");
+    }
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
 /// Both halves of each script fixture answer the same way: what one platform's
 /// half names, the other's names too.
 ///

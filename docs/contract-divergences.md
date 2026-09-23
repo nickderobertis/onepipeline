@@ -7201,7 +7201,7 @@ holder, carries neither `broken` nor `ran`, `results` says `kept: busy — …` 
 slot `idle`. Released, the next sweep takes the slot and maintains it. Then the
 slot's worktree is removed — a scratch directory cleaned out, a clone that never
 finished — and the next sweep due records `broken`, naming the worktree, with
-`results` saying `kept: broken — …` and not `kept: busy`. `tests::a_sweep_is_recorded_only_where_something_ran_was_claimed_or_failed`
+`results` saying `kept: broken — …` and not `kept: busy`. `tests::a_sweep_is_recorded_where_something_ran_or_a_due_slot_could_not_and_never_otherwise`
 holds the silent set beside it, and it was seen to fail against the build that
 recorded only a slot that ran — which is the build this entry is about.
 

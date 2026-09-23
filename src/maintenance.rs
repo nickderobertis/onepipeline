@@ -293,7 +293,7 @@ impl Maintained {
     /// `a_slot_another_process_holds_is_busy_and_one_whose_worktree_is_gone_is_broken`
     /// drives both loud slot answers through the compiled binary — a slot whose
     /// occupancy lease another process holds, and one whose worktree is gone — and
-    /// `tests::a_sweep_is_recorded_only_where_something_ran_was_claimed_or_failed`
+    /// `tests::a_sweep_is_recorded_where_something_ran_or_a_due_slot_could_not_and_never_otherwise`
     /// holds the quiet set beside them.
     fn is_recorded(&self) -> bool {
         match &self.outcome {
@@ -459,10 +459,6 @@ impl Sweep {
     /// next pace.
     fn start(config: MaintenanceConfig, paths: &RunPaths, tx: Sender<Message>) -> Option<Self> {
         let started_at = crate::sys::now_rfc3339();
-        // Counted where the decision to sweep is made rather than where the
-        // thread comes back, so a host reading the counts sees the ask and not
-        // only the asks that finished inside the window it read.
-        crate::loopstats::maintenance_swept();
         // The marker before the thread, so no reader meets a live sweep with
         // nothing on disk saying so. A marker that could not be written costs
         // the sweep nothing: `status` then says nothing about it, which is the
@@ -486,10 +482,18 @@ impl Sweep {
                 let _ = tx.send(Message::Maintained(Box::new(swept)));
             });
         match handle {
-            Ok(handle) => Some(Self {
-                handle: Some(handle),
-                paths: paths.clone(),
-            }),
+            Ok(handle) => {
+                // Counted here rather than above, so the count is of sweeps this
+                // driver **started**: a host that would not give it a thread did
+                // not sweep, and the arm below says so. Still before the thread is
+                // joined, because what a reader of the counts is asking is whether
+                // the driver asked at all, not whether the asking has finished.
+                crate::loopstats::maintenance_swept();
+                Some(Self {
+                    handle: Some(handle),
+                    paths: paths.clone(),
+                })
+            }
             // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can
             // type reaches this arm: it is a host that will not start a thread at all,
             // which no plan, flag or environment of this crate's decides. What it does
@@ -979,11 +983,12 @@ mod tests {
         }
     }
 
-    /// A sweep on which nothing ran writes nothing; one on which a slot ran, an
-    /// identity was claimed or one failed writes one record carrying exactly
-    /// those identities, each with the sibling's own outcome shape.
+    /// A sweep on which nothing was due and nothing was wrong writes nothing; one
+    /// on which a slot ran, a due slot could not be maintained, an identity was
+    /// claimed or one failed writes one record carrying exactly those identities,
+    /// each with the sibling's own outcome shape.
     #[test]
-    fn a_sweep_is_recorded_only_where_something_ran_was_claimed_or_failed() {
+    fn a_sweep_is_recorded_where_something_ran_or_a_due_slot_could_not_and_never_otherwise() {
         let nothing = Swept {
             started_at: "2026-09-20T00:00:00.000Z".into(),
             identities: vec![
