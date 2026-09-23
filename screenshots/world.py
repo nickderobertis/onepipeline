@@ -131,7 +131,11 @@ def _lifecycle_keys(plan: str) -> list[str]:
             _named(step, "step", task)
             for step in re.findall(r'^\s*-\s*"id":\s*"([^"]+)"', text, re.M)
         ]
-        keys.append(f"{node}.{steps[0]}" if steps else node)
+        if not steps:
+            # A node the engine dispatches directly: its own id is the key.
+            keys.append(node)
+            continue
+        keys.append(f"{node}.{steps[0]}")
     return keys
 
 
