@@ -1269,10 +1269,15 @@ const CONCURRENT_NODES: usize = 12;
 /// it is rewritten, so this is what a reader arriving inside that window gets — an empty
 /// file, or a front matter that stops mid-key.
 fn shadow_document(path: &Path) -> Result<Value, String> {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
         // Absent is not torn: the projection removes a shadow task no snapshot wrote, and
         // a listing taken a moment before the removal names a file that has since gone.
-        return Ok(Value::Null);
+        // That one kind and no other — every other refusal is this reader failing rather
+        // than the store changing under it, and taken for absence it would let the journey
+        // pass having read nothing at all.
+        Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => return Ok(Value::Null),
+        Err(refused) => return Err(format!("{} could not be read: {refused}", path.display())),
     };
     let front = text
         .strip_prefix("---\n")
@@ -1291,19 +1296,33 @@ fn shadow_document(path: &Path) -> Result<Value, String> {
     Ok(parsed)
 }
 
-/// Every `.md` document under `dir`, in path order.
+/// Every `.md` document under `dir`, in path order, or a panic naming what it could not
+/// list.
 ///
 /// `.md` and nothing else, because that is what a `local-md` source lists: an atomic write
 /// leaves a temporary beside its destination until the rename publishes it, and a reader
 /// that took one of those for a document would be reading a file nobody published.
+///
+/// A directory that is not there is a state of a live store — the projection writes one
+/// per project and takes it away with the project — so it is stepped over. Anything else
+/// the host refuses is this listing failing, and it says so rather than returning a
+/// shorter list, which would read here as a store with fewer documents in it.
 fn shadow_documents(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(next) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&next) else {
-            continue;
+        let entries = match std::fs::read_dir(&next) {
+            Ok(entries) => entries,
+            Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(refused) => panic!("{} could not be listed: {refused}", next.display()),
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|refused| {
+                panic!(
+                    "{} holds an entry that could not be read: {refused}",
+                    next.display()
+                )
+            });
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);

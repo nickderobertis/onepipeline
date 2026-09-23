@@ -1293,14 +1293,52 @@ pub fn read_json_opt<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
 }
 
 /// Write a JSON document so no reader can observe it half-written.
+///
+/// Every document written through here is this host's own account of a run — a
+/// checkpoint, a launch record, a reclaim — so it is written at
+/// [`Durability::Record`]: nothing else can reconstruct one.
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let body = serde_json::to_string_pretty(value)
         .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
-    write_atomic(path, body.as_bytes())
+    write_atomic(path, body.as_bytes(), Durability::Record)
+}
+
+/// What a write is asked to survive, beyond the reader it is already safe from.
+///
+/// Every write through [`write_atomic`] is published by a rename, so whichever of
+/// these it is, a reader listing that directory meets the previous file or the
+/// whole new one and never a partial one. What differs is a *host* that stops
+/// between the write and the disk: a file nothing else can reconstruct has to
+/// have landed before its name appears, and a file that is rebuilt as soon as its
+/// run is relaunched does not.
+#[derive(Clone, Copy, Debug)]
+pub enum Durability {
+    /// This host's own account of what it did. Synced to the disk before the
+    /// rename publishes the name, because a host that stopped in between would
+    /// otherwise leave the name pointing at contents that never landed — with
+    /// nothing left to rebuild them from.
+    ///
+    /// Precisely that and no more, because the two halves persist separately:
+    /// the sync is over the temporary's *contents*, and whether the rename's own
+    /// directory entry has reached the disk when the host stops is the
+    /// filesystem's business rather than this function's. So what a host that
+    /// stopped leaves behind is the previous record or the whole new one — never
+    /// a name pointing at contents that never landed. It is not a promise that
+    /// the newest record is the one that survives; a run whose machine died is
+    /// relaunched from its journal either way.
+    Record,
+    /// A projection of such a record, published by the rename alone.
+    ///
+    /// A run whose machine died is relaunched from its journal, which writes the
+    /// projection again; so the sync would buy durability for a file that is
+    /// rebuilt anyway. It is not free to buy: `writeback::write_shadow` replaces
+    /// one document per node, about a hundred per pass on a hundred-node run, so
+    /// this is a disk sync per node per pass rather than one.
+    Projection,
 }
 
 /// Write bytes so no reader can observe them half-written.
-pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub fn write_atomic(path: &Path, bytes: &[u8], durability: Durability) -> Result<()> {
     let ledger = |e: io::Error| Error::Ledger {
         path: path.to_path_buf(),
         source: e,
@@ -1311,18 +1349,53 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     // The temporary carries this process's pid so two writers racing the same
     // target cannot truncate each other's partial file before the rename.
     let temp = path.with_extension(format!("tmp.{}", sys::pid()));
-    // Flushed before the rename rather than at a drop, which discards its error.
-    // Deliberately not `sync_all`: a reader past the rename needs the page cache
-    // the write already filled, and `writeback::write_shadow` replaces one
-    // document per node, so a disk sync each would make a hundred-node run's
-    // every pass wait on a hundred of them.
-    {
-        use io::Write as _;
-        let mut file = fs::File::create(&temp).map_err(ledger)?;
-        file.write_all(bytes).map_err(ledger)?;
-        file.flush().map_err(ledger)?;
+    // The rename is what publishes the name, so whatever `durability` asks for
+    // happens before it rather than after: a host that died in between would
+    // otherwise leave the destination naming a file whose contents never landed.
+    // Which files are worth that is [`Durability`]'s own account.
+    let published = onto_the_disk(&temp, bytes, durability).and_then(|()| fs::rename(&temp, path));
+    // llmlint: ignore-block[changed_behavior_has_e2e] reaching this needs the host to
+    // refuse a call this function makes, which no journey can ask of a real run without a
+    // filesystem built to fail: the unit tests induce both refusals against the real
+    // filesystem — a rename onto a directory, and a temporary name no file can take — and
+    // assert the temporary is gone, the destination untouched, and the error naming the
+    // destination. What an e2e could observe is a file that is *not* there, which no
+    // surface of this product reports.
+    if published.is_err() {
+        // A temporary no rename published is not a document, and every directory
+        // written through here is one something lists — the shadow store, the
+        // runs root, the gate's entries. Left behind, a failed write leaves a
+        // file there under a name nothing is looking for and nothing removes.
+        // Its own removal failing adds nothing to the error below, which already
+        // names the destination and what the host said.
+        let _ = fs::remove_file(&temp);
     }
-    fs::rename(&temp, path).map_err(ledger)
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    published.map_err(ledger)
+}
+
+/// [`write_atomic`]'s temporary: written whole, and as far towards the disk as
+/// `durability` asks, before the rename that gives it its name.
+///
+/// Flushed and synced explicitly rather than at a drop, which discards the error
+/// — and this is the one write whose failure the caller has to hear, because the
+/// rename after it would publish the file regardless.
+fn onto_the_disk(temp: &Path, bytes: &[u8], durability: Durability) -> io::Result<()> {
+    use io::Write as _;
+    let mut file = fs::File::create(temp)?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    // llmlint: ignore-block[changed_behavior_has_e2e] what the sync buys is visible only to
+    // a host that stops between this write and the rename after it, so proving it end to
+    // end means killing the machine mid-call — which this suite cannot do and which no
+    // output of this product reports. The unit tests drive both arms through the real
+    // filesystem and assert what is observable: the document published, and no temporary
+    // left beside it.
+    match durability {
+        Durability::Record => file.sync_all(),
+        Durability::Projection => Ok(()),
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 /// A record fragment an append found at the end of a file and discarded.
@@ -1997,7 +2070,7 @@ fn reclaim(path: &Path, dead: &LockRecord, body: &str) -> Result<Reclaimed> {
             // what the path holds, which is what an earlier winner changes.
             let outcome = match read_lock_file(path) {
                 Ok(LockFile::Record(now)) if now == *dead => {
-                    write_atomic(path, body.as_bytes()).map(|()| Reclaimed::Won)
+                    write_atomic(path, body.as_bytes(), Durability::Record).map(|()| Reclaimed::Won)
                 }
                 Ok(LockFile::Record(now)) => Ok(Reclaimed::HeldBy(now)),
                 Ok(LockFile::Absent) => Ok(Reclaimed::Released),
@@ -3967,6 +4040,111 @@ mod tests {
         );
         assert!(!records[2].terminated);
         assert_eq!(read_lines(&path).len(), 3);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A written document is whole at its destination, under its own name, with
+    /// nothing of the writing left beside it.
+    ///
+    /// The temporary is the whole mechanism — the bytes are written, flushed and
+    /// synced into a sibling and the rename publishes them — so this is also the
+    /// one place the sync itself is exercised: a host that refused it would fail
+    /// here rather than anywhere a reader could see.
+    #[test]
+    fn a_published_document_replaces_its_destination_and_leaves_no_temporary_behind() {
+        for durability in [Durability::Record, Durability::Projection] {
+            let root = scratch(&format!("publish-{durability:?}"));
+            let path = root.join("board.md");
+            let temp = path.with_extension(format!("tmp.{}", sys::pid()));
+            fs::write(&path, "the document before").expect("a destination to replace");
+
+            write_atomic(&path, b"the document after", durability).expect("it is published");
+
+            assert_eq!(
+                fs::read_to_string(&path).expect("the destination reads"),
+                "the document after",
+                "{durability:?} did not replace the document it published over"
+            );
+            assert!(
+                !temp.exists(),
+                "{durability:?} left the temporary the rename published: {}",
+                temp.display()
+            );
+            fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    /// A write the host refuses at the rename is reported, and the temporary it
+    /// had already filled goes with it.
+    ///
+    /// Induced by making the destination a directory, which is a rename no host
+    /// performs — so everything before it succeeds and this reaches the one
+    /// state where a whole temporary exists and no document was published. Left
+    /// behind, it would sit in a directory something lists, under a name nothing
+    /// is looking for and nothing else removes.
+    #[test]
+    fn a_write_the_host_will_not_publish_is_reported_and_takes_its_temporary_with_it() {
+        for durability in [Durability::Record, Durability::Projection] {
+            let root = scratch(&format!("unpublishable-{durability:?}"));
+            let path = root.join("board.md");
+            let temp = path.with_extension(format!("tmp.{}", sys::pid()));
+            // Holding a document of its own, so what is asserted below is that
+            // the destination was left alone rather than merely that it exists.
+            fs::create_dir_all(&path).expect("a destination no rename can replace");
+            fs::write(path.join("kept.md"), "what the destination held").expect("it holds one");
+
+            let refused = write_atomic(&path, b"the document that cannot land", durability);
+
+            let Err(Error::Ledger { path: named, .. }) = refused else {
+                panic!("{durability:?} did not report a rename onto a directory: {refused:?}");
+            };
+            assert_eq!(
+                named, path,
+                "the refusal named something other than the destination"
+            );
+            assert!(
+                !temp.exists(),
+                "{durability:?} left the temporary of a write it could not publish: {}",
+                temp.display()
+            );
+            assert_eq!(
+                fs::read_to_string(path.join("kept.md")).expect("the destination reads"),
+                "what the destination held"
+            );
+            fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    /// A temporary this host will not open is reported before anything is
+    /// published, and the destination is left as it was.
+    ///
+    /// Induced by putting a directory at the temporary's own name: the one
+    /// failure that happens before a byte is written, so there is no temporary
+    /// file to clear afterwards and the clearing has to be as quiet about that
+    /// as it is about a removal the host refuses.
+    #[test]
+    fn a_temporary_this_host_will_not_open_is_reported_and_leaves_the_destination_alone() {
+        let root = scratch("unopenable");
+        let path = root.join("board.md");
+        let temp = path.with_extension(format!("tmp.{}", sys::pid()));
+        fs::write(&path, "the document before").expect("a destination to leave alone");
+        fs::create_dir_all(&temp).expect("a temporary name no file can take");
+
+        let refused = write_atomic(&path, b"the document never written", Durability::Record);
+
+        assert!(
+            matches!(refused, Err(Error::Ledger { .. })),
+            "a temporary that could not be opened was not reported: {refused:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("the destination reads"),
+            "the document before",
+            "the destination moved for a write that never reached it"
+        );
+        assert!(
+            temp.is_dir(),
+            "the clearing removed something this write did not put there"
+        );
         fs::remove_dir_all(&root).ok();
     }
 
