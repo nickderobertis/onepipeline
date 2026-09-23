@@ -233,6 +233,132 @@ fn dispatched(world: &World, case: &str, branch: Option<&str>) -> (Value, Value)
     (world.run_json(case, "result.json"), opened(world, case))
 }
 
+/// The labels the sibling's own record of session `token` carries, as `onevcs
+/// session holders --json` reports them — the read a host's listing of whose
+/// sessions and branches these are makes, rather than this crate's journal.
+fn labels_of(world: &World, token: &str) -> Value {
+    holder_of(world, token)["labels"].clone()
+}
+
+/// The sibling's own `session holders --json` row for session `token`.
+fn holder_of(world: &World, token: &str) -> Value {
+    let printed = onevcs(world, &["session", "holders", "service", "--json"]);
+    let held: Value = serde_json::from_str(printed.trim()).unwrap_or_else(|e| {
+        panic!("`onevcs session holders --json` printed no JSON: {e}: {printed}")
+    });
+    held.as_array()
+        .into_iter()
+        .flatten()
+        .find(|row| row["token"].as_str() == Some(token))
+        .cloned()
+        .unwrap_or_else(|| panic!("no holder of `service` is session {token}: {printed}"))
+}
+
+/// The token of the session a run's node opened, off the sibling's own record.
+fn token_of(world: &World, run: &str) -> String {
+    opened(world, run)["payload"]["token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("run {run} opened no session\n{}", why(world, run)))
+        .to_owned()
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey lives
+// beside the other session journeys in this file, which is where a reader looks for one
+// and what `just test-e2e` already runs on its own. What it exercises is the seam in
+// `src/executor.rs` that opens a node's session and the `onevcs` calls behind
+// `src/vcs.rs`, both of which any change under `src/` can move — the stamping it asserts
+// on is four lines at that seam — so a project edged narrower than the crate would drop
+// it out of `nx affected` for the very changes it exists to catch, which is the ground
+// `tests/e2e/unwatched.rs` and the blocks in `tests/e2e/views.rs` carry for their own.
+/// Every session a node opens says whose it is on the sibling's own record: the
+/// run, the node, and the session that launched the run — fresh, in a pooled
+/// slot, and from a launch nothing attributed, which names no launcher at all
+/// rather than an empty one.
+#[test]
+fn a_nodes_session_names_its_run_its_node_and_the_session_that_launched_it() {
+    let world = World::new("session-labels");
+    let _repo = world.repository("local-direct", &[]);
+
+    let (settled, _) = dispatched(&world, "labelled", None);
+    assert_eq!(
+        settled["nodes"][0]["status"],
+        "done",
+        "{settled}\n{}",
+        why(&world, "labelled")
+    );
+    assert_eq!(
+        labels_of(&world, &token_of(&world, "labelled")),
+        json!({"run": "labelled", "node": "labelled", "launcher": world.session}),
+        "the fresh session does not say which run, node and launch opened it"
+    );
+
+    // A pooled slot is opened through the same seam and says the same.
+    world.script("pooled.work", "pooled wrote this\n");
+    let mut pooled = lifecycle("pooled", &[]);
+    pooled["pool"] = json!(1);
+    let path = world.plan("pooled", &plan_of("pooled", vec![pooled]));
+    world.run(&["start", &path, "--attach"]).settled();
+    world.until("the pooled run to settle", |world| {
+        world.run_file("pooled", "result.json").is_file()
+    });
+    let settled = world.run_json("pooled", "result.json");
+    assert_eq!(
+        settled["nodes"][0]["status"],
+        "done",
+        "{settled}\n{}",
+        why(&world, "pooled")
+    );
+    let slot = holder_of(&world, &token_of(&world, "pooled"));
+    assert!(
+        Path::new(slot["worktree"].as_str().unwrap_or_default())
+            .components()
+            .any(|part| part.as_os_str() == "pool"),
+        "the pooled node's session was not placed in a pool slot: {slot}"
+    );
+    assert_eq!(
+        slot["labels"],
+        json!({"run": "pooled", "node": "pooled", "launcher": world.session}),
+        "the pooled slot's session does not say which run, node and launch opened it"
+    );
+
+    // A launch made where nothing names a launching session: the binary records a
+    // blank `ONEPIPELINE_LAUNCHER_SESSION` as `unknown`, so this is the arm that
+    // `ledger::attributed` refuses on that word rather than on an empty string.
+    let anonymous = world
+        .as_session("ignored")
+        .with_env("ONEPIPELINE_LAUNCHER_SESSION", "");
+    let (settled, _) = dispatched(&anonymous, "anonymous", None);
+    assert_eq!(
+        settled["nodes"][0]["status"],
+        "done",
+        "{settled}\n{}",
+        why(&world, "anonymous")
+    );
+    assert_eq!(
+        labels_of(&world, &token_of(&world, "anonymous")),
+        json!({"run": "anonymous", "node": "anonymous"}),
+        "a launch nothing attributed stamped a launcher on its node's session"
+    );
+
+    // And nothing else opened one: the observer graph works in no session, so every
+    // session on the identity is one of the three nodes' own.
+    let printed = onevcs(&world, &["session", "holders", "service", "--json"]);
+    let held: Value = serde_json::from_str(printed.trim()).expect("holders print JSON");
+    let mut nodes: Vec<&str> = held
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|row| row["labels"]["node"].as_str().unwrap_or("<unlabelled>"))
+        .collect();
+    nodes.sort_unstable();
+    assert_eq!(
+        nodes,
+        ["anonymous", "labelled", "pooled"],
+        "a session opened for something other than a node: {printed}"
+    );
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
 /// How long the publication under a stopped run is given to leave.
 ///
 /// Neither platform's stop can be refused — `SIGKILL` on one, `taskkill /F` on
@@ -559,6 +685,13 @@ fn a_retry_lands_the_work_a_stopped_run_left_on_the_branch_it_pinned() {
          could reach the work session {stranded} left there: {taken}"
     );
     let _ = &stranded;
+    // Whichever way the sibling reached it, the session the retry worked in says
+    // it is the retry's — its run and its node — and not the stopped run's.
+    assert_eq!(
+        labels_of(&world, &token_of(&world, "retry")),
+        json!({"run": "retry", "node": "continuation", "launcher": world.session}),
+        "the retry's session does not name the retried node"
+    );
 
     // And what that buys, which is the only thing an operator cares about: the
     // work the stopped run stranded reached the base, beside the retry's own.
