@@ -47,6 +47,12 @@
 //! exactly that, so the window was measuring the runner and reporting it as this
 //! crate's defect. Those readings survive as
 //! [`the_timings_the_old_gate_asserted_are_measured_and_never_judged`].
+//!
+//! Three trees, because one quiet look is not a tree that stopped. A spinning
+//! tree and a silent one bracket the rule; between them is one working in
+//! bursts, whose pauses swallow whole looks while activity keeps arriving either
+//! side. So a condemnation answers to the **gap between activity events** ending
+//! at it, never to the look at it.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -80,23 +86,22 @@ fn the_linked_default_bound_outlasts_a_member_writing_its_report() {
 /// The bound the two driven halves supervise under, set the way an operator sets
 /// it.
 ///
-/// Small enough to spend seconds and not half an hour, and above
-/// `oneagentgraph`'s own probe floor so the rule gets a baseline and a
-/// comparison inside it.
+/// Small enough to spend seconds and not half an hour, above `oneagentgraph`'s
+/// own probe floor so the rule gets a baseline and a comparison inside it, and
+/// wide enough for [`watchdog`] to fit between the two windows [`bound`] asserts
+/// it between — which the two seconds this began at was not.
 #[cfg(unix)]
-const BOUND: &str = "2";
+const BOUND: &str = "6";
 
-/// The cadence every look in this file is taken on.
-///
-/// The sibling's own floor on how often it examines a quiet member's tree — how
-/// much rarer than that it examines one is its business and changes without this
-/// file. Looking on the floor is what this half needs from it: the rule can
-/// never take a reading this loop did not take one beside, and
-/// [`Stall::condemns`](oneagentgraph::member::Stall::condemns) is driven from
-/// the same iteration, so the pair the rule compares lies inside the span this
-/// loop recorded look by look.
+/// The cadence every look in this file is taken on: under the sibling's own
+/// probe floor, so the rule never takes a reading without one of this loop's
+/// beside it, and a pause is resolved finer than the rule resolves it — which is
+/// what lets a look find nothing while the rule's wider window over the same
+/// pause still finds work.
 #[cfg(unix)]
-const LOOK_EVERY: Duration = oneagentgraph::member::HEARTBEAT_INTERVAL;
+fn look_every() -> Duration {
+    oneagentgraph::member::HEARTBEAT_INTERVAL / 2
+}
 
 /// The longest this file waits for anything, and a **backstop rather than a
 /// bound**: nothing is asserted about how much of it a verdict spends, and a
@@ -106,6 +111,15 @@ const LOOK_EVERY: Duration = oneagentgraph::member::HEARTBEAT_INTERVAL;
 /// nextest's `terminate-after` rather than as a binary that hangs.
 #[cfg(unix)]
 const BACKSTOP: Duration = Duration::from_secs(60);
+
+/// How many activity events a failure message names, most recent last.
+///
+/// A watch takes four readings a second and runs for tens of seconds, so the
+/// whole list is hundreds of timestamps and buries the count and the gap printed
+/// beside it. Where activity was when the verdict landed is what a reader of one
+/// of these is after.
+#[cfg(unix)]
+const REPORTED_ACTIVITY: usize = 8;
 
 /// How many activity events the busy half watches for before it has seen enough.
 ///
@@ -117,14 +131,48 @@ const BACKSTOP: Duration = Duration::from_secs(60);
 #[cfg(unix)]
 const ACTIVITY_EVENTS: usize = 8;
 
-/// A member that publishes nothing while nothing under it does any work, which
-/// is what a member composing a report looks like from here.
+/// The silence a report is written in: nothing published, and nothing under the
+/// member charged for it either.
 #[cfg(unix)]
 const IDLE: &[&str] = &["sleep", "600"];
 
-/// A member that publishes nothing while its tree is charged CPU the whole time.
+/// That same silence with live work under it.
 #[cfg(unix)]
 const BUSY: &[&str] = &["sh", "-c", "while :; do :; done"];
+
+/// How long the tree below stops for between bursts of work.
+///
+/// Several looks wide, so whole look windows fall inside a pause even where a
+/// loaded host stretches the cadence — and narrow enough that the gap a pause
+/// opens stays inside [`watchdog`], which is what makes a verdict over one a
+/// judgement rather than an excuse.
+#[cfg(unix)]
+fn pause() -> Duration {
+    look_every() * 4
+}
+
+/// A member that publishes nothing while its tree works in bursts, stopping for
+/// [`pause`] between them.
+///
+/// The burst is held to the clock rather than to a count of iterations, because
+/// what a count costs is the host's to decide and what this needs is a burst
+/// several looks wide on any of them. `date` is asked for the time rather than
+/// the shell, whose `SECONDS` is not POSIX; the inner count is what keeps that
+/// question from being asked thousands of times a second.
+#[cfg(unix)]
+fn intermittent() -> Vec<String> {
+    vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        format!(
+            "while :; do until=$(( $(date +%s) + 2 )); \
+             while [ \"$(date +%s)\" -lt \"$until\" ]; do \
+             i=0; while [ $i -lt 5000 ]; do i=$((i+1)); done; done; \
+             sleep {}; done",
+            pause().as_secs_f32()
+        ),
+    ]
+}
 
 /// The bound this file's driven halves run under, read the way the sibling reads
 /// it at launch.
@@ -140,21 +188,46 @@ fn bound() -> Duration {
         bound < KILLED_REPORTS,
         "this journey is only quick because the environment shortens the bound"
     );
+    assert!(
+        watchdog() > pause() + look_every() * 2,
+        "an activity gap of {:?} is what a pause under the bursting tree opens, and the {:?} \
+         watchdog interval is inside it — so that tree's missed observations would excuse a \
+         verdict instead of being judged by one",
+        pause() + look_every() * 2,
+        watchdog()
+    );
+    assert!(
+        watchdog() * 2 < bound,
+        "the {:?} watchdog interval is not comfortably under the {bound:?} bound, so a quiet \
+         stretch long enough for the rule to reach a verdict over would fit inside it and be \
+         read as work still arriving",
+        watchdog()
+    );
     bound
 }
 
 /// The interval activity is held to arriving inside: **a gap between activity
 /// events**, never a total elapsed time.
 ///
-/// Twice the bound the rule condemns after — deliberately generous, because
-/// what this has to separate is a tree that
-/// stopped from a runner that was merely slow, and the window it replaces could
-/// not (issue #415). A spinning process charged less than
-/// [`WORKING_PERCENT_OF_A_CORE`](oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE)%
-/// of a core across a window this long has not been delayed; it has stopped, and
-/// the rule condemning it would be the rule reading the truth.
+/// Counted in looks rather than in bounds, because what it separates is a tree
+/// that stopped from a look that missed one that had not — the distinction the
+/// elapsed-time window it replaces could not draw. It has to clear the gap a
+/// pause under [`intermittent`] opens and stay under the shortest quiet a
+/// verdict can sit at the end of; [`bound`] asserts both, and the driven half
+/// prints the gap it measured, so a host that narrows either says so rather
+/// than waiting to go flaky.
 #[cfg(unix)]
-fn watchdog(bound: Duration) -> Duration {
+fn watchdog() -> Duration {
+    look_every() * 8
+}
+
+/// The longest quiet this half accepts a **spared** verdict over.
+///
+/// Twice the bound: a member left uncharged that long and spared anyway is the
+/// rule failing to look. Wide where [`watchdog`] is narrow, because the two
+/// answer opposite questions.
+#[cfg(unix)]
+fn longest_spared_quiet(bound: Duration) -> Duration {
     bound * 2
 }
 
@@ -167,11 +240,14 @@ fn watchdog(bound: Duration) -> Duration {
 /// bound elapses, and a stamped tree whose work keeps arriving inside the
 /// watchdog interval is never condemned.
 ///
+/// The third tree is that second direction over a member a single look gets
+/// wrong, and without it one missed observation excuses any verdict at all.
+///
 /// Neither direction reads a clock the host controls. The idle verdict is held
-/// against the rule's *own* bound, which load can only lengthen. The busy one is
-/// a gap between activity events — and where a runner starves the spin loop past
-/// the watchdog, the rule is judging precisely the readings this test took, so
-/// what is asserted is that the work had stopped before the verdict.
+/// against the rule's *own* bound, which load can only lengthen. The other two
+/// are gaps between activity events — and where a runner starves a tree past the
+/// watchdog, the rule is judging precisely the readings this test took, so what
+/// is asserted is that activity had stopped arriving before the verdict.
 ///
 /// POSIX only, because the evidence is: a member's tree is the [`SCRATCH_ENV`]
 /// stamp the kernel fixes at `exec`, and on Windows it is a job object, which
@@ -194,10 +270,11 @@ fn the_activity_rule_condemns_a_member_once_the_work_under_it_stops_and_not_whil
     assert_eq!(
         idle.events(),
         0,
-        "the tree this half calls idle was charged CPU at {:?} into its life, so what the rule \
-         judged is not a member doing nothing and nothing here is measuring the silence a report \
-         is written in",
-        idle.activity()
+        "the tree this half calls idle was charged CPU {} times, latest at {:?} into its life, \
+         so what the rule judged is not a member doing nothing and nothing here is measuring the \
+         silence a report is written in",
+        idle.events(),
+        idle.recent_activity()
     );
     let Some(condemned) = idle.verdict() else {
         panic!(
@@ -238,44 +315,85 @@ fn the_activity_rule_condemns_a_member_once_the_work_under_it_stops_and_not_whil
                 busy.events() >= ACTIVITY_EVENTS,
                 "the busy tree produced {} activity events in {:?}, short of the {ACTIVITY_EVENTS} \
                  this half watches for, so the backstop ended the watch before the rule had been \
-                 given its opportunities to condemn: {:?}",
+                 given its opportunities to condemn, the last of them at {:?}",
                 busy.events(),
                 busy.spent,
-                busy.activity()
+                busy.recent_activity()
             );
             let quiet = busy.longest_quiet();
             assert!(
-                quiet <= watchdog(bound),
+                quiet <= longest_spared_quiet(bound),
                 "the work under the busy tree went {quiet:?} without being charged {}% of a core \
-                 — past the {:?} watchdog interval — while the rule spared it anyway, so the rule \
-                 is sparing a member on something other than the evidence under it. Activity \
-                 arrived at {:?} over {:?}",
+                 — past the {:?} a sparing verdict is accepted over — while the rule spared it \
+                 anyway, so the rule is sparing a member on something other than the evidence \
+                 under it. {} activity events over {:?}, the last of them at {:?}",
                 oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE,
-                watchdog(bound),
-                busy.activity(),
-                busy.spent
+                longest_spared_quiet(bound),
+                busy.events(),
+                busy.spent,
+                busy.recent_activity()
             );
         }
-        Some(at) => {
-            // The runner starved the spin loop, and the rule is then judging the
-            // readings this loop took: what is asserted is the *order* — that the
-            // work had stopped before the verdict. Stopped means a look that
-            // found none, anywhere in the bound the rule judged, rather than a
-            // gap measured against the rule's examination cadence: a tree
-            // charged a working rate in every one of these windows is charged
-            // one over any span built out of them, so this holds whatever
-            // cadence the rule examines on.
-            assert!(
-                !busy.worked_throughout(at.saturating_sub(bound), at),
-                "the activity rule condemned a member {at:?} into its life though every look \
-                 across the {bound:?} before the verdict — the same readings, taken in the same \
-                 iterations the rule took its own in — found work under it. Activity arrived at \
-                 {:?} over {:?}",
-                busy.activity(),
-                busy.spent
-            );
-        }
+        Some(at) => condemned_only_past_the_watchdog(&busy, at, "spinning"),
     }
+
+    let bursts = intermittent();
+    let bursts: Vec<&str> = bursts.iter().map(String::as_str).collect();
+    let bursting_tree = Tree::spawn("bursting", &bursts).unwrap_or_else(|why| panic!("{why}"));
+    let bursting = watch(&bursting_tree, bound, |watch| {
+        watch.missed_between_activity() > 0 && watch.spent > bound * 2
+    });
+    assert!(
+        bursting.missed_between_activity() > 0,
+        "no look at the bursting tree found it charged nothing between two that found it \
+         charged {}% of a core, over {} looks and {:?} — so the missed observation this tree \
+         exists to put in front of the rule was never taken, and a verdict excused by one would \
+         pass here unseen. The last of its {} activity events arrived at {:?}",
+        oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE,
+        bursting.looks.len(),
+        bursting.spent,
+        bursting.events(),
+        bursting.recent_activity()
+    );
+    if let Some(at) = bursting.verdict() {
+        condemned_only_past_the_watchdog(&bursting, at, "bursting");
+    }
+    // What the watchdog interval has to be wider than, on the host that ran it.
+    // The margin between these two is the whole of why the bursting tree's
+    // pauses are judged rather than excused, and it is the host's to narrow, so
+    // it is printed rather than left to be re-derived from the constants.
+    println!(
+        "the bursting tree: {} activity events over {:?}, {} looks found nothing between two \
+         that found work, longest gap {:?} against a {:?} watchdog interval",
+        bursting.events(),
+        bursting.spent,
+        bursting.missed_between_activity(),
+        bursting.longest_quiet(),
+        watchdog()
+    );
+}
+
+/// What a condemnation has to rest on: activity that stopped **arriving**.
+///
+/// The gap ending at the verdict, never the look at it — a look that found
+/// nothing under a tree still working is a missed observation, which the
+/// bursting tree produces on purpose and a loaded runner produces by accident.
+/// Where the gap is past [`watchdog`] the rule is reading the same stop this
+/// loop recorded, and there is nothing left to disagree about.
+#[cfg(unix)]
+fn condemned_only_past_the_watchdog(watch: &Watch, at: Duration, tree: &str) {
+    assert!(
+        watch.quiet_at(at) > watchdog(),
+        "the activity rule condemned a member {at:?} into its life, {:?} after the last look \
+         that found work under its {tree} tree — inside the {:?} activity is held to arriving \
+         within, so the verdict rests on something other than work that stopped. {} activity \
+         events over {:?}, the last of them at {:?}",
+        watch.quiet_at(at),
+        watchdog(),
+        watch.events(),
+        watch.spent,
+        watch.recent_activity()
+    );
 }
 
 /// The timings the gate above used to assert, kept as a measurement and never as
@@ -364,15 +482,14 @@ struct Look {
 #[cfg(unix)]
 struct Watch {
     looks: Vec<Look>,
-    /// How far into the member's life the last look was taken, whatever ended
-    /// the watch.
+    /// How much of the member's life this watch covers — a verdict, `enough` and
+    /// the backstop all end one, and which of them did is not recorded.
     spent: Duration,
 }
 
 #[cfg(unix)]
 impl Watch {
-    /// How far into the member's life the rule first condemned it, or `None`
-    /// where it never did.
+    /// How far into the member's life the rule first condemned it.
     fn verdict(&self) -> Option<Duration> {
         self.looks
             .iter()
@@ -392,15 +509,37 @@ impl Watch {
         self.looks.iter().filter(|look| look.working).count()
     }
 
-    /// Whether every look taken in `from..=to` found the tree working, over at
-    /// least one look.
-    fn worked_throughout(&self, from: Duration, to: Duration) -> bool {
-        let mut looks = self
+    fn recent_activity(&self) -> Vec<Duration> {
+        let activity = self.activity();
+        activity[activity.len().saturating_sub(REPORTED_ACTIVITY)..].to_vec()
+    }
+
+    /// How long the tree had gone without an activity event by `at`, which for a
+    /// verdict is the gap the rule reached it at the end of.
+    fn quiet_at(&self, at: Duration) -> Duration {
+        let last = self
             .looks
             .iter()
-            .filter(|look| look.at > from && look.at <= to)
-            .peekable();
-        looks.peek().is_some() && looks.all(|look| look.working)
+            .filter(|look| look.working && look.at <= at)
+            .map(|look| look.at)
+            .next_back()
+            .unwrap_or(Duration::ZERO);
+        at.saturating_sub(last)
+    }
+
+    /// Looks that found no work with activity arriving on both sides of them: a
+    /// work observation missed under a tree that never stopped.
+    fn missed_between_activity(&self) -> usize {
+        let (Some(first), Some(last)) = (
+            self.looks.iter().position(|look| look.working),
+            self.looks.iter().rposition(|look| look.working),
+        ) else {
+            return 0;
+        };
+        self.looks[first..last]
+            .iter()
+            .filter(|look| !look.working)
+            .count()
     }
 
     /// The longest the tree went without an activity event — counting the wait
@@ -457,7 +596,7 @@ fn watch(tree: &Tree, bound: Duration, enough: impl Fn(&Watch) -> bool) -> Watch
         if condemned || enough(&watch) {
             break;
         }
-        std::thread::sleep(LOOK_EVERY);
+        std::thread::sleep(look_every());
     }
     watch
 }
