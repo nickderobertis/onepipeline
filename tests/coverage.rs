@@ -36,11 +36,16 @@ use std::{env, fs};
 /// issue, an instrumented object file carrying a coverage map, and a fixture the
 /// report would have skipped proves nothing about a step that exists to keep it
 /// out.
+///
+/// The scratch directory is named with a quote and a space in it because the
+/// recipe takes that name from the environment: a step that read the value as
+/// shell source would either remove the wrong thing or fail to parse, and both
+/// look like a passing removal from anywhere but here.
 #[test]
 fn the_clean_step_removes_an_instrumented_binary_an_earlier_run_left() {
     // Under `target/` for the reason `build_config` puts its probes there: a
     // failed run leaves the tree that failed where the other build artifacts are.
-    let scratch = repo_root().join("target/coverage-clean-probe");
+    let scratch = repo_root().join("target/coverage-clean-probe's tree");
     let _ = fs::remove_dir_all(&scratch);
     let deps = scratch.join("debug/deps");
     fs::create_dir_all(&deps)
@@ -113,34 +118,60 @@ fn the_clean_step_removes_the_directory_this_run_is_measured_from() {
     );
 }
 
-/// And it refuses a directory it should not remove rather than removing it.
+/// And it refuses a directory outside this clone rather than removing it.
 ///
-/// The override above reaches `rm -rf` from the environment, so the recipe checks
-/// it first. Each value below is one a missing check would act on, and each is
-/// harmless if the check were gone — an empty value `rm -rf` ignores, a relative
-/// path under the repository root, and a top-level path nothing has created — so
-/// this journey cannot itself be the accident it guards against.
+/// `.cargo/config.toml` puts every build under this clone into `<clone>/target`,
+/// so a tree to clean that resolves anywhere else is a misconfiguration and not a
+/// tree to remove — and what the recipe is handed comes from the environment.
+///
+/// Each case below is one a recipe that checked the *spelling* of the value would
+/// accept: an absolute path outside the clone, that same path reached through
+/// `..`, and one whose name carries a quote. Each resolves to a directory this
+/// test made under the temporary directory, so were the check gone this journey
+/// would delete its own fixture and nothing else — it cannot be the accident it
+/// guards against. The relative one is there because the recipe runs from the
+/// repository root, where an unresolvable relative path is the shape a mistyped
+/// override actually takes.
 #[test]
-fn the_clean_step_refuses_a_target_directory_it_should_not_remove() {
+fn the_clean_step_refuses_a_target_directory_outside_this_clone() {
+    let outside = env::temp_dir().join(format!(
+        "onepipeline-coverage-clean-outside-{}",
+        std::process::id()
+    ));
+    let quoted = outside.join("a tree named with ' in it");
+    fs::create_dir_all(outside.join("below"))
+        .unwrap_or_else(|e| panic!("could not create {}: {e}", outside.display()));
+    fs::create_dir_all(&quoted)
+        .unwrap_or_else(|e| panic!("could not create {}: {e}", quoted.display()));
+
+    let reached_through_dots = outside.join("below/..");
     for refused in [
-        "",
-        "relative/dir",
-        "/onepipeline-coverage-clean-must-refuse-this",
+        outside.as_os_str(),
+        reached_through_dots.as_os_str(),
+        quoted.as_os_str(),
+        OsStr::new("relative/dir"),
     ] {
-        let attempt = just(&["_crate-coverage-clean"], Some(OsStr::new(refused)));
+        let attempt = just(&["_crate-coverage-clean"], Some(refused));
         assert!(
             !attempt.status.success(),
-            "the clean step accepted {refused:?} as a directory to remove whole: {}",
+            "the clean step accepted {refused:?} as a tree to remove whole: {}",
             said(&attempt)
         );
         let complaint = String::from_utf8_lossy(&attempt.stderr);
         assert!(
-            complaint.contains(&format!("refusing to remove '{refused}'")),
-            "the refusal of {refused:?} does not name what it refused, so a run \
+            complaint.contains("refusing to remove"),
+            "the refusal of {refused:?} does not say what it refused, so a run \
              that set it wrong is left to guess: {}",
             said(&attempt)
         );
     }
+    assert!(
+        quoted.is_dir(),
+        "{} was removed by a step that had refused to remove it",
+        quoted.display()
+    );
+    fs::remove_dir_all(&outside)
+        .unwrap_or_else(|e| panic!("could not remove {}: {e}", outside.display()));
 }
 
 /// `INSTR_PROF_RAW_MAGIC_64` little-endian and not one byte more: as far into its

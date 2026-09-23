@@ -243,19 +243,19 @@ offline-tiers := "(" + rest-tier + ") or (" + note-tier + ")"
 # runs below report nothing and one merge reports both: the note journeys are
 # their own Nx project, and splitting the run must not split the floor.
 
-# The directory `cargo llvm-cov` builds the instrumented tree into and writes the
-# profiles beside: `llvm-cov-target` under this clone's target directory, which
+# Where `cargo llvm-cov` builds the instrumented tree and writes the profiles
+# beside it: `llvm-cov-target` under this clone's target directory, which
 # `.cargo/config.toml` pins to `<clone>/target` and `tests/build_config.rs` holds
-# there. `CARGO_LLVM_COV_TARGET_DIR` is cargo-llvm-cov's own override of that, so
-# honouring it keeps the two ends agreeing, and is what lets a test point the
-# recipe at a scratch tree rather than at the one the run is being measured from.
+# there. cargo-llvm-cov's own `CARGO_LLVM_COV_TARGET_DIR` overrides this at run
+# time, which is what lets a test point the step at a scratch tree rather than at
+# the one the run is being measured from.
 #
-# Where that directory really is stays cargo-llvm-cov's to decide, so this is not
-# taken on trust: `tests/coverage.rs` holds this value against the directory
+# Where the tree really is stays cargo-llvm-cov's to decide, so this is not taken
+# on trust: `tests/coverage.rs` holds this value against the directory
 # `LLVM_PROFILE_FILE` points the profiling runtime at, and the tier fails if the
 # two ever part — including on a run whose configuration moved the target
-# directory out from under the default below.
-llvm-cov-target-dir := env("CARGO_LLVM_COV_TARGET_DIR", justfile_directory() / "target" / "llvm-cov-target")
+# directory out from under this default.
+llvm-cov-target-dir := justfile_directory() / "target" / "llvm-cov-target"
 
 # Remove that directory whole, before the first instrumented run. Clearing only
 # the profiles — `--profraw-only`, what this did — left every instrumented binary
@@ -267,15 +267,29 @@ llvm-cov-target-dir := env("CARGO_LLVM_COV_TARGET_DIR", justfile_directory() / "
 # investigation into covered code costs more than the instrumented rebuild this
 # now pays for.
 #
-# The path reaches `rm -rf` from the environment, so it is checked before it is
-# used rather than trusted: an empty, relative or top-level value is refused by
-# name and nothing is removed.
+# What `rm -rf` is handed comes from the environment, so it is resolved and then
+# checked rather than trusted, and neither step reads it as shell source: the
+# override arrives through a parameter expansion, so a quote in it is a character
+# in a path and not a change to how this line parses. `cd -P`/`pwd -P` then answer
+# with the directory the value *reaches* — `/tmp/..` reaches `/`, and a symlink
+# reaches what it points at — and that answer, not its spelling, has to sit inside
+# this clone, which is where `.cargo/config.toml` pins every build under it.
+# Anything else is refused by name with nothing removed. A value that reaches
+# nothing is the first run, whose tree does not exist yet: it is checked as
+# written, and removing it does nothing. `:-` reads an override set to the empty
+# string as no override, which is how cargo-llvm-cov reads one too, so the two
+# agree about which tree that run builds in. The `|| reached=` is load-bearing
+# under this justfile's `-e`: without it a value that reaches nothing takes the
+# recipe down before the check can say anything, and the first run of a fresh
+# clone fails.
 _crate-coverage-clean:
-    @dir='{{llvm-cov-target-dir}}'; \
-      case "$dir" in /?*/?*) ;; \
-        *) echo "refusing to remove '$dir' — CARGO_LLVM_COV_TARGET_DIR has to name an absolute path below a top-level directory, and nothing was removed" >&2; exit 1;; \
+    @root="$(pwd -P)"; \
+      dir="${CARGO_LLVM_COV_TARGET_DIR:-{{llvm-cov-target-dir}}}"; \
+      reached="$(cd -P -- "$dir" 2>/dev/null && pwd -P)" || reached=; \
+      case "${reached:-$dir}" in "$root"/?*) ;; \
+        *) echo "refusing to remove '${reached:-$dir}': the instrumented tree has to sit inside this clone ($root), which is where .cargo/config.toml pins every build under it — nothing was removed" >&2; exit 1;; \
       esac; \
-      rm -rf "$dir"
+      rm -rf -- "${reached:-$dir}"
 
 # The crate's own half of the offline suite, instrumented, reporting nothing.
 _crate-test-rest:
