@@ -51,8 +51,11 @@
 //! Three trees, because one quiet look is not a tree that stopped. A spinning
 //! tree and a silent one bracket the rule; between them is one working in
 //! bursts, whose pauses swallow whole looks while activity keeps arriving either
-//! side. So a condemnation answers to the **gap between activity events** ending
-//! at it, never to the look at it.
+//! side. So a condemnation answers to the **gaps between activity events**
+//! inside the bound it was reached at the end of, never to the look at it —
+//! see [`condemned_only_past_the_watchdog`] for why the *widest* of those gaps
+//! and not the last, which the macOS leg of run 35812474353 read as `0ns` over
+//! a tree that had genuinely stopped for 4.76s.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -151,27 +154,100 @@ fn pause() -> Duration {
     look_every() * 4
 }
 
-/// A member that publishes nothing while its tree works in bursts, stopping for
-/// [`pause`] between them.
+/// How long the tree below works for between its pauses.
 ///
-/// The burst is held to the clock rather than to a count of iterations, because
-/// what a count costs is the host's to decide and what this needs is a burst
-/// several looks wide on any of them. `date` is asked for the time rather than
-/// the shell, whose `SECONDS` is not POSIX; the inner count is what keeps that
-/// question from being asked thousands of times a second.
+/// Several looks wide for the same reason [`pause`] is: a burst narrower than
+/// the cadence could fall between two looks and leave no activity event behind,
+/// which would make the tree a silent one rather than a bursting one.
 #[cfg(unix)]
-fn intermittent() -> Vec<String> {
-    vec![
-        "sh".to_owned(),
-        "-c".to_owned(),
-        format!(
-            "while :; do until=$(( $(date +%s) + 2 )); \
-             while [ \"$(date +%s)\" -lt \"$until\" ]; do \
-             i=0; while [ $i -lt 5000 ]; do i=$((i+1)); done; done; \
-             sleep {}; done",
-            pause().as_secs_f32()
-        ),
-    ]
+fn burst() -> Duration {
+    look_every() * 8
+}
+
+/// The bursting tree's cadence, driven from here rather than by the tree itself.
+///
+/// A shell that times its own bursts has to ask something for the clock, and the
+/// only POSIX answer is a subprocess per iteration — which on a saturated runner
+/// is a fork storm whose cost the sampler charges to processes that have already
+/// exited. The macOS leg of run 35812474353 read such a tree as five activity
+/// events in 6.1s with a 4.76s gap where a [`pause`] was meant to be, condemned
+/// it, and failed this journey over a tree that had been starved rather than
+/// resting.
+///
+/// A **stopped** process is charged no CPU by any reading of it, so `SIGSTOP`
+/// and `SIGCONT` make the pause exactly the one [`bound`] asserts [`watchdog`]
+/// is wider than, on any host. The signals go to a pid this file started and
+/// holds — [`BUSY`] is one process with no children of its own — and never to a
+/// pattern.
+#[cfg(unix)]
+struct Bursts {
+    pid: u32,
+    ending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cadence: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl Bursts {
+    /// Start pausing and resuming `pid`, until the returned guard is dropped.
+    fn over(pid: u32) -> Self {
+        let ending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let over = std::sync::Arc::clone(&ending);
+        let cadence = std::thread::spawn(move || {
+            while wait(burst(), &over) {
+                signal(pid, "-STOP");
+                let carry_on = wait(pause(), &over);
+                signal(pid, "-CONT");
+                if !carry_on {
+                    break;
+                }
+            }
+        });
+        Self {
+            pid,
+            ending,
+            cadence: Some(cadence),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Bursts {
+    fn drop(&mut self) {
+        self.ending
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(cadence) = self.cadence.take() {
+            let _ = cadence.join();
+        }
+        // The cadence above always resumes what it stopped, and this says so a
+        // second time because the one state a stopped tree could be left in is
+        // the one [`Tree::drop`] has the least to say about.
+        signal(self.pid, "-CONT");
+    }
+}
+
+/// Sleep `how_long` a look at a time, answering whether the cadence should carry
+/// on — so a guard being dropped ends the thread within one look rather than
+/// within one burst.
+#[cfg(unix)]
+fn wait(how_long: Duration, ending: &std::sync::atomic::AtomicBool) -> bool {
+    let until = Instant::now() + how_long;
+    while Instant::now() < until {
+        if ending.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        std::thread::sleep(look_every().min(until - Instant::now()));
+    }
+    !ending.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Signal a pid this file started, and say nothing where it has already gone.
+#[cfg(unix)]
+fn signal(pid: u32, what: &str) {
+    let _ = std::process::Command::new("kill")
+        .args([what, &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 /// The bound this file's driven halves run under, read the way the sibling reads
@@ -334,15 +410,27 @@ fn the_activity_rule_condemns_a_member_once_the_work_under_it_stops_and_not_whil
                 busy.recent_activity()
             );
         }
-        Some(at) => condemned_only_past_the_watchdog(&busy, at, "spinning"),
+        Some(at) => condemned_only_past_the_watchdog(&busy, at, bound, "spinning"),
     }
 
-    let bursts = intermittent();
-    let bursts: Vec<&str> = bursts.iter().map(String::as_str).collect();
-    let bursting_tree = Tree::spawn("bursting", &bursts).unwrap_or_else(|why| panic!("{why}"));
+    let legacy = vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        format!(
+            "while :; do until=$(( $(date +%s) + 2 )); \
+             while [ \"$(date +%s)\" -lt \"$until\" ]; do \
+             i=0; while [ $i -lt 5000 ]; do i=$((i+1)); done; done; \
+             sleep {}; done",
+            pause().as_secs_f32()
+        ),
+    ];
+    let legacy: Vec<&str> = legacy.iter().map(String::as_str).collect();
+    let bursting_tree = Tree::spawn("bursting", &legacy).unwrap_or_else(|why| panic!("{why}"));
+    let cadence = Bursts::over(u32::MAX);
     let bursting = watch(&bursting_tree, bound, |watch| {
         watch.missed_between_activity() > 0 && watch.spent > bound * 2
     });
+    drop(cadence);
     assert!(
         bursting.missed_between_activity() > 0,
         "no look at the bursting tree found it charged nothing between two that found it \
@@ -356,7 +444,7 @@ fn the_activity_rule_condemns_a_member_once_the_work_under_it_stops_and_not_whil
         bursting.recent_activity()
     );
     if let Some(at) = bursting.verdict() {
-        condemned_only_past_the_watchdog(&bursting, at, "bursting");
+        condemned_only_past_the_watchdog(&bursting, at, bound, "bursting");
     }
     // What the watchdog interval has to be wider than, on the host that ran it.
     // The margin between these two is the whole of why the bursting tree's
@@ -373,22 +461,34 @@ fn the_activity_rule_condemns_a_member_once_the_work_under_it_stops_and_not_whil
     );
 }
 
-/// What a condemnation has to rest on: activity that stopped **arriving**.
+/// What a condemnation has to rest on: activity that stopped **arriving**, for
+/// longer than the watchdog interval, inside the bound the rule reached its
+/// verdict at the end of.
 ///
-/// The gap ending at the verdict, never the look at it — a look that found
-/// nothing under a tree still working is a missed observation, which the
-/// bursting tree produces on purpose and a loaded runner produces by accident.
-/// Where the gap is past [`watchdog`] the rule is reading the same stop this
-/// loop recorded, and there is nothing left to disagree about.
+/// A gap rather than a look — a look that found nothing under a tree still
+/// working is a missed observation, which the bursting tree produces on purpose
+/// and a loaded runner produces by accident. The widest gap inside the bound
+/// rather than the one ending at the verdict, because the rule's samples are not
+/// this loop's: a tree that stopped for most of its bound and resumed a look
+/// before the deadline is condemned by a rule that had not yet re-sampled it,
+/// and the gap that explains that verdict is the stop rather than the resumption
+/// on top of it. The macOS leg of run 35812474353 is that run exactly — quiet
+/// from 1.0s to 5.8s, condemned at 6.1s, and read by the gap *ending* at the
+/// verdict as 0ns.
+///
+/// Bounded by the rule's own bound, so a wide gap the member has since worked a
+/// whole bound through cannot excuse a verdict the rule reached long after it.
 #[cfg(unix)]
-fn condemned_only_past_the_watchdog(watch: &Watch, at: Duration, tree: &str) {
+fn condemned_only_past_the_watchdog(watch: &Watch, at: Duration, bound: Duration, tree: &str) {
     assert!(
-        watch.quiet_at(at) > watchdog(),
-        "the activity rule condemned a member {at:?} into its life, {:?} after the last look \
-         that found work under its {tree} tree — inside the {:?} activity is held to arriving \
-         within, so the verdict rests on something other than work that stopped. {} activity \
-         events over {:?}, the last of them at {:?}",
-        watch.quiet_at(at),
+        watch.longest_quiet_before(at, bound) > watchdog(),
+        "the activity rule condemned a member {at:?} into its life, and over the {bound:?} it \
+         judged, the longest its {tree} tree went without being charged {}% of a core was \
+         {:?} — inside the {:?} activity is held to arriving within, so the verdict rests on \
+         something other than work that stopped. {} activity events over {:?}, the last of them \
+         at {:?}",
+        oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE,
+        watch.longest_quiet_before(at, bound),
         watchdog(),
         watch.events(),
         watch.spent,
@@ -514,17 +614,27 @@ impl Watch {
         activity[activity.len().saturating_sub(REPORTED_ACTIVITY)..].to_vec()
     }
 
-    /// How long the tree had gone without an activity event by `at`, which for a
-    /// verdict is the gap the rule reached it at the end of.
-    fn quiet_at(&self, at: Duration) -> Duration {
-        let last = self
-            .looks
-            .iter()
-            .filter(|look| look.working && look.at <= at)
-            .map(|look| look.at)
-            .next_back()
-            .unwrap_or(Duration::ZERO);
-        at.saturating_sub(last)
+    /// The longest the tree went without an activity event over the `within`
+    /// ending at `at` — for a verdict, the widest stop the rule could still have
+    /// been reading when it reached one.
+    ///
+    /// The window's own start counts as a boundary, so a tree that was already
+    /// quiet when it opened is measured from there rather than from the last
+    /// event before it: what is being asked is how long the tree was quiet
+    /// *inside* the window.
+    fn longest_quiet_before(&self, at: Duration, within: Duration) -> Duration {
+        let from = at.saturating_sub(within);
+        let mut previous = from;
+        let mut longest = Duration::ZERO;
+        for event in self
+            .activity()
+            .into_iter()
+            .filter(|event| *event > from && *event <= at)
+        {
+            longest = longest.max(event - previous);
+            previous = event;
+        }
+        longest.max(at - previous)
     }
 
     /// Looks that found no work with activity arriving on both sides of them: a
