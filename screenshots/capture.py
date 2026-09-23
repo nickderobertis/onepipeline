@@ -97,7 +97,7 @@ def screencomp_pins_agree() -> str | None:
             f"installs {found['installs'][0]}. The gallery and the gate would then "
             "come from two releases. Set both to the same tag."
         )
-    return covered_by_named_inputs()
+    return None
 
 
 #: Where the build graph declares what can change a rendered shot, beside
@@ -110,11 +110,19 @@ NAMED_INPUTS = Path("nx.json")
 
 def covered_by_named_inputs() -> str | None:
     """The refusal, when a guard path is under no declared named input."""
+    document = json.loads((REPO / NAMED_INPUTS).read_text())
+    entries = None
+    if isinstance(document, dict) and isinstance(document.get("namedInputs"), dict):
+        entries = document["namedInputs"].get("visualDocsSource")
+    if not isinstance(entries, list) or not all(isinstance(e, str) for e in entries):
+        return (
+            f"screenshots: {NAMED_INPUTS} does not declare a `visualDocsSource` "
+            "named input as a list of path patterns, so nothing in the build graph "
+            "says what can change a rendered shot. Restore it."
+        )
     declared = [
         entry.removeprefix("{workspaceRoot}/").removesuffix("/**/*").removesuffix("**/*")
-        for entry in json.loads((REPO / NAMED_INPUTS).read_text())["namedInputs"][
-            "visualDocsSource"
-        ]
+        for entry in entries
         if entry.startswith("{workspaceRoot}/")
     ]
     guard = re.search(
@@ -139,10 +147,10 @@ def covered_by_named_inputs() -> str | None:
 
 def main() -> int:
     world_module.clear_stack_settings()
-    parted = screencomp_pins_agree()
-    if parted is not None:
-        print(parted, file=sys.stderr)
-        return 1
+    for refusal in (screencomp_pins_agree(), covered_by_named_inputs()):
+        if refusal is not None:
+            print(refusal, file=sys.stderr)
+            return 1
     binaries = REPO / "target" / "release"
     arch = host_arch()
     out = Path(os.environ.get("SHOTS_OUT") or REPO / "shots" / "current" / arch)
@@ -237,8 +245,8 @@ def capture(scratch: Path, binaries: Path) -> list[tuple[str, str]]:
         # Both lifecycle dispatches are inside the double's hold, so this is the
         # one moment the run has work genuinely in flight. Waited for on the
         # journal — the dispatch's own first record — rather than on a clock.
-        world.until_journal("turn-started", "docs")
-        world.until_journal("turn-started", "service")
+        for key in world_module.HELD:
+            world.until_journal("turn-started", key.split(".", 1)[0])
         held.append(("status", world.cli("status", PLAN_RUN).stdout))
         held.append(("watch", bounded_watch(world)))
 
@@ -282,6 +290,14 @@ def bounded_watch(world: World) -> str:
     returns it. Nothing here waits on the clock, and nothing about the run's
     order depends on how fast this machine is.
     """
+    if not world_module.HELD:
+        raise SystemExit(
+            "screenshots: the plan this capture drives holds no lifecycle "
+            "dispatch open, so there is nothing for a bounded wait to return on. "
+            "This scene needs a plan with at least one node that targets a "
+            "repository."
+        )
+    released = world_module.HELD[0]
     log = world.root / "watch.err"
     machine = world.root / "watch.out"
     watching = subprocess.Popen(
@@ -302,7 +318,7 @@ def bounded_watch(world: World) -> str:
             "--timeout",
             "none",
             "--until",
-            "node=docs",
+            f"node={released.split('.', 1)[0]}",
         ],
         env=world.env,
         stdin=subprocess.DEVNULL,
@@ -312,7 +328,7 @@ def bounded_watch(world: World) -> str:
     )
     try:
         world.until_lines_matching(log, r"^-- watching ", 1)
-        world.release(world_module.HELD[0])
+        world.release(released)
         watching.wait(timeout=world_module.DEADLINE_SECONDS)
     finally:
         if watching.poll() is None:
