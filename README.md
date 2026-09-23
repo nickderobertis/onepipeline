@@ -310,7 +310,7 @@ still reaches `onevcs`'s own `NothingToPublish` at publication and settles
 
 ![a finished six-node run's per-node outcomes: design and design-approval done, docs done (change-open) carrying a NOT landed note and the change request's URL, readiness-handoff done (no-changes), release-approval done, and service done with its landing reported UNDECIDED](screenshots/images/results.svg)
 
-> Every picture on this page is a capture of the real CLI driving a real run offline, rendered by [`just screenshots`](screenshots/AGENTS.md) and gated on its content hash by [screencomp](https://github.com/nickderobertis/screencomp) — so a change to what a verb prints refreshes them deliberately or fails.
+> Every picture on this page is a capture of the real CLI reading a real run offline — the shipped example plan above, driven end to end, and for the timing view a finished run this repository checks in — [with no model, no network and no credential](screenshots/AGENTS.md). The stills are gated on their content hash by [screencomp](https://github.com/nickderobertis/screencomp), so a change to what a verb prints refreshes them deliberately or fails; the animation above is regenerated from the same run on demand.
 
 A dispatch that ends for a reason that is **not the agent's verdict on its task**
 settles `dispatch-died` rather than `task-failed`: a rate limit twenty seconds after
