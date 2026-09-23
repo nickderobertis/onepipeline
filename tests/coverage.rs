@@ -5,7 +5,7 @@
 //! object it finds there, so one whose source has moved on is measured with no
 //! profile to its name and every line counted as missed, failing the 95% floor
 //! over code this run covered. `_crate-coverage-clean` removes that tree whole
-//! before the first instrumented run, and the five tests below drive it.
+//! before the first instrumented run, and the six tests below drive it.
 //!
 //! This run's own is a *truncated profile*, left by a cancellation journey that
 //! killed an instrumented process while the profiling runtime was still flushing.
@@ -254,10 +254,10 @@ fn the_clean_step_refuses_what_does_not_reach_this_clones_build_directory() {
 }
 
 /// And it refuses what is there but cannot be entered, rather than passing over
-/// it as a name that reaches nothing: a file, or a link whose target is gone, sits
-/// under the build directory by its spelling, but where it leads cannot be
-/// resolved, so the bound cannot be asked of it and a silent pass would hide the
-/// misconfiguration.
+/// it as a name that reaches nothing: a file, a link whose target is gone, or a
+/// directory this account may not search each sits under the build directory by
+/// its spelling, but where it leads cannot be resolved, so the bound cannot be
+/// asked of it and a silent pass would hide the misconfiguration.
 #[test]
 fn the_clean_step_refuses_what_is_there_but_cannot_be_entered() {
     let build = repo_root().join("target");
@@ -282,7 +282,37 @@ fn the_clean_step_refuses_what_is_there_but_cannot_be_entered() {
     #[cfg(not(unix))]
     let broken_link: Option<&OsStr> = None;
 
-    let unenterable: Vec<&OsStr> = [file.as_os_str()].into_iter().chain(broken_link).collect();
+    // A directory with no search permission is refused the same way. It is only a
+    // case where this account really cannot enter it — root can — so it is asked
+    // of the shell first, the same way the recipe will ask it.
+    #[cfg(unix)]
+    let sealed = build.join(format!(
+        "coverage-clean-probe-sealed-{}",
+        std::process::id()
+    ));
+    #[cfg(unix)]
+    let unsearchable: Option<&OsStr> = {
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir_all(&sealed)
+            .unwrap_or_else(|e| panic!("could not create {}: {e}", sealed.display()));
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000))
+            .unwrap_or_else(|e| panic!("could not seal {}: {e}", sealed.display()));
+        let enterable = Command::new("sh")
+            .args(["-c", "cd -- \"$1\"", "sh"])
+            .arg(&sealed)
+            .status()
+            .unwrap_or_else(|e| panic!("could not run sh: {e}"))
+            .success();
+        (!enterable).then_some(sealed.as_os_str())
+    };
+    #[cfg(not(unix))]
+    let unsearchable: Option<&OsStr> = None;
+
+    let unenterable: Vec<&OsStr> = [file.as_os_str()]
+        .into_iter()
+        .chain(broken_link)
+        .chain(unsearchable)
+        .collect();
     for target in unenterable {
         let attempt = just(&["_crate-coverage-clean".as_ref(), target]);
         assert!(
@@ -308,6 +338,14 @@ fn the_clean_step_refuses_what_is_there_but_cannot_be_entered() {
     #[cfg(unix)]
     fs::remove_file(&dangling)
         .unwrap_or_else(|e| panic!("could not unlink {}: {e}", dangling.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o700))
+            .unwrap_or_else(|e| panic!("could not unseal {}: {e}", sealed.display()));
+        fs::remove_dir(&sealed)
+            .unwrap_or_else(|e| panic!("could not remove {}: {e}", sealed.display()));
+    }
 }
 
 /// And it refuses a build directory *whole*, which is the one case the journey
