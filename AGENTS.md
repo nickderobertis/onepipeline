@@ -126,7 +126,17 @@ registry has moved past this lock, so its answer changes without this tree
 changing and a release nobody here made would otherwise block an unrelated
 merge. Red there is closed by one `cargo update -p <spec>` on any branch, never
 by requiring it here. `published-smoke.yml` gates nothing either — it runs after
-`release.yml` completes, and reports by opening an issue.
+`release.yml` completes, and reports by opening an issue. `visual-docs.yml` is
+the third: it recaptures the README's screenshots and fails on drift from the
+committed digest baseline, and it is deliberately **not** required because it is
+a *documentation* check rather than a correctness one — it needs a third-party
+renderer and a third-party CLI that `just check` deliberately does not install,
+and a picture that has gone stale is a thing to refresh rather than a reason to
+hold a correct change out of `main`. What makes it real anyway is local:
+`.githooks/pre-push` recaptures and **blocks the push** when a shot drifts, and
+`just bootstrap` is what points `core.hooksPath` at that directory. No
+screenshot step is reachable from `just check`, from `just gate`, or from
+`ci.yml`'s `gate` job. `screenshots/AGENTS.md` is the whole of the rest.
 
 **A job's assertions and the artifact it installs come from one revision.**
 `install-documented` installs the remote's default branch — README's `cargo
