@@ -1521,14 +1521,27 @@ impl ChannelState {
         Ok(None)
     }
 
+    /// Every question a reply on the log carries the answer to.
+    ///
+    /// The reply log is where a question's answer *is*: the pending slot holds
+    /// one question at a time and a surface nobody claimed holds none, so which
+    /// questions have been answered is read off the replies and not off the
+    /// queue. Read by [`outstanding`](Self::outstanding), by the engine
+    /// answering a reconciler finding the committed edit it asked for, and by
+    /// [`views::blocking_surface`](crate::views::blocking_surface), which is
+    /// what keeps an answered question from being reported as a decision the run
+    /// is still held on.
+    pub(crate) fn answered(&self) -> BTreeSet<Correlation> {
+        self.replies()
+            .into_iter()
+            .filter_map(|queued| queued.correlation)
+            .collect()
+    }
+
     /// Every question still waiting for its answer, oldest first: each surface
     /// the log queued under a correlation no reply on the reply log carries.
     fn outstanding(&self) -> crate::Result<Vec<Surface>> {
-        let answered: BTreeSet<Correlation> = self
-            .replies()
-            .into_iter()
-            .filter_map(|queued| queued.correlation)
-            .collect();
+        let answered = self.answered();
         let mut asked = BTreeSet::new();
         Ok(self
             .surfaces()?
