@@ -25,7 +25,7 @@ use std::path::PathBuf;
 
 use crate::harness::{
     agent, git, hook_script, lifecycle, plan_of, rows, Repository, ReturningHookVerb, World,
-    REFUSED,
+    REFUSED, WATCH_ELAPSED,
 };
 use onevcs::provenance::SUBJECT_LIMIT;
 use serde_json::json;
@@ -3074,12 +3074,36 @@ fn a_session_open_conflict_raises_a_decision_where_a_publication_conflict_retrie
             "the decision does not name {names:?}: {said}"
         );
     }
+    // It is raised under a **stable key**, because its text asks for a graph
+    // edit and a commands-only envelope answers no question on its own: the
+    // `retry` it names is recorded against that key, and committing that retry
+    // is what answers it.
+    let key = world
+        .queued_surfaces(&run)
+        .into_iter()
+        .find(|surface| surface["blocking"] == json!(true))
+        .and_then(|surface| surface["correlation"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| {
+            panic!(
+                "the session-open conflict was raised under no key\n{}",
+                why(&world, &run)
+            )
+        });
+    assert!(
+        key.contains("session-conflict") && key.contains("service"),
+        "the key says nothing about the finding it belongs to: {key}"
+    );
+
     // The planner reads it off the queue, which is where a decision is answered
-    // from.
+    // from, and the run reports it as the decision it is held on.
     world
         .run(&["next", &run])
         .exited(0)
         .out_has("cannot open a session");
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision");
 
     // Answering it. The merge is the person's — nothing in this run can do it,
     // which is exactly why it is a decision — and the `retry` the decision names
@@ -3097,6 +3121,9 @@ fn a_session_open_conflict_raises_a_decision_where_a_publication_conflict_retrie
     );
     crate::harness::git(&world, &repo.checkout, &["checkout", "main"]);
     world.script("service-again.work", "the worker wrote this\n");
+    // The replacement holds, so the run is still being driven while this journey
+    // asks what a supervisor watching it is told.
+    world.script("service-again.wait", "");
     world
         .run_with_stdin(
             &["reply", &run],
@@ -3118,10 +3145,53 @@ fn a_session_open_conflict_raises_a_decision_where_a_publication_conflict_retrie
             .to_string(),
         )
         .exited(0);
+
+    // The commit is the answer: the finding asked for exactly this retry, so it
+    // leaves the planner's queue on the commit rather than waiting for a second
+    // reply nobody owes it. Asked of `status` before anything else moves, so what
+    // cleared the decision is the edit and not the run going on.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("waiting for planner decision");
+
     // And the run resumes from there: a driver takes the intact ledger up and the
     // replacement continues the branch the resolution is on rather than returning
-    // to the conflict.
-    world.run(&["adopt", &run]).settled();
+    // to the conflict. Spawned rather than run to completion, because what a
+    // supervisor is told about a decision is only answerable while the run is
+    // live: with nothing driving it, every watch ends on that instead.
+    let mut driver = world
+        .cmd(&["adopt", &run])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the driver starts");
+    world.until("the replacement to be dispatched", |world| {
+        !dispatches_of(world, &run, "service-again").is_empty()
+    });
+
+    // With the replacement in flight, neither view still reports the answered
+    // decision: `watch --until surface` runs out its clock rather than returning
+    // on it, which is what it did for the rest of the run before the commit
+    // answered anything.
+    let watched = world.run(&["watch", &run, "--until", "surface", "--timeout", "0"]);
+    let standing = world.run(&["status", &run]);
+
+    world.release("service-again.go");
+    let driven = driver.wait().expect("the driver ends");
+
+    watched.exited(WATCH_ELAPSED);
+    assert!(
+        !watched.stdout.contains("surface-waiting"),
+        "the watch returned on a decision the commit answered:\n{}",
+        watched.stdout
+    );
+    standing.exited(0).out_lacks("waiting for planner decision");
+    assert!(
+        driven.success(),
+        "the driver did not settle the run: {driven}"
+    );
+
     let settled = world
         .events_of(&run, "node-settled")
         .into_iter()
