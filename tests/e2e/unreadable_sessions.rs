@@ -217,29 +217,109 @@ fn ready_line(stdout: &str) -> &str {
 /// not make, rather than reporting nothing to preserve.
 ///
 /// Two callers on one command. `recoverable(&Scope::All)` is every other
-/// unpublished branch on this host — a fact a person decommissioning the machine
+/// unpublished branch on this host — a fact somebody decommissioning the machine
 /// acts on, so an empty list from a failed enumeration is the one answer it may
 /// never give — and `preserve` is the push that puts this run's own branches on
-/// their origins.
+/// their origins, whose refusal is reported per branch and does not stop the
+/// others.
+///
+/// A run per state, because a shutdown ends the run it read.
 #[test]
 fn a_shutdown_names_the_read_it_could_not_make_and_the_branch_it_could_not_preserve() {
     let world = World::new("unreadable-shutdown");
     let _repository = world.repository("local-direct", &[]);
-    let path = world.plan("preserving", &plan_of("preserving", vec![lifecycle("build", &[])]));
-    world.script("build.wait", "hold");
-    world.run(&["start", &path, "--detach"]).exited(0);
-    world.until("the node's session to open", |world| {
-        !world.events_of("preserving", "session-opened").is_empty()
-    });
 
     for which in Unreadable::BOTH {
+        let name = format!("preserving-{}", which.slug());
+        let path = world.plan(&name, &plan_of(&name, vec![lifecycle("build", &[])]));
+        world.script("build.turn-open", "");
+        world.script("build.wait", "hold");
+        world.run(&["start", &path, "--detach"]).exited(0);
+        world.until("the node's session to open", |world| {
+            !world.events_of(&name, "session-opened").is_empty()
+        });
+
         break_records(&world, which);
-        // The shutdown itself is not refused — the other branches on this host
-        // are a fact rather than a failure — so the report is where it says so.
-        let report = world.run(&["shutdown", "--mine", "--grace", "1"]);
+        // The shutdown itself is not refused for this — the other branches on
+        // this host are a fact rather than a failure — so the report is where it
+        // says so, and it says it as something other than a count of zero.
+        let report = world.run(&["shutdown", &name, "--grace", "1"]);
         report
             .out_has("other unpublished branches on this host: not read — ")
-            .out_has("This is not a count");
+            .out_has("This is not a count")
+            .out_has("could not be preserved: ");
+        mend_records(&world, which);
+    }
+}
+
+/// A dispatch over records this host cannot read is refused by its open, and the
+/// advisory read before it says it was the one that could not be made.
+///
+/// Three callers on one path, in the order the driver reaches them.
+/// `pool::Workspaces::admit` asks `workspace_capacity` before the dispatch — an
+/// advisory read whose refusal is **never** a reading that found room, so it is
+/// said out loud and the open is left to decide; `vcs::session_open` is that
+/// open, and its refusal is the node's, so the node is settled on it rather than
+/// dispatched into a workspace nothing could account for; and `vcs::session` is
+/// how the driver reads a session's record, which is what ends a follow.
+///
+/// The run is minted behind a human gate and then **adopted**, for two reasons a
+/// simpler shape cannot give: the launch interlock asks the same records and
+/// refuses first, so the dispatch is only reachable on a run accepted while they
+/// read; and `adopt` drives in the invoking process, so what the driver says about
+/// a read it could not make is on this command's own stderr, where a host reads it.
+#[test]
+fn a_dispatch_over_unreadable_records_is_refused_by_its_open_and_the_read_before_it_says_so() {
+    let world = World::new("unreadable-dispatch");
+    let _repository = world.repository("local-direct", &[]);
+    world.script("build.work", "this never reaches a workspace\n");
+
+    for which in Unreadable::BOTH {
+        let name = format!("dispatch-{}", which.slug());
+        let path = world.plan(
+            &name,
+            &plan_of(
+                &name,
+                vec![
+                    crate::harness::human("approve", &[]),
+                    lifecycle("build", &["approve"]),
+                ],
+            ),
+        );
+        world.run(&["start", &path, "--attach"]).exited(0);
+        world.run(&["attest", &name, "approve"]).exited(0);
+
+        break_records(&world, which);
+        let adopted = world.run(&["adopt", &name]);
+        adopted
+            .err_has("cannot read what the 'service' workspace admits")
+            .err_has("its own open decides");
+        // The open's refusal is the node's, and it is the refusal of a dispatch
+        // that never began rather than a verdict on the task: the sibling would
+        // not cut a workspace, so nothing of the agent's ran.
+        let settled = world.run_json(&name, "result.json");
+        let build = settled["nodes"]
+            .as_array()
+            .expect("the result names its nodes")
+            .iter()
+            .find(|node| node["id"] == "build")
+            .unwrap_or_else(|| panic!("{name} recorded no build node: {settled}"))
+            .clone();
+        assert_eq!(build["outcome"], "infrastructure-failure", "{settled}");
+
+        // And the settlement carries the sibling's own reason, so a reader learns
+        // what could not be read rather than only that something could not.
+        let settlements = world.events_of(&name, "node-settled");
+        let detail = settlements
+            .iter()
+            .filter(|event| event["labels"]["node"] == "build")
+            .filter_map(|event| event["payload"]["detail"].as_str().map(str::to_owned))
+            .next_back()
+            .unwrap_or_else(|| panic!("{name}'s settlement carries no detail: {settlements:?}"));
+        assert!(
+            detail.contains("session") || detail.contains("onevcs"),
+            "{detail}"
+        );
         mend_records(&world, which);
     }
 }

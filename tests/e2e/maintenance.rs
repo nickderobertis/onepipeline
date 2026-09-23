@@ -1209,6 +1209,99 @@ fn a_non_empty_command_runs_with_the_program_and_arguments_the_document_named() 
     release(&world, "argv");
 }
 
+/// A sweep whose identity the sibling cannot survey reports that identity's
+/// refusal rather than maintaining nothing quietly.
+///
+/// `onevcs::pool_maintain` claims each slot under a census of the host's open
+/// sessions, and the linked release refuses that census where a session record or
+/// the sessions directory will not read instead of taking it as nobody being
+/// anywhere — which would run a maintenance command inside a slot a live session
+/// is working in. So the sweep's record carries the identity's `error` and no
+/// outcome, and `results` says the identity failed.
+///
+/// Both states, arranged the way a broken host arrives at them and never by
+/// substituting anything: the sessions directory is not a directory, and a record
+/// inside it is not a document. The slot is cut first, while they still read.
+#[test]
+fn a_sweep_reports_an_identity_whose_sessions_the_sibling_could_not_survey() {
+    let world = pooled_world("maintenance-unsurveyable", Some(FAST_PACE));
+    let repo = world.repository("local-direct", &[]);
+    pooled_with_maintenance(&world, None);
+    cut_a_slot(&world, &repo.checkout);
+    let second = schedule(&world, "second", "1s", "");
+    let sessions = world.onevcs_home().join("sessions");
+    let aside = world.onevcs_home().join("sessions.aside");
+    let bogus = sessions.join("s-unreadable.json");
+    // Read straight off the slot's worktree rather than through `pool status`,
+    // which surveys the same records and would refuse beside the sweep. Resolved
+    // once, while they still read.
+    let marker = Path::new(the_slot(&world)["path"].as_str().expect("a slot path"))
+        .join("worktree")
+        .join("maintained.log");
+    let ran = |marker: &Path| {
+        std::fs::read_to_string(marker)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+
+    for unreadable in ["directory", "record"] {
+        // The run's one node is a plain agent dispatch, which opens no session of
+        // its own — so what meets the broken records is the sweep and nothing else.
+        let name = format!("unsurveyable-{unreadable}");
+        held_run(&world, &name, 2, &["--maintenance-config", &second]).exited(0);
+        world.until("the dispatch", |world| {
+            !world.events_of(&name, "node-dispatched").is_empty()
+        });
+        let before = ran(&marker);
+        if unreadable == "directory" {
+            std::fs::rename(&sessions, &aside).expect("the sessions directory moves aside");
+            std::fs::write(&sessions, "this is not a directory")
+                .expect("a file takes its place");
+        } else {
+            std::fs::write(&bogus, "{ not a session record").expect("the record is written");
+        }
+        let failed = |record: &Value| {
+            record["payload"]["identities"][0]
+                .get("error")
+                .and_then(Value::as_str)
+                .is_some()
+        };
+        world.until("the record of the identity's refusal", |world| {
+            records(world, &name).iter().any(failed)
+        });
+        let record = records(&world, &name)
+            .into_iter()
+            .find(failed)
+            .expect("the record of the identity's refusal");
+        let identity = &record["payload"]["identities"][0];
+        assert_eq!(identity["identity"], SERVICE_IDENTITY, "{record}");
+        assert!(identity.get("outcome").is_none(), "{record}");
+        // The enumeration itself was made — this is one identity refusing, not the
+        // host's registry — so the sweep is not recorded as an unlistable host.
+        assert!(record["payload"].get("error").is_none(), "{record}");
+        world
+            .run(&["results", &name])
+            .exited(0)
+            .out_has(&format!("{SERVICE_IDENTITY} (every 1s): failed — "));
+        // Nothing ran inside the slot while the census could not be made, which is
+        // the whole point of the refusal: a maintenance command under a live
+        // session's build is what taking the census as empty would have caused.
+        assert_eq!(
+            ran(&marker),
+            before,
+            "a sweep maintained the slot while the host's sessions could not be surveyed"
+        );
+        if unreadable == "directory" {
+            std::fs::remove_file(&sessions).expect("the file in its place goes");
+            std::fs::rename(&aside, &sessions).expect("the sessions directory comes back");
+        } else {
+            std::fs::remove_file(&bogus).expect("the unreadable record goes");
+        }
+        release(&world, &name);
+    }
+}
+
 /// Both halves of each script fixture answer the same way: what one platform's
 /// half names, the other's names too.
 ///
