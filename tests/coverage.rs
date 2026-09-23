@@ -79,8 +79,9 @@ fn the_clean_step_removes_an_instrumented_binary_an_earlier_run_left() {
     );
 }
 
-/// And the tree it removes by default is *this* one: the one this run's own
-/// profiles are being written into.
+/// And the tree it would remove by default is *this* one: the one this run's own
+/// profiles are being written into. Nothing is removed here — that tree is the
+/// running tier's — so what this holds is the two paths against each other.
 ///
 /// A recipe that removed a plausible directory nothing writes to would pass every
 /// removal assertion above and fix nothing, so the default is asked of `just`
@@ -89,7 +90,7 @@ fn the_clean_step_removes_an_instrumented_binary_an_earlier_run_left() {
 /// built this binary. This is also what a run configured to build somewhere else
 /// runs into: the tier fails here rather than cleaning a tree nothing wrote to.
 #[test]
-fn the_clean_step_removes_the_directory_this_run_is_measured_from() {
+fn the_clean_steps_default_tree_is_the_one_this_run_is_measured_from() {
     let Some(measured) = profile_directory() else {
         // Uninstrumented: `just test-quick` runs this same suite on the
         // cross-platform legs, where there is no instrumented tree to clean.
@@ -102,7 +103,6 @@ fn the_clean_step_removes_the_directory_this_run_is_measured_from() {
         said(&evaluated)
     );
     let named = PathBuf::from(String::from_utf8_lossy(&evaluated.stdout).trim());
-    // Both ends resolved, so two spellings of one directory compare equal.
     let resolve = |path: &PathBuf| {
         path.canonicalize()
             .unwrap_or_else(|e| panic!("{} does not resolve: {e}", path.display()))
@@ -139,21 +139,29 @@ fn the_clean_step_passes_over_a_tree_that_was_never_built() {
     );
 }
 
-/// And it refuses a tree outside this clone rather than removing it.
+/// And it refuses what does not reach this clone's build directory, rather than
+/// removing it.
 ///
-/// `.cargo/config.toml` puts every build under this clone into `<clone>/target`,
-/// so a tree to clean that resolves anywhere else is a misconfiguration rather
-/// than a tree to remove.
+/// `.cargo/config.toml` puts every build in this clone under `<clone>/target`, so
+/// a tree to clean that reaches anywhere else is a misconfiguration rather than a
+/// tree to remove — and the bound is that directory rather than the clone,
+/// because the clone also holds `src` and `.git`.
 ///
 /// Each case is one a step that checked the *spelling* of what it was handed
-/// would accept: an absolute path outside the clone, that same path reached
-/// through `..`, a symlink inside the clone pointing out of it, one whose name
-/// carries a quote, and the empty and relative values a mistyped override
-/// actually takes. Every one of them resolves to a fixture this test made, so
-/// were the check gone the journey would delete its own fixture and nothing
-/// else — it cannot be the accident it guards against.
+/// would accept: a path beside the build tree but inside the clone, an absolute
+/// path outside the clone, that same path reached through `..`, a symlink inside
+/// the build tree pointing out of it, and a name carrying a quote. The empty and
+/// relative ones are there for a different reason — they reach nothing at all,
+/// which is the shape a mistyped argument takes, and the step has to refuse them
+/// rather than fall back to some tree of its own.
+///
+/// Every case that reaches anything reaches a fixture this test made, so were the
+/// check gone the journey would delete its own fixtures and nothing else — it
+/// cannot be the accident it guards against. That is also why `<clone>/target`
+/// itself is not among them, though the step refuses it: the tier running this
+/// test is inside it.
 #[test]
-fn the_clean_step_refuses_a_tree_outside_this_clone() {
+fn the_clean_step_refuses_what_does_not_reach_this_clones_build_directory() {
     let outside = env::temp_dir().join(format!(
         "onepipeline-coverage-clean-outside-{}",
         std::process::id()
@@ -165,20 +173,29 @@ fn the_clean_step_refuses_a_tree_outside_this_clone() {
         .unwrap_or_else(|e| panic!("could not create {}: {e}", quoted.display()));
     let through_dots = outside.join("below/..");
 
+    // Inside the clone and beside the build tree, which is the case that says the
+    // bound is the build directory and not the repository.
+    let beside = repo_root().join("coverage-clean-probe-beside-the-build-tree");
+    fs::create_dir_all(&beside)
+        .unwrap_or_else(|e| panic!("could not create {}: {e}", beside.display()));
+
     let mut refused: Vec<&OsStr> = vec![
+        beside.as_os_str(),
         outside.as_os_str(),
         through_dots.as_os_str(),
         quoted.as_os_str(),
         OsStr::new(""),
         OsStr::new("relative/dir"),
     ];
-    // A symlink is the one spelling that sits inside the clone and still leaves
-    // it, so it is the case that says the step resolves rather than reads.
+    // A symlink is the one spelling that sits inside the build tree and still
+    // leaves it, so it is the case that says the step resolves rather than reads.
     #[cfg(unix)]
     let link = repo_root().join("target/coverage-clean-probe-link");
     #[cfg(unix)]
     {
         let _ = fs::remove_file(&link);
+        fs::create_dir_all(repo_root().join("target"))
+            .unwrap_or_else(|e| panic!("could not create the build directory: {e}"));
         std::os::unix::fs::symlink(&outside, &link)
             .unwrap_or_else(|e| panic!("could not link {}: {e}", link.display()));
         refused.push(link.as_os_str());
@@ -205,8 +222,15 @@ fn the_clean_step_refuses_a_tree_outside_this_clone() {
         "{} was removed by a step that had refused to remove it",
         quoted.display()
     );
+    assert!(
+        beside.is_dir(),
+        "{} was removed by a step that had refused to remove it",
+        beside.display()
+    );
     #[cfg(unix)]
     fs::remove_file(&link).unwrap_or_else(|e| panic!("could not unlink {}: {e}", link.display()));
+    fs::remove_dir_all(&beside)
+        .unwrap_or_else(|e| panic!("could not remove {}: {e}", beside.display()));
     fs::remove_dir_all(&outside)
         .unwrap_or_else(|e| panic!("could not remove {}: {e}", outside.display()));
 }
@@ -260,8 +284,9 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// `just`, run the way the `coverage-clean` Nx target runs it: from the
-/// repository root, over this repository's real justfile.
+/// The recipe reads the bound on what it may remove off its own working
+/// directory, so this runs from the repository root, as the `coverage-clean` Nx
+/// target does.
 fn just(args: &[&OsStr]) -> Output {
     Command::new("just")
         .args(args)

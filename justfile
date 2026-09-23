@@ -276,18 +276,23 @@ llvm-cov-target-dir := justfile_directory() / "target" / "llvm-cov-target"
 #
 # `rm -rf` is handed the directory the argument *reaches* rather than its
 # spelling, and only after that is checked: `cd -P`/`pwd -P` follow `..` and
-# symlinks to the end — `/tmp/..` reaches `/` — and what they reach has to sit
-# inside this clone, where `.cargo/config.toml` pins every build under it.
-# Anything else is refused by name with nothing removed. A value that reaches
-# nothing is the ordinary first run, whose tree does not exist yet: it is checked
-# as written and removing it does nothing. The `|| reached=` is load-bearing under
-# this justfile's `-e` — without it that first run dies on the failed `cd` before
-# the check can say anything.
+# symlinks to the end — `/tmp/..` reaches `/`, and a link inside the clone reaches
+# wherever it points — and what they reach has to sit under the build directory
+# `.cargo/config.toml` pins every build in this clone to. That bound is the build
+# tree rather than the clone, because the clone also holds `src`, `.git` and this
+# file, and none of them is ever a tree to remove whole. `just` runs a recipe from
+# the justfile's own directory, so the bound is read off that rather than written
+# out, and nothing but the literal `target` is interpolated into these lines.
+# Anything outside it is refused by name with nothing removed. A value that
+# reaches nothing is the ordinary first run, whose tree does not exist yet: it is
+# checked as written and removing it does nothing. The `|| reached=` is
+# load-bearing under this justfile's `-e` — without it that first run dies on the
+# failed `cd` before the check can say anything.
 _crate-coverage-clean dir=llvm-cov-target-dir:
-    @root="$(pwd -P)"; \
+    @built="$(pwd -P)/target"; \
       reached="$(cd -P -- "$1" 2>/dev/null && pwd -P)" || reached=; \
-      case "${reached:-$1}" in "$root"/?*) ;; \
-        *) echo "refusing to remove '${reached:-$1}': the instrumented tree has to sit inside this clone ($root), which is where .cargo/config.toml pins every build under it — nothing was removed" >&2; exit 1;; \
+      case "${reached:-$1}" in "$built"/?*) ;; \
+        *) echo "refusing to remove '${reached:-$1}': the instrumented tree has to sit under this clone's build directory ($built), which is where .cargo/config.toml pins every build in it — nothing was removed" >&2; exit 1;; \
       esac; \
       rm -rf -- "${reached:-$1}"
 
