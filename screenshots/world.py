@@ -74,14 +74,14 @@ SOURCE = _source()
 def _plan_named(name: str) -> str:
     """One shipped project document's `onepipeline.name`, refused if it moved."""
     document = repo_root() / STORE / "projects" / f"{name}.md"
-    found = re.search(r'"onepipeline\.name":\s*"([^"]+)"', document.read_text())
-    if not found:
+    found = re.findall(r'"onepipeline\.name":\s*"([^"]+)"', document.read_text())
+    if len(found) != 1:
         raise SystemExit(
-            f"screenshots: {document} no longer declares `onepipeline.name`, so the "
-            "capture cannot say which run it is about. Restore it, or point this "
-            "capture at a plan that has one."
+            f"screenshots: {document} declares `onepipeline.name` {len(found)} "
+            "times, and the capture reads one — it is what names the run every "
+            "scene is of. Leave exactly one."
         )
-    return _named(found.group(1), "plan", document)
+    return _named(found[0], "plan", document)
 
 
 def _nodes_of(plan: str) -> dict[str, list[str]]:
@@ -92,7 +92,14 @@ def _nodes_of(plan: str) -> dict[str, list[str]]:
         node = re.search(r'"onepipeline\.id":\s*"([^"]+)"', text)
         if not node:
             continue
-        nodes[_named(node.group(1), "node", task)] = [
+        id_ = _named(node.group(1), "node", task)
+        if id_ in nodes:
+            raise SystemExit(
+                f"screenshots: two tasks under {STORE}/tasks/{plan} declare the "
+                f"node id {id_!r}. A later one would replace the earlier here and "
+                "the capture would drive a graph the plan does not hold."
+            )
+        nodes[id_] = [
             _named(step, "step", task)
             for step in re.findall(r'^\s*-\s*"id":\s*"([^"]+)"', text, re.M)
         ]

@@ -69,29 +69,71 @@ WORKFLOW = Path(".github/workflows/visual-docs.yml")
 def screencomp_pins_agree() -> str | None:
     """The refusal, when the workflow's two screencomp versions have parted."""
     text = (REPO / WORKFLOW).read_text()
-    used = re.search(r"visual-docs-reusable\.yml@(\S+)", text)
-    installed = re.search(r"screencomp-version:\s*(\S+)", text)
+    # `findall`, not `search`: a second declaration of either would leave one of
+    # them unchecked, which is exactly the drift this reconciliation exists for.
+    found = {
+        "calls": re.findall(r"visual-docs-reusable\.yml@(\S+)", text),
+        "installs": re.findall(r"^\s*screencomp-version:\s*(\S+)", text, re.M),
+    }
     release = re.compile(r"^v?\d+\.\d+\.\d+$")
-    if not used or not installed:
-        return (
-            f"screenshots: {WORKFLOW} no longer names both a screencomp "
-            "reusable-workflow ref and a `screencomp-version:` to install. It has "
-            "to name both, and they have to agree — restore them."
-        )
-    for what, found in (("calls", used), ("installs", installed)):
-        if not release.match(found.group(1)):
+    for what, seen in found.items():
+        if len(seen) != 1:
             return (
-                f"screenshots: {WORKFLOW} {what} screencomp "
-                f"{found.group(1)!r}, which is not an immutable release tag. A "
-                "moving ref would change the gate under a baseline nothing "
-                "recaptured — name a `vMAJOR.MINOR.PATCH` release."
+                f"screenshots: {WORKFLOW} {what} screencomp {len(seen)} times, and "
+                "this reconciliation is of one against one. It has to name the "
+                "reusable workflow's ref once and the version to install once, and "
+                "they have to agree."
             )
-    if used.group(1) != installed.group(1):
+        if not release.match(seen[0]):
+            return (
+                f"screenshots: {WORKFLOW} {what} screencomp {seen[0]!r}, which is "
+                "not an immutable release tag. A moving ref would change the gate "
+                "under a baseline nothing recaptured — name a `vMAJOR.MINOR.PATCH` "
+                "release."
+            )
+    if found["calls"][0] != found["installs"][0]:
         return (
-            f"screenshots: {WORKFLOW} calls screencomp {used.group(1)} and installs "
-            f"{installed.group(1)}. The gallery and the gate would then come from "
-            "two releases. Set both to the same tag."
+            f"screenshots: {WORKFLOW} calls screencomp {found['calls'][0]} and "
+            f"installs {found['installs'][0]}. The gallery and the gate would then "
+            "come from two releases. Set both to the same tag."
         )
+    return covered_by_named_inputs()
+
+
+#: Where the build graph declares what can change a rendered shot, beside
+#: `screencomp.toml`'s own list for the local guard. The two are deliberately
+#: different shapes — Nx enumerates directories a cached target re-runs on, the
+#: guard enumerates files worth paying for a local recapture over — so they are
+#: reconciled by containment rather than by equality.
+NAMED_INPUTS = Path("nx.json")
+
+
+def covered_by_named_inputs() -> str | None:
+    """The refusal, when a guard path is under no declared named input."""
+    declared = [
+        entry.removeprefix("{workspaceRoot}/").removesuffix("/**/*").removesuffix("**/*")
+        for entry in json.loads((REPO / NAMED_INPUTS).read_text())["namedInputs"][
+            "visualDocsSource"
+        ]
+        if entry.startswith("{workspaceRoot}/")
+    ]
+    guard = re.search(
+        r"^paths = \[(.*?)^\]", (REPO / "screencomp.toml").read_text(), re.M | re.S
+    )
+    if not guard:
+        return (
+            "screenshots: screencomp.toml no longer declares `[guard].paths`, so "
+            "the local guard would recapture on nothing. Restore the list."
+        )
+    for path in re.findall(r'"([^"]+)"', guard.group(1)):
+        bare = path.removesuffix("/**").removesuffix("**")
+        if not any(bare == entry or bare.startswith(entry) for entry in declared):
+            return (
+                f"screenshots: screencomp.toml's [guard].paths names {path!r}, which "
+                "no `visualDocsSource` entry in nx.json covers — so a change there "
+                "would make the local guard recapture while the cached target "
+                "replayed a stale result. Add it to that named input."
+            )
     return None
 
 

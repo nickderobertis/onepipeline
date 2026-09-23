@@ -92,7 +92,9 @@ attached stream prints changes, and commit the new hero beside the new baseline.
   declares no `check`, `build` or `test` because it has none: declaring the
   uniform set and running nothing would drop it out of every repo-wide verb
   while appearing covered by it. A new path that can change a shot belongs in
-  `visualDocsSource` in `nx.json` **and** in `[guard].paths`.
+  `visualDocsSource` in `nx.json` **and** in `[guard].paths`; the capture
+  refuses when a guard path is under no named input, which is the direction that
+  would otherwise let a cached target replay a stale result.
 - **No image goes under `docs/`** — that directory is machine-consumed and named
   in a cached build input.
 - The guard only runs where `core.hooksPath` points at `.githooks`, which is
