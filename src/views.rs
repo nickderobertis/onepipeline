@@ -499,13 +499,36 @@ pub fn decision_outstanding(state: &RunState, paths: &RunPaths) -> bool {
 /// the reasoning above runs out: the reader that asked the question has gone, so
 /// there is no next move sitting in anybody's queue, and a run reported as
 /// waiting for a planner would wait for ever.
+///
+/// **Neither does one a reply has already answered.** A question is answered on
+/// the reply log, and releasing the pending slot is what a verdict additionally
+/// does — so a question answered while nobody had claimed it is still sitting in
+/// `waiting`, and a reconciler finding answered by the very edit it asked for is
+/// exactly that case. Counting it would report a decision the run is held on
+/// after the thing it asked for is on the graph, which is what
+/// `watch --until surface` returned on for the rest of the run.
 pub(crate) fn blocking_surface(paths: &RunPaths) -> bool {
-    let queue = crate::channel::ChannelState::new(paths).queue();
-    queue
-        .waiting
-        .iter()
-        .chain(queue.pending.iter())
-        .any(|surface| surface.blocking && !surface.abandoned)
+    let channel = crate::channel::ChannelState::new(paths);
+    let queue = channel.queue();
+    let standing = || {
+        queue
+            .waiting
+            .iter()
+            .chain(queue.pending.iter())
+            .filter(|surface| surface.blocking && !surface.abandoned)
+    };
+    // The reply log is read only where something is standing, so a run with no
+    // blocking surface pays one queue read per poll rather than two files.
+    if standing().next().is_none() {
+        return false;
+    }
+    let answered = channel.answered();
+    standing().any(|surface| {
+        !surface
+            .correlation
+            .as_ref()
+            .is_some_and(|correlation| answered.contains(correlation))
+    })
 }
 
 /// Whether a run is being driven, and if not, why not.
@@ -4655,6 +4678,53 @@ mod tests {
         let view = RunView::open(&paths).expect("the run reads");
         assert_eq!(view.liveness(), DriverLiveness::Driving);
         assert!(!view.liveness().is_undriven());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// And the same silence with that decision **answered**, which is what a
+    /// reconciler finding looks like once the edit it asked for is committed.
+    ///
+    /// The surface is still on the queue — a record is answered, never removed —
+    /// so a reader that counted it would keep reporting a planner decision for
+    /// the rest of the run, which is what `watch --until surface` returned on
+    /// and what the Stop hook's watch invariant failed against.
+    #[test]
+    fn a_blocking_surface_a_reply_answered_is_no_longer_a_decision() {
+        let root = scratch("quiet-answered");
+        let paths = quiet_run(&root, "demo");
+        let correlation =
+            crate::findings::correlation(crate::findings::FindingKind::SessionConflict, "build")
+                .expect("a key");
+        let channel = crate::channel::ChannelState::new(&paths);
+        channel
+            .push(crate::channel::Surface {
+                id: 0,
+                kind: "finding".into(),
+                message: "node 'build' cannot open a session; answer with a `retry`".into(),
+                source: "reconciler".into(),
+                blocking: true,
+                queued_at: sys::now_millis(),
+                abandoned: false,
+                asker: None,
+                workstream: Some("build".into()),
+                correlation: Some(correlation.clone()),
+            })
+            .expect("the finding queues");
+        assert!(blocking_surface(&paths), "the finding is not a decision");
+
+        channel
+            .answer_bound(
+                &crate::channel::Reply {
+                    message: Some("answered by the edit it asked for".into()),
+                    ..crate::channel::Reply::default()
+                },
+                Some(&correlation),
+            )
+            .expect("the finding is answered");
+
+        assert!(!blocking_surface(&paths));
+        let view = RunView::open(&paths).expect("the run reads");
+        assert_eq!(view.liveness(), DriverLiveness::Parked);
         std::fs::remove_dir_all(&root).ok();
     }
 
