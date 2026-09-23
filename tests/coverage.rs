@@ -198,7 +198,7 @@ fn the_clean_step_refuses_what_does_not_reach_this_clones_build_directory() {
     #[cfg(unix)]
     let link = repo_root().join("target/coverage-clean-probe-link");
     #[cfg(unix)]
-    let resolved: Option<&OsStr> = {
+    let symlinked: Option<&OsStr> = {
         let _ = fs::remove_file(&link);
         fs::create_dir_all(repo_root().join("target"))
             .unwrap_or_else(|e| panic!("could not create the build directory: {e}"));
@@ -207,7 +207,7 @@ fn the_clean_step_refuses_what_does_not_reach_this_clones_build_directory() {
         Some(link.as_os_str())
     };
     #[cfg(not(unix))]
-    let resolved: Option<&OsStr> = None;
+    let symlinked: Option<&OsStr> = None;
 
     let refused: Vec<&OsStr> = [
         beside.as_os_str(),
@@ -216,7 +216,7 @@ fn the_clean_step_refuses_what_does_not_reach_this_clones_build_directory() {
         quoted.as_os_str(),
     ]
     .into_iter()
-    .chain(resolved)
+    .chain(symlinked)
     .collect();
 
     for target in refused {
@@ -251,6 +251,63 @@ fn the_clean_step_refuses_what_does_not_reach_this_clones_build_directory() {
         .unwrap_or_else(|e| panic!("could not remove {}: {e}", beside.display()));
     fs::remove_dir_all(&outside)
         .unwrap_or_else(|e| panic!("could not remove {}: {e}", outside.display()));
+}
+
+/// And it refuses what is there but cannot be entered, rather than passing over
+/// it as a name that reaches nothing: a file, or a link whose target is gone, sits
+/// under the build directory by its spelling, but where it leads cannot be
+/// resolved, so the bound cannot be asked of it and a silent pass would hide the
+/// misconfiguration.
+#[test]
+fn the_clean_step_refuses_what_is_there_but_cannot_be_entered() {
+    let build = repo_root().join("target");
+    fs::create_dir_all(&build)
+        .unwrap_or_else(|e| panic!("could not create the build directory: {e}"));
+    let file = build.join(format!("coverage-clean-probe-file-{}", std::process::id()));
+    fs::write(&file, "not a tree")
+        .unwrap_or_else(|e| panic!("could not create {}: {e}", file.display()));
+
+    #[cfg(unix)]
+    let dangling = build.join(format!(
+        "coverage-clean-probe-dangling-{}",
+        std::process::id()
+    ));
+    #[cfg(unix)]
+    let broken_link: Option<&OsStr> = {
+        let _ = fs::remove_file(&dangling);
+        std::os::unix::fs::symlink(build.join("coverage-clean-probe-gone"), &dangling)
+            .unwrap_or_else(|e| panic!("could not link {}: {e}", dangling.display()));
+        Some(dangling.as_os_str())
+    };
+    #[cfg(not(unix))]
+    let broken_link: Option<&OsStr> = None;
+
+    let unenterable: Vec<&OsStr> = [file.as_os_str()].into_iter().chain(broken_link).collect();
+    for target in unenterable {
+        let attempt = just(&["_crate-coverage-clean".as_ref(), target]);
+        assert!(
+            !attempt.status.success(),
+            "the clean step passed over {target:?}, which is there but cannot be \
+             entered, as though it named nothing: {}",
+            said(&attempt)
+        );
+        let complaint = String::from_utf8_lossy(&attempt.stderr);
+        assert!(
+            complaint.contains("refusing to remove"),
+            "the refusal of {target:?} does not say what it refused: {}",
+            said(&attempt)
+        );
+    }
+
+    assert!(
+        file.is_file(),
+        "{} was removed by a step that had refused to remove it",
+        file.display()
+    );
+    fs::remove_file(&file).unwrap_or_else(|e| panic!("could not remove {}: {e}", file.display()));
+    #[cfg(unix)]
+    fs::remove_file(&dangling)
+        .unwrap_or_else(|e| panic!("could not unlink {}: {e}", dangling.display()));
 }
 
 /// And it refuses a build directory *whole*, which is the one case the journey
@@ -420,7 +477,14 @@ fn profile_directory() -> Option<PathBuf> {
 /// first, then the llvm-tools shipped beside the active toolchain's target libdir.
 fn llvm_profdata() -> Option<PathBuf> {
     if let Some(explicit) = env::var_os("LLVM_PROFDATA") {
-        return Some(PathBuf::from(explicit));
+        let explicit = PathBuf::from(explicit);
+        assert!(
+            explicit.is_file(),
+            "$LLVM_PROFDATA is {:?}, which is not a file; point it at an \
+             llvm-profdata executable, or unset it to use the toolchain's own",
+            explicit
+        );
+        return Some(explicit);
     }
     let printed = Command::new("rustc")
         .args(["--print", "target-libdir"])
