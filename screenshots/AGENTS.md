@@ -116,3 +116,8 @@ say:
 - Neither of those needs `freeze` or `screencomp`, so neither is excused from
   the offline tier: `tests/visual_docs.rs` drives `world.py` against real `git`
   for both.
+- **The two switches are spelled, not merely present.** `SCREENSHOTS_NO_BUILD`
+  (`capture.sh`) and `SCREENCOMP_GUARD_REQUIRE` (the hook) each take `0`/`1`,
+  `false`/`true` or `no`/`yes`, and refuse anything else. Present-means-on would
+  read a `=0` as "on" — a skipped build photographs whatever binary was lying in
+  `target/`, which is a baseline blessed for code nobody here has.

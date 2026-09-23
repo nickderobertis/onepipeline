@@ -22,8 +22,9 @@
 #[cfg(unix)] // The capture is `capture.sh` over `capture.py`; it runs where they do.
 mod unix {
     use std::fs;
+    use std::io::Write;
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Output};
+    use std::process::{Command, Output, Stdio};
 
     struct Scratch(PathBuf);
 
@@ -338,6 +339,110 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
             hero.windows(11).any(|w| w == b"NETSCAPE2.0"),
             "the README's hero carries no loop extension, so it plays once and stops \
              wherever the reader's renderer leaves it"
+        );
+    }
+
+    /// Run the committed pre-push hook the way git runs it — the pushed refs on
+    /// its stdin, the remote and its URL as arguments — with `screencomp` off
+    /// `PATH`, which is the branch where `SCREENCOMP_GUARD_REQUIRE` decides the
+    /// answer. The environment is cleared rather than inherited so that a `CI`
+    /// or a `SCREENCOMP_GUARD_REQUIRE` in the runner's own environment cannot
+    /// decide what this journey observes.
+    fn pre_push(require: Option<&str>) -> Output {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut hook = Command::new("bash");
+        hook.arg(".githooks/pre-push")
+            .arg("origin")
+            .arg("https://example.invalid/onepipeline.git")
+            .current_dir(root)
+            .env_clear()
+            // `/usr/bin:/bin` carries the coreutils the hook runs and not the
+            // `screencomp` this host installs under its home.
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(value) = require {
+            hook.env("SCREENCOMP_GUARD_REQUIRE", value);
+        }
+        let mut running = hook.spawn().expect("the pre-push hook runs");
+        let zero = "0".repeat(40);
+        running
+            .stdin
+            .as_mut()
+            .expect("the hook's stdin is a pipe")
+            .write_all(format!("refs/heads/topic {zero} refs/heads/topic {zero}\n").as_bytes())
+            .expect("git's ref line is written to the hook");
+        running
+            .wait_with_output()
+            .expect("the pre-push hook is waited on")
+    }
+
+    /// `SCREENCOMP_GUARD_REQUIRE` says which way the guard answers when it
+    /// cannot evaluate a push, so reading it as present-means-on would turn the
+    /// `=0` of someone asking for the lenient answer into the strict one.
+    #[test]
+    fn the_guard_holds_its_strictness_switch_to_a_value_it_can_have() {
+        let lenient = pre_push(Some("0"));
+        assert!(
+            lenient.status.success(),
+            "`SCREENCOMP_GUARD_REQUIRE=0` blocked a push the guard could not evaluate, \
+             which is the opposite of what it asks for:\n{}",
+            String::from_utf8_lossy(&lenient.stderr)
+        );
+
+        let strict = pre_push(Some("1"));
+        assert_eq!(
+            strict.status.code(),
+            Some(1),
+            "`SCREENCOMP_GUARD_REQUIRE=1` let a push through that the guard could not \
+             evaluate:\n{}",
+            String::from_utf8_lossy(&strict.stderr)
+        );
+
+        let typo = pre_push(Some("ture"));
+        let said = String::from_utf8_lossy(&typo.stderr).into_owned();
+        assert_eq!(
+            typo.status.code(),
+            Some(1),
+            "a misspelt `SCREENCOMP_GUARD_REQUIRE` was read as one of the two answers \
+             rather than refused, so the push went whichever way the typo happened to \
+             fall:\n{said}"
+        );
+        assert!(
+            said.contains("SCREENCOMP_GUARD_REQUIRE is 'ture'"),
+            "the guard refused the misspelt value without quoting it back, so the \
+             reader cannot see what it read:\n{said}"
+        );
+    }
+
+    /// `SCREENSHOTS_NO_BUILD` decides whether the scenes are rendered from the
+    /// binaries in this tree, so a value it guesses at is a baseline blessed for
+    /// code nobody here has.
+    #[test]
+    fn the_capture_holds_its_build_switch_to_a_value_it_can_have() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let refused = Command::new("bash")
+            .arg("screenshots/capture.sh")
+            .current_dir(root)
+            .env("SCREENSHOTS_NO_BUILD", "flase")
+            .output()
+            .expect("the capture entry point runs");
+        let said = String::from_utf8_lossy(&refused.stderr).into_owned();
+        assert_eq!(
+            refused.status.code(),
+            Some(2),
+            "a misspelt `SCREENSHOTS_NO_BUILD` was read as 'skip the build', so the \
+             capture would have photographed whatever binary was lying in target/:\n{said}"
+        );
+        assert!(
+            said.contains("SCREENSHOTS_NO_BUILD is 'flase'"),
+            "the capture refused the misspelt value without quoting it back:\n{said}"
+        );
+        assert!(
+            !said.contains("Compiling") && !said.contains("Finished"),
+            "the capture started building before it had decided whether to, so the \
+             refusal costs a release build:\n{said}"
         );
     }
 }

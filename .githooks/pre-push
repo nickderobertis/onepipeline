@@ -47,6 +47,20 @@ if ! printf '%s\n' "$LANES" | grep -qxF "$LANE"; then
   echo "          with 'just screenshots-bless', and commit shots/baseline/$LANE.json." >&2
   exit 1
 fi
+# `SCREENCOMP_GUARD_REQUIRE` is external input and it decides which way this hook
+# answers when it cannot evaluate the push. Present-means-on would read
+# `SCREENCOMP_GUARD_REQUIRE=0` as "require", which is the opposite of what that
+# typed, so it too is held to a value it can have.
+case "${SCREENCOMP_GUARD_REQUIRE:-0}" in
+  0 | false | no) GUARD_REQUIRE=0 ;;
+  1 | true | yes) GUARD_REQUIRE=1 ;;
+  *)
+    echo "pre-push: SCREENCOMP_GUARD_REQUIRE is '${SCREENCOMP_GUARD_REQUIRE}', which is" >&2
+    echo "          neither 0/false/no nor 1/true/yes. Refusing rather than guessing" >&2
+    echo "          whether this push may go without the guard having evaluated it." >&2
+    exit 1
+    ;;
+esac
 MANIFEST="shots/baseline/${LANE}.json"
 GALLERY="shots/review"
 CURRENT="shots/current"
@@ -74,7 +88,7 @@ if ! command -v screencomp >/dev/null 2>&1; then
     echo "          then enable the hook: just bootstrap"
     echo "          Set SCREENCOMP_GUARD_REQUIRE=1 to fail here instead."
   } >&2
-  [ -n "${SCREENCOMP_GUARD_REQUIRE:-}" ] && exit 1
+  [ "$GUARD_REQUIRE" = 1 ] && exit 1
   exit 0
 fi
 
