@@ -134,11 +134,27 @@ fn resolved(lock: &Path, name: &str) -> Vec<String> {
 /// the requirement excludes is right to say nothing about it. Pre-1.0 the minor
 /// is the breaking position, so a patch past the linked one is always admitted.
 fn a_release_past(name: &str) -> String {
+    a_release_past_at(name, 100)
+}
+
+/// A release past the version the lock resolves, at `patch`, inside the same
+/// minor and so inside the caret its requirement states.
+///
+/// The general form of [`a_release_past`], for the held-back fixtures below:
+/// each of those needs three releases in one minor — one under the admissible
+/// one, the admissible one, and one above it that a requirement holds back — and
+/// the order between them is the whole of what the check is being asked about.
+/// Derived rather than written for the reason [`a_release_past`] states, and
+/// because the fixtures that were written did go stale: they named the `0.7`
+/// line, and the `onevcs-testing` pin moved to `0.8.0`, so every one of them
+/// served releases *below* the linked version and asserted on a check that was
+/// correctly saying nothing.
+fn a_release_past_at(name: &str, patch: u64) -> String {
     let linked = &linked(name)[0];
     let (major_minor, _) = linked
         .rsplit_once('.')
         .unwrap_or_else(|| panic!("the lock's `{name}` version has three components: {linked}"));
-    format!("{major_minor}.100")
+    format!("{major_minor}.{patch}")
 }
 
 /// A release past the version the lock resolves that its own requirement does
@@ -625,14 +641,16 @@ fn the_update_spec_this_check_prints_is_one_cargo_accepts() {
 fn a_release_held_back_by_this_manifests_own_requirement_is_reported_and_is_not_a_finding() {
     let linked_testing = &linked("onevcs-testing")[0];
     let pinned_vcs = required("onevcs");
+    let older_held = a_release_past_at("onevcs-testing", 99);
+    let newest_held = a_release_past_at("onevcs-testing", 100);
     // Two releases held back, so the line names the newest of them; and the
     // one holding the older back is a `build` requirement, which cargo does
     // resolve for a dependency and which holds back exactly as `normal` does.
     let index = index_serving(
         "held-back",
         &[
-            served("onevcs-testing", "0.7.99").requiring(&[("onevcs", "^0.98.0", "build")]),
-            served("onevcs-testing", "0.7.100").requiring(&[("onevcs", "^0.99.0", "normal")]),
+            served("onevcs-testing", &older_held).requiring(&[("onevcs", "^0.98.0", "build")]),
+            served("onevcs-testing", &newest_held).requiring(&[("onevcs", "^0.99.0", "normal")]),
         ],
     );
 
@@ -647,8 +665,8 @@ fn a_release_held_back_by_this_manifests_own_requirement_is_reported_and_is_not_
     assert!(
         report.contains(&format!(
             "onevcs-testing: links {linked_testing}, the newest its requirement permits that \
-             this manifest admits; 0.7.100 is held back by onevcs = \"{pinned_vcs}\" (0.7.100 \
-             requires onevcs ^0.99.0)"
+             this manifest admits; {newest_held} is held back by onevcs = \"{pinned_vcs}\" \
+             ({newest_held} requires onevcs ^0.99.0)"
         )),
         "the check passed without naming the release held back, the requirement of this \
          manifest holding it, and what the release itself requires — which is the whole of \
@@ -656,7 +674,7 @@ fn a_release_held_back_by_this_manifests_own_requirement_is_reported_and_is_not_
         said(&run)
     );
     assert!(
-        !report.contains("0.7.99"),
+        !report.contains(&older_held),
         "the check named a held-back release below the newest one, which is not the release \
          a reader moving the pin would take:\n{}",
         said(&run)
@@ -724,11 +742,13 @@ fn a_dev_requirement_of_a_newer_release_holds_nothing_back() {
 fn the_fix_for_a_lock_behind_an_admissible_release_stops_short_of_the_held_back_one() {
     let stale_testing = &linked("onevcs-testing")[0];
     let pinned_vcs = required("onevcs");
+    let admissible = a_release_past_at("onevcs-testing", 100);
+    let held_back = a_release_past_at("onevcs-testing", 101);
     let index = index_serving(
         "behind-under-held-back",
         &[
-            served("onevcs-testing", "0.7.100"),
-            served("onevcs-testing", "0.7.101").requiring(&[("onevcs", "^0.99.0", "normal")]),
+            served("onevcs-testing", &admissible),
+            served("onevcs-testing", &held_back).requiring(&[("onevcs", "^0.99.0", "normal")]),
         ],
     );
     let run = linked_engines(&["--index", &index]);
@@ -741,7 +761,8 @@ fn the_fix_for_a_lock_behind_an_admissible_release_stops_short_of_the_held_back_
     let report = String::from_utf8_lossy(&run.stderr);
     assert!(
         report.contains(&format!(
-            "onevcs-testing: links {stale_testing}, but its requirement already permits 0.7.100"
+            "onevcs-testing: links {stale_testing}, but its requirement already permits \
+             {admissible}"
         )),
         "the refusal names a release other than the newest one this manifest admits:\n{}",
         said(&run)
@@ -755,14 +776,15 @@ fn the_fix_for_a_lock_behind_an_admissible_release_stops_short_of_the_held_back_
         .unwrap_or_else(|| panic!("the refusal carries no fix line:\n{}", said(&run)));
     assert_eq!(
         fix,
-        format!("cargo update -p onevcs-testing@{stale_testing} --precise 0.7.100"),
+        format!("cargo update -p onevcs-testing@{stale_testing} --precise {admissible}"),
         "the remedy does not resolve to the admissible release the refusal named: run as \
          printed it would take the held-back one and resolve `onevcs` twice:\n{}",
         said(&run)
     );
     assert!(
         report.contains(&format!(
-            "(0.7.101 is held back by onevcs = \"{pinned_vcs}\": 0.7.101 requires onevcs ^0.99.0)"
+            "({held_back} is held back by onevcs = \"{pinned_vcs}\": {held_back} requires \
+             onevcs ^0.99.0)"
         )),
         "the refusal does not say why the fix stops short of the newest release:\n{}",
         said(&run)
@@ -785,11 +807,13 @@ fn the_fix_for_a_lock_behind_an_admissible_release_stops_short_of_the_held_back_
 #[test]
 fn a_held_back_release_below_the_newest_admitted_one_is_not_reported() {
     let stale_testing = &linked("onevcs-testing")[0];
+    let held_back = a_release_past_at("onevcs-testing", 99);
+    let admissible = a_release_past_at("onevcs-testing", 100);
     let index = index_serving(
         "held-back-below-admitted",
         &[
-            served("onevcs-testing", "0.7.99").requiring(&[("onevcs", "^0.99.0", "normal")]),
-            served("onevcs-testing", "0.7.100"),
+            served("onevcs-testing", &held_back).requiring(&[("onevcs", "^0.99.0", "normal")]),
+            served("onevcs-testing", &admissible),
         ],
     );
     let run = linked_engines(&["--index", &index]);
@@ -1021,11 +1045,13 @@ fn the_remedy_printed_in_the_mixed_case_performed_with_cargo_moves_the_lock_to_t
     }
     let starting = fs::read_to_string(&lock).expect("the starting lock");
 
+    let admissible = a_release_past_at("onevcs-testing", 100);
+    let held_back = a_release_past_at("onevcs-testing", 101);
     let index = index_serving(
         "mixed-remedy/index",
         &[
-            served("onevcs-testing", "0.7.100"),
-            served("onevcs-testing", "0.7.101").requiring(&[("onevcs", "^0.99.0", "normal")]),
+            served("onevcs-testing", &admissible),
+            served("onevcs-testing", &held_back).requiring(&[("onevcs", "^0.99.0", "normal")]),
             served("onevcs", "0.99.0"),
         ],
     );
@@ -1076,7 +1102,7 @@ fn the_remedy_printed_in_the_mixed_case_performed_with_cargo_moves_the_lock_to_t
     );
     assert_eq!(
         resolved(&lock, "onevcs-testing"),
-        vec!["0.7.100".to_string()],
+        vec![admissible.clone()],
         "performed, the remedy did not leave `onevcs-testing` at the release the refusal \
          named:\n{}",
         said(&performed)
@@ -1290,9 +1316,10 @@ fn the_release_note_says_so_where_a_linked_engine_is_behind_the_requirement() {
 fn the_release_note_says_so_where_a_newer_release_is_held_back() {
     let linked_testing = &linked("onevcs-testing")[0];
     let pinned_vcs = required("onevcs");
+    let held_back = a_release_past_at("onevcs-testing", 100);
     let index = index_serving(
         "notes-held-back",
-        &[served("onevcs-testing", "0.7.100").requiring(&[("onevcs", "^0.99.0", "normal")])],
+        &[served("onevcs-testing", &held_back).requiring(&[("onevcs", "^0.99.0", "normal")])],
     );
     let run = linked_engines(&["--index", &index, "--format", "notes"]);
     assert!(
@@ -1304,8 +1331,8 @@ fn the_release_note_says_so_where_a_newer_release_is_held_back() {
     assert!(
         notes.contains(&format!(
             "- `onevcs-testing` links {linked_testing}, the newest its requirement permits that \
-             this manifest admits; 0.7.100 is held back by `onevcs = \"{pinned_vcs}\"` \
-             (0.7.100 requires onevcs ^0.99.0)."
+             this manifest admits; {held_back} is held back by `onevcs = \"{pinned_vcs}\"` \
+             ({held_back} requires onevcs ^0.99.0)."
         )),
         "the note does not say the newer release exists and why it was not taken, so a \
          reader still has to diff the registry against the lock to learn it:\n{}",
@@ -1331,11 +1358,13 @@ fn the_release_note_says_so_where_a_newer_release_is_held_back() {
 fn the_release_note_carries_a_held_back_release_on_the_warning_of_an_engine_that_is_also_behind() {
     let stale_testing = &linked("onevcs-testing")[0];
     let pinned_vcs = required("onevcs");
+    let admissible = a_release_past_at("onevcs-testing", 100);
+    let held_back = a_release_past_at("onevcs-testing", 101);
     let index = index_serving(
         "notes-behind-under-held-back",
         &[
-            served("onevcs-testing", "0.7.100"),
-            served("onevcs-testing", "0.7.101").requiring(&[("onevcs", "^0.99.0", "normal")]),
+            served("onevcs-testing", &admissible),
+            served("onevcs-testing", &held_back).requiring(&[("onevcs", "^0.99.0", "normal")]),
         ],
     );
     let run = linked_engines(&["--index", &index, "--format", "notes"]);
@@ -1348,8 +1377,8 @@ fn the_release_note_carries_a_held_back_release_on_the_warning_of_an_engine_that
     assert!(
         notes.contains(&format!(
             "- `onevcs-testing` links {stale_testing}; the requirement already permitted \
-             0.7.100 (0.7.101 is held back by `onevcs = \"{pinned_vcs}\"`: 0.7.101 requires \
-             onevcs ^0.99.0)."
+             {admissible} ({held_back} is held back by `onevcs = \"{pinned_vcs}\"`: \
+             {held_back} requires onevcs ^0.99.0)."
         )),
         "the warning names the release the lock is behind without saying a newer one is held \
          back, so a reader who takes the update still meets the newer release unexplained:\n{}",
