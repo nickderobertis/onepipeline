@@ -1307,60 +1307,74 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 ///
 /// Every write through [`write_atomic`] is published by a rename, so whichever of
 /// these it is, a reader listing that directory meets the previous file or the
-/// whole new one and never a partial one. What differs is a *host* that stops
-/// between the write and the disk: a file nothing else can reconstruct has to
-/// have landed before its name appears, and a file that is rebuilt as soon as its
-/// run is relaunched does not.
+/// whole new one and never a partial one. What differs is a *host* that stops:
+/// a file nothing else can reconstruct has to be on the disk before the write
+/// returns, and a file that is rebuilt as soon as its run is relaunched does not.
 #[derive(Clone, Copy, Debug)]
 pub enum Durability {
-    /// This host's own account of what it did. Synced to the disk before the
-    /// rename publishes the name, because a host that stopped in between would
-    /// otherwise leave the name pointing at contents that never landed — with
-    /// nothing left to rebuild them from.
+    /// This host's own account of what it did — a checkpoint, a launch record, a
+    /// reclaim — on the disk by the time the write returns.
     ///
-    /// Precisely that and no more, because the two halves persist separately:
-    /// the sync is over the temporary's *contents*, and whether the rename's own
-    /// directory entry has reached the disk when the host stops is the
-    /// filesystem's business rather than this function's. So what a host that
-    /// stopped leaves behind is the previous record or the whole new one — never
-    /// a name pointing at contents that never landed. It is not a promise that
-    /// the newest record is the one that survives; a run whose machine died is
-    /// relaunched from its journal either way.
+    /// Both halves of it, because they persist separately. The contents are
+    /// synced before the rename publishes the name, and the directory entry that
+    /// rename installed is synced after it; either alone leaves a host that
+    /// stopped in a state this promises against — a name resolving to contents
+    /// that never landed, or contents no name resolves to — and nothing else can
+    /// rebuild a record of what this host did. So a host that stops immediately
+    /// after a write of this kind returns comes back with the destination name
+    /// resolving to the whole new file.
     Record,
-    /// A projection of such a record, published by the rename alone.
+    /// A projection of such records, published by the rename alone.
     ///
     /// A run whose machine died is relaunched from its journal, which writes the
-    /// projection again; so the sync would buy durability for a file that is
+    /// projection again; so the syncs would buy durability for a file that is
     /// rebuilt anyway. It is not free to buy: `writeback::write_shadow` replaces
     /// one document per node, about a hundred per pass on a hundred-node run, so
-    /// this is a disk sync per node per pass rather than one.
+    /// this is a pair of disk syncs per node per pass rather than none. A reader
+    /// past the rename is served either way — that is the rename's doing, not the
+    /// syncs'.
     Projection,
 }
 
-/// Write bytes so no reader can observe them half-written.
+impl Durability {
+    /// Whether a write of this kind is carried to the disk before it returns.
+    ///
+    /// The one place the two arms differ, so neither the order of the steps nor
+    /// the cleanup after a failed one can drift between them.
+    fn syncs(self) -> bool {
+        match self {
+            Self::Record => true,
+            Self::Projection => false,
+        }
+    }
+}
+
+/// Write bytes so no reader can observe them half-written, and carry them as far
+/// towards the disk as `durability` asks.
 pub fn write_atomic(path: &Path, bytes: &[u8], durability: Durability) -> Result<()> {
     let ledger = |e: io::Error| Error::Ledger {
         path: path.to_path_buf(),
         source: e,
     };
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(ledger)?;
-    }
+    // The directory the destination is published into, which is both what has to
+    // exist before the write and what a [`Durability::Record`] syncs afterwards.
+    // A bare file name's parent is `""`, which no host will open; the directory
+    // it means is this process's own, and `.` is how that one is named.
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    fs::create_dir_all(&parent).map_err(ledger)?;
     // The temporary carries this process's pid so two writers racing the same
     // target cannot truncate each other's partial file before the rename.
     let temp = path.with_extension(format!("tmp.{}", sys::pid()));
-    // The rename is what publishes the name, so whatever `durability` asks for
-    // happens before it rather than after: a host that died in between would
-    // otherwise leave the destination naming a file whose contents never landed.
-    // Which files are worth that is [`Durability`]'s own account.
-    let published = onto_the_disk(&temp, bytes, durability).and_then(|()| fs::rename(&temp, path));
+    let published = publish(&temp, path, &parent, bytes, durability);
     // llmlint: ignore-block[changed_behavior_has_e2e] reaching this needs the host to
     // refuse a call this function makes, which no journey can ask of a real run without a
-    // filesystem built to fail: the unit tests induce both refusals against the real
-    // filesystem — a rename onto a directory, and a temporary name no file can take — and
-    // assert the temporary is gone, the destination untouched, and the error naming the
-    // destination. What an e2e could observe is a file that is *not* there, which no
-    // surface of this product reports.
+    // filesystem built to fail: the unit tests induce those refusals — a rename onto a
+    // directory, a temporary name no file can take, and each sync in turn — and assert the
+    // temporary is gone and the error names the destination. What an e2e could observe is
+    // a file that is *not* there, which no surface of this product reports.
     if published.is_err() {
         // A temporary no rename published is not a document, and every directory
         // written through here is one something lists — the shadow store, the
@@ -1374,28 +1388,193 @@ pub fn write_atomic(path: &Path, bytes: &[u8], durability: Durability) -> Result
     published.map_err(ledger)
 }
 
-/// [`write_atomic`]'s temporary: written whole, and as far towards the disk as
-/// `durability` asks, before the rename that gives it its name.
+/// One write, from the temporary nobody is looking for to the published name.
 ///
-/// Flushed and synced explicitly rather than at a drop, which discards the error
-/// — and this is the one write whose failure the caller has to hear, because the
-/// rename after it would publish the file regardless.
-fn onto_the_disk(temp: &Path, bytes: &[u8], durability: Durability) -> io::Result<()> {
+/// The rename is what publishes, so whatever `durability` asks for straddles it:
+/// the contents reach the disk before the name exists, and the entry that name is
+/// reaches it after. Which of those a write makes is [`Durability`]'s own
+/// account.
+///
+/// Every step here is asked for through [`disk`], which records it. What a sync
+/// buys is visible only to a host that stops between two of these calls, and no
+/// test can arrange that; so what the unit tests read back instead is that each
+/// call was made, in the order it has to be made in — and they refuse one at a
+/// time to drive the failure path above.
+fn publish(
+    temp: &Path,
+    path: &Path,
+    parent: &Path,
+    bytes: &[u8],
+    durability: Durability,
+) -> io::Result<()> {
     use io::Write as _;
     let mut file = fs::File::create(temp)?;
     file.write_all(bytes)?;
+    // Flushed explicitly rather than at a drop, which discards the error — and
+    // this is the one write whose failure the caller has to hear, because the
+    // rename after it would publish the file regardless.
     file.flush()?;
-    // llmlint: ignore-block[changed_behavior_has_e2e] what the sync buys is visible only to
-    // a host that stops between this write and the rename after it, so proving it end to
-    // end means killing the machine mid-call — which this suite cannot do and which no
-    // output of this product reports. The unit tests drive both arms through the real
-    // filesystem and assert what is observable: the document published, and no temporary
-    // left beside it.
-    match durability {
-        Durability::Record => file.sync_all(),
-        Durability::Projection => Ok(()),
+    if durability.syncs() {
+        disk::sync_contents(&file)?;
     }
-    // llmlint: ignore-end[changed_behavior_has_e2e]
+    disk::publish(temp, path)?;
+    if durability.syncs() {
+        disk::sync_entry(parent)?;
+    }
+    Ok(())
+}
+
+/// The three things [`publish`] asks of the host once its temporary is written:
+/// sync the contents, publish the name, sync the directory entry that name is.
+///
+/// A module of its own because the order of those three is the whole of what
+/// [`Durability::Record`] promises, and the promise is about a host that stops
+/// between two of them — which nothing here can arrange. So each call is recorded
+/// as it is made, against the real filesystem, and the unit tests read that
+/// recording back through [`write_atomic`] rather than through the source.
+///
+/// Production records nothing and refuses nothing: [`record`] is an empty
+/// `cfg(not(test))` function, and the binary the e2e journeys drive is built
+/// without `cfg(test)`.
+mod disk {
+    #[cfg(test)]
+    use std::cell::RefCell;
+    use std::{fs, io, path::Path};
+
+    /// One thing [`super::publish`] asks of the host.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum Step {
+        /// The temporary's contents, pushed to the disk before the rename.
+        Contents,
+        /// The temporary renamed over the destination, which publishes the name.
+        Publish,
+        /// The directory entry the rename installed, pushed to the disk after it.
+        Entry,
+    }
+
+    /// Push the temporary's contents to the disk.
+    pub(super) fn sync_contents(file: &fs::File) -> io::Result<()> {
+        record(Step::Contents)?;
+        file.sync_all()
+    }
+
+    /// Publish the temporary under the destination's name.
+    pub(super) fn publish(temp: &Path, path: &Path) -> io::Result<()> {
+        record(Step::Publish)?;
+        fs::rename(temp, path)
+    }
+
+    /// Push the directory entry the rename installed to the disk.
+    ///
+    /// The other half of [`super::Durability::Record`]: contents and the name
+    /// that resolves to them persist separately, so without this a host that
+    /// stopped can come back with the whole new file on the disk and the
+    /// destination still naming the previous one, or nothing at all.
+    ///
+    /// A directory is synced by syncing a handle on the directory itself, which
+    /// is what [`synced`] opens where the host has one to open.
+    pub(super) fn sync_entry(dir: &Path) -> io::Result<()> {
+        record(Step::Entry)?;
+        synced(dir)
+    }
+
+    /// The host's own way to sync a directory handle.
+    #[cfg(unix)]
+    fn synced(dir: &Path) -> io::Result<()> {
+        fs::File::open(dir)?.sync_all()
+    }
+
+    /// Windows opens no directory through `std`, so there is nothing to ask it.
+    ///
+    /// The step above is still recorded, because what it records is what this
+    /// write *asked for*; what the host does with the ask is the host's. A run
+    /// there gets the rename, which is the half every reader depends on.
+    #[cfg(not(unix))]
+    fn synced(_dir: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Nothing, in every build but the one `cargo test` compiles.
+    #[cfg(not(test))]
+    fn record(_step: Step) -> io::Result<()> {
+        Ok(())
+    }
+
+    // The watch this thread's writes record into, while one is installed. Per
+    // thread, so a test that installs one reads its own writes and not another
+    // test's running beside it.
+    #[cfg(test)]
+    thread_local! {
+        static WATCHED: RefCell<Option<Watched>> = const { RefCell::new(None) };
+    }
+
+    /// What one [`Watch`] has seen, and the one step it is refusing.
+    #[cfg(test)]
+    struct Watched {
+        asked: Vec<Step>,
+        refusing: Option<Step>,
+    }
+
+    #[cfg(test)]
+    fn record(step: Step) -> io::Result<()> {
+        WATCHED.with_borrow_mut(|watched| {
+            let Some(watched) = watched.as_mut() else {
+                return Ok(());
+            };
+            watched.asked.push(step);
+            if watched.refusing == Some(step) {
+                return Err(io::Error::other(format!(
+                    "this host will not {step:?} for the test that asked"
+                )));
+            }
+            Ok(())
+        })
+    }
+
+    /// A watch over the steps this thread's writes ask for, until it is dropped.
+    #[cfg(test)]
+    pub(super) struct Watch;
+
+    /// Watch this thread's writes, refusing at most one step of each.
+    ///
+    /// Panics on a watch already installed on this thread rather than replacing
+    /// it: the steps read back would be a mix of two writes, which is a test
+    /// passing on somebody else's evidence.
+    #[cfg(test)]
+    pub(super) fn watching(refusing: Option<Step>) -> Watch {
+        WATCHED.with_borrow_mut(|watched| {
+            assert!(
+                watched.is_none(),
+                "a watch is already installed on this thread"
+            );
+            *watched = Some(Watched {
+                asked: Vec::new(),
+                refusing,
+            });
+        });
+        Watch
+    }
+
+    #[cfg(test)]
+    impl Watch {
+        /// Every step asked for since this watch was installed, in order.
+        pub(super) fn asked(&self) -> Vec<Step> {
+            WATCHED.with_borrow(|watched| {
+                watched
+                    .as_ref()
+                    .expect("this watch is installed")
+                    .asked
+                    .clone()
+            })
+        }
+    }
+
+    #[cfg(test)]
+    impl Drop for Watch {
+        fn drop(&mut self) {
+            WATCHED.with_borrow_mut(|watched| *watched = None);
+        }
+    }
 }
 
 /// A record fragment an append found at the end of a file and discarded.
@@ -4146,6 +4325,100 @@ mod tests {
             "the clearing removed something this write did not put there"
         );
         fs::remove_dir_all(&root).ok();
+    }
+
+    /// A record reaches the disk on both sides of the rename that publishes it:
+    /// its contents before, and the directory entry that names them after.
+    ///
+    /// The order is the whole of what [`Durability::Record`] promises, and the
+    /// promise is about a host that stops between two of those steps — which
+    /// nothing here can arrange. So what is read back is what this write asked
+    /// the host for, recorded by `disk` as each call was made against the real
+    /// filesystem, through `write_atomic` rather than by reading it.
+    #[test]
+    fn a_record_is_synced_before_its_rename_and_its_entry_after_it() {
+        let root = scratch("record-reaches-the-disk");
+        let path = root.join("checkpoint.json");
+
+        let watch = disk::watching(None);
+        write_atomic(&path, b"the record", Durability::Record).expect("it is published");
+        let asked = watch.asked();
+        drop(watch);
+
+        assert_eq!(
+            asked,
+            vec![disk::Step::Contents, disk::Step::Publish, disk::Step::Entry],
+            "a record did not reach the disk on both sides of the rename that published it"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("the destination reads"),
+            "the record"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A projection is published by the rename and nothing else.
+    ///
+    /// Not an optimisation left unstated: the shadow store is rewritten from the
+    /// run's journal whenever the run is relaunched, so a sync per document buys
+    /// durability for a file that is rebuilt anyway — about a hundred of them per
+    /// write-back pass. What the reader past the rename needs, it already has.
+    #[test]
+    fn a_projection_is_published_by_its_rename_alone() {
+        let root = scratch("projection-reaches-no-disk");
+        let path = root.join("000-node.md");
+
+        let watch = disk::watching(None);
+        write_atomic(&path, b"the projection", Durability::Projection).expect("it is published");
+        let asked = watch.asked();
+        drop(watch);
+
+        assert_eq!(
+            asked,
+            vec![disk::Step::Publish],
+            "a projection asked the disk for more than the rename that publishes it"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("the destination reads"),
+            "the projection"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A sync the host refuses is a failed write, named by its destination, with
+    /// no temporary left beside it.
+    ///
+    /// Both of them, because they fail on opposite sides of the rename: refusing
+    /// the contents leaves a whole temporary and no published document, and
+    /// refusing the entry leaves a published document and no temporary. A write
+    /// that cannot say its record is on the disk has failed either way, and
+    /// neither may leave a file in a directory something lists under a name
+    /// nothing is looking for.
+    #[test]
+    fn a_sync_the_host_refuses_is_a_failed_write_that_leaves_no_temporary() {
+        for refused in [disk::Step::Contents, disk::Step::Entry] {
+            let root = scratch(&format!("refused-{refused:?}"));
+            let path = root.join("checkpoint.json");
+            let temp = path.with_extension(format!("tmp.{}", sys::pid()));
+
+            let watch = disk::watching(Some(refused));
+            let reported = write_atomic(&path, b"the record", Durability::Record);
+            drop(watch);
+
+            let Err(Error::Ledger { path: named, .. }) = reported else {
+                panic!("a refused {refused:?} was not reported as a failed write: {reported:?}");
+            };
+            assert_eq!(
+                named, path,
+                "a refused {refused:?} named something other than the destination"
+            );
+            assert!(
+                !temp.exists(),
+                "a refused {refused:?} left the temporary of a write that failed: {}",
+                temp.display()
+            );
+            fs::remove_dir_all(&root).ok();
+        }
     }
 
     /// A fragment a dead writer left is cut back to the last boundary, and what
