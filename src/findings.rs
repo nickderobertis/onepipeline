@@ -85,8 +85,9 @@ impl FindingKind {
 /// half is cut and the digest below is what actually distinguishes two keys.
 const READABLE: usize = 40;
 
-/// How many hex digits of the digest a correlation carries.
-const DIGEST: usize = 12;
+/// How many bytes of the digest a correlation carries, each written as the two
+/// hex digits below — so twelve of them are twenty-four characters of key.
+const DIGEST_BYTES: usize = 12;
 
 /// The graph edit one finding asks the planner to commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,7 +159,7 @@ pub(crate) fn correlation(kind: FindingKind, node: &str) -> Option<Correlation> 
         .finalize()
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .take(DIGEST)
+        .take(DIGEST_BYTES)
         .collect();
     let readable: String = node
         .chars()
