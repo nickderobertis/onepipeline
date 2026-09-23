@@ -62,7 +62,7 @@ HOLD_MS = 3000
 
 
 def main() -> int:
-    world_module.clear_stack_settings()
+    world_module.clear_inherited_settings()
     binaries = REPO / "target" / "release"
     here = Path(__file__).resolve().parent
     out = Path(os.environ.get("DEMO_GIF_OUT") or here / "images" / "demo.gif")

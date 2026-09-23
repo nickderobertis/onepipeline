@@ -222,7 +222,7 @@ class World:
     def _environment(self) -> dict:
         # Every setting the engine and its two siblings read, stated by this
         # world. The capturing process's own environment is cleared of them
-        # first (see `clear_stack_settings`), so nothing an operator exported can
+        # first (see `clear_inherited_settings`), so nothing an operator exported can
         # print into a shot or point the journey somewhere else.
         path = os.pathsep.join([str(self.bin), os.environ.get("PATH", "")])
         stated = os.environ.get("SHOTS_ONETASKGRAPH_BIN")
@@ -243,12 +243,19 @@ class World:
                 "with `just bootstrap`, or point SHOTS_ONETASKGRAPH_BIN at an "
                 "executable one, then re-run `just screenshots`."
             )
-        env = dict(os.environ)
+        env = {n: v for n, v in os.environ.items() if not n.startswith("GIT_")}
         env.update(
             {
                 "PATH": path,
                 "HOSTNAME": HOST,
+                # Every git setting this world runs under is stated here, and
+                # nothing inherited survives the comprehension above: a hook's
+                # `GIT_DIR` would make the seed commits below land in the
+                # repository being pushed (see `clear_inherited_settings`), and
+                # a host `/etc/gitconfig` would decide what these repositories
+                # are, which is this world's to say.
                 "GIT_CONFIG_GLOBAL": str(self.root / "gitconfig"),
+                "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_AUTHOR_NAME": "onepipeline shots",
                 "GIT_AUTHOR_EMAIL": "shots@onepipeline.invalid",
                 "GIT_COMMITTER_NAME": "onepipeline shots",
@@ -492,14 +499,27 @@ def run(argv: list[str], env: dict) -> None:
         )
 
 
-def clear_stack_settings() -> None:
-    """Unset every `ONE*_` setting this stack reads, before the capture sets its own.
+def clear_inherited_settings() -> None:
+    """Unset every `ONE*_` and `GIT_*` setting, before the capture states its own.
 
     The scenes render the real binary, and this engine and both siblings read
     their settings from the environment ahead of most other layers — so a
     `ONEPIPELINE_RUNS_DIR` exported in the capturing shell points the whole
     journey somewhere else, and a `ONEHARNESS_*` rides into a dispatch. Either
     drifts the capture against a baseline taken in a clean shell.
+
+    `GIT_*` is the same hazard with teeth, because one of this capture's callers
+    is a **git hook**. Every hook runs with `GIT_DIR` naming the repository being
+    pushed, and `GIT_DIR` beats `-C` and beats discovery: the world's own
+    `git -C <tmp>/repo-0 add -A && git commit` then stages the *repository's*
+    tracked files as deleted against a work tree that is an empty temporary
+    directory, and commits that onto the branch under push. It has happened —
+    a capture run from the pre-push guard wrote a commit removing every file in
+    this repository onto the pushed branch. So the whole prefix goes, `GIT_DIR`,
+    `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_CONFIG_COUNT` and the rest of it
+    alike, and `_environment` states the handful the world actually wants. An
+    allowlist of the dangerous ones would be a list to keep current against git's
+    releases; "the world states its own git environment" is one rule.
     """
     prefixes = (
         "ONEPIPELINE_",
@@ -509,10 +529,11 @@ def clear_stack_settings() -> None:
         "ONEHARNESS_",
         "ONEJUDGE_",
         "ONEMESSAGEBUS_",
+        "GIT_",
     )
     for name in [n for n in os.environ if n.startswith(prefixes)]:
         # The capture's own inputs are named with a `SHOTS_` prefix precisely so
-        # that clearing the stack's settings cannot take them away.
+        # that clearing the inherited settings cannot take them away.
         del os.environ[name]
 
 

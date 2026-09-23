@@ -146,7 +146,7 @@ def covered_by_named_inputs() -> str | None:
 
 
 def main() -> int:
-    world_module.clear_stack_settings()
+    world_module.clear_inherited_settings()
     for refusal in (screencomp_pins_agree(), covered_by_named_inputs()):
         if refusal is not None:
             print(refusal, file=sys.stderr)
