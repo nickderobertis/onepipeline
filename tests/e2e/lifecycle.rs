@@ -7228,31 +7228,67 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
     // they worked — and the hold cleared on the record. Usually once; not
     // always. The read that let it go is advisory and `open` is authoritative:
     // the sibling counts a slot idle from the moment the first's publication
-    // closes the session record and takes it only once the tree is returned,
-    // so a read inside that window admits the second and its open is refused
+    // closes the session record and takes it only once the tree is returned.
+    // Two different things reach the second inside that window, and this
+    // journey has met both on Windows, where it is wide enough for the poll to
+    // land in. A read inside it admits the second and its open is refused
     // `PoolExhausted` — the race the contract says costs the node nothing, and
-    // the one this journey met on Windows, where the window is wide enough for
-    // the poll to land in. So what is held is the accounting rather than the
-    // count: every dispatch is a first attempt of its own — never the boundary
-    // asking again — every dispatch past the first is answered by a
-    // `node-requeued` under `workspace-exhausted`, and the node settled once.
+    // which this crate answers with a `node-requeued` under
+    // `workspace-exhausted` and a fresh attempt. Or the open is admitted and
+    // its own `git fetch` collides in that one checkout with the fetch the
+    // first's return is still running there — which is not a pool refusal, so
+    // `src/pool.rs`'s exemption does not reach it and the boundary answers it
+    // the way it answers any dispatch that failed: it asks again, naming what
+    // it is asking after.
+    //
+    // So what is held is the accounting rather than the count. Read in order,
+    // every dispatch of the second is exactly one of those two — a fresh
+    // attempt, which is attempt 1 and names no reason, or the boundary asking
+    // again, which names what it follows and counts one past the dispatch
+    // before it — there is one fresh attempt per refusal plus the one that took
+    // the slot, and however many times the host got in the way, the node
+    // settled once.
     let dispatched = dispatches_of(&world, &run, "second");
     let requeued: Vec<serde_json::Value> = world
         .events_of(&run, "node-requeued")
         .into_iter()
         .filter(|event| event["labels"]["node"] == "second")
         .collect();
+    let mut fresh = 0usize;
+    let mut previous = 0u64;
+    for dispatch in &dispatched {
+        let attempt = dispatch["payload"]["attempt"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("a dispatch naming no attempt: {dispatch}"));
+        if dispatch["payload"]["reason"].is_null() {
+            assert_eq!(
+                attempt, 1,
+                "a fresh dispatch is not a first attempt\n{dispatch}"
+            );
+            fresh += 1;
+        } else {
+            assert!(
+                dispatch["payload"]["reason"]
+                    .as_str()
+                    .is_some_and(|reason| !reason.trim().is_empty()),
+                "a re-asked dispatch says nothing about what it follows\n{dispatch}"
+            );
+            assert_eq!(
+                attempt,
+                previous + 1,
+                "a re-asked dispatch does not count one past the one before it\n{dispatch}\n{}",
+                why(&world, &run)
+            );
+        }
+        previous = attempt;
+    }
     assert_eq!(
-        dispatched.len(),
+        fresh,
         1 + requeued.len(),
-        "a dispatch of the second is not accounted for by a refusal\n{dispatched:#?}\n\
+        "a fresh dispatch of the second is not accounted for by a refusal\n{dispatched:#?}\n\
          {requeued:#?}\n{}",
         why(&world, &run)
     );
-    for dispatch in &dispatched {
-        assert_eq!(dispatch["payload"]["attempt"], 1, "{dispatch}");
-        assert!(dispatch["payload"]["reason"].is_null(), "{dispatch}");
-    }
     for requeue in &requeued {
         assert_eq!(
             requeue["payload"]["reason"], "workspace-exhausted",
