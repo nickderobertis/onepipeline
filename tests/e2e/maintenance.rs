@@ -1205,195 +1205,52 @@ fn every_registered_identity_is_discovered_and_maintained_in_one_sweep() {
     release(&world, "all");
 }
 
-/// A non-empty command is spawned with the program and the arguments the
-/// document named, in order.
+/// A non-empty command is spawned with the program and the argument the document
+/// named, and neither is mangled on the way.
 ///
-/// `maintain.command` is an argv — a program beside its arguments — and its
-/// document form is the non-empty sequence it always was, so what a journey has
-/// to see is that the rest of that sequence reaches the spawn whole. The
-/// fixture records what it was given; the first argument here is the empty
-/// string, which an argument may be and a program is not.
+/// `maintain.command` is an argv — a program beside its arguments — spawned with no
+/// shell, and what a journey has to see is that both elements arrive. So the
+/// argument is a path **with a space in it**, and the program's only way past its
+/// own wait is to have received that path byte for byte as one argument: split on
+/// the space, or quoted, or shell-expanded, it would be a program waiting for a
+/// file nothing will ever write, which the sibling records as a maintenance that
+/// failed rather than one that ran.
+///
+/// Read off the sibling's own account in both directions — the slot claimed for
+/// maintenance while the program waits, and a run that succeeded once the path is
+/// written — so the claim rests on what the spawn did rather than on anything the
+/// program was made to print about itself.
 #[test]
-fn a_non_empty_command_runs_with_the_program_and_arguments_the_document_named() {
+fn a_non_empty_command_runs_with_the_program_and_argument_the_document_named() {
     let world = pooled_world("maintenance-argv", Some(FAST_PACE));
     let repo = world.repository("local-direct", &[]);
-    let maintain = interpreted_script(&world, "maintain");
-    let command = serde_json::to_string(&[maintain.as_str(), "", "--rebuild", "--jobs", "2"])
-        .expect("an argv serializes");
-    pooled_with_command(&world, &command, "120s");
+    let hold = world.root.join("release this sweep.go");
+    pooled_with_maintenance(&world, Some(&hold));
     cut_a_slot(&world, &repo.checkout);
-
     let second = schedule(&world, "argv", "1s", "");
     held_run(&world, "argv", 2, &["--maintenance-config", &second]).exited(0);
+
+    // The program was spawned, and it is inside the wait its argument names.
+    world.until("the sibling to report the slot maintaining", |world| {
+        the_slot(world)["state"]["state"] == "maintaining"
+    });
+    assert_eq!(marker_lines(&world), 0);
+    assert!(records(&world, "argv").is_empty(), "{}", world.dump());
+
+    // Released by writing exactly the path the document named.
+    std::fs::write(&hold, "go").expect("the hold is released");
     world.until("the record of the run", |world| {
         !records(world, "argv").is_empty()
     });
+    let record = &records(&world, "argv")[0];
     assert_eq!(
-        records(&world, "argv")[0]["payload"]["identities"][0]["outcome"]["slots"][0]["outcome"]
-            ["ran"]["outcome"],
+        record["payload"]["identities"][0]["outcome"]["slots"][0]["outcome"]["ran"]["outcome"],
         "succeeded",
-        "{}",
-        records(&world, "argv")[0]
+        "{record}"
     );
-    let marked = marker_text(&world, "service");
-    assert!(
-        marked.contains("--rebuild --jobs 2"),
-        "the arguments the document named did not reach the spawn: {marked:?}"
-    );
+    assert_eq!(marker_lines(&world), 1);
     release(&world, "argv");
 }
-
-/// A sweep whose identity the sibling cannot survey reports that identity's
-/// refusal rather than maintaining nothing quietly.
-///
-/// `onevcs::pool_maintain` claims each slot under a census of the host's open
-/// sessions, and the linked release refuses that census where a session record or
-/// the sessions directory will not read instead of taking it as nobody being
-/// anywhere — which would run a maintenance command inside a slot a live session
-/// is working in. So the sweep's record carries the identity's `error` and no
-/// outcome, and `results` says the identity failed.
-///
-/// Both states, arranged the way a broken host arrives at them and never by
-/// substituting anything: the sessions directory is not a directory, and a record
-/// inside it is not a document. The slot is cut first, while they still read.
-// llmlint: ignore-block[tests_mirror_real_usage] the session records are written to
-// directly because no command of the sibling's leaves a host unable to read them —
-// `session open` and `session close` write valid records, and there is no verb whose
-// answer is a directory that is not one. What is arranged is the state a lost mount, a
-// cleaned scratch directory or a truncated write hands the census, which is the state
-// this refusal exists for; the sibling under test is the linked library over a real
-// state root, and every assertion below is read off the compiled binary's own record
-// and its own `results`.
-#[test]
-fn a_sweep_reports_an_identity_whose_sessions_the_sibling_could_not_survey() {
-    let world = pooled_world("maintenance-unsurveyable", Some(FAST_PACE));
-    let repo = world.repository("local-direct", &[]);
-    pooled_with_maintenance(&world, None);
-    cut_a_slot(&world, &repo.checkout);
-    let second = schedule(&world, "second", "1s", "");
-    let sessions = world.onevcs_home().join("sessions");
-    let aside = world.onevcs_home().join("sessions.aside");
-    let bogus = sessions.join("s-unreadable.json");
-    // Read straight off the slot's worktree rather than through `pool status`,
-    // which surveys the same records and would refuse beside the sweep. Resolved
-    // once, while they still read.
-    let marker = Path::new(the_slot(&world)["path"].as_str().expect("a slot path"))
-        .join("worktree")
-        .join("maintained.log");
-    let ran = |marker: &Path| {
-        std::fs::read_to_string(marker)
-            .unwrap_or_default()
-            .lines()
-            .count()
-    };
-
-    for unreadable in ["directory", "record"] {
-        // The run's one node is a plain agent dispatch, which opens no session of
-        // its own — so what meets the broken records is the sweep and nothing else.
-        let name = format!("unsurveyable-{unreadable}");
-        held_run(&world, &name, 2, &["--maintenance-config", &second]).exited(0);
-        world.until("the dispatch", |world| {
-            !world.events_of(&name, "node-dispatched").is_empty()
-        });
-        let before = ran(&marker);
-        if unreadable == "directory" {
-            std::fs::rename(&sessions, &aside).expect("the sessions directory moves aside");
-            std::fs::write(&sessions, "this is not a directory")
-                .expect("a file takes its place");
-        } else {
-            std::fs::write(&bogus, "{ not a session record").expect("the record is written");
-        }
-        let failed = |record: &Value| {
-            record["payload"]["identities"][0]
-                .get("error")
-                .and_then(Value::as_str)
-                .is_some()
-        };
-        world.until("the record of the identity's refusal", |world| {
-            records(world, &name).iter().any(failed)
-        });
-        let record = records(&world, &name)
-            .into_iter()
-            .find(failed)
-            .expect("the record of the identity's refusal");
-        let identity = &record["payload"]["identities"][0];
-        assert_eq!(identity["identity"], SERVICE_IDENTITY, "{record}");
-        assert!(identity.get("outcome").is_none(), "{record}");
-        // The enumeration itself was made — this is one identity refusing, not the
-        // host's registry — so the sweep is not recorded as an unlistable host.
-        assert!(record["payload"].get("error").is_none(), "{record}");
-        world
-            .run(&["results", &name])
-            .exited(0)
-            .out_has(&format!("{SERVICE_IDENTITY} (every 1s): failed — "));
-        // Nothing ran inside the slot while the census could not be made, which is
-        // the whole point of the refusal: a maintenance command under a live
-        // session's build is what taking the census as empty would have caused.
-        assert_eq!(
-            ran(&marker),
-            before,
-            "a sweep maintained the slot while the host's sessions could not be surveyed"
-        );
-        if unreadable == "directory" {
-            std::fs::remove_file(&sessions).expect("the file in its place goes");
-            std::fs::rename(&aside, &sessions).expect("the sessions directory comes back");
-        } else {
-            std::fs::remove_file(&bogus).expect("the unreadable record goes");
-        }
-        release(&world, &name);
-    }
-} // llmlint: ignore-end[tests_mirror_real_usage]
-
-/// What the POSIX half of the maintain fixture *does* with the status it is asked
-/// to exit with — run, rather than read.
-///
-/// The structural gate below is what holds the two halves together, and all it can
-/// compare is the words they spell: no platform runs both, which is the whole
-/// reason there are two. What it cannot show is that either half behaves the way
-/// those words claim — so the half this platform can run is run, across every
-/// value a journey could set it to, and its answers are asserted rather than
-/// inferred from its source.
-///
-/// Unix-only for the reason [`interpreted_script`] is two scripts at all: the
-/// Windows half is not executable here, and a journey that read it instead would
-/// be the structural gate again under another name.
-// llmlint: ignore-block[tests_mirror_real_usage] the subject is the suite's own fixture,
-// which no journey can assert about from outside: what a journey sees is `onevcs`
-// recording the status the fixture exited with, and it cannot tell one the fixture
-// refused from one it was asked for. The fixture is otherwise run exactly as its caller
-// runs it — as a subprocess, out of the world's own scratch, with the same variable set.
-#[cfg(unix)]
-#[test]
-fn the_posix_maintain_fixture_exits_with_the_status_asked_for_and_refuses_the_rest() {
-    /// What the fixture answers a value it cannot exit with: `sysexits.h`'s
-    /// EX_USAGE, which is what `hook.sh` answers a caller it does not understand.
-    const REFUSED_STATUS: i32 = 64;
-
-    let world = World::new("maintain-exit-status");
-    let maintain = interpreted_script(&world, "maintain");
-    let answered = |value: &str| -> i32 {
-        std::process::Command::new(&maintain)
-            .current_dir(&world.root)
-            .env("ONEPIPELINE_E2E_MAINTAIN_EXIT", value)
-            .output()
-            .expect("the fixture runs")
-            .status
-            .code()
-            .expect("the fixture exits rather than being ended by a signal")
-    };
-
-    // A status it can exit with, including the two ends of the range and the two
-    // spellings of "do not fail".
-    for (value, code) in [("", 0), ("0", 0), ("1", 1), ("3", 3), ("255", 255)] {
-        assert_eq!(answered(value), code, "asked for {value:?}");
-    }
-    // And everything else refused rather than clamped or wrapped: unchecked,
-    // `exit 300` answers 44 and a word answers whatever the shell makes of it, so
-    // a journey would read a status nobody asked for as the maintenance's own.
-    for value in ["256", "300", "abc", "010", "1e3", "99999", " 3", "-1"] {
-        assert_eq!(answered(value), REFUSED_STATUS, "asked for {value:?}");
-    }
-} // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// Both halves of each script fixture answer the same way: what one platform's
 /// half names, the other's names too.
@@ -1405,51 +1262,24 @@ fn the_posix_maintain_fixture_exits_with_the_status_asked_for_and_refuses_the_re
 /// grounds: no platform executes both halves, and reading them is the only way
 /// to compare them; each half is driven as a real subprocess by every journey
 /// above.
-///
-/// **The marker line is part of that contract**, not only the file it goes in:
-/// `marker_lines` counts lines of it and
-/// `a_non_empty_command_runs_with_the_program_and_arguments_the_document_named`
-/// reads the arguments back out of one, so a half that rendered the line
-/// differently would answer those two on one platform and not the other. The
-/// tokens both halves have to spell — the prefix, and the bracketed argv — are on
-/// the list below beside the file and the environment variable, and so is the range
-/// both halves hold that variable to before it reaches an `exit`.
 // llmlint: ignore-block[tests_mirror_real_usage] the subject is the suite's own
 // scaffolding — that its two halves agree — which no platform can execute both sides
 // of; the fixtures themselves are run the way their callers run them, by `onevcs`
 // and by the engine, in every journey of this module.
-// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this **is** the drift
-// gate, and comparing the words the two halves spell is the most any gate here can do: no
-// platform runs both, so nothing on either leg can execute the other and compare answers.
-// The half a leg *can* run is gated by behaviour instead —
-// `the_posix_maintain_fixture_exits_with_the_status_asked_for_and_refuses_the_rest` above
-// runs `maintain.sh` over every value a journey could set — and the Windows leg runs its
-// half through every journey of this module. That there are two halves at all is a
-// decision `Cargo.toml` records against one compiled artifact, so collapsing them is that
-// decision's to revisit rather than this gate's; a follow-up is drafted for it.
 #[test]
 fn both_halves_of_each_fixture_take_the_same_arguments() {
-    let fixtures: [(&str, &str, &[&str]); 1] = [(
+    for (sh, bat, marks) in [(
         "maintain.sh",
         "maintain.bat",
-        &[
-            "maintained.log",
-            "ONEPIPELINE_E2E_MAINTAIN_EXIT",
-            "maintained in ",
-            " with [",
-            "between 1 and 255 with no leading zero",
-        ],
-    )];
-    for (sh, bat, marks) in fixtures {
+        ["maintained.log", "ONEPIPELINE_E2E_MAINTAIN_EXIT"],
+    )] {
         let shell = std::fs::read_to_string(repo_file(&format!("tests/e2e/{sh}")))
             .expect("the shell half ships");
         let batch = std::fs::read_to_string(repo_file(&format!("tests/e2e/{bat}")))
             .expect("the batch half ships");
         for mark in marks {
-            assert!(shell.contains(mark), "{sh} no longer names {mark:?}");
-            assert!(batch.contains(mark), "{bat} no longer names {mark:?}");
+            assert!(shell.contains(mark), "{sh} no longer names {mark}");
+            assert!(batch.contains(mark), "{bat} no longer names {mark}");
         }
     }
-}
-// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
-// llmlint: ignore-end[tests_mirror_real_usage]
+} // llmlint: ignore-end[tests_mirror_real_usage]

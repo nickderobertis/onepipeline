@@ -2,26 +2,20 @@
 rem The Windows half of the host's `maintain` command the journeys in
 rem `maintenance.rs` name. `maintain.sh` is where what it leaves behind, what it
 rem waits for, and why the wait is bounded are written down; this answers the same
-rem way — the recorded line carries the arguments it was given, and only a
-rem non-empty first argument is a path to wait for. What is written down here is
-rem what cmd makes different.
+rem way. What is written down here is what cmd makes different.
 setlocal enabledelayedexpansion
 
-rem Every caller-supplied value is taken into a variable through a **quoted** `set`
-rem before it reaches any command line, and read back with delayed expansion after.
-rem An unquoted `%~1` or `%*` in an `echo` is parsed by cmd as syntax, so an argument
-rem carrying `&`, `|` or `>` would run or redirect instead of being recorded; the
-rem quoted form makes it data. `maintain.sh` needs none of this because the shell's
-rem own quoting already does it.
-set "waited=%~1"
-set "given=%*"
+if not "%~2"=="" (
+  echo maintain: takes at most one argument, the path to wait for 1>&2
+  exit /b 64
+)
 
-if not "!waited!"=="" (
+if not "%~1"=="" (
   set /a "left=300"
   :waitloop
-  if exist "!waited!" goto write
+  if exist "%~1" goto write
   if !left! LEQ 0 (
-    echo maintain: nothing wrote !waited! within 300 seconds, so this hold expired and the sibling records the maintenance as failed. Write that path to release a hold you meant to keep; a hold that ran this long is a journey that ended without releasing it, so read the journey's own panic for why it stopped 1>&2
+    echo maintain: nothing wrote %~1 within 300 seconds; the journey holding this sweep releases it by writing that path, so a hold this long is a journey that ended without releasing it — let the sibling record the failure and read the journey's own panic 1>&2
     exit /b 1
   )
   set /a "left=left-1"
@@ -33,54 +27,14 @@ if not "!waited!"=="" (
 )
 
 :write
-echo maintained in %CD% with [!given!]>>maintained.log
+echo maintained in %CD%>>maintained.log
 if errorlevel 1 (
   echo maintain: cannot write maintained.log in %CD%; this runs in the slot's worktree, which onevcs cut under ONEVCS_HOME, so check that state root is on a writable mount and that nothing holds the worktree read-only 1>&2
   exit /b 1
 )
 echo maintain: wrote maintained.log in %CD%
-rem The status this fixture is asked to exit with, checked before it reaches
-rem `exit /b`. `maintain.sh` says why it is refused rather than clamped and why a
-rem leading zero goes with the rest.
-rem
-rem **Every test below is a quoted `set` or a quoted `if`, and none of them puts the
-rem value on a command line.** An unvalidated environment value expanded unquoted in
-rem cmd — into a pipe, into `set /a`, into a bare `echo` — is parsed as syntax, so
-rem one carrying `&` or `|` would run rather than be refused. So the digits are
-rem stripped by substitution and the remainder compared as a quoted string: nothing
-rem here is a pipe, nothing is arithmetic, and the one numeric comparison happens
-rem only after the value is known to be one to three digits. The refusal names the
-rem variable and the range and deliberately does **not** echo the value, for the
-rem same reason; `maintain.sh` can quote it safely and does.
-rem llmlint: ignore-block[changed_behavior_has_e2e] no platform in this runner executes a
-rem `.bat`, so these branches cannot be driven from here — the leg that runs them is the
-rem Windows one, and it drives them through every journey of `maintenance.rs`. The contract
-rem they implement *is* executed on this platform, against the half that can be:
-rem `the_posix_maintain_fixture_exits_with_the_status_asked_for_and_refuses_the_rest` runs
-rem `maintain.sh` over every value a journey could set and asserts each answer, and the
-rem structural gate beside it holds this half to the same range sentence.
-rem llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] there is one source and
-rem it cannot be reached: no platform runs both halves, and this repository's `Cargo.toml`
-rem records the decision against the alternative — "a script rather than a compiled binary,
-rem and per platform rather than one artifact, because the alternative was a workspace member
-rem shipping a Rust program to stand in for three shell one-liners". Consolidating the two
-rem into one artifact is that decision's to revisit, not this fixture's; a follow-up is
-rem drafted for it. What is available is done: the runnable half is gated by **behaviour**,
-rem and the pair by the sentences both must spell.
-set "asked=0"
-if defined ONEPIPELINE_E2E_MAINTAIN_EXIT set "asked=%ONEPIPELINE_E2E_MAINTAIN_EXIT%"
-if "!asked!"=="0" exit /b 0
-if not "!asked:~3!"=="" goto badexit
-if "!asked:~0,1!"=="0" goto badexit
-set "rest=!asked!"
-for %%d in (0 1 2 3 4 5 6 7 8 9) do set "rest=!rest:%%d=!"
-if not "!rest!"=="" goto badexit
-if !asked! GTR 255 goto badexit
-echo maintain: ONEPIPELINE_E2E_MAINTAIN_EXIT=!asked! asks for a maintenance that fails after writing maintained.log, so this exits !asked! and the sibling records a command that failed. Unset it for one that succeeds 1>&2
-exit /b !asked!
-
-:badexit
-echo maintain: ONEPIPELINE_E2E_MAINTAIN_EXIT holds a value this fixture cannot exit with. Set it to a whole number between 1 and 255 with no leading zero, or unset it for a maintenance that succeeds 1>&2
-exit /b 64
-rem llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
-rem llmlint: ignore-end[changed_behavior_has_e2e]
+if defined ONEPIPELINE_E2E_MAINTAIN_EXIT if not "%ONEPIPELINE_E2E_MAINTAIN_EXIT%"=="0" (
+  echo maintain: exiting %ONEPIPELINE_E2E_MAINTAIN_EXIT% because ONEPIPELINE_E2E_MAINTAIN_EXIT asks for a maintenance that fails after writing; unset it for one that succeeds 1>&2
+  exit /b %ONEPIPELINE_E2E_MAINTAIN_EXIT%
+)
+exit /b 0
