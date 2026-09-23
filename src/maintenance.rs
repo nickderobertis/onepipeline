@@ -277,24 +277,16 @@ pub(crate) struct Maintained {
 
 impl Maintained {
     /// Whether this identity is written into the record: a slot ran, a **due**
-    /// slot could not be maintained, another run had the identity, or it failed.
+    /// slot could not be maintained — `unavailable` or `broken` — another run had
+    /// the identity, or it failed. The quiet answers are the ones that mean the
+    /// schedule and the pool are working: `not-due`, `in-use`, no command, no
+    /// slots.
     ///
-    /// The quiet answers are the ones that mean the schedule is working —
-    /// `not-due`, an identity with no command, one with no slots, and a slot a
-    /// session is working in, which is the pool being used. The loud ones are the
-    /// asks that did not land: `unavailable`, a slot that came up due and
-    /// something else held, and `broken`, one that came up due and is not usable.
-    /// Both are the per-slot form of the `claimed` recorded beside them — a
-    /// maintenance this sweep meant to do and did not — and the second, since the
-    /// sibling narrowed `broken` to a clone, worktree or record that nothing
-    /// waiting clears, is the only thing that says a slot needs a person.
-    ///
-    /// `tests/e2e/maintenance.rs`'s
-    /// `a_slot_another_process_holds_is_busy_and_one_whose_worktree_is_gone_is_broken`
-    /// drives both loud slot answers through the compiled binary — a slot whose
-    /// occupancy lease another process holds, and one whose worktree is gone — and
-    /// `tests::a_sweep_is_recorded_where_something_ran_or_a_due_slot_could_not_and_never_otherwise`
-    /// holds the quiet set beside them.
+    /// Which side each answer falls on is
+    /// [divergence 89](../docs/contract-divergences.md), a proposal the contract's
+    /// owner has not ruled on; the reasoning lives there rather than here, and
+    /// `tests/e2e/maintenance.rs` drives both loud slot answers through the
+    /// compiled binary.
     fn is_recorded(&self) -> bool {
         match &self.outcome {
             Err(_) | Ok(IdentityOutcome::Claimed { .. }) => true,
