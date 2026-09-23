@@ -14,6 +14,15 @@
 //! broken host arrives at them — a sessions directory that is not a directory, and
 //! a record that is not a document — and never by substituting anything: the
 //! `onevcs` under test is the linked library, answering out of the real state root.
+// llmlint: ignore-file[tests_mirror_real_usage] **the whole module's subject is a state no
+// interface reaches.** Every verb of the sibling's that writes a session record writes a
+// valid one, and none of them answers with a sessions directory that is not a directory or a
+// record that is not a document — so there is no command sequence that puts a host where
+// these journeys put it, and the two states are written onto the state root directly. They
+// are the states a lost mount, a cleaned scratch directory or a truncated write hands the
+// linked library, which is what its refusals exist for. Nothing else here is arranged:
+// every run is started, adopted, attested, shut down and read back through the compiled
+// binary, and every claim is read off that binary's own output, journal or result.
 // llmlint: ignore-file[e2e_not_mocked] nothing here stands in for the layer under test.
 // `onevcs` is the linked library reading a real state root, and what is arranged is
 // the *state* it reads — the same state a host with a lost mount or a truncated write

@@ -964,6 +964,14 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
     // let go, because that one document is what every other thing a run does over
     // a repository resolves through — so a world that never had it would have no
     // run to sweep beside.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] the registry is written to directly
+    // because no command of the sibling's leaves a host with one it cannot read: every
+    // verb that writes that document writes a valid one, and `register` is how a host
+    // arrives at a *readable* registry rather than this. What is arranged is the state a
+    // truncated write or a half-restored state root hands the loader, which is the state
+    // the sweep's refusal exists for; everything asserted about it is read back off the
+    // compiled binary — its own journal record and its own `results`.
     pooled_with_maintenance(&world, None);
     let registry = world.onevcs_home().join("registry.json");
     let saved = std::fs::read_to_string(&registry).expect("the host has a registry");
@@ -994,7 +1002,7 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
         .out_has("the host's identities could not be enumerated:");
     std::fs::write(&registry, &saved).expect("the registry is put back");
     release(&world, "unlistable");
-}
+} // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A slot something else holds right now is reported **busy**, and one whose
 /// worktree is gone is reported **broken**.
@@ -1251,6 +1259,14 @@ fn a_non_empty_command_runs_with_the_program_and_arguments_the_document_named() 
 /// Both states, arranged the way a broken host arrives at them and never by
 /// substituting anything: the sessions directory is not a directory, and a record
 /// inside it is not a document. The slot is cut first, while they still read.
+// llmlint: ignore-block[tests_mirror_real_usage] the session records are written to
+// directly because no command of the sibling's leaves a host unable to read them —
+// `session open` and `session close` write valid records, and there is no verb whose
+// answer is a directory that is not one. What is arranged is the state a lost mount, a
+// cleaned scratch directory or a truncated write hands the census, which is the state
+// this refusal exists for; the sibling under test is the linked library over a real
+// state root, and every assertion below is read off the compiled binary's own record
+// and its own `results`.
 #[test]
 fn a_sweep_reports_an_identity_whose_sessions_the_sibling_could_not_survey() {
     let world = pooled_world("maintenance-unsurveyable", Some(FAST_PACE));
@@ -1329,7 +1345,7 @@ fn a_sweep_reports_an_identity_whose_sessions_the_sibling_could_not_survey() {
         }
         release(&world, &name);
     }
-}
+} // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// Both halves of each script fixture answer the same way: what one platform's
 /// half names, the other's names too.

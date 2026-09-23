@@ -25,7 +25,7 @@ if [ "$#" -ge 1 ] && [ -n "$1" ]; then
   deadline=$(( $(date +%s) + 300 ))
   until [ -f "$1" ]; do
     if [ "$(date +%s)" -ge "$deadline" ]; then
-      echo "maintain: nothing wrote $1 within 300 seconds; the journey holding this sweep releases it by writing that path, so a hold this long is a journey that ended without releasing it — let the sibling record the failure and read the journey's own panic" >&2
+      echo "maintain: nothing wrote $1 within 300 seconds, so this hold expired and the sibling records the maintenance as failed. Write that path to release a hold you meant to keep; a hold that ran this long is a journey that ended without releasing it, so read the journey's own panic for why it stopped" >&2
       exit 1
     fi
     sleep 0.05
@@ -38,6 +38,6 @@ if ! printf 'maintained in %s at %s with [%s]\n' "$(pwd)" "$(date +%s)" "$*" >>m
 fi
 echo "maintain: wrote maintained.log in $(pwd)"
 if [ "${ONEPIPELINE_E2E_MAINTAIN_EXIT:-0}" != "0" ]; then
-  echo "maintain: exiting $ONEPIPELINE_E2E_MAINTAIN_EXIT because ONEPIPELINE_E2E_MAINTAIN_EXIT asks for a maintenance that fails after writing; unset it for one that succeeds" >&2
+  echo "maintain: ONEPIPELINE_E2E_MAINTAIN_EXIT=$ONEPIPELINE_E2E_MAINTAIN_EXIT asks for a maintenance that fails after writing maintained.log, so this exits $ONEPIPELINE_E2E_MAINTAIN_EXIT and the sibling records a command that failed. Unset it for one that succeeds" >&2
   exit "$ONEPIPELINE_E2E_MAINTAIN_EXIT"
 fi
