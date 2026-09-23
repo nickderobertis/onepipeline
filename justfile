@@ -434,12 +434,13 @@ screenshots:
 screenshots-gif:
     @command -v python3 >/dev/null || { echo "python3 not found: needed to render the demo GIF" >&2; exit 1; }
     @python3 -c "import PIL" 2>/dev/null || { echo "Pillow not installed: pip install Pillow" >&2; exit 1; }
-    RUSTFLAGS="-D warnings" cargo build --release --locked --bin onepipeline --package onevcs --bin onevcs
+    RUSTFLAGS="-D warnings" cargo build --release --locked --bin onepipeline
+    RUSTFLAGS="-D warnings" cargo build --release --locked --package onevcs --bin onevcs
     RUSTFLAGS="-D warnings" cargo build --release --locked --package onepipeline-testfakes
     python3 screenshots/demo-gif.py
 
 # Refresh the committed digest baseline from a fresh capture, after an INTENDED
-# output change. Rewrites this host's lane only (scripts/host-arch.sh names it,
+# output change. Rewrites this host's lane only (screenshots/host-arch.sh names it,
 # and the pre-push guard classifies the same one); commit shots/baseline/ and
 # screenshots/images/ together.
 screenshots-bless:

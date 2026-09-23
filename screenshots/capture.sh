@@ -15,9 +15,14 @@ cd "$repo_root"
 # The real binary a user runs, the real `onevcs` CLI the world registers its
 # repositories through, and the two scripted doubles this repository's own
 # offline tier substitutes at their subprocess boundaries.
+#
+# One `cargo build` per package: `--package` scopes EVERY `--bin` in the same
+# invocation, so asking one command for this crate's binary and the sibling's
+# looks for both in the sibling and fails with "no bin target named
+# `onepipeline` in `onevcs` package".
 if [ -z "${SCREENSHOTS_NO_BUILD:-}" ]; then
-  RUSTFLAGS="-D warnings" cargo build --release --locked \
-    --bin onepipeline --package onevcs --bin onevcs >&2
+  RUSTFLAGS="-D warnings" cargo build --release --locked --bin onepipeline >&2
+  RUSTFLAGS="-D warnings" cargo build --release --locked --package onevcs --bin onevcs >&2
   RUSTFLAGS="-D warnings" cargo build --release --locked --package onepipeline-testfakes >&2
 fi
 
