@@ -81,7 +81,7 @@ pub(crate) fn release_asked() {
     RELEASE_ASKS.fetch_add(1, Ordering::Relaxed);
 }
 
-pub(crate) fn maintenance_swept() {
+pub(crate) fn maintenance_sweep_started() {
     MAINTENANCE_SWEEPS.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -218,7 +218,7 @@ mod tests {
         published();
         upstream_read();
         release_asked();
-        maintenance_swept();
+        maintenance_sweep_started();
         store_read(7);
         records_folded(3);
         flush(&paths).expect("the counts are written");

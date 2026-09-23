@@ -480,7 +480,7 @@ impl Sweep {
                 // not sweep, and the arm below says so. Still before the thread is
                 // joined, because what a reader of the counts is asking is whether
                 // the driver asked at all, not whether the asking has finished.
-                crate::loopstats::maintenance_swept();
+                crate::loopstats::maintenance_sweep_started();
                 Some(Self {
                     handle: Some(handle),
                     paths: paths.clone(),

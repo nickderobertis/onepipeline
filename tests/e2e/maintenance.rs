@@ -1097,7 +1097,6 @@ fn a_slot_another_process_holds_is_busy_and_one_whose_worktree_is_gone_is_broken
     assert_eq!(after["last_maintained"], Value::Null, "{after}");
     assert_eq!(after["state"]["state"], "idle", "{after}");
 
-    // Released, the next sweep takes the slot and maintains it.
     drop(held);
     world.until("the slot to be maintained once the lease goes", |world| {
         marker_lines(world) == 1
@@ -1194,8 +1193,6 @@ fn every_registered_identity_is_discovered_and_maintained_in_one_sweep() {
             "{record}"
         );
     }
-    // And the sibling's own account of each: a command that ran in every slot,
-    // and a stamp on every one.
     for repo in ["service", "other", "third"] {
         assert_eq!(
             marker_text(&world, repo).lines().count(),
