@@ -4460,7 +4460,8 @@ fn a_reconciler_finding_that_asks_for_an_edit_is_answered_by_that_edit() {
     let record = record.split_whitespace().collect::<Vec<_>>().join(" ");
     for states in [
         "**Beside it, and not a divergence: a finding that asks for an edit is answered by that edit.**",
-        "the op and target node it asked for are recorded against that correlation in the run's own directory",
+        "The op and target node it asked for are recorded against that correlation in the run's own directory",
+        "from the attempt as well, for a kind that can recur per attempt, which this one is not",
         "the commit of that edit appends the answer — on either writer of the graph, bound by `--correlation` or not",
         "A graph edit still answers no *question*: what it answers is the finding that asked for it",
     ] {

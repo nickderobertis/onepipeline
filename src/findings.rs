@@ -36,11 +36,48 @@ use crate::Result;
 /// planner reads.
 pub(crate) const REQUESTS_FILE: &str = "finding-requests.json";
 
-/// The kind of the finding a session open that conflicts raises.
+/// A finding that asks the planner for a graph edit, by what it is about.
 ///
-/// Half of its correlation, so the key says what it is about as well as which
-/// node it is about.
-pub(crate) const SESSION_CONFLICT: &str = "session-conflict";
+/// Half of the correlation such a finding is raised under, so the key says what
+/// it is about as well as which node it is about. A closed set and not a word,
+/// because it is what the key's identity is derived from: a kind spelled two
+/// ways would be two questions about one finding.
+///
+/// **None of them can recur per attempt**, which is why the attempt is not part
+/// of the key: each asks for the edit that takes its node out of the graph, so
+/// the finding and the node it is about go together. A kind that could recur
+/// would take the attempt beside it, and
+/// `the_key_is_derived_from_what_the_contract_states_it_is` is what would notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FindingKind {
+    /// A session this run cannot open, because the node's branch and its base
+    /// conflict. Answered by a `retry` of that node.
+    SessionConflict,
+}
+
+impl FindingKind {
+    /// Every kind, which is what the key's identity is held against.
+    ///
+    /// Only the gate reads it: nothing in the engine iterates the kinds — each
+    /// raise names its own — so a listing compiled into the binary would be a
+    /// table nothing consults.
+    #[cfg(test)]
+    pub(crate) const ALL: [FindingKind; 1] = [FindingKind::SessionConflict];
+
+    /// The word the key carries for it.
+    pub(crate) const fn word(self) -> &'static str {
+        match self {
+            FindingKind::SessionConflict => "session-conflict",
+        }
+    }
+
+    /// The op a finding of this kind asks the planner to commit.
+    pub(crate) const fn asks_for(self) -> Op {
+        match self {
+            FindingKind::SessionConflict => Op::Retry,
+        }
+    }
+}
 
 /// How much of a node id a correlation carries in readable form.
 ///
@@ -53,19 +90,46 @@ const DIGEST: usize = 12;
 
 /// The graph edit one finding asks the planner to commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RequestedEdit {
-    /// The op word it asks for, as the reply envelope spells it.
-    // llmlint: ignore[invalid_states_unrepresentable] `Op` is a `Copy` word table with no
-    // serde impl and no place in any wire shape, and this is a **durable record field**: a
-    // run written by this build is read back by the next one, so the record carries the op's
-    // wire word — the spelling `docs/contract.md` states — and `Op::word` is what writes it.
-    pub op: String,
-    /// The node it asks for it on.
+    /// The op it asks for, written and read as the word the reply envelope
+    /// spells it with.
+    ///
+    /// Read back **through the op vocabulary**, so a word no op of this build
+    /// carries refuses the record rather than sitting in it matching nothing.
+    #[serde(with = "op_word")]
+    pub op: Op,
+    /// The node it asks for it on, as a graph, a journal label and a surface's
+    /// `workstream` all spell it.
+    // llmlint: ignore[invalid_states_unrepresentable] `graph::NodeRef` is the repository's
+    // node-identity type and it deliberately cannot be built from text — `NodeRef::of` takes
+    // a `Node`, which is what keeps an unvalidated string from arriving as an identity — so
+    // a record read back off disk cannot produce one. What is written here comes from a
+    // `NodeRef` at the raise site, and what it is read for is comparison against the id a
+    // committed operation records: the same string on both sides, never resolved into a
+    // graph node. `src/channel.rs` carries the same reasoning for the same reason.
     pub node: String,
 }
 
-/// The correlation a finding of `kind` about `node` is raised under, where one
-/// can be spelled for it.
+/// `RequestedEdit::op` on the wire: the op's own word, read back through the
+/// vocabulary that owns it.
+mod op_word {
+    use super::Op;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(op: &Op, into: S) -> Result<S::Ok, S::Error> {
+        into.serialize_str(op.word())
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(from: D) -> Result<Op, D::Error> {
+        let word = String::deserialize(from)?;
+        Op::of_word(&word).ok_or_else(|| {
+            serde::de::Error::custom(format!("'{word}' is not an op this build issues"))
+        })
+    }
+}
+
+/// The correlation a finding of `kind` about `node` is raised under.
 ///
 /// **Stable**: the same finding about the same node yields the same key however
 /// often it is raised, which is what lets a manager bind a reply to it with
@@ -75,14 +139,15 @@ pub(crate) struct RequestedEdit {
 /// correlation is a bounded alphabet: two ids that sanitize alike still differ
 /// here.
 ///
-/// `None` for a `kind` no correlation can carry — one outside that alphabet or
-/// past its bound, which every kind this crate raises is inside. The node is
-/// sanitized and cut and so can never be the reason, and a finding this cannot
-/// spell a key for is raised exactly as it was before it had one: readable,
-/// blocking, and answered by a reply rather than by an edit. Said rather than
-/// panicked because a key that could not be built is not a reason to end the
-/// loop that is reporting a conflict.
-pub(crate) fn correlation(kind: &str, node: &str) -> Option<Correlation> {
+/// The kind and the node are the whole of it — see [`FindingKind`] for why no
+/// attempt rides beside them. `None` is a key this build could not spell, which
+/// a closed kind and a sanitized, cut node leave no input for; a finding without
+/// one is raised exactly as it was before findings had keys — readable,
+/// blocking, and answered by a reply rather than by an edit — because a key that
+/// could not be built is not a reason to end the loop that is reporting a
+/// conflict.
+pub(crate) fn correlation(kind: FindingKind, node: &str) -> Option<Correlation> {
+    let kind = kind.word();
     let mut digest = Sha256::new();
     digest.update(kind.as_bytes());
     // A separator no side of the pair can contain, so ("a", "bc") and ("ab",
@@ -127,7 +192,7 @@ pub(crate) fn requests(
     recorded.insert(
         correlation.clone(),
         RequestedEdit {
-            op: op.word().to_owned(),
+            op,
             node: node.to_owned(),
         },
     );
@@ -179,7 +244,7 @@ pub(crate) fn answer_requested(paths: &RunPaths, operations: &[edits::Operation]
 fn satisfies(operation: &edits::Operation, request: &RequestedEdit) -> bool {
     match operation {
         edits::Operation::RetryRequested { node, .. } => {
-            request.op == Op::Retry.word() && request.node == *node
+            request.op == Op::Retry && request.node == *node
         }
         _ => false,
     }
@@ -195,7 +260,7 @@ fn answer(request: &RequestedEdit) -> Reply {
         author: Author::default(),
         message: Some(format!(
             "answered by the edit it asked for: a `{op}` of '{node}' was committed.",
-            op = request.op,
+            op = request.op.word(),
             node = request.node,
         )),
         ..Reply::default()
@@ -251,8 +316,10 @@ mod tests {
         /// Raise the session-open finding about `node`, with the `retry` it asks
         /// for recorded against it, exactly as the engine raises it.
         fn conflicted(&self, node: &str) -> Correlation {
-            let correlation = correlation(SESSION_CONFLICT, node).expect("a key");
-            requests(&self.paths, &correlation, Op::Retry, node).expect("the request records");
+            let kind = FindingKind::SessionConflict;
+            let correlation = correlation(kind, node).expect("a key");
+            requests(&self.paths, &correlation, kind.asks_for(), node)
+                .expect("the request records");
             ChannelState::new(&self.paths)
                 .push(Surface {
                     id: 0,
@@ -293,38 +360,89 @@ mod tests {
     /// same readable prefix must still be two correlations.
     #[test]
     fn a_findings_key_is_stable_and_one_per_kind_and_node() {
-        let key = |kind: &str, node: &str| correlation(kind, node).expect("a key");
+        let key = |kind, node: &str| correlation(kind, node).expect("a key");
+        let conflict = FindingKind::SessionConflict;
         assert_eq!(
-            key(SESSION_CONFLICT, "service"),
-            key(SESSION_CONFLICT, "service"),
+            key(conflict, "service"),
+            key(conflict, "service"),
             "the same finding raised again carries a different key"
         );
-        assert_ne!(
-            key(SESSION_CONFLICT, "service"),
-            key(SESSION_CONFLICT, "other")
-        );
-        assert_ne!(key(SESSION_CONFLICT, "service"), key("check-in", "service"));
-        assert!(key(SESSION_CONFLICT, "service")
+        assert_ne!(key(conflict, "service"), key(conflict, "other"));
+        assert!(key(conflict, "service")
             .as_str()
             .contains("session-conflict.service."));
 
         // Two ids no correlation alphabet can spell, and no length bounds: the
         // node is sanitized and cut, and the digest is what keeps them apart.
         assert_ne!(
-            key(SESSION_CONFLICT, "ship it/now (please)"),
-            key(SESSION_CONFLICT, "ship it/now (please!)")
+            key(conflict, "ship it/now (please)"),
+            key(conflict, "ship it/now (please!)")
         );
         let long = "n".repeat(4096);
-        assert_eq!(key(SESSION_CONFLICT, &long), key(SESSION_CONFLICT, &long));
-        assert_ne!(
-            key(SESSION_CONFLICT, &long),
-            key(SESSION_CONFLICT, &format!("{long}n"))
-        );
+        assert_eq!(key(conflict, &long), key(conflict, &long));
+        assert_ne!(key(conflict, &long), key(conflict, &format!("{long}n")));
+    }
 
-        // And a kind no correlation can carry spells no key at all, rather than
-        // ending the loop that is raising the finding.
-        assert_eq!(correlation("not a kind", "service"), None);
-        assert_eq!(correlation(&"k".repeat(200), "service"), None);
+    /// The identity the contract states a finding's key is derived from is the
+    /// identity this module derives it from.
+    ///
+    /// The drift gate for that sentence, beside the derivation rather than only
+    /// beside the document: the contract makes the attempt part of the identity
+    /// **for a finding that can recur per attempt**, and this build raises none —
+    /// each kind asks for the edit that takes its node out of the graph. So the
+    /// day a kind arrives that does not, this fails rather than the key quietly
+    /// meaning something the contract does not say. `channel.rs`'s
+    /// `the_token_prefix_is_the_one_the_contract_and_the_readme_state` is the
+    /// same shape.
+    #[test]
+    fn the_key_is_derived_from_what_the_contract_states_it_is() {
+        let contract = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract.md"),
+        )
+        .expect("the contract ships");
+        // Read with its wrapping collapsed, so a reflowed paragraph is still the
+        // same statement.
+        let contract = contract.split_whitespace().collect::<Vec<_>>().join(" ");
+        for states in [
+            "derived from the finding's kind and the node it concerns",
+            "and from the attempt beside them for a finding that can recur per attempt, of which this build raises none",
+        ] {
+            assert!(
+                contract.contains(states),
+                "the contract no longer states: {states}"
+            );
+        }
+
+        // Every kind this build raises asks for the edit that takes its node out
+        // of the graph, which is what "raises none" above rests on.
+        for kind in FindingKind::ALL {
+            assert_eq!(
+                kind.asks_for(),
+                Op::Retry,
+                "'{}' asks for an op that leaves its node in the graph, so its finding can \
+                 recur per attempt and its key has to carry the attempt",
+                kind.word()
+            );
+        }
+
+        // And the key moves on the kind and on the node, and on nothing else: a
+        // derivation reading a third thing would make one finding two questions.
+        let keys: std::collections::BTreeSet<String> = FindingKind::ALL
+            .into_iter()
+            .flat_map(|kind| {
+                ["service", "other"]
+                    .into_iter()
+                    .map(move |node| correlation(kind, node).expect("a key").as_str().to_owned())
+            })
+            .collect();
+        assert_eq!(keys.len(), FindingKind::ALL.len() * 2, "{keys:?}");
+        for kind in FindingKind::ALL {
+            assert!(
+                keys.contains(correlation(kind, "service").expect("a key").as_str()),
+                "the key for '{}' is not the one derived a second time",
+                kind.word()
+            );
+        }
     }
 
     /// Committing the edit a finding asked for answers that finding — once — and

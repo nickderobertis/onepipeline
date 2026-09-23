@@ -4692,7 +4692,9 @@ mod tests {
     fn a_blocking_surface_a_reply_answered_is_no_longer_a_decision() {
         let root = scratch("quiet-answered");
         let paths = quiet_run(&root, "demo");
-        let correlation = crate::findings::correlation("session-conflict", "build").expect("a key");
+        let correlation =
+            crate::findings::correlation(crate::findings::FindingKind::SessionConflict, "build")
+                .expect("a key");
         let channel = crate::channel::ChannelState::new(&paths);
         channel
             .push(crate::channel::Surface {

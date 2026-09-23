@@ -1493,10 +1493,13 @@ worked, `watch --until surface` returned on it every time it was asked, and the
 Stop hook's watch invariant failed against a run whose next move was already on
 the graph. The contract's Channel paragraph now states the rule, and this is what
 it means for this kind: a finding whose text asks for a graph edit is raised under
-a **stable correlation** derived from its kind and the node it concerns, the op
-and target node it asked for are recorded against that correlation in the run's
-own directory, and the commit of that edit appends the answer — on either writer
-of the graph, bound by `--correlation` or not. A graph edit still answers no
+a **stable correlation** derived from its kind and the node it concerns — and
+from the attempt as well, for a kind that can recur per attempt, which this one
+is not: the `retry` that answers it takes its node out of the graph, so the
+finding and the node go together. The op and target node it asked for are
+recorded against that correlation in the run's own directory, and the commit of
+that edit appends the answer — on either writer of the graph, bound by
+`--correlation` or not. A graph edit still answers no
 *question*: what it answers is the finding that asked for it, matched against what
 that finding recorded and nothing else. Nothing published moves: the correlation
 goes in the field `agent.planner-surface@1` already declares for one, the reply is

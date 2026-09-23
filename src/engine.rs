@@ -1524,10 +1524,11 @@ fn converge(
                     // between the question being askable and the run knowing
                     // which edit answers it.
                     if let Some(correlation) = &surface.correlation {
+                        let kind = crate::findings::FindingKind::SessionConflict;
                         crate::findings::requests(
                             paths,
                             correlation,
-                            crate::channel::layout::Op::Retry,
+                            kind.asks_for(),
                             conflict.node.as_str(),
                         )?;
                     }
@@ -4256,7 +4257,7 @@ fn session_conflict_surface(conflict: &SessionConflict) -> Surface {
         asker: None,
         workstream: Some(conflict.node.as_str().to_owned()),
         correlation: crate::findings::correlation(
-            crate::findings::SESSION_CONFLICT,
+            crate::findings::FindingKind::SessionConflict,
             conflict.node.as_str(),
         ),
     }
