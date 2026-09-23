@@ -1,8 +1,18 @@
 //! Byte-for-byte fidelity, proven rather than asserted: a stream each of the
 //! three producers wrote on a real host round-trips through this crate's
-//! `Reader` and `serde_json::to_string` with no byte changed.
+//! `Reader` and `serde_json::to_string` with no byte changed. Those three are
+//! [`RECORDED`].
 //!
-//! The four streams and this test came from `onemessagebus`'s agent profile
+//! A fourth file is deliberately **not** one of them. `onepipeline-relayed-drift.jsonl`
+//! holds three relayed lines an older `onepipeline` wrote with `member` among
+//! the extras, after `persona`, because its own copy of `Labels` had no field
+//! for it. That order is drift this crate reconciled rather than a shape to
+//! preserve, so the last test here holds those lines to reading whole and coming
+//! back out in the reserved order — which is different bytes, on purpose. They
+//! are kept in their own file so the byte-identity tests above stay exact rather
+//! than carrying an exception list.
+//!
+//! All four streams and this test came from `onemessagebus`'s agent profile
 //! crate at tag `onemessagebus-agent-v0.8.0`, along with the vocabulary they are
 //! written in. That is exactly what makes them worth keeping: the vocabulary
 //! moved into `src/vocabulary.rs` and the bytes on the wire did not, and these
@@ -37,10 +47,14 @@ fn recorded_path(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
-/// Every line of every recorded stream reads as an envelope of this crate's
-/// vocabulary and serializes back to exactly the line its producer wrote.
+/// Every line of each of the three exact streams reads as an envelope of this
+/// crate's vocabulary and serializes back to exactly the line its producer
+/// wrote.
+///
+/// The drift file is deliberately outside this — see the module doc, and the
+/// last test here, which is what holds it.
 #[test]
-fn every_recorded_line_round_trips_with_no_byte_changed() {
+fn every_line_of_the_three_exact_streams_round_trips_with_no_byte_changed() {
     for (name, contents, _) in RECORDED {
         for (number, line) in contents.lines().enumerate() {
             let envelope: Envelope = serde_json::from_str(line)
@@ -56,11 +70,11 @@ fn every_recorded_line_round_trips_with_no_byte_changed() {
     }
 }
 
-/// The same, through `Reader` over the file: every line is a whole record,
+/// The same three, through `Reader` over the file: every line is a whole record,
 /// nothing is torn or refused, and the positions chain from the first byte to
 /// the last.
 #[test]
-fn every_recorded_stream_reads_whole_through_the_reader() {
+fn each_of_the_three_exact_streams_reads_whole_through_the_reader() {
     for (name, contents, _) in RECORDED {
         let reader = Reader::open(recorded_path(name)).expect("opens");
         let mut lines = contents.lines();
