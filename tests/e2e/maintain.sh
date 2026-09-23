@@ -5,21 +5,23 @@
 #
 # It leaves one line in `maintained.log` in the directory it is started in —
 # the slot's worktree — which is the marker a journey reads to say the slot was
-# maintained, and how many times. Given a path as its one argument it waits for
-# that file to exist before writing, for up to 300 seconds, so a journey can hold
-# a sweep open long enough to look at it from outside; a hold nobody releases
-# ends as a maintenance that failed rather than one that never ended, which the
-# sibling's own `timeout` would otherwise decide. `ONEPIPELINE_E2E_MAINTAIN_EXIT`
-# names the status it exits with after writing, `0` unset, so a journey can see
-# a command that failed recorded as one.
+# maintained, and how many times. The line carries **the arguments it was given**,
+# so a journey can read back what reached the spawn: `maintain.command` is an argv
+# whose first element is the program and whose rest are its arguments, and the one
+# way to see the rest arrived in order is to have the program say so.
+#
+# Its first argument is a path to wait for before writing, for up to 300 seconds,
+# so a journey can hold a sweep open long enough to look at it from outside; the
+# empty string is no wait, which is also how a journey names an argument that is
+# the empty string and sees it come through. Every further argument is recorded
+# and nothing else. A hold nobody releases ends as a maintenance that failed
+# rather than one that never ended, which the sibling's own `timeout` would
+# otherwise decide. `ONEPIPELINE_E2E_MAINTAIN_EXIT` names the status it exits with
+# after writing, `0` unset, so a journey can see a command that failed recorded as
+# one.
 set -u
 
-if [ "$#" -gt 1 ]; then
-  echo "maintain: takes at most one argument, the path to wait for" >&2
-  exit 64
-fi
-
-if [ "$#" -eq 1 ]; then
+if [ "$#" -ge 1 ] && [ -n "$1" ]; then
   deadline=$(( $(date +%s) + 300 ))
   until [ -f "$1" ]; do
     if [ "$(date +%s)" -ge "$deadline" ]; then
@@ -30,7 +32,7 @@ if [ "$#" -eq 1 ]; then
   done
 fi
 
-if ! printf 'maintained in %s at %s\n' "$(pwd)" "$(date +%s)" >>maintained.log; then
+if ! printf 'maintained in %s at %s with [%s]\n' "$(pwd)" "$(date +%s)" "$*" >>maintained.log; then
   echo "maintain: cannot write maintained.log in $(pwd); this runs in the slot's worktree, which onevcs cut under ONEVCS_HOME, so check that state root is on a writable mount and that nothing holds the worktree read-only" >&2
   exit 1
 fi

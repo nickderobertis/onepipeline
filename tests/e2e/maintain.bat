@@ -2,13 +2,10 @@
 rem The Windows half of the host's `maintain` command the journeys in
 rem `maintenance.rs` name. `maintain.sh` is where what it leaves behind, what it
 rem waits for, and why the wait is bounded are written down; this answers the same
-rem way. What is written down here is what cmd makes different.
+rem way — the recorded line carries the arguments it was given, and only a
+rem non-empty first argument is a path to wait for. What is written down here is
+rem what cmd makes different.
 setlocal enabledelayedexpansion
-
-if not "%~2"=="" (
-  echo maintain: takes at most one argument, the path to wait for 1>&2
-  exit /b 64
-)
 
 if not "%~1"=="" (
   set /a "left=300"
@@ -27,7 +24,7 @@ if not "%~1"=="" (
 )
 
 :write
-echo maintained in %CD%>>maintained.log
+echo maintained in %CD% with [%*]>>maintained.log
 if errorlevel 1 (
   echo maintain: cannot write maintained.log in %CD%; this runs in the slot's worktree, which onevcs cut under ONEVCS_HOME, so check that state root is on a writable mount and that nothing holds the worktree read-only 1>&2
   exit /b 1

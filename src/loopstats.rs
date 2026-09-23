@@ -37,6 +37,16 @@ static STATUSES: AtomicU64 = AtomicU64::new(0);
 static PUBLICATIONS: AtomicU64 = AtomicU64::new(0);
 static UPSTREAM_READS: AtomicU64 = AtomicU64::new(0);
 static RELEASE_ASKS: AtomicU64 = AtomicU64::new(0);
+/// Pool-maintenance sweeps this driver started.
+///
+/// The idle work the reconcile loop pays for beside [`RELEASE_ASKS`], and counted
+/// for the same reason: a sweep on a schedule measured in days answers not-due for
+/// every slot almost every time it is asked, so it writes no journal record and
+/// leaves the slots' own stamps exactly as they were. Nothing else a host can read
+/// says whether the driver asked at all — which is what the pace is a bound on —
+/// and "asked and found nothing to do" and "never asked" are the two states that
+/// bound tells apart.
+static MAINTENANCE_SWEEPS: AtomicU64 = AtomicU64::new(0);
 /// Bytes read out of a run store by this process, whichever run's they came from
 /// — this one's journal, or another's answering a cross-DAG edge.
 static STORE_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -69,6 +79,10 @@ pub(crate) fn upstream_read() {
 
 pub(crate) fn release_asked() {
     RELEASE_ASKS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn maintenance_swept() {
+    MAINTENANCE_SWEEPS.fetch_add(1, Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -133,6 +147,7 @@ pub(crate) fn flush(paths: &crate::ledger::RunPaths) -> crate::error::Result<()>
         "publications": PUBLICATIONS.load(Ordering::Relaxed),
         "upstream_reads": UPSTREAM_READS.load(Ordering::Relaxed),
         "release_asks": RELEASE_ASKS.load(Ordering::Relaxed),
+        "maintenance_sweeps": MAINTENANCE_SWEEPS.load(Ordering::Relaxed),
         "store_bytes": STORE_BYTES.load(Ordering::Relaxed),
         "records_folded": RECORDS_FOLDED.load(Ordering::Relaxed),
     });
@@ -203,6 +218,7 @@ mod tests {
         published();
         upstream_read();
         release_asked();
+        maintenance_swept();
         store_read(7);
         records_folded(3);
         flush(&paths).expect("the counts are written");
@@ -218,6 +234,7 @@ mod tests {
             "publications",
             "upstream_reads",
             "release_asks",
+            "maintenance_sweeps",
             "store_bytes",
             "records_folded",
         ] {
