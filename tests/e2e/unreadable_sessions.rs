@@ -35,9 +35,7 @@ use crate::harness::{lifecycle, plan_of, World, REFUSED};
 /// the journeys arrange one state after another over one host.
 #[derive(Clone, Copy, Debug)]
 enum Unreadable {
-    /// The sessions directory is not a directory.
     Directory,
-    /// One record inside it is not a document this host can read.
     Record,
 }
 

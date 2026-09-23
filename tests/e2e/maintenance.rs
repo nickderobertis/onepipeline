@@ -1341,24 +1341,38 @@ fn a_sweep_reports_an_identity_whose_sessions_the_sibling_could_not_survey() {
 /// grounds: no platform executes both halves, and reading them is the only way
 /// to compare them; each half is driven as a real subprocess by every journey
 /// above.
+///
+/// **The marker line is part of that contract**, not only the file it goes in:
+/// `marker_lines` counts lines of it and
+/// `a_non_empty_command_runs_with_the_program_and_arguments_the_document_named`
+/// reads the arguments back out of one, so a half that rendered the line
+/// differently would answer those two on one platform and not the other. The
+/// tokens both halves have to spell — the prefix, and the bracketed argv — are on
+/// the list below beside the file and the environment variable.
 // llmlint: ignore-block[tests_mirror_real_usage] the subject is the suite's own
 // scaffolding — that its two halves agree — which no platform can execute both sides
 // of; the fixtures themselves are run the way their callers run them, by `onevcs`
 // and by the engine, in every journey of this module.
 #[test]
 fn both_halves_of_each_fixture_take_the_same_arguments() {
-    for (sh, bat, marks) in [(
+    let fixtures: [(&str, &str, &[&str]); 1] = [(
         "maintain.sh",
         "maintain.bat",
-        ["maintained.log", "ONEPIPELINE_E2E_MAINTAIN_EXIT"],
-    )] {
+        &[
+            "maintained.log",
+            "ONEPIPELINE_E2E_MAINTAIN_EXIT",
+            "maintained in ",
+            " with [",
+        ],
+    )];
+    for (sh, bat, marks) in fixtures {
         let shell = std::fs::read_to_string(repo_file(&format!("tests/e2e/{sh}")))
             .expect("the shell half ships");
         let batch = std::fs::read_to_string(repo_file(&format!("tests/e2e/{bat}")))
             .expect("the batch half ships");
         for mark in marks {
-            assert!(shell.contains(mark), "{sh} no longer names {mark}");
-            assert!(batch.contains(mark), "{bat} no longer names {mark}");
+            assert!(shell.contains(mark), "{sh} no longer names {mark:?}");
+            assert!(batch.contains(mark), "{bat} no longer names {mark:?}");
         }
     }
 } // llmlint: ignore-end[tests_mirror_real_usage]
