@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.3](https://github.com/nickderobertis/onepipeline/compare/v0.44.2...v0.44.3) - 2026-09-23
+
+### Fixed
+
+- *(deps)* close the engine-currency check on the patches this workspace already permits ([#477](https://github.com/nickderobertis/onepipeline/pull/477))
+
 ## [0.44.2](https://github.com/nickderobertis/onepipeline/compare/v0.44.1...v0.44.2) - 2026-09-22
 
 ### Added
