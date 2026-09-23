@@ -7211,3 +7211,29 @@ command ran, no stamp, the slot still `idle` — but not which outcome the sibli
 answered, since neither `unavailable` nor `broken` would be on any record. That
 is the cost of the narrower reading, stated so the owner is choosing rather than
 discovering it.
+
+**Put to the owner twice and unanswered.** The node that opened this entry asked
+over the run's planner channel at correlation
+`c-6a04137e944f1cfd9f964acfaf54279b`, with a 120-second window, and again at
+`c-f9ad62d9b1ed68adacd920d7061348b0`, with a 900-second one, naming the three
+options above. Both returned `timeout`; both questions stand on the channel,
+marked abandoned, and either can still be answered with `onepipeline reply
+<run> --correlation <id>`. So this entry is OPEN in the ordinary way this file
+means it — the code took the nearest thing that exists and the proposal is
+waiting — rather than because nobody put it.
+
+**No declared document's shape changed with it, so nothing here is owed a schema
+version or a golden.** Worth writing down, because the opposite is the natural
+assumption about a change that puts a new word on a record. The
+`pool-maintenance` payload is registered at `SchemaId::literal("agent",
+"pipeline.pool-maintenance", 2)` and generated from `payload::PoolMaintenance`,
+which carries the slot outcome as `MaintainedAnswer::Outcome { outcome: Value }`
+— an opaque value, deliberately, for the reason the directive over it gives: a
+restatement would be a second copy of the sibling's vocabulary to drift. So a new
+variant arriving in that vocabulary is invisible to the document, and the change
+that added it touches no file under `schemas/`, `tests/golden/`, `src/payload.rs`
+or `src/event.rs`. Bumping that id to `3` would announce a change no consumer can
+observe. What the read side owes instead is proof that a record written before
+the vocabulary existed still reads, which
+`maintenance::tests::busy_is_not_broken_and_a_record_written_before_the_vocabulary_still_reads`
+gives by parsing such a payload verbatim rather than round-tripping today's type.
