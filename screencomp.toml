@@ -34,8 +34,12 @@ embed_limit = 10             # embed images inline when <= N shots differ (0 dis
 #   - the fixtures the capture drives, because they decide what run is being
 #     photographed;
 #   - the capture machinery and this file.
-# CI re-captures on every pull request whatever this says, so a path missing
-# here costs a local warning rather than a drifted baseline.
+# llmlint: ignore[changed_behavior_has_e2e] this list decides only whether the *local*
+# hook pays for a capture before a push. CI re-captures on every pull request whatever it
+# says, so a path missing here costs one developer one slow round trip and can never
+# reach the committed baseline — and a journey over it would be asserting that
+# `screencomp scope`, a third-party matcher this repository does not ship, still matches
+# globs.
 paths = [
   "src/cli.rs",
   "src/main.rs",

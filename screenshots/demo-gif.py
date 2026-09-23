@@ -11,14 +11,11 @@ from, whose live view redraws in place. The text is monochrome because the
 tool's is.
 """
 
-# llmlint: ignore-file[changed_behavior_has_e2e] the capture is informational machinery
-# whose every step is a third-party tool this repository deliberately does not install
-# for `just check` — `freeze` renders the scenes and `screencomp` classifies them — so
-# an offline journey of it could only assert against stubs of those two, which tests the
-# stubs. What this machinery produces is checked instead, and more strictly than a
-# journey would: the committed digest baseline is re-derived by
-# `.github/workflows/visual-docs.yml` on every pull request, and a capture that stopped
-# working, changed a byte, or lost a scene is a red check there.
+# llmlint: ignore-file[changed_behavior_has_e2e] this renderer is Pillow drawing text,
+# and a journey of it would test Pillow. The GIF is deliberately not hash-gated — it is
+# not byte-reproducible across Pillow versions — and what signals that it has gone stale
+# is the hash-gated `monitor` scene, which renders the same lines from the same source;
+# `screenshots/AGENTS.md` says so and says to re-render then.
 
 from __future__ import annotations
 

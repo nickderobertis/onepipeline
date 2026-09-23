@@ -7,14 +7,10 @@ file rather than a clock, are `AGENTS.md` beside it. Shared by `capture.py` and
 they photographed.
 """
 
-# llmlint: ignore-file[changed_behavior_has_e2e] the capture is informational machinery
-# whose every step is a third-party tool this repository deliberately does not install
-# for `just check` — `freeze` renders the scenes and `screencomp` classifies them — so
-# an offline journey of it could only assert against stubs of those two, which tests the
-# stubs. What this machinery produces is checked instead, and more strictly than a
-# journey would: the committed digest baseline is re-derived by
-# `.github/workflows/visual-docs.yml` on every pull request, and a capture that stopped
-# working, changed a byte, or lost a scene is a red check there.
+# llmlint: ignore-file[changed_behavior_has_e2e] the capture's every step is a
+# third-party tool `just check` does not install (`freeze`, `screencomp`), so a journey
+# could only assert against stubs of those two. What it produces is checked instead: the
+# visual-docs workflow re-derives the committed baseline on every pull request.
 
 from __future__ import annotations
 
@@ -309,6 +305,18 @@ class World:
             time.sleep(POLL_SECONDS)
 
 
+def _mapping(record: dict, key: str) -> dict:
+    """A record's nested object, or an empty one for anything that is not.
+
+    A journal is external input here exactly as a plan file is: this capture
+    reads what the binary under test wrote, and a `labels` or `payload` that is
+    not an object is a record this journey has no reading of rather than a crash
+    inside `.get`.
+    """
+    value = record.get(key)
+    return value if isinstance(value, dict) else {}
+
+
 def _record(line: str) -> dict | None:
     """One journal line as a record, or `None` for anything that is not one.
 
@@ -342,8 +350,8 @@ def journal_has(journal: Path, kind: str, node: str | None) -> bool:
             continue
         if node is None:
             return True
-        labels = record.get("labels") or {}
-        payload = record.get("payload") or {}
+        labels = _mapping(record, "labels")
+        payload = _mapping(record, "payload")
         if node in (labels.get("node"), payload.get("reference"), payload.get("node")):
             return True
     return False
@@ -535,14 +543,14 @@ def _pending_attestations(journal: Path) -> list[str]:
         record = _record(line)
         if record is None:
             continue
-        payload = record.get("payload") or {}
+        payload = _mapping(record, "payload")
         kind = record.get("kind")
         if kind == "decision-pending" and payload.get("kind") == "attestation":
             reference = payload.get("reference")
             if reference and reference not in raised:
                 raised.append(reference)
         elif kind == "human-attested":
-            labels = record.get("labels") or {}
+            labels = _mapping(record, "labels")
             for name in (payload.get("reference"), labels.get("node")):
                 if name:
                     answered.add(name)

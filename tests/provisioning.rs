@@ -539,6 +539,33 @@ esac
              deliberately leaves unhooked"
         );
 
+        // `just bootstrap` is what a clean clone runs, and it activates the hook
+        // through a dependency. Running the whole thing here would install
+        // toolchains onto this host, so what is held is the dependency itself —
+        // read off `just`'s own plan for that recipe — and then the step it
+        // names is run for real below. Dropped from `bootstrap`, the recipe
+        // would still work and this journey would still fail.
+        let planned = Command::new("just")
+            .args(["--dry-run", "bootstrap"])
+            .current_dir(&clone)
+            .output()
+            .expect("just plans the bootstrap recipe");
+        let plan = format!(
+            "{}{}",
+            String::from_utf8_lossy(&planned.stdout),
+            String::from_utf8_lossy(&planned.stderr)
+        );
+        assert!(
+            planned.status.success(),
+            "`just --dry-run bootstrap` failed, so what a clean clone runs cannot \
+             be read:\n{plan}"
+        );
+        assert!(
+            plan.contains("core.hooksPath .githooks"),
+            "`just bootstrap` no longer activates the committed guard, so a clean \
+             clone would push with nothing watching the screenshots:\n{plan}"
+        );
+
         let provisioned = Command::new("just")
             .arg("_hooks")
             .current_dir(&clone)

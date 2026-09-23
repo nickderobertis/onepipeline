@@ -4,14 +4,10 @@
 # `shots/baseline/<arch>.json` this host owns. The spellings match
 # `[capture].arches` in screencomp.toml, which is what CI fans out over.
 
-# llmlint: ignore-file[changed_behavior_has_e2e] the capture is informational machinery
-# whose every step is a third-party tool this repository deliberately does not install
-# for `just check` — `freeze` renders the scenes and `screencomp` classifies them — so
-# an offline journey of it could only assert against stubs of those two, which tests the
-# stubs. What this machinery produces is checked instead, and more strictly than a
-# journey would: the committed digest baseline is re-derived by
-# `.github/workflows/visual-docs.yml` on every pull request, and a capture that stopped
-# working, changed a byte, or lost a scene is a red check there.
+# llmlint: ignore-file[changed_behavior_has_e2e] the capture's every step is a
+# third-party tool `just check` does not install (`freeze`, `screencomp`), so a journey
+# could only assert against stubs of those two. What it produces is checked instead: the
+# visual-docs workflow re-derives the committed baseline on every pull request.
 set -euo pipefail
 
 # An architecture this mapping does not know is refused rather than passed
