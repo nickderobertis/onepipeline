@@ -54,7 +54,7 @@ CURRENT="shots/current"
 # No-op under CI: the visual-docs workflow is the source of truth there.
 [ -n "${CI:-}" ] && exit 0
 
-# llmlint: ignore-start[cli_output_contract] every ending below reports that the guard
+# llmlint: ignore-block[cli_output_contract] every ending below reports that the guard
 # could not evaluate this push and then lets the push through, and that is the contract a
 # git hook's status has: it answers "may this push go", not "did the guard run". The three
 # things that reach these endings — an optional third-party CLI this repository
