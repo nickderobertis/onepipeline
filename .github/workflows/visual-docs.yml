@@ -1,18 +1,8 @@
 # Terminal screenshots, through screencomp's reusable workflow. The capture step
-# is ours (scripts/screenshots.sh); screencomp owns the classify gate, the HTML
-# gallery, the GitHub Pages deploy and the sticky before/after PR comment.
+# is ours; screencomp owns the classify gate, the gallery and the PR comment.
 #
-# **Informational, and deliberately not a required check** — AGENTS.md says why,
-# beside the two other workflows this repository keeps outside its required set.
-# No step here is reachable from `just check`, from `just gate`, or from the
-# `gate` job in ci.yml: the deterministic gate stays offline and free of
-# third-party tools, and this needs two of them.
-#
-# Which CPU arch(es) CI captures is read from `[capture].arches` in
-# screencomp.toml — one lane per arch, fanned out by the reusable workflow. This
-# repository declares one, `x86_64`, because the shots are deterministic SVGs
-# (a vendored, version-pinned font embedded into each file) whose bytes are the
-# same on every CPU, so a second lane would prove the same bytes twice.
+# Informational and **not a required check** — AGENTS.md says why, beside the two
+# other workflows this repository keeps out of its required set.
 
 name: Visual docs
 
@@ -30,19 +20,23 @@ on:
 
 jobs:
   visual-docs:
-    # Granted on the job rather than the workflow, so nothing outside this one
-    # call carries either write.
-    #
-    # llmlint: ignore[least_privilege_grants] neither grant can be narrowed by event here.
-    # `permissions` values are literals — GitHub accepts no expression in them — and a
-    # reusable-workflow call takes its permissions from the calling job, so a
-    # `pull_request`-only `pull-requests: write` means a second job duplicating this whole
-    # `with:` block. That duplicate drifts, and it renames the check this workflow reports,
-    # which is the context branch protection is meant to require. The narrower grant is not
-    # worth a second copy of the call that produces it.
+    # llmlint: ignore-block[least_privilege_grants] granted on the job rather than the
+    # workflow, and neither can be narrowed further by event here: `permissions` values
+    # are literals — GitHub accepts no expression in them — and a reusable-workflow call
+    # takes its permissions from the calling job. A `pull_request`-only
+    # `pull-requests: write` therefore means a *second job* duplicating this whole `with:`
+    # block; that duplicate drifts, and it renames the check this workflow reports, which
+    # is the context branch protection is meant to require.
     permissions:
       contents: write       # push the gh-pages gallery
       pull-requests: write  # post the sticky diff comment on a pull request
+    # llmlint: ignore-end[least_privilege_grants]
+    # The next two lines name one screencomp release twice — GitHub resolves a
+    # reusable workflow by ref and the workflow installs the CLI by version, and
+    # neither can be derived from the other in YAML. `screenshots/capture.py`
+    # reconciles them: it reads both out of this file and refuses the capture
+    # when they have parted, so the drift fails the guard and this workflow
+    # rather than producing a gallery from one release and a gate from another.
     uses: nickderobertis/screencomp/.github/workflows/visual-docs-reusable.yml@v0.4.8
     with:
       screencomp-version: v0.4.8

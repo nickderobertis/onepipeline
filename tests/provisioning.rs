@@ -452,19 +452,14 @@ esac
     /// The committed visual guard is **activated** by provisioning, not merely
     /// committed.
     ///
-    /// `core.hooksPath` is per-clone state that is never committed, so a
-    /// `.githooks/pre-push` nothing points git at runs nothing — the guard
-    /// would be a file rather than a gate. What makes it real is the
-    /// `bootstrap` recipe's own `_hooks` dependency, and that is what this
-    /// drives: a **fresh clone** of this repository, provisioned through the
-    /// real recipe, then asked what git resolved. Nothing else of the bootstrap
-    /// is run, because the rest installs toolchains onto this host and none of
-    /// it decides where a hook lives.
+    /// `core.hooksPath` is per-clone state that is never committed, so the one
+    /// thing a fresh clone does not inherit is the setting that makes
+    /// `.githooks/pre-push` run at all. Hence a real clone rather than this
+    /// worktree, and hence the assertion that it starts without one: without
+    /// that, this would pass over a clone that had been configured by hand.
     ///
-    /// The clone is shallow and local (`git clone --no-hardlinks .`), so it is
-    /// a real second working copy with its own `.git` and its own config —
-    /// which is the whole point: the setting under test is exactly the one a
-    /// clone does not inherit.
+    /// Only `_hooks` is run, not the whole bootstrap: the rest installs
+    /// toolchains onto this host and none of it decides where a hook lives.
     #[test]
     fn provisioning_a_fresh_clone_activates_the_committed_visual_guard() {
         let root = std::env::temp_dir().join(format!(

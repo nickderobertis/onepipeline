@@ -132,7 +132,7 @@ two third-party tools `just check` does not install, and a stale picture is a
 thing to refresh rather than a reason to hold a correct change out of `main`.
 What enforces it is local — `.githooks/pre-push`, which `just bootstrap`
 activates — and no screenshot step is reachable from `check`, from `gate`, or
-from `ci.yml`'s `gate` job. `screenshots/AGENTS.md` is the rest.
+from `ci.yml`'s `gate` job.
 
 **A job's assertions and the artifact it installs come from one revision.**
 `install-documented` installs the remote's default branch — README's `cargo

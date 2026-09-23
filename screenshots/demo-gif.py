@@ -11,6 +11,15 @@ from, whose live view redraws in place. The text is monochrome because the
 tool's is.
 """
 
+# llmlint: ignore-file[changed_behavior_has_e2e] the capture is informational machinery
+# whose every step is a third-party tool this repository deliberately does not install
+# for `just check` — `freeze` renders the scenes and `screencomp` classifies them — so
+# an offline journey of it could only assert against stubs of those two, which tests the
+# stubs. What this machinery produces is checked instead, and more strictly than a
+# journey would: the committed digest baseline is re-derived by
+# `.github/workflows/visual-docs.yml` on every pull request, and a capture that stopped
+# working, changed a byte, or lost a scene is a red check there.
+
 from __future__ import annotations
 
 import os
@@ -56,7 +65,7 @@ HOLD_MS = 3000
 
 
 def main() -> int:
-    world_module.clean_environment()
+    world_module.clear_stack_settings()
     binaries = REPO / "target" / "release"
     here = Path(__file__).resolve().parent
     out = Path(os.environ.get("DEMO_GIF_OUT") or here / "images" / "demo.gif")

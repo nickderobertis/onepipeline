@@ -1,144 +1,92 @@
 # Terminal screenshots
 
-Deterministic SVGs of the **real** CLI's output, gated on their content hash by
-[screencomp](https://github.com/nickderobertis/screencomp), plus one animated GIF
-that is deliberately not gated. Informational, like `deps-check` — **never part
-of `just check`, `just gate`, or `ci.yml`'s `gate` job**.
+The README's images: deterministic SVGs of the real CLI's real output, gated on
+their content hash by [screencomp](https://github.com/nickderobertis/screencomp),
+plus one animated GIF that is not. Informational, like `deps-check` — never in
+`just check`, `just gate`, or `ci.yml`'s `gate` job.
 
 > `CLAUDE.md` is a symlink to this file — edit `AGENTS.md` only.
 
-## The scenes
+## Which scenes, and why not the others
 
-One per surface the README explains, in the section that explains it. A shot
-that would say less than the sentence beside it is left out rather than padded
-in, which is why `agents` (the offline fixture runs no real `oneharness`, so it
-would read `no sessions recorded`), `transcript`, `goals`, `host` and
-`channel queue` are absent.
+`status`, `watch`, `monitor`, `results`, `runs`, `telemetry --breakdown`, the
+`--help` verb list, and `demo.gif` of `start --attach`. Each sits in the README
+section that explains that surface.
 
-| scene | why it documents that surface |
-| --- | --- |
-| `demo.gif` | `start --attach` is the tool's main usage, and the arrival of those lines **is** the experience of it |
-| `status` | the richest static view, and the only one answering "what is happening right now" |
-| `watch` | the README spends ~30 lines on its three line kinds — event, heartbeat, return |
-| `monitor` | the other ~30. Not progressive: one pass writes the whole document, its trailer and its resume line |
-| `results` | the one view showing what a finished DAG produced, with each node's own evidence |
-| `runs` | the paragraph claiming a listing groups its runs by project |
-| `telemetry` | the eight buckets and the per-party cost — real numbers, from the recorded layer below |
-| `help` | the whole verb surface, which the README never lists, and the only colourised view this tool has |
-
-**No colour beyond that one.** Nothing in this stack emits an ANSI escape
-outside `clap`'s own help. The shots are monochrome because the output is.
+**The bar for a new one: it must say more than the sentence it would sit
+beside.** `agents` fails it (the offline fixture runs no real `oneharness`, so
+it reads `no sessions recorded`), and so do `transcript`, `goals`, `host` and
+`channel queue`. The stills are monochrome because the output is — `clap`'s help
+is the only coloured surface in this stack — so a shot that merely repeats its
+paragraph earns nothing, and a shorter set is the better README.
 
 ## Two fixture layers
 
-**Driven** — `examples/plan-store`'s `tracked-release`, copied byte for byte as
-`tests/e2e/shipped.rs` copies it and executed by the real compiled binary: six
-nodes, two `kind: human` approvals, a lifecycle node with a human step, two real
-repositories on real bare origins. Feeds `status`, `watch`, `results`, `monitor`,
-`runs` and the GIF — the views that exist to show a graph have to show one.
+**Driven** — the shipped `examples/plan-store` `tracked-release` plan, executed
+by the real binary: six nodes, two human approvals, real repositories on real
+bare origins. Feeds every view that exists to show a *graph*.
 
-**Recorded** — `tests/recorded/run-root/onemessagebus-repair-2`, read exactly as
-`tests/parity.rs` reads it. Feeds `telemetry --breakdown` **and nothing else**:
-its buckets are a real run's 41 minutes and its cost a real run's $5.35, which no
-offline drive of a scripted double can be. It is a *one-node* run, which is why
-there are two layers at all.
+**Recorded** — `tests/recorded/run-root/onemessagebus-repair-2`, read as
+`tests/parity.rs` reads it. Feeds `telemetry --breakdown` and nothing else,
+because its buckets and its cost are a real run's and no offline drive of a
+scripted double can be. It is one node, which is why there are two layers.
 
-**Nothing costs anything.** Real binary, real `onetaskgraph`, real linked
-`onevcs` over real git. Two subprocesses are substituted, and they are the two
-this repository's own offline tier substitutes: `fake-oneagentgraph` at
-`ONEPIPELINE_ONEAGENTGRAPH_BIN` and `fake-gh` at `onevcs`'s `ONEVCS_GH`. No model
-call, no harness turn, no network, no credential, no real GitHub.
+Two subprocesses are substituted and they are the two this repository's own
+offline tier substitutes — `fake-oneagentgraph` and `fake-gh`. **Keep it that
+way**: no model call, no harness turn, no network, no credential, no real GitHub,
+and a scene that cannot be had on those terms is the wrong scene.
 
-**Every wait polls a file** — `tests/AGENTS.md`'s one rule for this repository's
-suite, and a capture that slept to let output settle is what that note forbids.
-The two lifecycle dispatches sit in the doubles' own `<key>.wait`/`<key>.go` hold
-and are released one at a time, each waited out on the journal, so the order the
-run settles in is stated here rather than decided by the host; and the `watch`
-scene's heartbeat count is decided by reading `watch`'s own output file.
+**Every wait polls a file** (`tests/AGENTS.md`'s one rule). A capture that slept
+to let output settle is what that note forbids; hold a dispatch with the doubles'
+own `<key>.wait`/`<key>.go` and release one at a time, so the order the run
+settles in is stated rather than decided by the host.
 
-## What the bytes are pinned to
+## What the bytes are pinned to, and where each pin lives
 
-- **The renderer** — `freeze`, at the justfile's `freeze-version` line, which is
-  the **only** place this repository names it: `just screenshots-tools` installs
-  from it and `install-freeze.sh` reads that same line for CI.
-- **The font** — `fonts/JetBrainsMono-Regular.ttf` (OFL), vendored, embedded into
-  each SVG as base64, named once in `capture.py`. Nothing is fetched.
-- **The lane** — `[capture].arches` in `screencomp.toml` is the only place a lane
-  is declared and `host-arch.sh` the only place this host's is derived. One lane,
-  `x86_64`: an SVG is layout maths, so its bytes are identical on every CPU and a
-  second lane would prove the same bytes twice. The guard still classifies the
-  host's own lane and refuses an undeclared one, so an `arm64` developer adds
-  that lane and blesses it once.
-- **The environment** — `world.py` clears every ambient `ONEPIPELINE_*`,
-  `ONEVCS_*`, `ONETASKGRAPH_*`, `ONEAGENTGRAPH_*`, `ONEHARNESS_*`, `ONEJUDGE_*`
-  and `ONEMESSAGEBUS_*` before setting its own. Each is read ahead of most other
-  layers, so an exported one prints into a shot or moves the whole journey.
+| pinned | its one source |
+| --- | --- |
+| renderer (`freeze`) | the justfile's `freeze-version`; `install-freeze.sh` reads that line for CI |
+| font | `fonts/JetBrainsMono-Regular.ttf` (OFL), vendored and embedded, named in `capture.py` |
+| arch lane | `[capture].arches` in `screencomp.toml`; `host-arch.sh` derives this host's |
+| screencomp | named twice in the workflow, which YAML cannot avoid — `capture.py` refuses a capture when the two have parted |
 
-Everything per-run is normalised in the capture instead: `normalise.py` is the
-list — the instant on each line, the pid in an agent stream id, the session token
-`onevcs` mints, the driver's pid, the scratch world's paths, this machine's free
-space, a clock-derived age, and a cursor's journal byte offset.
-
+Beyond those, the world clears every ambient `ONE*_` setting before setting its
+own, and `normalise.py` replaces each per-run or per-host value with a fixed one.
 **No clock override, deterministic-id switch, `--no-color`, `--width` or demo
-flag may be added for a capture's convenience.** The CLI surface is the approved
-`docs/contract.md`'s and the code is written to match it, so such a flag is a
-contract change. That is why the normalisation is here.
+flag may be added to make a capture easier**: the CLI surface is the approved
+`docs/contract.md`'s, so such a flag is a contract change. Normalise instead.
 
-## Why this is not a second statement of the contract
+## Why a generated capture is not a second statement of the contract
 
-`docs/contract.md` is the authority for the CLI surface and the judged lint's
-`contracts_have_one_source_or_a_drift_gate` fires on a second spelling of one. A
-committed screenshot of CLI output would be such a spelling **if it were
+`contracts_have_one_source_or_a_drift_gate` fires on a second spelling of a
+contract, and a committed screenshot of CLI output would be one **if it were
 hand-made**. It is not: every image is what the real binary printed, and CI
 refuses the change the moment its bytes leave `shots/baseline/<arch>.json`. The
-baseline is the drift gate and the binary stays the one source — an image cannot
-say what the binary does not, because one that did is a red check.
+baseline is the drift gate; the binary stays the one source. For the same reason
+a capture that *contradicted* `docs/contract.md` is a contract bug to report, not
+a shot to adjust.
 
-For the same reason, a capture that contradicted the contract is a **contract bug
-to report**, not a shot to adjust: the disagreement is between the binary and the
-document.
-
-## Commands
-
-`just --list` is the index; the four are `screenshots-tools`, `screenshots`,
-`screenshots-gif` and `screenshots-bless`. What is not discoverable from there:
-**bless only after an intended output change**, and commit the refreshed
-baseline with `images/` in the same commit, because CI compares the two against
-each other.
-
-`just screenshots` is the `onepipeline-visual-docs` project's own target rather
-than the CLI application's, so a slow check needing two third-party tools sits
-behind its own edge and its inputs are declared (`visualDocsSource` in
-`nx.json`). That project declares no `check`, `build` or `test` target because it
-has none — declaring the uniform set and running nothing would drop it out of
-every repo-wide verb while appearing covered by it.
-
-**No image lives under `docs/`**: that directory holds the contract and its
-divergences, both machine-consumed and both named in a cached build input.
-
-## The gate, and activating its local half
-
-CI fails on drift. `.githooks/pre-push` is the local half: it re-captures only
-when a `[guard].paths` file changes and **blocks the push** on drift, after
-regenerating this lane and building a review gallery.
-
-`core.hooksPath` is per-clone state and is never committed, so a committed guard
-nothing activates runs nothing. **`just bootstrap` activates it**, and
-`tests/provisioning.rs` drives that over a fresh clone and asserts what git then
-resolves — so this is a promise with a test behind it rather than a convention.
-The directory carries the visual guard **and nothing else**: `just gate` stays
-unhooked, as it already was, and nothing was displaced because this repository
-installed no git hook before.
-
-## When the output legitimately changes
-
-Editing what a verb prints, the CLI surface, the order the engine writes events
-in, the shipped example plan, the doubles, or the capture will move the SVGs.
-That is expected — bless, and commit the baseline with the images.
-
-**The GIF's own drift gate is the hash-gated `monitor` scene.** The attached
-stream is `views::monitor`'s own lines, so anything that changes what the hero
-shows changes that scene too and fails CI. What the GIF is not is
-*byte*-reproducible — across Pillow versions it is not, which is why it is
-rendered on demand rather than hashed — so a red `monitor` is the signal to run
+**The GIF's drift gate is the hash-gated `monitor` scene** — the attached stream
+is `views::monitor`'s own lines, so whatever changes the hero fails that scene.
+What the GIF is not is byte-reproducible across Pillow versions, which is why it
+is rendered on demand rather than hashed: a red `monitor` is the signal to run
 `just screenshots-gif` and commit the new hero beside the new baseline.
+
+## Working on it
+
+`just --list` indexes the four recipes (`screenshots-tools`, `screenshots`,
+`screenshots-gif`, `screenshots-bless`). What it does not say:
+
+- **Bless only after an intended output change**, and commit the refreshed
+  baseline together with `images/` — CI compares the two against each other.
+- The capture is the `onepipeline-visual-docs` project's own target, which
+  declares no `check`, `build` or `test` because it has none: declaring the
+  uniform set and running nothing would drop it out of every repo-wide verb
+  while appearing covered by it. A new path that can change a shot belongs in
+  `visualDocsSource` in `nx.json` **and** in `[guard].paths`.
+- **No image goes under `docs/`** — that directory is machine-consumed and named
+  in a cached build input.
+- The guard only runs where `core.hooksPath` points at `.githooks`, which is
+  per-clone state `just bootstrap` sets; `tests/provisioning.rs` holds that.
+  The directory carries the visual guard **and nothing else** — `just gate` stays
+  unhooked, as it already was.

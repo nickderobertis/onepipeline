@@ -411,12 +411,8 @@ session-setup:
 setup-llmlint:
     ./scripts/setup-llmlint.sh
 
-# Deterministic SVGs of the real CLI's real output, rendered by `freeze` from a
-# vendored pinned font and gated, galleried and PR-commented by screencomp. What
-# the scenes are and why each one documents its surface is screenshots/AGENTS.md.
-# Regenerating is out of the gate, like `deps-check`: the capture needs a
-# third-party renderer this repository does not install for `just check`, and
-# `.github/workflows/visual-docs.yml` owns the comparison.
+# Out of the gate for the reason `deps-check` is: these need third-party tools
+# `just check` deliberately does not install.
 
 # Install the pinned capture renderer (`freeze`) on demand. Needs Go.
 screenshots-tools:

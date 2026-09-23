@@ -9,11 +9,21 @@ SVG per scene — and copies each image to `images/`, which is what the README
 embeds and what is committed.
 """
 
+# llmlint: ignore-file[changed_behavior_has_e2e] the capture is informational machinery
+# whose every step is a third-party tool this repository deliberately does not install
+# for `just check` — `freeze` renders the scenes and `screencomp` classifies them — so
+# an offline journey of it could only assert against stubs of those two, which tests the
+# stubs. What this machinery produces is checked instead, and more strictly than a
+# journey would: the committed digest baseline is re-derived by
+# `.github/workflows/visual-docs.yml` on every pull request, and a capture that stopped
+# working, changed a byte, or lost a scene is a red check there.
+
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -51,8 +61,40 @@ WRAP_COLUMNS = 118
 WINDOW_WIDTH = 60 + round(WRAP_COLUMNS * 8.42)
 
 
+#: The workflow that calls screencomp, and the two places it names a version of
+#: it — the reusable workflow's ref and the version it installs. Contract 2 of
+#: the visual-docs adoption requires the copies to be reconciled by something
+#: that fails when they part; this capture is that something, because it is what
+#: both the local guard and the workflow run.
+WORKFLOW = Path(".github/workflows/visual-docs.yml")
+
+
+def screencomp_pins_agree() -> str | None:
+    """The refusal, when the workflow's two screencomp versions have parted."""
+    text = (REPO / WORKFLOW).read_text()
+    used = re.search(r"visual-docs-reusable\.yml@(\S+)", text)
+    installed = re.search(r"screencomp-version:\s*(\S+)", text)
+    if not used or not installed:
+        return (
+            f"screenshots: {WORKFLOW} no longer names both a screencomp "
+            "reusable-workflow ref and a `screencomp-version:` to install. It has "
+            "to name both, and they have to agree — restore them."
+        )
+    if used.group(1) != installed.group(1):
+        return (
+            f"screenshots: {WORKFLOW} calls screencomp {used.group(1)} and installs "
+            f"{installed.group(1)}. The gallery and the gate would then come from "
+            "two releases. Set both to the same tag."
+        )
+    return None
+
+
 def main() -> int:
-    world_module.clean_environment()
+    world_module.clear_stack_settings()
+    parted = screencomp_pins_agree()
+    if parted is not None:
+        print(parted, file=sys.stderr)
+        return 1
     binaries = REPO / "target" / "release"
     arch = host_arch()
     out = Path(os.environ.get("SHOTS_OUT") or REPO / "shots" / "current" / arch)

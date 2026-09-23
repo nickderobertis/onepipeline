@@ -13,14 +13,27 @@
 # script rather than a hard-coded URL in a workflow: screencomp fans one capture
 # job out per lane in `[capture].arches`, and an `arm64` lane's runner needs an
 # `arm64` binary.
+
+# llmlint: ignore-file[changed_behavior_has_e2e] the capture is informational machinery
+# whose every step is a third-party tool this repository deliberately does not install
+# for `just check` — `freeze` renders the scenes and `screencomp` classifies them — so
+# an offline journey of it could only assert against stubs of those two, which tests the
+# stubs. What this machinery produces is checked instead, and more strictly than a
+# journey would: the committed digest baseline is re-derived by
+# `.github/workflows/visual-docs.yml` on every pull request, and a capture that stopped
+# working, changed a byte, or lost a scene is a red check there.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 version="$(sed -n 's/^freeze-version *:= *"\([^"]*\)".*/\1/p' "$repo_root/justfile")"
-if [ -z "$version" ]; then
-  echo "install-freeze: the justfile no longer carries a 'freeze-version' line," >&2
-  echo "                which is the only place this repository pins the renderer." >&2
-  echo "                Restore it there (and nowhere else), then re-run." >&2
+# A release number, and nothing else: this value is interpolated into a URL and
+# into the archive's filename, so a line that had grown a comment, a range or a
+# path would reach the network as part of one.
+if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  echo "install-freeze: the justfile's 'freeze-version' line reads '$version'," >&2
+  echo "                which is not a MAJOR.MINOR.PATCH release. That line is the" >&2
+  echo "                only place this repository pins the renderer — set it to a" >&2
+  echo "                published freeze release and re-run." >&2
   exit 1
 fi
 

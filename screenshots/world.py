@@ -7,6 +7,15 @@ file rather than a clock, are `AGENTS.md` beside it. Shared by `capture.py` and
 they photographed.
 """
 
+# llmlint: ignore-file[changed_behavior_has_e2e] the capture is informational machinery
+# whose every step is a third-party tool this repository deliberately does not install
+# for `just check` — `freeze` renders the scenes and `screencomp` classifies them — so
+# an offline journey of it could only assert against stubs of those two, which tests the
+# stubs. What this machinery produces is checked instead, and more strictly than a
+# journey would: the committed digest baseline is re-derived by
+# `.github/workflows/visual-docs.yml` on every pull request, and a capture that stopped
+# working, changed a byte, or lost a scene is a red check there.
+
 from __future__ import annotations
 
 import json
@@ -115,12 +124,20 @@ class World:
     def _environment(self) -> dict:
         # Every setting the engine and its two siblings read, stated by this
         # world. The capturing process's own environment is cleared of them
-        # first (see `clean_environment`), so nothing an operator exported can
+        # first (see `clear_stack_settings`), so nothing an operator exported can
         # print into a shot or point the journey somewhere else.
         path = os.pathsep.join([str(self.bin), os.environ.get("PATH", "")])
-        onetaskgraph = os.environ.get("SHOTS_ONETASKGRAPH_BIN") or shutil.which(
-            "onetaskgraph"
-        )
+        stated = os.environ.get("SHOTS_ONETASKGRAPH_BIN")
+        if stated:
+            # An override that does not name a runnable program would otherwise
+            # fail several steps later, as a plan the launcher could not read.
+            if not (Path(stated).is_file() and os.access(stated, os.X_OK)):
+                raise SystemExit(
+                    f"screenshots: SHOTS_ONETASKGRAPH_BIN names {stated!r}, which is "
+                    "not an executable file. Point it at one, or unset it to take "
+                    "`onetaskgraph` from PATH: `unset SHOTS_ONETASKGRAPH_BIN`."
+                )
+        onetaskgraph = stated or shutil.which("onetaskgraph")
         if not onetaskgraph:
             raise SystemExit(
                 "screenshots: no `onetaskgraph` on PATH. The capture reads every plan "
@@ -342,8 +359,8 @@ def run(argv: list[str], env: dict) -> None:
         )
 
 
-def clean_environment() -> None:
-    """Clear every ambient setting this stack reads before the capture sets its own.
+def clear_stack_settings() -> None:
+    """Unset every `ONE*_` setting this stack reads, before the capture sets its own.
 
     The scenes render the real binary, and this engine and both siblings read
     their settings from the environment ahead of most other layers — so a
