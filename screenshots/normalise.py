@@ -1,25 +1,9 @@
 #!/usr/bin/env python3
-"""Normalisation: everything in a view that changes from one run to the next.
+"""Per-run and per-host values replaced by fixed ones, so a capture hashes the same.
 
-screencomp gates on the **hash** of each image, so a capture has to be
-byte-identical on every machine and every runner. `onepipeline` renders live
-facts about a live run, and nearly every view carries something that is true of
-one run and of no other: the wall-clock timestamp on each event, the launching
-session, the host name, the pid inside an agent stream id, the random session
-token `onevcs` mints per publication, the absolute temporary paths the world
-lives under, a node's age computed from the clock, the free space on this
-machine's disk, and the live journal byte offset `monitor`'s resume line carries.
-
-**This engine has no clock override, no deterministic-id switch, no `--no-color`
-and no demo flag, and this capture adds none.** The CLI surface is held to the
-approved `docs/contract.md`, and a flag added for a screenshot's convenience
-would be a contract change rather than a capture decision — so the whole answer
-is here, in the capture, exactly as `llmlint`'s capture rewrites its three
-per-run paths.
-
-Every rule below replaces a **per-run or per-host** value with a fixed one. None
-of them changes what a verb prints: no line is added, dropped or reordered, and
-no word a verb chose is rewritten into a different word.
+Why this file exists at all, and the full list of what it rewrites, is
+`AGENTS.md` beside it. What is local here: no rule adds, drops or reorders a
+line, and none rewrites a word a verb chose into a different word.
 """
 
 from __future__ import annotations

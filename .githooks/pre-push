@@ -23,14 +23,13 @@
 # so the capture runs NATIVELY here, with no Docker and no pinned container, and
 # still produces byte-identical output to CI.
 #
-# llmlint: ignore-file[changed_behavior_has_e2e] every command this script runs
-# is a third-party tool this repository neither installs in `just check` nor
-# ships — `screencomp` and `freeze` — driven over a capture that takes about a
-# minute of real subprocess work; an offline journey of it could only assert
-# against stubs of those two tools, which is a test of the stubs. What the guard
-# is a guard over is itself checked: `just screenshots` and `screencomp classify`
-# are the two commands here and both are exercised directly by the visual-docs
-# workflow on every pull request.
+# llmlint: ignore-file[changed_behavior_has_e2e] every command this script runs is a
+# third-party tool this repository neither installs in `just check` nor ships —
+# `screencomp` and `freeze` — driven over a capture that takes about a minute of real
+# subprocess work; an offline journey of it could only assert against stubs of those two
+# tools, which is a test of the stubs. What the guard guards is itself checked: `just
+# screenshots` and `screencomp classify` are the two commands here and the visual-docs
+# workflow runs both on every pull request.
 set -euo pipefail
 
 # The declared `[capture].arches` lanes, read out of screencomp.toml so a lane
@@ -39,7 +38,7 @@ set -euo pipefail
 # rather than guess.
 LANES="$(sed -n 's/^arches *= *\[\(.*\)\].*/\1/p' screencomp.toml \
   | tr -d '"[:blank:]' | tr ',' '\n' | grep -v '^$' || true)"
-LANE="$(bash scripts/host-arch.sh)"
+LANE="$(bash screenshots/host-arch.sh)"
 if ! printf '%s\n' "$LANES" | grep -qxF "$LANE"; then
   echo "pre-push: this host's architecture ($LANE) has no lane in [capture].arches" >&2
   echo "          of screencomp.toml, so it has no committed baseline to classify" >&2
@@ -68,7 +67,6 @@ if ! command -v screencomp >/dev/null 2>&1; then
   exit 0
 fi
 
-# --- 1. Compute the push range(s) from git's stdin ---------------------------
 ranges=()
 if [ -n "${SCREENCOMP_GUARD_RANGE:-}" ]; then
   ranges+=("$SCREENCOMP_GUARD_RANGE")   # test/override: diff this range directly
@@ -88,9 +86,11 @@ else
 fi
 [ "${#ranges[@]}" -eq 0 ] && exit 0
 
-changed="$(for r in "${ranges[@]}"; do git diff --name-only "$r"; done | sort -u)"
+# `--` ends option parsing: SCREENCOMP_GUARD_RANGE is an override a test or a
+# developer sets, and a value beginning with a dash would otherwise be read as a
+# flag to `git diff` rather than as the range it is meant to be.
+changed="$(for r in "${ranges[@]}"; do git diff --name-only "$r" --; done | sort -u)"
 
-# --- 2. Cheap path: is anything screenshot-relevant? -------------------------
 # `scope` exits 3 when a changed path matches [guard].paths, 0 when none do, and
 # any OTHER non-zero on error. Treat ONLY exit 3 as relevant; on an error, warn
 # and skip rather than force a slow capture — the workflow is the backstop.
@@ -109,16 +109,14 @@ case "$scope_status" in
     ;;
 esac
 
-# --- 3. Relevant change: re-capture natively (needs the pinned freeze) --------
 if ! command -v freeze >/dev/null 2>&1; then
   echo "pre-push: a file that can change a rendered shot changed, and 'freeze' is" >&2
   echo "          not installed to re-capture. Install it: just screenshots-tools" >&2
   echo "          then retry, or bypass with: git push --no-verify" >&2
   exit 1
 fi
-SHOTS_OUT="$CURRENT/$LANE" bash scripts/screenshots.sh
+SHOTS_OUT="$CURRENT/$LANE" bash screenshots/capture.sh
 
-# --- 4. Classify the capture against the committed baseline manifest ---------
 set +e
 screencomp classify --baseline-manifest "$MANIFEST" --current "$CURRENT" --arch "$LANE" --exit-code
 status=$?
@@ -132,8 +130,9 @@ elif [ "$status" -ne 3 ]; then
   exit "$status"
 fi
 
-# --- On drift (classify exit 3): regenerate, build a gallery, BLOCK. ---------
-SHOTS_CURRENT="$CURRENT" bash scripts/bless-baseline.sh   # rewrites $MANIFEST
+# Drift, which is classify's exit 3: regenerate this lane, build the review
+# gallery, and block the push so the refresh is committed deliberately.
+SHOTS_CURRENT="$CURRENT" bash screenshots/bless.sh        # rewrites $MANIFEST
 screencomp gallery --input "$CURRENT" --arch "$LANE" \
   --output "$GALLERY" --title "Pre-push screenshot review" >/dev/null
 

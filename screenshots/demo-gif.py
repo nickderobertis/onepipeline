@@ -1,34 +1,14 @@
 #!/usr/bin/env python3
-"""Render the animated README hero: `onepipeline start --attach` driving a DAG.
+"""Render the animated README hero: `start --attach` driving a DAG to settlement.
 
-Run it through `just screenshots-gif`. Like `scripts/screenshots.py` it drives
-the **real compiled binary** against this repository's own offline fixtures —
-the shipped `examples/plan-store` `tracked-release` plan, six nodes with two
-`kind: human` approvals, executed through the two scripted doubles the e2e suite
-substitutes at their subprocess boundaries. No model call, no harness turn, no
-network, no credential.
+Run it through `just screenshots-gif`. Why this one artifact is not hash-gated,
+and when to regenerate it, are `AGENTS.md` beside it.
 
-**What it animates is the real stream, not a reconstruction of one.** Both of
-this tool's live surfaces are append-only — `start --attach` polls every 50 ms
-and prints the newly appended monitor lines to stderr, and nothing ever redraws
-in place — so the frames here are simply that stream revealed as it arrived,
-through a scrolling terminal window. (`llmlint`'s renderer, which this is
-adapted from, has to reconstruct its frames because its live view redraws; this
-one does not, and should stay simpler.)
-
-**It is deliberately NOT hash-gated.** A GIF is not byte-reproducible across
-Pillow versions, so it is regenerated on demand and committed, exactly as
-`llmlint`'s is. Regenerate it whenever what the attached stream prints changes —
-the event kinds in `src/event.rs`, the line `src/views.rs` renders one as, or
-the plan in `examples/plan-store`.
-
-The text is monochrome because the tool's output is: nothing in this stack emits
-a colour escape outside `clap`'s own help. Colouring it here would be drawing
-something no terminal shows.
-
-llmlint: ignore-file[new_code_lands_in_a_project] the visual-docs capture is
-informational machinery outside every Nx target the gate reaches, and outside
-the crate on purpose (the 95% coverage floor is measured over the crate).
+What is local here: both of this tool's live surfaces are **append-only**, so the
+frames are simply the real stream revealed as it arrived through a scrolling
+window — nothing is reconstructed, unlike `llmlint`'s renderer this is adapted
+from, whose live view redraws in place. The text is monochrome because the
+tool's is.
 """
 
 from __future__ import annotations
@@ -39,13 +19,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+# This directory is not on `sys.path` when the file is run as a script from the
+# repository root, which is how `just screenshots-gif` runs it.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import normalise
+import world as world_module
+from world import World
 
-import shotnorm  # noqa: E402
-import shotworld as world_module  # noqa: E402
-from shotworld import World  # noqa: E402
-
-from PIL import Image, ImageDraw, ImageFont  # noqa: E402
+from PIL import Image, ImageDraw, ImageFont
 
 REPO = world_module.repo_root()
 
@@ -77,12 +58,35 @@ HOLD_MS = 3000
 def main() -> int:
     world_module.clean_environment()
     binaries = REPO / "target" / "release"
-    out = Path(os.environ.get("DEMO_GIF_OUT") or REPO / "screenshots" / "images" / "demo.gif")
-    font_path = REPO / "screenshots" / "fonts" / "JetBrainsMono-Regular.ttf"
-    for needed in (binaries / "onepipeline", binaries / "fake-oneagentgraph", font_path):
+    here = Path(__file__).resolve().parent
+    out = Path(os.environ.get("DEMO_GIF_OUT") or here / "images" / "demo.gif")
+    if out.suffix != ".gif" or not out.parent.is_dir():
+        print(
+            f"demo-gif: DEMO_GIF_OUT names {out}, which is not a `.gif` inside an "
+            "existing directory, so this run would either write the wrong kind of "
+            "file or fail on the write. Point it at one, or unset it to write "
+            "screenshots/images/demo.gif: `unset DEMO_GIF_OUT`.",
+            file=sys.stderr,
+        )
+        return 1
+    font_path = here / "fonts" / "JetBrainsMono-Regular.ttf"
+    for needed in (binaries / "onepipeline", binaries / "fake-oneagentgraph"):
         if not needed.exists():
-            print(f"demo-gif: missing {needed}", file=sys.stderr)
+            print(
+                f"demo-gif: {needed} is not built, and the hero is rendered from "
+                "what it prints. Run `just screenshots-gif`, which builds the "
+                "release binaries first.",
+                file=sys.stderr,
+            )
             return 1
+    if not font_path.exists():
+        print(
+            f"demo-gif: the vendored font {font_path} is missing, so the frames "
+            "cannot be drawn. Restore it from git: "
+            "`git checkout -- screenshots/fonts`.",
+            file=sys.stderr,
+        )
+        return 1
 
     with tempfile.TemporaryDirectory(prefix="onepipeline-gif-") as scratch:
         scratch = Path(scratch)
@@ -93,8 +97,8 @@ def main() -> int:
         # The same normalisation the stills get, for the same reason: the raw
         # stream carries this machine's temporary paths, the doubles' pids and
         # the session tokens `onevcs` minted for this one run.
-        stream = shotnorm.realign(
-            shotnorm.Normaliser(
+        stream = normalise.realign(
+            normalise.Normaliser(
                 {
                     str(world.root / "onevcs-home"): "/home/you/.onevcs",
                     str(world.runs): "/home/you/onepipeline/runs",
@@ -107,7 +111,13 @@ def main() -> int:
 
     lines = [line.rstrip("\n") for line in stream.splitlines()]
     if not lines:
-        print("demo-gif: the attached run printed nothing to animate", file=sys.stderr)
+        print(
+            "demo-gif: the attached run printed nothing to animate, which means "
+            "`start --attach` streamed no line at all. Run "
+            "`just test-e2e shipped` to drive the same plan through the suite and "
+            "see what refused it.",
+            file=sys.stderr,
+        )
         return 1
     frames = build_frames(lines)
     out.parent.mkdir(parents=True, exist_ok=True)

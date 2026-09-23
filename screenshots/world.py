@@ -1,36 +1,20 @@
 #!/usr/bin/env python3
-"""The offline world the visual-docs capture drives, and the normalisation it needs.
+"""The offline world the capture drives, and the journey it drives through it.
 
-Shared by `scripts/screenshots.py` (the hash-gated stills) and
-`scripts/demo-gif.py` (the animated README hero), so the two scenes come from
-one recipe rather than from two that can disagree about what the run was.
-
-**Everything is real except two subprocesses.** The compiled `onepipeline`
-binary is driven as a subprocess; `onetaskgraph` is the real released binary
-reading the shipped `examples/plan-store` byte for byte; `onevcs` is linked into
-that binary and drives real git against real bare origins on disk. The two
-substitutions are the ones this repository's own offline tier makes, at the two
-process boundaries that would otherwise cost a paid model turn or a network
-call: `fake-oneagentgraph` at `ONEPIPELINE_ONEAGENTGRAPH_BIN` and `fake-gh` at
-`onevcs`'s own `ONEVCS_GH`, both built from `crates/testfakes`. No model call,
-no harness turn, no network, no credential, no real GitHub.
-
-**Every wait polls a file.** `tests/AGENTS.md` carries exactly one rule for this
-repository's suite — a wait polls files, and a wall-clock deadline is the
-backstop for the product's own asynchrony rather than the signal — and a capture
-that slept to let output settle is precisely what that note forbids. Each wait
-below names the file it watches and the record it is waiting for; the deadline
-only decides how long a world that never gets there takes to fail.
+Which fixtures this composes and why, and the rule that every wait here polls a
+file rather than a clock, are `AGENTS.md` beside it. Shared by `capture.py` and
+`demo-gif.py` so the stills and the animated hero cannot disagree about what run
+they photographed.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -66,13 +50,41 @@ HOST = "shots-host"
 
 #: How long a world that never reaches a record takes to fail. The backstop,
 #: never the signal.
-DEADLINE_SECONDS = float(os.environ.get("SHOTS_DEADLINE_SECONDS", "180"))
+DEFAULT_DEADLINE_SECONDS = 180.0
+
+
+def _deadline() -> float:
+    """`SHOTS_DEADLINE_SECONDS`, refused rather than coerced.
+
+    Read leniently, a malformed or non-positive value becomes a backstop of zero
+    — every wait fails on its first poll — or of infinity, where a world that
+    never gets there hangs the capture instead of failing it.
+    """
+    stated = os.environ.get("SHOTS_DEADLINE_SECONDS")
+    if stated is None or stated.strip() == "":
+        return DEFAULT_DEADLINE_SECONDS
+    try:
+        seconds = float(stated)
+    except ValueError:
+        seconds = float("nan")
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise SystemExit(
+            f"screenshots: SHOTS_DEADLINE_SECONDS is {stated!r}, which is not a "
+            f"positive number of seconds. Give it one (the default is "
+            f"{DEFAULT_DEADLINE_SECONDS:g}), or unset it: "
+            f"`unset SHOTS_DEADLINE_SECONDS`."
+        )
+    return seconds
+
+
+DEADLINE_SECONDS = _deadline()
 
 #: How often a wait re-reads the file it is watching.
 POLL_SECONDS = 0.02
 
 
 def repo_root() -> Path:
+    """The repository root: this file's directory is `screenshots/` under it."""
     return Path(__file__).resolve().parent.parent
 
 
@@ -114,8 +126,9 @@ class World:
         if not onetaskgraph:
             raise SystemExit(
                 "screenshots: no `onetaskgraph` on PATH. The capture reads every plan "
-                "through the real binary, exactly as the e2e suite does — install it "
-                "with `just bootstrap`, or set SHOTS_ONETASKGRAPH_BIN."
+                "through the real binary, exactly as the e2e suite does. Install it "
+                "with `just bootstrap`, or point SHOTS_ONETASKGRAPH_BIN at an "
+                "executable one, then re-run `just screenshots`."
             )
         env = dict(os.environ)
         env.update(
@@ -168,8 +181,11 @@ class World:
         identities = example_repositories()
         if not identities:
             raise SystemExit(
-                "screenshots: no example task names a repository, so the world "
-                "registers nothing and the launch would be refused"
+                "screenshots: no task under examples/plan-store/tasks/ carries a "
+                "`repositories:` list, so this world registers no identity and the "
+                "launcher refuses the run before it maps the plan. Restore the "
+                "repository the example tasks target, or point this capture at a "
+                "plan that names one."
             )
         for nth, identity in enumerate(identities):
             checkout = self.root / f"repo-{nth}"
@@ -269,9 +285,13 @@ class World:
             if time.monotonic() > deadline:
                 raise Waited(
                     f"screenshots: the world never reached {what} within "
-                    f"{DEADLINE_SECONDS:g}s. The deadline is the backstop, so this "
-                    "is a world that did not get there rather than one that was "
-                    "too slow."
+                    f"{DEADLINE_SECONDS:g}s. The deadline is the backstop rather "
+                    "than the signal, so this is a world that did not get there. "
+                    "Read the run's own journal and driver log under the runs root "
+                    "named in the environment above — `events.jsonl` says how far "
+                    "the run got and `driver.log` why it stopped — and raise "
+                    "SHOTS_DEADLINE_SECONDS only if the run is genuinely still "
+                    "moving."
                 )
             time.sleep(POLL_SECONDS)
 
@@ -320,7 +340,9 @@ def run(argv: list[str], env: dict) -> None:
     done = subprocess.run(argv, env=env, capture_output=True, text=True)
     if done.returncode != 0:
         raise SystemExit(
-            f"screenshots: {' '.join(argv)} failed ({done.returncode}):\n{done.stderr}"
+            f"screenshots: building the capture's world failed at "
+            f"`{' '.join(argv)}` ({done.returncode}). Fix what its own error "
+            f"below names, then re-run `just screenshots`:\n{done.stderr}"
         )
 
 
@@ -429,7 +451,8 @@ def drive(world: World, attach_log: Path, while_held=None) -> None:
     results = world.cli("results", PLAN_RUN)
     if not results.stdout.startswith(f"{PLAN_RUN}  complete"):
         raise SystemExit(
-            "screenshots: the driven run did not reach `complete`:\n" + results.stdout
+            "screenshots: the driven run did not reach `complete`, so the scenes "
+            "would photograph a run that failed. " + REPAIR + "\n" + results.stdout
         )
 
 
@@ -489,14 +512,28 @@ def expect(done: subprocess.CompletedProcess, code: int, what: str) -> None:
     _expect(done, code, what)
 
 
+#: What to do about any journey step that ended wrong. The journey is this
+#: repository's own offline fixtures driving its own binary, so a step that
+#: ended wrong is a fixture or a binary that moved rather than a flake.
+REPAIR = (
+    "The capture drives the real binary against the fixtures in "
+    "examples/plan-store and crates/testfakes. Read the output above, then "
+    "either rebuild (`cargo build --release --locked`) if the binary is stale, "
+    "or fix the fixture the step names. `just test-e2e shipped` drives the same "
+    "plan through the suite and fails with more detail."
+)
+
+
 def _expect(done: subprocess.CompletedProcess, code: int, what: str) -> None:
     if done.returncode != code:
         raise SystemExit(
-            f"screenshots: `{what}` exited {done.returncode}, expected {code}:\n"
-            f"{done.stdout}\n{done.stderr}"
+            f"screenshots: `{what}` exited {done.returncode}, expected {code}. "
+            f"{REPAIR}\n{done.stdout}\n{done.stderr}"
         )
 
 
 def _expect_code(actual: int, code: int, what: str) -> None:
     if actual != code:
-        raise SystemExit(f"screenshots: `{what}` exited {actual}, expected {code}")
+        raise SystemExit(
+            f"screenshots: `{what}` exited {actual}, expected {code}. {REPAIR}"
+        )

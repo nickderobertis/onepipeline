@@ -56,12 +56,6 @@ paths = [
   "graphs/**",
   "crates/testfakes/**",
   "tests/recorded/run-root/**",
-  "scripts/screenshots.sh",
-  "scripts/screenshots.py",
-  "scripts/shotworld.py",
-  "scripts/shotnorm.py",
-  "scripts/host-arch.sh",
-  "scripts/bless-baseline.sh",
   "screenshots/**",
   "screencomp.toml",
 ]

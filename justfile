@@ -441,7 +441,7 @@ screenshots-gif:
     @python3 -c "import PIL" 2>/dev/null || { echo "Pillow not installed: pip install Pillow" >&2; exit 1; }
     cargo build --release --locked --bin onepipeline --package onevcs --bin onevcs
     cargo build --release --locked --package onepipeline-testfakes
-    python3 scripts/demo-gif.py
+    python3 screenshots/demo-gif.py
 
 # Refresh the committed digest baseline from a fresh capture, after an INTENDED
 # output change. Rewrites this host's lane only (scripts/host-arch.sh names it,
@@ -458,11 +458,11 @@ screenshots-bless:
 # in nx.json enumerates every path that can change a rendered shot — rather than
 # being a command nothing knows the inputs of.
 _visual-docs-capture:
-    @bash scripts/screenshots.sh
+    @bash screenshots/capture.sh
 
 _visual-docs-bless:
-    @bash scripts/bless-baseline.sh
-    @echo "baseline refreshed for the $(bash scripts/host-arch.sh) lane; commit shots/baseline/ + screenshots/images/"
+    @bash screenshots/bless.sh
+    @echo "baseline refreshed for the $(bash screenshots/host-arch.sh) lane; commit shots/baseline/ + screenshots/images/"
 
 # Kept OUT of `check` on purpose: the deterministic gate stays offline and
 # credential-free. Config is the composed `llmlint.yml`.

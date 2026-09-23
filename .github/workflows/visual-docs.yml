@@ -28,12 +28,16 @@ on:
     # grow the branch without bound (keeps the 20 most recent versions).
     - cron: "19 5 1 * *"
 
-permissions:
-  contents: write       # push the gh-pages gallery
-  pull-requests: write  # post the diff comment
-
 jobs:
   visual-docs:
+    # Granted on the job rather than the workflow, so nothing outside this one
+    # call carries either write. Neither can be narrowed further by event:
+    # `permissions` values are literals — GitHub accepts no expression there — so
+    # a `pull_request`-only `pull-requests: write` would have to be a second job
+    # duplicating this call, and the duplicate is the larger hazard.
+    permissions:
+      contents: write       # push the gh-pages gallery
+      pull-requests: write  # post the sticky diff comment on a pull request
     uses: nickderobertis/screencomp/.github/workflows/visual-docs-reusable.yml@v0.4.8
     with:
       screencomp-version: v0.4.8
@@ -63,11 +67,19 @@ jobs:
       # binary, exactly as the e2e suite does.
       #
       # The reusable workflow exports $SHOTS_OUT as shots/current/<arch>;
-      # scripts/screenshots.sh writes captures.json and the SVGs there.
+      # screenshots/capture.sh writes captures.json and the SVGs there.
+      # llmlint: ignore-block[work_goes_through_command_surface] this block runs inside a
+      # bare `rust:1-bookworm` container that has neither `just` nor Node, so neither
+      # `just screenshots-tools` (which also needs Go) nor `just bootstrap` (which
+      # installs rustup components, cargo-nextest, cargo-llvm-cov and strace, none of
+      # which a capture uses, and which fans out through Nx) can be called here. Each
+      # line is the body of the recipe that owns it, reading its version from that
+      # recipe's own single source, so the command surface still decides what is
+      # installed — `just screenshots-tools` installs this same `freeze` and
+      # `_ensure-onetaskgraph` this same release.
       capture-command: |
         export RUSTUP_TOOLCHAIN="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
-        bash scripts/install-freeze.sh
+        bash screenshots/install-freeze.sh
         cargo install onetaskgraph --locked \
           --version "$(sed -n 's/^onetaskgraph-version *:= *"\([^"]*\)".*/\1/p' justfile)"
-        # llmlint: ignore[work_goes_through_command_surface] no `just` in this container; `just screenshots` wraps exactly this line
-        bash scripts/screenshots.sh
+        bash screenshots/capture.sh
