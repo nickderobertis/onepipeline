@@ -50,7 +50,6 @@ class Normaliser:
         self.paths = sorted(paths.items(), key=lambda pair: -len(pair[0]))
         self.seen: dict[str, dict[str, str]] = {}
 
-    # -- ordinal maps -----------------------------------------------------
     def _ordinal(self, family: str, key: str, make) -> str:
         table = self.seen.setdefault(family, {})
         if key not in table:

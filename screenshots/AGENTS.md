@@ -100,49 +100,45 @@ document.
 
 ## Commands
 
-| command | what it does |
-| --- | --- |
-| `just screenshots-tools` | install the pinned `freeze` (needs Go) |
-| `just screenshots` | capture: build, drive, render to `shots/current/<arch>/` and `images/` |
-| `just screenshots-gif` | regenerate `images/demo.gif` (needs Python 3 + Pillow) |
-| `just screenshots-bless` | after an **intended** output change: recapture and rewrite this host's lane |
+`just --list` is the index; the four are `screenshots-tools`, `screenshots`,
+`screenshots-gif` and `screenshots-bless`. What is not discoverable from there:
+**bless only after an intended output change**, and commit the refreshed
+baseline with `images/` in the same commit, because CI compares the two against
+each other.
 
-`just screenshots` is the `onepipeline-visual-docs` project's own target, so its
-inputs are declared (`visualDocsSource` in `nx.json`) and a slow check needing two
-third-party tools sits behind its own edge rather than inside the CLI
-application's dependency surface. That project declares no `check`, `build` or
-`test` target because it has none — declaring the uniform set and running nothing
-would drop it out of every repo-wide verb while appearing covered by it.
+`just screenshots` is the `onepipeline-visual-docs` project's own target rather
+than the CLI application's, so a slow check needing two third-party tools sits
+behind its own edge and its inputs are declared (`visualDocsSource` in
+`nx.json`). That project declares no `check`, `build` or `test` target because it
+has none — declaring the uniform set and running nothing would drop it out of
+every repo-wide verb while appearing covered by it.
 
-Committed: `shots/baseline/<arch>.json`, `images/*.svg`, `images/demo.gif`.
-Gitignored: `shots/current/`, `shots/review/`, `shots/verify/`. **No image lives
-under `docs/`**: that directory holds the contract and its divergences, both
-machine-consumed and both named in a cached build input.
+**No image lives under `docs/`**: that directory holds the contract and its
+divergences, both machine-consumed and both named in a cached build input.
 
 ## The gate, and activating its local half
 
-CI fails on drift (`fail-on-drift: true`). `.githooks/pre-push` is the local
-half: it re-captures only when a `[guard].paths` file changes, and on drift
-regenerates this lane, builds `shots/review/index.html`, and **blocks the push**.
+CI fails on drift. `.githooks/pre-push` is the local half: it re-captures only
+when a `[guard].paths` file changes and **blocks the push** on drift, after
+regenerating this lane and building a review gallery.
 
 `core.hooksPath` is per-clone state and is never committed, so a committed guard
-that nothing activates runs nothing. **`just bootstrap` activates it** — it
-depends on `_hooks`, which sets `core.hooksPath` to `.githooks`, and
-`tests/provisioning.rs` drives that recipe over a fresh clone and asserts the
-result. `screencomp doctor --env` reports whether this clone has it.
-
+nothing activates runs nothing. **`just bootstrap` activates it**, and
+`tests/provisioning.rs` drives that over a fresh clone and asserts what git then
+resolves — so this is a promise with a test behind it rather than a convention.
 The directory carries the visual guard **and nothing else**: `just gate` stays
-unhooked, which is how this repository already was, and nothing was displaced
-because it installed no git hook before.
+unhooked, as it already was, and nothing was displaced because this repository
+installed no git hook before.
 
 ## When the output legitimately changes
 
 Editing what a verb prints, the CLI surface, the order the engine writes events
 in, the shipped example plan, the doubles, or the capture will move the SVGs.
-Run `just screenshots-bless` and commit the baseline with `images/`. Bumping
-`freeze-version` or the font reflows every shot — bless once.
+That is expected — bless, and commit the baseline with the images.
 
-The GIF is **not** hash-gated, so nothing tells you when it has gone stale:
-regenerate it with `just screenshots-gif` whenever what the attached stream
-prints changes — the kinds in `src/event.rs`, the line `src/views.rs` renders one
-as, or the plan the journey drives.
+**The GIF's own drift gate is the hash-gated `monitor` scene.** The attached
+stream is `views::monitor`'s own lines, so anything that changes what the hero
+shows changes that scene too and fails CI. What the GIF is not is
+*byte*-reproducible — across Pillow versions it is not, which is why it is
+rendered on demand rather than hashed — so a red `monitor` is the signal to run
+`just screenshots-gif` and commit the new hero beside the new baseline.

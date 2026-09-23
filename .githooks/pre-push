@@ -47,9 +47,9 @@ if ! printf '%s\n' "$LANES" | grep -qxF "$LANE"; then
   echo "          with 'just screenshots-bless', and commit shots/baseline/$LANE.json." >&2
   exit 1
 fi
-MANIFEST="shots/baseline/${LANE}.json"     # the lane's committed baseline
-GALLERY="shots/review"                     # [guard].gallery (review output)
-CURRENT="shots/current"                    # capture root, mirrors visual-docs.yml
+MANIFEST="shots/baseline/${LANE}.json"
+GALLERY="shots/review"
+CURRENT="shots/current"
 
 # No-op under CI: the visual-docs workflow is the source of truth there.
 [ -n "${CI:-}" ] && exit 0

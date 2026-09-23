@@ -84,13 +84,7 @@ def main() -> int:
             )
             return 1
 
-    # Only what a previous capture of this directory wrote is removed. A
-    # recursive delete of whatever `$SHOTS_OUT` named would make an environment
-    # variable — set by a workflow, a hook, or a shell — the thing deciding what
-    # gets destroyed, over a path this program never validated.
     out.mkdir(parents=True, exist_ok=True)
-    for stale in [*out.glob("*.svg"), out / "captures.json"]:
-        stale.unlink(missing_ok=True)
     images = REPO / "screenshots" / "images"
     images.mkdir(parents=True, exist_ok=True)
 
@@ -101,6 +95,10 @@ def main() -> int:
     index = []
     for name, text in scenes:
         image = f"{name}.svg"
+        # Written over by name. Nothing here removes a file it is not about to
+        # write: `$SHOTS_OUT` comes from a workflow, a hook or a shell, and a
+        # sweep of whatever it happened to name would make an environment
+        # variable the thing deciding what gets destroyed.
         render(text, out / image)
         shutil.copy2(out / image, images / image)
         index.append(
@@ -112,6 +110,9 @@ def main() -> int:
             }
         )
     index.sort(key=lambda shot: (shot["name"], json.dumps(shot["toggles"], sort_keys=True)))
+    # Rewritten whole, so a scene that has been removed leaves the index on
+    # this run even if its old image file is still on disk: `captures.json` is
+    # what screencomp classifies against, and it lists exactly what was captured.
     (out / "captures.json").write_text(
         json.dumps({"schema": 1, "shots": index}, indent=2) + "\n"
     )

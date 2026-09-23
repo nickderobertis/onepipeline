@@ -18,7 +18,6 @@ import subprocess
 import time
 from pathlib import Path
 
-# --- The journey's fixed vocabulary -----------------------------------------
 # The shipped plan the capture drives, and the nodes the journey names. Read
 # here and nowhere else, so a rename in the example store fails the capture
 # loudly instead of quietly photographing a different run.
@@ -102,7 +101,6 @@ class World:
         self.fakes = root / "fakes"
         self.store = root / "store"
 
-    # -- building ---------------------------------------------------------
     def build(self) -> None:
         if self.root.exists():
             shutil.rmtree(self.root)
@@ -237,7 +235,6 @@ class World:
         """Let a held dispatch finish, the way the doubles' own hold is released."""
         self.script(f"{key}.go", "")
 
-    # -- reading ----------------------------------------------------------
     @property
     def run_root(self) -> Path:
         return self.runs / PLAN_RUN
@@ -252,7 +249,6 @@ class World:
             **kwargs,
         )
 
-    # -- waiting ----------------------------------------------------------
     def until_journal(self, kind: str, node: str | None = None, run: str | None = None) -> None:
         """Wait until the run's journal carries `kind` (about `node`, when named)."""
         journal = (self.runs / (run or PLAN_RUN)) / "events.jsonl"
@@ -370,7 +366,6 @@ def clean_environment() -> None:
         del os.environ[name]
 
 
-# --- The journey -------------------------------------------------------------
 
 
 def drive(world: World, attach_log: Path, while_held=None) -> None:

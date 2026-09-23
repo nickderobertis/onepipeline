@@ -31,10 +31,15 @@ on:
 jobs:
   visual-docs:
     # Granted on the job rather than the workflow, so nothing outside this one
-    # call carries either write. Neither can be narrowed further by event:
-    # `permissions` values are literals — GitHub accepts no expression there — so
-    # a `pull_request`-only `pull-requests: write` would have to be a second job
-    # duplicating this call, and the duplicate is the larger hazard.
+    # call carries either write.
+    #
+    # llmlint: ignore[least_privilege_grants] neither grant can be narrowed by event here.
+    # `permissions` values are literals — GitHub accepts no expression in them — and a
+    # reusable-workflow call takes its permissions from the calling job, so a
+    # `pull_request`-only `pull-requests: write` means a second job duplicating this whole
+    # `with:` block. That duplicate drifts, and it renames the check this workflow reports,
+    # which is the context branch protection is meant to require. The narrower grant is not
+    # worth a second copy of the call that produces it.
     permissions:
       contents: write       # push the gh-pages gallery
       pull-requests: write  # post the sticky diff comment on a pull request
@@ -69,10 +74,17 @@ jobs:
       # The reusable workflow exports $SHOTS_OUT as shots/current/<arch>;
       # screenshots/capture.sh writes captures.json and the SVGs there.
       capture-command: |
-        export RUSTUP_TOOLCHAIN="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+        RUSTUP_TOOLCHAIN="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+        # One channel, or none: read leniently, an empty value silently builds with the
+        # image's own toolchain and a two-line one exports a string rustup cannot resolve.
+        if [ "$(printf '%s' "$RUSTUP_TOOLCHAIN" | wc -l)" -ne 0 ] || [ -z "$RUSTUP_TOOLCHAIN" ]; then
+          echo "rust-toolchain.toml does not name exactly one channel: '$RUSTUP_TOOLCHAIN'" >&2
+          exit 1
+        fi
+        export RUSTUP_TOOLCHAIN
         # llmlint: ignore[work_goes_through_command_surface] this container is a bare `rust:1-bookworm` with no `just`; this is the body of `just screenshots-tools`, which additionally needs Go, and it reads the same `freeze-version` line that recipe does
         bash screenshots/install-freeze.sh
-        # llmlint: ignore[work_goes_through_command_surface] the body of `_ensure-onetaskgraph`, reading the same `onetaskgraph-version` line; `just bootstrap` is the recipe that owns it and it additionally installs rustup components, cargo-nextest, cargo-llvm-cov and strace, none of which a capture uses, through Nx, which this container has no Node for
+        # llmlint: ignore[work_goes_through_command_surface, diagnostics_error_or_absent] the body of `_ensure-onetaskgraph`, reading the same `onetaskgraph-version` line; `just bootstrap` is the recipe that owns it and additionally installs rustup components, cargo-nextest, cargo-llvm-cov and strace, none of which a capture uses, through Nx, which this container has no Node for. Its diagnostics are a published sibling's own: `-D warnings` over another crate's source fails this capture on a warning nobody here can fix, and that crate's own gate is where they are answered
         cargo install onetaskgraph --locked \
           --version "$(sed -n 's/^onetaskgraph-version *:= *"\([^"]*\)".*/\1/p' justfile)"
         # llmlint: ignore[work_goes_through_command_surface] no `just` in this container; `just screenshots` wraps exactly this line

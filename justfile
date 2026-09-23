@@ -411,7 +411,6 @@ session-setup:
 setup-llmlint:
     ./scripts/setup-llmlint.sh
 
-# --- Visual docs (informational; never part of `check` or CI's gate) ---------
 # Deterministic SVGs of the real CLI's real output, rendered by `freeze` from a
 # vendored pinned font and gated, galleried and PR-commented by screencomp. What
 # the scenes are and why each one documents its surface is screenshots/AGENTS.md.
@@ -439,8 +438,8 @@ screenshots:
 screenshots-gif:
     @command -v python3 >/dev/null || { echo "python3 not found: needed to render the demo GIF" >&2; exit 1; }
     @python3 -c "import PIL" 2>/dev/null || { echo "Pillow not installed: pip install Pillow" >&2; exit 1; }
-    cargo build --release --locked --bin onepipeline --package onevcs --bin onevcs
-    cargo build --release --locked --package onepipeline-testfakes
+    RUSTFLAGS="-D warnings" cargo build --release --locked --bin onepipeline --package onevcs --bin onevcs
+    RUSTFLAGS="-D warnings" cargo build --release --locked --package onepipeline-testfakes
     python3 screenshots/demo-gif.py
 
 # Refresh the committed digest baseline from a fresh capture, after an INTENDED
