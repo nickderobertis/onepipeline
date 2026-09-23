@@ -11,6 +11,13 @@
 //!
 //! Both drive the real `screenshots/world.py` as a subprocess, against real
 //! `git`, exactly as `screenshots/capture.py` imports and calls it.
+//!
+//! The third journey is over what the capture recipes *produce* rather than how
+//! they run: the README's images. `just screenshots` and `just screenshots-gif`
+//! both end by writing into `screenshots/images/`, and what makes either run
+//! worth making is that the README then resolves to what it wrote. That needs
+//! neither `freeze` nor `screencomp` nor Pillow — it reads the committed tree —
+//! so, like the two above, it is not excused from this tier.
 
 #[cfg(unix)] // The capture is `capture.sh` over `capture.py`; it runs where they do.
 mod unix {
@@ -212,6 +219,125 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
             "[]",
             "the capture left a GIT_* setting of the caller's standing; the world states \
              the whole of its own git environment and inherits none of it:\n{report}"
+        );
+    }
+
+    /// Every image `README.md` points at, in the order the README names them.
+    ///
+    /// Markdown's inline image is `![alt](path)`, and every image in this README
+    /// is that form; a reference-style one would be a link this returns nothing
+    /// for, which the "first image" assertion below would then fail on rather
+    /// than pass over.
+    fn readme_images(readme: &str) -> Vec<(usize, String, String)> {
+        let mut found = Vec::new();
+        let mut rest = readme;
+        let mut consumed = 0usize;
+        while let Some(open) = rest.find("![") {
+            let after_open = open + 2;
+            let Some(alt_end) = rest[after_open..].find("](") else {
+                break;
+            };
+            let alt = &rest[after_open..after_open + alt_end];
+            let path_start = after_open + alt_end + 2;
+            let Some(path_end) = rest[path_start..].find(')') else {
+                break;
+            };
+            let path = &rest[path_start..path_start + path_end];
+            found.push((consumed + open, alt.to_string(), path.to_string()));
+            consumed += path_start + path_end;
+            rest = &rest[path_start + path_end..];
+        }
+        found
+    }
+
+    /// The README's pictures are the whole point of the capture, and nothing
+    /// else checks that the files it writes are the files the README reads.
+    ///
+    /// Three things are asserted, because three different edits break them
+    /// separately: that every referenced image is committed here (a capture
+    /// whose output was never added leaves a README full of broken images on
+    /// the registries, which render it from the published tarball); that the
+    /// hero is the animation rather than a still (`just screenshots-gif` is the
+    /// only recipe that writes it, and a still would silently satisfy every
+    /// other check); and that the hero is *animated*, which is the one property
+    /// of that file no hash gate covers — the GIF is deliberately outside the
+    /// baseline, so a one-frame render is otherwise nobody's failure.
+    #[test]
+    fn the_readme_reads_the_images_the_capture_recipes_write() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let readme = fs::read_to_string(root.join("README.md")).expect("the README is readable");
+        let images = readme_images(&readme);
+
+        assert!(
+            !images.is_empty(),
+            "the README references no images at all, so either the capture's output was \
+             dropped from it or this journey no longer knows how it names one"
+        );
+
+        // One `ls-files` for the whole README rather than one per image: what is
+        // asked is membership, and `--error-unmatch` answers it by exiting
+        // non-zero, which `git` above turns into a panic of its own wording.
+        let listed = git(&["ls-files"], root);
+        let tracked: Vec<String> = String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+
+        for (_, alt, path) in &images {
+            let on_disk = root.join(path);
+            assert!(
+                on_disk.is_file(),
+                "the README shows `{path}`, which no file in this tree resolves to — a \
+                 capture wrote it and it was never committed, so the rendered README is \
+                 broken wherever it is read from the tree"
+            );
+            assert!(
+                tracked.iter().any(|t| t == path),
+                "`{path}` exists here but git does not track it, so it is absent from the \
+                 published tarball the registries render the README from"
+            );
+            assert!(
+                !alt.trim().is_empty(),
+                "the README's image `{path}` carries no alt text, so a reader who cannot \
+                 see it is told nothing about what is in the picture"
+            );
+        }
+
+        let (at, _, first) = &images[0];
+        assert_eq!(
+            first, "screenshots/images/demo.gif",
+            "the README's first image is `{first}` rather than the animated hero; the \
+             recording of an attached run driving a plan to settlement is what a reader \
+             deciding whether to install this sees before any prose"
+        );
+        let title_end = readme.find('\n').expect("the README has a title line");
+        let between = readme[title_end..*at].trim();
+        assert!(
+            between.is_empty(),
+            "prose has been inserted between the README's title and its hero image, which \
+             now reads: {between:?}"
+        );
+
+        // The hero, structurally. Pillow writes a Graphic Control Extension
+        // ahead of each frame of an animation and a `NETSCAPE2.0` application
+        // extension to say it loops; a single still saved to the same path has
+        // neither, and `GIF89a` is the only header that carries either.
+        let hero = fs::read(root.join(first)).expect("the README's hero image is readable");
+        assert!(
+            hero.starts_with(b"GIF89a"),
+            "the README's hero is not a GIF89a file, so whatever wrote it was not \
+             `just screenshots-gif`"
+        );
+        let frames = hero.windows(3).filter(|w| *w == [0x21, 0xF9, 0x04]).count();
+        assert!(
+            frames > 1,
+            "the README's hero carries {frames} frame control block(s), so it is a still \
+             rather than a recording of a run"
+        );
+        assert!(
+            hero.windows(11).any(|w| w == b"NETSCAPE2.0"),
+            "the README's hero carries no loop extension, so it plays once and stops \
+             wherever the reader's renderer leaves it"
         );
     }
 }
