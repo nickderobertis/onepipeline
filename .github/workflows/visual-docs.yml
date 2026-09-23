@@ -86,12 +86,12 @@ jobs:
         export RUSTUP_TOOLCHAIN
         # llmlint: ignore[work_goes_through_command_surface] this container is a bare `rust:1-bookworm` with no `just`; this is the body of `just screenshots-tools`, which additionally needs Go, and it reads the same `freeze-version` line that recipe does
         bash screenshots/install-freeze.sh
-        # llmlint: ignore[work_goes_through_command_surface, diagnostics_error_or_absent] the body of `_ensure-onetaskgraph`, reading the same `onetaskgraph-version` line; `just bootstrap` is the recipe that owns it and additionally installs rustup components, cargo-nextest, cargo-llvm-cov and strace, none of which a capture uses, through Nx, which this container has no Node for. Its diagnostics are a published sibling's own: `-D warnings` over another crate's source fails this capture on a warning nobody here can fix, and that crate's own gate is where they are answered
         store="$(sed -n 's/^onetaskgraph-version *:= *"\([^"]*\)".*/\1/p' justfile)"
         echo "$store" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' || {
           echo "the justfile does not name exactly one onetaskgraph release: '$store'" >&2
           exit 1
         }
+        # llmlint: ignore[work_goes_through_command_surface, diagnostics_error_or_absent] this is the body of `_ensure-onetaskgraph`, reading the same `onetaskgraph-version` line that recipe reads; `just bootstrap` owns it and additionally installs rustup components, cargo-nextest, cargo-llvm-cov and strace — none of which a capture uses — through Nx, which this container has no Node for. And the diagnostics are a published sibling's own: `-D warnings` over another crate's source fails this capture on a warning nobody here can fix, and that crate's own gate is where they are answered
         cargo install onetaskgraph --locked --version "$store"
         # llmlint: ignore[work_goes_through_command_surface] no `just` in this container; `just screenshots` wraps exactly this line
         bash screenshots/capture.sh

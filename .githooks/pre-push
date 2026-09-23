@@ -54,17 +54,19 @@ CURRENT="shots/current"
 # No-op under CI: the visual-docs workflow is the source of truth there.
 [ -n "${CI:-}" ] && exit 0
 
-# llmlint: ignore[cli_output_contract] a hook's exit status answers "may this push go",
-# not "did the guard run". Refusing every push made on a machine without an optional
-# third-party CLI — which `just check` deliberately does not install — would make a
-# developer's `git push` depend on a tool this repository does not provision, and the
-# visual-docs workflow gates the same capture on the pull request either way. The status
-# says the push may proceed and the message says the guard did not evaluate it, which are
-# two different facts; SCREENCOMP_GUARD_REQUIRE=1 is how a machine that *has* provisioned
-# it asks for the stricter answer.
+# llmlint: ignore-start[cli_output_contract] every ending below reports that the guard
+# could not evaluate this push and then lets the push through, and that is the contract a
+# git hook's status has: it answers "may this push go", not "did the guard run". The three
+# things that reach these endings — an optional third-party CLI this repository
+# deliberately does not install for `just check`, a `screencomp scope` that could not
+# answer, and git handing this hook something that is not an object name — are all
+# conditions under which refusing would make `git push` depend on tooling or on input the
+# developer did not choose, while the visual-docs workflow re-captures on the pull request
+# either way. The message says the guard did not evaluate it, which is the fact a reader
+# needs; SCREENCOMP_GUARD_REQUIRE=1 is how a machine that *has* provisioned the tool asks
+# for the stricter answer.
 #
 # Without the CLI the guard CANNOT evaluate the push, so do NOT skip silently.
-# Warn loudly and skip; set SCREENCOMP_GUARD_REQUIRE=1 to fail here instead.
 if ! command -v screencomp >/dev/null 2>&1; then
   {
     echo "pre-push: screencomp is NOT on PATH — the visual guard cannot run."
@@ -131,10 +133,6 @@ set -e
 case "$scope_status" in
   0) exit 0 ;;                            # nothing relevant: pass silently
   3) : ;;                                 # a relevant path matched: capture below
-  # llmlint: ignore[cli_output_contract] the same reading as the missing-CLI ending
-  # above: a third-party tool that could not answer is not this push's defect, and the
-  # workflow re-captures on the pull request regardless. Forcing the slow capture on an
-  # unreadable answer would instead make every push pay for a tool that is out of date.
   *)
     echo "pre-push: 'screencomp scope' failed (exit $scope_status); skipping the" >&2
     echo "          visual guard. Is screencomp current? The visual-docs workflow" >&2
@@ -142,6 +140,7 @@ case "$scope_status" in
     exit 0
     ;;
 esac
+# llmlint: ignore-end[cli_output_contract]
 
 if ! command -v freeze >/dev/null 2>&1; then
   echo "pre-push: a file that can change a rendered shot changed, and 'freeze' is" >&2

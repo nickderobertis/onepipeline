@@ -23,29 +23,106 @@ import subprocess
 import time
 from pathlib import Path
 
-# The shipped plan the capture drives, and the nodes the journey names. Read
-# here and nowhere else, so a rename in the example store fails the capture
-# loudly instead of quietly photographing a different run.
-PLAN_PROJECT = "plans:tracked-release"
-PLAN_RUN = "tracked-release"
-SMALL_PROJECT = "plans:single-node"
-SMALL_RUN = "single-node"
+def repo_root() -> Path:
+    """The repository root: this file's directory is `screenshots/` under it."""
+    return Path(__file__).resolve().parent.parent
 
-#: The two lifecycle dispatches the capture holds open. Holding them is what
-#: lets `status` be read with work genuinely in flight, gives `watch` something
-#: to return on, and — because they are released one at a time — fixes the order
-#: the two settle in, which a host would otherwise decide per run.
-HELD_DOCS = "docs"
-HELD_SERVICE = "service.implement"
 
-#: The one node of the smallest plan this repository ships. The capture drives
-#: that plan too, so the listing has a second project to group.
-SMALL_NODE = "cover-report-failures"
+# **Nothing below restates the fixtures.** Every plan id, run id and node id the
+# journey names is read out of the shipped `examples/plan-store` documents at
+# capture time, so a task that is renamed, regrouped or given another step moves
+# the capture with it instead of leaving a copy here to go stale. What is stated
+# is only *which* plan of that store this capture is about, by the role it plays
+# — the multi-node one and the smallest one — and each is resolved below.
 
-#: The human approvals the capture clears, in the order the plan reaches them.
-#: A planner clears these with `onepipeline attest`, exactly as the README
-#: documents; nothing here is a shortcut around the product.
-APPROVALS = ["design-approval", "service", "release-approval"]
+#: Where the shipped example store lives, relative to the repository root.
+STORE = Path("examples/plan-store")
+
+
+def _source() -> str:
+    """The one source the shipped store's own `onetaskgraph.yaml` declares."""
+    document = repo_root() / STORE / "onetaskgraph.yaml"
+    names = re.findall(r"^  ([A-Za-z0-9_-]+):$", document.read_text(), re.M)
+    if len(names) != 1:
+        raise SystemExit(
+            f"screenshots: {document} declares {len(names)} sources, and this "
+            "capture qualifies its plan ids with exactly one. Name which to use "
+            "here, or restore the store to a single source."
+        )
+    return names[0]
+
+
+#: The source every plan id below is qualified by.
+SOURCE = _source()
+
+
+def _plan_named(name: str) -> str:
+    """One shipped project document's `onepipeline.name`, refused if it moved."""
+    document = repo_root() / STORE / "projects" / f"{name}.md"
+    found = re.search(r'"onepipeline\.name":\s*"([^"]+)"', document.read_text())
+    if not found:
+        raise SystemExit(
+            f"screenshots: {document} no longer declares `onepipeline.name`, so the "
+            "capture cannot say which run it is about. Restore it, or point this "
+            "capture at a plan that has one."
+        )
+    return found.group(1)
+
+
+def _nodes_of(plan: str) -> dict[str, list[str]]:
+    """Each node id of a shipped plan, with the step ids it declares, in file order."""
+    nodes: dict[str, list[str]] = {}
+    for task in sorted((repo_root() / STORE / "tasks" / plan).glob("*.md")):
+        text = task.read_text()
+        node = re.search(r'"onepipeline\.id":\s*"([^"]+)"', text)
+        if not node:
+            continue
+        nodes[node.group(1)] = re.findall(r'^\s*-\s*"id":\s*"([^"]+)"', text, re.M)
+    if not nodes:
+        raise SystemExit(
+            f"screenshots: no task under {STORE}/tasks/{plan} declares an "
+            "`onepipeline.id`, so the plan has no node for the capture to name."
+        )
+    return nodes
+
+
+def _lifecycle_keys(plan: str) -> list[str]:
+    """The doubles' script key for each node that targets a repository.
+
+    A node's dispatch is scripted under its own id, and a node with steps under
+    `<node>.<first step>` — which is the key `crates/testfakes` derives from the
+    labels the engine passes it. Read off the documents so a plan that grew a
+    step is held open at the right key rather than at a name that no longer
+    dispatches anything.
+    """
+    keys = []
+    for task in sorted((repo_root() / STORE / "tasks" / plan).glob("*.md")):
+        text = task.read_text()
+        node = re.search(r'"onepipeline\.id":\s*"([^"]+)"', text)
+        if not node or "repositories:" not in text:
+            continue
+        steps = re.findall(r'^\s*-\s*"id":\s*"([^"]+)"', text, re.M)
+        keys.append(f"{node.group(1)}.{steps[0]}" if steps else node.group(1))
+    return keys
+
+
+#: The multi-node plan — six nodes, two human approvals, a lifecycle node with a
+#: human step — and the smallest one, which the capture also drives so the
+#: listing has a second project to group.
+PLAN = _plan_named("tracked-release")
+SMALL = _plan_named("single-node")
+PLAN_PROJECT = f"{SOURCE}:{PLAN}"
+PLAN_RUN = PLAN
+SMALL_PROJECT = f"{SOURCE}:{SMALL}"
+SMALL_RUN = SMALL
+
+#: The lifecycle dispatches the capture holds open. Holding them is what lets
+#: `status` be read with work genuinely in flight, gives `watch` something to
+#: return on, and — because they are released one at a time — fixes the order
+#: they settle in, which a host would otherwise decide per run.
+HELD = _lifecycle_keys(PLAN)
+#: Every node of the smallest plan, whose dispatches are scripted the same way.
+SMALL_KEYS = _lifecycle_keys(SMALL)
 
 #: The launching session and the host name every command runs under. Fixed
 #: rather than this machine's, because both print into a rendered view.
@@ -85,11 +162,6 @@ DEADLINE_SECONDS = _deadline()
 
 #: How often a wait re-reads the file it is watching.
 POLL_SECONDS = 0.02
-
-
-def repo_root() -> Path:
-    """The repository root: this file's directory is `screenshots/` under it."""
-    return Path(__file__).resolve().parent.parent
 
 
 class Waited(RuntimeError):
@@ -216,30 +288,22 @@ class World:
             )
 
     def _script_the_doubles(self) -> None:
-        # What each lifecycle worker "did": a file in the worktree, so the
-        # node's branch carries a diff and the node publishes rather than
-        # settling `empty-branch`.
-        self.script(f"{HELD_DOCS}.work", "The approved API and its rollout, documented.\n")
-        self.script(
-            f"{HELD_SERVICE}.work",
-            "The approved API and rollout behaviour, implemented.\n",
-        )
-        self.script(
-            f"{SMALL_NODE}.work",
-            "The reporting service's failure paths, covered.\n",
-        )
-        # And the holds: both lifecycle dispatches wait for a file this capture
-        # writes. That is what stands the run still while `status` and `watch`
-        # are read, and what makes the order the two settle in this capture's
-        # to state rather than the host's to decide.
-        self.script(f"{HELD_DOCS}.wait", "")
-        self.script(f"{HELD_SERVICE}.wait", "")
-        # Each held dispatch announces its member and opens its turn before it
-        # waits, as a real one does, so `status` read during the hold shows work
-        # that has said something rather than a dispatch that has recorded
-        # nothing yet.
-        self.script(f"{HELD_DOCS}.turn-open", "")
-        self.script(f"{HELD_SERVICE}.turn-open", "")
+        for key in HELD + SMALL_KEYS:
+            # What each lifecycle worker "did": a file in the worktree, so the
+            # node's branch carries a diff and the node publishes rather than
+            # settling `empty-branch`.
+            self.script(f"{key}.work", "What this node was asked for, delivered.\n")
+        for key in HELD:
+            # The holds. Each lifecycle dispatch of the multi-node plan waits
+            # for a file this capture writes, which is what stands the run still
+            # while `status` and `watch` are read and what makes the order they
+            # settle in this capture's to state rather than the host's.
+            self.script(f"{key}.wait", "")
+            # And each announces its member and opens its turn before it waits,
+            # as a real dispatch does, so a `status` read during the hold shows
+            # work that has said something rather than one that has recorded
+            # nothing yet.
+            self.script(f"{key}.turn-open", "")
 
     def script(self, name: str, body: str) -> None:
         (self.fakes / name).write_text(body)
@@ -459,8 +523,8 @@ def drive(world: World, attach_log: Path, while_held=None) -> None:
     )
     try:
         _clear_next_approval(world)
-        world.until_journal("node-dispatched", HELD_DOCS)
-        world.until_journal("node-dispatched", "service")
+        for key in HELD:
+            world.until_journal("node-dispatched", key.split(".", 1)[0])
         if while_held is not None:
             # Called with both lifecycle dispatches genuinely in flight. It may
             # release a hold itself — the `watch` scene does, because what it is
@@ -469,14 +533,15 @@ def drive(world: World, attach_log: Path, while_held=None) -> None:
             # nothing about the order the run settles in.
             while_held()
         # Released one at a time, each release waited out on the journal before
-        # the next, so the two lifecycle nodes settle in this order every run.
-        world.release(HELD_DOCS)
-        world.until_journal("node-settled", HELD_DOCS)
-        world.release(HELD_SERVICE)
-        # The lifecycle node's own human step, raised once its worker step has
-        # settled and cleared the same way the plan's node-level approvals are.
-        _clear_next_approval(world)
-        world.until_journal("node-settled", "service")
+        # the next, so the lifecycle nodes settle in this order every run. A
+        # node whose worker step is followed by a human one raises its own
+        # approval on the way, cleared exactly as the plan's node-level ones are.
+        for key in HELD:
+            node = key.split(".", 1)[0]
+            world.release(key)
+            if _pending_attestations(world.run_root / "events.jsonl") or "." in key:
+                _clear_next_approval(world)
+            world.until_journal("node-settled", node)
         started.wait(timeout=DEADLINE_SECONDS)
     finally:
         if started.poll() is None:

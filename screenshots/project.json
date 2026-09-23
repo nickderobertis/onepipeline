@@ -7,6 +7,7 @@
     "scope:docs",
     "lang:shell"
   ],
+  "//": "llmlint: ignore-file[new_projects_keep_the_graph_uniform] this project produces no artifact the repository ships or tests — its output is documentation images — so it declares no `build`, `test`, `lint` or `check` target rather than declaring the uniform set and running nothing in it, which would drop it out of every repo-wide verb while appearing covered by them. Naming the capture `build` instead would fan it into `just build`, which a clean clone must be able to run and which would then require `freeze` and `screencomp`, two third-party tools `just bootstrap` deliberately does not install.",
   "targets": {
     "screenshots": {
       "command": "just _visual-docs-capture",

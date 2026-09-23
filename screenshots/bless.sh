@@ -27,4 +27,11 @@ if [ ! -d "$current" ]; then
 fi
 
 lane="$(bash "$here/host-arch.sh")"
-screencomp manifest --input "$current" --arch "$lane" --output "shots/baseline/${lane}.json"
+if ! screencomp manifest --input "$current" --arch "$lane" \
+  --output "shots/baseline/${lane}.json"; then
+  echo "bless: screencomp could not write a baseline from the capture in" >&2
+  echo "       $current (its own message is above). The usual cause is a" >&2
+  echo "       capture that did not finish — re-run 'just screenshots' and" >&2
+  echo "       check it reports the scenes it wrote before blessing again." >&2
+  exit 1
+fi

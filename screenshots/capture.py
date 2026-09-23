@@ -35,12 +35,13 @@ from world import PLAN_RUN, SMALL_PROJECT, World
 
 REPO = world_module.repo_root()
 
-#: The recorded run the `telemetry` scene is read from, and the four settings
-#: the binary reads it as a finished run under. `tests/parity.rs` is the worked
-#: example and the offline contract; this is the same recipe, in Python.
-RECORDED_RUN = "onemessagebus-repair-2"
-RECORDING_HOST = "U-17UN402ICR95C"
-RECORDING_SESSION = "28f7a3f8-23c8-535f-bf37-c37d2dfb31bd"
+#: The recorded run the `telemetry` scene is read from. The **only** thing
+#: stated about it here is which directory it is; the host it was recorded on,
+#: the session that launched it and the pid of the driver that drove it are all
+#: read out of its own launch record below, because they are facts of that
+#: fixture and a copy of them here would go stale the day it is re-recorded.
+#: `tests/parity.rs` is the worked example and the offline contract.
+RECORDED = Path("tests/recorded/run-root")
 #: A pid no platform issues — above Linux's `PID_MAX_LIMIT` and macOS's
 #: `PID_MAX`, and not a multiple of four, which every Windows pid is — written
 #: over the recorded driver's, so the run reads as finished on any host.
@@ -264,7 +265,7 @@ def bounded_watch(world: World) -> str:
     )
     try:
         world.until_lines_matching(log, r"^-- watching ", 1)
-        world.release(world_module.HELD_DOCS)
+        world.release(world_module.HELD[0])
         watching.wait(timeout=world_module.DEADLINE_SECONDS)
     finally:
         if watching.poll() is None:
@@ -323,35 +324,53 @@ def telemetry_scene(scratch: Path, binaries: Path, normalise) -> str:
     finished here, and the sibling pointed at an executable that is not there so
     the provider-health block is silence rather than a probe of this machine.
     """
+    recorded = sorted((REPO / RECORDED).iterdir())
+    recorded = [entry for entry in recorded if entry.is_dir()]
+    if len(recorded) != 1:
+        raise SystemExit(
+            f"screenshots: {RECORDED} holds {len(recorded)} recorded runs, and "
+            "this scene is about one. Name which to photograph here."
+        )
+    source = recorded[0]
     root = scratch / "recorded" / "runs"
-    run = root / RECORDED_RUN
-    shutil.copytree(REPO / "tests" / "recorded" / "run-root" / RECORDED_RUN, run)
+    run = root / source.name
+    shutil.copytree(source, run)
     (run / "README.md").unlink(missing_ok=True)
     (run / "dispatches").mkdir(exist_ok=True)
     launch = run / "launch.json"
-    record = launch.read_text()
-    driver = '"pid": 3682555,'
-    if record.count(driver) != 1:
+    record = json.loads(launch.read_text())
+    try:
+        host = record["host"]
+        session = record["session"]
+        driver = f'"pid": {record["pid"]},'
+    except (KeyError, TypeError) as missing:
         raise SystemExit(
-            "screenshots: the launch record in "
-            "tests/recorded/run-root/onemessagebus-repair-2 no longer names its "
-            "driver's pid exactly once, so the copy cannot be made to read as "
-            "finished on this host. `tests/parity.rs` rewrites the same value and "
-            "carries the same assertion — update both together."
+            f"screenshots: {source}/launch.json no longer names the host, the "
+            f"launching session and the driver's pid ({missing}), which is what "
+            "lets this capture read the run as finished on any machine. "
+            "`tests/parity.rs` reads the same record — update both together."
+        ) from missing
+    text = launch.read_text()
+    if text.count(driver) != 1:
+        raise SystemExit(
+            f"screenshots: {source}/launch.json names its driver's pid "
+            f"{record['pid']} {text.count(driver)} times, and exactly "
+            "one is what can be rewritten to a pid no platform issues. Re-record "
+            "the run, or read it the way `tests/parity.rs` does."
         )
-    launch.write_text(record.replace(driver, f'"pid": {NO_PROCESS},'))
+    launch.write_text(text.replace(driver, f'"pid": {NO_PROCESS},'))
 
     env = dict(os.environ)
     env.update(
         {
             "ONEPIPELINE_RUNS_DIR": str(root),
-            "HOSTNAME": RECORDING_HOST,
-            "ONEPIPELINE_LAUNCHER_SESSION": RECORDING_SESSION,
+            "HOSTNAME": host,
+            "ONEPIPELINE_LAUNCHER_SESSION": session,
             "ONEPIPELINE_ONEAGENTGRAPH_BIN": NO_SIBLING,
         }
     )
     done = subprocess.run(
-        [str(binaries / "onepipeline"), "telemetry", RECORDED_RUN, "--breakdown"],
+        [str(binaries / "onepipeline"), "telemetry", run.name, "--breakdown"],
         env=env,
         capture_output=True,
         text=True,

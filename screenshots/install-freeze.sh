@@ -64,8 +64,14 @@ trap 'rm -rf "$tmp"' EXIT
 # against the release's own digest before anything unpacks it: a truncated
 # download or a substituted asset otherwise becomes a renderer this repository
 # hashes its whole visual baseline against.
-curl -fsSL "$release/$archive" -o "$tmp/$archive"
-curl -fsSL "$release/checksums.txt" -o "$tmp/checksums.txt"
+if ! curl -fsSL "$release/$archive" -o "$tmp/$archive" ||
+  ! curl -fsSL "$release/checksums.txt" -o "$tmp/checksums.txt"; then
+  echo "install-freeze: could not download freeze $version or its checksums from" >&2
+  echo "                $release. Check the release exists and that this machine" >&2
+  echo "                can reach github.com; on a host with Go and no egress to" >&2
+  echo "                releases, 'just screenshots-tools' builds it instead." >&2
+  exit 1
+fi
 # The exact filename field, never a substring of it: the release also publishes
 # `<archive>.sbom.json`, whose line a substring match picks up too, and
 # `sha256sum --check` then fails on a file this script never downloaded.
@@ -86,7 +92,13 @@ if ! (cd "$tmp" && sha256sum --check --status expected.txt); then
   exit 1
 fi
 
-tar -xzf "$tmp/$archive" -C "$tmp"
+if ! tar -xzf "$tmp/$archive" -C "$tmp"; then
+  echo "install-freeze: $archive verified against its checksum but did not" >&2
+  echo "                unpack (tar's message is above), so the release's" >&2
+  echo "                archive format has changed. Check the release at" >&2
+  echo "                $release and update this script." >&2
+  exit 1
+fi
 binary="$(find "$tmp" -type f -name freeze -perm -u+x | head -1)"
 if [ -z "$binary" ]; then
   echo "install-freeze: $archive carries no 'freeze' executable, so the release's" >&2
@@ -94,5 +106,16 @@ if [ -z "$binary" ]; then
   echo "                update this script." >&2
   exit 1
 fi
-install -m 0755 "$binary" "$into/freeze"
-freeze --version >&2
+if ! install -m 0755 "$binary" "$into/freeze"; then
+  echo "install-freeze: could not install the renderer into $into (the message" >&2
+  echo "                above is the system's). Pass a directory you can write" >&2
+  echo "                as the first argument and make sure it is on PATH." >&2
+  exit 1
+fi
+if ! "$into/freeze" --version >&2; then
+  echo "install-freeze: $into/freeze installed but will not run on this host," >&2
+  echo "                so the capture has no renderer. Check that the asset" >&2
+  echo "                matches this machine's architecture ($(uname -m)); if it" >&2
+  echo "                does, build it from source with 'just screenshots-tools'." >&2
+  exit 1
+fi

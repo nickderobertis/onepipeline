@@ -36,8 +36,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 REPO = world_module.repo_root()
 
-# The same window the still scenes are rendered in (`scripts/screenshots.py`
-# hands `freeze` this background), so the hero and the stills read as one set.
+# The window `capture.py` hands `freeze` for every still, so the hero and the
+# stills read as one set rather than as two tools' pictures.
 BG = (13, 17, 23)
 BAR = (22, 27, 34)
 FG = (201, 209, 217)
