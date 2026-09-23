@@ -1563,7 +1563,22 @@ fn converge(
                         None => state.graph.get(&node).and_then(crate::vcs::request_for),
                     };
                     let hold = request
-                        .and_then(|request| crate::vcs::workspace_capacity(&request).ok())
+                        .and_then(|request| match crate::vcs::workspace_capacity(&request) {
+                            Ok(capacity) => Some(capacity),
+                            // The refusal is said rather than dropped: the node is
+                            // queued again either way, but a hold that is absent
+                            // because nothing could be read is not one that is
+                            // absent because the identity had room.
+                            Err(why) => {
+                                eprintln!(
+                                    "onepipeline: cannot read what the '{}' workspace admits \
+                                     after its refusal of '{node}', so the node is queued again \
+                                     with no reading held: {why}",
+                                    request.repo
+                                );
+                                None
+                            }
+                        })
                         .map(|capacity| crate::pool::WorkspaceHold::of(&capacity));
                     workspaces.refused(&node, hold, resume);
                     // llmlint: ignore-end[changed_behavior_has_e2e]

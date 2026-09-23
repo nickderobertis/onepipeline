@@ -160,6 +160,7 @@ mod turns;
 // site the rule reads, and what it adds is only that the module belongs to this binary for
 // the same reason `mod listing` above does — what it exercises is `watchers`, `unwatched`,
 // `summary` and `views`, which any change under `src/` can move.
+mod unreadable_sessions;
 mod unwatched;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod views;
