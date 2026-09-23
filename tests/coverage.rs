@@ -8,7 +8,7 @@
 //! no profile to its name and every line of it counted as missed — and the 95%
 //! floor fails over code this run covered. `_crate-coverage-clean` is what stops
 //! it, by removing that directory whole before the first instrumented run, and
-//! the two tests below drive that recipe.
+//! the three tests below drive that recipe.
 //!
 //! This run's own is a *truncated profile*. The cancellation journeys kill
 //! instrumented processes, and one killed while the profiling runtime is still
@@ -20,7 +20,8 @@
 //! the recipe merges from — and the recipe is the assertion. Take
 //! `--failure-mode all` out of the justfile and it fails again.
 
-use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::{env, fs};
 
@@ -55,7 +56,7 @@ fn the_clean_step_removes_an_instrumented_binary_an_earlier_run_left() {
         stale.display()
     );
 
-    let cleaned = just(&["_crate-coverage-clean"], Some(&scratch));
+    let cleaned = just(&["_crate-coverage-clean"], Some(scratch.as_os_str()));
     assert!(
         cleaned.status.success(),
         "the clean step failed: {}",
@@ -97,14 +98,49 @@ fn the_clean_step_removes_the_directory_this_run_is_measured_from() {
         said(&evaluated)
     );
     let named = PathBuf::from(String::from_utf8_lossy(&evaluated.stdout).trim());
+    // Both ends resolved, so two spellings of one directory compare equal.
+    let resolve = |path: &PathBuf| {
+        path.canonicalize()
+            .unwrap_or_else(|e| panic!("{} does not resolve: {e}", path.display()))
+    };
     assert_eq!(
-        canonical(&named),
-        canonical(&measured),
+        resolve(&named),
+        resolve(&measured),
         "the clean step removes {}, but this run is measured from {} — so the \
          stale objects it exists to remove would stay",
         named.display(),
         measured.display()
     );
+}
+
+/// And it refuses a directory it should not remove rather than removing it.
+///
+/// The override above reaches `rm -rf` from the environment, so the recipe checks
+/// it first. Each value below is one a missing check would act on, and each is
+/// harmless if the check were gone — an empty value `rm -rf` ignores, a relative
+/// path under the repository root, and a top-level path nothing has created — so
+/// this journey cannot itself be the accident it guards against.
+#[test]
+fn the_clean_step_refuses_a_target_directory_it_should_not_remove() {
+    for refused in [
+        "",
+        "relative/dir",
+        "/onepipeline-coverage-clean-must-refuse-this",
+    ] {
+        let attempt = just(&["_crate-coverage-clean"], Some(OsStr::new(refused)));
+        assert!(
+            !attempt.status.success(),
+            "the clean step accepted {refused:?} as a directory to remove whole: {}",
+            said(&attempt)
+        );
+        let complaint = String::from_utf8_lossy(&attempt.stderr);
+        assert!(
+            complaint.contains(&format!("refusing to remove '{refused}'")),
+            "the refusal of {refused:?} does not name what it refused, so a run \
+             that set it wrong is left to guess: {}",
+            said(&attempt)
+        );
+    }
 }
 
 /// `INSTR_PROF_RAW_MAGIC_64` little-endian and not one byte more: as far into its
@@ -152,7 +188,6 @@ fn a_truncated_profile_left_by_a_killed_child_does_not_fail_the_coverage_step() 
     );
 }
 
-/// The repository root: `CARGO_MANIFEST_DIR` is the root crate's directory.
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -161,7 +196,7 @@ fn repo_root() -> PathBuf {
 /// repository root, over this repository's real justfile. `llvm_cov_target_dir`
 /// is cargo-llvm-cov's own override, set where a caller needs the recipe pointed
 /// somewhere other than the tree it is running in.
-fn just(args: &[&str], llvm_cov_target_dir: Option<&Path>) -> Output {
+fn just(args: &[&str], llvm_cov_target_dir: Option<&OsStr>) -> Output {
     let mut command = Command::new("just");
     command.args(args).current_dir(repo_root());
     match llvm_cov_target_dir {
@@ -184,13 +219,6 @@ fn said(output: &Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     )
-}
-
-/// A path with its symlinks resolved, so two spellings of one directory compare
-/// equal. Left as written when it does not resolve, so the assertion that reads
-/// it reports the mismatch rather than this panicking first.
-fn canonical(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// The directory `cargo llvm-cov` globs `*.profraw` out of, read from the pattern

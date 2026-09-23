@@ -21,7 +21,7 @@ set positional-arguments := true
 # clippy, rustdoc, or cargo-deny inherit those tools' diagnostics, which already
 # name the exact problem and its fix; a wrapper message would bury them. The
 # recipes whose failure needs project-level context (_crate-fmt-check,
-# _crate-coverage, msrv) add one explicitly.
+# _crate-coverage-clean, _crate-coverage, msrv) add one explicitly.
 
 # The released `onetaskgraph` this build's own checks read their plans through.
 # A plan is one project of that store and this crate *drives* the binary rather
@@ -244,25 +244,38 @@ offline-tiers := "(" + rest-tier + ") or (" + note-tier + ")"
 # their own Nx project, and splitting the run must not split the floor.
 
 # The directory `cargo llvm-cov` builds the instrumented tree into and writes the
-# profiles beside, spelled the way cargo-llvm-cov resolves it: its own
-# `CARGO_LLVM_COV_TARGET_DIR` where the environment carries one, and otherwise
-# `llvm-cov-target` under the clone's target directory, which `.cargo/config.toml`
-# pins to `<clone>/target` and `tests/build_config.rs` holds there. Reading
-# `CARGO_TARGET_DIR` as well is not decoration: it outranks that file, so a run
-# carrying one builds somewhere this path would not name, and a clean that missed
-# it would empty a directory nothing had written to while reporting success.
-llvm-cov-target-dir := env("CARGO_LLVM_COV_TARGET_DIR", env("CARGO_TARGET_DIR", justfile_directory() / "target") / "llvm-cov-target")
+# profiles beside: `llvm-cov-target` under this clone's target directory, which
+# `.cargo/config.toml` pins to `<clone>/target` and `tests/build_config.rs` holds
+# there. `CARGO_LLVM_COV_TARGET_DIR` is cargo-llvm-cov's own override of that, so
+# honouring it keeps the two ends agreeing, and is what lets a test point the
+# recipe at a scratch tree rather than at the one the run is being measured from.
+#
+# Where that directory really is stays cargo-llvm-cov's to decide, so this is not
+# taken on trust: `tests/coverage.rs` holds this value against the directory
+# `LLVM_PROFILE_FILE` points the profiling runtime at, and the tier fails if the
+# two ever part — including on a run whose configuration moved the target
+# directory out from under the default below.
+llvm-cov-target-dir := env("CARGO_LLVM_COV_TARGET_DIR", justfile_directory() / "target" / "llvm-cov-target")
 
 # Remove that directory whole, before the first instrumented run. Clearing only
 # the profiles — `--profraw-only`, what this did — left every instrumented binary
-# an earlier run had built, and the report reads the objects it *finds* under that
-# directory rather than the ones this run produced: a test binary whose source has
-# since moved on is still an object carrying a coverage map, so every line of it
-# counts as missed and the 95% floor fails over code this run covered. That is a
-# false failure on every iterative run after the first, and an investigation into
-# covered code costs more than the instrumented rebuild this now pays for.
+# an earlier run had built, and the report measures the objects it *finds* under
+# that directory rather than the ones this run produced: a test binary whose
+# source has since moved on is still an object carrying a coverage map, so every
+# line of it counts as missed and the 95% floor fails over code this run covered.
+# That is a false failure on every iterative run after the first, and an
+# investigation into covered code costs more than the instrumented rebuild this
+# now pays for.
+#
+# The path reaches `rm -rf` from the environment, so it is checked before it is
+# used rather than trusted: an empty, relative or top-level value is refused by
+# name and nothing is removed.
 _crate-coverage-clean:
-    @rm -rf '{{llvm-cov-target-dir}}'
+    @dir='{{llvm-cov-target-dir}}'; \
+      case "$dir" in /?*/?*) ;; \
+        *) echo "refusing to remove '$dir' — CARGO_LLVM_COV_TARGET_DIR has to name an absolute path below a top-level directory, and nothing was removed" >&2; exit 1;; \
+      esac; \
+      rm -rf "$dir"
 
 # The crate's own half of the offline suite, instrumented, reporting nothing.
 _crate-test-rest:
