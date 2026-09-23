@@ -247,8 +247,13 @@ def bounded_watch(world: World) -> str:
             str(world.bin / "onepipeline"),
             "watch",
             PLAN_RUN,
+            # Long enough that the window between this capture reading the
+            # first tick and the run producing its next event cannot fit a
+            # second one. A one-second interval fitted on this machine and not
+            # under a tracer, which is exactly the kind of difference a slower
+            # runner has.
             "--tick-interval",
-            "1",
+            "5",
             # The only ending this wait may take is the one the scene is about.
             # A `--timeout` would add a second, and which of the two fired would
             # then depend on how fast this machine is.
@@ -271,6 +276,19 @@ def bounded_watch(world: World) -> str:
         if watching.poll() is None:
             watching.kill()
             watching.wait()
+    # What the scene is a picture of is **one** tick. A machine slow enough to
+    # fit another between the release and the node settling would render a
+    # different picture under the same name, which is a drifted baseline for a
+    # reason no diff explains — so it refuses instead.
+    ticks = sum(1 for line in log.read_text().splitlines() if line.startswith("-- watching "))
+    if ticks != 1:
+        raise SystemExit(
+            f"screenshots: the bounded watch printed {ticks} heartbeats, and this "
+            "scene is of one. The machine was slow enough that another tick "
+            "landed between the release and the node settling; re-run "
+            "`just screenshots`, and raise the scene's `--tick-interval` if it "
+            "keeps happening."
+        )
     # The human lines are on standard error and one NDJSON record per line on
     # standard output — the split is the contract, so this scene takes the human
     # half and says so in `screenshots/AGENTS.md`.
