@@ -66,11 +66,20 @@ baseline is the drift gate; the binary stays the one source. For the same reason
 a capture that *contradicted* `docs/contract.md` is a contract bug to report, not
 a shot to adjust.
 
-**The GIF's drift gate is the hash-gated `monitor` scene** — the attached stream
-is `views::monitor`'s own lines, so whatever changes the hero fails that scene.
-What the GIF is not is byte-reproducible across Pillow versions, which is why it
-is rendered on demand rather than hashed: a red `monitor` is the signal to run
-`just screenshots-gif` and commit the new hero beside the new baseline.
+<!-- llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the GIF is the one
+image here with no gate, and that is a ruling rather than an omission: a GIF is not
+byte-reproducible across Pillow versions, so hashing one would fail every capture on a
+machine with a different Pillow and say nothing about the tool. The stack-wide decision
+is to regenerate and commit it — `llmlint`, the reference adoption, does exactly this
+with its own hero — and the restatement it carries is bounded to a rendering of the same
+run the gated stills come from. Changing that is the contract owner's, not this
+repository's. -->
+**The GIF is the one image with no gate.** The hash-gated `monitor` scene covers
+most of what it shows — the attached stream is `views::monitor`'s own lines — so
+a red `monitor` is usually the signal to re-render. It is not the whole signal:
+the launcher's own `-- <run> …` status lines and this renderer's own layout are
+outside it. So re-render on purpose — `just screenshots-gif` — whenever what the
+attached stream prints changes, and commit the new hero beside the new baseline.
 
 ## Working on it
 
