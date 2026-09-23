@@ -22,7 +22,17 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# The remote to rehearse against. It reaches `git remote get-url` as an argument
+# and is interpolated into a remote-tracking ref, so it is held to a remote's
+# name and to *this* clone's remotes before either — an option-shaped or
+# path-shaped value would otherwise change what those commands mean.
 remote="${1:-origin}"
+if ! printf '%s\n' "$remote" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]*$' \
+   || ! git remote | grep -qxF "$remote"; then
+  echo "rehearse-guard: '$remote' is not a remote of this clone. Name one of:" >&2
+  git remote | sed 's/^/                /' >&2
+  exit 1
+fi
 hook=".githooks/pre-push"
 [ -x "$hook" ] || {
   echo "rehearse-guard: $hook is not executable, so git would not run it either." >&2
@@ -46,10 +56,7 @@ local_sha="$(git rev-parse HEAD)"
 # and the case the guard resolves through `origin/HEAD`.
 remote_sha="$(git rev-parse -q --verify "refs/remotes/${remote}/${ref#refs/heads/}" \
   || printf '0000000000000000000000000000000000000000')"
-url="$(git remote get-url "$remote" 2>/dev/null || echo "$remote")"
-
-echo "rehearse-guard: running $hook as git would, for $ref -> $remote" >&2
-echo "rehearse-guard: ${local_sha} over ${remote_sha}" >&2
+url="$(git remote get-url "$remote")"
 
 # The environment git gives a hook. `GIT_DIR` is the point of the exercise: it
 # beats `-C` and beats discovery, so anything the capture runs git for sees this
@@ -66,9 +73,8 @@ printf '%s %s %s %s\n' "$ref" "$local_sha" "$ref" "$remote_sha" \
 status=$?
 set -e
 
-if [ "$status" -eq 0 ]; then
-  echo "rehearse-guard: the guard would let this push through." >&2
-else
-  echo "rehearse-guard: the guard would BLOCK this push (exit $status)." >&2
-fi
+# Quiet on success, like the capture it wraps: the hook has already said the
+# shots are unchanged, and the exit status is the answer either way.
+[ "$status" -eq 0 ] \
+  || echo "rehearse-guard: the guard would BLOCK this push (exit $status)." >&2
 exit "$status"
