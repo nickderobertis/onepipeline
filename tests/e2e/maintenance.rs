@@ -162,7 +162,6 @@ fn schedule(world: &World, name: &str, every: &str, rules: &str) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// The sibling's own account of one registered identity's pool.
 fn pool_status_of(world: &World, repo: &str) -> Value {
     let output = world
         .cmd_on(&onevcs_binary(), &["pool", "status", repo, "--json"])
@@ -176,12 +175,10 @@ fn pool_status_of(world: &World, repo: &str) -> Value {
     serde_json::from_slice(&output.stdout).expect("the status is JSON")
 }
 
-/// The `service` identity's one slot, as the sibling reports it.
 fn the_slot(world: &World) -> Value {
     the_slot_of(world, "service")
 }
 
-/// The same, for any registered identity.
 fn the_slot_of(world: &World, repo: &str) -> Value {
     let status = pool_status_of(world, repo);
     let slots = status["slots"].as_array().expect("slots");
@@ -197,7 +194,6 @@ fn marker_text(world: &World, repo: &str) -> String {
     std::fs::read_to_string(worktree.join("maintained.log")).unwrap_or_default()
 }
 
-/// How many times the `service` identity's maintain command has run.
 fn marker_lines(world: &World) -> usize {
     marker_text(world, "service").lines().count()
 }

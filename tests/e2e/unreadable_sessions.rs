@@ -30,7 +30,9 @@ use crate::harness::{lifecycle, plan_of, World, REFUSED};
 ///
 /// Both are `onevcs`'s own refusals and not this crate's: the first is the
 /// listing that could not be made at all, and the second the record the listing
-/// enumerated and then could not load.
+/// enumerated and then could not load. Each is applied by [`break_records`] and
+/// taken back by [`mend_records`], which leave everything else as they found it —
+/// the journeys arrange one state after another over one host.
 #[derive(Clone, Copy, Debug)]
 enum Unreadable {
     /// The sessions directory is not a directory.
@@ -52,22 +54,18 @@ impl Unreadable {
     }
 }
 
-/// Where the host keeps its session records.
 fn sessions(world: &World) -> PathBuf {
     world.onevcs_home().join("sessions")
 }
 
-/// The record this journey writes that is not a document.
 fn unreadable_record(world: &World) -> PathBuf {
     sessions(world).join("s-unreadable.json")
 }
 
-/// Where the directory is put while a journey holds a file in its place.
 fn aside(world: &World) -> PathBuf {
     world.onevcs_home().join("sessions.aside")
 }
 
-/// Put the host into `which`, and leave everything else exactly as it was.
 fn break_records(world: &World, which: Unreadable) {
     match which {
         Unreadable::Directory => {
@@ -87,7 +85,6 @@ fn break_records(world: &World, which: Unreadable) {
     }
 }
 
-/// Put it back, so the next state is arranged over the host the last one was.
 fn mend_records(world: &World, which: Unreadable) {
     match which {
         Unreadable::Directory => {
@@ -322,4 +319,88 @@ fn a_dispatch_over_unreadable_records_is_refused_by_its_open_and_the_read_before
         );
         mend_records(&world, which);
     }
+}
+
+/// A follow whose session record goes unreadable underneath it ends, and says
+/// that is what ended it.
+///
+/// `vcs::settled` is the follow thread's poll: it reads the session's record each
+/// pass and stops once the session has closed. The linked release refuses a record
+/// it cannot read rather than answering that there is no such session, and a
+/// follow that ended on the refusal is not one that ended on the close — ending it
+/// is still the safe direction, since a thread reading a stream nobody will ever
+/// close is one this process would never collect, but ending it in silence leaves
+/// a reader thinking the stream ran out.
+#[test]
+fn a_follow_whose_session_record_goes_unreadable_says_that_is_what_ended_it() {
+    for which in Unreadable::BOTH {
+        a_follow_interrupted_by(which);
+    }
+}
+
+/// The journey above, over one state.
+///
+/// A world each, because the hold on the publishing push is installed as the
+/// repository's own hook when the repository is made, and a world has one
+/// repository.
+///
+/// Two things have to be true at the same instant for the claim to mean anything,
+/// and both are waited for rather than timed. The follow has to be **live** — it
+/// starts only once the dispatch's step has drained, so it does not exist while
+/// the worker is working — and the publication it follows has to still be
+/// running, or the driver's teardown could stop the thread before it read
+/// anything. A record the live follow has relayed is both at once: it proves the
+/// thread is polling, and the publication is held at the repository's merge path
+/// until this journey lets it through.
+fn a_follow_interrupted_by(which: Unreadable) {
+    let world = World::new(&format!("unreadable-follow-{}", which.slug()));
+    let go = world.fakes.join("push.go");
+    let held = crate::harness::held_publication(&world, &go);
+    world.repository("local-direct", &held.argv());
+    world.script("build.work", "the follow saw this\n");
+    let path = world.plan("followed", &plan_of("followed", vec![lifecycle("build", &[])]));
+
+    // Attached, so the child *is* the run's driver and the follow thread it starts
+    // writes to a stderr this journey can read; in a file, so the read is a poll
+    // of the child's own announcement rather than a clock.
+    let log = world.root.join("driver.err");
+    let errors = std::fs::File::create(&log).expect("the driver's stderr file");
+    let driver = world
+        .cmd(&["start", &path, "--attach"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(errors))
+        .spawn()
+        .expect("the driver starts");
+    world.until("the follow to relay the publication it is following", |world| {
+        !world.events_of("followed", "merge-queued").is_empty()
+    });
+    let token = world.events_of("followed", "session-opened")[0]["payload"]["token"]
+        .as_str()
+        .expect("the session names itself")
+        .to_owned();
+    let record = sessions(&world).join(format!("{token}.json"));
+    let saved = std::fs::read_to_string(&record).expect("the session has a record");
+
+    // For the record state it is **this** session's own record that goes, which is
+    // the one the poll reads; for the other, the directory holding it.
+    match which {
+        Unreadable::Directory => break_records(&world, which),
+        Unreadable::Record => std::fs::write(&record, "{ not a session record")
+            .expect("the session's record is made unreadable"),
+    }
+    let said = format!("cannot read session {token}'s record, so the follow of its stream ends");
+    world.until("the follow to say which read ended it", |_| {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains(&said)
+    });
+
+    // Put back before the push goes through, so the run winds down over a host
+    // that reads and the child ends rather than being left behind.
+    match which {
+        Unreadable::Directory => mend_records(&world, which),
+        Unreadable::Record => std::fs::write(&record, &saved).expect("the record comes back"),
+    }
+    held.release();
+    crate::harness::ended(driver);
 }

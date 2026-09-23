@@ -517,37 +517,20 @@ resolver = "2"
 # `oneagentgraph` 0.4.10 is the relink onto the `oneharness-core` 0.18.0 that
 # block asks for, and nothing else: nothing here reads anything new from it.
 #
-# `onevcs` 0.31.2 is the release the **slot vocabulary, the maintenance argv, the
-# identity listing and the workspace-listing refusals** arrive in, and this build
-# links all four:
-#
-# - `SlotOutcome::Unavailable { holder }` (onevcs #177) separates a healthy slot
-#   something holds right now from `Broken`, which that release narrows to a
-#   clone, worktree or record nothing waiting clears. `src/maintenance.rs`
-#   matches the enum exhaustively, so below it the build does not compile, and a
-#   busy pool slot was reported to a supervisor as a damaged worktree.
-# - `Maintenance::command` is a non-empty argv — a program beside its arguments
-#   (onevcs #173) — so a `maintain.command` naming nothing to spawn is refused
-#   where the document deserializes, by the key an operator edits, instead of at a
-#   validation nothing reached.
-# - `onevcs::registered_identities()` (onevcs #174) is the library form of the
-#   unindented lines `onevcs repos` prints. It is why this bump is a **requirement**
-#   of the code rather than a lock move: the sweep read the host's identities by
-#   spawning that verb and parsing its display prose, and #174 exists to remove
-#   exactly that coupling, so there is no build below this pin that reads them the
-#   way `src/maintenance.rs` now does.
-# - `session_holders`, `recoverable`, `pool_maintain`, `workspace_capacity`,
-#   `preserve` and `session` return `Err` where an unreadable session record or
-#   sessions directory used to be acted on as partial state (onevcs #175, #176),
-#   and `release_status` returns the new `Error::UnresolvableReference` for a
-#   reference naming no work the host knows. Every caller here already reported a
-#   refusal rather than an absence — `Answer::of` reads any `Err` from
-#   `release_status` as not-answered — so what the pin buys is that the answers
-#   they report are now the sibling's own rather than a silent partial read.
-#
-# A **requirement**, because `^0.30` admits no 0.31.x pre-1.0; `onevcs-testing`
-# 0.7.5 requires exactly this `onevcs`, so the two requirements and the lock move
-# together or the lock resolves the library twice.
+# `onevcs` 0.31.2 is a **requirement** of the code rather than a lock move, and
+# `registered_identities()` is why: the pool-maintenance sweep read this host's
+# identities by spawning `onevcs repos` and parsing its display lines, and no
+# release below this pin publishes the library form that replaces it (onevcs #174).
+# Three more contracts come with it and `src/maintenance.rs` is written to them:
+# `SlotOutcome::Unavailable { holder }` beside a `Broken` narrowed to a clone,
+# worktree or record nothing waiting clears (#177), which the exhaustive match
+# there does not compile without; `Maintenance::command` as a non-empty argv
+# (#173); and the workspace-listing operations refusing an unreadable session
+# record or sessions directory instead of acting on partial state (#175, #176),
+# with `release_status` naming an unresolvable reference as its own variant.
+# `^0.30` admits no 0.31.x pre-1.0, and `onevcs-testing` 0.7.5 requires exactly
+# this release, so the two requirements and the lock move together or the lock
+# resolves the library twice.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
