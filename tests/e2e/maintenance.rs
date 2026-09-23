@@ -416,12 +416,23 @@ fn two_drivers_idle_at_once_maintain_the_slot_once_between_them() {
         .exited(0)
         .out_has("claimed — another pool maintain (pid");
 
-    // Every further sweep of either driver is answered not-due — counted per
-    // driver, because each keeps its own account of what its loop did.
-    for driver in ["one", "two"] {
-        let swept = sweeps(&world, driver);
-        until_sweeps(&world, driver, swept + 2);
-    }
+    // Every further sweep of either driver is answered not-due. Counted per driver,
+    // because each keeps its own account of what its loop did — and waited for
+    // **together** rather than in turn: two waits in sequence take twice the
+    // wall-clock of one, and what this then asserts is that the slot was not
+    // maintained again, which stops being true the moment `every` elapses. A wait
+    // whose length decides its own assertion is a wait that passes on an idle host
+    // and fails on a loaded one.
+    let before: Vec<u64> = ["one", "two"]
+        .iter()
+        .map(|driver| sweeps(&world, driver))
+        .collect();
+    world.until("both drivers to have swept the registry twice more", |world| {
+        ["one", "two"]
+            .iter()
+            .zip(&before)
+            .all(|(driver, swept)| sweeps(world, driver) >= swept + 2)
+    });
     assert_eq!(marker_lines(&world), 1);
     assert_eq!(records(&world, "one").len(), 1, "{}", world.dump());
 
