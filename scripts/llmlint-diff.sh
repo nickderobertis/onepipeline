@@ -34,6 +34,8 @@
 # and a clean one is the one verdict line the judge records and Nx restores for a
 # replay. What this script adds to it is one line saying whether the verdict was
 # judged or replayed, and the refusals below, which each name the one thing to fix.
+# A failing report Nx forwarded none of is relayed from the record the judge left
+# beside the verdict, so the tier never fails without saying why.
 set -euo pipefail
 
 # Every caller runs this from the repository root: `just` from the justfile's own
@@ -106,10 +108,14 @@ trap 'rm -rf "$captured"' EXIT
 # on a miss, Nx restores it on a hit, and either way it is this run's or it is absent.
 record="$root/.lint-llm-diff/verdict"
 # A refusal the judge reached is recorded beside the verdict and cleared with it:
-# it is never a cached output, so it is this run's or it is absent.
+# it is never a cached output, so it is this run's or it is absent. The report
+# behind a non-zero judge run is recorded and cleared the same way and for the
+# same reason — it is what makes a red tier actionable, and Nx stores successful
+# tasks only, so it is never restored from anywhere.
 refusal="$root/.lint-llm-diff/refusal"
-rm -f "$record" "$refusal" || {
-  echo "lint-llm-diff: could not clear the previous verdict record $record or the refusal record beside it; remove them and retry" >&2
+judge_report="$root/.lint-llm-diff/report"
+rm -f "$record" "$refusal" "$judge_report" || {
+  echo "lint-llm-diff: could not clear the previous verdict record $record or the refusal and report records beside it; remove them and retry" >&2
   exit 3
 }
 
@@ -135,18 +141,36 @@ else
   provenance="judged this diff against base $base_sha (Nx cache miss)"
 fi
 
+# Relay one of the judge's own records when none of it reached this script.
+#
+# What the judged task says arrives here only through Nx's pipes, and on a loaded
+# host has arrived as Nx's wrapper alone — for a judge that said exactly what went
+# wrong. The judge records what it said, so that is what is relayed then, and it is
+# skipped when Nx did forward the text, so a run whose diagnostic arrived says it
+# once. The comparison is made against a copy with escapes stripped and blank lines
+# dropped, for the two reasons `$plain` exists at all: a coloured line never
+# matches its stripped twin, and an empty pattern matches every line there is,
+# which would report Nx's own blank lines as the judge's report arriving.
+relay_unforwarded() {
+  local recorded=$1
+  local lines="$captured/relayed"
+  [ -s "$recorded" ] || return 0
+  sed "s/${escape}\[[0-9;]*[a-zA-Z]//g" "$recorded" | grep -v '^[[:space:]]*$' >"$lines" || true
+  [ -s "$lines" ] || return 0
+  grep -qxF -f "$lines" "$plain" || cat "$recorded" >&2
+}
+
 if ((status != 0)); then
   # A failure is the whole report, on the streams it arrived on: the operator has
   # to act on it, and it is never cached, so it never has to survive a replay.
   cat "$captured/out"
   cat "$captured/err" >&2
-  # The judge's refusal reaches here through the same pipes as its verdict, and on
-  # a loaded host has arrived without it — Nx's wrapper alone, for a judge that
-  # said exactly what to do. What the judge recorded is relayed when what Nx
-  # forwarded lacks it, and only then, so a run whose refusal did arrive says it once.
-  if [ -s "$refusal" ] && ! grep -qxF -f "$refusal" "$plain"; then
-    cat "$refusal" >&2
-  fi
+  # Each of the two things a failing judge records — the report behind a non-zero
+  # llmlint run, and the refusal of a clean run that reached no verdict — is
+  # relayed when Nx forwarded none of it. Only one of them exists for any one run:
+  # they are the two disjoint ways this task ends without a verdict to report.
+  relay_unforwarded "$judge_report"
+  relay_unforwarded "$refusal"
   echo "lint-llm-diff: $provenance" >&2
   exit "$status"
 fi
