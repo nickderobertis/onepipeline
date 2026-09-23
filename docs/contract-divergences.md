@@ -7191,14 +7191,17 @@ the opposite ground — a session working in a slot is the pool being used, whic
 is what the pool is for and the common case on a busy host.
 
 Driven by `tests/e2e/maintenance.rs`'s
-`a_slot_another_process_holds_is_reported_busy_rather_than_broken`: the journey
-takes the slot's occupancy lease the way `session_reuse.rs` takes a run root's —
-no verb of the sibling's holds one past its own exit — and drives the compiled
-binary through a sweep that finds the slot due and meets that lease. The record
-carries `unavailable` with the holder, carries neither `broken` nor `ran`,
-`results` says `kept: busy — …` and not `kept: broken`, nothing ran, nothing was
-stamped, and the sibling still calls the slot `idle`. Released, the next sweep
-takes the slot and maintains it. `tests::a_sweep_is_recorded_only_where_something_ran_was_claimed_or_failed`
+`a_slot_another_process_holds_is_busy_and_one_whose_worktree_is_gone_is_broken`,
+over both loud answers and neither of them forged. It takes the slot's occupancy
+lease the way `session_reuse.rs` takes a run root's — no verb of the sibling's
+holds one past its own exit — and drives the compiled binary through a sweep that
+finds the slot due and meets that lease: the record carries `unavailable` with the
+holder, carries neither `broken` nor `ran`, `results` says `kept: busy — …` and not
+`kept: broken`, nothing ran, nothing was stamped, and the sibling still calls the
+slot `idle`. Released, the next sweep takes the slot and maintains it. Then the
+slot's worktree is removed — a scratch directory cleaned out, a clone that never
+finished — and the next sweep due records `broken`, naming the worktree, with
+`results` saying `kept: broken — …` and not `kept: busy`. `tests::a_sweep_is_recorded_only_where_something_ran_was_claimed_or_failed`
 holds the silent set beside it, and it was seen to fail against the build that
 recorded only a slot that ran — which is the build this entry is about.
 

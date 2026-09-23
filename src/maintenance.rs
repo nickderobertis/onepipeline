@@ -288,6 +288,13 @@ impl Maintained {
     /// maintenance this sweep meant to do and did not — and the second, since the
     /// sibling narrowed `broken` to a clone, worktree or record that nothing
     /// waiting clears, is the only thing that says a slot needs a person.
+    ///
+    /// `tests/e2e/maintenance.rs`'s
+    /// `a_slot_another_process_holds_is_busy_and_one_whose_worktree_is_gone_is_broken`
+    /// drives both loud slot answers through the compiled binary — a slot whose
+    /// occupancy lease another process holds, and one whose worktree is gone — and
+    /// `tests::a_sweep_is_recorded_only_where_something_ran_was_claimed_or_failed`
+    /// holds the quiet set beside them.
     fn is_recorded(&self) -> bool {
         match &self.outcome {
             Err(_) | Ok(IdentityOutcome::Claimed { .. }) => true,
@@ -623,17 +630,18 @@ fn identity_phrase(outcome: &IdentityOutcome) -> String {
 ///
 /// Every arm is one the sibling can answer, and `tests::every_slot_outcome_has_a_phrase`
 /// holds each spelling; `tests/e2e/maintenance.rs` drives the ones a journey can
-/// produce — a command that succeeded, failed, and timed out, and a slot whose
-/// occupancy another process holds — through `results`.
-// llmlint: ignore-block[changed_behavior_has_e2e] `in-use`, `broken` and a command ended by a
-// signal are answered by the sibling under conditions a journey cannot schedule from
-// this crate's interface — a session opened into the slot between the survey and the
-// claim, a slot whose record the sibling cannot read, a process the host killed —
-// and a fixture that forged the record would prove the fixture; each phrase is held
-// by the unit test the doc names, over the sibling's own type. `unavailable` is
-// **not** in that list any more: `a_slot_another_process_holds_is_reported_busy_rather_than_broken`
-// takes the slot's occupancy lease the way `session_reuse.rs` takes a run root's and
-// drives the real binary into it.
+/// produce — a command that succeeded, failed, and timed out, a slot whose
+/// occupancy another process holds, and one whose worktree is gone — through
+/// `results`.
+// llmlint: ignore-block[changed_behavior_has_e2e] `in-use` and a command ended by a signal
+// are answered by the sibling under conditions a journey cannot schedule from this
+// crate's interface — a session opened into the slot between the survey and the claim, a
+// process the host killed — and a fixture that forged the record would prove the
+// fixture; each phrase is held by the unit test the doc names, over the sibling's own
+// type. `unavailable` and `broken` are **not** in that list any more:
+// `a_slot_another_process_holds_is_busy_and_one_whose_worktree_is_gone_is_broken` takes
+// the slot's occupancy lease the way `session_reuse.rs` takes a run root's, and then
+// removes the slot's worktree, driving the real binary into each.
 fn slot_phrase(outcome: &SlotOutcome) -> String {
     match outcome {
         SlotOutcome::NotDue { last_maintained } => {

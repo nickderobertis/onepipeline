@@ -996,7 +996,8 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
     release(&world, "unlistable");
 }
 
-/// A slot something else holds right now is reported **busy**, not broken.
+/// A slot something else holds right now is reported **busy**, and one whose
+/// worktree is gone is reported **broken**.
 ///
 /// The one distinction `onevcs` added the `unavailable` outcome for: a healthy
 /// slot a later sweep finds clear, against a clone, worktree or record that is
@@ -1018,7 +1019,7 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
 // interface to reach this state through. Everything else here is the compiled binary
 // driven the way a host drives it.
 #[test]
-fn a_slot_another_process_holds_is_reported_busy_rather_than_broken() {
+fn a_slot_another_process_holds_is_busy_and_one_whose_worktree_is_gone_is_broken() {
     use sha2::{Digest, Sha256};
 
     let world = pooled_world("maintenance-busy", Some(FAST_PACE));
@@ -1093,6 +1094,38 @@ fn a_slot_another_process_holds_is_reported_busy_rather_than_broken() {
     world.until("the slot to be maintained once the lease goes", |world| {
         marker_lines(world) == 1
     });
+
+    // The other half of the distinction, arranged the way a host arrives at it and
+    // not by forging a record: the slot's worktree is gone — a scratch directory
+    // cleaned out, a clone that never finished — so the next sweep that finds the
+    // slot due finds it unusable and says broken rather than busy. Nothing waiting
+    // clears this one, which is what the two words are for.
+    std::fs::remove_dir_all(Path::new(&run_root).join("worktree"))
+        .expect("the slot's worktree is removed");
+    let broke = |record: &Value| {
+        record["payload"]["identities"][0]["outcome"]["slots"][0]["outcome"]
+            .get("broken")
+            .is_some()
+    };
+    world.until("the record of the broken slot", |world| {
+        records(world, "busy").iter().any(broke)
+    });
+    let record = records(&world, "busy")
+        .into_iter()
+        .find(broke)
+        .expect("the record of the broken slot");
+    let reason = record["payload"]["identities"][0]["outcome"]["slots"][0]["outcome"]["broken"]
+        ["reason"]
+        .as_str()
+        .expect("a reason");
+    assert!(reason.contains("worktree"), "{record}");
+    world
+        .run(&["results", "busy"])
+        .exited(0)
+        .out_has(&format!(
+            "{SERVICE_IDENTITY} (every 1s): slot 1 kept: broken — "
+        ))
+        .out_lacks("kept: busy");
     release(&world, "busy");
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
