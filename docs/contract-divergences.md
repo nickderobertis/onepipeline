@@ -1501,7 +1501,13 @@ recorded against that correlation in the run's own directory, and the commit of
 that edit appends the answer — on either writer of the graph, bound by
 `--correlation` or not. A graph edit still answers no
 *question*: what it answers is the finding that asked for it, matched against what
-that finding recorded and nothing else. Nothing published moves: the correlation
+that finding recorded and nothing else. One consequence is worth naming, because
+it is the one place the answering is visible in a refusal: an envelope's commands
+are committed before its verdict half is delivered, so a reply that names a
+finding with `--correlation` *and* carries the edit it asked for finds its own
+question already answered, and that verdict is appended beside the edit rather
+than refused. Every other verdict naming an answered question is refused exactly
+as it was. Nothing published moves: the correlation
 goes in the field `agent.planner-surface@1` already declares for one, the reply is
 the `agent.queued-reply@1` a verdict is appended as, and neither
 `schemas/reply-envelope-v3.schema.json` nor `schemas/planner-channel.json`

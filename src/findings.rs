@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::channel::layout::Op;
-use crate::channel::{Author, ChannelState, Reply};
+use crate::channel::{Author, ChannelState, Command, Reply};
 use crate::edits;
 use crate::ledger::RunPaths;
 use crate::Result;
@@ -234,6 +234,35 @@ pub(crate) fn answer_requested(paths: &RunPaths, operations: &[edits::Operation]
         channel.answer_bound(&answer(request), Some(correlation))?;
     }
     Ok(())
+}
+
+/// Whether `commands` carry the edit the finding `correlation` names asked for,
+/// and the run has already recorded the answer to it.
+///
+/// The question the one tolerant append in
+/// [`ChannelState::answer_alongside`](crate::channel::ChannelState::answer_alongside)
+/// turns on, asked of the **envelope** rather than of the channel: whether one
+/// reply answered its own question is a fact about that reply. Both halves
+/// matter — a verdict naming a question some earlier reply answered carries none
+/// of these commands and is refused as it always was, and one whose edit the
+/// reconciler turned away has answered nothing yet, so there is nothing to append
+/// beside.
+///
+/// Matched on the command rather than on what it compiled to, because the caller
+/// is the submitting process and the compile belongs to whichever writer took the
+/// envelope.
+pub(crate) fn answered_alongside(
+    paths: &RunPaths,
+    correlation: &Correlation,
+    commands: &[Command],
+) -> bool {
+    let Some(request) = recorded(paths).remove(correlation) else {
+        return false;
+    };
+    commands.iter().any(|command| {
+        crate::channel::op_of(command) == request.op.word()
+            && crate::channel::target_of(command).as_deref() == Some(request.node.as_str())
+    }) && ChannelState::new(paths).answered().contains(correlation)
 }
 
 /// Whether one committed operation is the edit `request` asked for.
