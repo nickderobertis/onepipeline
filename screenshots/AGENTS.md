@@ -106,9 +106,9 @@ say:
   It is the one caller that runs the capture inside a *git hook*, and a hook's
   environment is not a shell's — git exports `GIT_DIR` and `GIT_WORK_TREE`
   naming the repository being pushed, and `GIT_DIR` beats `-C` and beats
-  discovery. Both publications this guard rejected were rejected for defects
-  reachable only there, the second of them a world whose seed commits landed in
-  the repository under push. So the capture clears the whole `GIT_*` prefix with
-  the stack's `ONE*_` settings and states the git environment it wants
+  discovery, so an inherited one lands the world's own seed commits in the
+  repository under push. The capture therefore clears the whole `GIT_*` prefix
+  with the stack's `ONE*_` settings and states the git environment it wants
   (`clear_inherited_settings` in `world.py`), and the recipe runs the real hook
-  with the real refs on its stdin, pushing nothing.
+  with the real refs on its stdin, pushing nothing. A defect reachable only
+  under a hook is reachable from neither `just screenshots` nor `just gate`.

@@ -3,12 +3,9 @@
 #
 # The guard is the one caller of the capture that runs inside a **git hook**, and
 # a hook's environment is not a shell's: git exports `GIT_DIR` and `GIT_WORK_TREE`
-# naming the repository being pushed, and writes the refs on the hook's stdin.
-# Both publications of this repository that the guard rejected were rejected for
-# defects that exist only there — a `cargo build` that resolved differently, and a
-# `GIT_DIR` that redirected the capture world's own `git commit` into the
-# repository under push. Neither is reachable by running `just screenshots`, and
-# both are one command away from being found before a push. This is that command.
+# naming the repository being pushed, and writes the refs on the hook's stdin. A
+# defect that only appears under those is not reachable by running `just
+# screenshots`, so it is found either here or by a rejected push.
 #
 # It invokes `.githooks/pre-push` itself rather than reimplementing it, so what
 # is rehearsed is the hook that will run. It pushes nothing and writes nothing

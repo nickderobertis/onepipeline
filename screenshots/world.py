@@ -509,17 +509,16 @@ def clear_inherited_settings() -> None:
     drifts the capture against a baseline taken in a clean shell.
 
     `GIT_*` is the same hazard with teeth, because one of this capture's callers
-    is a **git hook**. Every hook runs with `GIT_DIR` naming the repository being
-    pushed, and `GIT_DIR` beats `-C` and beats discovery: the world's own
-    `git -C <tmp>/repo-0 add -A && git commit` then stages the *repository's*
-    tracked files as deleted against a work tree that is an empty temporary
-    directory, and commits that onto the branch under push. It has happened —
-    a capture run from the pre-push guard wrote a commit removing every file in
-    this repository onto the pushed branch. So the whole prefix goes, `GIT_DIR`,
-    `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_CONFIG_COUNT` and the rest of it
-    alike, and `_environment` states the handful the world actually wants. An
-    allowlist of the dangerous ones would be a list to keep current against git's
-    releases; "the world states its own git environment" is one rule.
+    is a **git hook**, which git runs with `GIT_DIR` naming the repository being
+    pushed. `GIT_DIR` beats `-C` and beats discovery, so an inherited one makes
+    the world's own `git -C <tmp>/repo-0 add -A && git commit` stage this
+    repository's tracked files as deleted against a work tree that is an empty
+    temporary directory, and commit that onto the branch under push. So the whole
+    prefix goes, `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_CONFIG_COUNT`
+    and the rest of it alike, and `_environment` states the handful the world
+    actually wants. An allowlist of the dangerous ones would be a list to keep
+    current against git's releases; "the world states its own git environment" is
+    one rule.
     """
     prefixes = (
         "ONEPIPELINE_",
