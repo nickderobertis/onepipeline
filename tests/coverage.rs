@@ -8,7 +8,7 @@
 //! no profile to its name and every line of it counted as missed — and the 95%
 //! floor fails over code this run covered. `_crate-coverage-clean` is what stops
 //! it, by removing that directory whole before the first instrumented run, and
-//! the three tests below drive that recipe.
+//! the four tests below drive that recipe.
 //!
 //! This run's own is a *truncated profile*. The cancellation journeys kill
 //! instrumented processes, and one killed while the profiling runtime is still
@@ -28,19 +28,17 @@ use std::{env, fs};
 /// The clean step removes the instrumented tree whole, so nothing an earlier
 /// build left behind can reach the report.
 ///
-/// The recipe is pointed at a scratch directory through
-/// `CARGO_LLVM_COV_TARGET_DIR` — cargo-llvm-cov's own override, which the recipe
-/// reads for exactly this reason — because the real one is holding the binaries
-/// and profiles of the run executing this test. What is planted there is this
-/// executable, copied: under the coverage tier that is precisely the artifact at
-/// issue, an instrumented object file carrying a coverage map, and a fixture the
-/// report would have skipped proves nothing about a step that exists to keep it
-/// out.
+/// The recipe is pointed at a scratch tree by argument, because the tree it
+/// cleans by default is holding the binaries and profiles of the run executing
+/// this test. What is planted there is this executable, copied: under the
+/// coverage tier that is precisely the artifact at issue, an instrumented object
+/// file carrying a coverage map, and a fixture the report would have skipped
+/// proves nothing about a step that exists to keep one out.
 ///
-/// The scratch directory is named with a quote and a space in it because the
-/// recipe takes that name from the environment: a step that read the value as
-/// shell source would either remove the wrong thing or fail to parse, and both
-/// look like a passing removal from anywhere but here.
+/// The scratch tree is named with a quote and a space in it because the recipe is
+/// handed that name from outside: a step that read it as shell source would
+/// remove the wrong thing or fail to parse, and from anywhere but here both look
+/// like a removal that worked.
 #[test]
 fn the_clean_step_removes_an_instrumented_binary_an_earlier_run_left() {
     // Under `target/` for the reason `build_config` puts its probes there: a
@@ -61,7 +59,7 @@ fn the_clean_step_removes_an_instrumented_binary_an_earlier_run_left() {
         stale.display()
     );
 
-    let cleaned = just(&["_crate-coverage-clean"], Some(scratch.as_os_str()));
+    let cleaned = just(&["_crate-coverage-clean".as_ref(), scratch.as_os_str()]);
     assert!(
         cleaned.status.success(),
         "the clean step failed: {}",
@@ -81,14 +79,15 @@ fn the_clean_step_removes_an_instrumented_binary_an_earlier_run_left() {
     );
 }
 
-/// And the directory it removes is *this* one: the tree this run's own profiles
-/// are being written into.
+/// And the tree it removes by default is *this* one: the one this run's own
+/// profiles are being written into.
 ///
 /// A recipe that removed a plausible directory nothing writes to would pass every
-/// removal assertion above and fix nothing, so the path is asked of `just` rather
-/// than restated here, and held against `LLVM_PROFILE_FILE` — which the profiling
-/// runtime was pointed at by the same `cargo llvm-cov` invocation that built this
-/// binary.
+/// removal assertion above and fix nothing, so the default is asked of `just`
+/// rather than restated here, and held against `LLVM_PROFILE_FILE` — which the
+/// profiling runtime was pointed at by the same `cargo llvm-cov` invocation that
+/// built this binary. This is also what a run configured to build somewhere else
+/// runs into: the tier fails here rather than cleaning a tree nothing wrote to.
 #[test]
 fn the_clean_step_removes_the_directory_this_run_is_measured_from() {
     let Some(measured) = profile_directory() else {
@@ -96,7 +95,7 @@ fn the_clean_step_removes_the_directory_this_run_is_measured_from() {
         // cross-platform legs, where there is no instrumented tree to clean.
         return;
     };
-    let evaluated = just(&["--evaluate", "llvm-cov-target-dir"], None);
+    let evaluated = just(&["--evaluate".as_ref(), "llvm-cov-target-dir".as_ref()]);
     assert!(
         evaluated.status.success(),
         "the justfile does not resolve `llvm-cov-target-dir`: {}",
@@ -118,22 +117,43 @@ fn the_clean_step_removes_the_directory_this_run_is_measured_from() {
     );
 }
 
-/// And it refuses a directory outside this clone rather than removing it.
+/// A tree that does not exist yet is the ordinary first run of a fresh clone: the
+/// step removes nothing and says nothing, rather than failing the tier before it
+/// has built anything.
+#[test]
+fn the_clean_step_passes_over_a_tree_that_was_never_built() {
+    let never = repo_root().join("target/coverage-clean-probe-never-built");
+    let _ = fs::remove_dir_all(&never);
+
+    let cleaned = just(&["_crate-coverage-clean".as_ref(), never.as_os_str()]);
+    assert!(
+        cleaned.status.success(),
+        "the clean step failed over a tree that was never built, which is every \
+         first run: {}",
+        said(&cleaned)
+    );
+    assert!(
+        !never.exists(),
+        "the clean step created {}, which the instrumented build owns",
+        never.display()
+    );
+}
+
+/// And it refuses a tree outside this clone rather than removing it.
 ///
 /// `.cargo/config.toml` puts every build under this clone into `<clone>/target`,
-/// so a tree to clean that resolves anywhere else is a misconfiguration and not a
-/// tree to remove — and what the recipe is handed comes from the environment.
+/// so a tree to clean that resolves anywhere else is a misconfiguration rather
+/// than a tree to remove.
 ///
-/// Each case below is one a recipe that checked the *spelling* of the value would
-/// accept: an absolute path outside the clone, that same path reached through
-/// `..`, and one whose name carries a quote. Each resolves to a directory this
-/// test made under the temporary directory, so were the check gone this journey
-/// would delete its own fixture and nothing else — it cannot be the accident it
-/// guards against. The relative one is there because the recipe runs from the
-/// repository root, where an unresolvable relative path is the shape a mistyped
-/// override actually takes.
+/// Each case is one a step that checked the *spelling* of what it was handed
+/// would accept: an absolute path outside the clone, that same path reached
+/// through `..`, a symlink inside the clone pointing out of it, one whose name
+/// carries a quote, and the empty and relative values a mistyped override
+/// actually takes. Every one of them resolves to a fixture this test made, so
+/// were the check gone the journey would delete its own fixture and nothing
+/// else — it cannot be the accident it guards against.
 #[test]
-fn the_clean_step_refuses_a_target_directory_outside_this_clone() {
+fn the_clean_step_refuses_a_tree_outside_this_clone() {
     let outside = env::temp_dir().join(format!(
         "onepipeline-coverage-clean-outside-{}",
         std::process::id()
@@ -143,33 +163,50 @@ fn the_clean_step_refuses_a_target_directory_outside_this_clone() {
         .unwrap_or_else(|e| panic!("could not create {}: {e}", outside.display()));
     fs::create_dir_all(&quoted)
         .unwrap_or_else(|e| panic!("could not create {}: {e}", quoted.display()));
+    let through_dots = outside.join("below/..");
 
-    let reached_through_dots = outside.join("below/..");
-    for refused in [
+    let mut refused: Vec<&OsStr> = vec![
         outside.as_os_str(),
-        reached_through_dots.as_os_str(),
+        through_dots.as_os_str(),
         quoted.as_os_str(),
+        OsStr::new(""),
         OsStr::new("relative/dir"),
-    ] {
-        let attempt = just(&["_crate-coverage-clean"], Some(refused));
+    ];
+    // A symlink is the one spelling that sits inside the clone and still leaves
+    // it, so it is the case that says the step resolves rather than reads.
+    #[cfg(unix)]
+    let link = repo_root().join("target/coverage-clean-probe-link");
+    #[cfg(unix)]
+    {
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(&outside, &link)
+            .unwrap_or_else(|e| panic!("could not link {}: {e}", link.display()));
+        refused.push(link.as_os_str());
+    }
+
+    for target in refused {
+        let attempt = just(&["_crate-coverage-clean".as_ref(), target]);
         assert!(
             !attempt.status.success(),
-            "the clean step accepted {refused:?} as a tree to remove whole: {}",
+            "the clean step accepted {target:?} as a tree to remove whole: {}",
             said(&attempt)
         );
         let complaint = String::from_utf8_lossy(&attempt.stderr);
         assert!(
             complaint.contains("refusing to remove"),
-            "the refusal of {refused:?} does not say what it refused, so a run \
+            "the refusal of {target:?} does not say what it refused, so a run \
              that set it wrong is left to guess: {}",
             said(&attempt)
         );
     }
+
     assert!(
         quoted.is_dir(),
         "{} was removed by a step that had refused to remove it",
         quoted.display()
     );
+    #[cfg(unix)]
+    fs::remove_file(&link).unwrap_or_else(|e| panic!("could not unlink {}: {e}", link.display()));
     fs::remove_dir_all(&outside)
         .unwrap_or_else(|e| panic!("could not remove {}: {e}", outside.display()));
 }
@@ -224,19 +261,11 @@ fn repo_root() -> PathBuf {
 }
 
 /// `just`, run the way the `coverage-clean` Nx target runs it: from the
-/// repository root, over this repository's real justfile. `llvm_cov_target_dir`
-/// is cargo-llvm-cov's own override, set where a caller needs the recipe pointed
-/// somewhere other than the tree it is running in.
-fn just(args: &[&str], llvm_cov_target_dir: Option<&OsStr>) -> Output {
-    let mut command = Command::new("just");
-    command.args(args).current_dir(repo_root());
-    match llvm_cov_target_dir {
-        Some(dir) => command.env("CARGO_LLVM_COV_TARGET_DIR", dir),
-        // Removed rather than left: the recipe reads it first, so an inherited
-        // one would decide what the recipe under test names.
-        None => command.env_remove("CARGO_LLVM_COV_TARGET_DIR"),
-    };
-    command
+/// repository root, over this repository's real justfile.
+fn just(args: &[&OsStr]) -> Output {
+    Command::new("just")
+        .args(args)
+        .current_dir(repo_root())
         .output()
         .expect("just runs this repository's recipes")
 }
