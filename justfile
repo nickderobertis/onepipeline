@@ -259,19 +259,27 @@ llvm-cov-target-dir := justfile_directory() / "target" / "llvm-cov-target"
 #
 # What to remove is a parameter, read as `$1` and never interpolated into these
 # lines, which is what `set positional-arguments` is for; the tier passes none, so
-# the default is what every run of the gate exercises. `cd -P`/`pwd -P` then
-# answer with what the argument *reaches* through `..` and symlinks, and that
-# answer rather than its spelling has to sit under the build directory above —
-# narrower than the clone, which also holds `src` and `.git`. `|| reached=` keeps
-# a value that reaches nothing, which is the first run of a fresh clone, from
-# dying on `-e` before the check can pass it as written.
+# the default is what every run of the gate exercises. A name that reaches nothing
+# — the first run of a fresh clone, an empty argument, a typo — has nothing to
+# remove, so it removes nothing and says nothing, and `|| exit 0` is that: the
+# bound is asked only of a tree that is really there. `cd -P`/`pwd -P` then answer
+# with what the argument *reaches* through `..` and symlinks, and that answer
+# rather than its spelling has to sit under the build directory above — narrower
+# than the clone, which also holds `src` and `.git`. Resolving first is also what
+# makes this recipe portable: a tree that exists has a physical path in the
+# shell's own vocabulary on every platform, where its *spelling* is `D:\...` on
+# one of them and could never prefix-match a `pwd -P` answer.
+#
+# The one thing a silent no-op could hide — a `llvm-cov-target-dir` naming a tree
+# nothing builds into, so the stale objects survive elsewhere — is caught in
+# `tests/coverage.rs` instead, which holds the default against `LLVM_PROFILE_FILE`.
 _crate-coverage-clean dir=llvm-cov-target-dir:
-    @built="$(pwd -P)/target"; \
-      reached="$(cd -P -- "$1" 2>/dev/null && pwd -P)" || reached=; \
-      case "${reached:-$1}" in "$built"/?*) ;; \
-        *) echo "refusing to remove '${reached:-$1}': the instrumented tree has to sit under this clone's build directory ($built), which is where .cargo/config.toml pins every build in it — nothing was removed" >&2; exit 1;; \
+    @reached="$(cd -P -- "$1" 2>/dev/null && pwd -P)" || exit 0; \
+      built="$(pwd -P)/target"; \
+      case "$reached" in "$built"/?*) ;; \
+        *) echo "refusing to remove '$reached': the instrumented tree has to sit under this clone's build directory ($built), which is where .cargo/config.toml pins every build in it — nothing was removed" >&2; exit 1;; \
       esac; \
-      rm -rf -- "${reached:-$1}"
+      rm -rf -- "$reached"
 
 # The crate's own half of the offline suite, instrumented, reporting nothing.
 _crate-test-rest:

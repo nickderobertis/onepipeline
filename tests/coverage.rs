@@ -111,25 +111,48 @@ fn the_clean_steps_default_tree_is_the_one_this_run_is_measured_from() {
     );
 }
 
-/// A tree that does not exist yet is the ordinary first run of a fresh clone: the
-/// step removes nothing and says nothing, rather than failing the tier before it
-/// has built anything.
+/// And a name that reaches nothing removes nothing and says nothing.
+///
+/// A tree that does not exist yet is the ordinary first run of a fresh clone; an
+/// empty argument and a relative one naming no directory are what a mistyped
+/// argument looks like. None of the three is a tree to bound, because none of
+/// them has anything to remove — so the step passes rather than failing the tier
+/// before it has built anything, and rather than refusing over a spelling, which
+/// is the one thing that cannot be compared across platforms.
+///
+/// What a silent pass could hide instead — a default naming a tree nothing builds
+/// into — is what the journey two above catches, against `LLVM_PROFILE_FILE`.
 #[test]
-fn the_clean_step_passes_over_a_tree_that_was_never_built() {
+fn the_clean_step_passes_over_a_name_that_reaches_nothing() {
     let never = repo_root().join("target/coverage-clean-probe-never-built");
     let _ = fs::remove_dir_all(&never);
+    // Relative to the recipe's working directory, which is this clone's root.
+    let mistyped = repo_root().join("coverage-clean-probe-mistyped");
+    let _ = fs::remove_dir_all(&mistyped);
 
-    let cleaned = just(&["_crate-coverage-clean".as_ref(), never.as_os_str()]);
-    assert!(
-        cleaned.status.success(),
-        "the clean step failed over a tree that was never built, which is every \
-         first run: {}",
-        said(&cleaned)
-    );
+    for name in [
+        never.as_os_str(),
+        OsStr::new(""),
+        OsStr::new("coverage-clean-probe-mistyped/tree"),
+    ] {
+        let cleaned = just(&["_crate-coverage-clean".as_ref(), name]);
+        assert!(
+            cleaned.status.success(),
+            "the clean step failed over {name:?}, which names nothing to remove: \
+             {}",
+            said(&cleaned)
+        );
+    }
+
     assert!(
         !never.exists(),
         "the clean step created {}, which the instrumented build owns",
         never.display()
+    );
+    assert!(
+        !mistyped.exists(),
+        "the clean step created {} out of a name that reached nothing",
+        mistyped.display()
     );
 }
 
@@ -138,15 +161,15 @@ fn the_clean_step_passes_over_a_tree_that_was_never_built() {
 /// `.cargo/config.toml` pins every build in this clone under `<clone>/target`, so
 /// a tree reaching anywhere else is a misconfiguration rather than a tree to
 /// remove; the bound is that directory and not the clone, which also holds `src`
-/// and `.git`. The empty and relative cases reach nothing at all — the shape a
-/// mistyped argument takes, which the step has to refuse rather than fall back on
-/// a tree of its own.
+/// and `.git`. Every case here names a directory that is really there, because
+/// that is the whole of what the bound is asked of — a name reaching nothing has
+/// nothing to remove, and the journey below drives that instead.
 ///
-/// Everything here that reaches anything reaches a fixture this test made, so
-/// were the check gone the journey would delete its own fixtures and nothing
-/// else. That is why `<clone>/target` itself is absent from this list though the
-/// step refuses it too — the tier running this test is inside it — and why the
-/// test below reaches that case from a stand-in clone instead.
+/// Everything here reaches a fixture this test made, so were the check gone the
+/// journey would delete its own fixtures and nothing else. That is why
+/// `<clone>/target` itself is absent from this list though the step refuses it
+/// too — the tier running this test is inside it — and why the test below
+/// reaches that case from a stand-in clone instead.
 #[test]
 fn the_clean_step_refuses_what_does_not_reach_this_clones_build_directory() {
     let outside = env::temp_dir().join(format!(
@@ -166,27 +189,35 @@ fn the_clean_step_refuses_what_does_not_reach_this_clones_build_directory() {
     fs::create_dir_all(&beside)
         .unwrap_or_else(|e| panic!("could not create {}: {e}", beside.display()));
 
-    let mut refused: Vec<&OsStr> = vec![
-        beside.as_os_str(),
-        outside.as_os_str(),
-        through_dots.as_os_str(),
-        quoted.as_os_str(),
-        OsStr::new(""),
-        OsStr::new("relative/dir"),
-    ];
     // A symlink is the one spelling that sits inside the build tree and still
     // leaves it, so it is the case that says the step resolves rather than reads.
+    // It is unix-only because planting one on Windows takes a privilege a runner
+    // does not have, and the four cases above are what run there — so the case
+    // list is assembled rather than pushed to, which on Windows would leave a
+    // `mut` the compiler is right to reject.
     #[cfg(unix)]
     let link = repo_root().join("target/coverage-clean-probe-link");
     #[cfg(unix)]
-    {
+    let resolved: Option<&OsStr> = {
         let _ = fs::remove_file(&link);
         fs::create_dir_all(repo_root().join("target"))
             .unwrap_or_else(|e| panic!("could not create the build directory: {e}"));
         std::os::unix::fs::symlink(&outside, &link)
             .unwrap_or_else(|e| panic!("could not link {}: {e}", link.display()));
-        refused.push(link.as_os_str());
-    }
+        Some(link.as_os_str())
+    };
+    #[cfg(not(unix))]
+    let resolved: Option<&OsStr> = None;
+
+    let refused: Vec<&OsStr> = [
+        beside.as_os_str(),
+        outside.as_os_str(),
+        through_dots.as_os_str(),
+        quoted.as_os_str(),
+    ]
+    .into_iter()
+    .chain(resolved)
+    .collect();
 
     for target in refused {
         let attempt = just(&["_crate-coverage-clean".as_ref(), target]);
