@@ -45,6 +45,18 @@ set positional-arguments := true
 # requires the same release this line names and is why `rust-version` is 1.97.
 onetaskgraph-version := "0.2.32"
 
+# The renderer the visual-docs capture draws each scene with (`just screenshots`).
+# NOT part of `check`, `gate` or `bootstrap`: screenshots are informational, and
+# this is the only version of `freeze` a capture of this repository is ever taken
+# with.
+#
+# **This is the only place the release is named.** `just screenshots-tools`
+# installs it from here, and CI installs it through `scripts/install-freeze.sh`,
+# which reads this very line out of this file rather than keeping a second pin
+# that could drift from it. Bumping it reflows every shot: bless once and commit
+# the new baseline with the images.
+freeze-version := "0.2.2"
+
 # The MSRV has one source of truth — Cargo.toml's `rust-version` — so `just msrv`
 # cannot promise a floor the manifest no longer declares. CI reads the same field.
 msrv-version := `sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml`
@@ -60,8 +72,17 @@ default:
 # whole graph rather than the crate alone. Serialized: the projects share
 # installers, and two of those running at once race the same directory.
 # Set up the project from a clean clone.
-bootstrap:
+bootstrap: _hooks
     @bash scripts/nx.sh run-many -t bootstrap --parallel=1
+
+# Point this clone's git hooks at the committed directory. `core.hooksPath` is
+# per-clone state that is never committed, so a guard nothing activates is a
+# guard that runs nothing — this is what makes .githooks/pre-push real. The
+# directory carries the screencomp visual guard and nothing else: `just gate`
+# stays unhooked, exactly as it is today.
+_hooks:
+    @git rev-parse --git-dir >/dev/null 2>&1 || exit 0; \
+      git config core.hooksPath .githooks
 
 # The Rust crate's own provisioning (the `onepipeline:bootstrap` target).
 _crate-bootstrap:
@@ -389,6 +410,53 @@ session-setup:
 # Install/refresh the llmlint toolchain (oneharness + llmlint). Idempotent.
 setup-llmlint:
     ./scripts/setup-llmlint.sh
+
+# --- Visual docs (informational; never part of `check` or CI's gate) ---------
+# Deterministic SVGs of the real CLI's real output, rendered by `freeze` from a
+# vendored pinned font and gated, galleried and PR-commented by screencomp. What
+# the scenes are and why each one documents its surface is screenshots/AGENTS.md.
+# Regenerating is out of the gate, like `deps-check`: the capture needs a
+# third-party renderer this repository does not install for `just check`, and
+# `.github/workflows/visual-docs.yml` owns the comparison.
+
+# Install the pinned capture renderer (`freeze`) on demand. Needs Go.
+screenshots-tools:
+    @command -v go >/dev/null || { echo "go not found: needed to install freeze; see https://go.dev/dl" >&2; exit 1; }
+    go install github.com/charmbracelet/freeze@v{{freeze-version}}
+    @echo "installed freeze to $(go env GOPATH)/bin (ensure it is on PATH)"
+
+# Capture the screenshots: build the binaries, drive the real CLI against the
+# offline fixtures, render each scene to shots/current/<arch>/ and
+# screenshots/images/. Needs `freeze` on PATH (`just screenshots-tools`).
+screenshots:
+    @bash scripts/nx.sh run onepipeline:screenshots
+
+# Regenerate the animated README hero (screenshots/images/demo.gif): the same
+# real binary against the same offline fixtures, rendered frame by frame with
+# the same vendored font. Informational and deliberately NOT hash-gated — a GIF
+# is not byte-reproducible across Pillow versions — so it is regenerated on
+# demand and committed. Needs Python 3 + Pillow (`pip install Pillow`).
+screenshots-gif:
+    @command -v python3 >/dev/null || { echo "python3 not found: needed to render the demo GIF" >&2; exit 1; }
+    @python3 -c "import PIL" 2>/dev/null || { echo "Pillow not installed: pip install Pillow" >&2; exit 1; }
+    cargo build --release --locked --bin onepipeline --package onevcs --bin onevcs
+    cargo build --release --locked --package onepipeline-testfakes
+    python3 scripts/demo-gif.py
+
+# Refresh the committed digest baseline from a fresh capture, after an INTENDED
+# output change. Rewrites this host's lane only (scripts/host-arch.sh names it,
+# and the pre-push guard classifies the same one); commit shots/baseline/ and
+# screenshots/images/ together.
+screenshots-bless: screenshots
+    @bash scripts/bless-baseline.sh
+    @echo "baseline refreshed for the $(bash scripts/host-arch.sh) lane; commit shots/baseline/ + screenshots/images/"
+
+# The `onepipeline:screenshots` target's body. Through Nx so the capture is
+# declared in the build graph — `visualDocsSource` in nx.json enumerates every
+# path that can change a rendered shot — rather than being a command nothing
+# knows the inputs of.
+_crate-screenshots:
+    @bash scripts/screenshots.sh
 
 # Kept OUT of `check` on purpose: the deterministic gate stays offline and
 # credential-free. Config is the composed `llmlint.yml`.

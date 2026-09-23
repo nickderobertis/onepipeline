@@ -49,6 +49,24 @@
       "{workspaceRoot}/rustfmt.toml",
       "{workspaceRoot}/.config/nextest.toml",
       "sharedGlobals"
+    ],
+    "visualDocsSource": [
+      "{workspaceRoot}/src/**/*",
+      "{workspaceRoot}/crates/testfakes/**/*",
+      "{workspaceRoot}/examples/**/*",
+      "{workspaceRoot}/graphs/**/*",
+      "{workspaceRoot}/tests/recorded/run-root/**/*",
+      "{workspaceRoot}/screenshots/fonts/**/*",
+      "{workspaceRoot}/screencomp.toml",
+      "{workspaceRoot}/scripts/screenshots.sh",
+      "{workspaceRoot}/scripts/screenshots.py",
+      "{workspaceRoot}/scripts/shotworld.py",
+      "{workspaceRoot}/scripts/shotnorm.py",
+      "{workspaceRoot}/scripts/host-arch.sh",
+      "{workspaceRoot}/Cargo.toml",
+      "{workspaceRoot}/Cargo.lock",
+      "{workspaceRoot}/rust-toolchain.toml",
+      "sharedGlobals"
     ]
   },
   "targetDefaults": {
@@ -115,6 +133,12 @@
         "format-check",
         "lint",
         "test"
+      ]
+    },
+    "screenshots": {
+      "cache": true,
+      "inputs": [
+        "visualDocsSource"
       ]
     }
   }

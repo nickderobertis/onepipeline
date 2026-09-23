@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "shots": [
+    {
+      "name": "help",
+      "toggles": {},
+      "hash": "ad6dacc2963ae0d50c61e45d1e558116740d561363aca7103038e7209455b9cc"
+    },
+    {
+      "name": "monitor",
+      "toggles": {},
+      "hash": "7fed8c2a99ac1bd3c27badcc049236fc2a0413ecf3b2e6975367e87336118b02"
+    },
+    {
+      "name": "results",
+      "toggles": {},
+      "hash": "352e03097169f80fed5bdfa902ff51d3dfea9903f93820709bb02baae4c1acc0"
+    },
+    {
+      "name": "runs",
+      "toggles": {},
+      "hash": "7ca8f10e421b2aab5ab078a21a491552839d47af7707ac916328bc0c8efb129f"
+    },
+    {
+      "name": "status",
+      "toggles": {},
+      "hash": "eb070ac2d9e14eee542dc55bf7b2e259b81495d2d55646266b0dc6cf6f11d94c"
+    },
+    {
+      "name": "telemetry",
+      "toggles": {},
+      "hash": "02d8c5abe1e28eb4295eea0c2b8c16ede7db813a04faa311aeecbe5f65b3252b"
+    },
+    {
+      "name": "watch",
+      "toggles": {},
+      "hash": "8be9d86f906fbb1166ec080107da3dc35eaa659d71ff4f6a75a5f73a500674c0"
+    }
+  ]
+}
