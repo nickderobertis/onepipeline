@@ -60,6 +60,7 @@ pub mod rules;
 pub mod telemetry;
 pub mod verbs;
 pub mod views;
+pub mod vocabulary;
 
 // The engine behind the contract's surface. These modules are private on
 // purpose: `docs/contract.md` names the plan schema, the channel, the executor

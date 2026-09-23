@@ -105,9 +105,8 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
         "the session's own opening is not on its stream: {opening:?}"
     );
     assert!(
-        opening
-            .iter()
-            .all(|envelope| envelope.stream == token.0 && envelope.source == onevcs::Source::Vcs),
+        opening.iter().all(|envelope| envelope.stream == token.0
+            && envelope.source.as_str() == onevcs::SOURCE_WORD),
         "an envelope on this session's stream is attributed elsewhere: {opening:?}"
     );
 

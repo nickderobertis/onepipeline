@@ -1722,7 +1722,7 @@ pub(crate) fn read_envelope_lines(path: &Path, from: u64) -> Vec<EnvelopeLine> {
     // llmlint: ignore-block[no_panics_on_recoverable_errors] the same leniency every
     // ledger reader here follows, stated on `read_records` above: a file this process
     // cannot open reads as one that is not there.
-    let Ok(reader) = onemessagebus_agent::Reader::open_at(path, from) else {
+    let Ok(reader) = crate::vocabulary::Reader::open_at(path, from) else {
         return Vec::new();
     };
     // llmlint: ignore-end[no_panics_on_recoverable_errors]

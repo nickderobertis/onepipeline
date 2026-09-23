@@ -1,0 +1,648 @@
+{
+  "version": "1.0.0",
+  "description": "The agent stack's event envelope, filter, artifact reference and labels, as onepipeline declares them.",
+  "schemas": [
+    {
+      "id": "agent.event-envelope@1",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "v": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "description": "The envelope schema version the producer wrote against.",
+            "const": 1
+          },
+          "ts": {
+            "type": "string",
+            "description": "RFC 3339, millisecond precision, UTC."
+          },
+          "stream": {
+            "type": "string",
+            "description": "Unique id of the producing process."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Monotonic per [`stream`](Self::stream)."
+          },
+          "source": {
+            "$ref": "#/$defs/Source",
+            "description": "What produced the event, in the vocabulary's words."
+          },
+          "kind": {
+            "$ref": "#/$defs/Kind",
+            "description": "What happened, as its producer named it."
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Phase"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Which part of a change's life the event belongs to, as its producer\nclassified it."
+          },
+          "labels": {
+            "$ref": "#/$defs/Labels",
+            "description": "The reserved keys the vocabulary declares plus free-form extras.\nProducers stamp what they know; enrichers never rewrite.",
+            "default": {}
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Kind-specific detail. Text fields are bounded by\n[`MAX_PAYLOAD_TEXT_BYTES`](crate::MAX_PAYLOAD_TEXT_BYTES); larger\nevidence is an [`ArtifactRef`].",
+            "default": {}
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            "description": "Evidence stored by the producing library and referenced by id.",
+            "default": []
+          }
+        },
+        "required": [
+          "v",
+          "ts",
+          "stream",
+          "seq",
+          "source",
+          "kind"
+        ],
+        "description": "One event, as a producing process writes it and as a consumer reads it.\n\nMerge order across streams is `(ts, stream, seq)`. A consumer detects loss\nas a per-stream [`seq`](Self::seq) gap; there is no cross-stream promise\nbeyond the timestamps.\n\nThe type parameter is the [`Vocabulary`] the envelope is written over: it\ndecides the source words, the dimensions carried between `kind` and\n`labels`, and the label set. Deserialization refuses an unknown top-level\nfield, a `seq` that is not an unsigned integer, a source word the vocabulary\ndoes not admit, and a missing required field — each by name.",
+        "title": "Envelope",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "Source": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "agentgraph",
+                "description": "`oneagentgraph`."
+              },
+              {
+                "type": "string",
+                "const": "vcs",
+                "description": "`onevcs`."
+              },
+              {
+                "type": "string",
+                "const": "pipeline",
+                "description": "`onepipeline`."
+              }
+            ],
+            "description": "The library that produced an event."
+          },
+          "Kind": {
+            "type": "string",
+            "description": "What happened, as the kebab-case wire string.\n\nOpen on the wire and a string here, because a relay carries a sibling's\nkinds without interpreting them; a producing library keeps its own closed\nenum and converts into this with `From`."
+          },
+          "Phase": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "development",
+                "description": "The work is being made."
+              },
+              {
+                "type": "string",
+                "const": "integrate",
+                "description": "The work is being brought together with the base."
+              },
+              {
+                "type": "string",
+                "const": "review",
+                "description": "The change request is open and being ruled on."
+              },
+              {
+                "type": "string",
+                "const": "release",
+                "description": "What carries the landed change is being released."
+              }
+            ],
+            "description": "Which part of a change's life an event belongs to.\n\nFour phases over one change: the work is made, it is brought together with the\nbase it is going onto, it is proposed and ruled on, and what carries it is\nreleased. Stamped by the producer, never derived by a reader: one kind's phase\nis not always a fact about the kind."
+          },
+          "Labels": {
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The run this event belongs to."
+              },
+              "round": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "description": "The round within the run."
+              },
+              "node": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The graph node being executed."
+              },
+              "step": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The step within a node that runs several in sequence."
+              },
+              "member": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Which member of a conversation produced the event."
+              },
+              "persona": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The persona that member is running under."
+              }
+            },
+            "additionalProperties": true,
+            "description": "The reserved label keys, plus whatever else a producer stamped.\n\nReserved keys are absent rather than empty when unknown, so an enricher can\ntell \"not stamped\" from \"stamped empty\". The extras are flattened beside\nthem, in the order they were stamped."
+          },
+          "ArtifactRef": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Identifier, unique within the producing library's store."
+              },
+              "kind": {
+                "type": "string",
+                "description": "What the artifact is — a gate log, a check log, a transcript, a report."
+              },
+              "bytes": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "description": "Size of the stored artifact."
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "bytes"
+            ],
+            "description": "Evidence too large for a payload: stored by the producing library and\nreferenced by id, to be read back through that library."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.event-envelope@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "v": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "description": "The envelope schema version the producer wrote against.",
+            "const": 2
+          },
+          "ts": {
+            "type": "string",
+            "description": "RFC 3339, millisecond precision, UTC."
+          },
+          "stream": {
+            "type": "string",
+            "description": "Unique id of the producing process."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Monotonic per [`stream`](Self::stream)."
+          },
+          "source": {
+            "$ref": "#/$defs/Source",
+            "description": "What produced the event, in the vocabulary's words."
+          },
+          "kind": {
+            "$ref": "#/$defs/Kind",
+            "description": "What happened, as its producer named it."
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Phase"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Which part of a change's life the event belongs to, as its producer\nclassified it."
+          },
+          "labels": {
+            "$ref": "#/$defs/Labels",
+            "description": "The reserved keys the vocabulary declares plus free-form extras.\nProducers stamp what they know; enrichers never rewrite.",
+            "default": {}
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Kind-specific detail. Text fields are bounded by\n[`MAX_PAYLOAD_TEXT_BYTES`](crate::MAX_PAYLOAD_TEXT_BYTES); larger\nevidence is an [`ArtifactRef`].",
+            "default": {}
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            "description": "Evidence stored by the producing library and referenced by id.",
+            "default": []
+          }
+        },
+        "required": [
+          "v",
+          "ts",
+          "stream",
+          "seq",
+          "source",
+          "kind"
+        ],
+        "description": "One event, as a producing process writes it and as a consumer reads it.\n\nMerge order across streams is `(ts, stream, seq)`. A consumer detects loss\nas a per-stream [`seq`](Self::seq) gap; there is no cross-stream promise\nbeyond the timestamps.\n\nThe type parameter is the [`Vocabulary`] the envelope is written over: it\ndecides the source words, the dimensions carried between `kind` and\n`labels`, and the label set. Deserialization refuses an unknown top-level\nfield, a `seq` that is not an unsigned integer, a source word the vocabulary\ndoes not admit, and a missing required field — each by name.",
+        "title": "Envelope",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "Source": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "agentgraph",
+                "description": "`oneagentgraph`."
+              },
+              {
+                "type": "string",
+                "const": "vcs",
+                "description": "`onevcs`."
+              },
+              {
+                "type": "string",
+                "const": "pipeline",
+                "description": "`onepipeline`."
+              }
+            ],
+            "description": "The library that produced an event."
+          },
+          "Kind": {
+            "type": "string",
+            "description": "What happened, as the kebab-case wire string.\n\nOpen on the wire and a string here, because a relay carries a sibling's\nkinds without interpreting them; a producing library keeps its own closed\nenum and converts into this with `From`."
+          },
+          "Phase": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "development",
+                "description": "The work is being made."
+              },
+              {
+                "type": "string",
+                "const": "integrate",
+                "description": "The work is being brought together with the base."
+              },
+              {
+                "type": "string",
+                "const": "review",
+                "description": "The change request is open and being ruled on."
+              },
+              {
+                "type": "string",
+                "const": "release",
+                "description": "What carries the landed change is being released."
+              }
+            ],
+            "description": "Which part of a change's life an event belongs to.\n\nFour phases over one change: the work is made, it is brought together with the\nbase it is going onto, it is proposed and ruled on, and what carries it is\nreleased. Stamped by the producer, never derived by a reader: one kind's phase\nis not always a fact about the kind."
+          },
+          "Labels": {
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The run this event belongs to."
+              },
+              "round": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "description": "The round within the run."
+              },
+              "node": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The graph node being executed."
+              },
+              "step": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The step within a node that runs several in sequence."
+              },
+              "member": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Which member of a conversation produced the event."
+              },
+              "persona": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The persona that member is running under."
+              }
+            },
+            "additionalProperties": true,
+            "description": "The reserved label keys, plus whatever else a producer stamped.\n\nReserved keys are absent rather than empty when unknown, so an enricher can\ntell \"not stamped\" from \"stamped empty\". The extras are flattened beside\nthem, in the order they were stamped."
+          },
+          "ArtifactRef": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Identifier, unique within the producing library's store."
+              },
+              "kind": {
+                "type": "string",
+                "description": "What the artifact is — a gate log, a check log, a transcript, a report."
+              },
+              "bytes": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "description": "Size of the stored artifact."
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "bytes"
+            ],
+            "description": "Evidence too large for a payload: stored by the producing library and\nreferenced by id, to be read back through that library."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.event-filter@1",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "include": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Matcher"
+            },
+            "description": "Matchers an envelope satisfies one of to pass. Absent or empty admits\nevery envelope, so a filter that only rejects need name nothing here."
+          },
+          "exclude": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Matcher"
+            },
+            "description": "Matchers that reject. A match here rejects whatever\n[`include`](Self::include) said, so a broad include beside a narrow\nexclude is how \"all of this except that\" is written."
+          }
+        },
+        "description": "Which envelopes pass.",
+        "title": "Filter",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "Matcher": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Source"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The producer, by exact equality."
+              },
+              "kind": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "A glob over the kind's kebab-case wire string, where `*` stands for any\nrun of characters including none and every other character is itself."
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Phase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The phase the envelope was stamped at."
+              },
+              "run_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The `run_id` label."
+              },
+              "node": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The `node` label."
+              },
+              "step": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The `step` label."
+              },
+              "member": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The `member` label."
+              },
+              "persona": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The `persona` label."
+              }
+            },
+            "description": "One matcher: every field it names must hold of an envelope, and a field it\ndoes not name is not consulted."
+          },
+          "Source": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "agentgraph",
+                "description": "`oneagentgraph`."
+              },
+              {
+                "type": "string",
+                "const": "vcs",
+                "description": "`onevcs`."
+              },
+              {
+                "type": "string",
+                "const": "pipeline",
+                "description": "`onepipeline`."
+              }
+            ],
+            "description": "The library that produced an event."
+          },
+          "Phase": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "development",
+                "description": "The work is being made."
+              },
+              {
+                "type": "string",
+                "const": "integrate",
+                "description": "The work is being brought together with the base."
+              },
+              {
+                "type": "string",
+                "const": "review",
+                "description": "The change request is open and being ruled on."
+              },
+              {
+                "type": "string",
+                "const": "release",
+                "description": "What carries the landed change is being released."
+              }
+            ],
+            "description": "Which part of a change's life an event belongs to.\n\nFour phases over one change: the work is made, it is brought together with the\nbase it is going onto, it is proposed and ruled on, and what carries it is\nreleased. Stamped by the producer, never derived by a reader: one kind's phase\nis not always a fact about the kind."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.artifact-ref@1",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Identifier, unique within the producing library's store."
+          },
+          "kind": {
+            "type": "string",
+            "description": "What the artifact is — a gate log, a check log, a transcript, a report."
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Size of the stored artifact."
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "bytes"
+        ],
+        "description": "Evidence too large for a payload: stored by the producing library and\nreferenced by id, to be read back through that library.",
+        "title": "ArtifactRef",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.labels@1",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The run this event belongs to."
+          },
+          "round": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The round within the run."
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The graph node being executed."
+          },
+          "step": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The step within a node that runs several in sequence."
+          },
+          "member": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which member of a conversation produced the event."
+          },
+          "persona": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The persona that member is running under."
+          }
+        },
+        "additionalProperties": true,
+        "description": "The reserved label keys, plus whatever else a producer stamped.\n\nReserved keys are absent rather than empty when unknown, so an enricher can\ntell \"not stamped\" from \"stamped empty\". The extras are flattened beside\nthem, in the order they were stamped.",
+        "title": "Labels",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    }
+  ]
+}
