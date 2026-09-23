@@ -756,6 +756,17 @@ include = [
   # time — the telemetry document, and one launch config per schema version this
   # build reads. Without them the packaged crate does not build, let alone test.
   "tests/golden/*.json",
+  # The capture `src/payload.rs` reads at compile time: every schema id
+  # `onemessagebus-agent` 0.8.0's registry listed, and the document under each,
+  # which is what holds this crate's own registries to the ids that release
+  # registered. In `src/`, so without it the packaged **library** does not build.
+  "tests/recorded/registry/*.json",
+  # The four streams `tests/recorded_bus.rs` reads at compile time, copied byte
+  # for byte from that same tag: what proves the bytes on the wire did not move
+  # when the vocabulary came here. Without them the packaged crate's own test
+  # binary does not compile.
+  "tests/recorded/bus/*.ndjson",
+  "tests/recorded/bus/*.jsonl",
   # The planner-channel envelope schemas `src/channel/layout.rs` reads at compile
   # time; without them `cargo publish`'s verification build of the crate fails.
   "/schemas/**",

@@ -3,8 +3,8 @@
 //!
 //! One [`Message`] per [`PipelineKind`], under `agent.pipeline.<kind>@2` — the
 //! envelope version those records are written at — and every one of them in the
-//! registry [`crate::event::registry`] constructs, beside the agent profile's
-//! envelope that carries it. The merged stream's own kinds are then declared in
+//! registry [`crate::event::registry`] constructs, beside the
+//! [`crate::vocabulary`] envelope that carries it. The merged stream's own kinds are then declared in
 //! the same registry as the siblings' (`agent.agentgraph.<kind>`), and a payload
 //! is checkable against a document rather than against whichever reader folds it.
 //!

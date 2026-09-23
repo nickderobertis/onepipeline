@@ -18,6 +18,18 @@ Dependency direction is one-way and must stay that way: `onepipeline` →
 agent/harness and repository/host concerns stay in theirs — do not regrow
 harness selection, identity chains, or merge policy here.
 
+**This crate owns the agent stack's event vocabulary**, in `src/vocabulary.rs`,
+because it is the one crate that links every producer: the closed `Source`
+naming all three, the reserved labels, the matcher fields, and the
+`agent.event-envelope`, `agent.event-filter`, `agent.artifact-ref` and
+`agent.labels` schemas, published as `schemas/events.json`. Each producer
+declares its own vocabulary over the same `onemessagebus` core — `Phase` and the
+word `vcs` are **`onevcs`'s**, `agentgraph` is the graph's — so a sibling's
+envelope is not this crate's Rust type and crosses at its **JSON form**, with a
+refusal reported rather than a value dropped. Do not restate a sibling's word
+here; re-export it, and let `tests/contract.rs`'s drift check hold the two
+shapes together.
+
 Ships as a Rust library plus the `onepipeline` binary, distributed on crates.io,
 PyPI (`onepipeline-cli`), and npm (`onepipeline-cli`).
 

@@ -1482,8 +1482,9 @@ fn sibling_filter(filter: &EventFilter) -> Result<onevcs::EventFilter> {
 /// one session: they carry the sibling's kind, so they carry the phase that
 /// library puts that kind in rather than a second classification made here.
 /// `None` for the one kind whose phase its producer decides — a push, which this
-/// crate never records. The phase is the agent profile's on both sides, so what
-/// the sibling answers is this crate's value with no conversion between.
+/// crate never records. `Phase` is **`onevcs`'s own type**, re-exported by
+/// [`crate::vocabulary`], so what the sibling answers is this crate's value with
+/// no conversion between — the one part of a relayed envelope that needs none.
 fn phase_of_kind(kind: onevcs::EventKind) -> Option<crate::event::Phase> {
     <crate::event::Phase as onevcs::PhaseOf>::of(kind)
 }

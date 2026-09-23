@@ -22,8 +22,8 @@
 //! **The bytes do not move.** Every type here serializes to what the stack has
 //! always written: `tests/recorded/bus/` holds a stream from each producer,
 //! copied byte for byte from `onemessagebus` at tag
-//! `onemessagebus-agent-v0.8.0`, and `tests/recorded.rs` reads every line back
-//! through these types and re-serializes it with no byte changed.
+//! `onemessagebus-agent-v0.8.0`, and `tests/recorded_bus.rs` reads every line
+//! back through these types and re-serializes it with no byte changed.
 
 use std::fmt;
 
@@ -345,7 +345,8 @@ pub fn register_events(registry: &mut Registry) -> Result<(), onemessagebus::Reg
 /// own `onemessagebus` namespace so a client in another language validates
 /// against them.
 ///
-/// Both registries this crate builds — [`crate::payload::registry`] and
+/// Both registries this crate builds — `payload::registry`, which
+/// `onepipeline::event` reads envelopes through, and
 /// [`crate::channel::layout::registry`] — start from this, so they list the same
 /// ids with the same documents as the profile crate's `registry()` did at
 /// `onemessagebus-agent` 0.8.0. `tests/registry.rs` holds them to a capture of
