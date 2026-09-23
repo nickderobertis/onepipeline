@@ -83,8 +83,9 @@ attached stream prints changes, and commit the new hero beside the new baseline.
 
 ## Working on it
 
-`just --list` indexes the four recipes (`screenshots-tools`, `screenshots`,
-`screenshots-gif`, `screenshots-bless`). What it does not say:
+`just --list` indexes the five recipes (`screenshots-tools`, `screenshots`,
+`screenshots-gif`, `screenshots-bless`, `screenshots-guard`). What it does not
+say:
 
 - **Bless only after an intended output change**, and commit the refreshed
   baseline together with `images/` — CI compares the two against each other.
@@ -101,3 +102,13 @@ attached stream prints changes, and commit the new hero beside the new baseline.
   per-clone state `just bootstrap` sets; `tests/provisioning.rs` holds that.
   The directory carries the visual guard **and nothing else** — `just gate` stays
   unhooked, as it already was.
+- **Rehearse the guard before a push that will run it: `just screenshots-guard`.**
+  It is the one caller that runs the capture inside a *git hook*, and a hook's
+  environment is not a shell's — git exports `GIT_DIR` and `GIT_WORK_TREE`
+  naming the repository being pushed, and `GIT_DIR` beats `-C` and beats
+  discovery. Both publications this guard rejected were rejected for defects
+  reachable only there, the second of them a world whose seed commits landed in
+  the repository under push. So the capture clears the whole `GIT_*` prefix with
+  the stack's `ONE*_` settings and states the git environment it wants
+  (`clear_inherited_settings` in `world.py`), and the recipe runs the real hook
+  with the real refs on its stdin, pushing nothing.

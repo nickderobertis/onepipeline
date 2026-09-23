@@ -439,6 +439,14 @@ screenshots-gif:
     RUSTFLAGS="-D warnings" cargo build --release --locked --package onepipeline-testfakes
     python3 screenshots/demo-gif.py
 
+# Run the pre-push visual guard exactly as git would — `GIT_DIR` in the
+# environment, the pushed refs on stdin — without pushing anything. The guard is
+# the only caller of the capture that runs inside a hook, and a hook's
+# environment is not a shell's, so this is how a defect that only appears there
+# is found before a push rather than by a rejected one.
+screenshots-guard:
+    @bash screenshots/rehearse-guard.sh
+
 # Refresh the committed digest baseline from a fresh capture, after an INTENDED
 # output change. Rewrites this host's lane only (screenshots/host-arch.sh names it,
 # and the pre-push guard classifies the same one); commit shots/baseline/ and
