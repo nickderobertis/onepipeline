@@ -74,12 +74,21 @@ def screencomp_pins_agree() -> str | None:
     text = (REPO / WORKFLOW).read_text()
     used = re.search(r"visual-docs-reusable\.yml@(\S+)", text)
     installed = re.search(r"screencomp-version:\s*(\S+)", text)
+    release = re.compile(r"^v?\d+\.\d+\.\d+$")
     if not used or not installed:
         return (
             f"screenshots: {WORKFLOW} no longer names both a screencomp "
             "reusable-workflow ref and a `screencomp-version:` to install. It has "
             "to name both, and they have to agree — restore them."
         )
+    for what, found in (("calls", used), ("installs", installed)):
+        if not release.match(found.group(1)):
+            return (
+                f"screenshots: {WORKFLOW} {what} screencomp "
+                f"{found.group(1)!r}, which is not an immutable release tag. A "
+                "moving ref would change the gate under a baseline nothing "
+                "recaptured — name a `vMAJOR.MINOR.PATCH` release."
+            )
     if used.group(1) != installed.group(1):
         return (
             f"screenshots: {WORKFLOW} calls screencomp {used.group(1)} and installs "

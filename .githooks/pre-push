@@ -83,12 +83,12 @@ fi
 # option-shaped and nothing revision-shaped-but-not-this-push can be passed in.
 # `git diff` reads a leading dash as a flag however the arguments are ordered,
 # so the check is the guard rather than a `--` after the value.
-hex40='^[0-9a-f]{7,64}$'
+object_name='^[0-9a-f]{7,64}$'
 range='^[0-9a-f]{7,64}\.\.[0-9a-f]{7,64}$'
 
 ranges=()
 if [ -n "${SCREENCOMP_GUARD_RANGE:-}" ]; then
-  if ! [[ "$SCREENCOMP_GUARD_RANGE" =~ $range || "$SCREENCOMP_GUARD_RANGE" =~ $hex40 ]]; then
+  if ! [[ "$SCREENCOMP_GUARD_RANGE" =~ $range || "$SCREENCOMP_GUARD_RANGE" =~ $object_name ]]; then
     echo "pre-push: SCREENCOMP_GUARD_RANGE is '$SCREENCOMP_GUARD_RANGE', which is" >&2
     echo "          not an object name or a '<sha>..<sha>' range. Resolve the refs" >&2
     echo "          first ('git rev-parse') and set it to the resolved form, or" >&2
@@ -103,13 +103,13 @@ else
     if [[ "$local_sha" =~ $zero ]]; then
       continue                            # branch deletion: nothing to capture
     fi
-    if ! [[ "$local_sha" =~ $hex40 ]]; then
+    if ! [[ "$local_sha" =~ $object_name ]]; then
       echo "pre-push: git named '$local_sha' as the commit being pushed, which is" >&2
       echo "          not an object name. Skipping the visual guard; the" >&2
       echo "          visual-docs workflow still gates this on the pull request." >&2
       exit 0
     fi
-    if [[ "$remote_sha" =~ $zero ]] || ! [[ "$remote_sha" =~ $hex40 ]]; then
+    if [[ "$remote_sha" =~ $zero ]] || ! [[ "$remote_sha" =~ $object_name ]]; then
       base="$(git merge-base origin/HEAD "$local_sha" 2>/dev/null || true)"
       [ -n "$base" ] && ranges+=("${base}..${local_sha}") || ranges+=("$local_sha")
     else

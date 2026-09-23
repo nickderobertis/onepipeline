@@ -309,6 +309,24 @@ class World:
             time.sleep(POLL_SECONDS)
 
 
+def _record(line: str) -> dict | None:
+    """One journal line as a record, or `None` for anything that is not one.
+
+    A line mid-write is not yet JSON, and a journal is read while it is being
+    appended to — so a partial line is a "not yet" rather than a failure. Nor is
+    every well-formed JSON value a record: only an object has the keys read
+    below, and a bare string or list would otherwise reach `.get`.
+    """
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return record if isinstance(record, dict) else None
+
+
 def journal_has(journal: Path, kind: str, node: str | None) -> bool:
     """Whether one **finished** record of `kind` (about `node`) is in the journal."""
     if not journal.is_file():
@@ -317,10 +335,8 @@ def journal_has(journal: Path, kind: str, node: str | None) -> bool:
         line = line.strip()
         if not line:
             continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            # A record whose writer has not finished it. The next poll reads it.
+        record = _record(line)
+        if record is None:
             continue
         if record.get("kind") != kind:
             continue
@@ -333,6 +349,13 @@ def journal_has(journal: Path, kind: str, node: str | None) -> bool:
     return False
 
 
+#: What a repository identity in an example task may look like. The value is
+#: interpolated into the `https://<identity>.git` origin every registration is
+#: made against, so a task carrying a line that is not one would put arbitrary
+#: text into a URL this capture then hands `git`.
+IDENTITY = re.compile(r"^[A-Za-z0-9.-]+(?:/[A-Za-z0-9._-]+){2,}$")
+
+
 def example_repositories() -> list[str]:
     """Every repository origin the shipped example tasks name."""
     found: set[str] = set()
@@ -343,7 +366,15 @@ def example_repositories() -> list[str]:
                 listing = True
                 continue
             if listing and line.startswith("  - "):
-                found.add(line[4:].strip().strip('"'))
+                identity = line[4:].strip().strip('"')
+                if not IDENTITY.match(identity):
+                    raise SystemExit(
+                        f"screenshots: {task.name} names the repository "
+                        f"{identity!r}, which is not a `host/owner/name` identity. "
+                        "This capture registers each one as an origin URL, so fix "
+                        "the task's `repositories:` entry."
+                    )
+                found.add(identity)
                 continue
             listing = False
     return sorted(found)
@@ -501,9 +532,8 @@ def _pending_attestations(journal: Path) -> list[str]:
         line = line.strip()
         if not line:
             continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
+        record = _record(line)
+        if record is None:
             continue
         payload = record.get("payload") or {}
         kind = record.get("kind")
