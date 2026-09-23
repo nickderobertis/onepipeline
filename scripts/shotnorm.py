@@ -190,11 +190,19 @@ def realign(text: str) -> str:
     """
     lines = text.splitlines(keepends=True)
     fields = [re.match(EVENT_LINE, line) for line in lines]
-    columns = [len(m.group(1)) + len(m.group(2)) + len(m.group(3)) + len(m.group(4))
-               for m in fields if m]
-    if not columns:
+    # The column is read off the lines that are genuinely **padded** to it — the
+    # ones whose gap is more than the single space an overflowing id leaves. An
+    # overflowing line's own column is past the real one, so taking the maximum
+    # over every line would move the whole view four characters right of where
+    # the renderer puts it.
+    padded = [
+        len(m.group(1)) + len(m.group(2)) + len(m.group(3)) + len(m.group(4))
+        for m in fields
+        if m and len(m.group(4)) > 1
+    ]
+    if not padded:
         return text
-    column = max(columns)
+    column = max(padded)
     out = []
     for line, match in zip(lines, fields):
         if not match:
