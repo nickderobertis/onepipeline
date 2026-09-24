@@ -89,7 +89,6 @@ fn look_every() -> Duration {
 #[cfg(unix)]
 const BACKSTOP: Duration = Duration::from_secs(60);
 
-/// Keep failure output readable when a watch records many events.
 #[cfg(unix)]
 const REPORTED_ACTIVITY: usize = 8;
 
@@ -249,9 +248,6 @@ fn allowed_spared_quiet(bound: Duration) -> Duration {
     bound * 2
 }
 
-/// The idle tree proves condemnation still works; the spinning and bursting
-/// trees test continued activity, including quiet looks between bursts.
-///
 /// POSIX only, because the evidence is: a member's tree is the [`SCRATCH_ENV`]
 /// stamp the kernel fixes at `exec`, and on Windows it is a job object, which
 /// only the launcher of a tree can create — so a scratch this test stamped from
