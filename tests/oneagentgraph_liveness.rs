@@ -90,31 +90,15 @@ fn look_every() -> Duration {
     oneagentgraph::member::HEARTBEAT_INTERVAL / 2
 }
 
-/// The longest this file waits for anything, and a **backstop rather than a
-/// bound**: nothing is asserted about how much of it a verdict spends, and a
-/// loaded runner is free to spend all of it.
-///
-/// It exists so a look that never answers ends as a named failure well inside
-/// nextest's `terminate-after` rather than as a binary that hangs.
+/// A backstop for unanswered looks, below nextest's `terminate-after`.
+/// No verdict is held to this duration.
 #[cfg(unix)]
 const BACKSTOP: Duration = Duration::from_secs(60);
 
-/// How many activity events a failure message names, most recent last.
-///
-/// A watch takes four readings a second and runs for tens of seconds, so the
-/// whole list is hundreds of timestamps and buries the count and the gap printed
-/// beside it. Where activity was when the verdict landed is what a reader of one
-/// of these is after.
+/// Keep failure output readable when a watch records many events.
 #[cfg(unix)]
 const REPORTED_ACTIVITY: usize = 8;
 
-/// How many activity events the busy half watches for before it has seen enough.
-///
-/// The watch ends on the **evidence** rather than on a clock: enough events that
-/// the rule has been given its opportunities to condemn and declined them — see
-/// the `enough` closure at that call site for the other half of that. A runner
-/// that needs a minute to produce them is slow, not wrong, and nothing here
-/// reads it as wrong.
 #[cfg(unix)]
 const ACTIVITY_EVENTS: usize = 8;
 
@@ -148,17 +132,8 @@ fn burst() -> Duration {
     look_every() * 8
 }
 
-/// The bursting tree's cadence, driven from here rather than by the tree itself.
-///
-/// A shell that times its own bursts needs a subprocess per iteration to read
-/// the clock, and on a saturated runner that fork storm starves the bursts
-/// themselves, so the pauses stop being the ones this file chose.
-///
-/// A **stopped** process is charged no CPU by any reading of it, so `SIGSTOP`
-/// and `SIGCONT` make the pause exactly the one [`bound`] asserts [`watchdog`]
-/// is wider than, on any host. The signals go to a pid this file started and
-/// holds — [`BUSY`] is one process with no children of its own — and never to a
-/// pattern.
+/// Pause the owned spin-loop pid with signals. A timed shell loop would fork a
+/// clock reader on each iteration and compete with its own CPU measurements.
 #[cfg(unix)]
 struct Bursts {
     pid: u32,
@@ -168,7 +143,6 @@ struct Bursts {
 
 #[cfg(unix)]
 impl Bursts {
-    /// Start pausing and resuming `pid`, until the returned guard is dropped.
     fn over(pid: u32) -> Self {
         let ending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let over = std::sync::Arc::clone(&ending);
@@ -195,13 +169,14 @@ impl Drop for Bursts {
     fn drop(&mut self) {
         self.ending
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(cadence) = self.cadence.take() {
-            let _ = cadence.join();
-        }
+        let cadence_result = self.cadence.take().map(std::thread::JoinHandle::join);
         // The cadence above always resumes what it stopped, and this says so a
         // second time because the one state a stopped tree could be left in is
         // the one [`Tree::drop`] has the least to say about.
         signal(self.pid, "-CONT");
+        if let Some(result) = cadence_result {
+            result.expect("the bursting tree's signal cadence succeeds");
+        }
     }
 }
 
@@ -220,18 +195,17 @@ fn wait(how_long: Duration, ending: &std::sync::atomic::AtomicBool) -> bool {
     !ending.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Signal a pid this file started, and say nothing where it has already gone.
 #[cfg(unix)]
 fn signal(pid: u32, what: &str) {
-    let _ = std::process::Command::new("kill")
+    let status = std::process::Command::new("kill")
         .args([what, &pid.to_string()])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
+        .status()
+        .expect("the signal command runs");
+    assert!(status.success(), "signal {what} to owned pid {pid} succeeds");
 }
 
-/// The bound this file's driven halves run under, read the way the sibling reads
-/// it at launch.
 #[cfg(unix)]
 fn bound() -> Duration {
     let bounds = Bounds::from_env(&BTreeMap::from([(
@@ -278,7 +252,7 @@ fn watchdog() -> Duration {
 /// rule failing to look. Wide where [`watchdog`] is narrow, because the two
 /// answer opposite questions.
 #[cfg(unix)]
-fn longest_spared_quiet(bound: Duration) -> Duration {
+fn allowed_spared_quiet(bound: Duration) -> Duration {
     bound * 2
 }
 
@@ -366,13 +340,13 @@ fn the_activity_rule_condemns_an_idle_member_past_its_bound_and_never_one_whose_
             );
             let quiet = busy.longest_quiet();
             assert!(
-                quiet <= longest_spared_quiet(bound),
+                quiet <= allowed_spared_quiet(bound),
                 "the work under the busy tree went {quiet:?} without being charged {}% of a core \
                  — past the {:?} a sparing verdict is accepted over — while the rule spared it \
                  anyway, so the rule is sparing a member on something other than the evidence \
                  under it. {} activity events over {:?}, the last of them at {:?}",
                 oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE,
-                longest_spared_quiet(bound),
+                allowed_spared_quiet(bound),
                 busy.events(),
                 busy.spent,
                 busy.recent_activity()
@@ -402,10 +376,6 @@ fn the_activity_rule_condemns_an_idle_member_past_its_bound_and_never_one_whose_
     if let Some(at) = bursting.verdict() {
         condemned_only_past_the_watchdog(&bursting, at, bound, "bursting");
     }
-    // What the watchdog interval has to be wider than, on the host that ran it.
-    // The margin between these two is the whole of why the bursting tree's
-    // pauses are judged rather than excused, and it is the host's to narrow, so
-    // it is printed rather than left to be re-derived from the constants.
     println!(
         "the bursting tree: {} activity events over {:?}, {} looks found nothing between two \
          that found work, longest gap {:?} against a {:?} watchdog interval",
@@ -449,18 +419,10 @@ fn condemned_only_past_the_watchdog(watch: &Watch, at: Duration, bound: Duration
     );
 }
 
-/// The timings the gate above used to assert, kept as a measurement and never as
-/// a judgement.
-///
-/// Each reading is printed beside the window the old gate held it to and whether
-/// it fell inside; a host that cannot start a tree says so and stops.
-/// `.config/nextest.toml` prints this binary's output on success, so a green run
-/// carries the numbers too.
-// llmlint: ignore-block[tests_assert_real_behavior] this asserts nothing by
-// design: what its readings move with is the runner's load rather than this
-// crate, which is what made them a flaky gate (issue #415), so any assertion on
-// one puts that flake back. The behaviour the two trees demonstrate is asserted
-// in full immediately above, over the same helper and the same trees.
+/// Nextest includes this output in successful runs.
+// llmlint: ignore-block[tests_assert_real_behavior] timing varies with host
+// load, so asserting on it would restore issue #415's flaky gate. The journey
+// above asserts the rule's behavior over the same real trees.
 #[cfg(unix)]
 #[test]
 fn the_timings_the_old_gate_asserted_are_measured_and_never_judged() {
@@ -542,7 +504,6 @@ struct Watch {
 
 #[cfg(unix)]
 impl Watch {
-    /// How far into the member's life the rule first condemned it.
     fn verdict(&self) -> Option<Duration> {
         self.looks
             .iter()
@@ -638,15 +599,13 @@ fn watch(tree: &Tree, bound: Duration, enough: impl Fn(&Watch) -> bool) -> Watch
     let mut before: Option<(Instant, oneagentgraph::scratch::Work)> = None;
     while started.elapsed() < BACKSTOP {
         let now = Instant::now();
-        let work = oneagentgraph::scratch::work(&tree.scratch);
-        let working = match (before, work) {
-            (Some((taken, before)), Some(work)) => before.worked(work, now.duration_since(taken)),
-            // Nothing stamped is not a reading of zero, and the look after it is
-            // a fresh baseline rather than half of a comparison — the rule
-            // discards its own sample there for exactly the same reason.
-            _ => false,
+        let work = oneagentgraph::scratch::work(&tree.scratch)
+            .expect("the spawned tree remains visible to the activity rule");
+        let working = match before {
+            Some((taken, before)) => before.worked(work, now.duration_since(taken)),
+            None => false,
         };
-        before = work.map(|work| (now, work));
+        before = Some((now, work));
         // `0` is a member that has published nothing at all since it started,
         // which is the whole case: what is being judged is the silence.
         let condemned = stall.condemns(0, &tree.scratch);
@@ -681,10 +640,8 @@ use std::time::Instant;
 
 #[cfg(unix)]
 impl Tree {
-    /// Start a tree, or say what stopped it from starting.
-    ///
-    /// Fallible rather than panicking, because one of the two callers is a
-    /// measurement that may not fail the gate: a host that cannot start `sh` has
+    /// Fallible rather than panicking, because the timing measurement may not
+    /// fail the gate: a host that cannot start `sh` has
     /// nothing to report, which is not the same fact as a rule that misjudged a
     /// tree.
     fn spawn(name: &str, argv: &[&str]) -> Result<Self, String> {
