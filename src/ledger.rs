@@ -4227,7 +4227,16 @@ mod tests {
             start.wait();
             let mut reads = 0;
             while !first.is_finished() || !second.is_finished() {
-                let seen = fs::read(&path).expect("the published document reads");
+                let seen = match fs::read(&path) {
+                    Ok(seen) => seen,
+                    // Windows refuses an open that lands while a rename is replacing
+                    // the destination; that read observed no document at all.
+                    Err(e) if cfg!(windows) && e.kind() == io::ErrorKind::PermissionDenied => {
+                        std::thread::yield_now();
+                        continue;
+                    }
+                    Err(e) => panic!("the published document reads: {e:?}"),
+                };
                 // A run lock serializes write-back phases for one run, so no CLI
                 // journey can aim two phases at one shadow path. These real
                 // threads exercise the shared writer at that filesystem boundary.

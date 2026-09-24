@@ -1260,8 +1260,27 @@ fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item(
 /// uses the count to ensure both stores have projected before reading them.
 const CONCURRENT_NODES: usize = 12;
 
+/// `path`'s text, re-read past the refusal Windows gives an open that lands while a
+/// rename is replacing the file: that open observed no document, whole or torn. The
+/// rename finishes in microseconds, so the deadline is only a backstop.
+fn read_published(path: &Path) -> std::io::Result<String> {
+    let backstop = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match std::fs::read_to_string(path) {
+            Err(denied)
+                if cfg!(windows)
+                    && denied.kind() == std::io::ErrorKind::PermissionDenied
+                    && std::time::Instant::now() < backstop =>
+            {
+                std::thread::yield_now();
+            }
+            read => return read,
+        }
+    }
+}
+
 fn shadow_document(path: &Path) -> Result<Value, String> {
-    let text = match std::fs::read_to_string(path) {
+    let text = match read_published(path) {
         Ok(text) => text,
         // Absent is not torn: the projection removes a shadow task no snapshot wrote, and
         // a listing taken a moment before the removal names a file that has since gone.
