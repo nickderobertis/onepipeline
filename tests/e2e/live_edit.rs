@@ -63,6 +63,11 @@ fn committed(world: &World, run: &str) -> Vec<String> {
         .collect()
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys live
+// beside the other live-edit journeys in this file, for the reason the settle journey
+// below states: what they exercise is the crate's own edit vocabulary, reconciler and node
+// dispatch, which any change under `src/` can move, so no project edged narrower than the
+// crate could honestly run them.
 #[test]
 fn commands_only_set_replacements_replay_into_the_next_node_dispatch() {
     let world = World::new("edit-node-sets");
@@ -666,7 +671,7 @@ fn requeue_resolves_relative_node_and_step_graph_amendments() {
             .expect("the graph exists");
         assert_eq!(actual, expected, "{step}: {call}");
     }
-}
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The `edge-added` operations a run recorded, as `(from, to, target)`.
 ///
@@ -744,6 +749,11 @@ fn consumes_on_the_board(world: &World, run: &str, node: &str) -> Option<Value> 
     board_metadata(world, run, node).map(|metadata| metadata["onepipeline.consumes"].clone())
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys live
+// beside the other live-edit journeys in this file, for the reason the settle journey
+// below states: what they exercise is the crate's own edit vocabulary, reconciler and node
+// dispatch, which any change under `src/` can move, so no project edged narrower than the
+// crate could honestly run them.
 #[test]
 fn add_reparent_and_note_are_applied_and_reported_applied() {
     let world = World::new("edit-apply");
@@ -986,7 +996,7 @@ fn retry_cancel_requeue_and_drop_are_projected_after_their_rulings() {
             .any(|pair| { pair[0] == "--set" && pair[1] == "members.worker.agent.model=retried" }),
         "the retried node lost its overrides: {launched}"
     );
-}
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A node a `retry` superseded reads as **superseded**, everywhere the run is
 /// read — and a node that failed and was never retried still reads as the
@@ -1117,6 +1127,11 @@ fn a_node_a_retry_superseded_reads_as_superseded_and_one_that_was_not_still_read
         .exited(0);
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys live
+// beside the other live-edit journeys in this file, for the reason the settle journey
+// below states: what they exercise is the crate's own edit vocabulary, reconciler and node
+// dispatch, which any change under `src/` can move, so no project edged narrower than the
+// crate could honestly run them.
 #[test]
 fn cancel_parks_a_node_and_requeue_returns_it_to_the_frontier() {
     let world = World::new("edit-park");
@@ -1207,7 +1222,7 @@ fn cancel_parks_a_node_and_requeue_returns_it_to_the_frontier() {
             .any(|pair| { pair[0] == "--set" && pair[1] == "members.worker.agent.model=requeued" }),
         "the requeued list did not reach its dispatch: {call}"
     );
-}
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A parked node stays parked for as long as the run lasts, and `requeue` is
 /// the only way back.
@@ -2438,7 +2453,9 @@ fn from_entry_57(field: &str) -> Value {
     block[field].clone()
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what this journey exercises is the crate's own edit vocabulary, reconciler and projection, which any change under `src/` can move, so a narrower project could not honestly run it.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what this journey
+// exercises is the crate's own edit vocabulary, reconciler and projection, which any
+// change under `src/` can move, so a narrower project could not honestly run it.
 /// A run holding nodes a live edit created **projects**, and each of them reaches
 /// the board under its own id.
 ///

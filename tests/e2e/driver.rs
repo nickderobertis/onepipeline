@@ -219,6 +219,12 @@ fn a_run_whose_plan_states_no_goal_is_launched_saying_so() {
     }
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys prove
+// the launch's own override-list resolution and pre-launch refusals — flag, environment
+// and config precedence in `src/driver.rs` and the graph checks in `src/graph.rs` — so any
+// change under `src/` can move them. `nx.json`'s `noteJourneySource`, the one separately
+// edged Rust test input, itself begins `{workspaceRoot}/src/**/*`, so no narrower edge
+// exists.
 #[test]
 fn start_launches_the_named_dag_scope_graph_and_records_how_to_relaunch_it() {
     let world = World::new("driver-launch");
@@ -550,7 +556,7 @@ fn dag_override_is_checked_against_its_selected_graph_before_launch() {
         .err_has("dag-scope.yaml")
         .err_has("members.absent.agent.model=wrong");
     assert!(!world.run_file("bad-dag-set", "launch.json").exists());
-}
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The headline of the roundless contract: a plan runs with no agent at all.
 ///

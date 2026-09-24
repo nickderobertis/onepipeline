@@ -648,6 +648,10 @@ fn a_rules_every_beats_the_default_for_the_identity_it_matches() {
     release(&world, "unruled");
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey proves
+// the crate's own launch-config versioning in `src/filter.rs` and the driver's maintenance
+// wiring, which any change under `src/` can move, so no project edged narrower than the
+// crate could honestly run it.
 /// The flag and the key: the flag beats the config even when blank, a blank key
 /// names none, the parsed document is retained and replayed by `adopt` — which
 /// takes no flag — and a document this build does not accept is refused before
@@ -853,7 +857,7 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
         world.run_json("adopted", "launch.json")["maintenance_config"]["default"]["every"],
         "1h"
     );
-}
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// What a sweep records when it could not do its work — each one record, each
 /// named by `results`: a maintain command that failed, one that timed out under

@@ -118,6 +118,10 @@ fn a_node_dispatches_under_the_agent_graph_it_names() {
     );
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys prove
+// the crate's own plan validation of node `sets` in `src/graph.rs` and `src/plan.rs`,
+// which any change under `src/` can move, so no project edged narrower than the crate
+// could honestly run them.
 #[test]
 fn node_sets_are_refused_against_each_effective_step_graph_before_dispatch() {
     let world = World::new("plan-step-sets-refusal");
@@ -218,7 +222,7 @@ fn task_metadata_sets_round_trip_to_the_loaded_plan() {
     assert_eq!(loaded["tasks"][0]["sets"], sets);
     let task = world.store_tasks(&path);
     assert_eq!(task[0]["item"]["metadata"]["onepipeline.sets"], sets);
-}
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 #[test]
 fn a_node_pinned_to_an_executor_the_rules_do_not_declare_is_refused_by_name() {

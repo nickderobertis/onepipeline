@@ -17,6 +17,10 @@ use serde_json::{json, Value};
 
 use crate::harness::{agent, plan_of, World, REFUSED, STORE_SOURCE};
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys prove
+// `plan check`'s own resolution of each node's and step's effective graph in
+// `src/plancheck.rs`, which any change under `src/` can move, so no project edged narrower
+// than the crate could honestly run them.
 #[test]
 fn plan_check_applies_node_sets_to_the_effective_graph() {
     let world = World::new("plancheck-node-sets");
@@ -77,7 +81,7 @@ fn plan_check_refuses_node_sets_against_a_graph_it_cannot_read() {
         .run_from(&world.root, &["plan", "check", &project])
         .exited(HAS_REFUSALS)
         .out_has("missing-graph.yaml");
-}
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 const HAS_REFUSALS: i32 = 1;
 

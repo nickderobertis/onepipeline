@@ -483,12 +483,15 @@ pub struct Frontier {
     pub stated_landings: BTreeMap<String, StatedLanding>,
 }
 
-/// The launch context needed to validate an edited graph before dispatch.
+/// What an edit's overrides are checked against, read off the launch record
+/// rather than this process, because an `adopt`ing driver may have been started
+/// somewhere else with a different default graph and environment.
 #[derive(Debug, Clone)]
 pub struct GraphValidation {
     /// Resolved default node-scope graph.
     pub default_graph: oneagentgraph::config::ConfigRef,
-    /// Immutable launch baseline for node overrides.
+    /// The run-wide list a node edit composes onto until a `set-run-node-sets`
+    /// edit replaces it.
     pub launch_node_sets: Vec<String>,
     /// Directory relative graph references resolve against.
     pub launch_dir: std::path::PathBuf,
@@ -675,15 +678,25 @@ pub fn compile(
                 .as_deref()
                 .unwrap_or(&context.launch_node_sets),
         };
+        /// Which nodes' future dispatches one command can change the overrides of.
+        enum Affected<'a> {
+            One(&'a str),
+            EveryUnsettled,
+            Nothing,
+        }
         let affected = match command {
-            Command::SetNodeSets { id, .. } | Command::Requeue { id, .. } => Some(id.as_str()),
-            Command::Add { node } | Command::Retry { node, .. } => Some(node.id.as_str()),
-            Command::SetRunNodeSets { .. } => None,
-            _ => Some(""),
+            Command::SetNodeSets { id, .. } | Command::Requeue { id, .. } => {
+                Affected::One(id.as_str())
+            }
+            Command::Add { node } | Command::Retry { node, .. } => Affected::One(node.id.as_str()),
+            Command::SetRunNodeSets { .. } => Affected::EveryUnsettled,
+            _ => Affected::Nothing,
         };
         for node in candidate.iter() {
-            if affected.is_some_and(|id| id != node.id) {
-                continue;
+            match affected {
+                Affected::Nothing => break,
+                Affected::One(id) if id != node.id => continue,
+                Affected::One(_) | Affected::EveryUnsettled => {}
             }
             if frontier.recorded.get(&node.id).is_some_and(|status| {
                 matches!(

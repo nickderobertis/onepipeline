@@ -707,10 +707,7 @@ specific of the two. `OnejudgeMember::max_turns` is the sibling's existing
 mechanism, so nothing new was needed there.
 
 The planner accepted per-node and mid-run graph overrides as an extension of
-this entry's surface. Its terms — the node field, the order a dispatch composes
-it in, the planner-channel commands, and the launch-config lists — are stated
-once, in `docs/contract.md`, where `tests/contract.rs` drives them through the
-public types; this entry records only that the extension was ruled on.
+this entry's surface.
 
 `done_when` is **gone from `Node` and `Step`** rather than forwarded. onejudge
 hands that field to the judge verbatim as its criterion, and the judge is given

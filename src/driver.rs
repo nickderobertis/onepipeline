@@ -645,7 +645,9 @@ fn read_filter(paths: &RunPaths, args: &ReadArgs) -> Result<EventFilter> {
     }
 }
 
-/// Resolve an ordered graph override list at the launch boundary.
+/// One override list's whole value, from the first rung that names one: any
+/// flag, then the JSON-array environment variable, then the launch config. Rungs
+/// never merge, so an empty environment array clears what the config named.
 fn resolved_sets(flags: &[String], variable: &str, configured: &[String]) -> Result<Vec<String>> {
     if !flags.is_empty() {
         return Ok(flags.to_vec());
