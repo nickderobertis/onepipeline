@@ -1,18 +1,4 @@
-//! The gate's coverage tier, held against the two artifacts it finds in the tree
-//! it measures — one left by the run before this one, one left by this one.
-//!
-//! The earlier run's is an instrumented *binary*: the report measures every
-//! object it finds there, so one whose source has moved on is measured with no
-//! profile to its name and every line counted as missed, failing the 95% floor
-//! over code this run covered. `_crate-coverage-clean` removes that tree whole
-//! before the first instrumented run, and the six tests below drive it.
-//!
-//! This run's own is a *truncated profile*, left by a cancellation journey that
-//! killed an instrumented process while the profiling runtime was still flushing.
-//! `llvm-profdata` rejects the whole merge over one of those, which
-//! `_crate-coverage` reports as a test failure — so the last test plants one, on
-//! every coverage run, in the directory that recipe merges from. Take
-//! `--failure-mode all` out of the justfile and it fails again.
+//! Subprocess journeys for the coverage recipes and their build artifacts.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -73,16 +59,43 @@ fn the_clean_step_removes_an_instrumented_binary_an_earlier_run_left() {
     );
 }
 
-/// And the tree it would remove by default is *this* one: the one this run's own
-/// profiles are being written into. Nothing is removed here — that tree is the
-/// running tier's — so what this holds is the two paths against each other.
-///
-/// A recipe that removed a plausible directory nothing writes to would pass every
-/// removal assertion above and fix nothing, so the default is asked of `just`
-/// rather than restated here, and held against `LLVM_PROFILE_FILE` — which the
-/// profiling runtime was pointed at by the same `cargo llvm-cov` invocation that
-/// built this binary. This is also what a run configured to build somewhere else
-/// runs into: the tier fails here rather than cleaning a tree nothing wrote to.
+#[cfg(unix)]
+#[test]
+fn the_clean_step_removes_a_tree_reached_through_an_inbound_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let build = repo_root().join("target");
+    let reached = build.join(format!("coverage-clean-inbound-{}", std::process::id()));
+    let link = build.join(format!(
+        "coverage-clean-inbound-link-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&reached);
+    let _ = fs::remove_file(&link);
+    fs::create_dir_all(&reached).expect("create an in-bound instrumented tree");
+    let stale = reached.join("stale-binary");
+    fs::copy(env::current_exe().expect("test executable"), &stale)
+        .expect("plant an instrumented binary");
+    symlink(&reached, &link).expect("link to the in-bound tree");
+
+    let cleaned = just(&["_crate-coverage-clean".as_ref(), link.as_os_str()]);
+    assert!(
+        cleaned.status.success(),
+        "the clean step failed: {}",
+        said(&cleaned)
+    );
+    assert!(
+        !reached.exists(),
+        "the reached tree survived: {}",
+        said(&cleaned)
+    );
+    assert!(
+        link.symlink_metadata().is_ok(),
+        "the argument link was removed"
+    );
+    fs::remove_file(&link).expect("remove the dangling fixture link");
+}
+
 #[test]
 fn the_clean_steps_default_tree_is_the_one_this_run_is_measured_from() {
     let Some(measured) = profile_directory() else {
@@ -111,17 +124,7 @@ fn the_clean_steps_default_tree_is_the_one_this_run_is_measured_from() {
     );
 }
 
-/// And a name that reaches nothing removes nothing and says nothing.
-///
-/// A tree that does not exist yet is the ordinary first run of a fresh clone; an
-/// empty argument and a relative one naming no directory are what a mistyped
-/// argument looks like. None of the three is a tree to bound, because none of
-/// them has anything to remove — so the step passes rather than failing the tier
-/// before it has built anything, and rather than refusing over a spelling, which
-/// is the one thing that cannot be compared across platforms.
-///
-/// What a silent pass could hide instead — a default naming a tree nothing builds
-/// into — is what the journey two above catches, against `LLVM_PROFILE_FILE`.
+/// A missing tree is ordinary on the first instrumented run.
 #[test]
 fn the_clean_step_passes_over_a_name_that_reaches_nothing() {
     let never = repo_root().join("target/coverage-clean-probe-never-built");
@@ -156,20 +159,6 @@ fn the_clean_step_passes_over_a_name_that_reaches_nothing() {
     );
 }
 
-/// And it refuses what does not reach this clone's build directory.
-///
-/// `.cargo/config.toml` pins every build in this clone under `<clone>/target`, so
-/// a tree reaching anywhere else is a misconfiguration rather than a tree to
-/// remove; the bound is that directory and not the clone, which also holds `src`
-/// and `.git`. Every case here names a directory that is really there, because
-/// that is the whole of what the bound is asked of — a name reaching nothing has
-/// nothing to remove, and the journey below drives that instead.
-///
-/// Everything here reaches a fixture this test made, so were the check gone the
-/// journey would delete its own fixtures and nothing else. That is why
-/// `<clone>/target` itself is absent from this list though the step refuses it
-/// too — the tier running this test is inside it — and why the test below
-/// reaches that case from a stand-in clone instead.
 #[test]
 fn the_clean_step_refuses_what_does_not_reach_this_clones_build_directory() {
     let outside = env::temp_dir().join(format!(
@@ -189,12 +178,8 @@ fn the_clean_step_refuses_what_does_not_reach_this_clones_build_directory() {
     fs::create_dir_all(&beside)
         .unwrap_or_else(|e| panic!("could not create {}: {e}", beside.display()));
 
-    // A symlink is the one spelling that sits inside the build tree and still
-    // leaves it, so it is the case that says the step resolves rather than reads.
-    // It is unix-only because planting one on Windows takes a privilege a runner
-    // does not have, and the four cases above are what run there — so the case
-    // list is assembled rather than pushed to, which on Windows would leave a
-    // `mut` the compiler is right to reject.
+    // An in-tree symlink to `outside` proves the bound checks resolved paths.
+    // Creating that link on Windows requires elevated privileges.
     #[cfg(unix)]
     let link = repo_root().join("target/coverage-clean-probe-link");
     #[cfg(unix)]
@@ -348,20 +333,7 @@ fn the_clean_step_refuses_what_is_there_but_cannot_be_entered() {
     }
 }
 
-/// And it refuses a build directory *whole*, which is the one case the journey
-/// above leaves out: the bound is what sits under that directory, because it
-/// holds every build in a clone and not only the instrumented one.
-///
-/// The recipe reads that bound off its own working directory, so this drives it
-/// from a stand-in clone rather than from this one. The build directory it
-/// refuses is then the fixture's, and were the check gone the removal would take
-/// the fixture instead of the tree this tier's own binaries and profiles are in.
-/// The stand-in carries a copy of this clone's `Cargo.toml` because the justfile
-/// reads `rust-version` out of one before it runs any recipe at all.
-///
-/// The second half is what keeps the first honest: from that same working
-/// directory the instrumented tree one level under is removed, so a bound that
-/// had come to refuse everything could not pass the refusal alone.
+/// A stand-in clone lets us test refusal of its whole build directory safely.
 #[test]
 fn the_clean_step_refuses_a_build_directory_whole() {
     let clone = env::temp_dir().join(format!(
@@ -492,8 +464,6 @@ fn just_from(working: &Path, args: &[&OsStr]) -> Output {
         .expect("just runs this repository's recipes")
 }
 
-/// Everything the run said, so an assertion's failure names the whole report
-/// rather than the half it looked in.
 fn said(output: &Output) -> String {
     format!(
         "exit {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",
@@ -507,25 +477,15 @@ fn said(output: &Output) -> String {
 /// it points instrumented processes at. `None` when the run is not instrumented.
 fn profile_directory() -> Option<PathBuf> {
     let pattern = PathBuf::from(env::var_os("LLVM_PROFILE_FILE")?);
-    let dir = pattern.parent()?;
-    dir.is_dir().then(|| dir.to_path_buf())
-}
-
-/// A file this account may run: on unix, one with an execute bit set; elsewhere
-/// there is no such bit, and a file is as much as can be asked of it.
-fn is_executable(path: &Path) -> bool {
-    let Ok(meta) = fs::metadata(path) else {
-        return false;
-    };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        meta.is_file() && meta.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        meta.is_file()
-    }
+    let dir = pattern
+        .parent()
+        .expect("$LLVM_PROFILE_FILE has no parent directory");
+    assert!(
+        dir.is_dir(),
+        "$LLVM_PROFILE_FILE points into {}, which is not a directory",
+        dir.display()
+    );
+    Some(dir.to_path_buf())
 }
 
 /// `llvm-profdata`, found the way `cargo llvm-cov` finds it: an explicit override
@@ -533,11 +493,20 @@ fn is_executable(path: &Path) -> bool {
 fn llvm_profdata() -> Option<PathBuf> {
     if let Some(explicit) = env::var_os("LLVM_PROFDATA") {
         let explicit = PathBuf::from(explicit);
+        let probe = Command::new(&explicit)
+            .arg("--version")
+            .output()
+            .unwrap_or_else(|e| {
+                panic!(
+                    "$LLVM_PROFDATA is {:?}, which this account cannot run: {e}",
+                    explicit
+                )
+            });
         assert!(
-            is_executable(&explicit),
-            "$LLVM_PROFDATA is {:?}, which is not an executable file; point it at \
-             an llvm-profdata executable, or unset it to use the toolchain's own",
-            explicit
+            probe.status.success(),
+            "$LLVM_PROFDATA {:?} failed --version: {}",
+            explicit,
+            said(&probe)
         );
         return Some(explicit);
     }

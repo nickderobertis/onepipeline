@@ -257,25 +257,12 @@ llvm-cov-target-dir := justfile_directory() / "target" / "llvm-cov-target"
 # line of it counts as missed and the 95% floor fails over code this run covered,
 # on every iterative run after the first.
 #
-# What to remove is a parameter, read as `$1` and never interpolated into these
-# lines, which is what `set positional-arguments` is for; the tier passes none, so
-# the default is what every run of the gate exercises. A name that reaches nothing
-# — the first run of a fresh clone, an empty argument, a typo — has nothing to
-# remove, so it removes nothing and says nothing: the bound is asked only of what
-# is really there. Something that is there but cannot be entered — a file, a
-# dangling link, a directory this account may not search — is refused instead,
-# because what it reaches is then unknown and a no-op would hide it. `cd -P` and
-# `pwd -P` then answer with what the argument *reaches* through `..` and symlinks,
-# and that answer rather than its spelling has to sit under the build directory
-# above — narrower than the clone, which also holds `src` and `.git`. Resolving
-# first is also what makes this recipe portable: a tree that exists has a
-# physical path in the shell's own vocabulary on every platform, where its
-# *spelling* is `D:\...` on one of them and could never prefix-match a `pwd -P`
-# answer.
-#
-# The one thing a silent no-op could hide — a `llvm-cov-target-dir` naming a tree
-# nothing builds into, so the stale objects survive elsewhere — is caught in
-# `tests/coverage.rs` instead, which holds the default against `LLVM_PROFILE_FILE`.
+# Resolve existing arguments before removal so symlinks cannot reach outside
+# this clone's build directory. A missing tree is normal on the first run;
+# existing paths that cannot be entered fail instead of silently passing.
+# llmlint: ignore[cli_output_contract] Both refusals mean the caller must supply
+# an enterable target under this clone's build directory, so they share exit 1;
+# distinct stderr names the fault, as the adjacent _crate-coverage recipe does.
 _crate-coverage-clean dir=llvm-cov-target-dir:
     @if [ ! -e "$1" ] && [ ! -L "$1" ]; then exit 0; fi; \
       reached="$(cd -P -- "$1" && pwd -P)" || { echo "refusing to remove '$1': it is there but is not a directory this step can enter, so where it leads cannot be held against this clone's build directory — nothing was removed" >&2; exit 1; }; \
