@@ -995,6 +995,17 @@ fn start(args: &StartArgs) -> Result<i32> {
         oneharness_sessions: Some(sessions_file(&paths)?),
     };
     record.driven_by_this_process();
+    // The record is durable *before* anything that reads it exists. The engine
+    // loop opens the launch record for the node graph it dispatches under, and
+    // a detached driver is a separate process that would otherwise die on a file
+    // nobody had written yet — leaving a run stuck at `run-started` with nothing
+    // driving it. Before the journal's first append too: every append rewrites
+    // the run's summary document from this record, and a summary written before
+    // it exists attributes the run to nobody until something appends again — a
+    // detached run holding a human node read `[unknown]` to the session that
+    // launched it. It is written again below, once the pids and the observer's
+    // graph run are known.
+    ledger::write_json(&paths.launch(), &record)?;
 
     let mut open = Journal::open(&paths);
     if !live.is_empty() {
@@ -1046,13 +1057,6 @@ fn start(args: &StartArgs) -> Result<i32> {
         ]),
     )?;
 
-    // The record is durable *before* anything that reads it exists. The engine
-    // loop opens the launch record for the node graph it dispatches under, and
-    // a detached driver is a separate process that would otherwise die on a file
-    // nobody had written yet — leaving a run stuck at `run-started` with nothing
-    // driving it. It is written again below, once the pids and the observer's
-    // graph run are known.
-    ledger::write_json(&paths.launch(), &record)?;
     if args.detach {
         // Before the driver exists, and only on this path: a detaching launcher
         // is about to exit, and the driver it is about to start must not hold
