@@ -1304,9 +1304,9 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 
 /// What a write is asked to survive, beyond the reader it is already safe from.
 ///
-/// Every write through [`write_atomic`] is published by a rename, so whichever of
-/// these it is, a reader listing that directory meets the previous file or the
-/// whole new one and never a partial one. What differs is a *host* that stops:
+/// Every write through [`write_atomic`] is published by a rename. A directory
+/// listing can see the temporary sibling, but a reader opening the destination
+/// sees the previous file or the whole new one. What differs is a *host* that stops:
 /// a file nothing else can reconstruct has to be on the disk before the write
 /// returns, and a file that is rebuilt as soon as its run is relaunched does not.
 #[derive(Clone, Copy, Debug)]
@@ -4244,8 +4244,6 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    /// The CLI cannot name this writer's private temporary after a refused
-    /// rename; this filesystem test checks that it is removed.
     #[test]
     fn a_write_the_host_will_not_publish_is_reported_and_takes_its_temporary_with_it() {
         for durability in [Durability::Record, Durability::Projection] {
@@ -4424,8 +4422,6 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    /// An otherwise writable host cannot be made to refuse fsync reliably in a
-    /// CLI journey; the watcher refuses the real call at each sync boundary.
     #[test]
     fn a_sync_the_host_refuses_is_a_failed_write_that_leaves_no_temporary() {
         for refused in [disk::Step::Contents, disk::Step::Entry] {
