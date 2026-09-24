@@ -940,7 +940,15 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
     assert_eq!(identity["identity"], SERVICE_IDENTITY, "{refused}");
     assert!(identity.get("outcome").is_none(), "{refused}");
     let error = identity["error"].as_str().expect("an error");
-    assert!(error.contains("maintain command"), "{refused}");
+    // The **key an operator edits**, which is what the sibling's own refusal is
+    // written to name and the only part of it this crate depends on: `onevcs`
+    // 0.32.0 states it as `maintain.command is an empty list: name the program
+    // to run and its arguments`, where 0.30.1 said `naming a maintain command
+    // with no …`. The sentence is that library's to word and it moved; what must
+    // not move is that the sentence reaches the record whole, and that it tells
+    // a reader which key to go and fix. The constant behind it is private there,
+    // so this is a literal rather than a re-export.
+    assert!(error.contains("maintain.command"), "{refused}");
     world
         .run(&["results", "unmaintainable"])
         .exited(0)
