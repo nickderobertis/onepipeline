@@ -885,7 +885,6 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
             .collect::<Vec<_>>()
     );
 
-    // The paragraph that states it names the path, the version and its source.
     let passage = CONTRACT
         .split_once("**The event vocabulary is published as a document.**")
         .and_then(|(_, rest)| rest.split_once("\n\n"))
@@ -5168,6 +5167,10 @@ fn a_siblings_reserved_labels_source_word_phases_and_matcher_fields_are_this_cra
 /// with it. Historical recorded streams cannot detect a future version bump.
 #[test]
 fn the_merged_vocabulary_writes_each_producers_current_version() {
+    assert_eq!(
+        <onepipeline::vocabulary::Agent as onemessagebus::Vocabulary>::DEFAULT_SOURCE,
+        Source::Pipeline.as_str()
+    );
     let vcs_source = onevcs::Source::from(onevcs::SOURCE_WORD);
     assert_eq!(
         Source::Vcs.write_version(),

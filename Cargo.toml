@@ -513,17 +513,6 @@ resolver = "2"
 #   `tests/e2e/session_reuse.rs` reads the labels back through the linked
 #   release's own `session holders --json`.
 #
-#   **0.31 and 0.32 are held back by the wire, and `just engines-current` is
-#   silent about it**: the requirement above admits neither, so no lock lags a
-#   requirement for it to report. 0.32.0 requires `onemessagebus ^0.9.0` and
-#   requires `onemessagebus-agent` not at all — at bus 0.9.0 the agent profile
-#   folds into the core, generic over a `Vocabulary`, and no 0.9.x of it exists
-#   — so beside this manifest's 0.8.0 wire pins the lock carries the bus twice
-#   and the `Phase` and `Envelope` seams in `src/vcs.rs` stop compiling. Taking
-#   it is the whole wire, `oneagentgraph` 0.5.1 and `onejudge` 0.14.0 with it,
-#   and a rewrite of the envelope-and-filter paragraph of `docs/contract.md`
-#   that states both are `onemessagebus-agent`'s: the bus relink's to make, not
-#   a pin to raise beside a session-labels change.
 # - `oneagentgraph` 0.4.9 reports an exhausted single-sided fallback chain as
 #   `fallback_chain_exhausted` rather than `unclassified`, which
 #   `src/engine.rs` reads as a chain that stopped through that library's own
@@ -576,14 +565,10 @@ onevcs = "0.32.0"
 # requirements must resolve this package once. `just engines-current` and
 # `tests/linked_engines.rs` are what refuse a lock carrying it twice.
 #
-# 0.9.0 is the release that **deleted `crates/onemessagebus-agent`** — the last
-# of the stack's vocabulary the bus carried (onemessagebus#132). Its CLI offers
-# the `open` profile alone, and no source, phase, label, note or schema id of
-# any product is compiled into it. The last `onemessagebus-agent` release, 0.8.0,
-# stays on crates.io untouched; nothing here links it, and the streams it used to
-# read are read through this crate's own `Reader` — `tests/recorded/bus/` holds
-# four of them byte for byte from that tag. A **requirement**, because `^0.8`
-# admits no 0.9.x, and the four siblings beside it require exactly it.
+# 0.9.0 removed the bus's agent profile (onemessagebus#132). Its CLI offers
+# the `open` profile alone; this crate now declares the stack vocabulary and
+# reads its recorded streams. A **requirement**, because `^0.8` admits no
+# 0.9.x, and the four siblings beside it require exactly it.
 onemessagebus = "0.9.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
@@ -775,8 +760,8 @@ include = [
   # time — the telemetry document, and one launch config per schema version this
   # build reads. Without them the packaged crate does not build, let alone test.
   "tests/golden/*.json",
-  # The capture `src/payload.rs` reads at compile time: every schema id
-  # `onemessagebus-agent` 0.8.0's registry listed, and the document under each,
+  # The capture `src/payload.rs` reads at compile time: every schema id the
+  # retired profile's 0.8.0 registry listed, and the document under each,
   # which is what holds this crate's own registries to the ids that release
   # registered. In `src/`, so without it the packaged **library** does not build.
   "tests/recorded/registry/*.json",

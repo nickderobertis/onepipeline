@@ -18,10 +18,6 @@ Dependency direction is one-way and must stay that way: `onepipeline` →
 agent/harness and repository/host concerns stay in theirs — do not regrow
 harness selection, identity chains, or merge policy here.
 
-**This crate owns the agent stack's event vocabulary** in `src/vocabulary.rs`.
-Keep producer-owned words in their producer crates. Re-export their types here
-where the contract requires them.
-
 Ships as a Rust library plus the `onepipeline` binary, distributed on crates.io,
 PyPI (`onepipeline-cli`), and npm (`onepipeline-cli`).
 
