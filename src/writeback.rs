@@ -2237,16 +2237,11 @@ fn task_document(
     Ok((Value::Object(front), content))
 }
 
-/// Write one shadow document.
-///
 /// Atomic because the shadow store is a directory a reader *lists* while this writes it:
 /// the `project copy` below reads it as a `local-md` source, and a document replaced in
 /// place is truncated first, so a listing arriving in that window parses an empty file and
 /// reports the run's own board as malformed.
 ///
-/// At [`crate::ledger::Durability::Projection`], which is what this store is: every document here is
-/// projected from the run's journal, and a run whose host stopped is relaunched from that
-/// journal and projects them again.
 fn document(path: &Path, front: &Value, body: &str) -> Result<(), String> {
     let yaml = serde_norway::to_string(front).map_err(|e| e.to_string())?;
     crate::ledger::write_atomic(

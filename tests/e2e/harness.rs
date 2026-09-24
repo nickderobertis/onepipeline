@@ -2375,10 +2375,6 @@ impl World {
         self.plan_in(&self.store(), name, plan)
     }
 
-    /// The same, into a source root of this world's own rather than the shared one.
-    ///
-    /// Written by [`store_apart`](World::store_apart), read by
-    /// [`run_in`](World::run_in): the two halves of one run's own board.
     pub fn plan_in(&self, store: &Path, name: &str, plan: &Value) -> String {
         let plan = plan.as_object().expect("a plan is a mapping");
         let mut metadata = serde_json::Map::new();
@@ -2630,6 +2626,10 @@ impl World {
     /// Script one of the doubles: `world.script("build.fail", "1")`.
     pub fn script(&self, name: &str, body: &str) {
         std::fs::write(self.fakes.join(name), body).expect("the script is written");
+    }
+
+    pub fn unscript(&self, name: &str) {
+        std::fs::remove_file(self.fakes.join(name)).expect("the script is removed");
     }
 
     /// Release a rendezvous the doubles are holding.

@@ -1256,13 +1256,10 @@ fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item(
 
 /// How many nodes each run of the concurrency journey below carries.
 ///
-/// The shadow store is rewritten whole on every projection, so this is how many documents
-/// one write-back phase replaces — twelve tasks and the project item. It is not a bound
-/// anything asserts: what decides whether the reader below ever lands inside a rewrite is
-/// how fast it reads, not how much there is to read.
+/// A full phase replaces this many tasks and the project item. The readiness wait
+/// uses the count to ensure both stores have projected before reading them.
 const CONCURRENT_NODES: usize = 12;
 
-/// Parse a shadow document and check its known task body, or report the torn read.
 fn shadow_document(path: &Path) -> Result<Value, String> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -1341,7 +1338,6 @@ fn shadow_documents(dir: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// Two real runs project while a reader checks each complete shadow document.
 // llmlint: ignore-block[tests_mirror_real_usage] the claim is about a file a reader can
 // catch mid-write, and no CLI output reports one: what a torn read produces is the store's
 // own refusal, in another process, on a document this crate wrote — nondeterministically,
@@ -1350,13 +1346,23 @@ fn shadow_documents(dir: &Path) -> Vec<PathBuf> {
 // the property, it is the same read `local-md` performs, and a window microseconds wide is
 // caught by rate or not at all — a pass that listed a directory or spawned a process per
 // look would pass over a torn tree by never arriving inside one.
-// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] This journey's 7.5s
-// measured cost belongs with the compiled binary's write-back tests. The note
-// project's implicit edge does not make a separate project for one filesystem race
-// useful; the projection and store run here through the same binary as its peers.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] Measured at 7.5s
+// within this module's 36.2s, this uses the same compiled binary and store fixture as
+// its six peer write-back journeys. The only separate test edge is for conversational
+// note journeys; moving this filesystem race there loses this module's crateSource
+// coverage when the projection code changes.
 #[test]
 fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
     let world = World::new("writeback-concurrent-shadow");
+    world.script(
+        "onetaskgraph.delegate",
+        &onetaskgraph_binary().to_string_lossy(),
+    );
+    let world = world.with_env(
+        STORE_BINARY_ENV,
+        &double("fake-onetaskgraph").to_string_lossy(),
+    );
+    let copies = world.rendezvous("onetaskgraph.project-copy");
     let runs = ["left", "right"];
     let shadows: Vec<PathBuf> = runs
         .iter()
@@ -1373,11 +1379,15 @@ fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
         })
         .collect();
 
-    // The paths, once, off the first projection that built them. Listing them again every
-    // pass is what a reader cannot afford here: the window a replaced document is
-    // truncated in is microseconds wide, so what decides whether this ever lands inside
-    // one is how often it reads *the same file*, and a directory walk between two reads of
-    // one document is the whole of that interval spent elsewhere.
+    let left_copy = copies.arrived();
+    let right_copy = copies.arrived();
+    assert_ne!(left_copy.pid, right_copy.pid, "the same copy arrived twice");
+    world.unscript("onetaskgraph.project-copy.rendezvous");
+    left_copy.release();
+    right_copy.release();
+
+    // Cache the paths after the first projection so each pass spends its time
+    // reading documents during the remaining write-back phases.
     world.until("both runs to project a shadow store", |_| {
         shadows
             .iter()
@@ -1442,4 +1452,5 @@ fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
         );
     }
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-end[tests_mirror_real_usage]

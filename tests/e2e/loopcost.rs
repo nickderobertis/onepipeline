@@ -238,11 +238,8 @@ fn a_converged_run_does_no_scheduling_work_while_it_records_nothing() {
 fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
     let world = measured("loopcost-scale");
     world.script("hold.wait", "hold");
-    // A source root each, because the two runs are live together and each one projects its
-    // board back into the root it was launched from: shared, one run's write-back lands in
-    // the other's fixture and a reader can meet a document mid-replacement — the journey's
-    // own setup failing rather than anything either driver did. The workload is untouched:
-    // the same two plans, the same engine build, the same world, the same minute.
+    // Each live run projects into its source root. Separate roots prevent one run's
+    // board from changing the other's workload while they share this engine process.
     let small_store = world.store_apart("small");
     let large_store = world.store_apart("large");
     let small = world.plan_in(

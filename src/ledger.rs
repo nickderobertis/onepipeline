@@ -1294,9 +1294,8 @@ pub fn read_json_opt<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
 
 /// Write a JSON document so no reader can observe it half-written.
 ///
-/// Every document written through here is this host's own account of a run — a
-/// checkpoint, a launch record, a reclaim — so it is written at
-/// [`Durability::Record`]: nothing else can reconstruct one.
+/// Callers use [`Durability::Record`] so a checkpoint or launch record is durable
+/// even when a derived summary happens to use the same helper.
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let body = serde_json::to_string_pretty(value)
         .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
@@ -1312,27 +1311,10 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 /// returns, and a file that is rebuilt as soon as its run is relaunched does not.
 #[derive(Clone, Copy, Debug)]
 pub enum Durability {
-    /// This host's own account of what it did — a checkpoint, a launch record, a
-    /// reclaim — on the disk by the time the write returns.
-    ///
-    /// Both halves of it, because they persist separately. The contents are
-    /// synced before the rename publishes the name, and the directory entry that
-    /// rename installed is synced after it; either alone leaves a host that
-    /// stopped in a state this promises against — a name resolving to contents
-    /// that never landed, or contents no name resolves to — and nothing else can
-    /// rebuild a record of what this host did. So a host that stops immediately
-    /// after a write of this kind returns comes back with the destination name
-    /// resolving to the whole new file.
+    /// Sync contents before rename and the directory entry after it. A successful
+    /// return leaves the new destination durable across a host stop.
     Record,
-    /// A projection of such records, published by the rename alone.
-    ///
-    /// A run whose machine died is relaunched from its journal, which writes the
-    /// projection again; so the syncs would buy durability for a file that is
-    /// rebuilt anyway. It is not free to buy: `writeback::write_shadow` replaces
-    /// one document per node, about a hundred per pass on a hundred-node run, so
-    /// this is a pair of disk syncs per node per pass rather than none. A reader
-    /// past the rename is served either way — that is the rename's doing, not the
-    /// syncs'.
+    /// Rename without disk syncs; the run journal rebuilds this file after a crash.
     Projection,
 }
 
@@ -1380,27 +1362,26 @@ pub fn write_atomic(path: &Path, bytes: &[u8], durability: Durability) -> Result
         let ancestor = created.parent().unwrap_or_else(|| Path::new("."));
         disk::sync_entry(ancestor).map_err(ledger)?;
     }
-    // The temporary carries this process's pid so two writers racing the same
-    // target cannot truncate each other's partial file before the rename.
-    let temp = path.with_extension(format!("tmp.{}", sys::pid()));
+    let temp = temporary(path);
     let published = publish(&temp, path, &parent, bytes, durability);
-    // llmlint: ignore-block[changed_behavior_has_e2e] reaching this needs the host to
-    // refuse a call this function makes, which no journey can ask of a real run without a
-    // filesystem built to fail: the unit tests induce those refusals — a rename onto a
-    // directory, a temporary name no file can take, and each sync in turn — and assert the
-    // temporary is gone and the error names the destination. What an e2e could observe is
-    // a file that is *not* there, which no surface of this product reports.
+    // llmlint: ignore-block[changed_behavior_has_e2e] No CLI exposes failed temporary
+    // cleanup. Unit tests induce host refusals at the real filesystem calls and check
+    // that the destination is named and no temporary remains.
     if published.is_err() {
-        // A temporary no rename published is not a document, and every directory
-        // written through here is one something lists — the shadow store, the
-        // runs root, the gate's entries. Left behind, a failed write leaves a
-        // file there under a name nothing is looking for and nothing removes.
-        // Its own removal failing adds nothing to the error below, which already
-        // names the destination and what the host said.
+        // A failed write must not leave a temporary in a listed directory.
         let _ = fs::remove_file(&temp);
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
     published.map_err(ledger)
+}
+
+/// Each synchronous writer has its own temporary, even within one process.
+fn temporary(path: &Path) -> PathBuf {
+    path.with_extension(format!(
+        "tmp.{}.{:?}",
+        sys::pid(),
+        std::thread::current().id()
+    ))
 }
 
 /// Publish one temporary, recording host calls through [`disk`] for the unit tests.
@@ -1414,9 +1395,6 @@ fn publish(
     use io::Write as _;
     let mut file = fs::File::create(temp)?;
     file.write_all(bytes)?;
-    // Flushed explicitly rather than at a drop, which discards the error — and
-    // this is the one write whose failure the caller has to hear, because the
-    // rename after it would publish the file regardless.
     file.flush()?;
     if durability.syncs() {
         disk::sync_contents(&file)?;
@@ -1436,11 +1414,8 @@ mod disk {
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(super) enum Step {
-        /// The temporary's contents, pushed to the disk before the rename.
         Contents,
-        /// The temporary renamed over the destination, which publishes the name.
         Publish,
-        /// The directory entry the rename installed, pushed to the disk after it.
         Entry,
     }
 
@@ -1454,15 +1429,6 @@ mod disk {
         fs::rename(temp, path)
     }
 
-    /// Push the directory entry the rename installed to the disk.
-    ///
-    /// The other half of [`super::Durability::Record`]: contents and the name
-    /// that resolves to them persist separately, so without this a host that
-    /// stopped can come back with the whole new file on the disk and the
-    /// destination still naming the previous one, or nothing at all.
-    ///
-    /// A directory is synced by syncing a handle on the directory itself, which
-    /// is what [`synced`] opens where the host has one to open.
     pub(super) fn sync_entry(dir: &Path) -> io::Result<()> {
         record(Step::Entry)?;
         synced(dir)
@@ -1499,7 +1465,6 @@ mod disk {
         static WATCHED: RefCell<Option<Watched>> = const { RefCell::new(None) };
     }
 
-    /// What one [`Watch`] has seen, and the one step it is refusing.
     #[cfg(test)]
     struct Watched {
         asked: Vec<Step>,
@@ -1522,7 +1487,6 @@ mod disk {
         })
     }
 
-    /// A watch over the steps this thread's writes ask for, until it is dropped.
     #[cfg(test)]
     pub(super) struct Watch;
 
@@ -1548,7 +1512,6 @@ mod disk {
 
     #[cfg(test)]
     impl Watch {
-        /// Every step asked for since this watch was installed, in order.
         pub(super) fn asked(&self) -> Vec<Step> {
             WATCHED.with_borrow(|watched| {
                 watched
@@ -4213,19 +4176,12 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    /// A written document is whole at its destination, under its own name, with
-    /// nothing of the writing left beside it.
-    ///
-    /// The temporary is the whole mechanism — the bytes are written, flushed and
-    /// synced into a sibling and the rename publishes them — so this is also the
-    /// one place the sync itself is exercised: a host that refused it would fail
-    /// here rather than anywhere a reader could see.
     #[test]
     fn a_published_document_replaces_its_destination_and_leaves_no_temporary_behind() {
         for durability in [Durability::Record, Durability::Projection] {
             let root = scratch(&format!("publish-{durability:?}"));
             let path = root.join("board.md");
-            let temp = path.with_extension(format!("tmp.{}", sys::pid()));
+            let temp = temporary(&path);
             fs::write(&path, "the document before").expect("a destination to replace");
 
             write_atomic(&path, b"the document after", durability).expect("it is published");
@@ -4244,6 +4200,54 @@ mod tests {
         }
     }
 
+    #[test]
+    fn concurrent_writers_to_one_destination_publish_only_whole_documents() {
+        use std::sync::Barrier;
+
+        let root = scratch("concurrent-publish");
+        let path = root.join("board.md");
+        let before = vec![b'A'; 256 * 1024];
+        let after = vec![b'B'; 256 * 1024];
+        fs::write(&path, &before).expect("the first document exists");
+        let start = Barrier::new(3);
+
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                start.wait();
+                for _ in 0..40 {
+                    write_atomic(&path, &before, Durability::Projection).expect("first writer");
+                    std::thread::yield_now();
+                }
+            });
+            let second = scope.spawn(|| {
+                start.wait();
+                for _ in 0..40 {
+                    write_atomic(&path, &after, Durability::Projection).expect("second writer");
+                    std::thread::yield_now();
+                }
+            });
+            start.wait();
+            let mut reads = 0;
+            while !first.is_finished() || !second.is_finished() {
+                let seen = fs::read(&path).expect("the published document reads");
+                // A run lock serializes write-back phases for one run, so no CLI
+                // journey can aim two phases at one shadow path. These real
+                // threads exercise the shared writer at that filesystem boundary.
+                assert!(
+                    seen == before || seen == after,
+                    "a reader saw a partial document of {} bytes",
+                    seen.len()
+                );
+                reads += 1;
+                std::thread::yield_now();
+            }
+            first.join().expect("first writer completed");
+            second.join().expect("second writer completed");
+            assert!(reads > 0, "the reader did not overlap the writers");
+        });
+        fs::remove_dir_all(&root).ok();
+    }
+
     /// A write the host refuses at the rename is reported, and the temporary it
     /// had already filled goes with it.
     ///
@@ -4257,7 +4261,7 @@ mod tests {
         for durability in [Durability::Record, Durability::Projection] {
             let root = scratch(&format!("unpublishable-{durability:?}"));
             let path = root.join("board.md");
-            let temp = path.with_extension(format!("tmp.{}", sys::pid()));
+            let temp = temporary(&path);
             // Holding a document of its own, so what is asserted below is that
             // the destination was left alone rather than merely that it exists.
             fs::create_dir_all(&path).expect("a destination no rename can replace");
@@ -4296,7 +4300,7 @@ mod tests {
     fn a_temporary_this_host_will_not_open_is_reported_and_leaves_the_destination_alone() {
         let root = scratch("unopenable");
         let path = root.join("board.md");
-        let temp = path.with_extension(format!("tmp.{}", sys::pid()));
+        let temp = temporary(&path);
         fs::write(&path, "the document before").expect("a destination to leave alone");
         fs::create_dir_all(&temp).expect("a temporary name no file can take");
 
@@ -4379,6 +4383,33 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    #[test]
+    fn a_refused_new_parent_sync_reports_the_destination() {
+        let root = scratch("refused-new-parent");
+        let path = root.join("new").join("checkpoint.json");
+        let temp = temporary(&path);
+
+        // No host process can be made to lose a directory sync on demand. The
+        // watcher refuses the actual sync call; omitting that call would return Ok.
+        let watch = disk::watching(Some(disk::Step::Entry));
+        let reported = write_atomic(&path, b"the record", Durability::Record);
+        let asked = watch.asked();
+        drop(watch);
+
+        assert_eq!(
+            asked,
+            vec![disk::Step::Entry],
+            "the parent sync was skipped"
+        );
+        let Err(Error::Ledger { path: named, .. }) = reported else {
+            panic!("a refused parent sync was not reported: {reported:?}");
+        };
+        assert_eq!(named, path);
+        assert!(!path.exists(), "a failed write published its destination");
+        assert!(!temp.exists(), "a failed write left its temporary");
+        fs::remove_dir_all(&root).ok();
+    }
+
     /// A projection is published by the rename and nothing else.
     ///
     /// Not an optimisation left unstated: the shadow store is rewritten from the
@@ -4421,7 +4452,7 @@ mod tests {
         for refused in [disk::Step::Contents, disk::Step::Entry] {
             let root = scratch(&format!("refused-{refused:?}"));
             let path = root.join("checkpoint.json");
-            let temp = path.with_extension(format!("tmp.{}", sys::pid()));
+            let temp = temporary(&path);
 
             let watch = disk::watching(Some(refused));
             let reported = write_atomic(&path, b"the record", Durability::Record);
