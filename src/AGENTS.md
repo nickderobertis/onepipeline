@@ -10,6 +10,8 @@ them through.
 
 Rules:
 
+- **The event vocabulary lives in `vocabulary.rs`.** Keep producer-owned words
+  in their producer crates and re-export their types where the contract requires.
 - **Add no public item the contract does not name.** A `RunId` newtype, a
   builder, a convenience accessor, an extra enum variant: each is interface
   drift, and a consumer that pins to it gets a breaking change. When the engine

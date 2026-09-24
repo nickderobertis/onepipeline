@@ -2,25 +2,32 @@
 //!
 //! `onepipeline` merges the three libraries' streams into one, so it both
 //! *relays* envelopes produced by `oneagentgraph` and `onevcs` and *emits* its
-//! own. The envelope, its labels, sources and phases, the artifact reference and
-//! the kind are `onemessagebus-agent`'s, over the `onemessagebus` core, and are
-//! re-exported here at the paths this crate has always published them at — the
-//! same types both siblings re-export, so a relayed envelope is one value on
-//! every side of a relay. `onemessagebus`'s `docs/contract.md` is the one source
-//! of that shape; `docs/contract.md` here keeps a marked copy of the text, and
+//! own. The envelope's *shape* — a version, a stamp, a stream, a sequence
+//! number, a source, a kind, the labels, the payload, the artifacts — is the
+//! `onemessagebus` core's, and the **words** in one are this crate's:
+//! [`crate::vocabulary`] declares the sources, the phases, the reserved labels
+//! and what a matcher may ask of them, and the types re-exported below are the
+//! core's generic ones over that vocabulary, at the paths this crate has always
+//! published them at. `docs/contract.md` is the one source of what they say, and
 //! `tests/contract.rs` drives it through these re-exports.
 //!
-//! What stays this crate's is its vocabulary: the closed set of kinds it emits
-//! ([`PipelineKind`]), and the payload each carries, every one a registered bus
-//! message in the registry this crate constructs.
+//! A sibling declares its own vocabulary over the same core, so a relayed
+//! envelope is no longer one Rust value on both sides of a relay: it crosses at
+//! its JSON form, which `src/vcs.rs` and `src/agentgraph.rs` do and which
+//! `tests/contract.rs`'s drift check holds the two shapes to.
+//!
+//! What stays this crate's beyond the vocabulary is the closed set of kinds it
+//! emits ([`PipelineKind`]), and the payload each carries, every one a
+//! registered bus message in the registry this crate constructs.
 
 use std::sync::OnceLock;
 
 use onemessagebus::{Read, Registry};
-use onemessagebus_agent::registry::{EVENT_ENVELOPE_FAMILY, EVENT_ENVELOPE_READS};
 
+pub use crate::vocabulary::{
+    ArtifactRef, Envelope, Labels, Phase, Source, EVENT_ENVELOPE_FAMILY, EVENT_ENVELOPE_READS,
+};
 pub use onemessagebus::{Kind as EventKind, MAX_PAYLOAD_TEXT_BYTES};
-pub use onemessagebus_agent::event::{ArtifactRef, Envelope, Labels, Phase, Source};
 
 /// The envelope version this crate stamps on everything it writes.
 ///
@@ -31,18 +38,19 @@ pub use onemessagebus_agent::event::{ArtifactRef, Envelope, Labels, Phase, Sourc
 /// deserializing the command. Entry 65 of `docs/contract-divergences.md` proposes
 /// the move.
 ///
-/// The number is the agent profile's for the `pipeline` source, and the newest
-/// version its registry reads of `agent.event-envelope`: a test beside this holds
-/// all three to one another. A **relayed** envelope keeps its producer's own
-/// number, exactly as it keeps that producer's `stream`, `seq`, `source` and kind.
+/// The number is [`crate::vocabulary`]'s for the `pipeline` source, and the
+/// newest version this crate's registry reads of `agent.event-envelope`: a test
+/// beside this holds all three to one another. A **relayed** envelope keeps its
+/// producer's own number, exactly as it keeps that producer's `stream`, `seq`,
+/// `source` and kind.
 pub const ENVELOPE_VERSION: u32 = EVENT_ENVELOPE_READS[0];
 
 /// Every envelope version this build reads, newest first.
 ///
-/// The agent profile's read-set for `agent.event-envelope`, which is what its
-/// registry registers and what the fold asks that registry of a record. Version
-/// `1` is read whole: nothing was removed from the envelope or from a record's
-/// payload, so a `1` folds exactly as it always did.
+/// [`crate::vocabulary`]'s read-set for `agent.event-envelope`, which is what
+/// the registry registers and what the fold asks that registry of a record.
+/// Version `1` is read whole: nothing was removed from the envelope or from a
+/// record's payload, so a `1` folds exactly as it always did.
 pub const ENVELOPE_VERSIONS_READ: &[u32] = EVENT_ENVELOPE_READS;
 
 /// Whether this build knows the envelope schema a record was written at.
@@ -79,8 +87,9 @@ pub(crate) fn written_at_a_known_version(envelope: &Envelope) -> bool {
         .contains(&envelope.v)
 }
 
-/// The registry this crate constructs: the agent profile's, with every payload
-/// this crate emits registered beside the envelope that carries it.
+/// The registry this crate constructs: [`crate::vocabulary::registry`]'s, with
+/// every payload this crate emits registered beside the envelope that carries
+/// it.
 ///
 /// Built once per process, on first use; `main` asks for it before anything
 /// else so a build whose own payload documents do not register fails at start
@@ -464,13 +473,13 @@ mod tests {
         assert!(!written_at_a_known_version(&ahead));
     }
 
-    /// The version this build writes and the versions it reads are the agent
-    /// profile's registry's answer, not a second table kept here.
+    /// The version this build writes and the versions it reads are the
+    /// registry's answer, not a second table kept here.
     ///
     /// Three statements of one number — the constant a writer stamps, the
-    /// profile's write version for the `pipeline` source, and the newest version
-    /// the registry this crate constructs reads — so a bus release that moved one
-    /// without the others fails here rather than in a store.
+    /// vocabulary's write version for the `pipeline` source, and the newest
+    /// version the registry this crate constructs reads — so a change that moved
+    /// one without the others fails here rather than in a store.
     #[test]
     fn the_registry_answers_the_envelope_versions_this_build_writes_and_reads() {
         let registry = registry();

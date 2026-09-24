@@ -45,8 +45,10 @@ resolver = "2"
 #
 # The filter grammar this crate passes through to them is carried by both pins:
 # `oneagentgraph` merged it at v0.2.13 and `onevcs` at v0.2.7, and each pin below
-# is above its own. Since `oneagentgraph` 0.4.2 and `onevcs` 0.24.0 the grammar's
-# one implementation is `onemessagebus-agent`'s, which all three re-export.
+# is above its own. Since `oneagentgraph` 0.5.0 and `onevcs` 0.32.0 the grammar's
+# one implementation is the `onemessagebus` core's, which each of the three
+# declares its own vocabulary over — this crate's is `src/vocabulary.rs` — so a
+# filter crosses a seam at its JSON form rather than as one shared Rust type.
 # `tests/e2e/dispatch.rs` and `tests/e2e/real_vcs.rs` drive those surfaces against
 # the real siblings, so a pin moved below one fails rather than reads differently.
 #
@@ -511,17 +513,6 @@ resolver = "2"
 #   `tests/e2e/session_reuse.rs` reads the labels back through the linked
 #   release's own `session holders --json`.
 #
-#   **0.31 and 0.32 are held back by the wire, and `just engines-current` is
-#   silent about it**: the requirement above admits neither, so no lock lags a
-#   requirement for it to report. 0.32.0 requires `onemessagebus ^0.9.0` and
-#   requires `onemessagebus-agent` not at all — at bus 0.9.0 the agent profile
-#   folds into the core, generic over a `Vocabulary`, and no 0.9.x of it exists
-#   — so beside this manifest's 0.8.0 wire pins the lock carries the bus twice
-#   and the `Phase` and `Envelope` seams in `src/vcs.rs` stop compiling. Taking
-#   it is the whole wire, `oneagentgraph` 0.5.1 and `onejudge` 0.14.0 with it,
-#   and a rewrite of the envelope-and-filter paragraph of `docs/contract.md`
-#   that states both are `onemessagebus-agent`'s: the bus relink's to make, not
-#   a pin to raise beside a session-labels change.
 # - `oneagentgraph` 0.4.9 reports an exhausted single-sided fallback chain as
 #   `fallback_chain_exhausted` rather than `unclassified`, which
 #   `src/engine.rs` reads as a chain that stopped through that library's own
@@ -555,23 +546,30 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.4.10"
-onevcs = "0.30.1"
-# The wire both siblings above now re-export: the envelope, its labels, sources
-# and phases, the filter grammar, the reader, the merge and the schema registry
-# are `onemessagebus-agent`'s over the `onemessagebus` core, and `src/event.rs`
-# and `src/filter.rs` re-export them rather than keeping a copy. One copy or
-# none: the sibling requirements must resolve these packages once, because a
-# lock carrying a second copy would make a relayed envelope two different types.
+oneagentgraph = "0.5.1"
+onevcs = "0.32.0"
+# The wire core, and the only bus package in this graph. The agent stack's
+# vocabulary — the envelope, its labels, the three sources, the four phases, the
+# filter grammar, the reader, the merge and the event schema families — is
+# **this crate's own**, declared in `src/vocabulary.rs` over the core's generic
+# `Vocabulary` seam, and `src/event.rs` and `src/filter.rs` re-export it from
+# there. Each producer declares its own vocabulary over the same core:
+# `onevcs::Phase` and `onevcs::SOURCE_WORD` are onevcs's, and
+# `oneagentgraph::event::SOURCE_WORD` is the graph's. So a relayed envelope is no
+# longer one Rust value on both sides of a relay — it crosses at its JSON form,
+# which is what `src/vcs.rs` and `src/agentgraph.rs` do and what
+# `tests/contract.rs`'s drift check holds the two shapes to.
 #
-# 0.8.0 is the release the relink below the floors list names: it no longer
-# carries the planner-channel module — the layout is this crate's own,
-# `src/channel/layout.rs` — and defines a layout as a data document a host's bus
-# links (`LayoutDocument`, `SchemaBundle`), which is what `schemas/planner-channel.json`
-# is written through. A **requirement**, because `^0.7` admits no 0.8.x, and the
-# four siblings that re-export the bus require exactly it.
-onemessagebus = "0.8.0"
-onemessagebus-agent = "0.8.0"
+# One copy of the core or the crossing has no fixed point: `Envelope<Agent>`
+# compiled against two `onemessagebus` copies is two types, so the sibling
+# requirements must resolve this package once. `just engines-current` and
+# `tests/linked_engines.rs` are what refuse a lock carrying it twice.
+#
+# 0.9.0 removed the bus's agent profile (onemessagebus#132). Its CLI offers
+# the `open` profile alone; this crate now declares the stack vocabulary and
+# reads its recorded streams. A **requirement**, because `^0.8` admits no
+# 0.9.x, and the four siblings beside it require exactly it.
+onemessagebus = "0.9.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -609,10 +607,10 @@ onemessagebus-agent = "0.8.0"
 # 0.4.1 requires exactly this release, so the two move together, and it is a
 # requirement for the same pre-1.0 reason as the last: `^0.10` admits no 0.11.x.
 #
-# 0.12.0 is the release that adopted the bus: its command-provider frames are the
-# agent profile's registered messages, and from it on the graph, the judge and
-# this crate resolve the one `onemessagebus` and `onemessagebus-agent` the pins
-# above name, so the four move together or a relayed envelope is two types.
+# 0.12.0 is the release that adopted the bus: its command-provider frames are
+# registered bus messages, and from it on the graph, the judge and this crate
+# resolve the one `onemessagebus` the pin above names, so the four move together
+# or an envelope crossing a seam has no shape both sides agree on.
 #
 # 0.13.1 is the floor: it links oneharness-core 0.14.0's `server_overloaded`
 # failure kind (onejudge #94), and `oneagentgraph` 0.4.4 requires exactly it
@@ -633,7 +631,16 @@ onemessagebus-agent = "0.8.0"
 #
 # 0.13.5 is that release relinked onto the `oneharness-core` 0.18.0 below.
 # Nothing here reads anything new from it.
-onejudge = "0.13.5"
+#
+# 0.14.0 is the release that **declares** the note contract rather than
+# re-exporting it: `onejudge::note` owns `Note`, `Addressee`, `Party`,
+# `Criterion`, `Accepted` and the rest, keeping their names, serde shapes and
+# refusal words, and `Note` stays registered as `agent.note@1` — which is the id
+# `src/payload.rs` and `src/channel/layout.rs` now register it under, from that
+# library's type rather than from a bus profile. A **requirement** for the same
+# pre-1.0 reason as every raise above: `^0.13` admits no 0.14.x. `oneagentgraph`
+# 0.5.1 requires exactly it, so the two move together.
+onejudge = "0.14.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
@@ -705,7 +712,7 @@ oneharness-core = "0.18.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.7.1"
+onevcs-testing = "0.8.0"
 # **Test-support only**, and linked by `crates/testfakes` alone: the crate under test
 # still reads every plan by *driving* the `onetaskgraph` binary. These host the real
 # `local-md` plugin inside `label-strict-source`; that fake says why.
@@ -753,6 +760,17 @@ include = [
   # time — the telemetry document, and one launch config per schema version this
   # build reads. Without them the packaged crate does not build, let alone test.
   "tests/golden/*.json",
+  # The capture `src/payload.rs` reads at compile time: every schema id the
+  # retired profile's 0.8.0 registry listed, and the document under each,
+  # which is what holds this crate's own registries to the ids that release
+  # registered. In `src/`, so without it the packaged **library** does not build.
+  "tests/recorded/registry/*.json",
+  # The four streams `tests/recorded_bus.rs` reads at compile time, copied byte
+  # for byte from that same tag: what proves the bytes on the wire did not move
+  # when the vocabulary came here. Without them the packaged crate's own test
+  # binary does not compile.
+  "tests/recorded/bus/*.ndjson",
+  "tests/recorded/bus/*.jsonl",
   # The planner-channel envelope schemas `src/channel/layout.rs` reads at compile
   # time; without them `cargo publish`'s verification build of the crate fails.
   "/schemas/**",
@@ -837,9 +855,9 @@ onejudge = { workspace = true }
 # here. Already in the graph — `onejudge` and `oneagentgraph` build it — so it
 # adds nothing to what this build resolves.
 oneharness-core = { workspace = true }
-# The wire layer, re-exported — see `[workspace.dependencies]`.
+# The wire core this crate declares its own vocabulary over — see
+# `[workspace.dependencies]`. `src/vocabulary.rs` is that declaration.
 onemessagebus = { workspace = true }
-onemessagebus-agent = { workspace = true }
 # Each payload this crate emits is a registered bus `Message`, whose document is
 # generated from its type; `preserve_order` is the feature the bus builds it
 # with, so the one copy in the graph is the one the registry compiled against.
