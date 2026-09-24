@@ -608,7 +608,7 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
             .arg(root.join("screenshots/capture.py"))
             .current_dir(root)
             .output()
-            .expect("the capture runs")
+            .expect("python3 runs the capture; the capture is python and this tier drives it")
     }
 
     /// `[guard].paths` decides what the local guard pays for a recapture over,
