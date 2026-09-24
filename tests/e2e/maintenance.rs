@@ -697,15 +697,16 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
     // finish before the first idle pass. Closing out then waits for the sweep
     // it started and its record.
     let path = plan("configured");
-    world.script("build.wait", "hold");
+    let meeting = world.rendezvous("build");
     let configured = world
         .cmd(&["start", &path, "--attach", "--launch-config", &config])
         .spawn()
         .expect("configured run starts");
+    let held = meeting.arrived();
     until_sweeps(&world, 1);
-    world.release("build.go");
+    held.release();
     crate::harness::ended(configured);
-    world.unscript("build.wait");
+    world.unscript("build.rendezvous");
     let launch = world.run_json("configured", "launch.json");
     assert_eq!(
         launch["maintenance_config"],
@@ -845,13 +846,14 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
         "a run paused on a human gate swept the registry"
     );
     world.run(&["attest", "adopted", "approve"]).exited(0);
-    world.script("build.wait", "hold");
+    let meeting = world.rendezvous("build");
     let adopting = world
         .cmd(&["adopt", "adopted"])
         .spawn()
         .expect("adopt starts");
+    let held = meeting.arrived();
     until_sweeps(&world, swept + 1);
-    world.release("build.go");
+    held.release();
     crate::harness::ended(adopting);
     assert_eq!(
         world.run_json("adopted", "launch.json")["maintenance_config"]["default"]["every"],
