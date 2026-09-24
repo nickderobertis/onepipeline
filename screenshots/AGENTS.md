@@ -96,6 +96,17 @@ attached stream prints changes, and commit the new hero beside the new baseline.
   would otherwise let a cached target replay a stale result.
 - **No image goes under `docs/`** — that directory is machine-consumed and named
   in a cached build input.
+- **The workflow's `capture-command` runs under `sh`, and `sh` there is dash.**
+  screencomp's reusable workflow gives that step `shell: sh -e` and offers no
+  input to ask for another, while its `container:` input is what lets this
+  repository name `rust:1-bookworm` — whose `/bin/sh` is dash. So `[[`, `=~` and
+  the rest of bash's grammar are `not found` on those lines, and the guard the
+  shell skipped past then refuses a value it never read. What keeps the next
+  edit from assuming bash is `tests/visual_docs.rs`: it runs the *committed*
+  command under dash, both halves of both guards included, so the assumption
+  fails in `just check` rather than in the capture. The `screenshots/*.sh` that
+  command calls are bash, and stay bash, because it hands each to `bash` by
+  name.
 - The guard runs only where `core.hooksPath` points at `.githooks`, per-clone
   state `just bootstrap` sets. That directory carries the visual guard **and
   nothing else**: `just gate` stays unhooked.

@@ -23,6 +23,7 @@
 mod unix {
     use std::fs;
     use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output, Stdio};
 
@@ -510,6 +511,278 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
             !said.contains("Compiling") && !said.contains("Finished"),
             "the capture started building before it had decided whether to, so the \
              refusal costs a release build:\n{said}"
+        );
+    }
+
+    /// The `capture-command` the visual-docs workflow hands the container,
+    /// dedented out of the committed workflow rather than restated here — the
+    /// point of the journeys below is that what runs is what ships.
+    ///
+    /// It is a YAML literal block scalar: its body is every following line
+    /// indented past the key, dedented by the indentation of the first of them.
+    fn capture_command() -> String {
+        fn indent(line: &str) -> usize {
+            line.len() - line.trim_start().len()
+        }
+        let workflow = include_str!("../.github/workflows/visual-docs.yml");
+        let key = workflow
+            .lines()
+            .position(|line| line.trim_start() == "capture-command: |")
+            .expect("the visual-docs workflow hands the container a capture-command");
+        let outer = indent(workflow.lines().nth(key).expect("the key line"));
+        let body: Vec<&str> = workflow
+            .lines()
+            .skip(key + 1)
+            .take_while(|line| line.trim().is_empty() || indent(line) > outer)
+            .collect();
+        let margin = body
+            .iter()
+            .find(|line| !line.trim().is_empty())
+            .map(|line| indent(line))
+            .expect("the capture-command has a body");
+        let mut command = String::new();
+        for line in &body {
+            command.push_str(line.get(margin..).unwrap_or(""));
+            command.push('\n');
+        }
+        command
+    }
+
+    /// The shell the reusable workflow runs that command under.
+    ///
+    /// It gives the step `shell: sh -e` and offers no input to ask for another,
+    /// and `/bin/sh` in the `rust:1-bookworm` container the workflow names is
+    /// dash — which is the whole reason these journeys exist, so dash is what
+    /// they run under wherever the host has one. A host with none runs its own
+    /// `/bin/sh`: the command is POSIX either way, and the `gate` job, where
+    /// this suite's verdict is required, is a Debian-family host whose `/bin/sh`
+    /// *is* dash.
+    fn posix_shell() -> PathBuf {
+        ["/bin/dash", "/usr/bin/dash"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|candidate| candidate.exists())
+            .unwrap_or_else(|| PathBuf::from("/bin/sh"))
+    }
+
+    /// A tree the capture-command can be run in: the two files it derives a
+    /// version from, and a stand-in at each of the three paths it then hands
+    /// work to, every one of them appending the line it was reached on to
+    /// `$REACHED`.
+    ///
+    /// The stand-ins are what the command *calls* — `freeze`'s installer,
+    /// `cargo`, and the capture itself, none of which this tier installs — never
+    /// what it is. What runs here is the committed command, under a real shell.
+    fn capture_command_tree(root: &Path, toolchain: &str, justfile: &str) {
+        fs::write(root.join("rust-toolchain.toml"), toolchain).expect("the fixture's toolchain");
+        fs::write(root.join("justfile"), justfile).expect("the fixture's justfile");
+        fs::create_dir_all(root.join("screenshots")).expect("the fixture has a screenshots dir");
+        fs::create_dir_all(root.join("bin")).expect("the fixture has a stand-in bin");
+        for (path, body) in [
+            // Each reports `$RUSTUP_TOOLCHAIN` as it reaches it, so the export
+            // the command makes between the two guards is observed rather than
+            // assumed.
+            (
+                "screenshots/install-freeze.sh",
+                "install-freeze %s\\n' \"$RUSTUP_TOOLCHAIN\"",
+            ),
+            (
+                "screenshots/capture.sh",
+                "capture %s\\n' \"$RUSTUP_TOOLCHAIN\"",
+            ),
+            ("bin/cargo", "cargo %s\\n' \"$*\""),
+        ] {
+            let at = root.join(path);
+            fs::write(&at, format!("#!/bin/sh\nprintf '{body} >> \"$REACHED\"\n"))
+                .expect("the stand-in is written");
+            fs::set_permissions(&at, PermissionsExt::from_mode(0o755))
+                .expect("the stand-in is executable");
+        }
+    }
+
+    /// Run the committed capture-command in `root`, the way the reusable
+    /// workflow runs it: `sh -e <script>`, with the environment cleared so an
+    /// ambient `RUSTUP_TOOLCHAIN` cannot decide what is observed.
+    fn run_capture_command(root: &Path) -> Output {
+        let script = root.join("capture-command");
+        fs::write(&script, capture_command()).expect("the capture-command is written");
+        Command::new(posix_shell())
+            .arg("-e")
+            .arg(&script)
+            .current_dir(root)
+            .env_clear()
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", root.join("bin").display()),
+            )
+            .env("REACHED", root.join("reached"))
+            .output()
+            .expect("the capture-command runs under the workflow's shell")
+    }
+
+    /// What `run_capture_command` recorded, in the order it was reached.
+    fn reached(root: &Path) -> String {
+        fs::read_to_string(root.join("reached")).unwrap_or_default()
+    }
+
+    /// The channel this tree pins, read as the TOML it is rather than by the
+    /// `sed` the command derives it with, so the two can disagree.
+    fn pinned_channel() -> String {
+        let toolchain: toml::Value =
+            toml::from_str(include_str!("../rust-toolchain.toml")).expect("rust-toolchain.toml");
+        toolchain["toolchain"]["channel"]
+            .as_str()
+            .expect("the toolchain names a channel")
+            .to_owned()
+    }
+
+    /// The onetaskgraph release this tree pins, read the way `tests/provisioning.rs`
+    /// reads it.
+    fn pinned_onetaskgraph() -> String {
+        include_str!("../justfile")
+            .lines()
+            .find_map(|line| line.strip_prefix("onetaskgraph-version := \""))
+            .and_then(|rest| rest.strip_suffix('"'))
+            .expect("the justfile names the onetaskgraph release")
+            .to_owned()
+    }
+
+    /// The capture-command runs under the shell the reusable workflow gives it,
+    /// which is `sh` and not bash.
+    ///
+    /// That workflow runs the step as `sh -e` with no input to ask for another
+    /// shell, while its `container:` input lets this repository name an image
+    /// whose `/bin/sh` is dash — so a bashism here is not a style point. Run
+    /// 36036303459 is what it costs: `[[: not found` on stderr, the test never
+    /// evaluated, and the guard below it then refusing `1.97.1` as "not exactly
+    /// one pinned channel". The values this tree actually carries are what it is
+    /// driven against, so a guard that has stopped accepting them fails here.
+    #[test]
+    fn the_capture_command_runs_under_the_shell_the_workflow_gives_it() {
+        let (_scratch, root) = scratch("capture-command");
+        capture_command_tree(
+            &root,
+            include_str!("../rust-toolchain.toml"),
+            include_str!("../justfile"),
+        );
+
+        let done = run_capture_command(&root);
+        let said = String::from_utf8_lossy(&done.stderr).into_owned();
+        assert!(
+            said.is_empty(),
+            "the capture-command said something under `{}` that it does not say under \
+             bash. A construct this shell does not have reports itself exactly here, and \
+             the guard beneath it then answers against a value it never read:\n{said}",
+            posix_shell().display()
+        );
+        assert!(
+            done.status.success(),
+            "the capture-command failed under `{}`, the shell the reusable workflow runs \
+             it under:\n{said}",
+            posix_shell().display()
+        );
+
+        let channel = pinned_channel();
+        assert_eq!(
+            reached(&root),
+            format!(
+                "install-freeze {channel}\n\
+                 cargo install onetaskgraph --locked --version {}\n\
+                 capture {channel}\n",
+                pinned_onetaskgraph()
+            ),
+            "the capture-command reached the wrong work, or reached it carrying the wrong \
+             derived version: both guards accept what this tree pins, so what follows them \
+             is the pinned toolchain exported and the pinned release installed."
+        );
+    }
+
+    /// Both guards still refuse a channel or a release that is not exactly one
+    /// line naming an exact version, and refuse it before the work it would have
+    /// been used for.
+    ///
+    /// The refusals are the reason the guards exist and they are the half a
+    /// rewrite for another shell can quietly drop, so each is driven under that
+    /// same shell rather than reasoned about.
+    #[test]
+    fn the_capture_command_refuses_a_version_that_is_not_exactly_one_release() {
+        let real_toolchain = include_str!("../rust-toolchain.toml");
+        let real_justfile = include_str!("../justfile");
+
+        // A moving channel: resolvable, but not the same compiler twice.
+        let (_moving, root) = scratch("capture-command-moving-channel");
+        capture_command_tree(
+            &root,
+            &real_toolchain.replace(&format!("\"{}\"", pinned_channel()), "\"stable\""),
+            real_justfile,
+        );
+        let done = run_capture_command(&root);
+        let said = String::from_utf8_lossy(&done.stderr).into_owned();
+        assert_eq!(done.status.code(), Some(1), "a moving channel was accepted");
+        assert!(
+            said.contains("does not name exactly one pinned channel: 'stable'"),
+            "the capture-command refused a moving channel without quoting it back:\n{said}"
+        );
+        assert_eq!(
+            reached(&root),
+            "",
+            "the capture-command refused the channel only after spending the work it \
+             would have used it for"
+        );
+
+        // Two channels: the `sed` matches both lines, and a guard that answered
+        // "some line looks right" would export the pair.
+        let (_twice, root) = scratch("capture-command-channel-twice");
+        capture_command_tree(
+            &root,
+            &real_toolchain.replace("[toolchain]", "[toolchain]\nchannel = \"1.98.0\""),
+            real_justfile,
+        );
+        let done = run_capture_command(&root);
+        let said = String::from_utf8_lossy(&done.stderr).into_owned();
+        assert_eq!(
+            done.status.code(),
+            Some(1),
+            "a rust-toolchain.toml pinning the channel twice was accepted, so the capture \
+             built with whichever of the two `sed` printed first:\n{said}"
+        );
+        assert!(
+            said.contains(&format!("1.98.0\n{}", pinned_channel())),
+            "the capture-command refused the doubled channel without showing both:\n{said}"
+        );
+        assert_eq!(reached(&root), "", "work was spent on a doubled channel");
+
+        // The second guard, reached only once the first has passed: the release
+        // named twice, refused before `cargo install` picks one of the two.
+        let (_release, root) = scratch("capture-command-release-twice");
+        let release = pinned_onetaskgraph();
+        capture_command_tree(
+            &root,
+            real_toolchain,
+            &real_justfile.replace(
+                &format!("onetaskgraph-version := \"{release}\""),
+                &format!(
+                    "onetaskgraph-version := \"{release}\"\nonetaskgraph-version := \"0.1.0\""
+                ),
+            ),
+        );
+        let done = run_capture_command(&root);
+        let said = String::from_utf8_lossy(&done.stderr).into_owned();
+        assert_eq!(
+            done.status.code(),
+            Some(1),
+            "a justfile naming the onetaskgraph release twice was accepted:\n{said}"
+        );
+        assert!(
+            said.contains(&format!("{release}\n0.1.0")),
+            "the capture-command refused the doubled release without showing both:\n{said}"
+        );
+        assert_eq!(
+            reached(&root),
+            format!("install-freeze {}\n", pinned_channel()),
+            "the second guard answered somewhere other than between the renderer's \
+             installer and `cargo install`, so either it ran before the first guard's \
+             value was used or the release reached `cargo` anyway"
         );
     }
 }
