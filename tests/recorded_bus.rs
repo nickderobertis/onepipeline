@@ -3,18 +3,8 @@
 //! `Reader` and `serde_json::to_string` with no byte changed. Those three are
 //! [`RECORDED`].
 //!
-//! A fourth file is deliberately **not** one of them. `onepipeline-relayed-drift.jsonl`
-//! holds three relayed lines an older `onepipeline` wrote with `member` among
-//! the extras, after `persona`, because its own copy of `Labels` had no field
-//! for it. That order is drift this crate reconciled rather than a shape to
-//! preserve, so the last test here holds those lines to reading whole and coming
-//! back out in the reserved order — which is different bytes, on purpose. They
-//! are kept in their own file so the byte-identity tests above stay exact rather
-//! than carrying an exception list.
-//!
-//! These came here with the vocabulary they are written in, and that is what
-//! makes them worth keeping: it moved and the bytes on the wire did not.
-//! `tests/recorded/bus/README.md` is where each one came from.
+//! The fourth file tests the intentional repair of drifted label order.
+//! `tests/recorded/bus/README.md` records the fixtures' provenance.
 
 use onemessagebus::Reading;
 use onepipeline::event::{Envelope, Phase, Source};

@@ -226,8 +226,6 @@ fn the_document_reader_names_a_constraining_difference_and_a_prose_one_apart() {
     differences(&held, &constraining, "", &mut found);
     assert_eq!(found, ["/properties/v/const"]);
 
-    // A key one side has and the other does not is named at that key, whichever
-    // side is missing it.
     let mut added = held.clone();
     added["properties"]["extra"] = json!({"type": "string"});
     let mut found = Vec::new();

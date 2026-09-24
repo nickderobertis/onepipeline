@@ -4810,14 +4810,8 @@ fn a_session_line_this_build_cannot_read_is_reported_and_does_not_fail_the_node(
 /// own stderr and nothing in process observes it. It is the whole point of the
 /// behaviour: a silent drop is what makes a later reader of the merged store
 /// conclude nothing happened.
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this asks for
-// does not exist here, for the reason `driver.rs` states at length: `nx.json`'s
-// `noteJourneySource` — the input of the one separately edged Rust test project — itself
-// begins `{workspaceRoot}/src/**/*`, so a journey moved behind it is invalidated by exactly
-// the unrelated source changes the rule is about. And this one is of the `src/vcs.rs` relay
-// itself, which any change under `src/` can move, so it would be run anyway. Its two
-// siblings above — the unreadable stream and the unreadable line — sit on the same edge for
-// the same reason.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] This src/vcs.rs
+// relay journey has no narrower Nx edge: noteJourneySource includes src/**/*.
 #[test]
 fn an_envelope_that_does_not_cross_is_reported_and_the_publication_around_it_still_lands() {
     let world = World::new("lifecycle-foreignsource");
@@ -4838,7 +4832,6 @@ fn an_envelope_that_does_not_cross_is_reported_and_the_publication_around_it_sti
     world.script("service.work", "the worker wrote this\n");
     let run = driven(&world, "foreignsource", vec![lifecycle("service", &[])]);
 
-    // Said out loud, naming the session and the word it could not read.
     run.1.err_has("cannot relay session").err_has("harness");
     let run = run.0;
 
@@ -4854,7 +4847,6 @@ fn an_envelope_that_does_not_cross_is_reported_and_the_publication_around_it_sti
         "the publication did not reach the merged store, so the batch was refused whole \
          rather than the one envelope that could not cross"
     );
-    // Not silently admitted either: nothing carrying that word is in the store.
     assert!(
         !journal.iter().any(|event| event["source"] == "harness"),
         "an envelope this build has no source for reached the merged store"

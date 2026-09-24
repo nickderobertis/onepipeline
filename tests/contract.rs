@@ -837,8 +837,15 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
     };
     let path = repo_root().join(EVENTS_BUNDLE_PATH);
     let generated = events_bundle_json();
-    if std::env::var_os("ONEPIPELINE_WRITE_EVENTS_BUNDLE").is_some() {
-        std::fs::write(&path, &generated).expect("the bundle is written");
+    match std::env::var("ONEPIPELINE_WRITE_EVENTS_BUNDLE") {
+        Ok(value) if value == "1" => {
+            std::fs::write(&path, &generated).expect("the bundle is written");
+        }
+        Ok(value) => panic!("ONEPIPELINE_WRITE_EVENTS_BUNDLE must be 1, got {value:?}"),
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("ONEPIPELINE_WRITE_EVENTS_BUNDLE must be UTF-8 value 1")
+        }
     }
     let committed = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("{EVENTS_BUNDLE_PATH} is committed: {error}"));
@@ -910,6 +917,31 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         !onepipeline::channel::layout::bundle_json().contains("\"agent.event-envelope@2\""),
         "the planner-channel bundle now publishes the event ids too"
     );
+}
+
+#[test]
+fn an_invalid_bundle_write_switch_refuses_without_rewriting_the_file() {
+    let path = repo_root().join(onepipeline::vocabulary::EVENTS_BUNDLE_PATH);
+    let before = std::fs::read(&path).expect("the bundle is committed");
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "the_committed_events_bundle_is_the_compiled_in_vocabulary",
+            "--nocapture",
+        ])
+        .env("ONEPIPELINE_WRITE_EVENTS_BUNDLE", "0")
+        .output()
+        .expect("the contract test runs as a subprocess");
+    assert!(
+        !output.status.success(),
+        "0 must not enable a tracked-file write"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("ONEPIPELINE_WRITE_EVENTS_BUNDLE must be 1"),
+        "the refusal did not name the invalid switch: {output:?}"
+    );
+    assert_eq!(std::fs::read(path).expect("the bundle remains"), before);
 }
 
 /// The committed planner-channel document is the one this build generates
@@ -4988,10 +5020,10 @@ fn the_wire_types_resolve_where_they_did_and_are_the_vocabularys_own() {
 /// what makes them agree by check, and it lives here because `onepipeline` is
 /// the one crate that links every producer.
 ///
-/// Three properties, and **exactly** three — the whole envelope is not crossed
+/// Four properties, and **exactly** four — the whole envelope is not crossed
 /// here, because the crossing itself is `src/vcs.rs`'s and `src/agentgraph.rs`'s
 /// and each is driven against its own producer where it lives. What this holds
-/// is the three pieces of *vocabulary* a crossing has nothing to fall back on:
+/// is the four pieces of *vocabulary* a crossing has nothing to fall back on:
 ///
 /// 1. **A producer's reserved labels cross whole.** A sibling's `Labels` with
 ///    every reserved key set serializes to bytes this crate's `Labels` reads back
@@ -5130,6 +5162,24 @@ fn a_siblings_reserved_labels_source_word_phases_and_matcher_fields_are_this_cra
             }
         }
     }
+}
+
+/// A producer moving its write version must move the merged vocabulary's table
+/// with it. Historical recorded streams cannot detect a future version bump.
+#[test]
+fn the_merged_vocabulary_writes_each_producers_current_version() {
+    let vcs_source = onevcs::Source::from(onevcs::SOURCE_WORD);
+    assert_eq!(
+        Source::Vcs.write_version(),
+        <onevcs::VcsEvents as onemessagebus::Vocabulary>::write_version(&vcs_source)
+    );
+    let graph_source = oneagentgraph::event::Source::from(oneagentgraph::event::SOURCE_WORD);
+    assert_eq!(
+        Source::Agentgraph.write_version(),
+        <oneagentgraph::event::Agentgraph as onemessagebus::Vocabulary>::write_version(
+            &graph_source
+        )
+    );
 }
 
 #[test]

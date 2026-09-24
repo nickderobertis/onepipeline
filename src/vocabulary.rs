@@ -19,15 +19,9 @@
 //! and `tests/contract.rs` holds the shapes to one another so a producer that
 //! moved is a refusal here rather than a field silently dropped.
 //!
-//! **The bytes do not move.** Every type here serializes to what the stack has
-//! always written: `tests/recorded/bus/` holds a stream from each of the three
-//! producers, copied byte for byte from `onemessagebus` at tag
-//! `onemessagebus-agent-v0.8.0`, and `tests/recorded_bus.rs` reads every line of
-//! those three back through these types and re-serializes it with no byte
-//! changed. A fourth file there is the one deliberate exception, and it is a
-//! *repair* rather than a promise: three relayed lines an older `onepipeline`
-//! wrote with `member` among the extras, held to reading whole and coming back
-//! out in the reserved order [`Labels`] declares.
+//! **The bytes do not move.** `tests/recorded_bus.rs` holds producer streams
+//! to byte-identical round trips through this vocabulary. The fixtures' README
+//! records their provenance and the one repaired label-order exception.
 
 use std::fmt;
 
@@ -139,6 +133,10 @@ pub enum Source {
 }
 // llmlint: ignore-end[code_lands_in_the_domain_that_owns_it]
 
+// llmlint: ignore-block[code_lands_in_the_domain_that_owns_it] This crate is the only
+// composition layer that names all three producers, so its closed Source needs helpers
+// for every variant. The producer words are checked against their owners in
+// tests/contract.rs; moving these helpers to a producer would invert the dependency.
 impl Source {
     /// Every source, in the order a refusal lists them.
     #[must_use]
@@ -168,6 +166,7 @@ impl fmt::Display for Source {
         f.write_str(self.as_str())
     }
 }
+// llmlint: ignore-end[code_lands_in_the_domain_that_owns_it]
 
 /// The agent envelope's reserved top-level dimensions: `phase`, optional and
 /// omitted from the wire when absent, exactly as this crate relays it and

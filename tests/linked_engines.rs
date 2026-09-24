@@ -144,11 +144,7 @@ fn a_release_past(name: &str) -> String {
 /// each of those needs three releases in one minor — one under the admissible
 /// one, the admissible one, and one above it that a requirement holds back — and
 /// the order between them is the whole of what the check is being asked about.
-/// Derived rather than written for the reason [`a_release_past`] states, and
-/// because the fixtures that were written did go stale: they named the `0.7`
-/// line, and the `onevcs-testing` pin moved to `0.8.0`, so every one of them
-/// served releases *below* the linked version and asserted on a check that was
-/// correctly saying nothing.
+/// Derived rather than written for the reason [`a_release_past`] states.
 fn a_release_past_at(name: &str, patch: u64) -> String {
     let linked = &linked(name)[0];
     let (major_minor, _) = linked
