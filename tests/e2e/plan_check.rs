@@ -36,6 +36,49 @@ fn plan_check_applies_node_sets_to_the_effective_graph() {
         .out_has("members.absent.agent.model=wrong");
 }
 
+#[test]
+fn plan_check_applies_node_sets_to_each_steps_own_graph() {
+    let world = World::new("plancheck-step-sets");
+    std::fs::write(
+        world.root.join("single-sided.yaml"),
+        "version: 1\nname: single-sided\nmembers:\n  worker:\n    kind: oneharness\n    \
+         oneharness_config: ./oneharness.toml\n",
+    )
+    .expect("the step's own graph is written");
+    // The first step dispatches under the shipped two-sided graph, which has the
+    // path; the second under its own single-sided one, which does not.
+    let node = json!({
+        "id": "service", "repo": "service", "title": "feat: ship service",
+        "sets": ["members.worker.agent.model=chosen"],
+        "steps": [
+            {"id": "build", "persona": "engineer", "task": "## What\nbuild"},
+            {"id": "review", "persona": "reviewer", "task": "## What\nreview",
+             "deps": ["build"], "agent_graph": "./single-sided.yaml"}
+        ]
+    });
+    let project = world.plan("step-sets", &plan_of("step-sets", vec![node]));
+    world
+        .run_from(&world.root, &["plan", "check", &project])
+        .exited(HAS_REFUSALS)
+        .out_has("service")
+        .out_has("review")
+        .out_has("single-sided.yaml")
+        .out_has("members.worker.agent.model=chosen");
+}
+
+#[test]
+fn plan_check_refuses_node_sets_against_a_graph_it_cannot_read() {
+    let world = World::new("plancheck-unreadable-graph");
+    let mut node = agent("build", &[]);
+    node["agent_graph"] = json!("./missing-graph.yaml");
+    node["sets"] = json!(["members.worker.agent.model=chosen"]);
+    let project = world.plan("unreadable", &plan_of("unreadable", vec![node]));
+    world
+        .run_from(&world.root, &["plan", "check", &project])
+        .exited(HAS_REFUSALS)
+        .out_has("missing-graph.yaml");
+}
+
 const HAS_REFUSALS: i32 = 1;
 
 /// Write one executable check into this world and answer with its path.
