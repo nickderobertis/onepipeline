@@ -1336,30 +1336,21 @@ pub fn write_atomic(path: &Path, bytes: &[u8], durability: Durability) -> Result
     };
     // The directory the destination is published into, which is both what has to
     // exist before the write and what a [`Durability::Record`] syncs afterwards.
-    // A bare file name's parent is `""`, which no host will open; the directory
-    // it means is this process's own, and `.` is how that one is named.
-    let parent = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
+    let parent = directory_of(path);
     let mut missing = Vec::new();
     if durability.syncs() {
-        let mut dir = parent.as_path();
+        let mut dir = parent;
         while !dir.try_exists().map_err(ledger)? {
-            missing.push(dir.to_path_buf());
-            dir = match dir.parent() {
-                Some(ancestor) if !ancestor.as_os_str().is_empty() => ancestor,
-                _ => Path::new("."),
-            };
+            missing.push(dir);
+            dir = directory_of(dir);
         }
     }
-    fs::create_dir_all(&parent).map_err(ledger)?;
+    fs::create_dir_all(parent).map_err(ledger)?;
     for created in missing.into_iter().rev() {
-        let ancestor = created.parent().unwrap_or_else(|| Path::new("."));
-        disk::sync_entry(ancestor).map_err(ledger)?;
+        disk::sync_entry(directory_of(created)).map_err(ledger)?;
     }
     let temp = temporary(path);
-    let published = publish(&temp, path, &parent, bytes, durability);
+    let published = publish(&temp, path, parent, bytes, durability);
     // llmlint: ignore-block[changed_behavior_has_e2e] No CLI exposes failed temporary
     // cleanup. Unit tests induce host refusals at the real filesystem calls and check
     // that the destination is named and no temporary remains.
@@ -1369,6 +1360,17 @@ pub fn write_atomic(path: &Path, bytes: &[u8], durability: Durability) -> Result
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
     published.map_err(ledger)
+}
+
+/// The directory `path` is named in.
+///
+/// A bare relative name's parent is `""`, which no host will open; the directory it
+/// means is this process's own, and `.` is how that one is named.
+fn directory_of(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
 }
 
 /// Each synchronous writer has its own temporary, even within one process.
@@ -4364,6 +4366,45 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// Relative, because that is where a new parent's own parent is `""` rather
+    /// than a directory: the sync has to be asked of `.`, which is what it names.
+    #[test]
+    fn a_record_under_a_new_relative_parent_syncs_the_working_directory_entry() {
+        struct Removed(PathBuf);
+        impl Drop for Removed {
+            fn drop(&mut self) {
+                fs::remove_dir_all(&self.0).ok();
+            }
+        }
+        let dir = PathBuf::from(format!(
+            ".onepipeline-ledger-relative-{}-{:?}",
+            sys::pid(),
+            std::thread::current().id()
+        ));
+        let _removed = Removed(dir.clone());
+        let path = dir.join("checkpoint.json");
+
+        let watch = disk::watching(None);
+        write_atomic(&path, b"the record", Durability::Record).expect("it is published");
+        let asked = watch.asked();
+        drop(watch);
+
+        assert_eq!(
+            asked,
+            vec![
+                disk::Step::Entry,
+                disk::Step::Contents,
+                disk::Step::Publish,
+                disk::Step::Entry,
+            ],
+            "a new relative parent was not synced before its record was published"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("the destination reads"),
+            "the record"
+        );
+    }
+
     #[test]
     fn a_refused_new_parent_sync_reports_the_destination() {
         let root = scratch("refused-new-parent");
@@ -4420,12 +4461,19 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// The destination each refusal leaves: one refused before the rename keeps
+    /// the record it replaced, and one refused after it holds the new record the
+    /// rename already published, whose durability the failure leaves unconfirmed.
     #[test]
     fn a_sync_the_host_refuses_is_a_failed_write_that_leaves_no_temporary() {
-        for refused in [disk::Step::Contents, disk::Step::Entry] {
+        for (refused, left) in [
+            (disk::Step::Contents, "the record before"),
+            (disk::Step::Entry, "the record"),
+        ] {
             let root = scratch(&format!("refused-{refused:?}"));
             let path = root.join("checkpoint.json");
             let temp = temporary(&path);
+            fs::write(&path, "the record before").expect("a record to replace");
 
             let watch = disk::watching(Some(refused));
             let reported = write_atomic(&path, b"the record", Durability::Record);
@@ -4442,6 +4490,11 @@ mod tests {
                 !temp.exists(),
                 "a refused {refused:?} left the temporary of a write that failed: {}",
                 temp.display()
+            );
+            assert_eq!(
+                fs::read_to_string(&path).expect("the destination reads"),
+                left,
+                "a refused {refused:?} left the wrong record at the destination"
             );
             fs::remove_dir_all(&root).ok();
         }
