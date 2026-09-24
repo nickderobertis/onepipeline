@@ -28,29 +28,18 @@
 //! [`the_linked_default_bound_outlasts_a_member_writing_its_report`] is the
 //! **number** 0.3.8 moved, read the way the sibling reads it at launch. It is
 //! the half that fails against a stale lock.
-//! [`the_activity_rule_condemns_a_member_once_the_work_under_it_stops_and_not_while_it_arrives`]
+//! [`the_activity_rule_condemns_an_idle_member_past_its_bound_and_never_one_whose_work_keeps_arriving`]
 //! is what that number is a bound *on*, driven over real processes and real
 //! elapsed time under a bound this test's own environment sets small — seconds
 //! rather than half an hour, which is the only reason the pair is quick.
 //!
-//! # What the second half judges, and what it no longer does
+//! # Judged on activity, not on elapsed time
 //!
-//! It judges the **order and spacing of activity**: a tree whose work keeps
-//! arriving inside a generous watchdog interval is spared, and one whose work
-//! has stopped is condemned once the bound elapses. It does not judge how long
-//! the host took to get there.
-//!
-//! Elapsed-time windows measure the runner rather than this crate: a loaded host
-//! starves a spin loop, a starved tree is charged no CPU, and the rule reads
-//! exactly that. Those readings survive, unjudged, as
+//! The second half passes or fails on the order and spacing of activity events.
+//! Elapsed-time windows measure the runner rather than this crate — a loaded
+//! host starves a spin loop, and the rule reads a starved tree as idle — so
+//! those timings survive only as a reading, in
 //! [`the_timings_the_old_gate_asserted_are_measured_and_never_judged`].
-//!
-//! Three trees, because one quiet look is not a member that stopped. A spinning
-//! tree and a silent one bracket the rule; between them is one working in
-//! bursts, whose pauses put quiet looks between activity events. So a
-//! condemnation answers to the **gaps between activity events** inside the bound
-//! it was reached at the end of, never to the look at it — see
-//! [`condemned_only_past_the_watchdog`] for why the *widest* of those gaps.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -87,7 +76,7 @@ fn the_linked_default_bound_outlasts_a_member_writing_its_report() {
 /// Small enough to spend seconds and not half an hour, above `oneagentgraph`'s
 /// own probe floor so the rule gets a baseline and a comparison inside it, and
 /// wide enough for [`watchdog`] to fit between the two windows [`bound`] asserts
-/// it between — which the two seconds this began at was not.
+/// it between.
 #[cfg(unix)]
 const BOUND: &str = "6";
 
@@ -276,13 +265,8 @@ fn bound() -> Duration {
 /// The interval activity is held to arriving inside: **a gap between activity
 /// events**, never a total elapsed time.
 ///
-/// Counted in looks rather than in bounds, because what it separates is a tree
-/// that stopped from a quiet look under one that had not — the distinction the
-/// elapsed-time window it replaces could not draw. It has to clear the gap a
-/// pause under [`Bursts`] opens and stay under the shortest quiet a
-/// verdict can sit at the end of; [`bound`] asserts both, and the driven half
-/// prints the gap it measured, so a host that narrows either says so rather
-/// than waiting to go flaky.
+/// Counted in looks, because what it separates is a member that stopped from a
+/// quiet look under one that had not; [`bound`] asserts it fits.
 #[cfg(unix)]
 fn watchdog() -> Duration {
     look_every() * 8
@@ -298,23 +282,15 @@ fn longest_spared_quiet(bound: Duration) -> Duration {
     bound * 2
 }
 
-/// What that bound is a bound *on*: work stopping, and only past the bound.
+/// What that bound is a bound *on*, over three real trees.
 ///
-/// A member writing a report is silent **and idle** — it waits on a model, so
-/// nothing under it is charged CPU — which is the reading this drives. Both
-/// directions, because the sparing half alone would pass against a watchdog
-/// switched off: a stamped tree doing nothing is condemned and not before its
-/// bound elapses, and a stamped tree whose work keeps arriving inside the
-/// watchdog interval is never condemned.
-///
-/// The third tree is that second direction over a member a single look gets
-/// wrong, and without it one quiet look excuses any verdict at all.
-///
-/// Neither direction reads a clock the host controls. The idle verdict is held
-/// against the rule's *own* bound, which load can only lengthen. The other two
-/// are gaps between activity events — and where a runner starves a tree past the
-/// watchdog, the rule is judging precisely the readings this test took, so what
-/// is asserted is that activity had stopped arriving before the verdict.
+/// A member writing a report is silent **and idle**, and is condemned only past
+/// the rule's own bound, which load can only lengthen. A spinning tree and a
+/// bursting one — whose [`pause`]s put quiet looks between activity events —
+/// are spared, and a verdict over either passes only where
+/// [`condemned_only_past_the_watchdog`] finds activity had stopped arriving.
+/// Without the idle tree the sparing half would pass against a rule switched
+/// off; without the bursting one a single quiet look would excuse any verdict.
 ///
 /// POSIX only, because the evidence is: a member's tree is the [`SCRATCH_ENV`]
 /// stamp the kernel fixes at `exec`, and on Windows it is a job object, which
@@ -329,7 +305,8 @@ fn longest_spared_quiet(bound: Duration) -> Duration {
 // would report a platform green for a mechanism it never exercised.
 #[cfg(unix)]
 #[test]
-fn the_activity_rule_condemns_a_member_once_the_work_under_it_stops_and_not_while_it_arrives() {
+fn the_activity_rule_condemns_an_idle_member_past_its_bound_and_never_one_whose_work_keeps_arriving(
+) {
     let bound = bound();
 
     let idle_tree = Tree::spawn("idle", IDLE).unwrap_or_else(|why| panic!("{why}"));

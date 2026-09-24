@@ -117,8 +117,9 @@ test-group = 'e2e'
 # llmlint: ignore-block[changed_behavior_has_e2e] what changes here is how much
 # of a nextest run reaches its log, which no consumer of this crate can observe
 # and no test of this crate can assert without running nextest inside nextest.
-# What is assertable is that the key exists: nextest refuses a key it does not
-# know, so a typo fails every recipe at once rather than silently printing less.
+# What is assertable nextest asserts itself: it refuses a key it does not know
+# and a `binary()` filter that matches no binary, so a typo here or a rename of
+# that test binary fails every recipe at once rather than silently printing less.
 [[profile.default.overrides]]
 filter = 'binary(oneagentgraph_liveness)'
 success-output = "final"
