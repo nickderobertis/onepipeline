@@ -74,10 +74,13 @@ jobs:
         RUSTUP_TOOLCHAIN="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
         # Exactly one line, and an exact release on it — which is what this
         # repository pins and what `cargo +<channel>` resolves identically
-        # everywhere. Read leniently, an empty value silently builds with the
-        # image's own toolchain and anything else exports a string rustup either
-        # cannot resolve or resolves to a moving channel.
-        echo "$RUSTUP_TOOLCHAIN" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' || {
+        # everywhere. The *whole* value is matched rather than any line of it:
+        # `grep -q` answers "some line matched", so a file that pinned the
+        # channel twice would pass and export both. Read leniently, an empty
+        # value silently builds with the image's own toolchain and anything else
+        # exports a string rustup either cannot resolve or resolves to a moving
+        # channel.
+        [[ "$RUSTUP_TOOLCHAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
           echo "rust-toolchain.toml does not name exactly one pinned channel: '$RUSTUP_TOOLCHAIN'" >&2
           exit 1
         }
@@ -85,7 +88,9 @@ jobs:
         # llmlint: ignore[work_goes_through_command_surface] this container is a bare `rust:1-bookworm` with no `just`; this is the body of `just screenshots-tools`, which additionally needs Go, and it reads the same `freeze-version` line that recipe does
         bash screenshots/install-freeze.sh
         release="$(sed -n 's/^onetaskgraph-version *:= *"\([^"]*\)".*/\1/p' justfile)"
-        echo "$release" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' || {
+        # The whole value again, for the reason above: a justfile naming the
+        # release twice must refuse here rather than install one of the two.
+        [[ "$release" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
           echo "the justfile does not name exactly one onetaskgraph release: '$release'" >&2
           exit 1
         }

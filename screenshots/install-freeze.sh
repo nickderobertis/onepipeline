@@ -24,8 +24,10 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 version="$(sed -n 's/^freeze-version *:= *"\([^"]*\)".*/\1/p' "$repo_root/justfile")"
 # A release number, and nothing else: this value is interpolated into a URL and
 # into the archive's filename, so a line that had grown a comment, a range or a
-# path would reach the network as part of one.
-if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+# path would reach the network as part of one. The whole value is matched rather
+# than any line of it — `grep -q` answers "some line matched", so a justfile
+# pinning the renderer twice would pass and put both releases in the URL.
+if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "install-freeze: the justfile's 'freeze-version' line reads '$version'," >&2
   echo "                which is not a MAJOR.MINOR.PATCH release. That line is the" >&2
   echo "                only place this repository pins the renderer — set it to a" >&2
