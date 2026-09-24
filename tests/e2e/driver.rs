@@ -1766,6 +1766,36 @@ fn a_run_belongs_to_the_session_that_launched_it() {
         .out_has("no runs recorded");
 }
 
+/// The owner a run's first summary document names, with nothing appended after
+/// it to write a second.
+///
+/// A launch whose observer never starts refuses after `run-started` and appends
+/// nothing more, so the listing reads the document that one append wrote. That
+/// document is written from the launch record, and a launch that wrote the
+/// record after its first append left its own run reading `[unknown]` — the
+/// window a detached run holding a human node sits in until its driver appends.
+#[test]
+fn a_launch_that_refuses_after_its_first_append_still_belongs_to_its_session() {
+    let world = World::new("driver-first-summary");
+    world.script("run.hang", "hold");
+    let path = world.plan("refused", &plan_of("refused", vec![agent("build", &[])]));
+    let mut launch = world.cmd(&[
+        "start",
+        &path,
+        "--attach",
+        "--dag-graph",
+        &world.shipped_dag_graph(),
+    ]);
+    launch.env(crate::harness::STARTUP_TIMEOUT_ENV, "1");
+    world
+        .run_on(launch, "start")
+        .exited(REFUSED)
+        .err_has("neither started nor exited");
+
+    world.run(&["runs"]).exited(0).out_has("[mine]");
+    world.run(&["runs", "--mine"]).exited(0).out_has("refused");
+}
+
 #[test]
 fn stop_refuses_another_sessions_run_and_force_names_the_owner() {
     let world = World::new("driver-stop");
