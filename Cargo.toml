@@ -343,8 +343,12 @@ resolver = "2"
 # again, and the kernel lists newest first, so a live stamped tree dropped out of
 # `scratch::work` once enough newer processes existed and read as idle. A
 # **requirement**, because the macOS leg of `tests/oneagentgraph_liveness.rs`
-# fails below it; that test holds it, by requiring a spawned tree to stay
-# visible for every look of its watch.
+# fails below it: that test requires a spawned tree to stay visible for every
+# look of its watch, and holds this floor wherever the host starts enough newer
+# processes during that watch — CI's `cross (macos-latest)` leg, busy with the
+# rest of the suite, did within six seconds. How many that takes depends on the
+# host, so the load-independent gate is the library's own: its macOS test that
+# the live listing names `launchd`, pid 1, which 0.5.1 drops at any load.
 #
 # `oneagentgraph` 0.3.19 carries **graph schema version 9** — `schedule` and
 # `dir` on a `kind: onejudge` member, one paced conversation whose firing is a
