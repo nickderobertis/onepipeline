@@ -40,22 +40,17 @@
 //! has stopped is condemned once the bound elapses. It does not judge how long
 //! the host took to get there.
 //!
-//! It used to, against absolute elapsed-time windows, and a GitHub-hosted macOS
-//! runner starves a spin loop past them under ordinary load: three such runs
-//! condemned a spinning tree 5.3–5.45 s in and each cost a valid change a manual
-//! rerun (issue #415). A starved tree is charged no CPU and the rule reads
-//! exactly that, so the window was measuring the runner and reporting it as this
-//! crate's defect. Those readings survive as
+//! Elapsed-time windows measure the runner rather than this crate: a loaded host
+//! starves a spin loop, a starved tree is charged no CPU, and the rule reads
+//! exactly that. Those readings survive, unjudged, as
 //! [`the_timings_the_old_gate_asserted_are_measured_and_never_judged`].
 //!
-//! Three trees, because one quiet look is not a tree that stopped. A spinning
+//! Three trees, because one quiet look is not a member that stopped. A spinning
 //! tree and a silent one bracket the rule; between them is one working in
-//! bursts, whose pauses swallow whole looks while activity keeps arriving either
-//! side. So a condemnation answers to the **gaps between activity events**
-//! inside the bound it was reached at the end of, never to the look at it —
-//! see [`condemned_only_past_the_watchdog`] for why the *widest* of those gaps
-//! and not the last, which the macOS leg of run 35812474353 read as `0ns` over
-//! a tree that had genuinely stopped for 4.76s.
+//! bursts, whose pauses put quiet looks between activity events. So a
+//! condemnation answers to the **gaps between activity events** inside the bound
+//! it was reached at the end of, never to the look at it — see
+//! [`condemned_only_past_the_watchdog`] for why the *widest* of those gaps.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -166,13 +161,9 @@ fn burst() -> Duration {
 
 /// The bursting tree's cadence, driven from here rather than by the tree itself.
 ///
-/// A shell that times its own bursts has to ask something for the clock, and the
-/// only POSIX answer is a subprocess per iteration — which on a saturated runner
-/// is a fork storm whose cost the sampler charges to processes that have already
-/// exited. The macOS leg of run 35812474353 read such a tree as five activity
-/// events in 6.1s with a 4.76s gap where a [`pause`] was meant to be, condemned
-/// it, and failed this journey over a tree that had been starved rather than
-/// resting.
+/// A shell that times its own bursts needs a subprocess per iteration to read
+/// the clock, and on a saturated runner that fork storm starves the bursts
+/// themselves, so the pauses stop being the ones this file chose.
 ///
 /// A **stopped** process is charged no CPU by any reading of it, so `SIGSTOP`
 /// and `SIGCONT` make the pause exactly the one [`bound`] asserts [`watchdog`]
@@ -267,7 +258,7 @@ fn bound() -> Duration {
     assert!(
         watchdog() > pause() + look_every() * 2,
         "an activity gap of {:?} is what a pause under the bursting tree opens, and the {:?} \
-         watchdog interval is inside it — so that tree's missed observations would excuse a \
+         watchdog interval is inside it — so that tree's pauses would excuse a \
          verdict instead of being judged by one",
         pause() + look_every() * 2,
         watchdog()
@@ -286,7 +277,7 @@ fn bound() -> Duration {
 /// events**, never a total elapsed time.
 ///
 /// Counted in looks rather than in bounds, because what it separates is a tree
-/// that stopped from a look that missed one that had not — the distinction the
+/// that stopped from a quiet look under one that had not — the distinction the
 /// elapsed-time window it replaces could not draw. It has to clear the gap a
 /// pause under [`Bursts`] opens and stay under the shortest quiet a
 /// verdict can sit at the end of; [`bound`] asserts both, and the driven half
@@ -317,7 +308,7 @@ fn longest_spared_quiet(bound: Duration) -> Duration {
 /// watchdog interval is never condemned.
 ///
 /// The third tree is that second direction over a member a single look gets
-/// wrong, and without it one missed observation excuses any verdict at all.
+/// wrong, and without it one quiet look excuses any verdict at all.
 ///
 /// Neither direction reads a clock the host controls. The idle verdict is held
 /// against the rule's *own* bound, which load can only lengthen. The other two
@@ -416,13 +407,13 @@ fn the_activity_rule_condemns_a_member_once_the_work_under_it_stops_and_not_whil
     let bursting_tree = Tree::spawn("bursting", BUSY).unwrap_or_else(|why| panic!("{why}"));
     let cadence = Bursts::over(bursting_tree.child.id());
     let bursting = watch(&bursting_tree, bound, |watch| {
-        watch.missed_between_activity() > 0 && watch.spent > bound * 2
+        watch.quiet_looks_between_activity() > 0 && watch.spent > bound * 2
     });
     drop(cadence);
     assert!(
-        bursting.missed_between_activity() > 0,
+        bursting.quiet_looks_between_activity() > 0,
         "no look at the bursting tree found it charged nothing between two that found it \
-         charged {}% of a core, over {} looks and {:?} — so the missed observation this tree \
+         charged {}% of a core, over {} looks and {:?} — so the quiet look this tree \
          exists to put in front of the rule was never taken, and a verdict excused by one would \
          pass here unseen. The last of its {} activity events arrived at {:?}",
         oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE,
@@ -443,7 +434,7 @@ fn the_activity_rule_condemns_a_member_once_the_work_under_it_stops_and_not_whil
          that found work, longest gap {:?} against a {:?} watchdog interval",
         bursting.events(),
         bursting.spent,
-        bursting.missed_between_activity(),
+        bursting.quiet_looks_between_activity(),
         bursting.longest_quiet(),
         watchdog()
     );
@@ -453,16 +444,13 @@ fn the_activity_rule_condemns_a_member_once_the_work_under_it_stops_and_not_whil
 /// longer than the watchdog interval, inside the bound the rule reached its
 /// verdict at the end of.
 ///
-/// A gap rather than a look — a look that found nothing under a tree still
-/// working is a missed observation, which the bursting tree produces on purpose
-/// and a loaded runner produces by accident. The widest gap inside the bound
-/// rather than the one ending at the verdict, because the rule's samples are not
-/// this loop's: a tree that stopped for most of its bound and resumed a look
-/// before the deadline is condemned by a rule that had not yet re-sampled it,
-/// and the gap that explains that verdict is the stop rather than the resumption
-/// on top of it. The macOS leg of run 35812474353 is that run exactly — quiet
-/// from 1.0s to 5.8s, condemned at 6.1s, and read by the gap *ending* at the
-/// verdict as 0ns.
+/// A gap rather than a look — a quiet look between activity events is not a
+/// member that stopped, and the bursting tree produces them on purpose. The
+/// widest gap inside the bound rather than the one ending at the verdict,
+/// because the rule's samples are not this loop's: a tree that stopped for most
+/// of its bound and resumed a look before the deadline is condemned by a rule
+/// that had not yet re-sampled it, and the gap that explains that verdict is the
+/// stop rather than the resumption on top of it.
 ///
 /// Bounded by the rule's own bound, so a wide gap the member has since worked a
 /// whole bound through cannot excuse a verdict the rule reached long after it.
@@ -625,9 +613,10 @@ impl Watch {
         longest.max(at - previous)
     }
 
-    /// Looks that found no work with activity arriving on both sides of them: a
-    /// work observation missed under a tree that never stopped.
-    fn missed_between_activity(&self) -> usize {
+    /// Looks that found no work with activity events on both sides of them — the
+    /// quiet reading a rule judging single looks would condemn a member on while
+    /// its work goes on arriving.
+    fn quiet_looks_between_activity(&self) -> usize {
         let (Some(first), Some(last)) = (
             self.looks.iter().position(|look| look.working),
             self.looks.iter().rposition(|look| look.working),
@@ -657,11 +646,10 @@ impl Watch {
 /// own cadence, until `enough` says the watch has seen what it came for — or the
 /// member is condemned, or [`BACKSTOP`] expires.
 ///
-/// The reading above each verdict and the reading the rule takes inside it are
-/// two calls in one iteration of this loop, so they are of the same tree at the
-/// same moment and the pairs they compare are the same pair. That is what lets
-/// either half say what the rule saw when it decided, rather than guessing from
-/// a clock.
+/// Each look reads the tree immediately before asking the rule, which samples it
+/// on its own coarser cadence — so a look is evidence of what the rule could
+/// have seen near that moment, not a copy of the sample it judged. That is why
+/// a verdict is held to the gaps across a whole bound rather than to one look.
 #[cfg(unix)]
 fn watch(tree: &Tree, bound: Duration, enough: impl Fn(&Watch) -> bool) -> Watch {
     let started = Instant::now();
