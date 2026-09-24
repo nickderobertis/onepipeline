@@ -4244,7 +4244,6 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    /// A failed rename removes its completed temporary and preserves the destination.
     #[test]
     fn a_write_the_host_will_not_publish_is_reported_and_takes_its_temporary_with_it() {
         for durability in [Durability::Record, Durability::Projection] {
@@ -4428,7 +4427,6 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    /// A refused sync reports the destination and leaves no temporary behind.
     #[test]
     fn a_sync_the_host_refuses_is_a_failed_write_that_leaves_no_temporary() {
         for refused in [disk::Step::Contents, disk::Step::Entry] {

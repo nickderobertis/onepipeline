@@ -42,17 +42,12 @@ use serde_json::{json, Value};
 // run them, and a constant they share cannot be edged narrower than they are.
 const WINDOW: Duration = Duration::from_secs(60);
 
-/// How long the scale journey waits for its large run's held node to dispatch.
+/// How long the scale journey waits for its large run's other nodes to settle.
 ///
-/// That node is queued behind the run's ninety-nine others at a concurrency of
-/// four, so the wait is those hundred dispatches rather than one step of the
-/// loop, and it is sized to them: three seconds each, where the slowest
-/// cross-platform leg has taken about one and a half — a debug build reading its
-/// journal through the bus reader, whose decode is recorded in
-/// `docs/contract-divergences.md` entry 76. It is the harness's backstop and not
-/// what the journey proves: every bound the journey asserts is a count of work,
-/// and none of them moved.
-const QUEUED_DISPATCHES: Duration = Duration::from_secs(3 * 100);
+/// The 99 independent tasks run at a concurrency of four. This is a backstop
+/// for their dispatch and settlement; the measured assertion is the work done
+/// during the idle minute that follows.
+const LARGE_RUN_SETTLEMENT: Duration = Duration::from_secs(3 * 100);
 
 /// A world whose driver counts its own work, and whose held dispatches outlast
 /// the journey holding them.
@@ -60,7 +55,7 @@ const QUEUED_DISPATCHES: Duration = Duration::from_secs(3 * 100);
 /// The harness's default hold patience is set above one `until` deadline, which
 /// is what every other journey holds a dispatch across. The journeys here hold
 /// one across several — at the longest, two `until` deadlines, then
-/// [`QUEUED_DISPATCHES`], then the whole of [`WINDOW`], six hundred seconds —
+/// [`LARGE_RUN_SETTLEMENT`], then the whole of [`WINDOW`], six hundred seconds —
 /// and a hold that expires inside the window is not reported as the expiry it
 /// is: the double exits, the engine dispatches the node again, and that
 /// re-dispatch's reads land in the minute that was supposed to record nothing.
@@ -248,8 +243,10 @@ fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
         &plan_of("small", vec![agent("hold", &[])]),
     );
 
-    let mut many: Vec<Value> = (0..99).map(|n| agent(&format!("n{n}"), &[])).collect();
-    many.push(agent("hold", &[]));
+    // Dispatch the held node first so the wait for the other 99 cannot consume
+    // the held dispatch's own rendezvous deadline on a loaded host.
+    let mut many = vec![agent("hold", &[])];
+    many.extend((0..99).map(|n| agent(&format!("n{n}"), &[])));
     let large = world.plan_in(&large_store, "large", &plan_of("large", many));
 
     world
@@ -259,12 +256,12 @@ fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
         .run_in(&large_store, &["start", &large, "--detach"])
         .exited(0);
     for run in ["small", "large"] {
-        world.until_within(QUEUED_DISPATCHES, "both dispatches to start", |world| {
+        world.until("both dispatches to start", |world| {
             recorded(world, run, "node-dispatched", "hold")
         });
         reporting(&world, run);
     }
-    world.until("the large run's other nodes to settle", |world| {
+    world.until_within(LARGE_RUN_SETTLEMENT, "the large run's other nodes to settle", |world| {
         world
             .events_of("large", "node-settled")
             .iter()
