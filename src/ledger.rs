@@ -1486,7 +1486,7 @@ mod disk {
     #[cfg(test)]
     pub(super) struct Watch;
 
-    /// Watch this thread's writes, refusing at most one step of each.
+    /// Watch this thread's writes, refusing every occurrence of the selected step.
     ///
     /// Panics on a watch already installed on this thread rather than replacing
     /// it: the steps read back would be a mix of two writes, which is a test
@@ -4404,7 +4404,8 @@ mod tests {
     /// Not an optimisation left unstated: the shadow store is rewritten from the
     /// run's journal whenever the run is relaunched, so a sync per document buys
     /// durability for a file that is rebuilt anyway — about a hundred of them per
-    /// write-back pass. What the reader past the rename needs, it already has.
+    /// write-back pass. A CLI reader can check the published bytes, but cannot
+    /// observe the absence of sync calls; this watcher records those real calls.
     #[test]
     fn a_projection_is_published_by_its_rename_alone() {
         let root = scratch("projection-reaches-no-disk");
