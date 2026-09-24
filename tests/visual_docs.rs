@@ -21,6 +21,7 @@
 
 #[cfg(unix)] // The capture is `capture.sh` over `capture.py`; it runs where they do.
 mod unix {
+    use std::env;
     use std::fs;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
@@ -600,13 +601,34 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
         );
         fs::write(root.join("screencomp.toml"), screencomp_toml)
             .expect("the fixture's screencomp.toml is written");
+
+        // The renderer's preflight sits between the reconciliations and the
+        // binaries, and `freeze` is a third-party tool no tier of this
+        // repository installs — so on a runner without it the capture stops
+        // there and a journey about the reconciliations reports on the runner
+        // instead. The ending comes from the fixture: a stand-in on the PATH
+        // `run_capture_py` hands the capture, never reached, because the
+        // refusal after it is where this fixture stops.
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).expect("the fixture has a stand-in bin");
+        let renderer = bin.join("freeze");
+        fs::write(&renderer, "#!/bin/sh\nexit 1\n").expect("the renderer stand-in is written");
+        fs::set_permissions(&renderer, PermissionsExt::from_mode(0o755))
+            .expect("the renderer stand-in is executable");
     }
 
-    /// Run the committed `capture.py` in `root`, the way `capture.sh` does.
+    /// Run the committed `capture.py` in `root`, the way `capture.sh` does,
+    /// with the fixture's own `bin` ahead of the host's on PATH so which
+    /// refusal answers is this tree's to decide and not this machine's.
     fn run_capture_py(root: &Path) -> Output {
+        let inherited = env::var("PATH").unwrap_or_default();
         Command::new("python3")
             .arg(root.join("screenshots/capture.py"))
             .current_dir(root)
+            .env(
+                "PATH",
+                format!("{}:{inherited}", root.join("bin").display()),
+            )
             .output()
             .expect("python3 runs the capture; the capture is python and this tier drives it")
     }
