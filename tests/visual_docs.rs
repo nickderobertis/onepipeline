@@ -578,22 +578,22 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
         fs::write(root.join("justfile"), justfile).expect("the fixture's justfile");
         fs::create_dir_all(root.join("screenshots")).expect("the fixture has a screenshots dir");
         fs::create_dir_all(root.join("bin")).expect("the fixture has a stand-in bin");
-        for (path, body) in [
-            // Each reports `$RUSTUP_TOOLCHAIN` as it reaches it, so the export
-            // the command makes between the two guards is observed rather than
-            // assumed.
+        for (path, reports) in [
+            // The two scripts report `$RUSTUP_TOOLCHAIN` as they are reached, so
+            // the export the command makes between the two guards is observed
+            // rather than assumed.
             (
                 "screenshots/install-freeze.sh",
-                "install-freeze %s\\n' \"$RUSTUP_TOOLCHAIN\"",
+                r#"printf 'install-freeze %s\n' "$RUSTUP_TOOLCHAIN""#,
             ),
             (
                 "screenshots/capture.sh",
-                "capture %s\\n' \"$RUSTUP_TOOLCHAIN\"",
+                r#"printf 'capture %s\n' "$RUSTUP_TOOLCHAIN""#,
             ),
-            ("bin/cargo", "cargo %s\\n' \"$*\""),
+            ("bin/cargo", r#"printf 'cargo %s\n' "$*""#),
         ] {
             let at = root.join(path);
-            fs::write(&at, format!("#!/bin/sh\nprintf '{body} >> \"$REACHED\"\n"))
+            fs::write(&at, format!("#!/bin/sh\n{reports} >> \"$REACHED\"\n"))
                 .expect("the stand-in is written");
             fs::set_permissions(&at, PermissionsExt::from_mode(0o755))
                 .expect("the stand-in is executable");
@@ -718,7 +718,12 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
         );
         let done = run_capture_command(&root);
         let said = String::from_utf8_lossy(&done.stderr).into_owned();
-        assert_eq!(done.status.code(), Some(1), "a moving channel was accepted");
+        assert_eq!(
+            done.status.code(),
+            Some(1),
+            "a moving channel was accepted, so the capture builds with whichever compiler \
+             `stable` names on the day it runs:\n{said}"
+        );
         assert!(
             said.contains("does not name exactly one pinned channel: 'stable'"),
             "the capture-command refused a moving channel without quoting it back:\n{said}"
