@@ -1,6 +1,13 @@
 # onepipeline
 
-![the stderr of onepipeline start --attach driving a six-node plan: node-ready, node-dispatched and node-settled lines arriving as each node runs, a decision-pending line pausing the run on a human approval and clearing once it is attested, and a closing status line reading 6/6 done, 1 not landed, SETTLED, complete](screenshots/images/demo.gif)
+![the stderr of onepipeline start --attach driving a six-node plan: node-ready, node-dispatched and node-settled lines arriving as each node runs, a decision-pending line pausing the run on a human approval and clearing once it is attested, and a closing status line reading 6/6 done, 1 not landed, SETTLED, complete](screenshots/images/demo.gif) <!-- llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the hero is not a second
+spelling of the CLI's output: it is a rendering of the same run the hash-gated stills come
+from, written by `just screenshots-gif` from the binary this tree builds, and the `monitor`
+still it overlaps with IS gated on its content hash. It carries no gate of its own because
+a GIF is not byte-reproducible across Pillow versions, so hashing one would fail every
+capture on a machine with a different Pillow while saying nothing about the tool. That is
+the stack-wide ruling `llmlint`'s own adoption made; `screenshots/AGENTS.md` records it
+together with what to re-render on and when, and changing it is the contract owner's. -->
 
 Execute a task DAG over [`oneagentgraph`](https://github.com/nickderobertis/oneagentgraph)
 and [`onevcs`](https://github.com/nickderobertis/onevcs), merging their event
