@@ -23,8 +23,6 @@
 //!
 //! [`Stall`]: oneagentgraph::member::Stall
 //!
-//! # Two halves, because the change had two
-//!
 //! [`the_linked_default_bound_outlasts_a_member_writing_its_report`] is the
 //! **number** 0.3.8 moved, read the way the sibling reads it at launch. It is
 //! the half that fails against a stale lock.
@@ -38,8 +36,7 @@
 //! The second half passes or fails on the order and spacing of activity events.
 //! Elapsed-time windows measure the runner rather than this crate — a loaded
 //! host starves a spin loop, and the rule reads a starved tree as idle — so
-//! those timings survive only as a reading, in
-//! [`the_timing_probe_cannot_fail_the_gate`].
+//! those timings survive only as a reading printed by [`report_timings`].
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -70,7 +67,6 @@ fn the_linked_default_bound_outlasts_a_member_writing_its_report() {
     );
 }
 
-/// Operator-set stall bound for the driven activity and timing probes.
 #[cfg(unix)]
 const BOUND: &str = "6";
 
@@ -195,7 +191,10 @@ fn signal(pid: u32, what: &str) {
         .stderr(std::process::Stdio::null())
         .status()
         .expect("the signal command runs");
-    assert!(status.success(), "signal {what} to owned pid {pid} succeeds");
+    assert!(
+        status.success(),
+        "signal {what} to owned pid {pid} succeeds"
+    );
 }
 
 #[cfg(unix)]
@@ -297,7 +296,7 @@ fn the_activity_rule_condemns_idle_members_and_requires_an_activity_gap_for_work
 
     let busy_tree = Tree::spawn("working", BUSY).unwrap_or_else(|why| panic!("{why}"));
     let busy = watch(&busy_tree, bound, |watch| {
-        watch.events() >= ACTIVITY_EVENTS && watch.spent > bound * 2
+        watch.events() >= ACTIVITY_EVENTS && watch.spent >= bound * 3
     });
     assert!(
         busy.events() > 0,
@@ -308,6 +307,7 @@ fn the_activity_rule_condemns_idle_members_and_requires_an_activity_gap_for_work
         busy.looks.len(),
         busy.spent
     );
+    report_timings(&idle, &busy, bound);
     match busy.verdict() {
         None => {
             assert!(
@@ -400,75 +400,42 @@ fn condemned_only_after_activity_gap(watch: &Watch, at: Duration, bound: Duratio
     );
 }
 
-// llmlint: ignore-block[tests_assert_real_behavior] timing varies with host
-// load, so asserting on it would restore issue #415's flaky gate. The journey
-// above asserts the rule's behavior over the same real trees.
 #[cfg(unix)]
-#[test]
-fn the_timing_probe_cannot_fail_the_gate() {
-    if std::panic::catch_unwind(measure_timings).is_err() {
-        println!("  timing measurement unavailable on this run");
-    }
-}
-
-#[cfg(unix)]
-fn measure_timings() {
-    let bound = bound();
+fn report_timings(idle: &Watch, busy: &Watch, bound: Duration) {
     println!("the activity rule under a {bound:?} bound — measured, and judged by nothing:");
-
-    match Tree::spawn("measured-idle", IDLE) {
-        Err(why) => println!("  idle tree            not measured: {why}"),
-        Ok(tree) => {
-            let idle = watch(&tree, bound, |_| false);
-            match idle.verdict() {
-                Some(at) => println!(
-                    "  idle tree condemned  {at:?} into its life — the old gate asserted after \
-                     {bound:?} and inside {:?}: {}",
-                    bound * 8,
-                    if at > bound && at < bound * 8 {
-                        "inside"
-                    } else {
-                        "outside"
-                    }
-                ),
-                None => println!(
-                    "  idle tree            never condemned over {} looks and {:?}",
-                    idle.looks.len(),
-                    idle.spent
-                ),
+    if let Some(at) = idle.verdict() {
+        println!(
+            "  idle tree condemned  {at:?} into its life — the old gate asserted after \
+             {bound:?} and inside {:?}: {}",
+            bound * 8,
+            if at > bound && at < bound * 8 {
+                "inside"
+            } else {
+                "outside"
             }
-        }
+        );
     }
-
-    match Tree::spawn("measured-working", BUSY) {
-        Err(why) => println!("  busy tree            not measured: {why}"),
-        Ok(tree) => {
-            let window = bound * 3;
-            let busy = watch(&tree, bound, |watch| watch.spent >= window);
-            match busy.verdict() {
-                Some(at) => println!(
-                    "  busy tree condemned  {at:?} into its life — the old gate asserted not \
-                     inside {window:?}: outside. A starved spin loop is charged no CPU and the \
-                     rule reads exactly that, which is why this is a reading and not a failure"
-                ),
-                None => println!(
-                    "  busy tree            not condemned over {:?} — the old gate asserted not \
-                     inside {window:?}: inside",
-                    busy.spent
-                ),
-            }
-            println!(
-                "  busy tree activity   {} of {} windows charged at least {}% of a core, longest \
-                 quiet gap {:?}",
-                busy.events(),
-                busy.looks.len().saturating_sub(1),
-                oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE,
-                busy.longest_quiet()
-            );
-        }
+    let window = bound * 3;
+    match busy.verdict() {
+        Some(at) => println!(
+            "  busy tree condemned  {at:?} into its life — the old gate asserted not \
+             inside {window:?}: outside"
+        ),
+        None => println!(
+            "  busy tree            not condemned over {:?} — the old gate asserted not \
+             inside {window:?}: inside",
+            busy.spent
+        ),
     }
+    println!(
+        "  busy tree activity   {} of {} windows charged at least {}% of a core, longest \
+         quiet gap {:?}",
+        busy.events(),
+        busy.looks.len().saturating_sub(1),
+        oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE,
+        busy.longest_quiet()
+    );
 }
-// llmlint: ignore-end[tests_assert_real_behavior]
 
 #[cfg(unix)]
 struct Look {
@@ -625,10 +592,6 @@ use std::time::Instant;
 
 #[cfg(unix)]
 impl Tree {
-    /// Fallible rather than panicking, because the timing measurement may not
-    /// fail the gate: a host that cannot start `sh` has
-    /// nothing to report, which is not the same fact as a rule that misjudged a
-    /// tree.
     fn spawn(name: &str, argv: &[&str]) -> Result<Self, String> {
         let scratch = std::env::temp_dir().join(format!(
             "onepipeline-liveness-{}-{name}",
