@@ -608,7 +608,12 @@ pub(crate) fn validate_dispatch_sets(
     default_graph: &str,
     run_sets: &[String],
 ) -> Result<()> {
-    if node.kind == NodeKind::Human || node.expects_no_diff {
+    // A dispatch no override list touches is the graph's as shipped, and what is
+    // wrong with that is oneagentgraph's to say, in its own words, when it runs.
+    if node.kind == NodeKind::Human
+        || node.expects_no_diff
+        || (run_sets.is_empty() && node.sets.is_empty())
+    {
         return Ok(());
     }
     let check = |step: Option<&Step>| -> Result<()> {

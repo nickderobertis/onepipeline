@@ -695,7 +695,10 @@ fn start(args: &StartArgs) -> Result<i32> {
         DAG_GRAPH_OFF => None,
         reference => Some(resolve_graph(reference, &launch_dir)?),
     };
-    if let Some(graph) = graph_ref.as_deref() {
+    // Only a launch that overrides the graph is checked here: an unusable graph
+    // with no override is the observer's to report when it supervises, and the
+    // run it watches goes on.
+    if let Some(graph) = graph_ref.as_deref().filter(|_| !dag_sets.is_empty()) {
         graph::validate_graph_sets(graph, &dag_sets, "dag-scope")?;
     }
     // The same, for the graph a change request's body is drafted by: naming none

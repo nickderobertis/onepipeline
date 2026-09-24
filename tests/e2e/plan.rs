@@ -192,7 +192,7 @@ fn node_sets_refuse_no_dispatch_and_bad_grammar() {
         node["sets"] = json!([if name == "grammar" {
             "bad-entry"
         } else {
-            "members.worker.model=chosen"
+            "members.worker.agent.model=chosen"
         }]);
         let path = world.plan(name, &plan_of(name, vec![node]));
         world

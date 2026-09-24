@@ -789,11 +789,12 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
             .err_has("maintenance_config")
             .err_has(names);
     }
-    // And the key under every earlier schema version this build still reads,
+    // And the key under every schema version before the one it arrived at,
     // refused by name and pointed at the version that admits it.
+    let arrived = 9;
     for earlier in onepipeline::filter::LAUNCH_CONFIG_SCHEMA_VERSIONS_READ
         .iter()
-        .filter(|version| **version < at)
+        .filter(|version| **version < arrived)
     {
         let early = world.root.join(format!("early-{earlier}.yaml"));
         std::fs::write(
@@ -808,7 +809,7 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
             )
             .exited(REFUSED)
             .err_has(&format!(
-                "`maintenance_config` is a schema {at} key and this config declares \
+                "`maintenance_config` is a schema {arrived} key and this config declares \
                  schema_version {earlier}"
             ));
     }
