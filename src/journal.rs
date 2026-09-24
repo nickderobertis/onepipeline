@@ -1259,7 +1259,7 @@ mod tests {
                 path
             })
             .collect();
-        let merged = onemessagebus_agent::Merge::open(&paths)
+        let merged = crate::vocabulary::Merge::open(&paths)
             .expect("the streams read")
             .into_records();
         let _ = std::fs::remove_dir_all(&dir);
@@ -1382,7 +1382,7 @@ mod tests {
         )
         .expect("a journal");
 
-        let reader = onemessagebus_agent::Reader::open(&path)
+        let reader = crate::vocabulary::Reader::open(&path)
             .expect("the journal opens")
             .collect_all();
         let reported = reader

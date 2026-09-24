@@ -8,8 +8,9 @@
 //! from which reader reached the queue first: see [`Reply`].
 //!
 //! The queues are `onemessagebus`'s. `ChannelState` is the run's `channel/`
-//! directory opened as the `planner-channel` layout `onemessagebus-agent`
-//! declares, over the bus's local transport: the logs, their policies, the
+//! directory opened as the `planner-channel` layout [`layout`] declares — this
+//! crate's own, since the protocol is this engine's — over the bus's local
+//! transport: the logs, their policies, the
 //! projection with its stamp and seal, the cursors, the asker identity, the
 //! correlation a question is answered by, and the author allowlist are all
 //! calls into that crate, which is where `docs/queues.md` and `docs/ask.md`
@@ -2077,11 +2078,11 @@ mod tests {
     }
 
     /// Both goldens are envelopes the schema this crate generates admits, and
-    /// each is admitted by the document the agent profile registers for the
-    /// version it was written against — so the type, the profile's documents and
-    /// what a person types are one shape.
+    /// each is admitted by the document the layout registers for the version it
+    /// was written against — so the type, the layout's documents and what a
+    /// person types are one shape.
     #[test]
-    fn both_goldens_validate_under_this_crates_schema_and_the_profiles_documents() {
+    fn both_goldens_validate_under_this_crates_schema_and_the_layouts_documents() {
         let mut own = onemessagebus::Registry::new();
         own.register::<Reply>()
             .expect("this crate's envelope schema registers");

@@ -107,3 +107,17 @@ threads-required = 4
 [[profile.default.overrides]]
 filter = 'binary(e2e) or binary(note) or binary(release_channel)'
 test-group = 'e2e'
+
+# Show the non-gating liveness timings in passing local and CI runs.
+#
+# llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] Nextest
+# rejects a binary() filter matching no target before running tests (exit 96
+# when this name was deliberately changed), so it is the drift gate here.
+# llmlint: ignore-block[changed_behavior_has_e2e] this only changes nextest's
+# own output; testing it would require nesting nextest. Nextest validates the
+# filter and setting when the focused binary runs.
+[[profile.default.overrides]]
+filter = 'binary(oneagentgraph_liveness)'
+success-output = "final"
+# llmlint: ignore-end[changed_behavior_has_e2e]
+# llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]

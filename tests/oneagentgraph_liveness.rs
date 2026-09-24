@@ -21,15 +21,22 @@
 //! what these drive: no double, no reimplementation, and the readings are the
 //! kernel's own.
 //!
-//! # Two halves, because the change had two
+//! [`Stall`]: oneagentgraph::member::Stall
 //!
 //! [`the_linked_default_bound_outlasts_a_member_writing_its_report`] is the
 //! **number** 0.3.8 moved, read the way the sibling reads it at launch. It is
 //! the half that fails against a stale lock.
-//! [`the_activity_rule_condemns_a_silent_member_only_once_its_bound_elapses`] is
-//! what that number is a bound *on*, driven over real processes and real elapsed
-//! time under a bound this test's own environment sets small — seconds rather
-//! than half an hour, which is the only reason the pair is quick.
+//! [`the_activity_rule_condemns_idle_members_and_requires_an_activity_gap_for_working_trees`]
+//! is what that number is a bound *on*, driven over real processes and real
+//! elapsed time under a bound this test's own environment sets small — seconds
+//! rather than half an hour, which is the only reason the pair is quick.
+//!
+//! # Judged on activity, not on elapsed time
+//!
+//! The second half passes or fails on the order and spacing of activity events.
+//! Elapsed-time windows measure the runner rather than this crate — a loaded
+//! host starves a spin loop, and the rule reads a starved tree as idle — so
+//! those timings survive only as a reading printed by [`report_timings`].
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -60,20 +67,186 @@ fn the_linked_default_bound_outlasts_a_member_writing_its_report() {
     );
 }
 
-/// What that bound is a bound *on*: silence alone, and only past the bound.
+#[cfg(unix)]
+const BOUND: &str = "6";
+
+/// The cadence every look in this file is taken on: under the sibling's own
+/// probe floor, so the rule never takes a reading without one of this loop's
+/// beside it, and a pause is resolved finer than the rule resolves it — which is
+/// what lets a look find nothing while the rule's wider window over the same
+/// pause still finds work.
+#[cfg(unix)]
+fn look_every() -> Duration {
+    oneagentgraph::member::HEARTBEAT_INTERVAL / 2
+}
+
+/// A backstop for unanswered looks, below nextest's `terminate-after`.
+/// No verdict is held to this duration.
+#[cfg(unix)]
+const BACKSTOP: Duration = Duration::from_secs(60);
+
+#[cfg(unix)]
+const REPORTED_ACTIVITY: usize = 8;
+
+#[cfg(unix)]
+const ACTIVITY_EVENTS: usize = 8;
+
+/// The silence a report is written in: nothing published, and nothing under the
+/// member charged for it either.
+#[cfg(unix)]
+const IDLE: &[&str] = &["sleep", "600"];
+
+#[cfg(unix)]
+const BUSY: &[&str] = &["sh", "-c", "while :; do :; done"];
+
+/// How long the tree below stops for between bursts of work.
 ///
-/// The rule's own seam, over a real process tree and real elapsed time. A
-/// member writing a report is silent **and idle** — it is waiting on a model,
-/// so nothing under it is charged CPU — which is exactly the reading this drives
-/// and exactly the one that used to be fatal. Both directions, because the
-/// sparing half alone would pass against a watchdog switched off:
+/// Several looks wide, so whole look windows fall inside a pause even where a
+/// loaded host stretches the cadence — and narrow enough that the gap a pause
+/// opens stays inside [`allowed_activity_gap`], which is what makes a verdict over one a
+/// judgement rather than an excuse.
+#[cfg(unix)]
+fn pause() -> Duration {
+    look_every() * 4
+}
+
+/// How long the tree below works for between its pauses.
 ///
-/// * a stamped tree doing nothing is condemned, and **not before its bound
-///   elapses** — which is what makes the bound the whole of the judgement, and
-///   therefore what makes the number above decide whether a report survives;
-/// * a stamped tree doing work is never condemned, however long its member has
-///   published nothing.
+/// Several looks wide for the same reason [`pause`] is: a burst narrower than
+/// the cadence could fall between two looks and leave no activity event behind,
+/// which would make the tree a silent one rather than a bursting one.
+#[cfg(unix)]
+fn burst() -> Duration {
+    look_every() * 8
+}
+
+/// Pause the owned spin-loop pid with signals. A timed shell loop would fork a
+/// clock reader on each iteration and compete with its own CPU measurements.
+#[cfg(unix)]
+struct Bursts {
+    pid: u32,
+    ending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cadence: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl Bursts {
+    fn over(pid: u32) -> Self {
+        let ending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let over = std::sync::Arc::clone(&ending);
+        let cadence = std::thread::spawn(move || {
+            while wait(burst(), &over) {
+                signal(pid, "-STOP");
+                let carry_on = wait(pause(), &over);
+                signal(pid, "-CONT");
+                if !carry_on {
+                    break;
+                }
+            }
+        });
+        Self {
+            pid,
+            ending,
+            cadence: Some(cadence),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Bursts {
+    fn drop(&mut self) {
+        self.ending
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let cadence_result = self.cadence.take().map(std::thread::JoinHandle::join);
+        // The cadence above always resumes what it stopped, and this says so a
+        // second time because the one state a stopped tree could be left in is
+        // the one [`Tree::drop`] has the least to say about.
+        signal(self.pid, "-CONT");
+        if let Some(result) = cadence_result {
+            result.expect("the bursting tree's signal cadence succeeds");
+        }
+    }
+}
+
+/// Sleep `how_long` a look at a time, answering whether the cadence should carry
+/// on — so a guard being dropped ends the thread within one look rather than
+/// within one burst.
+#[cfg(unix)]
+fn wait(how_long: Duration, ending: &std::sync::atomic::AtomicBool) -> bool {
+    let until = Instant::now() + how_long;
+    while Instant::now() < until {
+        if ending.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        std::thread::sleep(look_every().min(until - Instant::now()));
+    }
+    !ending.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(unix)]
+fn signal(pid: u32, what: &str) {
+    let status = std::process::Command::new("kill")
+        .args([what, &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("the signal command runs");
+    assert!(
+        status.success(),
+        "signal {what} to owned pid {pid} succeeds"
+    );
+}
+
+#[cfg(unix)]
+fn bound() -> Duration {
+    let bounds = Bounds::from_env(&BTreeMap::from([(
+        oneagentgraph::liveness::STALL_TIMEOUT_ENV.to_owned(),
+        BOUND.to_owned(),
+    )]))
+    .expect("the linked oneagentgraph reads the bound its environment names");
+    let bound = bounds.stall;
+    assert!(
+        bound < KILLED_REPORTS,
+        "this journey is only quick because the environment shortens the bound"
+    );
+    assert!(
+        allowed_activity_gap() > pause() + look_every() * 2,
+        "an activity gap of {:?} is what a pause under the bursting tree opens, and the {:?} \
+         allowed activity gap is inside it — so that tree's pauses would excuse a \
+         verdict instead of being judged by one",
+        pause() + look_every() * 2,
+        allowed_activity_gap()
+    );
+    assert!(
+        allowed_activity_gap() * 2 < bound,
+        "the {:?} allowed activity gap is not comfortably under the {bound:?} bound, so a quiet \
+         stretch long enough for the rule to reach a verdict over would fit inside it and be \
+         read as work still arriving",
+        allowed_activity_gap()
+    );
+    bound
+}
+
+/// Test-chosen tolerance for a gap between activity events, never a total
+/// elapsed time or a setting read from the linked rule.
 ///
+/// Counted in looks, because what it separates is a member that stopped from a
+/// quiet look under one that had not; [`bound`] asserts it fits.
+#[cfg(unix)]
+fn allowed_activity_gap() -> Duration {
+    look_every() * 8
+}
+
+/// The longest quiet this half accepts a **spared** verdict over.
+///
+/// Twice the bound: a member left uncharged that long and spared anyway is the
+/// rule failing to look. Wide where [`allowed_activity_gap`] is narrow, because the two
+/// answer opposite questions.
+#[cfg(unix)]
+fn allowed_spared_quiet(bound: Duration) -> Duration {
+    bound * 2
+}
+
 /// POSIX only, because the evidence is: a member's tree is the [`SCRATCH_ENV`]
 /// stamp the kernel fixes at `exec`, and on Windows it is a job object, which
 /// only the launcher of a tree can create — so a scratch this test stamped from
@@ -87,31 +260,33 @@ fn the_linked_default_bound_outlasts_a_member_writing_its_report() {
 // would report a platform green for a mechanism it never exercised.
 #[cfg(unix)]
 #[test]
-fn the_activity_rule_condemns_a_silent_member_only_once_its_bound_elapses() {
-    /// The bound this test supervises under, set the way an operator sets it.
-    /// Small enough to spend seconds and not half an hour, and above
-    /// `oneagentgraph`'s own probe floor so the rule gets a baseline and a
-    /// comparison inside it.
-    const BOUND: &str = "2";
+fn the_activity_rule_condemns_idle_members_and_requires_an_activity_gap_for_working_trees() {
+    let bound = bound();
 
-    let bounds = Bounds::from_env(&BTreeMap::from([(
-        oneagentgraph::liveness::STALL_TIMEOUT_ENV.to_owned(),
-        BOUND.to_owned(),
-    )]))
-    .expect("the linked oneagentgraph reads the bound its environment names");
-    let bound = bounds.stall;
-    assert!(
-        bound < KILLED_REPORTS,
-        "this journey is only quick because the environment shortens the bound"
+    let idle_tree = Tree::spawn("idle", IDLE).unwrap_or_else(|why| panic!("{why}"));
+    let idle = watch(&idle_tree, bound, |_| false);
+    assert_eq!(
+        idle.events(),
+        0,
+        "the tree this half calls idle was charged CPU {} times, latest at {:?} into its life, \
+         so what the rule judged is not a member doing nothing and nothing here is measuring the \
+         silence a report is written in",
+        idle.events(),
+        idle.recent_activity()
     );
-
-    // A member that publishes nothing while nothing under it does any work,
-    // which is what a member composing a report looks like from here.
-    let idle = Tree::spawn("idle", &["sleep", "600"]);
-    let condemned = drive(&idle, bound, bound * 8).expect(
-        "the activity rule never condemned a member that published nothing and did no work, so \
-         nothing here is measuring the silence a report is written in",
-    );
+    let Some(condemned) = idle.verdict() else {
+        panic!(
+            "the activity rule never condemned a member that published nothing and did no work, \
+             over {} looks and {:?} — so nothing here is measuring the silence a report is \
+             written in. That window is a backstop and not a bound: what failed is that no \
+             verdict arrived at all, however long it was given",
+            idle.looks.len(),
+            idle.spent
+        )
+    };
+    // The member published nothing, so its silence *is* its life: `condemned` is
+    // the reading the rule compared against its own bound, not a wall-clock
+    // window this test chose.
     assert!(
         condemned > bound,
         "the activity rule condemned a silent member {condemned:?} into its life, inside its own \
@@ -119,31 +294,285 @@ fn the_activity_rule_condemns_a_silent_member_only_once_its_bound_elapses() {
          what saves a report"
     );
 
-    // And the other direction: silence is not the finding, an *idle* tree is.
-    let working = Tree::spawn("working", &["sh", "-c", "while :; do :; done"]);
-    assert_eq!(
-        drive(&working, bound, bound * 3),
-        None,
-        "the activity rule condemned a member with live work under it, so it is judging silence \
-         rather than the evidence the silence is explained by"
+    let busy_tree = Tree::spawn("working", BUSY).unwrap_or_else(|why| panic!("{why}"));
+    let busy = watch(&busy_tree, bound, |watch| {
+        watch.events() >= ACTIVITY_EVENTS && watch.spent >= bound * 3
+    });
+    assert!(
+        busy.events() > 0,
+        "nothing under the busy tree was charged {}% of a core in any of {} looks over {:?}, so \
+         the spin loop this half spawns never ran and neither direction of the rule is under \
+         test here",
+        oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE,
+        busy.looks.len(),
+        busy.spent
+    );
+    report_timings(&idle, &busy, bound);
+    match busy.verdict() {
+        None => {
+            assert!(
+                busy.events() >= ACTIVITY_EVENTS,
+                "the busy tree produced {} activity events in {:?}, short of the {ACTIVITY_EVENTS} \
+                 this half watches for, so the backstop ended the watch before the rule had been \
+                 given its opportunities to condemn, the last of them at {:?}",
+                busy.events(),
+                busy.spent,
+                busy.recent_activity()
+            );
+            let quiet = busy.longest_quiet();
+            assert!(
+                quiet <= allowed_spared_quiet(bound),
+                "the work under the busy tree went {quiet:?} without being charged {}% of a core \
+                 — past the {:?} a sparing verdict is accepted over — while the rule spared it \
+                 anyway, so the rule is sparing a member on something other than the evidence \
+                 under it. {} activity events over {:?}, the last of them at {:?}",
+                oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE,
+                allowed_spared_quiet(bound),
+                busy.events(),
+                busy.spent,
+                busy.recent_activity()
+            );
+        }
+        Some(at) => condemned_only_after_activity_gap(&busy, at, bound, "spinning"),
+    }
+
+    let bursting_tree = Tree::spawn("bursting", BUSY).unwrap_or_else(|why| panic!("{why}"));
+    let cadence = Bursts::over(bursting_tree.child.id());
+    let bursting = watch(&bursting_tree, bound, |watch| {
+        watch.quiet_looks_between_activity() > 0 && watch.spent > bound * 2
+    });
+    drop(cadence);
+    assert!(
+        bursting.quiet_looks_between_activity() > 0,
+        "no look at the bursting tree found it charged nothing between two that found it \
+         charged {}% of a core, over {} looks and {:?} — so the quiet look this tree \
+         exists to put in front of the rule was never taken, and a verdict excused by one would \
+         pass here unseen. The last of its {} activity events arrived at {:?}",
+        oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE,
+        bursting.looks.len(),
+        bursting.spent,
+        bursting.events(),
+        bursting.recent_activity()
+    );
+    if let Some(at) = bursting.verdict() {
+        condemned_only_after_activity_gap(&bursting, at, bound, "bursting");
+    }
+    println!(
+        "the bursting tree: {} activity events over {:?}, {} looks found nothing between two \
+         that found work, longest gap {:?} against a {:?} allowed activity gap",
+        bursting.events(),
+        bursting.spent,
+        bursting.quiet_looks_between_activity(),
+        bursting.longest_quiet(),
+        allowed_activity_gap()
     );
 }
 
-/// Ask the rule until it condemns, and answer how far into the member's life it
-/// did — or `None` where it never did inside `give_up_after`.
+/// What a condemnation has to rest on: activity that stopped **arriving**, for
+/// longer than the test's allowed activity gap, inside the bound the rule reached its
+/// verdict at the end of.
+///
+/// A gap rather than a look — a quiet look between activity events is not a
+/// member that stopped, and the bursting tree produces them on purpose. The
+/// widest gap inside the bound rather than the one ending at the verdict,
+/// because the rule's samples are not this loop's: a tree that stopped for most
+/// of its bound and resumed a look before the deadline is condemned by a rule
+/// that had not yet re-sampled it, and the gap that explains that verdict is the
+/// stop rather than the resumption on top of it.
+///
+/// Bounded by the rule's own bound, so a wide gap the member has since worked a
+/// whole bound through cannot excuse a verdict the rule reached long after it.
 #[cfg(unix)]
-fn drive(tree: &Tree, bound: Duration, give_up_after: Duration) -> Option<Duration> {
+fn condemned_only_after_activity_gap(watch: &Watch, at: Duration, bound: Duration, tree: &str) {
+    assert!(
+        watch.longest_quiet_before(at, bound) > allowed_activity_gap(),
+        "the activity rule condemned a member {at:?} into its life, and over the {bound:?} it \
+         judged, the longest its {tree} tree went without being charged {}% of a core was \
+         {:?} — inside the {:?} activity is held to arriving within, so the verdict rests on \
+         something other than work that stopped. {} activity events over {:?}, the last of them \
+         at {:?}",
+        oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE,
+        watch.longest_quiet_before(at, bound),
+        allowed_activity_gap(),
+        watch.events(),
+        watch.spent,
+        watch.recent_activity()
+    );
+}
+
+#[cfg(unix)]
+fn report_timings(idle: &Watch, busy: &Watch, bound: Duration) {
+    println!("the activity rule under a {bound:?} bound — measured, and judged by nothing:");
+    if let Some(at) = idle.verdict() {
+        println!(
+            "  idle tree condemned  {at:?} into its life — the old gate asserted after \
+             {bound:?} and inside {:?}: {}",
+            bound * 8,
+            if at > bound && at < bound * 8 {
+                "inside"
+            } else {
+                "outside"
+            }
+        );
+    }
+    let window = bound * 3;
+    match busy.verdict() {
+        Some(at) => println!(
+            "  busy tree condemned  {at:?} into its life — the old gate asserted not \
+             inside {window:?}: outside"
+        ),
+        None => println!(
+            "  busy tree            not condemned over {:?} — the old gate asserted not \
+             inside {window:?}: inside",
+            busy.spent
+        ),
+    }
+    println!(
+        "  busy tree activity   {} of {} windows charged at least {}% of a core, longest \
+         quiet gap {:?}",
+        busy.events(),
+        busy.looks.len().saturating_sub(1),
+        oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE,
+        busy.longest_quiet()
+    );
+}
+
+#[cfg(unix)]
+struct Look {
+    at: Duration,
+    /// The activity event this whole gate is written in terms of: the tree was
+    /// charged enough CPU since the look before to count as working by
+    /// [`Work::worked`](oneagentgraph::scratch::Work::worked), the sibling's own
+    /// rate test, over the evidence the rule judges and at its cadence.
+    working: bool,
+    condemned: bool,
+}
+
+#[cfg(unix)]
+struct Watch {
+    looks: Vec<Look>,
+    /// How much of the member's life this watch covers — a verdict, `enough` and
+    /// the backstop all end one, and which of them did is not recorded.
+    spent: Duration,
+}
+
+#[cfg(unix)]
+impl Watch {
+    fn verdict(&self) -> Option<Duration> {
+        self.looks
+            .iter()
+            .find(|look| look.condemned)
+            .map(|look| look.at)
+    }
+
+    fn activity(&self) -> Vec<Duration> {
+        self.looks
+            .iter()
+            .filter(|look| look.working)
+            .map(|look| look.at)
+            .collect()
+    }
+
+    fn events(&self) -> usize {
+        self.looks.iter().filter(|look| look.working).count()
+    }
+
+    fn recent_activity(&self) -> Vec<Duration> {
+        let activity = self.activity();
+        activity[activity.len().saturating_sub(REPORTED_ACTIVITY)..].to_vec()
+    }
+
+    /// The longest the tree went without an activity event over the `within`
+    /// ending at `at` — for a verdict, the widest stop the rule could still have
+    /// been reading when it reached one.
+    ///
+    /// The window's own start counts as a boundary, so a tree that was already
+    /// quiet when it opened is measured from there rather than from the last
+    /// event before it: what is being asked is how long the tree was quiet
+    /// *inside* the window.
+    fn longest_quiet_before(&self, at: Duration, within: Duration) -> Duration {
+        let from = at.saturating_sub(within);
+        let mut previous = from;
+        let mut longest = Duration::ZERO;
+        for event in self
+            .activity()
+            .into_iter()
+            .filter(|event| *event > from && *event <= at)
+        {
+            longest = longest.max(event - previous);
+            previous = event;
+        }
+        longest.max(at - previous)
+    }
+
+    /// Looks that found no work with activity events on both sides of them — the
+    /// quiet reading a rule judging single looks would condemn a member on while
+    /// its work goes on arriving.
+    fn quiet_looks_between_activity(&self) -> usize {
+        let (Some(first), Some(last)) = (
+            self.looks.iter().position(|look| look.working),
+            self.looks.iter().rposition(|look| look.working),
+        ) else {
+            return 0;
+        };
+        self.looks[first..last]
+            .iter()
+            .filter(|look| !look.working)
+            .count()
+    }
+
+    fn longest_quiet(&self) -> Duration {
+        let mut previous = Duration::ZERO;
+        let mut longest = Duration::ZERO;
+        for at in self.activity() {
+            longest = longest.max(at.saturating_sub(previous));
+            previous = at;
+        }
+        longest.max(self.spent.saturating_sub(previous))
+    }
+}
+
+/// Watch `tree` under the rule, reading the rule's own evidence at the rule's
+/// own cadence, until `enough` says the watch has seen what it came for — or the
+/// member is condemned, or [`BACKSTOP`] expires.
+///
+/// Each look reads the tree immediately before asking the rule, which samples it
+/// on its own coarser cadence — so a look is evidence of what the rule could
+/// have seen near that moment, not a copy of the sample it judged. That is why
+/// a verdict is held to the gaps across a whole bound rather than to one look.
+#[cfg(unix)]
+fn watch(tree: &Tree, bound: Duration, enough: impl Fn(&Watch) -> bool) -> Watch {
     let started = Instant::now();
     let mut stall = oneagentgraph::member::Stall::new(bound, started);
-    while started.elapsed() < give_up_after {
+    let mut watch = Watch {
+        looks: Vec::new(),
+        spent: Duration::ZERO,
+    };
+    let mut before: Option<(Instant, oneagentgraph::scratch::Work)> = None;
+    while started.elapsed() < BACKSTOP {
+        let now = Instant::now();
+        let work = oneagentgraph::scratch::work(&tree.scratch)
+            .expect("the spawned tree remains visible to the activity rule");
+        let working = match before {
+            Some((taken, before)) => before.worked(work, now.duration_since(taken)),
+            None => false,
+        };
+        before = Some((now, work));
         // `0` is a member that has published nothing at all since it started,
         // which is the whole case: what is being judged is the silence.
-        if stall.condemns(0, &tree.scratch) {
-            return Some(started.elapsed());
+        let condemned = stall.condemns(0, &tree.scratch);
+        watch.spent = started.elapsed();
+        watch.looks.push(Look {
+            at: watch.spent,
+            working,
+            condemned,
+        });
+        if condemned || enough(&watch) {
+            break;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(look_every());
     }
-    None
+    watch
 }
 
 /// A real process tree under a scratch of its own, torn down with the test.
@@ -163,13 +592,14 @@ use std::time::Instant;
 
 #[cfg(unix)]
 impl Tree {
-    fn spawn(name: &str, argv: &[&str]) -> Self {
+    fn spawn(name: &str, argv: &[&str]) -> Result<Self, String> {
         let scratch = std::env::temp_dir().join(format!(
             "onepipeline-liveness-{}-{name}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&scratch);
-        std::fs::create_dir_all(&scratch).expect("a scratch directory for the member's tree");
+        std::fs::create_dir_all(&scratch)
+            .map_err(|error| format!("cannot make a scratch directory for {name}: {error}"))?;
         let child = std::process::Command::new(argv[0])
             .args(&argv[1..])
             .env(
@@ -181,7 +611,7 @@ impl Tree {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .unwrap_or_else(|error| panic!("cannot start the member's tree {argv:?}: {error}"));
+            .map_err(|error| format!("cannot start the member's tree {argv:?}: {error}"))?;
         let tree = Self { scratch, child };
         // The stamp is fixed at `exec`, so a look taken before the child has
         // reached it finds no tree — and the rule reads that as "nothing to ask"
@@ -189,13 +619,15 @@ impl Tree {
         // it to the rule, so what is under test is the verdict and not the race.
         let waiting = Instant::now();
         while oneagentgraph::scratch::work(&tree.scratch).is_none() {
-            assert!(
-                waiting.elapsed() < Duration::from_secs(10),
-                "the member's tree never became visible to the sibling's own stamp"
-            );
+            if waiting.elapsed() >= BACKSTOP {
+                return Err(format!(
+                    "the tree {argv:?} never became visible to the sibling's own stamp, over {:?}",
+                    waiting.elapsed()
+                ));
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
-        tree
+        Ok(tree)
     }
 }
 

@@ -641,10 +641,11 @@ fn identity_phrase(outcome: &IdentityOutcome) -> String {
 /// Every arm is one the sibling can answer, and `tests::every_slot_outcome_has_a_phrase`
 /// holds each spelling; `tests/e2e/maintenance.rs` drives the ones a journey can
 /// produce — a command that succeeded, failed, and timed out — through `results`.
-// llmlint: ignore-block[changed_behavior_has_e2e] `in-use`, `broken` and a command ended by a
-// signal are answered by the sibling under conditions a journey cannot schedule from
-// this crate's interface — a session opened into the slot between the survey and the
-// claim, a slot whose record the sibling cannot read, a process the host killed —
+// llmlint: ignore-block[changed_behavior_has_e2e] `in-use`, `unavailable`, `broken` and a
+// command ended by a signal are answered by the sibling under conditions a journey cannot
+// schedule from this crate's interface — a session opened into the slot between the survey
+// and the claim, another maintain holding the slot's claim at that instant, a slot whose
+// record the sibling cannot read, a process the host killed —
 // and a fixture that forged the record would prove the fixture; each phrase is held
 // by the unit test the doc names, over the sibling's own type.
 fn slot_phrase(outcome: &SlotOutcome) -> String {
@@ -660,6 +661,9 @@ fn slot_phrase(outcome: &SlotOutcome) -> String {
                 "kept: session {} is working in it",
                 crate::views::one_line(&session.0)
             )
+        }
+        SlotOutcome::Unavailable { holder } => {
+            format!("kept: held by {}", crate::views::one_line(holder))
         }
         SlotOutcome::Broken { reason } => format!("kept: {}", crate::views::one_line(reason)),
         SlotOutcome::Ran {
@@ -1079,6 +1083,12 @@ mod tests {
                     session: onevcs::SessionToken("s-abc".into()),
                 },
                 "kept: session s-abc is working in it",
+            ),
+            (
+                SlotOutcome::Unavailable {
+                    holder: "pid 91 is working in it".into(),
+                },
+                "kept: held by pid 91 is working in it",
             ),
             (
                 SlotOutcome::Broken {
