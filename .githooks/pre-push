@@ -42,6 +42,12 @@ set -euo pipefail
 # after one of them, it decided nothing on the hosts that reached that one first:
 # an arm64 machine was refused while holding `SCREENCOMP_GUARD_REQUIRE=0`, so the
 # answer to "may this push go" came from the CPU rather than from the switch.
+#
+# Two refusals below pass it by, and neither is one of those endings: an
+# `[capture].arches` that did not parse, and a CPU `host-arch.sh` has no spelling
+# for, which dies here under `set -e`. Each says this tree or this host cannot
+# support the guard at all rather than that the guard declined to evaluate a
+# push, and no value of a switch makes either one true or false.
 case "${SCREENCOMP_GUARD_REQUIRE:-0}" in
   0 | false | no) GUARD_REQUIRE=0 ;;
   1 | true | yes) GUARD_REQUIRE=1 ;;
@@ -77,7 +83,10 @@ MANIFEST="shots/baseline/${LANE}.json"
 GALLERY="shots/review"
 CURRENT="shots/current"
 
-# No-op under CI: the visual-docs workflow is the source of truth there. `CI` is
+# The guard stops here under CI: the visual-docs workflow is the source of truth
+# there. Only the guard does — the two refusals above stand wherever this hook
+# runs, because a screencomp.toml that does not parse and a CPU with no spelling
+# are facts about this checkout and this host, not about the push. `CI` is
 # the platform's variable rather than this repository's — GitHub spells it
 # `true`, others `1` — so it is read for the values that say "this is CI" and
 # nothing else. An unrecognised one is not a claim that this is CI, and the
