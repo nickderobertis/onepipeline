@@ -1334,8 +1334,6 @@ pub fn write_atomic(path: &Path, bytes: &[u8], durability: Durability) -> Result
         path: path.to_path_buf(),
         source: e,
     };
-    // The directory the destination is published into, which is both what has to
-    // exist before the write and what a [`Durability::Record`] syncs afterwards.
     let parent = directory_of(path);
     let mut missing = Vec::new();
     if durability.syncs() {

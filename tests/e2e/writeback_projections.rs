@@ -1260,6 +1260,18 @@ fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item(
 /// uses the count to ensure both stores have projected before reading them.
 const CONCURRENT_NODES: usize = 12;
 
+/// The body each run's project carries in the concurrency journey below, which its
+/// projected project document has to restate whole.
+///
+/// Long enough that a document published by writing in place could be read with its
+/// front matter closed and its body cut short.
+fn concurrent_project_body() -> String {
+    (0..512)
+        .map(|line| format!("Project body line {line:04} of the concurrency journey."))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// `path`'s text, re-read past the refusal Windows gives an open that lands while a
 /// rename is replacing the file: that open observed no document, whole or torn. The
 /// rename finishes in microseconds, so the deadline is only a backstop.
@@ -1303,7 +1315,15 @@ fn shadow_document(path: &Path) -> Result<Value, String> {
             path.display()
         ));
     }
-    if path.parent().and_then(Path::file_name) != Some(std::ffi::OsStr::new("projects")) {
+    if path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("projects")) {
+        if body != concurrent_project_body() {
+            return Err(format!(
+                "{} has a partial project body of {} bytes",
+                path.display(),
+                body.len()
+            ));
+        }
+    } else {
         let id = parsed["metadata"]["onepipeline.id"]
             .as_str()
             .ok_or_else(|| format!("{} carries no task id: {text:?}", path.display()))?;
@@ -1385,6 +1405,12 @@ fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
                 .map(|n| agent(&format!("{run}{n}"), &[]))
                 .collect();
             let project = world.plan_in(&store, run, &plan_of(run, nodes));
+            let fixture = store
+                .join("projects")
+                .join(format!("{}.md", project_id(run)));
+            let written = std::fs::read_to_string(&fixture).expect("the project fixture reads");
+            std::fs::write(&fixture, written + &concurrent_project_body())
+                .expect("the project fixture takes a body");
             world
                 .run_in(&store, &["start", &project, "--detach"])
                 .exited(0);
