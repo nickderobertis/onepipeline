@@ -4864,8 +4864,14 @@ fn the_wire_types_resolve_where_they_did_and_are_the_vocabularys_own() {
 /// 3. **The phases are one set.** `onevcs` stamps them and this crate relays and
 ///    filters on them, so the set here is that producer's own rather than a
 ///    second enum beside it.
+/// 4. **A producer's matcher fields cross whole.** A filter is handed *to* a
+///    sibling rather than read from one, so this is the crossing the other way:
+///    a sibling's `MatchFields` with every field named reads back here naming
+///    the same ones, and re-serializes to the same bytes. A field one of them
+///    grows and the other has not would make a spec a caller wrote against one
+///    grammar mean something narrower to the other.
 #[test]
-fn a_siblings_reserved_labels_source_word_and_phases_are_this_crates() {
+fn a_siblings_reserved_labels_source_word_phases_and_matcher_fields_are_this_crates() {
     // 1. Each sibling's reserved keys, all six set, through the wire.
     let vcs = onevcs::Labels {
         run_id: Some("R".into()),
@@ -4922,6 +4928,67 @@ fn a_siblings_reserved_labels_source_word_and_phases_are_this_crates() {
 
     // 3. The phases are the producer's own set, not a second one beside it.
     assert_eq!(Phase::every(), onevcs::Phase::every());
+
+    // 4. Every matcher field, through the wire, in both directions.
+    let vcs = onevcs::MatchFields {
+        phase: Some(onevcs::Phase::Development),
+        run_id: Some("R".into()),
+        node: Some("build".into()),
+        step: Some("implement".into()),
+        member: Some("worker".into()),
+        persona: Some("engineer".into()),
+    };
+    let graph = oneagentgraph::event::MatchFields {
+        // The graph links no `onevcs`, so its phase is an open word. A filter it
+        // accepts naming one still crosses into the closed `Phase` here.
+        phase: Some(oneagentgraph::event::Phase::from(
+            onevcs::Phase::Development.as_str(),
+        )),
+        run_id: Some("R".into()),
+        node: Some("build".into()),
+        step: Some("implement".into()),
+        member: Some("worker".into()),
+        persona: Some("engineer".into()),
+    };
+    let matching = [
+        ("onevcs", serde_json::to_string(&vcs).expect("serializes")),
+        (
+            "oneagentgraph",
+            serde_json::to_string(&graph).expect("serializes"),
+        ),
+    ];
+    for (producer, line) in &matching {
+        // `MatchFields` denies an unknown field, so a field this crate does not
+        // have is a refusal naming it rather than a value dropped.
+        let crossed: onepipeline::vocabulary::MatchFields = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("{producer}'s matcher fields do not cross: {e}"));
+        assert_eq!(crossed.phase, Some(Phase::Development), "{producer}");
+        assert_eq!(crossed.run_id.as_deref(), Some("R"), "{producer}");
+        assert_eq!(crossed.node.as_deref(), Some("build"), "{producer}");
+        assert_eq!(crossed.step.as_deref(), Some("implement"), "{producer}");
+        assert_eq!(crossed.member.as_deref(), Some("worker"), "{producer}");
+        assert_eq!(crossed.persona.as_deref(), Some("engineer"), "{producer}");
+        assert_eq!(
+            serde_json::to_string(&crossed).expect("serializes"),
+            *line,
+            "{producer}'s matcher fields do not come back out as the bytes it wrote"
+        );
+        // And the other way, which is the direction a filter actually travels:
+        // `sibling_filter` hands this crate's spec to the producer at its JSON
+        // form, so a field this crate grows and the producer has not is a
+        // refusal at the seam rather than a narrower filter nobody asked for.
+        let back = serde_json::to_string(&crossed).expect("serializes");
+        match *producer {
+            "onevcs" => {
+                serde_json::from_str::<onevcs::MatchFields>(&back)
+                    .unwrap_or_else(|e| panic!("onevcs refuses this crate's matcher: {e}"));
+            }
+            _ => {
+                serde_json::from_str::<oneagentgraph::event::MatchFields>(&back)
+                    .unwrap_or_else(|e| panic!("oneagentgraph refuses this crate's matcher: {e}"));
+            }
+        }
+    }
 }
 
 #[test]

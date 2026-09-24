@@ -3,9 +3,8 @@
 //! of the vocabulary promised — the same ids under the same documents as the
 //! bus's agent profile crate listed at its last release.
 //!
-//! Moved here with the vocabulary itself, from `onemessagebus`'s agent profile
-//! crate at tag `onemessagebus-agent-v0.8.0`, and extended by the capture under
-//! `tests/recorded/registry/`.
+//! `tests/recorded/registry/README.md` is where the capture the last of those
+//! is held against came from.
 
 use std::collections::BTreeMap;
 
@@ -16,8 +15,7 @@ use serde_json::{json, Value};
 const ENVELOPE_V1: &str = include_str!("golden/envelope-v1.json");
 const ENVELOPE_V2: &str = include_str!("golden/envelope-v2.json");
 
-/// Every id `onemessagebus_agent::registry()` listed at 0.8.0, and the document
-/// it held under each. See `tests/recorded/registry/README.md`.
+/// See `tests/recorded/registry/README.md`.
 const CAPTURED: &str = include_str!("recorded/registry/onemessagebus-agent-0.8.0.json");
 
 fn id(text: &str) -> SchemaId {

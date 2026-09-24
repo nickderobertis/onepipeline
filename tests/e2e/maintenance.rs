@@ -858,6 +858,14 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
 /// named by `results`: a maintain command that failed, one that timed out under
 /// the identity's own bound, an identity the sibling could not maintain, and a
 /// host whose identities could not be enumerated at all.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this asks for
+// does not exist here, and `tests/e2e/driver.rs` states why at length: `nx.json`'s
+// `noteJourneySource` — the input of the one separately edged Rust test project — itself
+// begins `{workspaceRoot}/src/**/*`, so a journey moved behind it is invalidated by exactly
+// the unrelated source changes the rule is about. This one is of `src/maintenance.rs`'s own
+// sweep and the records it writes, which any change under `src/` can move, so it would be
+// run anyway. `driver.rs`, `compatibility.rs`, `store.rs` and `live_edit.rs` carry the same
+// directive for the same reason.
 #[test]
 fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_host_are_recorded() {
     let world = pooled_world("maintenance-failures", Some(FAST_PACE))
@@ -982,6 +990,7 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
         .out_has("the host's identities could not be enumerated:");
     release(&unlistable, "unlistable");
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Both halves of each script fixture answer the same way: what one platform's
 /// half names, the other's names too.

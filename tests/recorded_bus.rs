@@ -12,12 +12,9 @@
 //! are kept in their own file so the byte-identity tests above stay exact rather
 //! than carrying an exception list.
 //!
-//! All four streams and this test came from `onemessagebus`'s agent profile
-//! crate at tag `onemessagebus-agent-v0.8.0`, along with the vocabulary they are
-//! written in. That is exactly what makes them worth keeping: the vocabulary
-//! moved into `src/vocabulary.rs` and the bytes on the wire did not, and these
-//! are the lines that say so. `tests/recorded/bus/README.md` says where each
-//! came from.
+//! These came here with the vocabulary they are written in, and that is what
+//! makes them worth keeping: it moved and the bytes on the wire did not.
+//! `tests/recorded/bus/README.md` is where each one came from.
 
 use onemessagebus::Reading;
 use onepipeline::event::{Envelope, Phase, Source};
