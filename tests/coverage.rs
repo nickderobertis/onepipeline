@@ -1,26 +1,12 @@
-//! Subprocess journeys for the coverage recipes and their build artifacts.
-
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::{env, fs};
 
-/// The clean step removes the instrumented tree whole, so nothing an earlier
-/// build left behind can reach the report.
-///
-/// The recipe is pointed at a scratch tree by argument, because the tree it
-/// cleans by default is holding the binaries and profiles of the run executing
-/// this test. What is planted there is this executable, copied: under the
-/// coverage tier that is precisely the artifact at issue, an instrumented object
-/// file carrying a coverage map, and a fixture the report would have skipped
-/// proves nothing about a step that exists to keep one out.
-///
-/// The scratch tree is named with a quote and a space in it because the recipe is
-/// handed that name from outside: a step that read it as shell source would
-/// remove the wrong thing or fail to parse, and from anywhere but here both look
-/// like a removal that worked.
+/// A copy of this test binary represents the stale coverage object. The scratch
+/// path includes a quote and a space to check argument handling.
 #[test]
-fn the_clean_step_removes_an_instrumented_binary_an_earlier_run_left() {
+fn the_clean_step_removes_a_test_binary_an_earlier_run_left() {
     // Under `target/` for the reason `build_config` puts its probes there: a
     // failed run leaves the tree that failed where the other build artifacts are.
     let scratch = repo_root().join("target/coverage-clean-probe's tree");
@@ -135,7 +121,6 @@ fn the_clean_step_passes_over_a_name_that_reaches_nothing() {
 
     for name in [
         never.as_os_str(),
-        OsStr::new(""),
         OsStr::new("coverage-clean-probe-mistyped/tree"),
     ] {
         let cleaned = just(&["_crate-coverage-clean".as_ref(), name]);
@@ -160,6 +145,49 @@ fn the_clean_step_passes_over_a_name_that_reaches_nothing() {
 }
 
 #[test]
+fn the_clean_step_refuses_an_empty_target_path() {
+    let cleaned = just(&["_crate-coverage-clean".as_ref(), OsStr::new("")]);
+    assert!(!cleaned.status.success(), "{}", said(&cleaned));
+    assert!(
+        String::from_utf8_lossy(&cleaned.stderr).contains("empty target path"),
+        "{}",
+        said(&cleaned)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_clean_step_reports_when_it_cannot_remove_an_existing_tree() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tree = repo_root().join(format!(
+        "target/coverage-clean-removal-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&tree);
+    fs::create_dir_all(&tree).expect("create an instrumented tree");
+    let stale = tree.join("stale-binary");
+    fs::copy(env::current_exe().expect("test executable"), &stale)
+        .expect("plant a binary in the tree");
+    fs::set_permissions(&tree, fs::Permissions::from_mode(0o500))
+        .expect("make the tree unremovable");
+
+    let cleaned = just(&["_crate-coverage-clean".as_ref(), tree.as_os_str()]);
+    let survived = stale.is_file();
+
+    fs::set_permissions(&tree, fs::Permissions::from_mode(0o700))
+        .expect("restore tree permissions");
+    fs::remove_dir_all(&tree).expect("remove the fixture");
+    assert!(!cleaned.status.success(), "{}", said(&cleaned));
+    assert!(
+        String::from_utf8_lossy(&cleaned.stderr).contains("could not remove instrumented tree"),
+        "{}",
+        said(&cleaned)
+    );
+    assert!(survived, "the attempted removal changed the fixture");
+}
+
+#[test]
 fn the_clean_step_refuses_what_does_not_reach_this_clones_build_directory() {
     let outside = env::temp_dir().join(format!(
         "onepipeline-coverage-clean-outside-{}",
@@ -178,8 +206,6 @@ fn the_clean_step_refuses_what_does_not_reach_this_clones_build_directory() {
     fs::create_dir_all(&beside)
         .unwrap_or_else(|e| panic!("could not create {}: {e}", beside.display()));
 
-    // An in-tree symlink to `outside` proves the bound checks resolved paths.
-    // Creating that link on Windows requires elevated privileges.
     #[cfg(unix)]
     let link = repo_root().join("target/coverage-clean-probe-link");
     #[cfg(unix)]
