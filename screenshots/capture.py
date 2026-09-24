@@ -221,6 +221,39 @@ def main() -> int:
     return 0
 
 
+#: Where the watch verb's own exit code for a met `--until` lives. One source:
+#: the crate defines it, `docs/contract.md` states that these codes do not move,
+#: and a capture that restated the number would be the second spelling.
+EXIT_CODES = Path("src/error.rs")
+
+
+def node_settled_exit() -> int:
+    """`EXIT_NODE_SETTLED`, read out of the crate that declares it."""
+    found = re.findall(
+        r"^pub const EXIT_NODE_SETTLED: i32 = (\d+);", (REPO / EXIT_CODES).read_text(), re.M
+    )
+    if len(found) != 1:
+        raise SystemExit(
+            f"screenshots: {EXIT_CODES} declares EXIT_NODE_SETTLED "
+            f"{len(found)} times, and the bounded-watch scene is held to exactly "
+            "one. That constant is the watch verb's own ending for a met "
+            "`--until`; if it was renamed, name the new one here."
+        )
+    return int(found[0])
+
+
+def printed(world: World, *args: str) -> str:
+    """One verb's stdout, refused unless that verb exited 0.
+
+    A verb that failed still prints, so an unchecked read renders a broken view
+    into a shot and blesses it. `world_module.expect` is the refusal every other
+    step of the journey already goes through, and it quotes both streams.
+    """
+    done = world.cli(*args)
+    world_module.expect(done, 0, "onepipeline " + " ".join(args))
+    return done.stdout
+
+
 def capture(scratch: Path, binaries: Path) -> list[tuple[str, str]]:
     """Every scene's text, normalised, in the order the README reads them."""
     scenes: list[tuple[str, str]] = []
@@ -247,7 +280,7 @@ def capture(scratch: Path, binaries: Path) -> list[tuple[str, str]]:
         # journal — the dispatch's own first record — rather than on a clock.
         for key in world_module.HELD:
             world.until_journal("turn-started", key.split(".", 1)[0])
-        held.append(("status", world.cli("status", PLAN_RUN).stdout))
+        held.append(("status", printed(world, "status", PLAN_RUN)))
         held.append(("watch", bounded_watch(world)))
 
     world_module.drive(world, scratch / "attach.log", while_held=while_held)
@@ -262,11 +295,11 @@ def capture(scratch: Path, binaries: Path) -> list[tuple[str, str]]:
     for name, text in held:
         scenes.append((name, normalise.realign(scene_of(text))))
     scenes.append(("help", help_scene(binaries)))
-    scenes.append(("results", scene_of(world.cli("results", PLAN_RUN).stdout)))
+    scenes.append(("results", scene_of(printed(world, "results", PLAN_RUN))))
     scenes.append(
-        ("monitor", normalise.realign(scene_of(world.cli("monitor", PLAN_RUN).stdout)))
+        ("monitor", normalise.realign(scene_of(printed(world, "monitor", PLAN_RUN))))
     )
-    scenes.append(("runs", scene_of(world.cli("runs").stdout)))
+    scenes.append(("runs", scene_of(printed(world, "runs"))))
     scenes.append(("telemetry", telemetry_scene(scratch, binaries, scene_of)))
     for name, text in scenes:
         if not text.strip():
@@ -334,6 +367,19 @@ def bounded_watch(world: World) -> str:
         if watching.poll() is None:
             watching.kill()
             watching.wait()
+    # The wait's own answer. `--until node=…` being met is the verb's
+    # `EXIT_NODE_SETTLED`, not zero, so the code is read out of the crate that
+    # defines it rather than written here: any *other* ending — the wait running
+    # out, a surface coming up, nothing driving, or the kill above — renders a
+    # different picture under this scene's name. Its streams went to files, so
+    # this quotes the log rather than `world.said`.
+    settled = node_settled_exit()
+    if watching.returncode != settled:
+        raise SystemExit(
+            f"screenshots: the bounded watch exited {watching.returncode}, and this "
+            f"scene is of a wait that returned on its `--until` condition ({settled}). "
+            f"{world_module.REPAIR}\nstderr:\n{log.read_text().rstrip()}"
+        )
     # What the scene is a picture of is **one** tick. A machine slow enough to
     # fit another between the release and the node settling would render a
     # different picture under the same name, which is a drifted baseline for a

@@ -58,6 +58,9 @@ paths = [
   "src/event.rs",
   "src/journal.rs",
   "src/graph.rs",
+  # Read by `capture.py` rather than rendered: it declares the exit code the
+  # bounded-watch scene holds its wait to.
+  "src/error.rs",
   "examples/plan-store/**",
   "graphs/**",
   "crates/testfakes/**",
