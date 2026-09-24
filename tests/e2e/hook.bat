@@ -87,6 +87,11 @@ exit /b 0
 rem A whole, valid `onevcs` envelope whose source word `onepipeline` has no
 rem variant for: the line the sibling hands over and the relay cannot cross.
 rem `hook.sh` says why `seq` is 1 and how this differs from `appendfuture`.
+rem llmlint: ignore-block[tests_mirror_real_usage] cmd's half of the verb `hook.sh`
+rem carries the reason for: a `pre-push` hook is operator-supplied code writing on the
+rem session's own stream, which is the only point inside a run where a repository's own
+rem code can reach one, and the line is the sibling's whole envelope shape rather than a
+rem shape invented here. No platform runs both halves, so each carries the directive.
 :appendforeignsource
 if not "%~2"=="" (
   call :fail "append-foreign-source-event takes no arguments"
@@ -108,6 +113,7 @@ if errorlevel 1 (
   exit /b 1
 )
 exit /b 0
+rem llmlint: ignore-end[tests_mirror_real_usage]
 
 rem The one line a hook says to make a refusal the host's rather than the work's;
 rem `hook.sh` says what it is for and where its spelling is held.

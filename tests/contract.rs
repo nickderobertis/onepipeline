@@ -851,7 +851,6 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
          hand.\n--- committed\n{committed}\n--- generated\n{generated}"
     );
 
-    // And it is the bundle the contract says it is, read back through the bus.
     let bundle =
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
@@ -4848,14 +4847,17 @@ fn the_wire_types_resolve_where_they_did_and_are_the_vocabularys_own() {
 /// what makes them agree by check, and it lives here because `onepipeline` is
 /// the one crate that links every producer.
 ///
-/// Three properties, each the thing a relay would lose if it drifted:
+/// Three properties, and **exactly** three — the whole envelope is not crossed
+/// here, because the crossing itself is `src/vcs.rs`'s and `src/agentgraph.rs`'s
+/// and each is driven against its own producer where it lives. What this holds
+/// is the three pieces of *vocabulary* a crossing has nothing to fall back on:
 ///
-/// 1. **A sibling's labels cross whole.** A producer's `Labels` with every
-///    reserved key set serializes to bytes this crate's `Labels` reads back with
-///    **no extras** — a reserved key that fell among the extras is a key this
-///    crate would re-serialize in the wrong slot, which is exactly the drift
-///    `tests/recorded/bus/onepipeline-relayed-drift.jsonl` recorded — and back
-///    to the same bytes.
+/// 1. **A producer's reserved labels cross whole.** A sibling's `Labels` with
+///    every reserved key set serializes to bytes this crate's `Labels` reads back
+///    with **no extras**, and re-serializes to the same bytes — a reserved key
+///    that fell among the extras is a key this crate would write in the wrong
+///    slot, which is exactly the drift
+///    `tests/recorded/bus/onepipeline-relayed-drift.jsonl` recorded.
 /// 2. **The source words are the same words.** A relayed envelope is attributed
 ///    by the word its producer stamped; a word each side spells its own copy of
 ///    is a word they can come apart on.
@@ -4863,7 +4865,7 @@ fn the_wire_types_resolve_where_they_did_and_are_the_vocabularys_own() {
 ///    filters on them, so the set here is that producer's own rather than a
 ///    second enum beside it.
 #[test]
-fn a_siblings_vocabulary_crosses_into_this_crates_with_nothing_lost() {
+fn a_siblings_reserved_labels_source_word_and_phases_are_this_crates() {
     // 1. Each sibling's reserved keys, all six set, through the wire.
     let vcs = onevcs::Labels {
         run_id: Some("R".into()),

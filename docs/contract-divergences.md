@@ -5901,8 +5901,8 @@ dated record of a ruling, decided against `onemessagebus` 0.7.0, and not a live 
 it says what moved and why, which is a restatement by nature. The live shape it describes
 has its gate in `tests/contract.rs` — `the_wire_types_resolve_where_they_did_and_are_the_vocabularys_own`
 holds each re-exported path to the type `src/vocabulary.rs` declares it as,
-`a_siblings_vocabulary_crosses_into_this_crates_with_nothing_lost` holds each producer's
-labels, source word and phases to this crate's, and
+`a_siblings_reserved_labels_source_word_and_phases_are_this_crates` holds each producer's
+reserved labels, source word and phases to this crate's, and
 `the_marked_copy_of_the_bus_contract_is_reconciled_against_the_released_bus` holds
 `docs/contract.md`'s marked copy of the envelope *shape* to the release `Cargo.lock`
 resolves, its matcher fields to the linked `Matcher` document, and its sources to the

@@ -220,6 +220,15 @@ case "${1-}" in
       broke "cannot append to $stream"
     fi
     ;;
+  # llmlint: ignore-block[tests_mirror_real_usage] a `pre-push` hook is operator-supplied
+  # code, and this verb is that operator writing on the session's own stream — which is
+  # what an `ONEVCS_HOME` shared with another producer of the stack leaves behind, and the
+  # only point inside a run where a repository's own code can reach a stream that exists
+  # at all. Nothing this suite could drive writes one: `Stream::emit` stamps `onevcs`'s own
+  # word on everything it appends. The line itself is the **sibling's** whole envelope
+  # shape, not a shape invented here, and the journey that uses it asserts entirely through
+  # the binary. `break-streams` and `append-future-event` above reach their cases the same
+  # way and `lifecycle.rs` carries the same directive over each of the three journeys.
   append-foreign-source-event)
     takes "$#" 1 "append-foreign-source-event takes no arguments"
     require_home
@@ -243,6 +252,7 @@ case "${1-}" in
       broke "cannot append to $stream"
     fi
     ;;
+  # llmlint: ignore-end[tests_mirror_real_usage]
   missing-prerequisite)
     takes "$#" 1 "missing-prerequisite takes no arguments"
     # What a real hook says when the host it runs on lacks a tool it needs — the
