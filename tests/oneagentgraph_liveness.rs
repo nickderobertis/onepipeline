@@ -8,7 +8,9 @@
 //! spending a quarter of an hour composing a report is *silent* by its reading.
 //! Under the ten-minute bound `oneagentgraph` 0.3.8 replaced, that member was
 //! killed mid-report and its node lost with it. `Cargo.toml`'s pin block records
-//! the floor; this is what holds it.
+//! the floor; this is what holds it. It holds 0.5.2 there too: below it, macOS
+//! enumerated only the newest quarter of the host's processes, so a live tree
+//! dropped out of the rule's sight.
 //!
 //! # Why here, and not through the binary
 //!

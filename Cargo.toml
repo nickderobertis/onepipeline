@@ -337,6 +337,15 @@ resolver = "2"
 # own launch-time `Bounds::from_env`, and the rule that bound governs, driven
 # over real processes under a bound the environment sets small.
 #
+# `oneagentgraph` 0.5.2 makes the activity rule's **macOS process enumeration**
+# see every process rather than the newest quarter. 0.5.1 divided
+# `proc_listallpids`' answer — already a count of pids — by the size of a pid
+# again, and the kernel lists newest first, so a live stamped tree dropped out of
+# `scratch::work` once enough newer processes existed and read as idle. A
+# **requirement**, because the macOS leg of `tests/oneagentgraph_liveness.rs`
+# fails below it; that test holds it, by requiring a spawned tree to stay
+# visible for every look of its watch.
+#
 # `oneagentgraph` 0.3.19 carries **graph schema version 9** — `schedule` and
 # `dir` on a `kind: onejudge` member, one paced conversation whose firing is a
 # turn — beside schema 8's `background` field and its liveness rule. The observer
@@ -546,7 +555,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.5.1"
+oneagentgraph = "0.5.2"
 onevcs = "0.32.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
