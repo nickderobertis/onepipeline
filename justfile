@@ -257,9 +257,9 @@ export ONEPIPELINE_COVERAGE_ROOT := justfile_directory()
 # Resolve existing arguments before removal so symlinks cannot reach outside
 # this clone's build directory. A missing tree is normal on the first run;
 # existing paths that cannot be entered fail instead of silently passing.
-# llmlint: ignore-block[cli_output_contract] This private recipe's diagnostic
-# text is not a public output contract. Each refusal names its invalid input
-# and exits 1; successful cleanup is quiet.
+# llmlint: ignore-block[cli_output_contract] Both invalid-path refusals are
+# one error class to the caller, so both exit 1 like adjacent _crate-coverage;
+# distinct stderr names the invalid input that needs correcting.
 _crate-coverage-clean dir=llvm-cov-target-dir:
     @if [ -z "$1" ]; then echo "refusing to clean an empty target path" >&2; exit 1; fi; \
       root="$(cd -P -- "$ONEPIPELINE_COVERAGE_ROOT" && pwd -P)"; \
