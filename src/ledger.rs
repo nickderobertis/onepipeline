@@ -1319,10 +1319,6 @@ pub enum Durability {
 }
 
 impl Durability {
-    /// Whether a write of this kind is carried to the disk before it returns.
-    ///
-    /// The one place the two arms differ, so neither the order of the steps nor
-    /// the cleanup after a failed one can drift between them.
     fn syncs(self) -> bool {
         match self {
             Self::Record => true,
@@ -4248,14 +4244,7 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    /// A write the host refuses at the rename is reported, and the temporary it
-    /// had already filled goes with it.
-    ///
-    /// Induced by making the destination a directory, which is a rename no host
-    /// performs — so everything before it succeeds and this reaches the one
-    /// state where a whole temporary exists and no document was published. Left
-    /// behind, it would sit in a directory something lists, under a name nothing
-    /// is looking for and nothing else removes.
+    /// A failed rename removes its completed temporary and preserves the destination.
     #[test]
     fn a_write_the_host_will_not_publish_is_reported_and_takes_its_temporary_with_it() {
         for durability in [Durability::Record, Durability::Projection] {
@@ -4438,15 +4427,7 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    /// A sync the host refuses is a failed write, named by its destination, with
-    /// no temporary left beside it.
-    ///
-    /// Both of them, because they fail on opposite sides of the rename: refusing
-    /// the contents leaves a whole temporary and no published document, and
-    /// refusing the entry leaves a published document and no temporary. A write
-    /// that cannot say its record is on the disk has failed either way, and
-    /// neither may leave a file in a directory something lists under a name
-    /// nothing is looking for.
+    /// A refused sync reports the destination and leaves no temporary behind.
     #[test]
     fn a_sync_the_host_refuses_is_a_failed_write_that_leaves_no_temporary() {
         for refused in [disk::Step::Contents, disk::Step::Entry] {
