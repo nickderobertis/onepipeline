@@ -9,6 +9,7 @@ setlocal enabledelayedexpansion
 if "%~1"=="wait-for" goto waitfor
 if "%~1"=="break-streams" goto breakstreams
 if "%~1"=="append-future-event" goto appendfuture
+if "%~1"=="append-foreign-source-event" goto appendforeignsource
 if "%~1"=="missing-prerequisite" goto missingprerequisite
 call :fail "unknown command '%~1'"
 exit /b 64
@@ -82,6 +83,37 @@ if errorlevel 1 (
   exit /b 1
 )
 exit /b 0
+
+rem A whole, valid `onevcs` envelope whose source word `onepipeline` has no
+rem variant for: the line the sibling hands over and the relay cannot cross.
+rem `hook.sh` says why `seq` is 1 and how this differs from `appendfuture`.
+rem llmlint: ignore-block[tests_mirror_real_usage] cmd's half of the verb `hook.sh`
+rem carries the reason for: a `pre-push` hook is operator-supplied code writing on the
+rem session's own stream, which is the only point inside a run where a repository's own
+rem code can reach one, and the line is the sibling's whole envelope shape rather than a
+rem shape invented here. No platform runs both halves, so each carries the directive.
+:appendforeignsource
+if not "%~2"=="" (
+  call :fail "append-foreign-source-event takes no arguments"
+  exit /b 64
+)
+if not defined ONEVCS_HOME (
+  call :fail "ONEVCS_HOME is unset, so there is no session stream to reach; set it to the state root this world gave onevcs, the way World::cmd does"
+  exit /b 64
+)
+call :sessionstream
+if errorlevel 1 (
+  call :fail "append-foreign-source-event runs in a tree under a session's run root; no ancestor of %CD% names a stream under %ONEVCS_HOME%\streams. Run this verb from the session's own tree, under the ONEVCS_HOME that session was given"
+  exit /b 64
+)
+for %%i in ("!stream!") do set "token=%%~ni"
+echo {"v":1,"ts":"2026-01-01T00:00:00.000Z","stream":"!token!","seq":1,"source":"harness","kind":"fetch","phase":"development","labels":{},"payload":{},"artifacts":[]}>>"!stream!"
+if errorlevel 1 (
+  call :broke "cannot append to !stream!"
+  exit /b 1
+)
+exit /b 0
+rem llmlint: ignore-end[tests_mirror_real_usage]
 
 rem The one line a hook says to make a refusal the host's rather than the work's;
 rem `hook.sh` says what it is for and where its spelling is held.
@@ -180,7 +212,7 @@ exit /b 1
 
 :fail
 echo pre-push: %~1 1>&2
-echo pre-push: the verbs are: wait-for PATH ^| break-streams ^| append-future-event ^| missing-prerequisite 1>&2
+echo pre-push: the verbs are: wait-for PATH ^| break-streams ^| append-future-event ^| append-foreign-source-event ^| missing-prerequisite 1>&2
 goto :eof
 
 rem A verb that could not do what it names — the host's fault rather than the

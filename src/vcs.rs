@@ -1377,11 +1377,35 @@ fn opened(token: &SessionToken, filter: Option<&EventFilter>) -> Option<EventStr
     }
 }
 
+/// One envelope the sibling handed over, as this crate's own.
+///
+/// `onevcs` declares its own vocabulary over the `onemessagebus` core and this
+/// crate declares its own, so the two are no longer one Rust type: the crossing
+/// is the wire shape they share by contract, exactly as `src/agentgraph.rs`
+/// crosses a graph's. Through `Serialize`/`Deserialize` rather than field by
+/// field, because the wire shape *is* the contract — a direct copy would be a
+/// second reading of a schema the sibling owns, and would silently drop the
+/// first field it added. `tests/contract.rs`'s drift check holds the two shapes
+/// to each other, so a producer that moved is a refusal here rather than a
+/// value quietly lost.
+///
+/// What crosses keeps everything its producer wrote: `stream`, `seq`, `source`,
+/// kind, phase and labels, unchanged.
+fn relayed(envelope: onevcs::Envelope) -> Result<Envelope> {
+    let value = serde_json::to_value(envelope)
+        .map_err(|error| sibling(format!("serializing session event: {error}")))?;
+    serde_json::from_value::<Envelope>(value)
+        .map_err(|error| sibling(format!("reading session event: {error}")))
+}
+
 /// The next batch of a stream, for relaying into the merged one.
 ///
-/// The sibling's envelope is the agent profile's, which is this crate's, so a
-/// batch is relayed as the values it was read as: `stream`, `seq`, `source`,
-/// kind, phase and labels exactly as the producer wrote them.
+/// Each envelope crosses through [`relayed`]. One that does not cross — a source
+/// word outside this crate's closed set, a field a newer `onevcs` added that
+/// this build has no place for — is **reported, naming the session and why, and
+/// the rest of the batch is still relayed**. A silent drop is what makes a later
+/// reader of the merged store think nothing happened, and refusing the whole
+/// batch over one record would throw away the publication around it.
 ///
 /// [`EventStream::read`] refuses a whole batch over one line it cannot parse, and
 /// its cursor has already moved past that line — so a refusal here is events
@@ -1389,16 +1413,41 @@ fn opened(token: &SessionToken, filter: Option<&EventFilter>) -> Option<EventStr
 /// reading: the alternative is to stop relaying a live publication over one
 /// record.
 fn next_batch(stream: &mut EventStream, token: &SessionToken) -> Vec<Envelope> {
-    match stream.read() {
+    let read = match stream.read() {
         Ok(events) => events,
         Err(error) => {
             eprintln!(
                 "onepipeline: cannot read session {}'s events: {error}",
                 token.0
             );
-            Vec::new()
+            return Vec::new();
         }
-    }
+    };
+    read.into_iter()
+        .filter_map(|envelope| {
+            let described = format!("{} seq {}", envelope.kind.0, envelope.seq);
+            match relayed(envelope) {
+                Ok(envelope) => Some(envelope),
+                Err(error) => {
+                    eprintln!("{}", relay_refusal(token, &described, &error));
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// What a relay says about an envelope that did not cross.
+///
+/// One function so the sentence has one source: `next_batch` prints it, and
+/// `an_envelope_that_does_not_cross_is_reported_and_the_batch_around_it_is_relayed`
+/// asserts on it. `described` is the envelope's own kind and `seq`, which is what
+/// lets a reader find the line in the session's stream.
+fn relay_refusal(token: &SessionToken, described: &str, error: &Error) -> String {
+    format!(
+        "onepipeline: cannot relay session {}'s {described}: {error}",
+        token.0
+    )
 }
 
 /// A session's own event stream, for relaying into the merged one.
@@ -1433,8 +1482,9 @@ fn sibling_filter(filter: &EventFilter) -> Result<onevcs::EventFilter> {
 /// one session: they carry the sibling's kind, so they carry the phase that
 /// library puts that kind in rather than a second classification made here.
 /// `None` for the one kind whose phase its producer decides — a push, which this
-/// crate never records. The phase is the agent profile's on both sides, so what
-/// the sibling answers is this crate's value with no conversion between.
+/// crate never records. `Phase` is **`onevcs`'s own type**, re-exported by
+/// [`crate::vocabulary`], so what the sibling answers is this crate's value with
+/// no conversion between — the one part of a relayed envelope that needs none.
 fn phase_of_kind(kind: onevcs::EventKind) -> Option<crate::event::Phase> {
     <crate::event::Phase as onevcs::PhaseOf>::of(kind)
 }
@@ -3308,6 +3358,113 @@ mod tests {
         "ONEVCS_HOME"
     }
 
+    /// An envelope that cannot cross into this crate's type is **reported** and
+    /// the rest of its batch is still relayed.
+    ///
+    /// The one thing the wire crossing added. Each producer declares its own
+    /// vocabulary now, and `onevcs`'s source is the core's *open* newtype while
+    /// this crate's is a closed enum of the three producers — so a word outside
+    /// that set is an envelope the sibling hands over quite happily and this
+    /// crate has no value for. Dropping it silently is what makes a later reader
+    /// of the merged store conclude nothing happened, and refusing the batch
+    /// would throw away the publication around it; so it is said on stderr,
+    /// naming the session and the reason, and the follow keeps going.
+    ///
+    /// Driven through the relay path — `events`, which is `next_batch` over a
+    /// real `onevcs::EventStream` — against a stream file, because no journey can
+    /// make the linked sibling write a source word it does not have. The reader
+    /// under test is this crate's own; nothing is doubled.
+    ///
+    /// It takes [`scratch_home_held`] because `ONEVCS_HOME` is process-global
+    /// and this crate's unit tests share one process.
+    #[test]
+    fn an_envelope_that_does_not_cross_is_reported_and_the_batch_around_it_is_relayed() {
+        let _home = super::scratch_home_held();
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-uncrossable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("streams")).expect("a scratch state root");
+        std::env::set_var(onevcs_home(), &root);
+
+        let token = SessionToken("s-uncrossable".into());
+        let line = |seq: u64, source: &str, kind: &str| {
+            serde_json::json!({
+                "v": 1,
+                "ts": "2026-01-01T00:00:00.000Z",
+                "stream": token.0,
+                "seq": seq,
+                "source": source,
+                "kind": kind,
+                "phase": "development",
+                "labels": {},
+                "payload": {},
+                "artifacts": [],
+            })
+            .to_string()
+        };
+        // The middle line is the one this crate has no `Source` for. It is a
+        // whole, valid envelope of the *sibling's* vocabulary, which is the case
+        // that matters: a line neither of them can read is refused by the
+        // sibling's reader long before it reaches here.
+        let batch = [
+            line(1, onevcs::SOURCE_WORD, "session-opened"),
+            line(2, "harness", "fetch"),
+            line(3, onevcs::SOURCE_WORD, "push"),
+        ]
+        .join("\n")
+            + "\n";
+        std::fs::write(
+            root.join("streams").join(format!("{}.ndjson", token.0)),
+            &batch,
+        )
+        .expect("the stream is written");
+
+        // The sibling really does hand all three over: without that, this would
+        // prove nothing about what the crossing decided.
+        let mut sibling = EventStream::open(&token).expect("the stream opens");
+        assert_eq!(
+            sibling
+                .read()
+                .expect("the sibling reads its own stream")
+                .len(),
+            3,
+            "the sibling did not hand over the envelope this crate cannot cross"
+        );
+
+        let merged = events(&token, None);
+        assert_eq!(
+            merged
+                .iter()
+                .map(|envelope| (envelope.seq, envelope.kind.0.clone()))
+                .collect::<Vec<_>>(),
+            vec![(1, "session-opened".to_owned()), (3, "push".to_owned())],
+            "the envelopes around the one that did not cross were not relayed"
+        );
+        for envelope in &merged {
+            assert_eq!(envelope.source, crate::event::Source::Vcs);
+            assert_eq!(
+                envelope.dimensions.phase,
+                Some(crate::event::Phase::Development)
+            );
+        }
+
+        // And the refusal names the session and says why, which is what stops the
+        // loss being silent. Composed here rather than captured off stderr: the
+        // sentence `next_batch` prints is this one, and a test that scraped the
+        // stream would be reading the terminal rather than the decision.
+        let uncrossable: onevcs::Envelope =
+            serde_json::from_str(&line(2, "harness", "fetch")).expect("the sibling reads it");
+        let refusal = relayed(uncrossable).expect_err("it does not cross");
+        let said = relay_refusal(&token, "fetch seq 2", &refusal);
+        assert!(
+            said.contains(&token.0) && said.contains("fetch seq 2") && said.contains("harness"),
+            "the refusal does not name the session, the record, and the word it could not \
+             read: {said}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The marks a reader starts from are the store's own, one series per stream.
     ///
     /// A store holds more than one producer's records, so a fold that kept a
@@ -3350,11 +3507,11 @@ mod tests {
     /// A relayed `onevcs` envelope is the same value whether it crossed as a
     /// value or as a line.
     ///
-    /// The sibling's envelope is the agent profile's, which is this crate's, so
-    /// there is no conversion left to lose a field in: the value a session's
-    /// stream hands over is the value this crate journals, and the line it wrote
-    /// reads back as that value — kind, phase, the `member` attribution and a key
-    /// nobody reserves, and the artifact, all as the producer stamped them.
+    /// The sibling declares its own vocabulary, so the crossing is the wire
+    /// shape the two share by contract: [`relayed`] takes the value a session's
+    /// stream hands over, and the line that value serializes to reads back as
+    /// the same thing — kind, phase, the `member` attribution and a key nobody
+    /// reserves, and the artifact, all as the producer stamped them.
     #[test]
     fn a_relayed_envelope_keeps_the_kind_and_attribution_its_producer_wrote() {
         let mut labels = onevcs::Labels {
@@ -3369,7 +3526,7 @@ mod tests {
             ts: "2026-01-01T00:00:00.000Z".into(),
             stream: "s-1".into(),
             seq: 4,
-            source: onevcs::Source::Vcs,
+            source: onevcs::Source::from(onevcs::SOURCE_WORD),
             kind: kind_of(onevcs::EventKind::ChangeOpened),
             dimensions: onevcs::Phase::Review.into(),
             labels,
@@ -3382,7 +3539,7 @@ mod tests {
         };
         let line = serde_json::to_string(&produced).expect("the sibling's envelope serializes");
         let as_line: Envelope = serde_json::from_str(&line).expect("the line reads back");
-        let as_value: Envelope = produced;
+        let as_value: Envelope = relayed(produced).expect("the value crosses");
         assert_eq!(as_line, as_value);
 
         assert_eq!(as_value.kind.0, "change-opened");

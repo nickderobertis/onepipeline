@@ -1,0 +1,1400 @@
+{
+  "agent.artifact-ref@1": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Identifier, unique within the producing library's store."
+      },
+      "kind": {
+        "type": "string",
+        "description": "What the artifact is — a gate log, a check log, a transcript, a report."
+      },
+      "bytes": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0,
+        "description": "Size of the stored artifact."
+      }
+    },
+    "required": [
+      "id",
+      "kind",
+      "bytes"
+    ],
+    "description": "Evidence too large for a payload: stored by the producing library and\nreferenced by id, to be read back through that library.",
+    "title": "ArtifactRef",
+    "$schema": "https://json-schema.org/draft/2020-12/schema"
+  },
+  "agent.event-envelope@1": {
+    "type": "object",
+    "properties": {
+      "v": {
+        "type": "integer",
+        "format": "uint32",
+        "minimum": 0,
+        "description": "The envelope schema version the producer wrote against.",
+        "const": 1
+      },
+      "ts": {
+        "type": "string",
+        "description": "RFC 3339, millisecond precision, UTC."
+      },
+      "stream": {
+        "type": "string",
+        "description": "Unique id of the producing process."
+      },
+      "seq": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0,
+        "description": "Monotonic per [`stream`](Self::stream)."
+      },
+      "source": {
+        "$ref": "#/$defs/Source",
+        "description": "What produced the event, in the vocabulary's words."
+      },
+      "kind": {
+        "$ref": "#/$defs/Kind",
+        "description": "What happened, as its producer named it."
+      },
+      "phase": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/Phase"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Which part of a change's life the event belongs to, as its producer\nclassified it."
+      },
+      "labels": {
+        "$ref": "#/$defs/Labels",
+        "description": "The reserved keys the vocabulary declares plus free-form extras.\nProducers stamp what they know; enrichers never rewrite.",
+        "default": {}
+      },
+      "payload": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Kind-specific detail. Text fields are bounded by\n[`MAX_PAYLOAD_TEXT_BYTES`](crate::MAX_PAYLOAD_TEXT_BYTES); larger\nevidence is an [`ArtifactRef`].",
+        "default": {}
+      },
+      "artifacts": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "description": "Evidence stored by the producing library and referenced by id.",
+        "default": []
+      }
+    },
+    "required": [
+      "v",
+      "ts",
+      "stream",
+      "seq",
+      "source",
+      "kind"
+    ],
+    "description": "One event, as a producing process writes it and as a consumer reads it.\n\nMerge order across streams is `(ts, stream, seq)`. A consumer detects loss\nas a per-stream [`seq`](Self::seq) gap; there is no cross-stream promise\nbeyond the timestamps.\n\nThe type parameter is the [`Vocabulary`] the envelope is written over: it\ndecides the source words, the dimensions carried between `kind` and\n`labels`, and the label set. Deserialization refuses an unknown top-level\nfield, a `seq` that is not an unsigned integer, a source word the vocabulary\ndoes not admit, and a missing required field — each by name.",
+    "title": "Envelope",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$defs": {
+      "Source": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "agentgraph",
+            "description": "`oneagentgraph`."
+          },
+          {
+            "type": "string",
+            "const": "vcs",
+            "description": "`onevcs`."
+          },
+          {
+            "type": "string",
+            "const": "pipeline",
+            "description": "`onepipeline`."
+          }
+        ],
+        "description": "The library that produced an event."
+      },
+      "Kind": {
+        "type": "string",
+        "description": "What happened, as the kebab-case wire string.\n\nOpen on the wire and a string here, because a relay carries a sibling's\nkinds without interpreting them; a producing library keeps its own closed\nenum and converts into this with `From`."
+      },
+      "Phase": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "development",
+            "description": "The work is being made."
+          },
+          {
+            "type": "string",
+            "const": "integrate",
+            "description": "The work is being brought together with the base."
+          },
+          {
+            "type": "string",
+            "const": "review",
+            "description": "The change request is open and being ruled on."
+          },
+          {
+            "type": "string",
+            "const": "release",
+            "description": "What carries the landed change is being released."
+          }
+        ],
+        "description": "Which part of a change's life an event belongs to.\n\nFour phases over one change: the work is made, it is brought together with\nthe base it is going onto, it is proposed and ruled on, and what carries it\nis released. Stamped by the producer, never derived by a reader: one kind's\nphase is not always a fact about the kind."
+      },
+      "Labels": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The run this event belongs to."
+          },
+          "round": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The round within the run."
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The graph node being executed."
+          },
+          "step": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The step within a node that runs several in sequence."
+          },
+          "member": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which member of a conversation produced the event."
+          },
+          "persona": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The persona that member is running under."
+          }
+        },
+        "additionalProperties": true,
+        "description": "The reserved label keys, plus whatever else a producer stamped.\n\nReserved keys are absent rather than empty when unknown, so an enricher can\ntell \"not stamped\" from \"stamped empty\". The extras are flattened beside\nthem, in the order they were stamped."
+      },
+      "ArtifactRef": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Identifier, unique within the producing library's store."
+          },
+          "kind": {
+            "type": "string",
+            "description": "What the artifact is — a gate log, a check log, a transcript, a report."
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Size of the stored artifact."
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "bytes"
+        ],
+        "description": "Evidence too large for a payload: stored by the producing library and\nreferenced by id, to be read back through that library."
+      }
+    }
+  },
+  "agent.event-envelope@2": {
+    "type": "object",
+    "properties": {
+      "v": {
+        "type": "integer",
+        "format": "uint32",
+        "minimum": 0,
+        "description": "The envelope schema version the producer wrote against.",
+        "const": 2
+      },
+      "ts": {
+        "type": "string",
+        "description": "RFC 3339, millisecond precision, UTC."
+      },
+      "stream": {
+        "type": "string",
+        "description": "Unique id of the producing process."
+      },
+      "seq": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0,
+        "description": "Monotonic per [`stream`](Self::stream)."
+      },
+      "source": {
+        "$ref": "#/$defs/Source",
+        "description": "What produced the event, in the vocabulary's words."
+      },
+      "kind": {
+        "$ref": "#/$defs/Kind",
+        "description": "What happened, as its producer named it."
+      },
+      "phase": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/Phase"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Which part of a change's life the event belongs to, as its producer\nclassified it."
+      },
+      "labels": {
+        "$ref": "#/$defs/Labels",
+        "description": "The reserved keys the vocabulary declares plus free-form extras.\nProducers stamp what they know; enrichers never rewrite.",
+        "default": {}
+      },
+      "payload": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Kind-specific detail. Text fields are bounded by\n[`MAX_PAYLOAD_TEXT_BYTES`](crate::MAX_PAYLOAD_TEXT_BYTES); larger\nevidence is an [`ArtifactRef`].",
+        "default": {}
+      },
+      "artifacts": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "description": "Evidence stored by the producing library and referenced by id.",
+        "default": []
+      }
+    },
+    "required": [
+      "v",
+      "ts",
+      "stream",
+      "seq",
+      "source",
+      "kind"
+    ],
+    "description": "One event, as a producing process writes it and as a consumer reads it.\n\nMerge order across streams is `(ts, stream, seq)`. A consumer detects loss\nas a per-stream [`seq`](Self::seq) gap; there is no cross-stream promise\nbeyond the timestamps.\n\nThe type parameter is the [`Vocabulary`] the envelope is written over: it\ndecides the source words, the dimensions carried between `kind` and\n`labels`, and the label set. Deserialization refuses an unknown top-level\nfield, a `seq` that is not an unsigned integer, a source word the vocabulary\ndoes not admit, and a missing required field — each by name.",
+    "title": "Envelope",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$defs": {
+      "Source": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "agentgraph",
+            "description": "`oneagentgraph`."
+          },
+          {
+            "type": "string",
+            "const": "vcs",
+            "description": "`onevcs`."
+          },
+          {
+            "type": "string",
+            "const": "pipeline",
+            "description": "`onepipeline`."
+          }
+        ],
+        "description": "The library that produced an event."
+      },
+      "Kind": {
+        "type": "string",
+        "description": "What happened, as the kebab-case wire string.\n\nOpen on the wire and a string here, because a relay carries a sibling's\nkinds without interpreting them; a producing library keeps its own closed\nenum and converts into this with `From`."
+      },
+      "Phase": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "development",
+            "description": "The work is being made."
+          },
+          {
+            "type": "string",
+            "const": "integrate",
+            "description": "The work is being brought together with the base."
+          },
+          {
+            "type": "string",
+            "const": "review",
+            "description": "The change request is open and being ruled on."
+          },
+          {
+            "type": "string",
+            "const": "release",
+            "description": "What carries the landed change is being released."
+          }
+        ],
+        "description": "Which part of a change's life an event belongs to.\n\nFour phases over one change: the work is made, it is brought together with\nthe base it is going onto, it is proposed and ruled on, and what carries it\nis released. Stamped by the producer, never derived by a reader: one kind's\nphase is not always a fact about the kind."
+      },
+      "Labels": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The run this event belongs to."
+          },
+          "round": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The round within the run."
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The graph node being executed."
+          },
+          "step": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The step within a node that runs several in sequence."
+          },
+          "member": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which member of a conversation produced the event."
+          },
+          "persona": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The persona that member is running under."
+          }
+        },
+        "additionalProperties": true,
+        "description": "The reserved label keys, plus whatever else a producer stamped.\n\nReserved keys are absent rather than empty when unknown, so an enricher can\ntell \"not stamped\" from \"stamped empty\". The extras are flattened beside\nthem, in the order they were stamped."
+      },
+      "ArtifactRef": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Identifier, unique within the producing library's store."
+          },
+          "kind": {
+            "type": "string",
+            "description": "What the artifact is — a gate log, a check log, a transcript, a report."
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Size of the stored artifact."
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "bytes"
+        ],
+        "description": "Evidence too large for a payload: stored by the producing library and\nreferenced by id, to be read back through that library."
+      }
+    }
+  },
+  "agent.event-filter@1": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "include": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/Matcher"
+        },
+        "description": "Matchers an envelope satisfies one of to pass. Absent or empty admits\nevery envelope, so a filter that only rejects need name nothing here."
+      },
+      "exclude": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/Matcher"
+        },
+        "description": "Matchers that reject. A match here rejects whatever\n[`include`](Self::include) said, so a broad include beside a narrow\nexclude is how \"all of this except that\" is written."
+      }
+    },
+    "description": "Which envelopes pass.",
+    "title": "Filter",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$defs": {
+      "Matcher": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Source"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The producer, by exact equality."
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A glob over the kind's kebab-case wire string, where `*` stands for any\nrun of characters including none and every other character is itself."
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Phase"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The phase the envelope was stamped at."
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `run_id` label."
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `node` label."
+          },
+          "step": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `step` label."
+          },
+          "member": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `member` label."
+          },
+          "persona": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `persona` label."
+          }
+        },
+        "description": "One matcher: every field it names must hold of an envelope, and a field it\ndoes not name is not consulted."
+      },
+      "Source": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "agentgraph",
+            "description": "`oneagentgraph`."
+          },
+          {
+            "type": "string",
+            "const": "vcs",
+            "description": "`onevcs`."
+          },
+          {
+            "type": "string",
+            "const": "pipeline",
+            "description": "`onepipeline`."
+          }
+        ],
+        "description": "The library that produced an event."
+      },
+      "Phase": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "development",
+            "description": "The work is being made."
+          },
+          {
+            "type": "string",
+            "const": "integrate",
+            "description": "The work is being brought together with the base."
+          },
+          {
+            "type": "string",
+            "const": "review",
+            "description": "The change request is open and being ruled on."
+          },
+          {
+            "type": "string",
+            "const": "release",
+            "description": "What carries the landed change is being released."
+          }
+        ],
+        "description": "Which part of a change's life an event belongs to.\n\nFour phases over one change: the work is made, it is brought together with\nthe base it is going onto, it is proposed and ruled on, and what carries it\nis released. Stamped by the producer, never derived by a reader: one kind's\nphase is not always a fact about the kind."
+      }
+    }
+  },
+  "agent.labels@1": {
+    "type": "object",
+    "properties": {
+      "run_id": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "The run this event belongs to."
+      },
+      "round": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "format": "uint64",
+        "minimum": 0,
+        "description": "The round within the run."
+      },
+      "node": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "The graph node being executed."
+      },
+      "step": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "The step within a node that runs several in sequence."
+      },
+      "member": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "Which member of a conversation produced the event."
+      },
+      "persona": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "The persona that member is running under."
+      }
+    },
+    "additionalProperties": true,
+    "description": "The reserved label keys, plus whatever else a producer stamped.\n\nReserved keys are absent rather than empty when unknown, so an enricher can\ntell \"not stamped\" from \"stamped empty\". The extras are flattened beside\nthem, in the order they were stamped.",
+    "title": "Labels",
+    "$schema": "https://json-schema.org/draft/2020-12/schema"
+  },
+  "agent.note@1": {
+    "type": "object",
+    "properties": {
+      "addressee": {
+        "$ref": "#/$defs/Addressee"
+      },
+      "text": {
+        "type": "string"
+      },
+      "criterion": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/Criterion"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "addressee",
+      "text"
+    ],
+    "description": "One note: what the worker reads, who it is for, and the property it binds.\n\nBuilt through [`Note::new`] / [`Note::to`] / [`Note::binding`] and in no other\nway — `non_exhaustive` closes the struct literal, and deserialization goes\nthrough the same conversion — so a note whose text nobody can read, or whose\ncriterion is unusable, is unrepresentable rather than representable and refused\nsomewhere later.",
+    "title": "Note",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$defs": {
+      "Addressee": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "worker",
+            "description": "An update to the *worker's* task."
+          },
+          {
+            "type": "string",
+            "const": "supervisor",
+            "description": "An update to the *supervisor's* brief."
+          },
+          {
+            "type": "string",
+            "const": "both",
+            "description": "Addressed to both parties."
+          }
+        ],
+        "description": "Who a note is for.\n\nRequired; there is no default, because a note whose addressee is guessed is a\nnote the judge may read as an instruction to itself. One run saw a simulated\nuser compose a four-point \"manager ruling\" in-conversation and instruct the\nworker to post it over the run channel, and the worker complied."
+      },
+      "Criterion": {
+        "type": "string",
+        "description": "The property a bound note requires of the finished work.\n\nA validated newtype, checked in the conversion that builds it, so a [`Note`]\ncarrying an unusable criterion is unrepresentable rather than\nrepresentable-and-refused-somewhere-later. The rules are the ones an\norchestrator already enforces on authored plan criteria\n(`orchestrator/criteria_guard.py` in `nickderobertis/ai-orchestrator`), ported\nhere so the *seam that accepts the note* refuses at the moment of binding\nrather than at render time — after the turn has been composed — or by the\njudge, which has already lost.\n\nWhat the rules cannot catch, stated plainly: \"this is a mechanism the author\npreferred rather than a property the node owes\" needs the author's intent, and\nno pattern has it. What stands in for it is the rendered framing\n([`Criteria::rendered`]), which instructs the judge to evaluate the property a\nnamed mechanism was serving."
+      }
+    }
+  },
+  "onemessagebus.transport-hello@1": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "protocol": {
+        "type": "string",
+        "description": "Always [`PROTOCOL`]."
+      },
+      "version": {
+        "type": "integer",
+        "format": "uint32",
+        "minimum": 0,
+        "description": "The version the client speaks: [`PROTOCOL_VERSION`]."
+      },
+      "config": {
+        "$ref": "#/$defs/TransportConfig",
+        "description": "The `transport` block of the configuration, with `dir` resolved."
+      }
+    },
+    "required": [
+      "protocol",
+      "version",
+      "config"
+    ],
+    "description": "The client's first line: which protocol, at which version, opening which\ntransport.",
+    "title": "PluginHello",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$defs": {
+      "TransportConfig": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/TransportKind",
+            "description": "The kind: `local`, `memory`, or a kind registered in-process or served\nby a plugin."
+          },
+          "dir": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The directory a directory-backed transport keeps its queues in."
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "additionalProperties": true,
+        "description": "The `transport` block of a configuration: the kind, the directory a\ndirectory-backed transport keeps its queues in, and whatever else the kind\ntakes."
+      },
+      "TransportKind": {
+        "type": "string",
+        "description": "A transport kind: lowercase ASCII letters, digits and `-`, starting with a\nletter — `local`, `nats`. A plugin serving it is named\n`onemessagebus-transport-<kind>`."
+      }
+    }
+  },
+  "onemessagebus.transport-reply@1": {
+    "oneOf": [
+      {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "$ref": "#/$defs/PluginAnswer"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "additionalProperties": false,
+        "description": "The request was done."
+      },
+      {
+        "type": "object",
+        "properties": {
+          "error": {
+            "$ref": "#/$defs/PluginError"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false,
+        "description": "It was not."
+      }
+    ],
+    "description": "One reply: what was asked for, or why not.",
+    "title": "PluginReply",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$defs": {
+      "PluginAnswer": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "hello": {
+                "type": "object",
+                "properties": {
+                  "protocol": {
+                    "description": "Always [`PROTOCOL`].",
+                    "type": "string"
+                  },
+                  "version": {
+                    "description": "The version the plugin speaks.",
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "protocol",
+                  "version"
+                ]
+              }
+            },
+            "required": [
+              "hello"
+            ],
+            "additionalProperties": false,
+            "description": "The answer to a hello: the plugin speaks this protocol at this version."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "position": {
+                "$ref": "#/$defs/Position"
+              }
+            },
+            "required": [
+              "position"
+            ],
+            "additionalProperties": false,
+            "description": "Where an appended record landed."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "batch": {
+                "type": "object",
+                "properties": {
+                  "records": {
+                    "description": "The whole records, oldest first.",
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/PluginStored"
+                    }
+                  },
+                  "torn": {
+                    "description": "A torn record after them.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/PluginTorn"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "records"
+                ]
+              }
+            },
+            "required": [
+              "batch"
+            ],
+            "additionalProperties": false,
+            "description": "The records a read found."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "cursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Position"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "cursor"
+            ],
+            "additionalProperties": false,
+            "description": "A consumer's cursor, or `null` for one that has read nothing."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "fingerprint": {
+                "$ref": "#/$defs/Fingerprint"
+              }
+            },
+            "required": [
+              "fingerprint"
+            ],
+            "additionalProperties": false,
+            "description": "A fingerprint."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "moved": {
+                "$ref": "#/$defs/Fingerprint"
+              }
+            },
+            "required": [
+              "moved"
+            ],
+            "additionalProperties": false,
+            "description": "A wait for a change saw the queue move: its fingerprint now."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "unchanged": {
+                "$ref": "#/$defs/Fingerprint"
+              }
+            },
+            "required": [
+              "unchanged"
+            ],
+            "additionalProperties": false,
+            "description": "A wait for a change timed out with the queue where it was: its\nfingerprint now."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "document": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "document"
+            ],
+            "additionalProperties": false,
+            "description": "A document's contents, or `null` where there is none."
+          },
+          {
+            "type": "string",
+            "const": "done",
+            "description": "Done, with nothing to hand back."
+          }
+        ],
+        "description": "What a request that was done answers."
+      },
+      "Position": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0,
+        "description": "Where in a queue a record ends: opaque to consumers, and meaningful only to\nthe transport that handed it out.\n\nA consumer receives positions from [`Transport::append`] and\n[`Transport::read`] and hands them back; it never builds one from a number\nit made up. It serializes as its token so a cursor survives a process.\n[`from_token`](Self::from_token) and [`token`](Self::token) exist for a\ntransport's own implementation: [`LocalTransport`]'s token is the byte offset\nat a record boundary, [`MemoryTransport`]'s the count of records before it."
+      },
+      "PluginStored": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "record": {
+            "type": "string",
+            "description": "The record."
+          },
+          "after": {
+            "$ref": "#/$defs/Position",
+            "description": "The position after it."
+          }
+        },
+        "required": [
+          "record",
+          "after"
+        ],
+        "description": "One record of a [`PluginAnswer::Batch`]."
+      },
+      "PluginTorn": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "at": {
+            "$ref": "#/$defs/Position",
+            "description": "Where it starts."
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "How many bytes of it there are."
+          }
+        },
+        "required": [
+          "at",
+          "bytes"
+        ],
+        "description": "The torn record of a [`PluginAnswer::Batch`]."
+      },
+      "Fingerprint": {
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "description": "A cheap change token for a queue: two fingerprints of one queue are equal\nwhen nothing observable about it moved.\n\nOpaque, like [`Position`]: a transport builds one from whatever it can\nobserve cheaply ([`LocalTransport`] from each file's length and modification\ntime), and a consumer only compares them."
+      },
+      "PluginError": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "message": {
+                "type": "string",
+                "description": "What the plugin said."
+              },
+              "queue": {
+                "$ref": "#/$defs/QueueName",
+                "description": "The queue."
+              },
+              "position": {
+                "$ref": "#/$defs/Position",
+                "description": "The position asked for."
+              },
+              "end": {
+                "$ref": "#/$defs/Position",
+                "description": "Where the queue ends."
+              },
+              "kind": {
+                "type": "string",
+                "const": "past_end"
+              }
+            },
+            "required": [
+              "kind",
+              "message",
+              "queue",
+              "position",
+              "end"
+            ],
+            "description": "[`TransportError::PastEnd`]."
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "message": {
+                "type": "string",
+                "description": "What the plugin said."
+              },
+              "queue": {
+                "$ref": "#/$defs/QueueName",
+                "description": "The queue."
+              },
+              "position": {
+                "$ref": "#/$defs/Position",
+                "description": "The position asked for."
+              },
+              "kind": {
+                "type": "string",
+                "const": "not_a_boundary"
+              }
+            },
+            "required": [
+              "kind",
+              "message",
+              "queue",
+              "position"
+            ],
+            "description": "[`TransportError::NotABoundary`]."
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "message": {
+                "type": "string",
+                "description": "What the plugin said."
+              },
+              "kind": {
+                "type": "string",
+                "const": "refused"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "description": "Anything else the transport refused."
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "message": {
+                "type": "string",
+                "description": "What the plugin said."
+              },
+              "kind": {
+                "type": "string",
+                "const": "protocol"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "description": "A request the plugin could not read, or one out of its place."
+          }
+        ],
+        "description": "Why a request was not done, discriminated by `kind`, in words the client\nturns back into a [`TransportError`]. `past_end` and `not_a_boundary` carry\nthe queue and the positions, so a queue reading the reply can fold its log\nagain; a reply missing one of them is not a reply."
+      },
+      "QueueName": {
+        "type": "string",
+        "description": "A queue's name: a non-empty run of ASCII letters, digits, `-` and `_`,\nstarting with a letter or digit — `questions`, `action-outcomes`."
+      }
+    }
+  },
+  "onemessagebus.transport-request@1": {
+    "oneOf": [
+      {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "queue": {
+            "$ref": "#/$defs/QueueName",
+            "description": "The queue."
+          },
+          "record": {
+            "type": "string",
+            "description": "The record."
+          },
+          "op": {
+            "type": "string",
+            "const": "append"
+          }
+        },
+        "required": [
+          "op",
+          "queue",
+          "record"
+        ],
+        "description": "[`Transport::append`]."
+      },
+      {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "queue": {
+            "$ref": "#/$defs/QueueName",
+            "description": "The queue."
+          },
+          "from": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Position"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Read after this position; from the start when absent."
+          },
+          "limit": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "At most this many records."
+          },
+          "op": {
+            "type": "string",
+            "const": "read"
+          }
+        },
+        "required": [
+          "op",
+          "queue",
+          "limit"
+        ],
+        "description": "[`Transport::read`]."
+      },
+      {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "queue": {
+            "$ref": "#/$defs/QueueName",
+            "description": "The queue."
+          },
+          "consumer": {
+            "$ref": "#/$defs/ConsumerName",
+            "description": "The consumer."
+          },
+          "op": {
+            "type": "string",
+            "const": "cursor"
+          }
+        },
+        "required": [
+          "op",
+          "queue",
+          "consumer"
+        ],
+        "description": "[`Transport::cursor`]."
+      },
+      {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "queue": {
+            "$ref": "#/$defs/QueueName",
+            "description": "The queue."
+          },
+          "consumer": {
+            "$ref": "#/$defs/ConsumerName",
+            "description": "The consumer."
+          },
+          "at": {
+            "$ref": "#/$defs/Position",
+            "description": "Where it has read up to."
+          },
+          "op": {
+            "type": "string",
+            "const": "commit"
+          }
+        },
+        "required": [
+          "op",
+          "queue",
+          "consumer",
+          "at"
+        ],
+        "description": "[`Transport::commit`]."
+      },
+      {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "queue": {
+            "$ref": "#/$defs/QueueName",
+            "description": "The queue."
+          },
+          "op": {
+            "type": "string",
+            "const": "begin_exclusive"
+          }
+        },
+        "required": [
+          "op",
+          "queue"
+        ],
+        "description": "Open [`Transport::exclusive`]'s section over a queue."
+      },
+      {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "queue": {
+            "$ref": "#/$defs/QueueName",
+            "description": "The queue."
+          },
+          "failed": {
+            "type": "boolean",
+            "description": "Whether the body failed, so the section ends with its failure."
+          },
+          "op": {
+            "type": "string",
+            "const": "end_exclusive"
+          }
+        },
+        "required": [
+          "op",
+          "queue",
+          "failed"
+        ],
+        "description": "End the section the matching `begin_exclusive` opened."
+      },
+      {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "queue": {
+            "$ref": "#/$defs/QueueName",
+            "description": "The queue."
+          },
+          "op": {
+            "type": "string",
+            "const": "fingerprint"
+          }
+        },
+        "required": [
+          "op",
+          "queue"
+        ],
+        "description": "[`Transport::fingerprint`]."
+      },
+      {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "queue": {
+            "$ref": "#/$defs/QueueName",
+            "description": "The queue."
+          },
+          "since": {
+            "$ref": "#/$defs/Fingerprint",
+            "description": "The fingerprint to wait for it to move from."
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "How long to wait, in milliseconds."
+          },
+          "op": {
+            "type": "string",
+            "const": "wait_for_change"
+          }
+        },
+        "required": [
+          "op",
+          "queue",
+          "since",
+          "timeout_ms"
+        ],
+        "description": "[`Transport::wait_for_change`]."
+      },
+      {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "queue": {
+            "$ref": "#/$defs/QueueName",
+            "description": "The queue."
+          },
+          "name": {
+            "$ref": "#/$defs/DocumentName",
+            "description": "The document."
+          },
+          "op": {
+            "type": "string",
+            "const": "document"
+          }
+        },
+        "required": [
+          "op",
+          "queue",
+          "name"
+        ],
+        "description": "[`Transport::document`]."
+      },
+      {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "queue": {
+            "$ref": "#/$defs/QueueName",
+            "description": "The queue."
+          },
+          "name": {
+            "$ref": "#/$defs/DocumentName",
+            "description": "The document."
+          },
+          "bytes": {
+            "type": "string",
+            "description": "Its new contents."
+          },
+          "op": {
+            "type": "string",
+            "const": "replace_document"
+          }
+        },
+        "required": [
+          "op",
+          "queue",
+          "name",
+          "bytes"
+        ],
+        "description": "[`Transport::replace_document`]."
+      }
+    ],
+    "description": "One request after the hello, discriminated by `op`: one per [`Transport`]\nmethod, with `exclusive` split into its opening and its end.\n\nRecords and documents travel as text, so a plugin carries UTF-8 records; a\nrecord that is not UTF-8 is refused by the client before it is sent.",
+    "title": "PluginRequest",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$defs": {
+      "QueueName": {
+        "type": "string",
+        "description": "A queue's name: a non-empty run of ASCII letters, digits, `-` and `_`,\nstarting with a letter or digit — `questions`, `action-outcomes`."
+      },
+      "Position": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0,
+        "description": "Where in a queue a record ends: opaque to consumers, and meaningful only to\nthe transport that handed it out.\n\nA consumer receives positions from [`Transport::append`] and\n[`Transport::read`] and hands them back; it never builds one from a number\nit made up. It serializes as its token so a cursor survives a process.\n[`from_token`](Self::from_token) and [`token`](Self::token) exist for a\ntransport's own implementation: [`LocalTransport`]'s token is the byte offset\nat a record boundary, [`MemoryTransport`]'s the count of records before it."
+      },
+      "ConsumerName": {
+        "type": "string",
+        "description": "A consumer's name, held to the same rule as a queue's. The consumer named\n[`ConsumerName::DEFAULT`] is the one a queue with a single reader has."
+      },
+      "Fingerprint": {
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "description": "A cheap change token for a queue: two fingerprints of one queue are equal\nwhen nothing observable about it moved.\n\nOpaque, like [`Position`]: a transport builds one from whatever it can\nobserve cheaply ([`LocalTransport`] from each file's length and modification\ntime), and a consumer only compares them."
+      },
+      "DocumentName": {
+        "type": "string",
+        "description": "A document's name: ASCII letters, digits, `-`, `_` and `.`, starting with\na letter or digit — `queue.json`. A name a queue's own files are kept\nunder locally (one ending `.jsonl`, `.torn`, `.staging` or `.lock`, or\nholding `-cursor.`) is refused, so a document never overwrites a queue."
+      }
+    }
+  }
+}

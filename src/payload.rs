@@ -3,8 +3,8 @@
 //!
 //! One [`Message`] per [`PipelineKind`], under `agent.pipeline.<kind>@2` — the
 //! envelope version those records are written at — and every one of them in the
-//! registry [`crate::event::registry`] constructs, beside the agent profile's
-//! envelope that carries it. The merged stream's own kinds are then declared in
+//! registry [`crate::event::registry`] constructs, beside the
+//! [`crate::vocabulary`] envelope that carries it. The merged stream's own kinds are then declared in
 //! the same registry as the siblings' (`agent.agentgraph.<kind>`), and a payload
 //! is checkable against a document rather than against whichever reader folds it.
 //!
@@ -1069,15 +1069,16 @@ macro_rules! payload_messages {
             }
         }
 
-        /// The agent profile's registry, with every payload this crate emits
-        /// registered beside the envelope that carries it.
+        /// The stack's registry ([`crate::vocabulary::registry`]), with every
+        /// payload this crate emits registered beside the envelope that carries
+        /// it.
         ///
         /// # Panics
         ///
         /// Never for this build's own types: each document is generated from the
         /// type it names, and each id is distinct.
         pub(crate) fn registry() -> Registry {
-            let mut registry = onemessagebus_agent::registry();
+            let mut registry = crate::vocabulary::registry();
             $(
                 registry
                     .register::<$payload>()
@@ -1137,6 +1138,58 @@ mod tests {
     use super::*;
     use crate::event::{registry, ENVELOPE_VERSION, PIPELINE_KINDS};
     use onemessagebus::CheckError;
+
+    /// The registry this crate reads envelopes through holds every id the bus's
+    /// agent profile crate held at its last release, under exactly the document
+    /// it held — so a record any build wrote validates the same way here.
+    ///
+    /// The private half of `tests/registry.rs`'s
+    /// `both_registries_hold_every_captured_id_under_its_captured_document`,
+    /// over the same committed capture; that file's own doc says why it is
+    /// split. `tests/recorded/registry/README.md` says where the capture came
+    /// from.
+    /// A document with every `description` removed, at every depth: what a
+    /// validator reads of it.
+    fn without_prose(document: &serde_json::Value) -> serde_json::Value {
+        match document {
+            serde_json::Value::Object(object) => serde_json::Value::Object(
+                object
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != "description")
+                    .map(|(key, value)| (key.clone(), without_prose(value)))
+                    .collect(),
+            ),
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(without_prose).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
+    #[test]
+    fn the_registry_this_crate_constructs_holds_every_captured_document() {
+        let captured: std::collections::BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            include_str!("../tests/recorded/registry/onemessagebus-agent-0.8.0.json"),
+        )
+        .expect("the capture is JSON");
+        assert!(!captured.is_empty(), "the capture is empty");
+        for (text, document) in &captured {
+            let id: SchemaId = text.parse().expect("an id");
+            let held = registry()
+                .schema(&id)
+                .unwrap_or_else(|| panic!("the registry does not register {text} at all"));
+            // Everything a validator reads, which is the document minus its
+            // prose: `Phase` is `onevcs`'s type now, so its `description` is
+            // written and wrapped there. `tests/registry.rs` is where that
+            // tolerance is pinned to exactly those three pointers.
+            assert_eq!(
+                without_prose(held),
+                without_prose(document),
+                "the registry holds {text} under a document that constrains differently from \
+                 the one `onemessagebus-agent` 0.8.0 registered it under"
+            );
+        }
+    }
 
     /// Every kind this crate emits has its own document, named for the kind and
     /// the envelope version it is written at, and the registry the crate

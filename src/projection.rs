@@ -1778,7 +1778,7 @@ fn fold_invocation(state: &mut RunState, event: &Envelope) {
 
 /// The member an envelope's labels named.
 ///
-/// The agent profile's `Labels` declares `member`, so a label that is not text
+/// [`crate::vocabulary`]'s `Labels` declares `member`, so a label that is not text
 /// never reaches a fold: the bus reader refuses the line, and the store's
 /// integrity report names it as one this build cannot read.
 fn member_label(event: &Envelope) -> MemberLabel {

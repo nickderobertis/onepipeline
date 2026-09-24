@@ -858,6 +858,8 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
 /// named by `results`: a maintain command that failed, one that timed out under
 /// the identity's own bound, an identity the sibling could not maintain, and a
 /// host whose identities could not be enumerated at all.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] This
+// src/maintenance.rs journey has no narrower Nx edge: noteJourneySource includes src/**/*.
 #[test]
 fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_host_are_recorded() {
     let world = pooled_world("maintenance-failures", Some(FAST_PACE))
@@ -940,7 +942,15 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
     assert_eq!(identity["identity"], SERVICE_IDENTITY, "{refused}");
     assert!(identity.get("outcome").is_none(), "{refused}");
     let error = identity["error"].as_str().expect("an error");
-    assert!(error.contains("maintain command"), "{refused}");
+    // The **key an operator edits**, which is what the sibling's own refusal is
+    // written to name and the only part of it this crate depends on: `onevcs`
+    // 0.32.0 states it as `maintain.command is an empty list: name the program
+    // to run and its arguments`, where 0.30.1 said `naming a maintain command
+    // with no …`. The sentence is that library's to word and it moved; what must
+    // not move is that the sentence reaches the record whole, and that it tells
+    // a reader which key to go and fix. The constant behind it is private there,
+    // so this is a literal rather than a re-export.
+    assert!(error.contains("maintain.command"), "{refused}");
     world
         .run(&["results", "unmaintainable"])
         .exited(0)
@@ -974,6 +984,7 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
         .out_has("the host's identities could not be enumerated:");
     release(&unlistable, "unlistable");
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Both halves of each script fixture answer the same way: what one platform's
 /// half names, the other's names too.
