@@ -45,6 +45,49 @@ fn the_clean_step_removes_a_test_binary_an_earlier_run_left() {
     );
 }
 
+#[test]
+fn the_default_clean_step_removes_the_instrumented_tree() {
+    // Give the recipe its own clone-sized root so this test cannot delete the
+    // instrumented binaries that the running suite still needs.
+    let scratch = repo_root().join(format!(
+        "target/onepipeline-coverage-default-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&scratch);
+    fs::create_dir_all(&scratch).expect("create a clean recipe root");
+    fs::copy(repo_root().join("justfile"), scratch.join("justfile"))
+        .expect("copy the real recipe to the isolated root");
+    fs::copy(repo_root().join("Cargo.toml"), scratch.join("Cargo.toml"))
+        .expect("copy the manifest read while parsing the justfile");
+    let tree = scratch.join("target/llvm-cov-target");
+    let deps = tree.join("debug/deps");
+    fs::create_dir_all(&deps).expect("create an old instrumented build");
+    let stale = deps.join("onepipeline_left_by_an_earlier_run-0123456789abcdef");
+    fs::copy(env::current_exe().expect("test executable"), &stale)
+        .expect("plant the stale test binary");
+
+    let cleaned = Command::new("just")
+        .arg("--justfile")
+        .arg(scratch.join("justfile"))
+        .arg("--working-directory")
+        .arg(&scratch)
+        .arg("_crate-coverage-clean")
+        .output()
+        .expect("run the clean recipe with its default argument");
+    assert!(cleaned.status.success(), "{}", said(&cleaned));
+    assert!(
+        !stale.exists(),
+        "the stale binary survived: {}",
+        said(&cleaned)
+    );
+    assert!(
+        !tree.exists(),
+        "the instrumented tree survived: {}",
+        said(&cleaned)
+    );
+    fs::remove_dir_all(&scratch).expect("remove the isolated recipe root");
+}
+
 #[cfg(unix)]
 #[test]
 fn the_clean_step_removes_a_tree_reached_through_an_inbound_symlink() {
@@ -115,33 +158,47 @@ fn the_clean_steps_default_tree_is_the_one_this_run_is_measured_from() {
 fn the_clean_step_passes_over_a_name_that_reaches_nothing() {
     let never = repo_root().join("target/coverage-clean-probe-never-built");
     let _ = fs::remove_dir_all(&never);
-    // Relative to the recipe's working directory, which is this clone's root.
-    let mistyped = repo_root().join("coverage-clean-probe-mistyped");
-    let _ = fs::remove_dir_all(&mistyped);
-
-    for name in [
-        never.as_os_str(),
-        OsStr::new("coverage-clean-probe-mistyped/tree"),
-    ] {
-        let cleaned = just(&["_crate-coverage-clean".as_ref(), name]);
-        assert!(
-            cleaned.status.success(),
-            "the clean step failed over {name:?}, which names nothing to remove: \
-             {}",
-            said(&cleaned)
-        );
-    }
+    let cleaned = just(&["_crate-coverage-clean".as_ref(), never.as_os_str()]);
+    assert!(cleaned.status.success(), "{}", said(&cleaned));
 
     assert!(
         !never.exists(),
         "the clean step created {}, which the instrumented build owns",
         never.display()
     );
-    assert!(
-        !mistyped.exists(),
-        "the clean step created {} out of a name that reached nothing",
-        mistyped.display()
-    );
+
+    let parent = repo_root().join(format!(
+        "target/coverage-clean-nested-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&parent).expect("create a nested build directory");
+    let missing = parent.join("never-built");
+    let cleaned = just(&["_crate-coverage-clean".as_ref(), missing.as_os_str()]);
+    assert!(cleaned.status.success(), "{}", said(&cleaned));
+    assert!(!missing.exists(), "the clean step created a missing tree");
+    fs::remove_dir(&parent).expect("remove the nested build directory");
+}
+
+#[test]
+fn the_clean_step_refuses_a_missing_name_outside_the_build_directory() {
+    let mistyped = repo_root().join("coverage-clean-probe-mistyped");
+    let _ = fs::remove_dir_all(&mistyped);
+    for (name, diagnostic) in [
+        (
+            "coverage-clean-probe-mistyped/tree",
+            "parent cannot be entered",
+        ),
+        ("coverage-clean-probe-mistyped", "parent is outside"),
+    ] {
+        let cleaned = just(&["_crate-coverage-clean".as_ref(), OsStr::new(name)]);
+        assert!(!cleaned.status.success(), "{}", said(&cleaned));
+        assert!(
+            String::from_utf8_lossy(&cleaned.stderr).contains(diagnostic),
+            "{}",
+            said(&cleaned)
+        );
+    }
+    assert!(!mistyped.exists(), "the refused name was created");
 }
 
 #[test]
@@ -374,6 +431,29 @@ fn the_clean_step_refuses_a_build_directory_whole() {
     fs::copy(repo_root().join("Cargo.toml"), clone.join("Cargo.toml"))
         .unwrap_or_else(|e| panic!("could not give the stand-in clone a manifest: {e}"));
 
+    let wrong_root = Command::new("just")
+        .arg("--justfile")
+        .arg(repo_root().join("justfile"))
+        .arg("--working-directory")
+        .arg(&clone)
+        .arg("_crate-coverage-clean")
+        .arg(&instrumented)
+        .output()
+        .expect("run the repository recipe outside its own root");
+    assert!(!wrong_root.status.success(), "{}", said(&wrong_root));
+    assert!(
+        String::from_utf8_lossy(&wrong_root.stderr).contains("outside this clone's root"),
+        "{}",
+        said(&wrong_root)
+    );
+    assert!(
+        instrumented.exists(),
+        "the wrong-root call removed the tree"
+    );
+
+    fs::copy(repo_root().join("justfile"), clone.join("justfile"))
+        .expect("give the stand-in clone the real recipe");
+
     let refused = just_from(
         &clone,
         &["_crate-coverage-clean".as_ref(), build.as_os_str()],
@@ -475,13 +555,12 @@ fn just(args: &[&OsStr]) -> Output {
     just_from(&repo_root(), args)
 }
 
-/// The same recipes against a working directory of the caller's choosing, which
-/// is how a test reaches the branch that refuses a build directory whole without
-/// naming the one this tier is running out of.
+/// The same recipe in a stand-in clone, which lets a test name its whole build
+/// directory without touching the one this tier is running out of.
 fn just_from(working: &Path, args: &[&OsStr]) -> Output {
     Command::new("just")
         .arg("--justfile")
-        .arg(repo_root().join("justfile"))
+        .arg(working.join("justfile"))
         .arg("--working-directory")
         .arg(working)
         .args(args)

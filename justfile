@@ -249,6 +249,7 @@ offline-tiers := "(" + rest-tier + ") or (" + note-tier + ")"
 # `tests/coverage.rs` holds this against where `LLVM_PROFILE_FILE` points — a run
 # configured to build elsewhere fails there rather than cleaning the wrong tree.
 llvm-cov-target-dir := justfile_directory() / "target" / "llvm-cov-target"
+export ONEPIPELINE_COVERAGE_ROOT := justfile_directory()
 
 # Remove the tree before either test tier: a stale binary retains a coverage
 # map and would count as uncovered in the later report.
@@ -256,14 +257,22 @@ llvm-cov-target-dir := justfile_directory() / "target" / "llvm-cov-target"
 # Resolve existing arguments before removal so symlinks cannot reach outside
 # this clone's build directory. A missing tree is normal on the first run;
 # existing paths that cannot be entered fail instead of silently passing.
-# llmlint: ignore-block[cli_output_contract] Both path refusals require the
-# caller to supply an enterable target under this clone's build directory.
-# They share exit 1 and give distinct stderr, as _crate-coverage does.
+# llmlint: ignore-block[cli_output_contract] This private recipe's diagnostic
+# text is not a public output contract. Each refusal names its invalid input
+# and exits 1; successful cleanup is quiet.
 _crate-coverage-clean dir=llvm-cov-target-dir:
     @if [ -z "$1" ]; then echo "refusing to clean an empty target path" >&2; exit 1; fi; \
-      if [ ! -e "$1" ] && [ ! -L "$1" ]; then exit 0; fi; \
+      root="$(cd -P -- "$ONEPIPELINE_COVERAGE_ROOT" && pwd -P)"; \
+      if [ "$(pwd -P)" != "$root" ]; then echo "refusing to clean from outside this clone's root ($root)" >&2; exit 1; fi; \
+      built="$root/target"; \
+      if [ ! -e "$1" ] && [ ! -L "$1" ]; then \
+        parent="$(dirname -- "$1")"; \
+        reached_parent="$(cd -P -- "$parent" && pwd -P)" || { echo "refusing to clean '$1': its parent cannot be entered" >&2; exit 1; }; \
+        case "$reached_parent" in "$built"|"$built"/?*) exit 0;; \
+          *) echo "refusing to clean '$1': its parent is outside this clone's build directory ($built)" >&2; exit 1;; \
+        esac; \
+      fi; \
       reached="$(cd -P -- "$1" && pwd -P)" || { echo "refusing to remove '$1': it is there but is not a directory this step can enter, so where it leads cannot be held against this clone's build directory — nothing was removed" >&2; exit 1; }; \
-      built="$(pwd -P)/target"; \
       case "$reached" in "$built"/?*) ;; \
         *) echo "refusing to remove '$reached': the instrumented tree has to sit under this clone's build directory ($built), which is where .cargo/config.toml pins every build in it — nothing was removed" >&2; exit 1;; \
       esac; \
