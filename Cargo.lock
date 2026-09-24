@@ -1279,9 +1279,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneagentgraph"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21cf18ded241e1be4cd1da486e42e4674c3023c9c303b600dc71d87ffa93ec46"
+checksum = "65cf3ba431a02c5e75530397c27b738e7a133d9b2bd29b247a3be187a926ef2c"
 dependencies = [
  "clap",
  "libc",
