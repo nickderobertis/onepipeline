@@ -1766,6 +1766,12 @@ fn a_run_belongs_to_the_session_that_launched_it() {
         .out_has("no runs recorded");
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey proves
+// the order `start` in `src/driver.rs` writes the launch record and the journal's first
+// append in, so any change under `src/` can move it. `nx.json`'s `noteJourneySource`, the
+// one separately edged Rust test input, itself begins `{workspaceRoot}/src/**/*`, so no
+// narrower edge exists. Its one second wait is the observer startup bound the refusal
+// needs, overridden down from the default.
 /// The owner a run's first summary document names, with nothing appended after
 /// it to write a second.
 ///
@@ -1794,7 +1800,7 @@ fn a_launch_that_refuses_after_its_first_append_still_belongs_to_its_session() {
 
     world.run(&["runs"]).exited(0).out_has("[mine]");
     world.run(&["runs", "--mine"]).exited(0).out_has("refused");
-}
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 #[test]
 fn stop_refuses_another_sessions_run_and_force_names_the_owner() {
