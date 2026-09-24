@@ -99,13 +99,19 @@ if ! tar -xzf "$tmp/$archive" -C "$tmp"; then
   echo "                $release and update this script." >&2
   exit 1
 fi
-binary="$(find "$tmp" -type f -name freeze -perm -u+x | head -1)"
-if [ -z "$binary" ]; then
-  echo "install-freeze: $archive carries no 'freeze' executable, so the release's" >&2
-  echo "                layout has changed. Check the release at $release and" >&2
-  echo "                update this script." >&2
+# Exactly one, rather than the first the filesystem happens to list: the archive
+# is a third party's layout, and an unpacked tree carrying two `freeze`
+# executables is one this script has no reading of. Installing whichever came
+# first would pin every committed shot to a renderer nobody chose.
+mapfile -t found < <(find "$tmp" -type f -name freeze -perm -u+x | sort)
+if [ "${#found[@]}" -ne 1 ]; then
+  echo "install-freeze: $archive unpacked to ${#found[@]} 'freeze' executables and" >&2
+  echo "                this script installs exactly one, so the release's layout" >&2
+  echo "                has changed. Check the release at $release and update this" >&2
+  echo "                script." >&2
   exit 1
 fi
+binary="${found[0]}"
 if ! install -m 0755 "$binary" "$into/freeze"; then
   echo "install-freeze: could not install the renderer into $into (the message" >&2
   echo "                above is the system's). Pass a directory you can write" >&2

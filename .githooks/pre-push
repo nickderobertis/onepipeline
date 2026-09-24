@@ -60,13 +60,32 @@ esac
 # knows and has not blessed, and only the second is a state a developer can be in.
 LANES="$(sed -n 's/^arches *= *\[\(.*\)\].*/\1/p' screencomp.toml \
   | tr -d '"[:blank:]' | tr ',' '\n' | grep -v '^$' || true)"
+# A `[capture].arches` that did not parse to lane names is this tree's own file
+# being wrong rather than this host being unusual, so it is refused outright
+# like an architecture `host-arch.sh` has no spelling for. Read leniently, it
+# would arrive below as "no lane matches", which reads as a host to add a lane
+# for and is a different thing to go and do.
+if [ -z "$LANES" ] || printf '%s\n' "$LANES" | grep -qvE '^[A-Za-z0-9_]+$'; then
+  echo "pre-push: screencomp.toml's [capture].arches did not read as a list of" >&2
+  echo "          lane names; it parsed to [${LANES//$'\n'/, }]. Fix that line —" >&2
+  echo "          the guard classifies this host's lane against" >&2
+  echo "          shots/baseline/<lane>.json and cannot pick one out of that." >&2
+  exit 1
+fi
 LANE="$(bash screenshots/host-arch.sh)"
 MANIFEST="shots/baseline/${LANE}.json"
 GALLERY="shots/review"
 CURRENT="shots/current"
 
-# No-op under CI: the visual-docs workflow is the source of truth there.
-[ -n "${CI:-}" ] && exit 0
+# No-op under CI: the visual-docs workflow is the source of truth there. `CI` is
+# the platform's variable rather than this repository's — GitHub spells it
+# `true`, others `1` — so it is read for the values that say "this is CI" and
+# nothing else. An unrecognised one is not a claim that this is CI, and the
+# answer to it is to run the guard: being wrong that way costs a capture, and
+# being wrong the other way turns the gate off without saying so.
+case "${CI:-}" in
+  1 | true | yes | on) exit 0 ;;
+esac
 
 # llmlint: ignore-block[cli_output_contract] every ending below reports that the guard
 # could not evaluate this push and then lets the push through, and that is the contract a
@@ -142,6 +161,15 @@ else
       exit 0
     fi
     if [[ "$remote_sha" =~ $zero ]] || ! [[ "$remote_sha" =~ $object_name ]]; then
+      # Forty zeroes is git saying the remote does not carry this branch yet.
+      # Anything else that is not an object name is git saying something this
+      # hook has no reading of, and it decides the range below — so say that it
+      # did rather than let the base change silently.
+      if ! [[ "$remote_sha" =~ $zero ]]; then
+        echo "pre-push: git named '$remote_sha' as the remote's tip, which is not an" >&2
+        echo "          object name. Taking the range from origin/HEAD instead, which" >&2
+        echo "          captures more than this push rather than less." >&2
+      fi
       base="$(git merge-base origin/HEAD "$local_sha" 2>/dev/null || true)"
       [ -n "$base" ] && ranges+=("${base}..${local_sha}") || ranges+=("$local_sha")
     else

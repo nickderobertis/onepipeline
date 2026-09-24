@@ -102,32 +102,26 @@ say:
   per-clone state `just bootstrap` sets; `tests/provisioning.rs` holds that.
   The directory carries the visual guard **and nothing else** — `just gate` stays
   unhooked, as it already was.
-- **A hook's environment is not a shell's.** Git runs the guard with `GIT_DIR`
-  and `GIT_WORK_TREE` naming the repository being pushed, and `GIT_DIR` beats
-  `-C` and beats discovery — so an inherited one seeds the world's throwaway
-  repositories into the repository under push. The world states its whole git
-  environment and inherits none of it (`clear_inherited_settings` in
-  `world.py`). Rehearse with `just screenshots-guard`, which runs the real hook
-  with real refs on its stdin and pushes nothing: neither `just screenshots` nor
-  `just gate` reaches what only a hook reaches.
+- **A hook's environment is not a shell's.** Git exports `GIT_DIR` and
+  `GIT_WORK_TREE` naming the repository being pushed, and `GIT_DIR` beats `-C`
+  and beats discovery, so an inherited one seeds the throwaway repositories into
+  that repository. The world states its whole git environment and inherits none
+  (`clear_inherited_settings` in `world.py`). What holds the two in step:
+  `just screenshots-guard` runs the real hook under a hook's environment with
+  real refs on stdin and pushes nothing, and `tests/visual_docs.rs` drives
+  `world.py` against real `git`. Neither `just screenshots` nor `just gate`
+  reaches what only a hook reaches.
 - **A failed step reports both streams** — `world.said`, which every step goes
   through. `git` writes `nothing to commit` to *stdout*, so a refusal quoting
-  `stderr` alone arrives blank.
-- Neither of those needs `freeze` or `screencomp`, so neither is excused from
-  the offline tier: `tests/visual_docs.rs` drives `world.py` against real `git`
-  for both.
+  `stderr` alone arrives blank. Held by the same tier: neither property needs
+  `freeze` or `screencomp`, so neither is excused from it.
 - **The two switches are spelled, not merely present.** `SCREENSHOTS_NO_BUILD`
   (`capture.sh`) and `SCREENCOMP_GUARD_REQUIRE` (the hook) each take `0`/`1`,
   `false`/`true` or `no`/`yes`, and refuse anything else. Present-means-on would
   read a `=0` as "on" — a skipped build photographs whatever binary was lying in
   `target/`, which is a baseline blessed for code nobody here has.
-- **`SCREENCOMP_GUARD_REQUIRE` is read before anything that can refuse.** Every
-  ending where the hook could not evaluate a push consults it, and a host whose
-  arch `[capture].arches` does not declare is one of them: it has no committed
-  baseline to classify against. Read after that check, the switch decided
-  nothing on the machines that reached it first — an `arm64` developer was
-  blocked while holding `SCREENCOMP_GUARD_REQUIRE=0`, and the same thing failed
-  the macOS leg of a test every other leg passed. So an ending that depends on
-  the host is reached in `tests/visual_docs.rs` from a fixture tree declaring a
-  lane no machine is, rather than from whichever runner happens to be that
-  shape; a journey only one platform can reach is one only that platform checks.
+- **`SCREENCOMP_GUARD_REQUIRE` is parsed before any path that can refuse**, so
+  every "could not evaluate this push" ending answers to it — a host whose arch
+  `[capture].arches` does not declare included. Reach a host-dependent ending
+  from a fixture tree rather than from a runner of that shape: a journey only
+  one platform can reach is one only that platform checks.
