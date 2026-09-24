@@ -1262,12 +1262,7 @@ fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item(
 /// how fast it reads, not how much there is to read.
 const CONCURRENT_NODES: usize = 12;
 
-/// One shadow document read the way a `local-md` source reads one, or why it could not be.
-///
-/// The reader the projection's own `project copy` is: front matter between the document's
-/// first two `---` lines, parsed as YAML. A document replaced in place is truncated before
-/// it is rewritten, so this is what a reader arriving inside that window gets — an empty
-/// file, or a front matter that stops mid-key.
+/// Parse a shadow document and check its known task body, or report the torn read.
 fn shadow_document(path: &Path) -> Result<Value, String> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -1279,12 +1274,11 @@ fn shadow_document(path: &Path) -> Result<Value, String> {
         Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => return Ok(Value::Null),
         Err(refused) => return Err(format!("{} could not be read: {refused}", path.display())),
     };
-    let front = text
+    let (front, body) = text
         .strip_prefix("---\n")
         .ok_or_else(|| format!("{} opens no front matter: {text:?}", path.display()))?
         .split_once("---\n")
-        .ok_or_else(|| format!("{} closes no front matter: {text:?}", path.display()))?
-        .0;
+        .ok_or_else(|| format!("{} closes no front matter: {text:?}", path.display()))?;
     let parsed: Value = serde_norway::from_str(front)
         .map_err(|error| format!("{} is not YAML ({error}): {text:?}", path.display()))?;
     if parsed.get("title").is_none() {
@@ -1292,6 +1286,18 @@ fn shadow_document(path: &Path) -> Result<Value, String> {
             "{} carries no title, so it is not a whole document: {text:?}",
             path.display()
         ));
+    }
+    if path.parent().and_then(Path::file_name) != Some(std::ffi::OsStr::new("projects")) {
+        let id = parsed["metadata"]["onepipeline.id"]
+            .as_str()
+            .ok_or_else(|| format!("{} carries no task id: {text:?}", path.display()))?;
+        let expected = agent(id, &[])["task"].as_str().unwrap().to_owned();
+        if body != expected {
+            return Err(format!(
+                "{} has a partial task body: {body:?}",
+                path.display()
+            ));
+        }
     }
     Ok(parsed)
 }
@@ -1335,19 +1341,7 @@ fn shadow_documents(dir: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// Two runs projecting at once never show a reader a half-written shadow document.
-///
-/// The shadow store a projection builds is a directory a reader *lists*: `project copy`
-/// reads it as a `local-md` source, and so does anything else pointed at the run. Replaced
-/// in place, each document is truncated before it is rewritten, and a reader arriving in
-/// that window parses an empty file — the run's own board reported as malformed, from a
-/// run that did nothing wrong.
-///
-/// So this drives two real runs at once, each rooted in a source of its own, and reads
-/// both shadow stores as fast as the host allows for as long as either is projecting.
-/// Every document read has to be whole. The journey also counts the rewrites it read
-/// *across*, so a loop that raced nothing cannot pass by reading two settled stores over
-/// and over.
+/// Two real runs project while a reader checks each complete shadow document.
 // llmlint: ignore-block[tests_mirror_real_usage] the claim is about a file a reader can
 // catch mid-write, and no CLI output reports one: what a torn read produces is the store's
 // own refusal, in another process, on a document this crate wrote — nondeterministically,
@@ -1356,6 +1350,10 @@ fn shadow_documents(dir: &Path) -> Vec<PathBuf> {
 // the property, it is the same read `local-md` performs, and a window microseconds wide is
 // caught by rate or not at all — a pass that listed a directory or spawned a process per
 // look would pass over a torn tree by never arriving inside one.
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] This journey's 7.5s
+// measured cost belongs with the compiled binary's write-back tests. The note
+// project's implicit edge does not make a separate project for one filesystem race
+// useful; the projection and store run here through the same binary as its peers.
 #[test]
 fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
     let world = World::new("writeback-concurrent-shadow");
@@ -1391,7 +1389,7 @@ fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
         .collect();
 
     let mut passes = 0_usize;
-    let mut rewrites = 0_usize;
+    let mut observed_changes = 0_usize;
     let mut last: Vec<Vec<Value>> = vec![Vec::new(); runs.len()];
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
@@ -1403,12 +1401,12 @@ fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
                     Ok(read) => seen.push(read),
                     Err(torn) => panic!(
                         "a reader caught a shadow document half-written, {passes} passes and \
-                         {rewrites} rewrites in: {torn}"
+                         {observed_changes} changes in: {torn}"
                     ),
                 }
             }
             if seen != last[nth] {
-                rewrites += 1;
+                observed_changes += 1;
                 last[nth] = seen;
             }
         }
@@ -1433,8 +1431,8 @@ fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
     // reader that read across no rewrite saw one settled state, and a run that published
     // nothing gave it none to read.
     assert!(
-        rewrites >= 10,
-        "the reader never overlapped the projections it is about: {rewrites} rewrites read \
+        observed_changes >= 10,
+        "the reader never overlapped the projections it is about: {observed_changes} changes read \
          across {passes} passes"
     );
     for run in runs {

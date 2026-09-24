@@ -2334,18 +2334,7 @@ impl World {
         self.root.join("plan-store")
     }
 
-    /// A `local-md` source root of this world's own, named for one plan.
-    ///
-    /// For a journey that has **two runs live at once**. Both project their board back as
-    /// they go, and the store's own writer replaces a document in place, so two runs
-    /// sharing one root have each one's write-back landing in the other's fixture — which
-    /// is the journey's own setup rather than anything the engine did, and it fails as a
-    /// document read between a truncate and a rewrite. Rooted apart, each run reads and
-    /// writes only what it was given, and what the journey measures is the two runs.
-    ///
-    /// The pair of it is [`run_in`](World::run_in): this says where the plan is written,
-    /// and that points a run at the same place. A world's own [`store`](World::store)
-    /// stays what every single-run journey uses.
+    /// A separate `local-md` source root for one concurrent run.
     pub fn store_apart(&self, name: &str) -> PathBuf {
         self.root.join(format!("plan-store-{name}"))
     }

@@ -1364,7 +1364,22 @@ pub fn write_atomic(path: &Path, bytes: &[u8], durability: Durability) -> Result
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => PathBuf::from("."),
     };
+    let mut missing = Vec::new();
+    if durability.syncs() {
+        let mut dir = parent.as_path();
+        while !dir.try_exists().map_err(ledger)? {
+            missing.push(dir.to_path_buf());
+            dir = match dir.parent() {
+                Some(ancestor) if !ancestor.as_os_str().is_empty() => ancestor,
+                _ => Path::new("."),
+            };
+        }
+    }
     fs::create_dir_all(&parent).map_err(ledger)?;
+    for created in missing.into_iter().rev() {
+        let ancestor = created.parent().unwrap_or_else(|| Path::new("."));
+        disk::sync_entry(ancestor).map_err(ledger)?;
+    }
     // The temporary carries this process's pid so two writers racing the same
     // target cannot truncate each other's partial file before the rename.
     let temp = path.with_extension(format!("tmp.{}", sys::pid()));
@@ -1388,18 +1403,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8], durability: Durability) -> Result
     published.map_err(ledger)
 }
 
-/// One write, from the temporary nobody is looking for to the published name.
-///
-/// The rename is what publishes, so whatever `durability` asks for straddles it:
-/// the contents reach the disk before the name exists, and the entry that name is
-/// reaches it after. Which of those a write makes is [`Durability`]'s own
-/// account.
-///
-/// Every step here is asked for through [`disk`], which records it. What a sync
-/// buys is visible only to a host that stops between two of these calls, and no
-/// test can arrange that; so what the unit tests read back instead is that each
-/// call was made, in the order it has to be made in — and they refuse one at a
-/// time to drive the failure path above.
+/// Publish one temporary, recording host calls through [`disk`] for the unit tests.
 fn publish(
     temp: &Path,
     path: &Path,
@@ -1424,24 +1428,12 @@ fn publish(
     Ok(())
 }
 
-/// The three things [`publish`] asks of the host once its temporary is written:
-/// sync the contents, publish the name, sync the directory entry that name is.
-///
-/// A module of its own because the order of those three is the whole of what
-/// [`Durability::Record`] promises, and the promise is about a host that stops
-/// between two of them — which nothing here can arrange. So each call is recorded
-/// as it is made, against the real filesystem, and the unit tests read that
-/// recording back through [`write_atomic`] rather than through the source.
-///
-/// Production records nothing and refuses nothing: [`record`] is an empty
-/// `cfg(not(test))` function, and the binary the e2e journeys drive is built
-/// without `cfg(test)`.
+/// Record host calls in unit tests; production calls the filesystem directly.
 mod disk {
     #[cfg(test)]
     use std::cell::RefCell;
     use std::{fs, io, path::Path};
 
-    /// One thing [`super::publish`] asks of the host.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(super) enum Step {
         /// The temporary's contents, pushed to the disk before the rename.
@@ -1452,13 +1444,11 @@ mod disk {
         Entry,
     }
 
-    /// Push the temporary's contents to the disk.
     pub(super) fn sync_contents(file: &fs::File) -> io::Result<()> {
         record(Step::Contents)?;
         file.sync_all()
     }
 
-    /// Publish the temporary under the destination's name.
     pub(super) fn publish(temp: &Path, path: &Path) -> io::Result<()> {
         record(Step::Publish)?;
         fs::rename(temp, path)
@@ -1478,23 +1468,24 @@ mod disk {
         synced(dir)
     }
 
-    /// The host's own way to sync a directory handle.
     #[cfg(unix)]
     fn synced(dir: &Path) -> io::Result<()> {
         fs::File::open(dir)?.sync_all()
     }
 
-    /// Windows opens no directory through `std`, so there is nothing to ask it.
-    ///
-    /// The step above is still recorded, because what it records is what this
-    /// write *asked for*; what the host does with the ask is the host's. A run
-    /// there gets the rename, which is the half every reader depends on.
-    #[cfg(not(unix))]
-    fn synced(_dir: &Path) -> io::Result<()> {
-        Ok(())
+    #[cfg(windows)]
+    fn synced(dir: &Path) -> io::Result<()> {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)?
+            .sync_all()
     }
 
-    /// Nothing, in every build but the one `cargo test` compiles.
     #[cfg(not(test))]
     fn record(_step: Step) -> io::Result<()> {
         Ok(())
@@ -4349,6 +4340,37 @@ mod tests {
             asked,
             vec![disk::Step::Contents, disk::Step::Publish, disk::Step::Entry],
             "a record did not reach the disk on both sides of the rename that published it"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("the destination reads"),
+            "the record"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_record_syncs_each_new_parent_entry_before_publishing() {
+        let root = scratch("new-record-parents");
+        let path = root.join("one").join("two").join("checkpoint.json");
+
+        let watch = disk::watching(None);
+        write_atomic(&path, b"the record", Durability::Record).expect("it is published");
+        let asked = watch.asked();
+        drop(watch);
+
+        // A crash between directory creation and publication cannot be induced in a
+        // process test. Record the real filesystem calls instead: without either
+        // parent sync this order loses an Entry before Contents.
+        assert_eq!(
+            asked,
+            vec![
+                disk::Step::Entry,
+                disk::Step::Entry,
+                disk::Step::Contents,
+                disk::Step::Publish,
+                disk::Step::Entry,
+            ],
+            "a new parent was not synced before its record was published"
         );
         assert_eq!(
             fs::read_to_string(&path).expect("the destination reads"),
