@@ -282,11 +282,10 @@ impl Maintained {
     /// schedule and the pool are working: `not-due`, `in-use`, no command, no
     /// slots.
     ///
-    /// Which side each answer falls on is
-    /// [divergence 89](../docs/contract-divergences.md), a proposal the contract's
-    /// owner has not ruled on; the reasoning lives there rather than here, and
-    /// `tests/e2e/maintenance.rs` drives both loud slot answers through the
-    /// compiled binary.
+    /// Which side each answer falls on is the contract's pool-maintenance clause,
+    /// as ruled in [divergence 89](../docs/contract-divergences.md), where the
+    /// reasoning lives; `tests/e2e/maintenance.rs` drives both loud slot answers
+    /// through the compiled binary.
     fn is_recorded(&self) -> bool {
         match &self.outcome {
             Err(_) | Ok(IdentityOutcome::Claimed { .. }) => true,

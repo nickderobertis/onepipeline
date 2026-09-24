@@ -6,19 +6,19 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82 and 83** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83 and 89** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80 and 84–89 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80 and 84–88 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80 and 84 to 89 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80 and 84 to 88 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -7196,9 +7196,20 @@ swallowed a worktree it could not remove, left an interrupted draft's worktree i
 the checkout's list, released its lock before git's add finished, handled a
 signal it was started ignoring, or printed a synopsis other than the one above.
 
-## 89. A due slot the sweep could not maintain is silent, and `unavailable` has nowhere to be read — OPEN
+## 89. A due slot the sweep could not maintain is silent, and `unavailable` has nowhere to be read — RESOLVED
 
-**Proposal (for the planner who owns the contract): amend the pool-maintenance
+**Ruling: approved as implemented. A `pool-maintenance` record is journalled when
+some slot `ran`, is `unavailable`, or is `broken`, or when some identity was
+`claimed` or failed; `not-due` and `in-use` stay silent beside
+`no-maintain-command` and `no-slots`.** The planner who owns the contract gave two
+reasons: `unavailable` is the per-slot form of the `claimed` the contract already
+records, since it arises only for a due slot, and a silent `broken` would leave
+nothing telling an operator that a slot needs a person. `docs/contract.md`'s
+pool-maintenance paragraph now states both halves, and the planner also confirmed
+the closing paragraph below: no declared document changed shape, so no schema
+version or golden is owed.
+
+**Proposal as it was put (for the planner who owns the contract): amend the pool-maintenance
 line's record clause so a `pool-maintenance` record is written when some slot
 ran, **some due slot could not be maintained** — `unavailable` or `broken` —
 some identity was `claimed`, or one failed; and so the silent set is
@@ -7267,11 +7278,8 @@ discovering it.
 over the run's planner channel at correlation
 `c-6a04137e944f1cfd9f964acfaf54279b`, with a 120-second window, and again at
 `c-f9ad62d9b1ed68adacd920d7061348b0`, with a 900-second one, naming the three
-options above. Both returned `timeout`; both questions stand on the channel,
-marked abandoned, and either can still be answered with `onepipeline reply
-<run> --correlation <id>`. So this entry is OPEN in the ordinary way this file
-means it — the code took the nearest thing that exists and the proposal is
-waiting — rather than because nobody put it.
+options above. Both returned `timeout`, and the ruling at the head of this entry
+was delivered afterwards, into the dispatch that followed.
 
 **No declared document's shape changed with it, so nothing here is owed a schema
 version or a golden.** Worth writing down, because the opposite is the natural
