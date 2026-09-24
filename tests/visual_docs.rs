@@ -145,8 +145,8 @@ raise SystemExit("the seed commit succeeded, so nothing was reported and this pr
     /// -A` / `commit` that seed each throwaway repository would act on that one
     /// instead. The hazard is demonstrated before it is closed: the same `git`
     /// question is asked from the throwaway directory on either side of
-    /// `clear_inherited_settings`, and the answer must move from the caller's
-    /// repository to the throwaway one.
+    /// `clear_inherited_engine_and_git_settings`, and the answer must move from
+    /// the caller's repository to the throwaway one.
     #[test]
     fn an_exported_git_dir_does_not_decide_which_repository_the_world_seeds() {
         let (_scratch, root) = scratch("git-dir");
@@ -175,7 +175,7 @@ def whose_repository():
     ).stdout.strip()
 
 print("before", whose_repository())
-world.clear_inherited_settings()
+world.clear_inherited_engine_and_git_settings()
 print("after", whose_repository())
 print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
 "#,

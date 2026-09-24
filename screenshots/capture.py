@@ -144,7 +144,7 @@ def uncovered_guard_path_refusal() -> str | None:
 
 
 def main() -> int:
-    world_module.clear_inherited_settings()
+    world_module.clear_inherited_engine_and_git_settings()
     for refusal in (screencomp_pin_refusal(), uncovered_guard_path_refusal()):
         if refusal is not None:
             print(refusal, file=sys.stderr)

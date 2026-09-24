@@ -13,8 +13,9 @@ they photographed.
 # instead, by the visual-docs workflow re-deriving the committed baseline on every pull
 # request. The part that needs neither tool is journeyed rather than excused:
 # `tests/visual_docs.rs` drives this file against real `git` for the two properties a
-# rejected push turned up — which repository `clear_inherited_settings` leaves the world's
-# git commands acting on, and that `run`'s refusal carries what the failing command said.
+# rejected push turned up — which repository the world's git commands act on once
+# `clear_inherited_engine_and_git_settings` has run, and that `run`'s refusal carries
+# what the failing command said.
 
 from __future__ import annotations
 
@@ -226,8 +227,8 @@ class World:
     def _environment(self) -> dict:
         # Every setting the engine and its two siblings read, stated by this
         # world. The capturing process's own environment is cleared of them
-        # first (see `clear_inherited_settings`), so nothing an operator exported can
-        # print into a shot or point the journey somewhere else.
+        # first (see `clear_inherited_engine_and_git_settings`), so nothing an
+        # operator exported can print into a shot or point the journey elsewhere.
         path = os.pathsep.join([str(self.bin), os.environ.get("PATH", "")])
         stated = os.environ.get("SHOTS_ONETASKGRAPH_BIN")
         if stated:
@@ -255,9 +256,10 @@ class World:
                 # Every git setting this world runs under is stated here, and
                 # nothing inherited survives the comprehension above: a hook's
                 # `GIT_DIR` would make the seed commits below land in the
-                # repository being pushed (see `clear_inherited_settings`), and
-                # a host `/etc/gitconfig` would decide what these repositories
-                # are, which is this world's to say.
+                # repository being pushed (see
+                # `clear_inherited_engine_and_git_settings`), and a host
+                # `/etc/gitconfig` would decide what these repositories are,
+                # which is this world's to say.
                 "GIT_CONFIG_GLOBAL": str(self.root / "gitconfig"),
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_AUTHOR_NAME": "onepipeline shots",
@@ -499,8 +501,8 @@ def said(done: subprocess.CompletedProcess) -> str:
     reports on stdout, and `git` is one of those: `git commit` with nothing
     staged exits non-zero having written `nothing to commit` to *stdout*. That
     is not hypothetical — it is how a capture once failed, under the `GIT_DIR`
-    defect `clear_inherited_settings` now closes, with the words "Fix what its
-    own error below names" followed by nothing at all. A reader given no
+    defect `clear_inherited_engine_and_git_settings` now closes, with the words
+    "Fix what its own error below names" followed by nothing at all. A reader given no
     diagnostic cannot tell a silent command from a message that was thrown away,
     so both streams are reported, each named, and a command that genuinely said
     nothing says so in words.
@@ -523,7 +525,7 @@ def run(argv: list[str], env: dict) -> None:
         )
 
 
-def clear_inherited_settings() -> None:
+def clear_inherited_engine_and_git_settings() -> None:
     """Unset every `ONE*_` and `GIT_*` setting, before the capture states its own.
 
     The scenes render the real binary, and this engine and both siblings read
