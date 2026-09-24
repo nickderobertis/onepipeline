@@ -88,6 +88,31 @@ fn the_default_clean_step_removes_the_instrumented_tree() {
     fs::remove_dir_all(&scratch).expect("remove the isolated recipe root");
 }
 
+/// A fresh clone has no build directory at all, and its first coverage run
+/// cleans before anything is built.
+#[test]
+fn the_default_clean_step_passes_on_a_clone_with_no_build_directory() {
+    let scratch = repo_root().join(format!(
+        "target/onepipeline-coverage-fresh-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&scratch);
+    fs::create_dir_all(&scratch).expect("create a clean recipe root");
+    fs::copy(repo_root().join("justfile"), scratch.join("justfile"))
+        .expect("copy the real recipe to the isolated root");
+    fs::copy(repo_root().join("Cargo.toml"), scratch.join("Cargo.toml"))
+        .expect("copy the manifest read while parsing the justfile");
+
+    let cleaned = just_from(&scratch, &["_crate-coverage-clean".as_ref()]);
+    assert!(cleaned.status.success(), "{}", said(&cleaned));
+    assert!(
+        !scratch.join("target").exists(),
+        "the clean step created the build directory: {}",
+        said(&cleaned)
+    );
+    fs::remove_dir_all(&scratch).expect("remove the isolated recipe root");
+}
+
 #[cfg(unix)]
 #[test]
 fn the_clean_step_removes_a_tree_reached_through_an_inbound_symlink() {
@@ -184,11 +209,9 @@ fn the_clean_step_refuses_a_missing_name_outside_the_build_directory() {
     let mistyped = repo_root().join("coverage-clean-probe-mistyped");
     let _ = fs::remove_dir_all(&mistyped);
     for (name, diagnostic) in [
-        (
-            "coverage-clean-probe-mistyped/tree",
-            "parent cannot be entered",
-        ),
-        ("coverage-clean-probe-mistyped", "parent is outside"),
+        ("coverage-clean-probe-mistyped/tree", "is outside"),
+        ("coverage-clean-probe-mistyped", "is outside"),
+        ("target/coverage-clean-probe-absent/../../src", "climbs out"),
     ] {
         let cleaned = just(&["_crate-coverage-clean".as_ref(), OsStr::new(name)]);
         assert!(!cleaned.status.success(), "{}", said(&cleaned));
@@ -199,6 +222,46 @@ fn the_clean_step_refuses_a_missing_name_outside_the_build_directory() {
         );
     }
     assert!(!mistyped.exists(), "the refused name was created");
+}
+
+/// A missing tree beneath a link is bounded by where the link leads.
+#[cfg(unix)]
+#[test]
+fn the_clean_step_bounds_a_missing_name_by_where_its_linked_ancestor_leads() {
+    let id = std::process::id();
+    let beside = repo_root().join(format!("target/coverage-clean-probe-linked-{id}"));
+    let outside = env::temp_dir().join(format!("onepipeline-coverage-linked-{id}"));
+    let inbound = repo_root().join(format!("target/coverage-clean-probe-in-{id}"));
+    let outbound = repo_root().join(format!("target/coverage-clean-probe-out-{id}"));
+    for (link, to) in [(&inbound, &beside), (&outbound, &outside)] {
+        let _ = fs::remove_file(link);
+        fs::create_dir_all(to).unwrap_or_else(|e| panic!("could not create {}: {e}", to.display()));
+        std::os::unix::fs::symlink(to, link)
+            .unwrap_or_else(|e| panic!("could not link {}: {e}", link.display()));
+    }
+
+    let cleaned = just(&[
+        "_crate-coverage-clean".as_ref(),
+        inbound.join("never").as_os_str(),
+    ]);
+    assert!(cleaned.status.success(), "{}", said(&cleaned));
+
+    let refused = just(&[
+        "_crate-coverage-clean".as_ref(),
+        outbound.join("never").as_os_str(),
+    ]);
+    assert!(!refused.status.success(), "{}", said(&refused));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("is outside"),
+        "{}",
+        said(&refused)
+    );
+
+    for (link, to) in [(&inbound, &beside), (&outbound, &outside)] {
+        fs::remove_file(link)
+            .unwrap_or_else(|e| panic!("could not unlink {}: {e}", link.display()));
+        fs::remove_dir(to).unwrap_or_else(|e| panic!("could not remove {}: {e}", to.display()));
+    }
 }
 
 #[test]
@@ -321,11 +384,9 @@ fn the_clean_step_refuses_what_does_not_reach_this_clones_build_directory() {
         .unwrap_or_else(|e| panic!("could not remove {}: {e}", outside.display()));
 }
 
-/// And it refuses what is there but cannot be entered, rather than passing over
-/// it as a name that reaches nothing: a file, a link whose target is gone, or a
-/// directory this account may not search each sits under the build directory by
-/// its spelling, but where it leads cannot be resolved, so the bound cannot be
-/// asked of it and a silent pass would hide the misconfiguration.
+/// And it refuses what is there but cannot be entered: where such a path leads
+/// cannot be held against the build directory, so a silent pass would hide the
+/// misconfiguration.
 #[test]
 fn the_clean_step_refuses_what_is_there_but_cannot_be_entered() {
     let build = repo_root().join("target");
@@ -396,6 +457,18 @@ fn the_clean_step_refuses_what_is_there_but_cannot_be_entered() {
             said(&attempt)
         );
     }
+
+    // A missing tree beneath that file is bounded through the file, which cannot
+    // be entered either.
+    let beneath = file.join("tree");
+    let attempt = just(&["_crate-coverage-clean".as_ref(), beneath.as_os_str()]);
+    assert!(!attempt.status.success(), "{}", said(&attempt));
+    assert!(
+        String::from_utf8_lossy(&attempt.stderr)
+            .contains("its nearest existing ancestor cannot be entered"),
+        "{}",
+        said(&attempt)
+    );
 
     assert!(
         file.is_file(),

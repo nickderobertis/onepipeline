@@ -243,11 +243,8 @@ offline-tiers := "(" + rest-tier + ") or (" + note-tier + ")"
 # runs below report nothing and one merge reports both: the note journeys are
 # their own Nx project, and splitting the run must not split the floor.
 
-# Where `cargo llvm-cov` builds the instrumented tree and writes the profiles:
-# `llvm-cov-target` under the directory `.cargo/config.toml` pins every build in
-# this clone to. Where it *really* is stays cargo-llvm-cov's to say, so
-# `tests/coverage.rs` holds this against where `LLVM_PROFILE_FILE` points — a run
-# configured to build elsewhere fails there rather than cleaning the wrong tree.
+# cargo-llvm-cov's instrumented tree; `tests/coverage.rs` holds this path against
+# `LLVM_PROFILE_FILE`, so a drift fails there rather than cleaning the wrong tree.
 llvm-cov-target-dir := justfile_directory() / "target" / "llvm-cov-target"
 export ONEPIPELINE_COVERAGE_ROOT := justfile_directory()
 
@@ -255,8 +252,9 @@ export ONEPIPELINE_COVERAGE_ROOT := justfile_directory()
 # map and would count as uncovered in the later report.
 #
 # Resolve existing arguments before removal so symlinks cannot reach outside
-# this clone's build directory. A missing tree is normal on the first run;
-# existing paths that cannot be entered fail instead of silently passing.
+# this clone's build directory. A missing tree is normal on the first run, even
+# with no build directory yet, so it is bounded through its nearest existing
+# ancestor; existing paths that cannot be entered fail instead of silently passing.
 # llmlint: ignore-block[cli_output_contract] Both invalid-path refusals are
 # one error class to the caller, so both exit 1 like adjacent _crate-coverage;
 # distinct stderr names the invalid input that needs correcting.
@@ -266,10 +264,15 @@ _crate-coverage-clean dir=llvm-cov-target-dir:
       if [ "$(pwd -P)" != "$root" ]; then echo "refusing to clean from outside this clone's root ($root)" >&2; exit 1; fi; \
       built="$root/target"; \
       if [ ! -e "$1" ] && [ ! -L "$1" ]; then \
-        parent="$(dirname -- "$1")"; \
-        reached_parent="$(cd -P -- "$parent" && pwd -P)" || { echo "refusing to clean '$1': its parent cannot be entered" >&2; exit 1; }; \
-        case "$reached_parent" in "$built"|"$built"/?*) exit 0;; \
-          *) echo "refusing to clean '$1': its parent is outside this clone's build directory ($built)" >&2; exit 1;; \
+        base="$1"; rest=""; \
+        while [ ! -e "$base" ] && [ ! -L "$base" ]; do \
+          part="$(basename -- "$base")"; \
+          if [ "$part" = ".." ]; then echo "refusing to clean '$1': it climbs out of a directory that does not exist" >&2; exit 1; fi; \
+          rest="/$part$rest"; base="$(dirname -- "$base")"; \
+        done; \
+        reached_base="$(cd -P -- "$base" && pwd -P)" || { echo "refusing to clean '$1': its nearest existing ancestor cannot be entered" >&2; exit 1; }; \
+        case "$reached_base$rest" in "$built"/?*) exit 0;; \
+          *) echo "refusing to clean '$1': it is outside this clone's build directory ($built)" >&2; exit 1;; \
         esac; \
       fi; \
       reached="$(cd -P -- "$1" && pwd -P)" || { echo "refusing to remove '$1': it is there but is not a directory this step can enter, so where it leads cannot be held against this clone's build directory — nothing was removed" >&2; exit 1; }; \
