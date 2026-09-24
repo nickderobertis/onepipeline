@@ -513,11 +513,18 @@ resolver = "2"
 # crate composes, so each was moved onto that bus before this one and a lock
 # holding any of them on 0.7 would resolve the bus twice.
 #
-# - `onevcs` 0.30.1 was that library on the bus 0.8.0, and 0.30.0 is where
-#   `SessionRequest.labels` arrived, which every literal here fills empty. The
-#   pin has since moved past it — see the block below — so what this bullet
-#   records is why the bus carried the pair over that step, not what the manifest
-#   names today.
+# - `onevcs` 0.30.1 is that library on the bus 0.8.0. Its 0.30.0 adds
+#   `SessionRequest.labels`, stored on the session record and reported by
+#   `session holders` and `recoverable`. `src/vcs.rs` builds the request with
+#   that field empty — a session's labels are not a plan's to spell — and
+#   `src/executor.rs` decides the three the engine owns over it where the
+#   session is opened, which is where the run, the node and the launch that
+#   owns them are known; so a pin below 0.30.0 does not compile. A
+#   **requirement**, because `^0.29` admits no 0.30.x; `onevcs-testing` 0.7.1
+#   requires exactly it, so the two move together.
+#   `tests/e2e/session_reuse.rs` reads the labels back through the linked
+#   release's own `session holders --json`.
+#
 # - `oneagentgraph` 0.4.9 reports an exhausted single-sided fallback chain as
 #   `fallback_chain_exhausted` rather than `unclassified`, which
 #   `src/engine.rs` reads as a chain that stopped through that library's own
@@ -532,21 +539,12 @@ resolver = "2"
 # `oneagentgraph` 0.4.10 is the relink onto the `oneharness-core` 0.18.0 that
 # block asks for, and nothing else: nothing here reads anything new from it.
 #
-# `onevcs` 0.32.1 is a **requirement** of the code rather than a lock move, and
-# it is the release carrying the four fixes this relink puts in force (onevcs
-# #173-#177). `registered_identities()` replaces the pool-maintenance sweep's
-# spawned `onevcs repos` and the parse of its display lines (#174).
-# `SlotOutcome::Unavailable { holder }` sits beside a `Broken` narrowed to a
-# clone, worktree or record nothing waiting clears (#177), and `src/maintenance.rs`
-# phrases the two apart; `Maintenance::command` is a non-empty argv (#173); and
-# the workspace-listing operations refuse an unreadable session record or
-# sessions directory instead of acting on partial state (#175, #176), with
-# `release_status` naming an unresolvable reference as its own variant. The
-# 0.32.0 the event-vocabulary relink took ships the same library source; 0.32.1
-# is the release those fixes were cut and verified as, so the requirement names
-# it rather than admitting a build nobody adopted them through. `onevcs-testing`
-# 0.8.1 requires exactly this release, so the two requirements and the lock move
-# together or the lock resolves the library twice.
+# `onevcs` 0.32.1 is the release carrying onevcs #173-#177, which
+# `src/maintenance.rs` is written to: `registered_identities()` in place of a
+# spawned `onevcs repos`, `SlotOutcome::Unavailable` beside a narrowed `Broken`,
+# a non-empty `maintain.command` argv, and listings that refuse unreadable
+# session records rather than read them as empty. `onevcs-testing` 0.8.1
+# requires exactly it, so the two move together.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the

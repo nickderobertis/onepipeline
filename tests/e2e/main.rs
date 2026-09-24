@@ -155,13 +155,9 @@ mod store;
 mod summary;
 mod surface;
 mod turns;
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] five journeys, 59.5s
-// together, and every one of them drives the compiled binary over a state root the
-// linked `onevcs` is reading: what they exercise is `concurrency`, `pool`, `vcs`, `views`,
-// `shutdown` and `maintenance` at once — every caller of the workspace-listing operations —
-// so the narrowest edge they can honestly sit behind is the crate's, as for `mod listing`
-// above. Its own directive rather than a place inside a neighbour's, because the reason is
-// this module's and a shared one would say nothing about either.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys reach
+// every caller of the workspace-listing operations across `src/`, so the crate's edge is
+// the narrowest they fit behind.
 mod unreadable_sessions;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the

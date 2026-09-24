@@ -7,13 +7,6 @@
 //! record it enumerated and then could not load is no longer a session nobody
 //! holds. "Nobody is in this workspace" and "this host could not say who is"
 //! are opposite facts, and the only safe one to act on is the first.
-//!
-//! So every journey here puts the host into one of those two states and drives a
-//! real command at it, once per state, asserting that what comes back **names the
-//! refusal** rather than reporting an absence. The states are made the way a
-//! broken host arrives at them — a sessions directory that is not a directory, and
-//! a record that is not a document — and never by substituting anything: the
-//! `onevcs` under test is the linked library, answering out of the real state root.
 // llmlint: ignore-file[tests_mirror_real_usage] **the whole module's subject is a state no
 // interface reaches.** Every verb of the sibling's that writes a session record writes a
 // valid one, and none of them answers with a sessions directory that is not a directory or a
@@ -23,11 +16,8 @@
 // linked library, which is what its refusals exist for. Nothing else here is arranged:
 // every run is started, adopted, attested, shut down and read back through the compiled
 // binary, and every claim is read off that binary's own output, journal or result.
-// llmlint: ignore-file[e2e_not_mocked] nothing here stands in for the layer under test.
-// `onevcs` is the linked library reading a real state root, and what is arranged is
-// the *state* it reads — the same state a host with a lost mount or a truncated write
-// hands it. `oneagentgraph` is the established double, because these journeys are
-// about a read of the host's records and a real agent turn is a paid one.
+// llmlint: ignore-file[e2e_not_mocked] `oneagentgraph` is the established double, because
+// a real agent turn is a paid one and these journeys are about the host's records.
 
 use std::path::PathBuf;
 
@@ -36,12 +26,6 @@ use serde_json::json;
 use crate::harness::{lifecycle, plan_of, World, REFUSED};
 
 /// The two ways this host cannot read its own session records.
-///
-/// Both are `onevcs`'s own refusals and not this crate's: the first is the
-/// listing that could not be made at all, and the second the record the listing
-/// enumerated and then could not load. Each is applied by [`break_records`] and
-/// taken back by [`mend_records`], which leave everything else as they found it —
-/// the journeys arrange one state after another over one host.
 #[derive(Clone, Copy, Debug)]
 enum Unreadable {
     Directory,
@@ -49,10 +33,8 @@ enum Unreadable {
 }
 
 impl Unreadable {
-    /// Both, so a journey states its claim once and is held to it twice.
     const BOTH: [Self; 2] = [Self::Directory, Self::Record];
 
-    /// A word for a run name, so the two states' runs do not collide.
     fn slug(self) -> &'static str {
         match self {
             Self::Directory => "directory",
@@ -345,8 +327,6 @@ fn a_follow_whose_session_record_goes_unreadable_says_that_is_what_ended_it() {
     }
 }
 
-/// The journey above, over one state.
-///
 /// A world each, because the hold on the publishing push is installed as the
 /// repository's own hook when the repository is made, and a world has one
 /// repository.

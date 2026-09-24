@@ -281,10 +281,7 @@ impl Workspaces {
         }
         let capacity = match crate::vcs::workspace_capacity(request) {
             Ok(capacity) => capacity,
-            // Said rather than swallowed, for the reason [`Admission::Unread`]
-            // gives. The open that follows refuses on its own account and its
-            // refusal is the node's; this is the advisory read saying it was the
-            // one that could not be made.
+            // See [`Admission::Unread`].
             Err(why) => {
                 eprintln!(
                     "onepipeline: cannot read what the '{}' workspace admits, so '{node}' is \

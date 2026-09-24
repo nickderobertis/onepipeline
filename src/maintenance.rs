@@ -276,16 +276,6 @@ pub(crate) struct Maintained {
 }
 
 impl Maintained {
-    /// Whether this identity is written into the record: a slot ran, a **due**
-    /// slot could not be maintained — `unavailable` or `broken` — another run had
-    /// the identity, or it failed. The quiet answers are the ones that mean the
-    /// schedule and the pool are working: `not-due`, `in-use`, no command, no
-    /// slots.
-    ///
-    /// Which side each answer falls on is the contract's pool-maintenance clause,
-    /// as ruled in [divergence 89](../docs/contract-divergences.md), where the
-    /// reasoning lives; `tests/e2e/maintenance.rs` drives both loud slot answers
-    /// through the compiled binary.
     fn is_recorded(&self) -> bool {
         match &self.outcome {
             Err(_) | Ok(IdentityOutcome::Claimed { .. }) => true,
@@ -364,16 +354,6 @@ impl Swept {
     }
 }
 
-/// The identities this host has registered, in sorted order, off the sibling's
-/// own registry.
-///
-/// [`onevcs::registered_identities`] is that enumeration's library form: the same
-/// rows `onevcs repos` prints, migrated as that command migrates them and keyed
-/// by normalized origin — so what comes back is already the sorted order this
-/// sweep visits in, and nothing here re-derives it from display prose. A registry
-/// this host cannot read is a sweep that could not be **made** rather than one
-/// that found nothing, and the sibling keeps those two apart so this can report
-/// the first rather than sweeping a host it was never able to ask about.
 fn identities() -> std::result::Result<Vec<String>, String> {
     onevcs::registered_identities()
         .map_err(|error| format!("the host's registered identities could not be read: {error}"))
