@@ -51,7 +51,7 @@ onetaskgraph-version := "0.2.32"
 # with.
 #
 # **This is the only place the release is named.** `just screenshots-tools`
-# installs it from here, and CI installs it through `scripts/install-freeze.sh`,
+# installs it from here, and CI installs it through `screenshots/install-freeze.sh`,
 # which reads this very line out of this file rather than keeping a second pin
 # that could drift from it. Bumping it reflows every shot: bless once and commit
 # the new baseline with the images.
