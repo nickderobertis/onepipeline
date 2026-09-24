@@ -116,10 +116,11 @@ say:
   `stderr` alone arrives blank. Held by the same tier: neither property needs
   `freeze` or `screencomp`, so neither is excused from it.
 - **The two switches are spelled, not merely present.** `SCREENSHOTS_NO_BUILD`
-  (`capture.sh`) and `SCREENCOMP_GUARD_REQUIRE` (the hook) each take `0`/`1`,
-  `false`/`true` or `no`/`yes`, and refuse anything else. Present-means-on would
-  read a `=0` as "on" — a skipped build photographs whatever binary was lying in
-  `target/`, which is a baseline blessed for code nobody here has.
+  (`capture.sh`) and `SCREENCOMP_GUARD_REQUIRE` (the hook) each read a written-out
+  yes or no — the spellings are the `case` statement beside each — and refuse
+  anything else. Present-means-on would read a `=0` as "on", and a skipped build
+  photographs whatever binary was lying in `target/`, which is a baseline blessed
+  for code nobody here has.
 - **`SCREENCOMP_GUARD_REQUIRE` is parsed before any path that can refuse**, so
   every "could not evaluate this push" ending answers to it — a host whose arch
   `[capture].arches` does not declare included. Reach a host-dependent ending
