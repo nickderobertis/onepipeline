@@ -71,14 +71,12 @@ jobs:
       # The reusable workflow exports $SHOTS_OUT as shots/current/<arch>;
       # screenshots/capture.sh writes captures.json and the SVGs there.
       #
-      # **This runs under `sh`, not bash.** The reusable workflow gives the
-      # capture-command `shell: sh -e` and offers no input to ask for another,
-      # and `/bin/sh` in the Debian-based image above is dash — so a bashism
-      # here is `[[: not found` on stderr and a guard that then reports its
-      # refusal against a value that is in fact fine. The two scripts below run
-      # under bash because they are handed to `bash` by name; nothing else on
-      # these lines may assume it. `tests/visual_docs.rs` drives this very
-      # command under dash so an edit that assumes bash fails there first.
+      # **These lines run under `sh`, not bash**: the reusable workflow gives
+      # this step `shell: sh -e` and offers no input to ask for another, and the
+      # image named above is Debian-based, so that `sh` is dash.
+      # `screenshots/AGENTS.md` holds what a bashism here costs and what catches
+      # the next one. The two scripts below are bash only because each is handed
+      # to `bash` by name; nothing else on these lines may assume it.
       capture-command: |
         # The shape both derivations below are held to: exactly one line naming
         # an exact release. The *whole* value is matched rather than any line of
