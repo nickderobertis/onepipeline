@@ -11,9 +11,11 @@
 #
 # `x86_64` rather than this developer's own arch because that is what the
 # repository's own CI runners are, and because the local pre-push guard
-# classifies **the lane of the host it runs on** and refuses a host whose arch
-# no lane declares — so an `arm64` developer adds that lane here and blesses it
-# once, rather than silently guarding nothing.
+# classifies **the lane of the host it runs on**: a host whose arch no lane
+# declares has nothing to classify against, so the guard says on every push that
+# it did not evaluate it, rather than guarding nothing silently. That is one of
+# its "could not evaluate" endings and answers to `SCREENCOMP_GUARD_REQUIRE`
+# like the rest — an `arm64` developer adds that lane here and blesses it once.
 arches = ["x86_64"]
 
 [comment]

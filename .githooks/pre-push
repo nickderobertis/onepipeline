@@ -32,25 +32,16 @@
 # workflow runs both on every pull request.
 set -euo pipefail
 
-# The declared `[capture].arches` lanes, read out of screencomp.toml so a lane
-# name lives in exactly one place, and this host's own lane among them. Anything
-# else is a host with no committed baseline and no CI job, so refuse loudly
-# rather than guess.
-LANES="$(sed -n 's/^arches *= *\[\(.*\)\].*/\1/p' screencomp.toml \
-  | tr -d '"[:blank:]' | tr ',' '\n' | grep -v '^$' || true)"
-LANE="$(bash screenshots/host-arch.sh)"
-if ! printf '%s\n' "$LANES" | grep -qxF "$LANE"; then
-  echo "pre-push: this host's architecture ($LANE) has no lane in [capture].arches" >&2
-  echo "          of screencomp.toml, so it has no committed baseline to classify" >&2
-  echo "          against. Declared: [${LANES//$'\n'/, }]" >&2
-  echo "          Add \"$LANE\" there (CI fans one job out per lane), capture it" >&2
-  echo "          with 'just screenshots-bless', and commit shots/baseline/$LANE.json." >&2
-  exit 1
-fi
 # `SCREENCOMP_GUARD_REQUIRE` is external input and it decides which way this hook
 # answers when it cannot evaluate the push. Present-means-on would read
 # `SCREENCOMP_GUARD_REQUIRE=0` as "require", which is the opposite of what that
 # typed, so it too is held to a value it can have.
+#
+# It is read before anything else can refuse, because EVERY ending that could not
+# evaluate the push consults it — the undeclared-lane one below included. Read
+# after one of them, it decided nothing on the hosts that reached that one first:
+# an arm64 machine was refused while holding `SCREENCOMP_GUARD_REQUIRE=0`, so the
+# answer to "may this push go" came from the CPU rather than from the switch.
 case "${SCREENCOMP_GUARD_REQUIRE:-0}" in
   0 | false | no) GUARD_REQUIRE=0 ;;
   1 | true | yes) GUARD_REQUIRE=1 ;;
@@ -61,6 +52,15 @@ case "${SCREENCOMP_GUARD_REQUIRE:-0}" in
     exit 1
     ;;
 esac
+
+# The declared `[capture].arches` lanes, read out of screencomp.toml so a lane
+# name lives in exactly one place, and this host's own lane among them.
+# `host-arch.sh` refuses a CPU it has no spelling for and keeps that refusal: a
+# lane this repository has never heard of is a different fact from a lane it
+# knows and has not blessed, and only the second is a state a developer can be in.
+LANES="$(sed -n 's/^arches *= *\[\(.*\)\].*/\1/p' screencomp.toml \
+  | tr -d '"[:blank:]' | tr ',' '\n' | grep -v '^$' || true)"
+LANE="$(bash screenshots/host-arch.sh)"
 MANIFEST="shots/baseline/${LANE}.json"
 GALLERY="shots/review"
 CURRENT="shots/current"
@@ -70,16 +70,32 @@ CURRENT="shots/current"
 
 # llmlint: ignore-block[cli_output_contract] every ending below reports that the guard
 # could not evaluate this push and then lets the push through, and that is the contract a
-# git hook's status has: it answers "may this push go", not "did the guard run". The three
-# things that reach these endings — an optional third-party CLI this repository
-# deliberately does not install for `just check`, a `screencomp scope` that could not
-# answer, and git handing this hook something that is not an object name — are all
-# conditions under which refusing would make `git push` depend on tooling or on input the
-# developer did not choose, while the visual-docs workflow re-captures on the pull request
-# either way. The message says the guard did not evaluate it, which is the fact a reader
-# needs; SCREENCOMP_GUARD_REQUIRE=1 is how a machine that *has* provisioned the tool asks
-# for the stricter answer.
+# git hook's status has: it answers "may this push go", not "did the guard run". The four
+# things that reach these endings — a host whose architecture no declared lane covers, an
+# optional third-party CLI this repository deliberately does not install for `just check`,
+# a `screencomp scope` that could not answer, and git handing this hook something that is
+# not an object name — are all conditions under which refusing would make `git push`
+# depend on hardware, on tooling, or on input the developer did not choose, while the
+# visual-docs workflow re-captures on the pull request either way. The message says the
+# guard did not evaluate it, which is the fact a reader needs; SCREENCOMP_GUARD_REQUIRE=1
+# is how a machine that *is* a declared lane and *has* provisioned the tool asks for the
+# stricter answer.
 #
+# A lane with no committed baseline gives the guard nothing to classify against, so it
+# CANNOT evaluate the push. Say so; do NOT skip silently.
+if ! printf '%s\n' "$LANES" | grep -qxF "$LANE"; then
+  {
+    echo "pre-push: this host's architecture ($LANE) has no lane in [capture].arches"
+    echo "          of screencomp.toml, so it has no committed baseline to classify"
+    echo "          against. Declared: [${LANES//$'\n'/, }]"
+    echo "          Add \"$LANE\" there (CI fans one job out per lane), capture it"
+    echo "          with 'just screenshots-bless', and commit shots/baseline/$LANE.json."
+    echo "          Set SCREENCOMP_GUARD_REQUIRE=1 to fail here instead."
+  } >&2
+  [ "$GUARD_REQUIRE" = 1 ] && exit 1
+  exit 0
+fi
+
 # Without the CLI the guard CANNOT evaluate the push, so do NOT skip silently.
 if ! command -v screencomp >/dev/null 2>&1; then
   {

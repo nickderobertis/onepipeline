@@ -121,3 +121,13 @@ say:
   `false`/`true` or `no`/`yes`, and refuse anything else. Present-means-on would
   read a `=0` as "on" — a skipped build photographs whatever binary was lying in
   `target/`, which is a baseline blessed for code nobody here has.
+- **`SCREENCOMP_GUARD_REQUIRE` is read before anything that can refuse.** Every
+  ending where the hook could not evaluate a push consults it, and a host whose
+  arch `[capture].arches` does not declare is one of them: it has no committed
+  baseline to classify against. Read after that check, the switch decided
+  nothing on the machines that reached it first — an `arm64` developer was
+  blocked while holding `SCREENCOMP_GUARD_REQUIRE=0`, and the same thing failed
+  the macOS leg of a test every other leg passed. So an ending that depends on
+  the host is reached in `tests/visual_docs.rs` from a fixture tree declaring a
+  lane no machine is, rather than from whichever runner happens to be that
+  shape; a journey only one platform can reach is one only that platform checks.

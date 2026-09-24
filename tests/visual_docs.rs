@@ -343,18 +343,19 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
     }
 
     /// Run the committed pre-push hook the way git runs it — the pushed refs on
-    /// its stdin, the remote and its URL as arguments — with `screencomp` off
-    /// `PATH`, which is the branch where `SCREENCOMP_GUARD_REQUIRE` decides the
-    /// answer. The environment is cleared rather than inherited so that a `CI`
-    /// or a `SCREENCOMP_GUARD_REQUIRE` in the runner's own environment cannot
-    /// decide what this journey observes.
-    fn pre_push(require: Option<&str>) -> Output {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    /// its stdin, the remote and its URL as arguments — from `at`, the tree
+    /// whose `screencomp.toml` and `screenshots/host-arch.sh` it reads, and with
+    /// `screencomp` off `PATH`, which is the branch where
+    /// `SCREENCOMP_GUARD_REQUIRE` decides the answer. The environment is cleared
+    /// rather than inherited so that a `CI` or a `SCREENCOMP_GUARD_REQUIRE` in
+    /// the runner's own environment cannot decide what this journey observes.
+    fn pre_push_from(at: &Path, require: Option<&str>) -> Output {
+        let hook_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".githooks/pre-push");
         let mut hook = Command::new("bash");
-        hook.arg(".githooks/pre-push")
+        hook.arg(&hook_path)
             .arg("origin")
             .arg("https://example.invalid/onepipeline.git")
-            .current_dir(root)
+            .current_dir(at)
             .env_clear()
             // `/usr/bin:/bin` carries the coreutils the hook runs and not the
             // `screencomp` this host installs under its home.
@@ -367,15 +368,50 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
         }
         let mut running = hook.spawn().expect("the pre-push hook runs");
         let zero = "0".repeat(40);
-        running
+        let refs = format!("refs/heads/topic {zero} refs/heads/topic {zero}\n");
+        // Every ending above the hook's ref loop answers without reading stdin,
+        // so a closed read end here is the hook having answered rather than a
+        // failure to ask it. Whether the write lands or loses the race is
+        // timing, and it decided nothing either way.
+        if let Err(why) = running
             .stdin
             .as_mut()
             .expect("the hook's stdin is a pipe")
-            .write_all(format!("refs/heads/topic {zero} refs/heads/topic {zero}\n").as_bytes())
-            .expect("git's ref line is written to the hook");
+            .write_all(refs.as_bytes())
+        {
+            assert_eq!(
+                why.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "git's ref line could not be written to the hook: {why}"
+            );
+        }
         running
             .wait_with_output()
             .expect("the pre-push hook is waited on")
+    }
+
+    /// The hook, run against this repository's own tree.
+    fn pre_push(require: Option<&str>) -> Output {
+        pre_push_from(Path::new(env!("CARGO_MANIFEST_DIR")), require)
+    }
+
+    /// A tree carrying the two host-facing inputs the hook reads before it can
+    /// answer: a `screencomp.toml` declaring `lane`, and this repository's own
+    /// `screenshots/host-arch.sh`, copied rather than imitated so what decides
+    /// the answer is the real derivation of this host's lane.
+    fn tree_declaring_lane(root: &Path, lane: &str) {
+        let real = Path::new(env!("CARGO_MANIFEST_DIR"));
+        fs::create_dir_all(root.join("screenshots")).expect("the fixture has a screenshots dir");
+        fs::copy(
+            real.join("screenshots/host-arch.sh"),
+            root.join("screenshots/host-arch.sh"),
+        )
+        .expect("the fixture carries this repository's own host-arch.sh");
+        fs::write(
+            root.join("screencomp.toml"),
+            format!("[capture]\narches = [\"{lane}\"]\n"),
+        )
+        .expect("the fixture's screencomp.toml is written");
     }
 
     /// `SCREENCOMP_GUARD_REQUIRE` says which way the guard answers when it
@@ -413,6 +449,45 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
             said.contains("SCREENCOMP_GUARD_REQUIRE is 'ture'"),
             "the guard refused the misspelt value without quoting it back, so the \
              reader cannot see what it read:\n{said}"
+        );
+    }
+
+    /// A host no declared lane covers is the guard's other "could not evaluate
+    /// this push" ending, and it answers to the same switch.
+    ///
+    /// It is reached from a tree whose `[capture].arches` names a lane no
+    /// machine is, rather than waited for on a runner of the right shape,
+    /// because the asymmetry IS the defect: on `x86_64` this ending is
+    /// unreachable, so the journey above passed on every leg but macOS, where an
+    /// arm64 runner hit this refusal before the switch had been read and was
+    /// blocked while holding `SCREENCOMP_GUARD_REQUIRE=0`. Driven from a
+    /// fixture, both answers are observed on whatever CPU this host has.
+    #[test]
+    fn a_host_with_no_declared_lane_answers_to_the_same_strictness_switch() {
+        let (_scratch, root) = scratch("no-lane");
+        tree_declaring_lane(&root, "nosucharch");
+
+        let lenient = pre_push_from(&root, Some("0"));
+        let said = String::from_utf8_lossy(&lenient.stderr).into_owned();
+        assert!(
+            lenient.status.success(),
+            "a host with no declared lane was blocked while `SCREENCOMP_GUARD_REQUIRE=0` \
+             asked for the lenient answer, so which way the push went was decided by the \
+             machine rather than by the switch:\n{said}"
+        );
+        assert!(
+            said.contains("has no lane in [capture].arches"),
+            "the guard let the push through without saying it had not evaluated it, so a \
+             developer on that host is guarded by nothing and told nothing:\n{said}"
+        );
+
+        let strict = pre_push_from(&root, Some("1"));
+        assert_eq!(
+            strict.status.code(),
+            Some(1),
+            "`SCREENCOMP_GUARD_REQUIRE=1` let a push through from a host with no committed \
+             baseline to classify a capture against:\n{}",
+            String::from_utf8_lossy(&strict.stderr)
         );
     }
 
