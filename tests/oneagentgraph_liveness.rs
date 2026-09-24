@@ -288,7 +288,7 @@ fn bound() -> Duration {
 /// Counted in looks rather than in bounds, because what it separates is a tree
 /// that stopped from a look that missed one that had not — the distinction the
 /// elapsed-time window it replaces could not draw. It has to clear the gap a
-/// pause under [`intermittent`] opens and stay under the shortest quiet a
+/// pause under [`Bursts`] opens and stay under the shortest quiet a
 /// verdict can sit at the end of; [`bound`] asserts both, and the driven half
 /// prints the gap it measured, so a host that narrows either says so rather
 /// than waiting to go flaky.
@@ -413,20 +413,8 @@ fn the_activity_rule_condemns_a_member_once_the_work_under_it_stops_and_not_whil
         Some(at) => condemned_only_past_the_watchdog(&busy, at, bound, "spinning"),
     }
 
-    let legacy = vec![
-        "sh".to_owned(),
-        "-c".to_owned(),
-        format!(
-            "while :; do until=$(( $(date +%s) + 2 )); \
-             while [ \"$(date +%s)\" -lt \"$until\" ]; do \
-             i=0; while [ $i -lt 5000 ]; do i=$((i+1)); done; done; \
-             sleep {}; done",
-            pause().as_secs_f32()
-        ),
-    ];
-    let legacy: Vec<&str> = legacy.iter().map(String::as_str).collect();
-    let bursting_tree = Tree::spawn("bursting", &legacy).unwrap_or_else(|why| panic!("{why}"));
-    let cadence = Bursts::over(u32::MAX);
+    let bursting_tree = Tree::spawn("bursting", BUSY).unwrap_or_else(|why| panic!("{why}"));
+    let cadence = Bursts::over(bursting_tree.child.id());
     let bursting = watch(&bursting_tree, bound, |watch| {
         watch.missed_between_activity() > 0 && watch.spent > bound * 2
     });
