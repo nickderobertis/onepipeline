@@ -93,7 +93,12 @@ attached stream prints changes, and commit the new hero beside the new baseline.
   while appearing covered by it. A new path that can change a shot belongs in
   `visualDocsSource` in `nx.json` **and** in `[guard].paths`; the capture
   refuses when a guard path is under no named input, which is the direction that
-  would otherwise let a cached target replay a stale result.
+  would otherwise let a cached target replay a stale result. It refuses a
+  `[guard].paths` stated more than once for the same reason the pin
+  reconciliation beside it does: reading the first block leaves the rest
+  deciding pushes unreconciled. The hook counts `arches` before reading it, on
+  the same grounds — `sed` answers with every line that matched, so two
+  declarations would run together into a lane neither states.
 - **No image goes under `docs/`** — that directory is machine-consumed and named
   in a cached build input.
 - **The workflow's `capture-command` runs under `sh`, and `sh` there is dash.**

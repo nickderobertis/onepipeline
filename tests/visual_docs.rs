@@ -484,6 +484,48 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
         );
     }
 
+    /// A `screencomp.toml` that states `arches` more than once is refused, and
+    /// refused whichever way `SCREENCOMP_GUARD_REQUIRE` points.
+    ///
+    /// Read leniently it is worse than a parse error: the hook's `sed` answers
+    /// with every line that matched, so two declarations run together into one
+    /// list, and the guard then classifies this host against a lane neither of
+    /// them names. That is this tree's own file being ambiguous rather than the
+    /// guard declining to evaluate a push, so the switch does not answer for it —
+    /// which is the half a refusal is easiest to lose.
+    #[test]
+    fn a_doubled_arches_declaration_is_refused_whichever_way_the_switch_points() {
+        let (_scratch, root) = scratch("arches-twice");
+        // Neither lane is a machine, so before this refusal existed the combined
+        // list reached the hook's "no lane for this host" ending — which *does*
+        // answer to the switch, and so let the lenient push through.
+        tree_declaring_lane(&root, "nosucharch");
+        fs::write(
+            root.join("screencomp.toml"),
+            "[capture]\narches = [\"nosucharch\"]\narches = [\"alsonosucharch\"]\n",
+        )
+        .expect("the fixture's doubled screencomp.toml is written");
+
+        for require in ["0", "1"] {
+            let refused = pre_push_from(&root, Some(require));
+            let said = String::from_utf8_lossy(&refused.stderr).into_owned();
+            assert_eq!(
+                refused.status.code(),
+                Some(1),
+                "`SCREENCOMP_GUARD_REQUIRE={require}` decided a push against a \
+                 screencomp.toml that names no single list of lanes, so the guard \
+                 classified this host against a lane neither declaration \
+                 states:\n{said}"
+            );
+            assert!(
+                said.contains("states 'arches' on 2 line(s)"),
+                "the hook refused under `SCREENCOMP_GUARD_REQUIRE={require}` without \
+                 saying how many declarations it found, so the reader cannot see that \
+                 the second one is the problem:\n{said}"
+            );
+        }
+    }
+
     /// `SCREENSHOTS_NO_BUILD` decides whether the scenes are rendered from the
     /// binaries in this tree, so a value it guesses at is a baseline blessed for
     /// code nobody here has.
@@ -511,6 +553,118 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
             !said.contains("Compiling") && !said.contains("Finished"),
             "the capture started building before it had decided whether to, so the \
              refusal costs a release build:\n{said}"
+        );
+    }
+
+    /// A tree `screenshots/capture.py` can be run in as its own repository: the
+    /// capture's Python and the lane derivation copied in, and the files its
+    /// reconciliations read — nx.json and the visual-docs workflow — taken from
+    /// this repository so only `screencomp.toml` differs from what really ships.
+    ///
+    /// `screenshots/world.py` resolves the shipped plan store as it is imported,
+    /// which is why that comes too: the capture is one module, and a fixture that
+    /// stubbed half of it would be asserting against the stub.
+    ///
+    /// `capture.py` resolves the repository from its own location, which is why
+    /// the directory is copied rather than pointed at: what answers is the
+    /// committed refusal reading a committed shape, not a restatement of either.
+    fn capture_py_tree(root: &Path, screencomp_toml: &str) {
+        let real = Path::new(env!("CARGO_MANIFEST_DIR"));
+        fs::create_dir_all(root.join("screenshots")).expect("the fixture has a screenshots dir");
+        fs::create_dir_all(root.join(".github/workflows"))
+            .expect("the fixture has a workflows dir");
+        for name in ["capture.py", "world.py", "normalise.py", "host-arch.sh"] {
+            fs::copy(
+                real.join("screenshots").join(name),
+                root.join("screenshots").join(name),
+            )
+            .unwrap_or_else(|why| panic!("the fixture carries this repository's {name}: {why}"));
+        }
+        for name in ["nx.json", ".github/workflows/visual-docs.yml"] {
+            fs::copy(real.join(name), root.join(name)).unwrap_or_else(|why| {
+                panic!("the fixture carries this repository's {name}: {why}")
+            });
+        }
+        fs::create_dir_all(root.join("examples")).expect("the fixture has an examples dir");
+        let copied = Command::new("cp")
+            .arg("-R")
+            .arg(real.join("examples/plan-store"))
+            .arg(root.join("examples"))
+            .output()
+            .expect("the shipped plan store is copied into the fixture");
+        assert!(
+            copied.status.success(),
+            "the fixture could not carry examples/plan-store, which world.py reads as \
+             it is imported: {}",
+            String::from_utf8_lossy(&copied.stderr)
+        );
+        fs::write(root.join("screencomp.toml"), screencomp_toml)
+            .expect("the fixture's screencomp.toml is written");
+    }
+
+    /// Run the committed `capture.py` in `root`, the way `capture.sh` does.
+    fn run_capture_py(root: &Path) -> Output {
+        Command::new("python3")
+            .arg(root.join("screenshots/capture.py"))
+            .current_dir(root)
+            .output()
+            .expect("the capture runs")
+    }
+
+    /// `[guard].paths` decides what the local guard pays for a recapture over,
+    /// and `capture.py` reconciles it against nx.json's `visualDocsSource` so a
+    /// path the guard watches cannot be one a cached target replays past.
+    ///
+    /// Stated twice, that reconciliation reads one block and leaves the other
+    /// independently effective — the same drift the screencomp-pin refusal
+    /// beside it uses `findall` to rule out — so a doubled declaration is
+    /// refused rather than half-read.
+    #[test]
+    fn the_capture_refuses_a_screencomp_toml_that_states_its_guard_paths_twice() {
+        let real =
+            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("screencomp.toml"))
+                .expect("this repository's screencomp.toml");
+
+        // The control: this repository's own file, which states it once. The run
+        // still ends unhappily — the fixture has no built binaries to photograph
+        // — but it has to get past both reconciliations to say so.
+        let (_ok, root) = scratch("guard-paths-once");
+        capture_py_tree(&root, &real);
+        let past = run_capture_py(&root);
+        let said = String::from_utf8_lossy(&past.stderr).into_owned();
+        assert!(
+            said.contains("is not built"),
+            "the capture stopped before it reached the binaries it drives, so this \
+             journey's control never got past the reconciliation it is here to leave \
+             alone:\n{said}"
+        );
+
+        // The second block names a path no `visualDocsSource` entry covers, so
+        // reading only the first would report the reconciliation clean over a
+        // list that is not the whole of what the guard watches.
+        let (_twice, root) = scratch("guard-paths-twice");
+        capture_py_tree(
+            &root,
+            &format!("{real}\n[stale]\npaths = [\n  \"nowhere/**\",\n]\n"),
+        );
+        let refused = run_capture_py(&root);
+        let said = String::from_utf8_lossy(&refused.stderr).into_owned();
+        assert_eq!(
+            refused.status.code(),
+            Some(1),
+            "a screencomp.toml stating `paths` twice was accepted, so the guard \
+             recaptures on a list this reconciliation never read:\n{said}"
+        );
+        assert!(
+            said.contains("declares `paths = [...]` 2 times"),
+            "the capture refused the doubled list without saying how many it found, so \
+             the reader cannot see that the second block is the problem:\n{said}"
+        );
+        assert!(
+            !said.contains("is not built"),
+            "the capture read past the doubled list and refused further on instead, so \
+             the reconciliation reported clean over half of what the guard \
+             watches:\n{said}"
         );
     }
 

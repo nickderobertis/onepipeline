@@ -44,10 +44,11 @@ set -euo pipefail
 # answer to "may this push go" came from the CPU rather than from the switch.
 #
 # Two refusals below pass it by, and neither is one of those endings: an
-# `[capture].arches` that did not parse, and a CPU `host-arch.sh` has no spelling
-# for, which dies here under `set -e`. Each says this tree or this host cannot
-# support the guard at all rather than that the guard declined to evaluate a
-# push, and no value of a switch makes either one true or false.
+# `[capture].arches` this tree does not state exactly once as a list of lane
+# names, and a CPU `host-arch.sh` has no spelling for, which dies here under
+# `set -e`. Each says this tree or this host cannot support the guard at all
+# rather than that the guard declined to evaluate a push, and no value of a
+# switch makes either one true or false.
 case "${SCREENCOMP_GUARD_REQUIRE:-0}" in
   0 | false | no) GUARD_REQUIRE=0 ;;
   1 | true | yes) GUARD_REQUIRE=1 ;;
@@ -64,6 +65,13 @@ esac
 # `host-arch.sh` refuses a CPU it has no spelling for and keeps that refusal: a
 # lane this repository has never heard of is a different fact from a lane it
 # knows and has not blessed, and only the second is a state a developer can be in.
+# Counted before it is read, because `sed` answers with *every* line that
+# matched: a screencomp.toml carrying a second `arches` — a duplicate in
+# `[capture]`, or one belonging to another table this pattern is not scoped to —
+# would arrive below as the two lists run together, and the guard would then
+# classify against a lane neither declaration names. Exactly one is what this
+# reads, and the alternative to counting is combining.
+DECLARED_ARCHES="$(grep -cE '^arches *=' screencomp.toml || true)"
 LANES="$(sed -n 's/^arches *= *\[\(.*\)\].*/\1/p' screencomp.toml \
   | tr -d '"[:blank:]' | tr ',' '\n' | grep -v '^$' || true)"
 # A `[capture].arches` that did not parse to lane names is this tree's own file
@@ -71,10 +79,11 @@ LANES="$(sed -n 's/^arches *= *\[\(.*\)\].*/\1/p' screencomp.toml \
 # like an architecture `host-arch.sh` has no spelling for. Read leniently, it
 # would arrive below as "no lane matches", which reads as a host to add a lane
 # for and is a different thing to go and do.
-if [ -z "$LANES" ] || printf '%s\n' "$LANES" | grep -qvE '^[A-Za-z0-9_]+$'; then
-  echo "pre-push: screencomp.toml's [capture].arches did not read as a list of" >&2
-  echo "          lane names; it parsed to [${LANES//$'\n'/, }]. Fix that line —" >&2
-  echo "          the guard classifies this host's lane against" >&2
+if [ "$DECLARED_ARCHES" != 1 ] || [ -z "$LANES" ] ||
+  printf '%s\n' "$LANES" | grep -qvE '^[A-Za-z0-9_]+$'; then
+  echo "pre-push: screencomp.toml states 'arches' on $DECLARED_ARCHES line(s), and the" >&2
+  echo "          lanes read [${LANES//$'\n'/, }] — which is not one list of lane" >&2
+  echo "          names. The guard classifies this host's lane against" >&2
   echo "          shots/baseline/<lane>.json and cannot pick one out of that." >&2
   exit 1
 fi

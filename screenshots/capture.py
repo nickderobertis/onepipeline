@@ -123,15 +123,21 @@ def uncovered_guard_path_refusal() -> str | None:
         for entry in entries
         if entry.startswith("{workspaceRoot}/")
     ]
-    guard = re.search(
+    # `findall`, not `search`, for the reason the pin reconciliation above uses
+    # it: `search` answers with the first block and leaves any other one
+    # independently effective, so a second `paths = [...]` could name a shot
+    # input this reconciliation never read.
+    guard = re.findall(
         r"^paths = \[(.*?)^\]", (REPO / "screencomp.toml").read_text(), re.M | re.S
     )
-    if not guard:
+    if len(guard) != 1:
         return (
-            "screenshots: screencomp.toml no longer declares `[guard].paths`, so "
-            "the local guard would recapture on nothing. Restore the list."
+            f"screenshots: screencomp.toml declares `paths = [...]` {len(guard)} "
+            "times, and the local guard recaptures on one list. Restore a single "
+            "`[guard].paths`: nothing here picks one of several, because the ones "
+            "it did not read would still decide pushes."
         )
-    for path in re.findall(r'"([^"]+)"', guard.group(1)):
+    for path in re.findall(r'"([^"]+)"', guard[0]):
         bare = path.removesuffix("/**").removesuffix("**")
         if not any(bare == entry or bare.startswith(entry) for entry in declared):
             return (
