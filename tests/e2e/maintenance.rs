@@ -692,15 +692,20 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
         world.dump()
     );
 
-    // The config alone names it, retained as the parsed document. This run is
-    // idle beside its one quick dispatch, so its driver sweeps — and, the run
-    // ending under it, closes out only once the sweep is joined and its record
-    // written: a driver closing out waits for the sweep it started.
+    // The config alone names it, retained as the parsed document. Hold its
+    // dispatch until the driver sweeps: on a busy host a quick dispatch can
+    // finish before the first idle pass. Closing out then waits for the sweep
+    // it started and its record.
     let path = plan("configured");
-    world
-        .run(&["start", &path, "--attach", "--launch-config", &config])
-        .exited(0)
-        .settled();
+    world.script("build.wait", "hold");
+    let configured = world
+        .cmd(&["start", &path, "--attach", "--launch-config", &config])
+        .spawn()
+        .expect("configured run starts");
+    until_sweeps(&world, 1);
+    world.release("build.go");
+    crate::harness::ended(configured);
+    world.unscript("build.wait");
     let launch = world.run_json("configured", "launch.json");
     assert_eq!(
         launch["maintenance_config"],
