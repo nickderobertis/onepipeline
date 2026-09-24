@@ -78,6 +78,7 @@ mod dispatchenv;
 mod driver;
 mod edits;
 mod engine;
+mod findings;
 mod freespace;
 mod graph;
 mod hooks;

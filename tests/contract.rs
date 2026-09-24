@@ -3311,6 +3311,54 @@ fn the_run_end_hooks_surface_is_what_the_contract_names() {
     }
 }
 
+/// The labels a node's `onevcs` session is opened with: the three keys are the
+/// block's and the crate's constants are held to them in both directions, and the
+/// event labels they mirror are reserved keys the dispatch really carries.
+#[test]
+fn the_session_labels_are_what_the_contract_names() {
+    use onepipeline::executor::{SESSION_LAUNCHER_LABEL, SESSION_NODE_LABEL, SESSION_RUN_LABEL};
+
+    let block: Value = serde_json::from_str(&fenced_block_naming("json", "onevcs_session_labels"))
+        .expect("the session-labels block is JSON");
+    let labels = &block["onevcs_session_labels"];
+    let keys = labels["keys"].as_object().expect("keys is an object");
+    let constants = [
+        ("run", SESSION_RUN_LABEL),
+        ("node", SESSION_NODE_LABEL),
+        ("launcher", SESSION_LAUNCHER_LABEL),
+    ];
+    assert_eq!(
+        keys.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+        constants
+            .iter()
+            .map(|(role, _)| *role)
+            .collect::<BTreeSet<_>>(),
+        "the block and the crate name different session labels"
+    );
+    for (role, constant) in constants {
+        assert_eq!(keys[role], constant, "keys.{role}");
+    }
+    // What each mirrors is a reserved event label a dispatch is stamped with.
+    let stamped = serde_json::to_value(Labels {
+        run_id: Some("demo-1".into()),
+        node: Some("service".into()),
+        ..Labels::default()
+    })
+    .expect("labels serialise");
+    for (role, event_label) in labels["mirrors"].as_object().expect("mirrors is an object") {
+        let event_label = event_label.as_str().expect("a mirrored label is named");
+        assert_eq!(
+            labels["attributed"][keys[role].as_str().expect("a key")],
+            stamped[event_label],
+            "{role} does not carry the dispatch's {event_label}"
+        );
+    }
+    // The launcher is the one key a launch may not have, and it is omitted then.
+    let unattributed = labels["unattributed"].as_object().expect("an object");
+    assert!(!unattributed.contains_key(SESSION_LAUNCHER_LABEL));
+    assert!(labels["attributed"][SESSION_LAUNCHER_LABEL].is_string());
+}
+
 /// The dispatch-env hook, as the contract's own block names it, is what this
 /// build takes and reads.
 ///
@@ -4516,6 +4564,99 @@ fn a_reply_declares_the_halves_the_contract_routes_it_by() {
     assert!(
         CONTRACT.contains("Neither reader advances the other's cursor"),
         "the contract no longer promises the two cursors stay apart"
+    );
+}
+
+/// A reconciler finding that asks for a graph edit is answered by that edit.
+///
+/// The rule the channel paragraph adds beside "a graph edit answers no
+/// question": a commands-only envelope still answers no *question*, and it
+/// answers the finding whose text asked for it. Held here, beside the routing
+/// rules it qualifies, and driven through the field it uses — `correlation`, on
+/// the public surface record, which is where a stable key for a finding goes and
+/// is why no wire shape moved for this.
+#[test]
+fn a_reconciler_finding_that_asks_for_an_edit_is_answered_by_that_edit() {
+    for states in [
+        "**A graph edit answers no *question*, and it answers the reconciler finding that asked \
+         for it.**",
+        "carries a **stable correlation**, derived from the finding's kind and the node it \
+         concerns",
+        "the run records against that correlation the op and the target node the finding asked \
+         for, in its own state and not on the surface",
+        "whether the reply carrying it was bound with `--correlation C` or bound to nothing, the \
+         engine appends an answer for that correlation",
+        "the finding leaves both what is waiting and what is pending",
+        "A committed edit that is not the one the finding asked for answers nothing",
+        "a finding an earlier reply already answered is not answered twice",
+        "A question an **earlier** reply answered is still not one a verdict can name",
+        "The one reply that is not refused for naming an answered question is the reply that \
+         answered it",
+        "a verdict carrying none of them, or one whose edit was turned away, is refused \
+         exactly as it was, as is a correlation no question ever carried.",
+    ] {
+        assert!(
+            CONTRACT.contains(states),
+            "the contract no longer states: {states}"
+        );
+    }
+
+    // And the entry that describes the finding kind says what the rule means for
+    // the one finding the reconciler raises under it. Read with its wrapping
+    // collapsed, so a reflowed paragraph is still the same statement.
+    let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergence record ships");
+    let record = record.split_whitespace().collect::<Vec<_>>().join(" ");
+    for states in [
+        "**Beside it, and not a divergence: a finding that asks for an edit is answered by that edit.**",
+        "The op and target node it asked for are recorded against that correlation in the run's own directory",
+        "from the attempt as well, for a kind that can recur per attempt, which this one is not",
+        "the commit of that edit appends the answer — on either writer of the graph, bound by `--correlation` or not",
+        "A graph edit still answers no *question*: what it answers is the finding that asked for it",
+    ] {
+        assert!(
+            record.contains(states),
+            "the divergence record no longer states: {states}"
+        );
+    }
+
+    // The key a finding is raised under is a value of the field the surface
+    // record already declares, written and read as the correlation it is — and a
+    // surface raised without one still serialises without the field.
+    let raised = json!({
+        "id": 4,
+        "kind": "finding",
+        "message": "node 'service' cannot open a session; answer this with a `retry` of 'service'",
+        "source": "reconciler",
+        "blocking": true,
+        "queued_at": 1,
+        "workstream": "service",
+        "correlation": "finding.session-conflict.service.0a1b2c3d4e5f",
+    });
+    let finding: Surface = serde_json::from_value(raised.clone()).expect("the finding parses");
+    assert_eq!(
+        finding
+            .correlation
+            .as_ref()
+            .map(std::string::ToString::to_string)
+            .as_deref(),
+        Some("finding.session-conflict.service.0a1b2c3d4e5f")
+    );
+    assert_eq!(
+        serde_json::to_value(&finding).expect("it serialises"),
+        raised,
+        "a finding raised under a stable key did not round-trip unchanged"
+    );
+
+    let mut reported = finding;
+    reported.correlation = None;
+    assert!(
+        !serde_json::to_value(&reported)
+            .expect("it serialises")
+            .as_object()
+            .expect("a surface is an object")
+            .contains_key("correlation"),
+        "a surface raised under no key writes the field anyway"
     );
 }
 

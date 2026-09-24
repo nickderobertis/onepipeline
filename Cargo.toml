@@ -502,9 +502,28 @@ resolver = "2"
 # holding any of them on 0.7 would resolve the bus twice.
 #
 # - `onevcs` 0.30.1 is that library on the bus 0.8.0. Its 0.30.0 adds
-#   `SessionRequest.labels`, which every literal here fills empty. A
+#   `SessionRequest.labels`, stored on the session record and reported by
+#   `session holders` and `recoverable`. `src/vcs.rs` builds the request with
+#   that field empty — a session's labels are not a plan's to spell — and
+#   `src/executor.rs` decides the three the engine owns over it where the
+#   session is opened, which is where the run, the node and the launch that
+#   owns them are known; so a pin below 0.30.0 does not compile. A
 #   **requirement**, because `^0.29` admits no 0.30.x; `onevcs-testing` 0.7.1
 #   requires exactly it, so the two move together.
+#   `tests/e2e/session_reuse.rs` reads the labels back through the linked
+#   release's own `session holders --json`.
+#
+#   **0.31 and 0.32 are held back by the wire, and `just engines-current` is
+#   silent about it**: the requirement above admits neither, so no lock lags a
+#   requirement for it to report. 0.32.0 requires `onemessagebus ^0.9.0` and
+#   requires `onemessagebus-agent` not at all — at bus 0.9.0 the agent profile
+#   folds into the core, generic over a `Vocabulary`, and no 0.9.x of it exists
+#   — so beside this manifest's 0.8.0 wire pins the lock carries the bus twice
+#   and the `Phase` and `Envelope` seams in `src/vcs.rs` stop compiling. Taking
+#   it is the whole wire, `oneagentgraph` 0.5.1 and `onejudge` 0.14.0 with it,
+#   and a rewrite of the envelope-and-filter paragraph of `docs/contract.md`
+#   that states both are `onemessagebus-agent`'s: the bus relink's to make, not
+#   a pin to raise beside a session-labels change.
 # - `oneagentgraph` 0.4.9 reports an exhausted single-sided fallback chain as
 #   `fallback_chain_exhausted` rather than `unclassified`, which
 #   `src/engine.rs` reads as a chain that stopped through that library's own
@@ -725,7 +744,7 @@ onetaskgraph-local-md = "=0.2.32"
 
 [package]
 name = "onepipeline"
-version = "0.44.2"
+version = "0.44.4"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."

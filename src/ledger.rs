@@ -1243,7 +1243,7 @@ fn is_zero(value: &u64) -> bool {
 /// and what a launcher that wrote a blank one recorded. Reading them apart would
 /// make a run written before the key existed *ownable* by whichever reader also
 /// had no session.
-fn attributed(recorded: &str) -> bool {
+pub(crate) fn attributed(recorded: &str) -> bool {
     !recorded.is_empty() && recorded != sys::UNKNOWN_LAUNCHER
 }
 
