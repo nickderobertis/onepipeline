@@ -4245,7 +4245,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unpublishable_write_reports_failure_removes_its_temporary_and_preserves_the_destination() {
+    fn a_refused_rename_is_reported_leaves_no_temporary_and_keeps_the_destination() {
         for durability in [Durability::Record, Durability::Projection] {
             let root = scratch(&format!("unpublishable-{durability:?}"));
             let path = root.join("board.md");
