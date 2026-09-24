@@ -4244,6 +4244,8 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// The CLI cannot name this writer's private temporary after a refused
+    /// rename; this filesystem test checks that it is removed.
     #[test]
     fn a_write_the_host_will_not_publish_is_reported_and_takes_its_temporary_with_it() {
         for durability in [Durability::Record, Durability::Projection] {
@@ -4277,13 +4279,8 @@ mod tests {
         }
     }
 
-    /// A temporary this host will not open is reported before anything is
-    /// published, and the destination is left as it was.
-    ///
-    /// Induced by putting a directory at the temporary's own name: the one
-    /// failure that happens before a byte is written, so there is no temporary
-    /// file to clear afterwards and the clearing has to be as quiet about that
-    /// as it is about a removal the host refuses.
+    /// A CLI caller cannot pre-place an obstruction at a temporary name chosen
+    /// from the writer's pid and thread id; this test can name it directly.
     #[test]
     fn a_temporary_this_host_will_not_open_is_reported_and_leaves_the_destination_alone() {
         let root = scratch("unopenable");
@@ -4427,6 +4424,8 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// An otherwise writable host cannot be made to refuse fsync reliably in a
+    /// CLI journey; the watcher refuses the real call at each sync boundary.
     #[test]
     fn a_sync_the_host_refuses_is_a_failed_write_that_leaves_no_temporary() {
         for refused in [disk::Step::Contents, disk::Step::Entry] {
