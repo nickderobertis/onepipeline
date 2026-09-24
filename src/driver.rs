@@ -2708,6 +2708,16 @@ fn deliver_verdict_half(
 ) -> Result<()> {
     match correlation {
         None => channel.answer_if_verdict(envelope)?,
+        // The commands above have already been committed, so a reply naming a
+        // reconciler finding *and* carrying the edit that finding asked for finds
+        // its own question answered by the time it gets here. Binding it would be
+        // refused — which is right for a verdict naming a question some earlier
+        // reply answered, and wrong for this one, since it would report a failure
+        // for a reply whose edit has landed. Asked of this envelope's own
+        // commands, so nothing else reaches the append.
+        Some(named) if crate::findings::answered_alongside(paths, named, &envelope.commands) => {
+            channel.answer_if_verdict_alongside(envelope, named)?;
+        }
         named => channel.answer_if_verdict_bound(envelope, named)?,
     }
     if envelope.carries_verdict() {

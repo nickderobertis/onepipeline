@@ -1519,7 +1519,20 @@ fn converge(
                 // A decision rather than a report, so it is raised blocking and
                 // the subtree below the node waits on the person answering it.
                 Message::SessionConflicted(conflict) => {
-                    raise(paths, journal, session_conflict_surface(&conflict))?
+                    let surface = session_conflict_surface(&conflict);
+                    // Recorded before it is raised, so no edit can commit
+                    // between the question being askable and the run knowing
+                    // which edit answers it.
+                    if let Some(correlation) = &surface.correlation {
+                        let kind = crate::findings::FindingKind::SessionConflict;
+                        crate::findings::requests(
+                            paths,
+                            correlation,
+                            kind.asks_for(),
+                            conflict.node.as_str(),
+                        )?;
+                    }
+                    raise(paths, journal, surface)?
                 }
                 // The node comes out of flight **without a settlement**: nothing
                 // about it was refused, only the host's room for it, so it goes
@@ -4213,6 +4226,14 @@ pub(crate) struct SessionConflict {
 /// **Blocking**, because it is a decision rather than a report: nothing in this
 /// run converges on it, and the subtree below the node cannot start until
 /// somebody merges two branches by hand.
+///
+/// It carries a **stable correlation**, because its text asks for a graph edit
+/// and a commands-only envelope answers no question on its own: the `retry` this
+/// message names is recorded against that correlation by the raise below, and
+/// committing it is what answers this finding. Derived from the kind and the
+/// node alone and not from the attempt: the retry that answers it takes the node
+/// out of the graph, so the same finding about the same node is the same
+/// question however often the open is refused.
 fn session_conflict_surface(conflict: &SessionConflict) -> Surface {
     Surface {
         id: 0,
@@ -4235,7 +4256,10 @@ fn session_conflict_surface(conflict: &SessionConflict) -> Surface {
         abandoned: false,
         asker: None,
         workstream: Some(conflict.node.as_str().to_owned()),
-        correlation: None,
+        correlation: crate::findings::correlation(
+            crate::findings::FindingKind::SessionConflict,
+            conflict.node.as_str(),
+        ),
     }
 }
 
@@ -5767,6 +5791,10 @@ pub(crate) fn record_operation_facts(
             _ => {}
         }
     }
+    // And, beside what this edit recorded, what it *answered*: a reconciler
+    // finding whose text asked for exactly this edit leaves the planner's queue
+    // on the commit rather than waiting for a second reply nobody owes it.
+    crate::findings::answer_requested(paths, operations)?;
     Ok(())
 }
 

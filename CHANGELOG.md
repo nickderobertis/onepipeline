@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.4](https://github.com/nickderobertis/onepipeline/compare/v0.44.3...v0.44.4) - 2026-09-23
+
+### Added
+
+- *(lifecycle)* label every session a node opens with its run, node and launching session; relink onevcs ([#482](https://github.com/nickderobertis/onepipeline/pull/482))
+
+## [0.44.3](https://github.com/nickderobertis/onepipeline/compare/v0.44.2...v0.44.3) - 2026-09-23
+
+### Fixed
+
+- *(deps)* close the engine-currency check on the patches this workspace already permits ([#477](https://github.com/nickderobertis/onepipeline/pull/477))
+
+## [0.44.2](https://github.com/nickderobertis/onepipeline/compare/v0.44.1...v0.44.2) - 2026-09-22
+
+### Added
+
+- *(dispatch)* resolve an extends chain when reading a member's harness config ([#469](https://github.com/nickderobertis/onepipeline/pull/469))
+
 ## [0.44.1](https://github.com/nickderobertis/onepipeline/compare/v0.44.0...v0.44.1) - 2026-09-22
 
 ### Fixed

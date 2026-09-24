@@ -37,6 +37,25 @@ use crate::controls::{NodeControls, WORKER_MEMBER};
 use crate::error::{Error, Result};
 use crate::event::{Envelope, Labels};
 
+/// The `onevcs` session label naming the run that opened a node's session.
+///
+/// Every session a node-scope dispatch opens carries this, [`SESSION_NODE_LABEL`]
+/// and [`SESSION_LAUNCHER_LABEL`] on its session record — the same run, node and
+/// launching session the dispatch's own events are stamped with — so a listing
+/// of the host's sessions and preserved branches says whose each one is without
+/// joining a run's journal. `docs/contract.md` states the three keys and
+/// `tests/contract.rs` reconciles them against these constants.
+pub const SESSION_RUN_LABEL: &str = "run";
+
+/// The `onevcs` session label naming the node that opened the session.
+pub const SESSION_NODE_LABEL: &str = "node";
+
+/// The `onevcs` session label naming the launching session — the one
+/// `ONEPIPELINE_LAUNCHER_SESSION` named at launch, which `runs --mine` and
+/// `unwatched --session` are keyed on. Omitted, never stamped empty, for a launch
+/// nothing attributed.
+pub const SESSION_LAUNCHER_LABEL: &str = "launcher";
+
 /// Where a node's dispatch runs.
 pub trait Executor {
     /// The name the [rules](crate::rules) file selects this executor by.
@@ -263,7 +282,11 @@ impl Executor for LocalExecutor {
         let (dir, session) = match &req.workspace {
             WorkspaceSpec::Path(path) => (path.clone(), None),
             WorkspaceSpec::VcsSession(request) => {
-                let session = crate::vcs::session_open(request)?;
+                let request = SessionRequest {
+                    labels: session_labels(&request.labels, &req.labels, launched.as_ref()),
+                    ..request.clone()
+                };
+                let session = crate::vcs::session_open(&request)?;
                 remember_worktree(&session);
                 (session.worktree.clone(), Some(session))
             }
@@ -664,6 +687,50 @@ fn launched_with(labels: &Labels) -> Result<Option<crate::ledger::LaunchRecord>>
     crate::ledger::read_json::<crate::ledger::LaunchRecord>(&paths.launch()).map(Some)
 }
 
+/// The labels a node's `onevcs` session is opened with.
+///
+/// Whatever the request already carries, with the engine's own keys decided over
+/// it: the run and the node off the dispatch's labels, and the launching session
+/// off the run's launch record when that launch was attributed to one. A key the
+/// engine has no value for is removed rather than left as the caller spelled it,
+/// so a session never names a launcher its launch did not have.
+// llmlint: ignore[changed_behavior_has_e2e] exactly two of this function's inputs
+// cannot be produced by the binary, so neither has a journey and neither is a gap a
+// journey could close. **A caller's own labels**, and with them the precedence the
+// engine's keys take over one and the removal of a key it has no value for:
+// `vcs::request_for` is the only thing here that builds a `SessionRequest` and it
+// builds `labels` empty, so a non-empty one needs a library caller assembling its own
+// `DispatchRequest`. **A recorded session that is empty**: `sys::launching_session`
+// maps a blank or absent `ONEPIPELINE_LAUNCHER_SESSION` to `UNKNOWN_LAUNCHER`, so this
+// build never writes one, and a record only reads back empty where it predates the
+// key. Both are held by
+// `tests::a_sessions_labels_keep_the_callers_and_the_engine_decides_its_own`, whose
+// own site says which of the two each assertion is. Everything the binary *can* reach
+// is end to end in `tests/e2e/session_reuse.rs`: the stamping on a fresh session, on a
+// pooled slot and on a retried node, and the omitted launcher a blank
+// `ONEPIPELINE_LAUNCHER_SESSION` produces, which is the `UNKNOWN_LAUNCHER` arm.
+fn session_labels(
+    asked: &std::collections::BTreeMap<String, String>,
+    labels: &Labels,
+    launched: Option<&crate::ledger::LaunchRecord>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut stamped = asked.clone();
+    let launcher = launched
+        .map(|record| record.session.as_str())
+        .filter(|session| crate::ledger::attributed(session));
+    for (key, value) in [
+        (SESSION_RUN_LABEL, labels.run_id.as_deref()),
+        (SESSION_NODE_LABEL, labels.node.as_deref()),
+        (SESSION_LAUNCHER_LABEL, launcher),
+    ] {
+        match value {
+            Some(value) => stamped.insert(key.to_owned(), value.to_owned()),
+            None => stamped.remove(key),
+        };
+    }
+    stamped
+}
+
 /// One dispatch running on this machine.
 #[derive(Debug)]
 struct LocalDispatch {
@@ -771,6 +838,62 @@ fn available_memory() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sessions_labels_keep_the_callers_and_the_engine_decides_its_own() {
+        let asked: std::collections::BTreeMap<String, String> = [
+            ("owner", "ci"),
+            (SESSION_RUN_LABEL, "stale-run"),
+            (SESSION_LAUNCHER_LABEL, "stale-session"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+        let labels = Labels {
+            run_id: Some("demo-1".into()),
+            node: Some("service".into()),
+            ..Labels::default()
+        };
+        let record = |session: &str| -> crate::ledger::LaunchRecord {
+            serde_json::from_value(serde_json::json!({
+                "run_id": "demo-1",
+                "session": session,
+            }))
+            .expect("a launch record")
+        };
+        let spelled = |stamped: std::collections::BTreeMap<String, String>| {
+            stamped
+                .into_iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            spelled(session_labels(&asked, &labels, Some(&record("session-a")))),
+            [
+                "launcher=session-a",
+                "node=service",
+                "owner=ci",
+                "run=demo-1"
+            ]
+        );
+        // An unattributed launch names no launcher, whatever the caller said, in
+        // either spelling of one. `unknown` is what this build records for a blank
+        // `ONEPIPELINE_LAUNCHER_SESSION`, and `tests/e2e/session_reuse.rs` drives that
+        // arm through the binary; the empty one is reachable only off a record written
+        // before the key existed, which is why it is asserted here and not there.
+        for nobody in ["", crate::sys::UNKNOWN_LAUNCHER] {
+            assert_eq!(
+                spelled(session_labels(&asked, &labels, Some(&record(nobody)))),
+                ["node=service", "owner=ci", "run=demo-1"],
+                "{nobody:?}"
+            );
+        }
+        assert_eq!(
+            spelled(session_labels(&asked, &labels, None)),
+            ["node=service", "owner=ci", "run=demo-1"]
+        );
+    }
 
     #[test]
     fn the_local_executor_is_named_and_capable_of_both_workspaces() {
