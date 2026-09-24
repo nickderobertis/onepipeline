@@ -1338,14 +1338,8 @@ fn shadow_documents(dir: &Path) -> Vec<PathBuf> {
     found
 }
 
-// llmlint: ignore-block[tests_mirror_real_usage] the claim is about a file a reader can
-// catch mid-write, and no CLI output reports one: what a torn read produces is the store's
-// own refusal, in another process, on a document this crate wrote — nondeterministically,
-// which is the defect. Everything driven here is real: the shipped binary, two real plan
-// stores, real dispatches, the real projection. The direct read is the one observation of
-// the property, it is the same read `local-md` performs, and a window microseconds wide is
-// caught by rate or not at all — a pass that listed a directory or spawned a process per
-// look would pass over a torn tree by never arriving inside one.
+// llmlint: ignore-block[tests_mirror_real_usage] no CLI output reports a torn file, and a
+// window microseconds wide is caught only by reading at rate, as `local-md` itself reads.
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] Measured at 7.5s
 // within this module's 36.2s, this uses the same compiled binary and store fixture as
 // its six peer write-back journeys. The only separate test edge is for conversational
