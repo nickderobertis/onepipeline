@@ -49,10 +49,8 @@ const declarations = execFileSync("git", ["ls-files", "--", "*project.json"], {
   .filter((path) => basename(path) === "project.json")
   .sort();
 
-/** Every project's Nx declaration, by the name Nx knows it as. */
 const projects = declarations.map((path) => JSON.parse(readFileSync(join(root, path), "utf8")));
 
-/** A project's declaration, looked up by the name Nx knows it as. */
 function project(name) {
   const found = projects.find((candidate) => candidate.name === name);
   assert.ok(found, `no committed project.json declares \`${name}\``);

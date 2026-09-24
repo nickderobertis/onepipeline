@@ -199,7 +199,7 @@ POLL_SECONDS = 0.02
 
 
 class Waited(RuntimeError):
-    """A world that never reached a record the journey waits for."""
+    """Raised by `_until`, never caught: a world that did not get there."""
 
 
 class World:
@@ -350,7 +350,6 @@ class World:
         (self.fakes / name).write_text(body)
 
     def release(self, key: str) -> None:
-        """Let a held dispatch finish, the way the doubles' own hold is released."""
         self.script(f"{key}.go", "")
 
     @property

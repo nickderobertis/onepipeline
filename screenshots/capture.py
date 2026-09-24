@@ -67,7 +67,6 @@ WORKFLOW = Path(".github/workflows/visual-docs.yml")
 
 
 def screencomp_pin_refusal() -> str | None:
-    """The refusal, when the workflow's two screencomp versions have parted."""
     text = (REPO / WORKFLOW).read_text()
     # `findall`, not `search`: a second declaration of either would leave one of
     # them unchecked, which is exactly the drift this reconciliation exists for.
@@ -109,7 +108,6 @@ NAMED_INPUTS = Path("nx.json")
 
 
 def uncovered_guard_path_refusal() -> str | None:
-    """The refusal, when a guard path is under no declared named input."""
     document = json.loads((REPO / NAMED_INPUTS).read_text())
     entries = None
     if isinstance(document, dict) and isinstance(document.get("namedInputs"), dict):

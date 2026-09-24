@@ -189,8 +189,8 @@ printf '%s\n' "$changed" | screencomp scope --changed-from - --exit-code --quiet
 scope_status=$?
 set -e
 case "$scope_status" in
-  0) exit 0 ;;                            # nothing relevant: pass silently
-  3) : ;;                                 # a relevant path matched: capture below
+  0) exit 0 ;;
+  3) : ;;
   *)
     echo "pre-push: 'screencomp scope' failed (exit $scope_status); skipping the" >&2
     echo "          visual guard. Is screencomp current? The visual-docs workflow" >&2

@@ -83,9 +83,7 @@ attached stream prints changes, and commit the new hero beside the new baseline.
 
 ## Working on it
 
-`just --list` indexes the five recipes (`screenshots-tools`, `screenshots`,
-`screenshots-gif`, `screenshots-bless`, `screenshots-guard`). What it does not
-say:
+`just --list` indexes the recipes. What it does not say:
 
 - **Bless only after an intended output change**, and commit the refreshed
   baseline together with `images/` — CI compares the two against each other.
@@ -98,16 +96,15 @@ say:
   would otherwise let a cached target replay a stale result.
 - **No image goes under `docs/`** — that directory is machine-consumed and named
   in a cached build input.
-- The guard only runs where `core.hooksPath` points at `.githooks`, which is
-  per-clone state `just bootstrap` sets; `tests/provisioning.rs` holds that.
-  The directory carries the visual guard **and nothing else** — `just gate` stays
-  unhooked, as it already was.
-- **A hook's environment is not a shell's:** git exports `GIT_DIR`, which beats
-  `-C` and beats discovery. So the world states its whole git environment and
-  inherits none of the caller's. Held in step by `just screenshots-guard`, the
-  only caller that reaches this, and by `tests/visual_docs.rs`.
-- **A failed step reports both streams** — git refuses on *stdout*, so a
-  diagnostic quoting `stderr` alone arrives blank. Same tier as above.
+- The guard runs only where `core.hooksPath` points at `.githooks`, per-clone
+  state `just bootstrap` sets. That directory carries the visual guard **and
+  nothing else**: `just gate` stays unhooked.
+- **A hook's environment is not a shell's:** it carries a `GIT_DIR`, which beats
+  `-C` and beats discovery, so the world states its whole git environment and
+  inherits none.
+- **A failed step reports both streams**, because git refuses on *stdout*.
+- The two above are reached only from a hook, so `just screenshots-guard`
+  rehearses one; `tests/visual_docs.rs` holds both.
 - **The two switches are spelled, not merely present.** `SCREENSHOTS_NO_BUILD`
   (`capture.sh`) and `SCREENCOMP_GUARD_REQUIRE` (the hook) each read a written-out
   yes or no — the spellings are the `case` statement beside each — and refuse
