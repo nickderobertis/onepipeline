@@ -107,7 +107,7 @@ use crate::projection::{self, RunState};
 // refusal of the checked-in version-1 document itself is held by
 // `the_document_the_build_before_this_one_wrote_is_refused_rather_than_read` below, over
 // the real reader and the real file.
-pub(crate) const CHECKPOINT_SCHEMA_VERSION: u32 = 5;
+pub(crate) const CHECKPOINT_SCHEMA_VERSION: u32 = 6;
 
 /// Read the version, refusing a document this build cannot honestly read.
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
@@ -1421,7 +1421,7 @@ mod tests {
     /// later build of this crate parses, and the only thing that stops a marker
     /// field being renamed, an absence becoming a zero, the digest turning back
     /// into a number, or the version moving without anyone deciding to move it.
-    const GOLDEN: &str = include_str!("../tests/golden/checkpoint-v5.json");
+    const GOLDEN: &str = include_str!("../tests/golden/checkpoint-v6.json");
 
     /// The digest of the journal bytes the golden's marker covers.
     const GOLDEN_BYTES_DIGESTED: u128 = 0x1234_5678_9abc_def0_1234_5678_9abc_def0;
@@ -1441,6 +1441,7 @@ mod tests {
         });
         let state = RunState {
             graph,
+            run_node_sets: Some(vec!["members.worker.agent.model=edited".into()]),
             recorded: BTreeMap::from([(
                 "build".to_string(),
                 crate::projection::Recorded::At(crate::graph::NodeStatus::Done),
@@ -1481,11 +1482,12 @@ mod tests {
     /// is a real document, byte-for-byte the shape this build writes, and the
     /// reader has to refuse it rather than resume from a fold it would not have
     /// computed.
-    const GOLDEN_EARLIER: [(u32, &str); 4] = [
+    const GOLDEN_EARLIER: [(u32, &str); 5] = [
         (1, include_str!("../tests/golden/checkpoint-v1.json")),
         (2, include_str!("../tests/golden/checkpoint-v2.json")),
         (3, include_str!("../tests/golden/checkpoint-v3.json")),
         (4, include_str!("../tests/golden/checkpoint-v4.json")),
+        (5, include_str!("../tests/golden/checkpoint-v5.json")),
     ];
 
     #[test]
@@ -1502,18 +1504,28 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_5_document_is_the_shape_the_golden_pins() {
+    fn a_schema_6_document_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&a_checkpoint()).expect("it serialises");
+        if std::env::var_os("ONEPIPELINE_WRITE_CHECKPOINT_GOLDEN").is_some() {
+            std::fs::write(
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/golden/checkpoint-v6.json"
+                ),
+                format!("{rendered}\n"),
+            )
+            .expect("write checkpoint golden");
+        }
         assert_eq!(
             rendered.trim(),
             GOLDEN.trim(),
             "the checkpoint document changed shape. If that was deliberate, bump \
-             CHECKPOINT_SCHEMA_VERSION and update tests/golden/checkpoint-v5.json together"
+             CHECKPOINT_SCHEMA_VERSION and update tests/golden/checkpoint-v6.json together"
         );
     }
 
     #[test]
-    fn a_schema_5_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
+    fn a_schema_6_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
         let read: Checkpoint =
             serde_json::from_str(GOLDEN).expect("the golden reads back into the types");
         // Compared through the wire rather than through `PartialEq`, which the

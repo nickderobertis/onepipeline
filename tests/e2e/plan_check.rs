@@ -15,7 +15,26 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::harness::{plan_of, World, REFUSED, STORE_SOURCE};
+use crate::harness::{agent, plan_of, World, REFUSED, STORE_SOURCE};
+
+#[test]
+fn plan_check_applies_node_sets_to_the_effective_graph() {
+    let world = World::new("plancheck-node-sets");
+    let mut valid = agent("build", &[]);
+    valid["sets"] = json!(["members.worker.agent.model=checked"]);
+    let project = world.plan("valid-sets", &plan_of("valid-sets", vec![valid]));
+    world.run(&["plan", "check", &project]).exited(0);
+
+    let mut invalid = agent("build", &[]);
+    invalid["sets"] = json!(["members.absent.agent.model=wrong"]);
+    let project = world.plan("invalid-sets", &plan_of("invalid-sets", vec![invalid]));
+    world
+        .run(&["plan", "check", &project])
+        .exited(HAS_REFUSALS)
+        .out_has("build")
+        .out_has("node-scope.yaml")
+        .out_has("members.absent.agent.model=wrong");
+}
 
 const HAS_REFUSALS: i32 = 1;
 

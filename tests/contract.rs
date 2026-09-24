@@ -431,11 +431,40 @@ fn dispatching_goes_through_the_oneagentgraph_seam_and_says_so_when_it_cannot() 
     std::env::remove_var("ONEPIPELINE_ONEAGENTGRAPH_BIN");
 }
 
-/// The `filters:` block in the contract is a block this crate's own types read.
-///
-/// Driven out of the document, like every other fixture here: the grammar is
-/// `onemessagebus`'s, re-exported, and this document keeps a marked copy of it, so
-/// a bus release whose grammar stopped matching that text fails this gate.
+/// The contract's graph override example must be the Node, Command, and
+/// LaunchConfig wire shapes this build publishes.
+#[test]
+fn the_contracts_graph_override_shapes_match_the_public_types() {
+    let block = fenced_block_naming("json", "\"graph_overrides\"");
+    let document: serde_json::Value = serde_json::from_str(&block).expect("contract JSON parses");
+    let overrides = &document["graph_overrides"];
+    let node: Node = serde_json::from_value(overrides["node"].clone()).expect("node parses");
+    assert_eq!(
+        serde_json::to_value(&node).expect("node serializes"),
+        overrides["node"]
+    );
+    let commands: Vec<onepipeline::channel::Command> =
+        serde_json::from_value(overrides["commands"].clone()).expect("commands parse");
+    assert_eq!(
+        serde_json::to_value(&commands).expect("commands serialize"),
+        overrides["commands"]
+    );
+    let launch: LaunchConfig =
+        serde_json::from_value(overrides["launch_config"].clone()).expect("launch parses");
+    assert_eq!(
+        serde_json::to_value(&launch).expect("launch serializes"),
+        overrides["launch_config"]
+    );
+    assert_eq!(launch.schema_version, LAUNCH_CONFIG_SCHEMA_VERSION);
+    assert_eq!(node.sets.len(), 2);
+    let mut empty = node;
+    empty.sets.clear();
+    assert!(serde_json::to_value(empty)
+        .expect("empty node serializes")
+        .get("sets")
+        .is_none());
+}
+
 #[test]
 fn the_contracts_launch_config_example_parses_and_round_trips() {
     let yaml = fenced_block_naming("yaml", "schema_version: 2");
@@ -1545,6 +1574,7 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         persona: Some("engineer".into()),
         deps: vec!["other".into()],
         max_turns: Some(1),
+        sets: vec!["members.worker.agent.model=example".into()],
         expects_no_diff: true,
         context: Some("note".into()),
         parked: true,
@@ -1925,6 +1955,8 @@ fn the_shipped_example_store_holds_a_project_per_example_plan() {
 /// prove.
 fn op_of(command: &Edit) -> &'static str {
     match command {
+        Edit::SetNodeSets { .. } => "set-node-sets",
+        Edit::SetRunNodeSets { .. } => "set-run-node-sets",
         Edit::Add { .. } => "add",
         Edit::Drop { .. } => "drop",
         Edit::Reparent { .. } => "reparent",
@@ -2279,7 +2311,8 @@ fn the_pool_maintenance_schedule_is_what_the_divergence_record_names() {
             .expect("the block states the version the key arrived at"),
     )
     .expect("a version fits");
-    assert_eq!(at, LAUNCH_CONFIG_SCHEMA_VERSION);
+    assert_eq!(at, 9, "maintenance_config retains its arrival version");
+    assert!(LAUNCH_CONFIG_SCHEMA_VERSIONS_READ.contains(&at));
     let named: LaunchConfig = serde_json::from_value(json!({
         "schema_version": at,
         KEY: "./maintenance.yml",

@@ -51,8 +51,9 @@ pub const DETAILED_PROFILE: &str = "detailed";
 /// `onemessagebus` configuration a run's channel is kept under and the bar its
 /// envelope reviewer judges against — `bus_config` and `envelope_reviewer_bar` —
 /// and **6** the commands a run fires when it ends — `success_hook`,
-/// `failure_hook` and `hook_timeout`.
-pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 9;
+/// `failure_hook` and `hook_timeout`. **10** adds the ordered node and dag
+/// graph override lists.
+pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 10;
 
 /// Every launch-config version this build **reads**, newest first.
 ///
@@ -68,8 +69,10 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 9;
 /// maintenance schedule, which is what a launch naming none of them means — and
 /// naming a later key there is refused by that field's name**, exactly as a key
 /// no version ever had is.
-pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 9] =
-    [LAUNCH_CONFIG_SCHEMA_VERSION, 8, 7, 6, 5, 4, 3, 2, 1];
+pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 10] =
+    [LAUNCH_CONFIG_SCHEMA_VERSION, 9, 8, 7, 6, 5, 4, 3, 2, 1];
+
+const OVERRIDE_LIST_SCHEMA_VERSION: u32 = 10;
 
 /// Each key younger than the schema itself: the version it arrived at, and
 /// whether a blank value is refused.
@@ -111,6 +114,8 @@ const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
     ("dispatch_env_hook", 8, BlankValue::Kept),
     (DISPATCH_ENV_HOOK_TIMEOUT_KEY, 8, BlankValue::Refused),
     (crate::maintenance::KEY, 9, BlankValue::Kept),
+    ("node_sets", OVERRIDE_LIST_SCHEMA_VERSION, BlankValue::Kept),
+    ("dag_sets", OVERRIDE_LIST_SCHEMA_VERSION, BlankValue::Kept),
 ];
 
 /// The launch-config key naming the write-back's per-item budget, spelled once
@@ -311,6 +316,12 @@ pub struct LaunchConfig {
     /// Schema version; [`LAUNCH_CONFIG_SCHEMA_VERSION`] for anything this crate
     /// writes.
     pub schema_version: u32,
+    /// Ordered overrides for every node-scope graph launch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node_sets: Vec<String>,
+    /// Ordered overrides for the dag-scope graph launch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dag_sets: Vec<String>,
     /// What this launch says about its run's events.
     ///
     /// Omitted when empty, so a config that declares nothing about events
@@ -489,6 +500,8 @@ impl Default for LaunchConfig {
     fn default() -> Self {
         Self {
             schema_version: LAUNCH_CONFIG_SCHEMA_VERSION,
+            node_sets: Vec::new(),
+            dag_sets: Vec::new(),
             filters: Filters::default(),
             pr_author_graph: None,
             node_validator: None,
@@ -528,6 +541,21 @@ impl LaunchConfig {
         let named = |why: String| Error::Invalid(format!("{}: {why}", path.display()));
         let config: Self =
             serde_norway::from_str(&text).map_err(|failure| named(failure.to_string()))?;
+        if config.schema_version < OVERRIDE_LIST_SCHEMA_VERSION {
+            let written: serde_json::Value =
+                serde_norway::from_str(&text).map_err(|failure| named(failure.to_string()))?;
+            for (key, _, _) in KEYS_BY_VERSION
+                .iter()
+                .filter(|(_, version, _)| *version == OVERRIDE_LIST_SCHEMA_VERSION)
+            {
+                if written.get(*key).is_some() {
+                    return Err(named(format!(
+                        "`{key}` is a schema {OVERRIDE_LIST_SCHEMA_VERSION} key and this config declares schema_version {} — set `schema_version: {LAUNCH_CONFIG_SCHEMA_VERSION}`",
+                        config.schema_version
+                    )));
+                }
+            }
+        }
         if !LAUNCH_CONFIG_SCHEMA_VERSIONS_READ.contains(&config.schema_version) {
             let known = LAUNCH_CONFIG_SCHEMA_VERSIONS_READ
                 .iter()
@@ -783,11 +811,12 @@ mod tests {
     /// without anyone deciding to move it. The earlier ones stay checked in for
     /// the half a single golden cannot pin — that a config written before the
     /// current version is still a document this build reads.
-    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v9.json");
+    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v10.json");
 
     /// The same document as each earlier version wrote it: the block it had, and
     /// no key that version never had, newest first.
-    const GOLDEN_EARLIER: [(u32, &str); 8] = [
+    const GOLDEN_EARLIER: [(u32, &str); 9] = [
+        (9, include_str!("../tests/golden/launch-config-v9.json")),
         (8, include_str!("../tests/golden/launch-config-v8.json")),
         (7, include_str!("../tests/golden/launch-config-v7.json")),
         (6, include_str!("../tests/golden/launch-config-v6.json")),
@@ -868,6 +897,8 @@ mod tests {
     fn golden() -> LaunchConfig {
         LaunchConfig {
             schema_version: LAUNCH_CONFIG_SCHEMA_VERSION,
+            node_sets: vec!["members.worker.agent.model=node".into()],
+            dag_sets: vec!["members.observer.agent.model=dag".into()],
             filters: pinned_filters(),
             pr_author_graph: Some("./graphs/pr-author.yaml".to_string()),
             node_validator: Some("./scripts/check-node.sh".to_string()),
@@ -919,6 +950,8 @@ mod tests {
                 earlier,
                 LaunchConfig {
                     schema_version: version,
+                    node_sets: Vec::new(),
+                    dag_sets: Vec::new(),
                     filters: pinned_filters(),
                     // Version 2 is the one that declared the drafting graph, and
                     // it names one; version 1 never had the key at all. Version 3
@@ -942,7 +975,7 @@ mod tests {
                     dispatch_env_hook: (version >= 8)
                         .then(|| "./scripts/dispatch-env.sh".to_string()),
                     dispatch_env_hook_timeout: NonZeroU64::new(60).filter(|_| version >= 8),
-                    maintenance_config: None,
+                    maintenance_config: (version >= 9).then(|| "./maintenance.yml".to_string()),
                 }
             );
             assert!(

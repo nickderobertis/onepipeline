@@ -33,7 +33,7 @@ use oneagentgraph::config::ConfigRef;
 use onevcs::SessionRequest;
 
 use crate::agentgraph::{Ending, Environment, GraphOutput, GraphRun, Launch};
-use crate::controls::{NodeControls, WORKER_MEMBER};
+use crate::controls::NodeControls;
 use crate::error::{Error, Result};
 use crate::event::{Envelope, Labels};
 
@@ -664,14 +664,28 @@ fn node_sets(
     if labels.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
         return Ok(Vec::new());
     }
-    let mut sets = launched.map_or_else(Vec::new, |record| record.node_sets.clone());
-    if let Some(persona) = &labels.persona {
-        sets.push(format!("members.{WORKER_MEMBER}.persona={persona}"));
-    }
-    // A control this build cannot apply refuses the launch here as well as at
-    // validation, so no path composes a launch that drops one on the floor.
-    sets.extend(controls.overrides().map_err(Error::Invalid)?);
-    Ok(sets)
+    let (run_sets, own_sets) = if let (Some(record), Some(run), Some(node)) =
+        (launched, labels.run_id.as_deref(), labels.node.as_deref())
+    {
+        let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
+        let state = crate::checkpoint::Projected::open(&paths);
+        (
+            state
+                .run_node_sets
+                .clone()
+                .unwrap_or_else(|| record.node_sets.clone()),
+            state
+                .graph
+                .get(node)
+                .map_or_else(Vec::new, |n| n.sets.clone()),
+        )
+    } else {
+        (
+            launched.map_or_else(Vec::new, |record| record.node_sets.clone()),
+            Vec::new(),
+        )
+    };
+    crate::graph::dispatch_sets(&run_sets, labels.persona.as_deref(), *controls, &own_sets)
 }
 
 /// The launch record of the run this dispatch belongs to, when it belongs to one.

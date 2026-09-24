@@ -213,6 +213,27 @@ pub(crate) fn check(args: &PlanCheckArgs) -> Result<i32> {
     }
 }
 
+/// Validate node overrides against the same effective graphs a launch uses.
+fn check_node_sets(plan: &crate::plan::Plan) -> std::result::Result<(), Refusal> {
+    if !plan.tasks.iter().any(|node| !node.sets.is_empty()) {
+        return Ok(());
+    }
+    let base = std::env::current_dir()
+        .map_err(|why| Refusal::plain(format!("cannot read the launch directory: {why}")))?;
+    let default = crate::driver::resolve_graph(&crate::engine::configured_node_graph(), &base)
+        .map_err(|why| Refusal::plain(why.to_string()))?;
+    let mut resolved = plan.clone();
+    crate::driver::resolve_plan_graphs(&mut resolved, &base)
+        .map_err(|why| Refusal::plain(why.to_string()))?;
+    for node in &resolved.tasks {
+        if !node.sets.is_empty() {
+            crate::graph::validate_dispatch_sets(node, &default, &[])
+                .map_err(|why| Refusal::node(&node.id, why.to_string()).field("sets"))?;
+        }
+    }
+    Ok(())
+}
+
 /// Run the loader, and then every registered check it leaves something to hand.
 ///
 /// It **spawns** each of those checks, which is the half of this verb that is
@@ -229,37 +250,39 @@ fn load_and_check(args: &PlanCheckArgs) -> Result<Answered> {
     let refusal = match store.read_plan(&project) {
         Err(Load::Unreadable(error)) => return Err(error),
         Err(Load::Refused(refusal)) => refusal,
-        Ok(read) => match crate::graph::check(&read.plan) {
-            Err(refusal) => refusal,
-            Ok(()) => {
-                let mut refusals = Vec::new();
-                let mut unrunnable = Vec::new();
-                // A document this build cannot write is one no check can be
-                // handed, so every registered check is one that could not be run
-                // rather than one handed a plan with a node missing from it.
-                // Where none is registered there is nobody it could not be handed
-                // to, and the loader's acceptance stands on its own.
-                match document(&read) {
-                    Ok(document) => {
-                        for path in &args.checks {
-                            match offer(path, &document) {
-                                Ok(answered) => refusals.extend(answered),
-                                Err(why) => unrunnable.push(why),
+        Ok(read) => {
+            match crate::graph::check(&read.plan).and_then(|()| check_node_sets(&read.plan)) {
+                Err(refusal) => refusal,
+                Ok(()) => {
+                    let mut refusals = Vec::new();
+                    let mut unrunnable = Vec::new();
+                    // A document this build cannot write is one no check can be
+                    // handed, so every registered check is one that could not be run
+                    // rather than one handed a plan with a node missing from it.
+                    // Where none is registered there is nobody it could not be handed
+                    // to, and the loader's acceptance stands on its own.
+                    match document(&read) {
+                        Ok(document) => {
+                            for path in &args.checks {
+                                match offer(path, &document) {
+                                    Ok(answered) => refusals.extend(answered),
+                                    Err(why) => unrunnable.push(why),
+                                }
                             }
                         }
+                        Err(why) => unrunnable.extend(args.checks.iter().map(|path| Unrunnable {
+                            check: path.display().to_string(),
+                            exit_code: None,
+                            stderr: why.clone(),
+                        })),
                     }
-                    Err(why) => unrunnable.extend(args.checks.iter().map(|path| Unrunnable {
-                        check: path.display().to_string(),
-                        exit_code: None,
-                        stderr: why.clone(),
-                    })),
+                    return Ok(Answered::Checked {
+                        refusals,
+                        unrunnable,
+                    });
                 }
-                return Ok(Answered::Checked {
-                    refusals,
-                    unrunnable,
-                });
             }
-        },
+        }
     };
     Ok(Answered::LoaderRefused {
         refusal: engine_refusal(refusal),

@@ -23,7 +23,7 @@ use crate::harness::{agent, human, plan_of, rows, World, NOTHING_DRIVING, REFUSE
 // which compiles the unix half, cannot see.
 #[cfg(unix)]
 use crate::harness::{end_process, reaped_pid};
-use serde_json::json;
+use serde_json::{json, Value};
 
 fn start_detached(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     start_detached_announcing(world, name, nodes).0
@@ -232,7 +232,7 @@ fn start_launches_the_named_dag_scope_graph_and_records_how_to_relaunch_it() {
         &world.shipped_dag_graph(),
         "--set",
         "members.monitor.agent.model=first value",
-        "--set=members.check-in.model=second=value",
+        "--set=members.monitor.agent.model=second=value",
         "--node-set",
         "members.worker.agent.model=node value",
     ]);
@@ -270,7 +270,7 @@ fn start_launches_the_named_dag_scope_graph_and_records_how_to_relaunch_it() {
         launch["dag_sets"],
         json!([
             "members.monitor.agent.model=first value",
-            "members.check-in.model=second=value"
+            "members.monitor.agent.model=second=value"
         ])
     );
     assert_eq!(
@@ -286,6 +286,270 @@ fn start_launches_the_named_dag_scope_graph_and_records_how_to_relaunch_it() {
     // the run is that process, and it is this build rather than any agent.
     assert_ne!(launch["pid"], json!(0));
     world.release("build.go");
+}
+
+#[test]
+fn launch_override_lists_resolve_file_environment_and_flags_independently() {
+    let world = World::new("launch-set-precedence");
+    let config = world.root.join("launch-sets.json");
+    let config_node = "members.worker.agent.model=config,=one\nline";
+    let config_dag = "members.monitor.agent.model=config,=one\nline";
+    std::fs::write(
+        &config,
+        json!({
+            "schema_version": onepipeline::filter::LAUNCH_CONFIG_SCHEMA_VERSION,
+            "node_sets": [config_node], "dag_sets": [config_dag]
+        })
+        .to_string(),
+    )
+    .expect("launch config written");
+    let env_node = "members.worker.agent.model=env,=two\nline";
+    let env_dag = "members.monitor.agent.model=env,=two\nline";
+    let flag_node = "members.worker.agent.model=flag,=three\nline";
+    let flag_dag = "members.monitor.agent.model=flag,=three\nline";
+    struct OverrideCase<'a> {
+        name: &'a str,
+        env_nodes: Option<Vec<&'a str>>,
+        env_dags: Option<Vec<&'a str>>,
+        expected_nodes: Vec<&'a str>,
+        expected_dags: Vec<&'a str>,
+    }
+    let cases = [
+        OverrideCase {
+            name: "config",
+            env_nodes: None,
+            env_dags: None,
+            expected_nodes: vec![config_node],
+            expected_dags: vec![config_dag],
+        },
+        OverrideCase {
+            name: "environment",
+            env_nodes: Some(vec![env_node]),
+            env_dags: Some(vec![env_dag]),
+            expected_nodes: vec![env_node],
+            expected_dags: vec![env_dag],
+        },
+        OverrideCase {
+            name: "flags",
+            env_nodes: Some(vec![env_node]),
+            env_dags: Some(vec![env_dag]),
+            expected_nodes: vec![flag_node],
+            expected_dags: vec![flag_dag],
+        },
+        OverrideCase {
+            name: "cleared",
+            env_nodes: Some(vec![]),
+            env_dags: Some(vec![]),
+            expected_nodes: vec![],
+            expected_dags: vec![],
+        },
+    ];
+    for OverrideCase {
+        name,
+        env_nodes,
+        env_dags,
+        expected_nodes,
+        expected_dags,
+    } in cases
+    {
+        let path = world.plan(name, &plan_of(name, vec![agent("build", &[])]));
+        let mut args = vec![
+            "start",
+            path.as_str(),
+            "--detach",
+            "--launch-config",
+            config.to_str().expect("path"),
+            "--dag-graph",
+        ];
+        let dag = world.shipped_dag_graph();
+        args.push(&dag);
+        if name == "flags" {
+            args.extend(["--node-set", flag_node, "--set", flag_dag]);
+        }
+        let mut command = world.cmd(&args);
+        if let Some(nodes) = env_nodes {
+            command.env(
+                "ONEPIPELINE_NODE_SETS",
+                serde_json::to_string(&nodes).expect("JSON"),
+            );
+        }
+        if let Some(dags) = env_dags {
+            command.env(
+                "ONEPIPELINE_DAG_SETS",
+                serde_json::to_string(&dags).expect("JSON"),
+            );
+        }
+        world.run_on(command, "start with layered sets").exited(0);
+        let launch = world.run_json(name, "launch.json");
+        assert_eq!(
+            launch["node_sets"],
+            if expected_nodes.is_empty() {
+                Value::Null
+            } else {
+                json!(expected_nodes)
+            },
+            "{name}: {launch}"
+        );
+        assert_eq!(
+            launch["dag_sets"],
+            if expected_dags.is_empty() {
+                Value::Null
+            } else {
+                json!(expected_dags)
+            },
+            "{name}: {launch}"
+        );
+        world.until("both graph scopes to launch", |world| {
+            ["node-scope.yaml", "dag-scope.yaml"].iter().all(|graph| {
+                world.invocations().iter().any(|call| {
+                    call["tool"] == "oneagentgraph"
+                        && call["args"].as_array().is_some_and(|args| {
+                            args.get(1)
+                                .and_then(Value::as_str)
+                                .is_some_and(|path| path.ends_with(graph))
+                                && args
+                                    .iter()
+                                    .any(|arg| arg == &format!("onepipeline.run_id={name}"))
+                        })
+                })
+            })
+        });
+        for (graph, expected) in [
+            ("node-scope.yaml", &expected_nodes),
+            ("dag-scope.yaml", &expected_dags),
+        ] {
+            let call = world
+                .invocations()
+                .into_iter()
+                .find(|call| {
+                    call["tool"] == "oneagentgraph"
+                        && call["args"].as_array().is_some_and(|args| {
+                            args.get(1)
+                                .and_then(Value::as_str)
+                                .is_some_and(|path| path.ends_with(graph))
+                                && args
+                                    .iter()
+                                    .any(|arg| arg == &format!("onepipeline.run_id={name}"))
+                        })
+                })
+                .unwrap_or_else(|| panic!("{name}: no {graph} launch: {}", world.dump()));
+            let sets: Vec<&str> = call["args"]
+                .as_array()
+                .expect("argv")
+                .windows(2)
+                .filter(|pair| pair[0] == "--set")
+                .filter_map(|pair| pair[1].as_str())
+                .filter(|set| {
+                    set.starts_with("members.worker.agent.model=")
+                        || set.starts_with("members.monitor.agent.model=")
+                })
+                .collect();
+            assert_eq!(
+                sets.as_slice(),
+                expected.as_slice(),
+                "{name}: {graph} launched with wrong sets: {call}"
+            );
+        }
+    }
+    let path = world.plan(
+        "malformed",
+        &plan_of("malformed", vec![agent("build", &[])]),
+    );
+    let mut command = world.cmd(&[
+        "start",
+        &path,
+        "--attach",
+        "--launch-config",
+        config.to_str().expect("path"),
+    ]);
+    command.env("ONEPIPELINE_NODE_SETS", "members.worker.model=not-json");
+    world
+        .run_on(command, "malformed node sets")
+        .exited(REFUSED)
+        .err_has("ONEPIPELINE_NODE_SETS");
+    assert!(!world.run_file("malformed", "launch.json").exists());
+    let path = world.plan(
+        "malformed-dag",
+        &plan_of("malformed-dag", vec![agent("build", &[])]),
+    );
+    let mut command = world.cmd(&[
+        "start",
+        &path,
+        "--attach",
+        "--launch-config",
+        config.to_str().expect("path"),
+    ]);
+    command.env("ONEPIPELINE_DAG_SETS", "not-json");
+    world
+        .run_on(command, "malformed dag sets")
+        .exited(REFUSED)
+        .err_has("ONEPIPELINE_DAG_SETS");
+    assert!(!world.run_file("malformed-dag", "launch.json").exists());
+    let older = world.root.join("old-launch-sets.json");
+    for key in ["node_sets", "dag_sets"] {
+        std::fs::write(&older, format!(r#"{{"schema_version":9,"{key}":[]}}"#))
+            .expect("older config written");
+        let name = format!("older-{key}");
+        let path = world.plan(&name, &plan_of(&name, vec![agent("build", &[])]));
+        world
+            .run(&[
+                "start",
+                &path,
+                "--attach",
+                "--launch-config",
+                older.to_str().expect("path"),
+            ])
+            .exited(REFUSED)
+            .err_has(key)
+            .err_has("schema 10");
+        assert!(!world.run_file(&name, "launch.json").exists());
+    }
+}
+
+#[test]
+fn invalid_run_wide_node_set_is_refused_before_launch() {
+    let world = World::new("launch-node-set-refusal");
+    let path = world.plan(
+        "bad-node-set",
+        &plan_of("bad-node-set", vec![agent("build", &[])]),
+    );
+    world
+        .run(&[
+            "start",
+            &path,
+            "--attach",
+            "--node-set",
+            "members.absent.agent.model=wrong",
+        ])
+        .exited(REFUSED)
+        .err_has("build")
+        .err_has("node-scope.yaml")
+        .err_has("members.absent.agent.model=wrong");
+    assert!(!world.run_file("bad-node-set", "launch.json").exists());
+    assert!(!world.was_invoked("oneagentgraph", &["run"]));
+}
+
+#[test]
+fn dag_override_is_checked_against_its_selected_graph_before_launch() {
+    let world = World::new("launch-dag-set-refusal");
+    let path = world.plan(
+        "bad-dag-set",
+        &plan_of("bad-dag-set", vec![agent("build", &[])]),
+    );
+    world
+        .run(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.shipped_dag_graph(),
+            "--set",
+            "members.absent.agent.model=wrong",
+        ])
+        .exited(REFUSED)
+        .err_has("dag-scope.yaml")
+        .err_has("members.absent.agent.model=wrong");
+    assert!(!world.run_file("bad-dag-set", "launch.json").exists());
 }
 
 /// The headline of the roundless contract: a plan runs with no agent at all.

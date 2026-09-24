@@ -32,7 +32,7 @@ use crate::filter::{self, EventFilter};
 use crate::graph::{self, GraphState};
 use crate::journal::{self, Journal};
 use crate::ledger::{self, LaunchRecord, RunPaths};
-use crate::plan::Plan;
+use crate::plan::{Node, Plan};
 use crate::sys::{self, Claim};
 use crate::views::{self, RunView};
 
@@ -513,16 +513,21 @@ pub(crate) fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
-fn resolve_plan_graphs(plan: &mut Plan, base: &Path) -> Result<()> {
+pub(crate) fn resolve_plan_graphs(plan: &mut Plan, base: &Path) -> Result<()> {
     for node in &mut plan.tasks {
-        if let Some(reference) = &mut node.agent_graph {
-            reference.0 = resolve_graph(&reference.0, base)?;
-        }
-        if let Some(steps) = &mut node.steps {
-            for step in steps {
-                if let Some(reference) = &mut step.agent_graph {
-                    reference.0 = resolve_graph(&reference.0, base)?;
-                }
+        resolve_node_graphs(node, base)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn resolve_node_graphs(node: &mut Node, base: &Path) -> Result<()> {
+    if let Some(reference) = &mut node.agent_graph {
+        reference.0 = resolve_graph(&reference.0, base)?;
+    }
+    if let Some(steps) = &mut node.steps {
+        for step in steps {
+            if let Some(reference) = &mut step.agent_graph {
+                reference.0 = resolve_graph(&reference.0, base)?;
             }
         }
     }
@@ -640,6 +645,20 @@ fn read_filter(paths: &RunPaths, args: &ReadArgs) -> Result<EventFilter> {
     }
 }
 
+/// Resolve an ordered graph override list at the launch boundary.
+fn resolved_sets(flags: &[String], variable: &str, configured: &[String]) -> Result<Vec<String>> {
+    if !flags.is_empty() {
+        return Ok(flags.to_vec());
+    }
+    match std::env::var(variable) {
+        Ok(value) => serde_json::from_str::<Vec<String>>(&value).map_err(|why| {
+            Error::Invalid(format!("{variable} must be a JSON array of strings: {why}"))
+        }),
+        Err(std::env::VarError::NotPresent) => Ok(configured.to_vec()),
+        Err(why) => Err(Error::Invalid(format!("{variable}: {why}"))),
+    }
+}
+
 /// `onepipeline start`.
 fn start(args: &StartArgs) -> Result<i32> {
     // The binary first, and its version with it: a plan that cannot be read is
@@ -660,12 +679,25 @@ fn start(args: &StartArgs) -> Result<i32> {
         Some(path) => crate::filter::LaunchConfig::load(path)?,
         None => crate::filter::LaunchConfig::default(),
     };
+    let node_sets = resolved_sets(
+        &args.node_sets,
+        "ONEPIPELINE_NODE_SETS",
+        &declared.node_sets,
+    )?;
+    let dag_sets = resolved_sets(&args.dag_sets, "ONEPIPELINE_DAG_SETS", &declared.dag_sets)?;
+    for entry in node_sets.iter().chain(&dag_sets) {
+        oneagentgraph::run::parse_set(entry)
+            .map_err(|why| Error::Invalid(format!("invalid graph override {entry:?}: {why}")))?;
+    }
     // Resolved only when one was named: `off` is the shipped default, and a
     // launch that names no observer resolves nothing and launches nothing.
     let graph_ref: Option<String> = match args.dag_graph.as_str() {
         DAG_GRAPH_OFF => None,
         reference => Some(resolve_graph(reference, &launch_dir)?),
     };
+    if let Some(graph) = graph_ref.as_deref() {
+        graph::validate_graph_sets(graph, &dag_sets, "dag-scope")?;
+    }
     // The same, for the graph a change request's body is drafted by: naming none
     // is the shipped default, and the flag overrides the config that names one.
     // Resolved against the launch directory like every other reference, so the
@@ -833,6 +865,9 @@ fn start(args: &StartArgs) -> Result<i32> {
         .unwrap_or(crate::cli::DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS);
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     resolve_plan_graphs(&mut plan, &launch_dir)?;
+    for node in &plan.tasks {
+        graph::validate_dispatch_sets(node, &node_graph_ref, &node_sets)?;
+    }
     // Before the run directory exists. A spec that could not be honoured is the
     // exit 2 it is, rather than a launch that has already minted a run and cut
     // sessions for it before a source refuses the filter it was handed.
@@ -946,8 +981,8 @@ fn start(args: &StartArgs) -> Result<i32> {
             0
         },
         dispatch_env_hook: dispatch_env_hook.unwrap_or_default(),
-        dag_sets: args.dag_sets.clone(),
-        node_sets: args.node_sets.clone(),
+        dag_sets,
+        node_sets,
         adoptions: 0,
         filters,
         bus_config,
@@ -2817,6 +2852,11 @@ pub(crate) fn submit_envelope(
     // is judged by the rules the run was started under.
     let frontier = Frontier {
         node_validator: view.launch.node_validator().map(str::to_owned),
+        graph_validation: Some(edits::GraphValidation {
+            default_graph: oneagentgraph::config::ConfigRef(view.launch.node_graph.clone()),
+            launch_node_sets: view.launch.node_sets.clone(),
+            launch_dir: view.launch.dir.clone(),
+        }),
         ..view.state.frontier()
     };
     // Advanced as it goes, and on a **copy**, because two of the facts an edit is

@@ -706,6 +706,29 @@ the run-wide `--node-set`s because a control written against one node is the mor
 specific of the two. `OnejudgeMember::max_turns` is the sibling's existing
 mechanism, so nothing new was needed there.
 
+The accepted extension adds an ordered node `sets` list, mapped from
+`onepipeline.sets`, after the run-wide list, persona, and `max_turns` for each
+agent dispatch, including every lifecycle step. oneagentgraph's loader applies
+each `PATH=VALUE` to the effective default, node, or step graph; this crate adds
+no harness field grammar and no list-form judge indexing. Invalid entries,
+missing graph paths, and values the graph schema refuses are rejected before
+dispatch, naming the node, step if any, graph, and entry. Human and
+`expects_no_diff` nodes cannot carry sets. The drafting `pr-author` dispatch
+continues to receive no node sets.
+
+The planner channel adds `set-node-sets` and `set-run-node-sets` replacement
+commands, journalled as named operations so checkpoint replay and adoption
+recover their command order. Checkpoint schema 6 pins the folded run-wide list.
+Empty lists clear an override; rejected edits keep
+both effective lists. The immutable launch record remains the baseline.
+The reply envelope stays at version 3; the generated planner-channel layout
+document advances additively to version 1.1.0 with the two new op words.
+Launch-config schema 10 adds `node_sets` and `dag_sets`; each takes its whole
+list from CLI flags, then its JSON-array environment variable, then the file.
+The resolved lists are recorded once, and only node sets can be changed live.
+Edits affect the next node dispatch, never a running conversation or the
+already launched dag-scope observer.
+
 `done_when` is **gone from `Node` and `Step`** rather than forwarded. onejudge
 hands that field to the judge verbatim as its criterion, and the judge is given
 the transcript whose first message is the task with its acceptance criteria — so

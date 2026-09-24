@@ -119,6 +119,108 @@ fn a_node_dispatches_under_the_agent_graph_it_names() {
 }
 
 #[test]
+fn node_sets_are_refused_against_each_effective_step_graph_before_dispatch() {
+    let world = World::new("plan-step-sets-refusal");
+    world.write_graphs();
+    let other = world.root.join("other-member.yaml");
+    std::fs::write(
+        &other,
+        "version: 1\nname: other\nmembers:\n  worker:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+    )
+    .expect("custom graph written");
+    let node = json!({
+        "id": "service", "repo": "service", "title": "feat: ship service",
+        "sets": ["members.worker.agent.model=chosen"],
+        "steps": [
+            {"id":"build", "persona":"engineer", "task":"## What\nbuild"},
+            {"id":"review", "persona":"reviewer", "task":"## What\nreview",
+             "deps":["build"], "agent_graph":other.to_string_lossy()}
+        ]
+    });
+    let path = world.plan("step-sets", &plan_of("step-sets", vec![node]));
+    world
+        .run(&["start", &path, "--attach"])
+        .exited(REFUSED)
+        .err_has("service")
+        .err_has("review")
+        .err_has("other-member.yaml")
+        .err_has("members.worker.agent.model=chosen");
+    assert!(!world.run_file("step-sets", "launch.json").exists());
+    assert!(!world.was_invoked("oneagentgraph", &["run"]));
+
+    let mut direct = agent("custom", &[]);
+    direct["agent_graph"] = json!(other.to_string_lossy());
+    direct["sets"] = json!(["members.worker.agent.model=chosen"]);
+    let path = world.plan("direct-sets", &plan_of("direct-sets", vec![direct]));
+    world
+        .run(&["start", &path, "--attach"])
+        .exited(REFUSED)
+        .err_has("custom")
+        .err_has("other-member.yaml")
+        .err_has("members.worker.agent.model=chosen");
+    assert!(!world.run_file("direct-sets", "launch.json").exists());
+}
+
+#[test]
+fn a_graph_schema_value_is_refused_before_any_dispatch() {
+    let world = World::new("plan-set-schema-value");
+    let mut node = agent("invalid-kind", &[]);
+    node["sets"] = json!(["members.worker.kind=not-a-member-kind"]);
+    let path = world.plan("set-schema-value", &plan_of("set-schema-value", vec![node]));
+    world
+        .run(&["start", &path, "--attach"])
+        .exited(REFUSED)
+        .err_has("invalid-kind")
+        .err_has("node-scope.yaml")
+        .err_has("members.worker.kind=not-a-member-kind");
+    assert!(!world.run_file("set-schema-value", "launch.json").exists());
+    assert!(!world.was_invoked("oneagentgraph", &["run"]));
+}
+
+#[test]
+fn node_sets_refuse_no_dispatch_and_bad_grammar() {
+    let world = World::new("plan-invalid-sets");
+    for (name, mut node, expected) in [
+        ("human", human("human", &[]), "needs an agent dispatch"),
+        (
+            "no-diff",
+            json!({"id":"no-diff","task":"## What\nwait","expects_no_diff":true}),
+            "needs an agent dispatch",
+        ),
+        ("grammar", agent("grammar", &[]), "PATH=VALUE"),
+    ] {
+        node["sets"] = json!([if name == "grammar" {
+            "bad-entry"
+        } else {
+            "members.worker.model=chosen"
+        }]);
+        let path = world.plan(name, &plan_of(name, vec![node]));
+        world
+            .run(&["start", &path, "--attach"])
+            .exited(REFUSED)
+            .err_has(expected);
+        assert!(!world.run_file(name, "launch.json").exists());
+    }
+}
+
+#[test]
+fn task_metadata_sets_round_trip_to_the_loaded_plan() {
+    let world = World::new("plan-task-sets");
+    let sets = json!([
+        "members.worker.agent.model=first,=choice",
+        "members.worker.judge.model=second choice"
+    ]);
+    let mut node = agent("build", &[]);
+    node["sets"] = sets.clone();
+    let path = world.plan("task-sets", &plan_of("task-sets", vec![node]));
+    world.run(&["start", &path, "--attach"]).settled();
+    let loaded = world.run_json("task-sets", "plan.json");
+    assert_eq!(loaded["tasks"][0]["sets"], sets);
+    let task = world.store_tasks(&path);
+    assert_eq!(task[0]["item"]["metadata"]["onepipeline.sets"], sets);
+}
+
+#[test]
 fn a_node_pinned_to_an_executor_the_rules_do_not_declare_is_refused_by_name() {
     let world = World::new("plan-pin");
     let rules = world.root.join("only-local.yaml");
@@ -682,6 +784,20 @@ fn a_project_the_schema_refuses_never_starts_a_run() {
                 {"id": "publish", "repo": "o/r", "persona": "e", "task": "t",
                  "title": "feat: ship it", "overflow": "unlimited"}]}),
             "node 'publish': `overflow` is a schema 3 field",
+        ),
+        (
+            "earlysets",
+            json!({"schema_version": 2, "tasks": [
+                {"id": "publish", "repo": "o/r", "persona": "e", "task": "t",
+                 "title": "feat: ship it", "sets": ["members.worker.agent.model=chosen"]}]}),
+            "`sets` is a schema 3 field",
+        ),
+        (
+            "earlysetsempty",
+            json!({"schema_version": 2, "tasks": [
+                {"id": "publish", "repo": "o/r", "persona": "e", "task": "t",
+                 "title": "feat: ship it", "sets": []}]}),
+            "`sets` is a schema 3 field",
         ),
         // A bound that is neither the word nor an integer is refused by the
         // sibling's own reading of it, at whichever version.
