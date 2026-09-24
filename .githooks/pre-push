@@ -39,9 +39,8 @@ set -euo pipefail
 #
 # It is read before anything else can refuse, because EVERY ending that could not
 # evaluate the push consults it — the undeclared-lane one below included. Read
-# after one of them, it decided nothing on the hosts that reached that one first:
-# an arm64 machine was refused while holding `SCREENCOMP_GUARD_REQUIRE=0`, so the
-# answer to "may this push go" came from the CPU rather than from the switch.
+# after one of them, "may this push go" is answered by whichever ending the host
+# reached first rather than by the switch.
 #
 # Two refusals below pass it by, and neither is one of those endings: an
 # `[capture].arches` this tree does not state exactly once as a list of lane

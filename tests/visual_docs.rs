@@ -806,10 +806,8 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
     ///
     /// That workflow runs the step as `sh -e` with no input to ask for another
     /// shell, while its `container:` input lets this repository name an image
-    /// whose `/bin/sh` is dash — so a bashism here is not a style point. Run
-    /// 36036303459 is what it costs: `[[: not found` on stderr, the test never
-    /// evaluated, and the guard below it then refusing `1.97.1` as "not exactly
-    /// one pinned channel". The values this tree actually carries are what it is
+    /// whose `/bin/sh` is dash, so a bashism here is a failing capture rather
+    /// than a style point. The values this tree actually carries are what it is
     /// driven against, so a guard that has stopped accepting them fails here.
     #[test]
     fn the_capture_command_runs_under_the_shell_the_workflow_gives_it() {
