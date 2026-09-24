@@ -449,6 +449,13 @@ fn the_contracts_graph_override_shapes_match_the_public_types() {
         serde_json::to_value(&commands).expect("commands serialize"),
         overrides["commands"]
     );
+    // The word the journal and the channel's replies name each command by is
+    // written a second time in `channel::op_of`; the serialized tag is its source.
+    for command in &commands {
+        let tag = serde_json::to_value(command).expect("command serializes")["op"].clone();
+        assert_eq!(onepipeline::channel::op_of(command), tag, "{tag}");
+        assert_eq!(op_of(command), tag, "{tag}");
+    }
     let launch: LaunchConfig =
         serde_json::from_value(overrides["launch_config"].clone()).expect("launch parses");
     assert_eq!(
