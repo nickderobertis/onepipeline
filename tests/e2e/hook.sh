@@ -21,6 +21,10 @@
 #                        stream directory was
 #   append-future-event  append a line no build of          0
 #                        `onevcs` can read
+#   append-foreign-source-event
+#                        append a whole `onevcs` envelope   0
+#                        whose source word `onepipeline`
+#                        has no variant for
 #   missing-prerequisite refuse the push as a tool this      1
 #                        host does not have, on the line
 #                        `onevcs` reads as such
@@ -39,7 +43,7 @@ set -u
 
 fail() {
   echo "pre-push: $1" >&2
-  echo "pre-push: the verbs are: wait-for PATH | break-streams | append-future-event | missing-prerequisite" >&2
+  echo "pre-push: the verbs are: wait-for PATH | break-streams | append-future-event | append-foreign-source-event | missing-prerequisite" >&2
   exit 64
 }
 
@@ -216,6 +220,39 @@ case "${1-}" in
       broke "cannot append to $stream"
     fi
     ;;
+  # llmlint: ignore-block[tests_mirror_real_usage] a `pre-push` hook is operator-supplied
+  # code, and this verb is that operator writing on the session's own stream — which is
+  # what an `ONEVCS_HOME` shared with another producer of the stack leaves behind, and the
+  # only point inside a run where a repository's own code can reach a stream that exists
+  # at all. Nothing this suite could drive writes one: `Stream::emit` stamps `onevcs`'s own
+  # word on everything it appends. The line itself is the **sibling's** whole envelope
+  # shape, not a shape invented here, and the journey that uses it asserts entirely through
+  # the binary. `break-streams` and `append-future-event` above reach their cases the same
+  # way and `lifecycle.rs` carries the same directive over each of the three journeys.
+  append-foreign-source-event)
+    takes "$#" 1 "append-foreign-source-event takes no arguments"
+    require_home
+    if ! stream=$(session_stream); then
+      fail "append-foreign-source-event runs in a tree under a session's run root; no ancestor of $(pwd) names a stream under $ONEVCS_HOME/streams. Run this verb from the session's own tree, under the ONEVCS_HOME that session was given"
+    fi
+    # A whole, valid `onevcs` envelope — every field that crate's reader asks
+    # for, on this session's own stream — whose **source word** is one
+    # `onepipeline`'s closed `Source` has no variant for. That is the one line
+    # the sibling hands over quite happily and the relay cannot cross, which is
+    # the case `an_envelope_that_does_not_cross_is_reported_and_the_publication_around_it_still_lands`
+    # is about. A line neither of them can read is `append-future-event` above.
+    #
+    # `seq` is 1 rather than something obviously synthetic on purpose: a high one
+    # would advance the relay's per-stream watermark if it ever reached it, and
+    # the journey would then be asserting on records suppressed rather than on
+    # records relayed.
+    token=$(basename "$stream" .ndjson)
+    line='{"v":1,"ts":"2026-01-01T00:00:00.000Z","stream":"'$token'","seq":1,"source":"harness","kind":"fetch","phase":"development","labels":{},"payload":{},"artifacts":[]}'
+    if ! printf '%s\n' "$line" >>"$stream"; then
+      broke "cannot append to $stream"
+    fi
+    ;;
+  # llmlint: ignore-end[tests_mirror_real_usage]
   missing-prerequisite)
     takes "$#" 1 "missing-prerequisite takes no arguments"
     # What a real hook says when the host it runs on lacks a tool it needs — the

@@ -25,7 +25,7 @@ use std::path::PathBuf;
 
 use crate::harness::{
     agent, git, hook_script, lifecycle, plan_of, rows, Repository, ReturningHookVerb, World,
-    REFUSED,
+    REFUSED, SURFACE_WAITING, WATCH_ELAPSED,
 };
 use onevcs::provenance::SUBJECT_LIMIT;
 use serde_json::json;
@@ -2947,6 +2947,64 @@ fn refuse_pushed_branches(world: &World, repo: &Repository) {
     let _ = world;
 }
 
+/// The key the run's one blocking surface was raised under, read the way anybody
+/// reads a run's channel without consuming it: `onepipeline channel queue`.
+///
+/// Through the verb rather than through the channel's files, because the key is
+/// what a manager copies into `reply --correlation` and the verb is where they
+/// copy it from.
+fn blocking_key(world: &World, run: &str) -> String {
+    let queue = world.run(&["channel", "queue", run]);
+    queue.exited(0);
+    queue.json()["surfaces"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|surface| surface["blocking"] == json!(true))
+        .and_then(|surface| surface["correlation"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| {
+            panic!(
+                "no blocking surface of run '{run}' was raised under a key\n{}",
+                why(world, run)
+            )
+        })
+}
+
+/// Every reply on the run's channel that answers the question `key` names, as
+/// `onepipeline channel queue` reports them.
+fn answers_to(world: &World, run: &str, key: &str) -> Vec<serde_json::Value> {
+    let queue = world.run(&["channel", "queue", run]);
+    queue.exited(0);
+    queue.json()["replies"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|reply| reply["correlation"] == json!(key))
+        .collect()
+}
+
+/// Whether the run has committed an edit whose command carries `op`.
+fn committed(world: &World, run: &str, op: &str) -> bool {
+    world
+        .events_of(run, "edit-committed")
+        .iter()
+        .any(|event| event["payload"]["command"]["op"] == json!(op))
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the two journeys below
+// live beside the other lifecycle journeys in this file, which is where a reader looks for
+// one and what `just test-e2e '<filter>'` already runs on its own. Each is about a session
+// open `onevcs` refuses and what this crate does with it, so what they exercise is
+// `engine`'s conflict path, `channel`'s answer record, `views`' decision reporting and
+// `watch`'s conditions together — every one of which any change under `src/` can move — so a
+// project edged narrower than the crate would drop them out of `nx affected` for exactly the
+// changes they exist to catch. Same grounds as `shutdown.rs`, `landing.rs` and `views.rs`,
+// each of which carries this suppression for its own journeys. Measured: about 96 and 48
+// seconds, and each spends that on a real publication into a real origin and a real
+// conflict, because a conflict nothing converges on cannot be stated without two branches
+// that actually disagree.
 /// A base that moves under a publication is the third preserving failure — and
 /// the conflict a session **open** meets is not it.
 ///
@@ -3074,12 +3132,26 @@ fn a_session_open_conflict_raises_a_decision_where_a_publication_conflict_retrie
             "the decision does not name {names:?}: {said}"
         );
     }
+    // It is raised under a **stable key**, because its text asks for a graph
+    // edit and a commands-only envelope answers no question on its own: the
+    // `retry` it names is recorded against that key, and committing that retry
+    // is what answers it.
+    let key = blocking_key(&world, &run);
+    assert!(
+        key.contains("session-conflict") && key.contains("service"),
+        "the key says nothing about the finding it belongs to: {key}"
+    );
+
     // The planner reads it off the queue, which is where a decision is answered
-    // from.
+    // from, and the run reports it as the decision it is held on.
     world
         .run(&["next", &run])
         .exited(0)
         .out_has("cannot open a session");
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision");
 
     // Answering it. The merge is the person's — nothing in this run can do it,
     // which is exactly why it is a decision — and the `retry` the decision names
@@ -3097,6 +3169,9 @@ fn a_session_open_conflict_raises_a_decision_where_a_publication_conflict_retrie
     );
     crate::harness::git(&world, &repo.checkout, &["checkout", "main"]);
     world.script("service-again.work", "the worker wrote this\n");
+    // The replacement holds, so the run is still being driven while this journey
+    // asks what a supervisor watching it is told.
+    world.script("service-again.wait", "");
     world
         .run_with_stdin(
             &["reply", &run],
@@ -3118,10 +3193,53 @@ fn a_session_open_conflict_raises_a_decision_where_a_publication_conflict_retrie
             .to_string(),
         )
         .exited(0);
+
+    // The commit is the answer: the finding asked for exactly this retry, so it
+    // leaves the planner's queue on the commit rather than waiting for a second
+    // reply nobody owes it. Asked of `status` before anything else moves, so what
+    // cleared the decision is the edit and not the run going on.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("waiting for planner decision");
+
     // And the run resumes from there: a driver takes the intact ledger up and the
     // replacement continues the branch the resolution is on rather than returning
-    // to the conflict.
-    world.run(&["adopt", &run]).settled();
+    // to the conflict. Spawned rather than run to completion, because what a
+    // supervisor is told about a decision is only answerable while the run is
+    // live: with nothing driving it, every watch ends on that instead.
+    let mut driver = world
+        .cmd(&["adopt", &run])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the driver starts");
+    world.until("the replacement to be dispatched", |world| {
+        !dispatches_of(world, &run, "service-again").is_empty()
+    });
+
+    // With the replacement in flight, neither view still reports the answered
+    // decision: `watch --until surface` runs out its clock rather than returning
+    // on it, which is what it did for the rest of the run before the commit
+    // answered anything.
+    let watched = world.run(&["watch", &run, "--until", "surface", "--timeout", "0"]);
+    let standing = world.run(&["status", &run]);
+
+    world.release("service-again.go");
+    let driven = driver.wait().expect("the driver ends");
+
+    watched.exited(WATCH_ELAPSED);
+    assert!(
+        !watched.stdout.contains("surface-waiting"),
+        "the watch returned on a decision the commit answered:\n{}",
+        watched.stdout
+    );
+    standing.exited(0).out_lacks("waiting for planner decision");
+    assert!(
+        driven.success(),
+        "the driver did not settle the run: {driven}"
+    );
+
     let settled = world
         .events_of(&run, "node-settled")
         .into_iter()
@@ -3134,6 +3252,222 @@ fn a_session_open_conflict_raises_a_decision_where_a_publication_conflict_retrie
         why(&world, &run)
     );
 }
+
+/// The same finding, answered by the **reconciler** and never read off the queue.
+///
+/// Three things the journey above cannot reach, in one run. Its run has no live
+/// driver when the retry arrives, so `reply` becomes the single writer and
+/// applies the edit itself; here a second node holds the run open, so the retry
+/// goes to the durable command queue and the **reconcile loop** is what commits
+/// it — and which of the two writers commits an edit is an accident of timing, so
+/// a finding answered on one path only is a decision that never clears on the
+/// other. Its finding is read off the queue before it is answered, so it is
+/// answered out of the pending slot; here nothing reads it, so it is still
+/// sitting in `waiting`, which a reader that only released the slot would keep
+/// reporting for the life of the run. And its reply is bound to nothing; here it
+/// is bound to the finding **by name**, which is the form the key exists for and
+/// the one where both halves of one envelope reach the same question.
+#[test]
+fn a_finding_nobody_read_is_answered_by_the_retry_the_reconciler_commits() {
+    let world = World::new("lifecycle-syncconflict-live")
+        .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2")
+        .with_env("ONEPIPELINE_BOUNDARY_ATTEMPTS", "3");
+    let repo = world.repository("local-direct", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("service.wait", "");
+    // The node that keeps a driver on this run after the lifecycle node fails:
+    // it holds until this test releases it, and nothing else here is waiting on
+    // it. Without it the run settles the moment the conflict is raised, and every
+    // watch ends on "nothing driving" instead of on what is being asked.
+    world.script("holder.wait", "hold");
+
+    let path = world.plan(
+        "syncconflictlive",
+        &plan_of(
+            "syncconflictlive",
+            vec![lifecycle("service", &[]), agent("holder", &[])],
+        ),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    let run = "syncconflictlive".to_string();
+
+    world.until("the node's session to cut its branch", |world| {
+        !world.events_of(&run, "session-opened").is_empty()
+    });
+    let work = repo.checkout.join("service.md");
+    std::fs::write(&work, "somebody else wrote this instead\n").expect("the base change");
+    crate::harness::git(&world, &repo.checkout, &["add", "-A"]);
+    crate::harness::git(
+        &world,
+        &repo.checkout,
+        &["commit", "-m", "feat: take the file another way"],
+    );
+    crate::harness::git(&world, &repo.checkout, &["push", "origin", "main"]);
+    world.release("service.go");
+
+    world.until("the session-open conflict to raise its decision", |world| {
+        world
+            .events_of(&run, "planner-surface-queued")
+            .iter()
+            .any(|event| event["payload"]["blocking"] == json!(true))
+    });
+    let key = blocking_key(&world, &run);
+
+    // Nobody has read it, and it is a decision all the same: a question nobody
+    // looked at is still a question the run is waiting on.
+    let held = world.run(&["channel", "queue", &run]);
+    held.exited(0);
+    assert_eq!(
+        held.json()["held"],
+        json!(null),
+        "something read the decision this journey leaves unread"
+    );
+    world
+        .run(&["watch", &run, "--until", "surface", "--timeout", "0"])
+        .exited(SURFACE_WAITING);
+
+    // An edit nobody asked for answers nothing. Committed by the reconciler like
+    // the retry below, and about the node this run is being held open by, so what
+    // makes it not an answer is that it is not the edit the finding named.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "version": 2,
+                "commands": [{"op": "amend", "id": "holder", "text": "keep holding"}]
+            })
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the amendment to be committed", |world| {
+        committed(world, &run, "amend")
+    });
+    assert!(
+        answers_to(&world, &run, &key).is_empty(),
+        "an edit the finding never asked for answered it\n{}",
+        why(&world, &run)
+    );
+    world
+        .run(&["watch", &run, "--until", "surface", "--timeout", "0"])
+        .exited(SURFACE_WAITING);
+
+    // And the retry it did ask for, bound to the finding **by name** and carrying
+    // a verdict beside it, so both halves of one envelope are about the same
+    // question. The replacement waits on the node holding this run open, so it
+    // never dispatches into the conflict this journey has not resolved.
+    world
+        .run_with_stdin(
+            &["reply", &run, "--correlation", &key],
+            &json!({
+                "version": 2,
+                "message": "merged the base into the branch; take it from there",
+                "commands": [{
+                    "op": "retry",
+                    "id": "service",
+                    "node": {
+                        "id": "service-again",
+                        "repo": "service",
+                        "persona": "engineer",
+                        "title": "feat: ship service",
+                        "deps": ["holder"],
+                        "task": "## What\nShip service.\n\n## Why\nUsers need it.\n\n\
+                                 ## Acceptance criteria\n- service is published.",
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the retry to be committed", |world| {
+        committed(world, &run, "retry")
+    });
+
+    // Answered once, by the commit — and the verdict that rode with it is
+    // recorded against the same question rather than refused. That order is the
+    // whole of why the second half matters: an envelope's commands are committed
+    // before its verdict half is delivered, so by the time `--correlation` is
+    // bound the edit has already answered what it names, and a refusal there
+    // would report a failure for a reply whose edit has landed.
+    let answers = answers_to(&world, &run, &key);
+    let engines: Vec<&serde_json::Value> = answers
+        .iter()
+        .filter(|reply| {
+            reply["reply"]["message"]
+                .as_str()
+                .is_some_and(|said| said.starts_with("answered by the edit it asked for"))
+        })
+        .collect();
+    assert_eq!(
+        engines.len(),
+        1,
+        "the commit answered the finding {} times: {answers:#?}\n{}",
+        engines.len(),
+        why(&world, &run)
+    );
+    assert!(
+        answers.iter().any(|reply| {
+            reply["reply"]["message"]
+                == json!("merged the base into the branch; take it from there")
+        }),
+        "the verdict naming the answered finding was not recorded against it: {answers:#?}"
+    );
+
+    // And it stops being a decision without ever having been read off the queue.
+    world
+        .run(&["watch", &run, "--until", "surface", "--timeout", "0"])
+        .exited(WATCH_ELAPSED);
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("waiting for planner decision");
+
+    // And the exception is the *answering* reply's alone. A later envelope naming
+    // the answered finding is refused whatever it carries — the same `retry`
+    // command that answered it included, which is the one an exception keyed on
+    // the command rather than on the envelope would have let through. Both are
+    // refused, and neither appends anything to the question.
+    let standing = answers_to(&world, &run, &key).len();
+    for (carrying, commands) in [
+        (
+            "the same retry again",
+            json!([{
+                "op": "retry",
+                "id": "service",
+                "node": {"id": "service-thrice", "repo": "service", "persona": "engineer",
+                         "title": "feat: ship service", "deps": ["holder"],
+                         "task": "## What\nShip service.\n\n## Why\nUsers need it.\n\n\
+                                  ## Acceptance criteria\n- service is published."}
+            }]),
+        ),
+        (
+            "an edit of its own",
+            json!([{"op": "amend", "id": "holder", "text": "still holding"}]),
+        ),
+    ] {
+        world
+            .run_with_stdin(
+                &["reply", &run, "--correlation", &key],
+                &json!({"version": 2, "message": "and once more", "commands": commands})
+                    .to_string(),
+            )
+            .exited(REFUSED);
+        assert_eq!(
+            answers_to(&world, &run, &key).len(),
+            standing,
+            "a later reply {carrying} appended to a finding an earlier one answered\n{}",
+            why(&world, &run)
+        );
+    }
+
+    // The run is still being driven throughout — which is what put the retry on
+    // the durable queue rather than making `reply` the writer.
+    world.run(&["stop", &run, "--force"]).exited(0);
+    world.until("the stop to be recorded", |world| {
+        !world.events_of(&run, "run-stopped").is_empty()
+    });
+    world.release("holder.go");
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A node that publishes into a host whose required check stays red.
 ///
@@ -4459,6 +4793,66 @@ fn a_session_line_this_build_cannot_read_is_reported_and_does_not_fail_the_node(
         "the publication still reached the merged store"
     );
 }
+
+/// An envelope on a session's stream whose source word this build has no
+/// variant for.
+///
+/// Each producer in the stack declares its own vocabulary over the one
+/// `onemessagebus` core, so `onevcs`'s `Source` is that core's **open** newtype
+/// and this crate's is a closed enum of the three producers it links. A word
+/// outside that set is an envelope the sibling hands over quite happily and the
+/// relay has no value for — the case the wire crossing in `src/vcs.rs` exists to
+/// decide. What this journey holds is the decision: the loss is **said out
+/// loud**, naming the session and why, the envelopes around it in the same batch
+/// still reach the merged store, and the node does not fail.
+///
+/// Driven through the binary, because the sentence is written to the driver's
+/// own stderr and nothing in process observes it. It is the whole point of the
+/// behaviour: a silent drop is what makes a later reader of the merged store
+/// conclude nothing happened.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] This src/vcs.rs
+// relay journey has no narrower Nx edge: noteJourneySource includes src/**/*.
+#[test]
+fn an_envelope_that_does_not_cross_is_reported_and_the_publication_around_it_still_lands() {
+    let world = World::new("lifecycle-foreignsource");
+    // llmlint: ignore-block[tests_mirror_real_usage] the same extension point as the two
+    // journeys above, and the same reason: a repository's `pre-push` hook is code an
+    // operator wrote, and a stream carrying an envelope whose source word this build has
+    // no variant for is what an `ONEVCS_HOME` shared with another producer of the stack
+    // leaves behind. No command writes one — `Stream::emit` stamps `onevcs`'s own word on
+    // everything it appends — and the stream exists only once the session has opened,
+    // which makes the hook the point inside a run where the repository's own code can
+    // reach it. Everything asserted is through the binary.
+    let hook = merge_path(&world, &ReturningHookVerb::AppendForeignSourceEvent);
+    world.repository(
+        "local-direct",
+        &hook.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.script("service.work", "the worker wrote this\n");
+    let run = driven(&world, "foreignsource", vec![lifecycle("service", &[])]);
+
+    run.1.err_has("cannot relay session").err_has("harness");
+    let run = run.0;
+
+    // And the batch around it was still relayed: the publication this same push
+    // performed reached the merged store, which is the record written *after*
+    // the hook appended its line.
+    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
+    let journal = world.journal(&run);
+    assert!(
+        journal
+            .iter()
+            .any(|event| event["source"] == "vcs" && event["kind"] == "published"),
+        "the publication did not reach the merged store, so the batch was refused whole \
+         rather than the one envelope that could not cross"
+    );
+    assert!(
+        !journal.iter().any(|event| event["source"] == "harness"),
+        "an envelope this build has no source for reached the merged store"
+    );
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Every `(node, step)` a dispatch was asked for, in the order they were asked.
 fn steps_dispatched(world: &World) -> Vec<(String, String)> {
@@ -6894,31 +7288,67 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
     // they worked — and the hold cleared on the record. Usually once; not
     // always. The read that let it go is advisory and `open` is authoritative:
     // the sibling counts a slot idle from the moment the first's publication
-    // closes the session record and takes it only once the tree is returned,
-    // so a read inside that window admits the second and its open is refused
+    // closes the session record and takes it only once the tree is returned.
+    // Two different things reach the second inside that window, and this
+    // journey has met both on Windows, where it is wide enough for the poll to
+    // land in. A read inside it admits the second and its open is refused
     // `PoolExhausted` — the race the contract says costs the node nothing, and
-    // the one this journey met on Windows, where the window is wide enough for
-    // the poll to land in. So what is held is the accounting rather than the
-    // count: every dispatch is a first attempt of its own — never the boundary
-    // asking again — every dispatch past the first is answered by a
-    // `node-requeued` under `workspace-exhausted`, and the node settled once.
+    // which this crate answers with a `node-requeued` under
+    // `workspace-exhausted` and a fresh attempt. Or the open is admitted and
+    // its own `git fetch` collides in that one checkout with the fetch the
+    // first's return is still running there — which is not a pool refusal, so
+    // `src/pool.rs`'s exemption does not reach it and the boundary answers it
+    // the way it answers any dispatch that failed: it asks again, naming what
+    // it is asking after.
+    //
+    // So what is held is the accounting rather than the count. Read in order,
+    // every dispatch of the second is exactly one of those two — a fresh
+    // attempt, which is attempt 1 and names no reason, or the boundary asking
+    // again, which names what it follows and counts one past the dispatch
+    // before it — there is one fresh attempt per refusal plus the one that took
+    // the slot, and however many times the host got in the way, the node
+    // settled once.
     let dispatched = dispatches_of(&world, &run, "second");
     let requeued: Vec<serde_json::Value> = world
         .events_of(&run, "node-requeued")
         .into_iter()
         .filter(|event| event["labels"]["node"] == "second")
         .collect();
+    let mut fresh = 0usize;
+    let mut previous = 0u64;
+    for dispatch in &dispatched {
+        let attempt = dispatch["payload"]["attempt"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("a dispatch naming no attempt: {dispatch}"));
+        if dispatch["payload"]["reason"].is_null() {
+            assert_eq!(
+                attempt, 1,
+                "a fresh dispatch is not a first attempt\n{dispatch}"
+            );
+            fresh += 1;
+        } else {
+            assert!(
+                dispatch["payload"]["reason"]
+                    .as_str()
+                    .is_some_and(|reason| !reason.trim().is_empty()),
+                "a re-asked dispatch says nothing about what it follows\n{dispatch}"
+            );
+            assert_eq!(
+                attempt,
+                previous + 1,
+                "a re-asked dispatch does not count one past the one before it\n{dispatch}\n{}",
+                why(&world, &run)
+            );
+        }
+        previous = attempt;
+    }
     assert_eq!(
-        dispatched.len(),
+        fresh,
         1 + requeued.len(),
-        "a dispatch of the second is not accounted for by a refusal\n{dispatched:#?}\n\
+        "a fresh dispatch of the second is not accounted for by a refusal\n{dispatched:#?}\n\
          {requeued:#?}\n{}",
         why(&world, &run)
     );
-    for dispatch in &dispatched {
-        assert_eq!(dispatch["payload"]["attempt"], 1, "{dispatch}");
-        assert!(dispatch["payload"]["reason"].is_null(), "{dispatch}");
-    }
     for requeue in &requeued {
         assert_eq!(
             requeue["payload"]["reason"], "workspace-exhausted",

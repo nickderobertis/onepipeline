@@ -701,11 +701,15 @@ fn backticked_in(passage: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// The contract's envelope and grammar paragraphs are a **marked copy** of
-/// `onemessagebus`'s contract, so they are reconciled against the released bus
-/// itself, not only against fixtures written here: a bus release that adds a
-/// matcher field or a source, or a lock that moves to a release the copy was not
-/// decided against, fails this gate instead of leaving the copy stale in silence.
+/// The contract's envelope-shape and grammar paragraphs are a **marked copy**
+/// of `onemessagebus`'s contract, so they are reconciled against the released
+/// core itself, not only against fixtures written here: a core release that adds
+/// a matcher field, or a lock that moves to a release the copy was not decided
+/// against, fails this gate instead of leaving the copy stale in silence.
+///
+/// The **words** the paragraphs name are this crate's own, so the sources below
+/// are held to `onepipeline::vocabulary` rather than to anything the core
+/// declares.
 #[test]
 fn the_marked_copy_of_the_bus_contract_is_reconciled_against_the_released_bus() {
     // The release the copy was decided against is the one this build links.
@@ -719,28 +723,36 @@ fn the_marked_copy_of_the_bus_contract_is_reconciled_against_the_released_bus() 
         .filter(|version| !version.is_empty())
         .expect("the contract names the bus release its marked copy was decided against");
     let lock = std::fs::read_to_string(repo_root().join("Cargo.lock")).expect("the lock ships");
-    for bus in ["onemessagebus", "onemessagebus-agent"] {
-        let resolved: Vec<&str> = lock
-            .split("[[package]]")
-            .filter(|package| {
-                package
-                    .lines()
-                    .any(|line| line == format!("name = \"{bus}\""))
-            })
-            .filter_map(|package| {
-                package
-                    .lines()
-                    .find_map(|line| line.strip_prefix("version = \""))
-                    .map(|version| version.trim_end_matches('"'))
-            })
-            .collect();
-        assert_eq!(
-            resolved,
-            vec![decided],
-            "docs/contract.md's copy was decided against `onemessagebus` {decided}, and the lock \
-             resolves {bus} at {resolved:?}: re-decide the copy against the linked release"
-        );
-    }
+    // One core, and exactly one copy of it: `onemessagebus-agent` is gone from
+    // the graph, so the package this asks about is the only bus left. That the
+    // lock carries it once rather than twice is the other half of what makes the
+    // copy reconcilable at all — a graph with two would have two grammars —
+    // which is why the resolutions are compared as a list.
+    let bus = "onemessagebus";
+    let resolved: Vec<&str> = lock
+        .split("[[package]]")
+        .filter(|package| {
+            package
+                .lines()
+                .any(|line| line == format!("name = \"{bus}\""))
+        })
+        .filter_map(|package| {
+            package
+                .lines()
+                .find_map(|line| line.strip_prefix("version = \""))
+                .map(|version| version.trim_end_matches('"'))
+        })
+        .collect();
+    assert_eq!(
+        resolved,
+        vec![decided],
+        "docs/contract.md's copy was decided against `onemessagebus` {decided}, and the lock \
+         resolves {bus} at {resolved:?}: re-decide the copy against the linked release"
+    );
+    assert!(
+        !lock.contains("name = \"onemessagebus-agent\""),
+        "the lock still carries `onemessagebus-agent`, whose vocabulary this crate now declares"
+    );
 
     // The matcher fields the grammar paragraph names are exactly the fields the
     // bus's own matcher document declares.
@@ -761,11 +773,11 @@ fn the_marked_copy_of_the_bus_contract_is_reconciled_against_the_released_bus() 
         .filter(|token| token != "onevcs")
         .collect();
     let document = serde_json::to_value(schemars::schema_for!(Matcher))
-        .expect("the bus's matcher document serializes");
+        .expect("the matcher document serializes");
     assert_eq!(
         named,
         property_names(&document, &document),
-        "the grammar paragraph's matcher fields are not the ones the linked bus declares"
+        "the grammar paragraph's matcher fields are not the ones this crate's vocabulary declares"
     );
 
     // And the sources the merged-stream paragraph names are the bus's own set.
@@ -780,7 +792,7 @@ fn the_marked_copy_of_the_bus_contract_is_reconciled_against_the_released_bus() 
             .iter()
             .map(|source| source.as_str().to_owned())
             .collect::<BTreeSet<_>>(),
-        "the contract's sources are not the ones the linked bus declares"
+        "the contract's sources are not the ones this crate's vocabulary declares"
     );
 }
 
@@ -809,6 +821,126 @@ fn the_contract_names_the_producers_words_for_a_chain_that_stopped() {
             "the chain-stopping paragraph does not name `{word}`: {passage}"
         );
     }
+}
+
+/// The committed event bundle is the one this build generates from its own
+/// vocabulary, through the bus's own bundle type: a change to the envelope, the
+/// filter, the artifact reference or the labels that is not regenerated here
+/// fails, and so does a hand edit.
+///
+/// `ONEPIPELINE_WRITE_EVENTS_BUNDLE=1` writes the generated document in place of
+/// the committed one instead — how it is regenerated, and never set by a check.
+#[test]
+fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
+    use onepipeline::vocabulary::{
+        events_bundle_ids, events_bundle_json, EVENTS_BUNDLE_PATH, EVENTS_BUNDLE_VERSION,
+    };
+    let path = repo_root().join(EVENTS_BUNDLE_PATH);
+    let generated = events_bundle_json();
+    match std::env::var("ONEPIPELINE_WRITE_EVENTS_BUNDLE") {
+        Ok(value) if value == "1" => {
+            std::fs::write(&path, &generated).expect("the bundle is written");
+        }
+        Ok(value) => panic!("ONEPIPELINE_WRITE_EVENTS_BUNDLE must be 1, got {value:?}"),
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("ONEPIPELINE_WRITE_EVENTS_BUNDLE must be UTF-8 value 1")
+        }
+    }
+    let committed = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{EVENTS_BUNDLE_PATH} is committed: {error}"));
+    assert!(
+        committed == generated,
+        "{EVENTS_BUNDLE_PATH} is not what the compiled-in vocabulary generates. If the \
+         vocabulary changed on purpose, raise `EVENTS_BUNDLE_VERSION` and regenerate it with \
+         `ONEPIPELINE_WRITE_EVENTS_BUNDLE=1 cargo test --test contract \
+         the_committed_events_bundle_is_the_compiled_in_vocabulary`; never edit it by \
+         hand.\n--- committed\n{committed}\n--- generated\n{generated}"
+    );
+
+    let bundle =
+        onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
+    assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
+    let carried: Vec<String> = bundle
+        .schemas()
+        .iter()
+        .map(|document| document.id.to_string())
+        .collect();
+    assert_eq!(
+        carried,
+        [
+            "agent.event-envelope@1",
+            "agent.event-envelope@2",
+            "agent.event-filter@1",
+            "agent.artifact-ref@1",
+            "agent.labels@1",
+        ],
+        "the bundle no longer publishes exactly the five ids this crate owns"
+    );
+    assert_eq!(
+        carried,
+        events_bundle_ids()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    );
+
+    let passage = CONTRACT
+        .split_once("**The event vocabulary is published as a document.**")
+        .and_then(|(_, rest)| rest.split_once("\n\n"))
+        .map(|(passage, _)| passage)
+        .expect("the contract states the published event bundle");
+    let named = backticked_in(passage);
+    for word in [
+        EVENTS_BUNDLE_PATH,
+        EVENTS_BUNDLE_VERSION,
+        "SchemaBundle",
+        "onepipeline::vocabulary",
+    ]
+    .into_iter()
+    .chain(carried.iter().map(String::as_str))
+    {
+        assert!(
+            named.contains(word),
+            "the event-bundle paragraph does not name `{word}`: {passage}"
+        );
+    }
+    assert!(
+        passage.contains("compiled-in vocabulary is its one source"),
+        "the paragraph does not say where the bundle comes from: {passage}"
+    );
+
+    // `schemas/planner-channel.json` is a different bundle and does not carry
+    // these, which is what makes the two statements separable.
+    assert!(
+        !onepipeline::channel::layout::bundle_json().contains("\"agent.event-envelope@2\""),
+        "the planner-channel bundle now publishes the event ids too"
+    );
+}
+
+#[test]
+fn an_invalid_bundle_write_switch_refuses_without_rewriting_the_file() {
+    let path = repo_root().join(onepipeline::vocabulary::EVENTS_BUNDLE_PATH);
+    let before = std::fs::read(&path).expect("the bundle is committed");
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "the_committed_events_bundle_is_the_compiled_in_vocabulary",
+            "--nocapture",
+        ])
+        .env("ONEPIPELINE_WRITE_EVENTS_BUNDLE", "0")
+        .output()
+        .expect("the contract test runs as a subprocess");
+    assert!(
+        !output.status.success(),
+        "0 must not enable a tracked-file write"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("ONEPIPELINE_WRITE_EVENTS_BUNDLE must be 1"),
+        "the refusal did not name the invalid switch: {output:?}"
+    );
+    assert_eq!(std::fs::read(path).expect("the bundle remains"), before);
 }
 
 /// The committed planner-channel document is the one this build generates
@@ -4466,6 +4598,99 @@ fn a_reply_declares_the_halves_the_contract_routes_it_by() {
     );
 }
 
+/// A reconciler finding that asks for a graph edit is answered by that edit.
+///
+/// The rule the channel paragraph adds beside "a graph edit answers no
+/// question": a commands-only envelope still answers no *question*, and it
+/// answers the finding whose text asked for it. Held here, beside the routing
+/// rules it qualifies, and driven through the field it uses — `correlation`, on
+/// the public surface record, which is where a stable key for a finding goes and
+/// is why no wire shape moved for this.
+#[test]
+fn a_reconciler_finding_that_asks_for_an_edit_is_answered_by_that_edit() {
+    for states in [
+        "**A graph edit answers no *question*, and it answers the reconciler finding that asked \
+         for it.**",
+        "carries a **stable correlation**, derived from the finding's kind and the node it \
+         concerns",
+        "the run records against that correlation the op and the target node the finding asked \
+         for, in its own state and not on the surface",
+        "whether the reply carrying it was bound with `--correlation C` or bound to nothing, the \
+         engine appends an answer for that correlation",
+        "the finding leaves both what is waiting and what is pending",
+        "A committed edit that is not the one the finding asked for answers nothing",
+        "a finding an earlier reply already answered is not answered twice",
+        "A question an **earlier** reply answered is still not one a verdict can name",
+        "The one reply that is not refused for naming an answered question is the reply that \
+         answered it",
+        "a verdict carrying none of them, or one whose edit was turned away, is refused \
+         exactly as it was, as is a correlation no question ever carried.",
+    ] {
+        assert!(
+            CONTRACT.contains(states),
+            "the contract no longer states: {states}"
+        );
+    }
+
+    // And the entry that describes the finding kind says what the rule means for
+    // the one finding the reconciler raises under it. Read with its wrapping
+    // collapsed, so a reflowed paragraph is still the same statement.
+    let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergence record ships");
+    let record = record.split_whitespace().collect::<Vec<_>>().join(" ");
+    for states in [
+        "**Beside it, and not a divergence: a finding that asks for an edit is answered by that edit.**",
+        "The op and target node it asked for are recorded against that correlation in the run's own directory",
+        "from the attempt as well, for a kind that can recur per attempt, which this one is not",
+        "the commit of that edit appends the answer — on either writer of the graph, bound by `--correlation` or not",
+        "A graph edit still answers no *question*: what it answers is the finding that asked for it",
+    ] {
+        assert!(
+            record.contains(states),
+            "the divergence record no longer states: {states}"
+        );
+    }
+
+    // The key a finding is raised under is a value of the field the surface
+    // record already declares, written and read as the correlation it is — and a
+    // surface raised without one still serialises without the field.
+    let raised = json!({
+        "id": 4,
+        "kind": "finding",
+        "message": "node 'service' cannot open a session; answer this with a `retry` of 'service'",
+        "source": "reconciler",
+        "blocking": true,
+        "queued_at": 1,
+        "workstream": "service",
+        "correlation": "finding.session-conflict.service.0a1b2c3d4e5f",
+    });
+    let finding: Surface = serde_json::from_value(raised.clone()).expect("the finding parses");
+    assert_eq!(
+        finding
+            .correlation
+            .as_ref()
+            .map(std::string::ToString::to_string)
+            .as_deref(),
+        Some("finding.session-conflict.service.0a1b2c3d4e5f")
+    );
+    assert_eq!(
+        serde_json::to_value(&finding).expect("it serialises"),
+        raised,
+        "a finding raised under a stable key did not round-trip unchanged"
+    );
+
+    let mut reported = finding;
+    reported.correlation = None;
+    assert!(
+        !serde_json::to_value(&reported)
+            .expect("it serialises")
+            .as_object()
+            .expect("a surface is an object")
+            .contains_key("correlation"),
+        "a surface raised under no key writes the field anyway"
+    );
+}
+
 #[test]
 fn the_contract_declares_an_open_surface_kind_vocabulary() {
     let check_in: SurfaceKind = serde_json::from_value(json!("check-in")).expect("parses");
@@ -4746,31 +4971,27 @@ fn an_envelope_round_trips_through_the_merged_streams_shape() {
     assert_eq!(serde_json::to_value(&envelope).expect("serializes"), wire);
 }
 
-/// Every item `onepipeline::event` and `onepipeline::filter` published before the
-/// wire moved onto the bus still resolves at the same path, and the envelope, its
-/// labels, source, phase and artifact, the kind, the filter and the matcher are
-/// the bus's own types rather than copies of them.
+/// Every item `onepipeline::event` and `onepipeline::filter` published still
+/// resolves at the same path, and each is what this crate's own vocabulary or
+/// the bus core declares it to be.
 ///
 /// A type named twice is proven one type by handing both names to a function
 /// that takes one: a copy, however faithful, does not compile here.
 #[test]
-fn the_wire_types_resolve_where_they_did_and_are_the_buss_own() {
+fn the_wire_types_resolve_where_they_did_and_are_the_vocabularys_own() {
     fn one_type<T>(_: std::marker::PhantomData<T>, _: std::marker::PhantomData<T>) {}
+    use onepipeline::vocabulary;
     use std::marker::PhantomData as Named;
-    one_type(Named::<Envelope>, Named::<onemessagebus_agent::Envelope>);
-    one_type(Named::<Labels>, Named::<onemessagebus_agent::Labels>);
-    one_type(Named::<Source>, Named::<onemessagebus_agent::Source>);
-    one_type(Named::<Phase>, Named::<onemessagebus_agent::Phase>);
+    one_type(Named::<Envelope>, Named::<vocabulary::Envelope>);
+    one_type(Named::<Labels>, Named::<vocabulary::Labels>);
+    one_type(Named::<Source>, Named::<vocabulary::Source>);
+    one_type(Named::<EventFilter>, Named::<vocabulary::EventFilter>);
+    one_type(Named::<Matcher>, Named::<vocabulary::Matcher>);
     one_type(Named::<ArtifactRef>, Named::<onemessagebus::ArtifactRef>);
     one_type(Named::<EventKind>, Named::<onemessagebus::Kind>);
-    one_type(
-        Named::<EventFilter>,
-        Named::<onemessagebus_agent::EventFilter>,
-    );
-    one_type(Named::<Matcher>, Named::<onemessagebus_agent::Matcher>);
-    // And the sibling that relays into this crate holds the same ones.
-    one_type(Named::<Envelope>, Named::<onevcs::Envelope>);
-    one_type(Named::<Envelope>, Named::<oneagentgraph::event::Envelope>);
+    // `Phase` is the producer that classifies its own kinds into it, not a
+    // second enum here: `onevcs` stamps it and this crate relays it.
+    one_type(Named::<Phase>, Named::<onevcs::Phase>);
 
     // The rest of what the two modules published, at the same paths.
     assert_eq!(ENVELOPE_VERSIONS_READ.first(), Some(&ENVELOPE_VERSION));
@@ -4787,6 +5008,181 @@ fn the_wire_types_resolve_where_they_did_and_are_the_buss_own() {
         Some(&LAUNCH_CONFIG_SCHEMA_VERSION)
     );
     assert_eq!(LaunchConfig::default().filters, Filters::default());
+}
+
+/// The drift gate for the vocabulary each producer now declares for itself.
+///
+/// Every producer in the stack declares its own words over the one
+/// `onemessagebus` core — `onevcs` its `Phase` and the word `vcs`,
+/// `oneagentgraph` the word `agentgraph`, this crate the closed `Source` naming
+/// all three — so nothing makes them agree by construction any more. This is
+/// what makes them agree by check, and it lives here because `onepipeline` is
+/// the one crate that links every producer.
+///
+/// Four properties, and **exactly** four — the whole envelope is not crossed
+/// here, because the crossing itself is `src/vcs.rs`'s and `src/agentgraph.rs`'s
+/// and each is driven against its own producer where it lives. What this holds
+/// is the four pieces of *vocabulary* a crossing has nothing to fall back on:
+///
+/// 1. **A producer's reserved labels cross whole.** A sibling's `Labels` with
+///    every reserved key set serializes to bytes this crate's `Labels` reads back
+///    with **no extras**, and re-serializes to the same bytes — a reserved key
+///    that fell among the extras is a key this crate would write in the wrong
+///    slot, which is exactly the drift
+///    `tests/recorded/bus/onepipeline-relayed-drift.jsonl` recorded.
+/// 2. **The source words are the same words.** A relayed envelope is attributed
+///    by the word its producer stamped; a word each side spells its own copy of
+///    is a word they can come apart on.
+/// 3. **The phases are one set.** `onevcs` stamps them and this crate relays and
+///    filters on them, so the set here is that producer's own rather than a
+///    second enum beside it.
+/// 4. **A producer's matcher fields cross whole.** A filter is handed *to* a
+///    sibling rather than read from one, so this is the crossing the other way:
+///    a sibling's `MatchFields` with every field named reads back here naming
+///    the same ones, and re-serializes to the same bytes. A field one of them
+///    grows and the other has not would make a spec a caller wrote against one
+///    grammar mean something narrower to the other.
+#[test]
+fn a_siblings_reserved_labels_source_word_phases_and_matcher_fields_are_this_crates() {
+    // 1. Each sibling's reserved keys, all six set, through the wire.
+    let vcs = onevcs::Labels {
+        run_id: Some("R".into()),
+        round: Some(2),
+        node: Some("build".into()),
+        step: Some("implement".into()),
+        member: Some("worker".into()),
+        persona: Some("engineer".into()),
+        extra: serde_json::Map::new(),
+    };
+    let graph = oneagentgraph::event::Labels {
+        run_id: Some("R".into()),
+        round: Some(2),
+        node: Some("build".into()),
+        step: Some("implement".into()),
+        member: Some("worker".into()),
+        persona: Some("engineer".into()),
+        extra: serde_json::Map::new(),
+    };
+    let produced = [
+        ("onevcs", serde_json::to_string(&vcs).expect("serializes")),
+        (
+            "oneagentgraph",
+            serde_json::to_string(&graph).expect("serializes"),
+        ),
+    ];
+    for (producer, line) in &produced {
+        let crossed: Labels = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("{producer}'s labels do not cross: {e}"));
+        assert!(
+            crossed.extra.is_empty(),
+            "{producer} stamped a reserved key this crate carries among the extras: {:?}",
+            crossed.extra
+        );
+        assert_eq!(crossed.run_id.as_deref(), Some("R"), "{producer}");
+        assert_eq!(crossed.round, Some(2), "{producer}");
+        assert_eq!(crossed.node.as_deref(), Some("build"), "{producer}");
+        assert_eq!(crossed.step.as_deref(), Some("implement"), "{producer}");
+        assert_eq!(crossed.member.as_deref(), Some("worker"), "{producer}");
+        assert_eq!(crossed.persona.as_deref(), Some("engineer"), "{producer}");
+        assert_eq!(
+            serde_json::to_string(&crossed).expect("serializes"),
+            *line,
+            "{producer}'s labels do not come back out as the bytes it wrote"
+        );
+    }
+
+    // 2. The word each producer stamps is the word this crate attributes it by.
+    assert_eq!(onevcs::SOURCE_WORD, Source::Vcs.as_str());
+    assert_eq!(
+        oneagentgraph::event::SOURCE_WORD,
+        Source::Agentgraph.as_str()
+    );
+
+    // 3. The phases are the producer's own set, not a second one beside it.
+    assert_eq!(Phase::every(), onevcs::Phase::every());
+
+    // 4. Every matcher field, through the wire, in both directions.
+    let vcs = onevcs::MatchFields {
+        phase: Some(onevcs::Phase::Development),
+        run_id: Some("R".into()),
+        node: Some("build".into()),
+        step: Some("implement".into()),
+        member: Some("worker".into()),
+        persona: Some("engineer".into()),
+    };
+    let graph = oneagentgraph::event::MatchFields {
+        // The graph links no `onevcs`, so its phase is an open word. A filter it
+        // accepts naming one still crosses into the closed `Phase` here.
+        phase: Some(oneagentgraph::event::Phase::from(
+            onevcs::Phase::Development.as_str(),
+        )),
+        run_id: Some("R".into()),
+        node: Some("build".into()),
+        step: Some("implement".into()),
+        member: Some("worker".into()),
+        persona: Some("engineer".into()),
+    };
+    let matching = [
+        ("onevcs", serde_json::to_string(&vcs).expect("serializes")),
+        (
+            "oneagentgraph",
+            serde_json::to_string(&graph).expect("serializes"),
+        ),
+    ];
+    for (producer, line) in &matching {
+        // `MatchFields` denies an unknown field, so a field this crate does not
+        // have is a refusal naming it rather than a value dropped.
+        let crossed: onepipeline::vocabulary::MatchFields = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("{producer}'s matcher fields do not cross: {e}"));
+        assert_eq!(crossed.phase, Some(Phase::Development), "{producer}");
+        assert_eq!(crossed.run_id.as_deref(), Some("R"), "{producer}");
+        assert_eq!(crossed.node.as_deref(), Some("build"), "{producer}");
+        assert_eq!(crossed.step.as_deref(), Some("implement"), "{producer}");
+        assert_eq!(crossed.member.as_deref(), Some("worker"), "{producer}");
+        assert_eq!(crossed.persona.as_deref(), Some("engineer"), "{producer}");
+        assert_eq!(
+            serde_json::to_string(&crossed).expect("serializes"),
+            *line,
+            "{producer}'s matcher fields do not come back out as the bytes it wrote"
+        );
+        // And the other way, which is the direction a filter actually travels:
+        // `sibling_filter` hands this crate's spec to the producer at its JSON
+        // form, so a field this crate grows and the producer has not is a
+        // refusal at the seam rather than a narrower filter nobody asked for.
+        let back = serde_json::to_string(&crossed).expect("serializes");
+        match *producer {
+            "onevcs" => {
+                serde_json::from_str::<onevcs::MatchFields>(&back)
+                    .unwrap_or_else(|e| panic!("onevcs refuses this crate's matcher: {e}"));
+            }
+            _ => {
+                serde_json::from_str::<oneagentgraph::event::MatchFields>(&back)
+                    .unwrap_or_else(|e| panic!("oneagentgraph refuses this crate's matcher: {e}"));
+            }
+        }
+    }
+}
+
+/// A producer moving its write version must move the merged vocabulary's table
+/// with it. Historical recorded streams cannot detect a future version bump.
+#[test]
+fn the_merged_vocabulary_writes_each_producers_current_version() {
+    assert_eq!(
+        <onepipeline::vocabulary::Agent as onemessagebus::Vocabulary>::DEFAULT_SOURCE,
+        Source::Pipeline.as_str()
+    );
+    let vcs_source = onevcs::Source::from(onevcs::SOURCE_WORD);
+    assert_eq!(
+        Source::Vcs.write_version(),
+        <onevcs::VcsEvents as onemessagebus::Vocabulary>::write_version(&vcs_source)
+    );
+    let graph_source = oneagentgraph::event::Source::from(oneagentgraph::event::SOURCE_WORD);
+    assert_eq!(
+        Source::Agentgraph.write_version(),
+        <oneagentgraph::event::Agentgraph as onemessagebus::Vocabulary>::write_version(
+            &graph_source
+        )
+    );
 }
 
 #[test]
@@ -5802,7 +6198,7 @@ const RULINGS: &[(&str, &str)] = &[
     ("74.", "holds any node that is not `done`"),
     (
         "75.",
-        "`onemessagebus`'s own `docs/contract.md` is the one source of their shape",
+        "`onemessagebus`'s own `docs/contract.md` is the one source of that shape",
     ),
     ("77.", "The planner channel runs on `onemessagebus`"),
     ("78.", "Surface kinds are an open vocabulary"),

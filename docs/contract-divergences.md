@@ -1483,6 +1483,36 @@ behind it is a stopped frontier. Reading narration while a blocking surface is
 pending no longer clears that pending state either: a report is not an answer,
 and only a reply releases the subtree a decision is holding.
 
+**Beside it, and not a divergence: a finding that asks for an edit is answered by
+that edit.** The reconciler raises one finding of its own under this kind — the
+session-open conflict, whose text asks the manager to answer it "with a `retry`
+of '<node>'" — and a commands-only envelope answers no question, so the manager
+committed exactly the retry the finding named and the finding stayed pending for
+the life of the run: `status` reported a planner decision while the replacement
+worked, `watch --until surface` returned on it every time it was asked, and the
+Stop hook's watch invariant failed against a run whose next move was already on
+the graph. The contract's Channel paragraph now states the rule, and this is what
+it means for this kind: a finding whose text asks for a graph edit is raised under
+a **stable correlation** derived from its kind and the node it concerns — and
+from the attempt as well, for a kind that can recur per attempt, which this one
+is not: the `retry` that answers it takes its node out of the graph, so the
+finding and the node go together. The op and target node it asked for are
+recorded against that correlation in the run's own directory, and the commit of
+that edit appends the answer — on either writer of the graph, bound by
+`--correlation` or not. A graph edit still answers no
+*question*: what it answers is the finding that asked for it, matched against what
+that finding recorded and nothing else. One consequence is worth naming, because
+it is the one place the answering is visible in a refusal: an envelope's commands
+are committed before its verdict half is delivered, so a reply that names a
+finding with `--correlation` *and* carries the edit it asked for finds its own
+question already answered, and that verdict is appended beside the edit rather
+than refused. Every other verdict naming an answered question is refused exactly
+as it was. Nothing published moves: the correlation
+goes in the field `agent.planner-surface@1` already declares for one, the reply is
+the `agent.queued-reply@1` a verdict is appended as, and neither
+`schemas/reply-envelope-v3.schema.json` nor `schemas/planner-channel.json`
+changes.
+
 ## 40. A node cannot say it depends on the *release* rather than on the work — OPEN
 
 **Proposal (for the planner who owns the contract): add two optional node fields
@@ -5899,10 +5929,15 @@ drives exactly that let-go against the real binary.
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this entry is the
 dated record of a ruling, decided against `onemessagebus` 0.7.0, and not a live contract:
 it says what moved and why, which is a restatement by nature. The live shape it describes
-has its gate in `tests/contract.rs` — the re-exported types are the bus's own by type
-identity, and `the_marked_copy_of_the_bus_contract_is_reconciled_against_the_released_bus`
-holds `docs/contract.md`'s marked copy to the release `Cargo.lock` resolves, its matcher
-fields to the bus's own `Matcher` document, and its sources to the bus's `Source` set. -->
+has its gate in `tests/contract.rs` — `the_wire_types_resolve_where_they_did_and_are_the_vocabularys_own`
+holds each re-exported path to the type `src/vocabulary.rs` declares it as,
+`a_siblings_reserved_labels_source_word_phases_and_matcher_fields_are_this_crates` holds
+each producer's reserved labels, source word, phases and matcher fields to this crate's,
+and
+`the_marked_copy_of_the_bus_contract_is_reconciled_against_the_released_bus` holds
+`docs/contract.md`'s marked copy of the envelope *shape* to the release `Cargo.lock`
+resolves, its matcher fields to the linked `Matcher` document, and its sources to the
+vocabulary's own `Source` set. -->
 **Ruling: the envelope and filter types are `onemessagebus-agent`'s, re-exported
 here at the paths this crate always published them at, with `onemessagebus`'s own
 `docs/contract.md` the one source of the text `docs/contract.md` keeps as a marked
@@ -5913,6 +5948,22 @@ the bus's `Merge` wherever the two agree; decode journal lines through the bus
 `Reader` and classify what it refuses as before; keep `ArtifactId` as this crate's
 own; and take the bus's byte order and its refusal of an unknown top-level field
 as the wire's rule, proven over a committed journal written before the change.**
+
+**Superseded in part, and this is where it is said.** The agent profile crate the
+ruling named no longer exists: `onemessagebus` 0.9.0 deleted
+`crates/onemessagebus-agent` (onemessagebus#132), and the agent stack's vocabulary
+— the three sources, the four phases, the six reserved labels, the matcher fields,
+and the `agent.event-envelope`, `agent.event-filter`, `agent.artifact-ref` and
+`agent.labels` schema families — is now **this crate's own**, declared at
+`src/vocabulary.rs` over the same `onemessagebus` core and published as
+`schemas/events.json`. `docs/contract.md` states it directly, so nothing below
+needs re-ruling: every path the ruling fixed still resolves, the bytes on the wire
+are unchanged (`tests/recorded/bus/` holds four streams from the profile crate's
+last tag and round-trips them), and only *who declares the words* moved. What is
+no longer true of the corners below is that a relayed `onevcs` envelope is the same
+Rust value on both sides of a relay: each producer now declares its own vocabulary,
+so `src/vcs.rs` crosses one at its JSON form, exactly as `src/agentgraph.rs`
+already did, and reports one that does not cross rather than dropping it.
 
 Numbered 74 when it was written. The run-end hooks reached `main` first and took
 74, so on the merge of that change this entry became 75 and the next became 76.

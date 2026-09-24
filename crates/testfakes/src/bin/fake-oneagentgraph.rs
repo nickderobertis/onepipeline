@@ -1132,7 +1132,7 @@ fn publish_deaths(
             // steps past its candidates and *then* the member it could not serve
             // dies, and a producer's seq is its own statement of that order.
             seq: 200 + offset as u64,
-            source: oneagentgraph::event::Source::Agentgraph,
+            source: oneagentgraph::event::Source::from(oneagentgraph::event::SOURCE_WORD),
             kind: oneagentgraph::event::EventKind::MemberDied.into(),
             dimensions: Default::default(),
             labels: serde_json::from_value(serde_json::Value::Object(labels.clone()))
@@ -1252,7 +1252,7 @@ fn refuse_candidates_under(labels: &serde_json::Map<String, serde_json::Value>, 
             ts: fake::now(),
             stream: stream(),
             seq: 100 + offset as u64,
-            source: oneagentgraph::event::Source::Agentgraph,
+            source: oneagentgraph::event::Source::from(oneagentgraph::event::SOURCE_WORD),
             kind: oneagentgraph::event::EventKind::FallbackAdvanced.into(),
             dimensions: Default::default(),
             labels: serde_json::from_value(serde_json::Value::Object(labels.clone()))
@@ -1628,7 +1628,7 @@ fn session_records(args: &[String], script: &str) {
             // stream from one, so this cannot move the mark a follow reads on
             // from and cannot hide a record the session really wrote.
             seq: 0,
-            source: onevcs::Source::Vcs,
+            source: onevcs::Source::from(onevcs::SOURCE_WORD),
             kind: onevcs::EventKind::SessionOpened.into(),
             dimensions: <onevcs::Phase as onevcs::PhaseOf>::of(onevcs::EventKind::SessionOpened)
                 .unwrap_or(onevcs::Phase::Development)
