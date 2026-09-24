@@ -4245,13 +4245,11 @@ mod tests {
     }
 
     #[test]
-    fn a_write_the_host_will_not_publish_is_reported_and_takes_its_temporary_with_it() {
+    fn an_unpublishable_write_reports_failure_removes_its_temporary_and_preserves_the_destination() {
         for durability in [Durability::Record, Durability::Projection] {
             let root = scratch(&format!("unpublishable-{durability:?}"));
             let path = root.join("board.md");
             let temp = temporary(&path);
-            // Holding a document of its own, so what is asserted below is that
-            // the destination was left alone rather than merely that it exists.
             fs::create_dir_all(&path).expect("a destination no rename can replace");
             fs::write(path.join("kept.md"), "what the destination held").expect("it holds one");
 
