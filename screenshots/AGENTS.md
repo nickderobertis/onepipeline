@@ -102,19 +102,12 @@ say:
   per-clone state `just bootstrap` sets; `tests/provisioning.rs` holds that.
   The directory carries the visual guard **and nothing else** — `just gate` stays
   unhooked, as it already was.
-- **A hook's environment is not a shell's.** Git exports `GIT_DIR` and
-  `GIT_WORK_TREE` naming the repository being pushed, and `GIT_DIR` beats `-C`
-  and beats discovery, so an inherited one seeds the throwaway repositories into
-  that repository. The world states its whole git environment and inherits none
-  (`clear_inherited_settings` in `world.py`). What holds the two in step:
-  `just screenshots-guard` runs the real hook under a hook's environment with
-  real refs on stdin and pushes nothing, and `tests/visual_docs.rs` drives
-  `world.py` against real `git`. Neither `just screenshots` nor `just gate`
-  reaches what only a hook reaches.
-- **A failed step reports both streams** — `world.said`, which every step goes
-  through. `git` writes `nothing to commit` to *stdout*, so a refusal quoting
-  `stderr` alone arrives blank. Held by the same tier: neither property needs
-  `freeze` or `screencomp`, so neither is excused from it.
+- **A hook's environment is not a shell's:** git exports `GIT_DIR`, which beats
+  `-C` and beats discovery. So the world states its whole git environment and
+  inherits none of the caller's. Held in step by `just screenshots-guard`, the
+  only caller that reaches this, and by `tests/visual_docs.rs`.
+- **A failed step reports both streams** — git refuses on *stdout*, so a
+  diagnostic quoting `stderr` alone arrives blank. Same tier as above.
 - **The two switches are spelled, not merely present.** `SCREENSHOTS_NO_BUILD`
   (`capture.sh`) and `SCREENCOMP_GUARD_REQUIRE` (the hook) each read a written-out
   yes or no — the spellings are the `case` statement beside each — and refuse
