@@ -4794,6 +4794,66 @@ fn a_session_line_this_build_cannot_read_is_reported_and_does_not_fail_the_node(
     );
 }
 
+/// An envelope on a session's stream whose source word this build has no
+/// variant for.
+///
+/// Each producer in the stack declares its own vocabulary over the one
+/// `onemessagebus` core, so `onevcs`'s `Source` is that core's **open** newtype
+/// and this crate's is a closed enum of the three producers it links. A word
+/// outside that set is an envelope the sibling hands over quite happily and the
+/// relay has no value for — the case the wire crossing in `src/vcs.rs` exists to
+/// decide. What this journey holds is the decision: the loss is **said out
+/// loud**, naming the session and why, the envelopes around it in the same batch
+/// still reach the merged store, and the node does not fail.
+///
+/// Driven through the binary, because the sentence is written to the driver's
+/// own stderr and nothing in process observes it. It is the whole point of the
+/// behaviour: a silent drop is what makes a later reader of the merged store
+/// conclude nothing happened.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] This src/vcs.rs
+// relay journey has no narrower Nx edge: noteJourneySource includes src/**/*.
+#[test]
+fn an_envelope_that_does_not_cross_is_reported_and_the_publication_around_it_still_lands() {
+    let world = World::new("lifecycle-foreignsource");
+    // llmlint: ignore-block[tests_mirror_real_usage] the same extension point as the two
+    // journeys above, and the same reason: a repository's `pre-push` hook is code an
+    // operator wrote, and a stream carrying an envelope whose source word this build has
+    // no variant for is what an `ONEVCS_HOME` shared with another producer of the stack
+    // leaves behind. No command writes one — `Stream::emit` stamps `onevcs`'s own word on
+    // everything it appends — and the stream exists only once the session has opened,
+    // which makes the hook the point inside a run where the repository's own code can
+    // reach it. Everything asserted is through the binary.
+    let hook = merge_path(&world, &ReturningHookVerb::AppendForeignSourceEvent);
+    world.repository(
+        "local-direct",
+        &hook.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.script("service.work", "the worker wrote this\n");
+    let run = driven(&world, "foreignsource", vec![lifecycle("service", &[])]);
+
+    run.1.err_has("cannot relay session").err_has("harness");
+    let run = run.0;
+
+    // And the batch around it was still relayed: the publication this same push
+    // performed reached the merged store, which is the record written *after*
+    // the hook appended its line.
+    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
+    let journal = world.journal(&run);
+    assert!(
+        journal
+            .iter()
+            .any(|event| event["source"] == "vcs" && event["kind"] == "published"),
+        "the publication did not reach the merged store, so the batch was refused whole \
+         rather than the one envelope that could not cross"
+    );
+    assert!(
+        !journal.iter().any(|event| event["source"] == "harness"),
+        "an envelope this build has no source for reached the merged store"
+    );
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
 /// Every `(node, step)` a dispatch was asked for, in the order they were asked.
 fn steps_dispatched(world: &World) -> Vec<(String, String)> {
     world

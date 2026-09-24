@@ -4702,6 +4702,10 @@ pub enum ReturningHookVerb {
     BreakStreams,
     /// Append a line to this session's stream that no build of `onevcs` can read.
     AppendFutureEvent,
+    /// Append a whole, valid `onevcs` envelope to this session's stream whose
+    /// **source word** `onepipeline`'s closed `Source` has no variant for: the
+    /// one line the sibling hands over and the relay cannot cross.
+    AppendForeignSourceEvent,
     /// Refuse the push the way a hook does when the host it runs on lacks a tool
     /// it needs: on the one line `onevcs` reads as the host's refusal rather than
     /// the work's, naming the tool and how to install it.
@@ -4714,6 +4718,7 @@ impl ReturningHookVerb {
         match self {
             Self::BreakStreams => "break-streams",
             Self::AppendFutureEvent => "append-future-event",
+            Self::AppendForeignSourceEvent => "append-foreign-source-event",
             Self::MissingPrerequisite => "missing-prerequisite",
         }
     }
@@ -5007,6 +5012,7 @@ fn both_hook_scripts_answer_the_same_verbs() {
             "wait-for",
             "break-streams",
             "append-future-event",
+            "append-foreign-source-event",
             "missing-prerequisite"
         ],
         "the hook scripts no longer dispatch the way this reads them"

@@ -109,10 +109,10 @@ pub const REPLY_ENVELOPE_VERSIONS_READ: &[u32] = &[REPLY_ENVELOPE_VERSION, 2];
 /// The reply envelope's schema family: `agent.reply-envelope`.
 ///
 /// Registered by this layout at every version of [`REPLY_ENVELOPE_VERSIONS_READ`]
-/// from the documents under `schemas/`, which are the documents the agent
-/// profile registered for it: the shape is this crate's reply, and the profile
-/// declared the family for this channel alone — nothing else of the profile
-/// carries a reply envelope.
+/// from the documents under `schemas/`, byte for byte the documents the agent
+/// profile crate registered for it through its 0.7 line: the shape is this
+/// crate's reply, and the family was declared for this channel alone — nothing
+/// else in the stack carries a reply envelope.
 pub const REPLY_ENVELOPE_FAMILY: &str = "agent.reply-envelope";
 
 /// `agent.planner-surface@1`: [`Surface`].
@@ -717,15 +717,15 @@ pub fn queues() -> Vec<QueueSpec> {
     vec![surfaces, replies, commands, outcomes]
 }
 
-/// Every schema the layout's queues name, beside every schema the agent
-/// profile registers.
+/// Every schema the layout's queues name, beside every schema the stack
+/// registers ([`crate::vocabulary::registry`]).
 ///
 /// The layout's own come first — its four records from their types, and the
-/// reply envelope family from the documents under `schemas/` — and the
-/// profile's are added under every id the layout did not register, so an id the
-/// profile still holds a document under is read by this crate's document. The
-/// registry the profile builds is what `onepipeline::event` reads envelopes
-/// through, and it is not touched.
+/// reply envelope family from the documents under `schemas/` — and the stack's
+/// are added under every id the layout did not register, so an id the stack
+/// holds a document under is read by this crate's document. The registry
+/// `onepipeline::event` reads envelopes through is built separately, over the
+/// same ids, and it is not touched.
 ///
 /// # Panics
 ///
@@ -758,18 +758,18 @@ pub fn registry() -> Registry {
             )
             .expect("the reply envelope schema registers");
     }
-    let profile = onemessagebus_agent::registry();
-    for id in profile.ids() {
+    let stack = crate::vocabulary::registry();
+    for id in stack.ids() {
         if registry.schema(&id).is_some() {
             continue;
         }
-        let document = profile
+        let document = stack
             .schema(&id)
             .cloned()
-            .unwrap_or_else(|| unreachable!("the profile holds every id it lists"));
+            .unwrap_or_else(|| unreachable!("the stack's registry holds every id it lists"));
         registry
             .register_schema(id, document)
-            .expect("a schema the profile registered registers again");
+            .expect("a schema the stack's registry holds registers again");
     }
     registry
 }
@@ -1171,14 +1171,14 @@ impl Channel {
 mod tests {
     use super::*;
 
-    /// The ids this layout registers are the ids the linked profile registered
-    /// for the channel through its 0.7.0 line, so a record validates against
-    /// the same id whichever build wrote it — and where the profile still holds
-    /// a document under one, the two admit the same records.
+    /// The ids this layout registers are the ids the agent profile crate
+    /// registered for the channel through its 0.7.0 line, so a record validates
+    /// against the same id whichever build wrote it — and where the stack's own
+    /// registry holds a document under one, the two admit the same records.
     #[test]
-    fn the_layout_registers_the_channels_ids_beside_the_profiles() {
+    fn the_layout_registers_the_channels_ids_beside_the_stacks() {
         let own = registry();
-        let profile = onemessagebus_agent::registry();
+        let stack = crate::vocabulary::registry();
         let channel_ids = [
             SURFACE_SCHEMA,
             QUEUED_REPLY_SCHEMA,
@@ -1190,10 +1190,10 @@ mod tests {
         for id in &channel_ids {
             assert!(own.schema(id).is_some(), "{id} is not registered");
         }
-        for id in profile.ids() {
+        for id in stack.ids() {
             assert!(
                 own.schema(&id).is_some(),
-                "the profile's {id} is not registered beside the layout's"
+                "the stack's {id} is not registered beside the layout's"
             );
         }
         let surface = serde_json::json!({
@@ -1202,10 +1202,10 @@ mod tests {
         });
         own.check(&SURFACE_SCHEMA, &surface)
             .expect("a surface validates against the layout's document");
-        if profile.schema(&SURFACE_SCHEMA).is_some() {
-            profile
+        if stack.schema(&SURFACE_SCHEMA).is_some() {
+            stack
                 .check(&SURFACE_SCHEMA, &surface)
-                .expect("the same surface validates against the profile's document");
+                .expect("the same surface validates against the stack's document");
         }
     }
 

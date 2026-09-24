@@ -3,12 +3,14 @@
 //! One grammar across the stack — `{include, exclude}` over `source`, a `kind`
 //! glob on the kebab-case wire string, and the reserved labels `run_id`, `node`,
 //! `step`, `member`, `persona`. Like the [envelope](crate::event::Envelope)
-//! beside it, the filter and its matcher are `onemessagebus-agent`'s, re-exported
-//! here at the paths this crate has always published them at, and
-//! `tests/contract.rs` drives the grammar committed in `docs/contract.md` through
-//! them. What stays this crate's is its policy: the launch config, the block
-//! naming each source's filter and the read-time profiles, and the profiles it
-//! ships.
+//! beside it, the filter and its matcher are the `onemessagebus` core's generic
+//! types over [`crate::vocabulary`], re-exported here at the paths this crate
+//! has always published them at, and `tests/contract.rs` drives the grammar
+//! committed in `docs/contract.md` through them. Each sibling declares the same
+//! grammar over its own vocabulary, so a filter crosses to one of them at its
+//! JSON form rather than as a shared Rust value. What stays this crate's is its
+//! policy: the launch config, the block naming each source's filter and the
+//! read-time profiles, and the profiles it ships.
 //!
 //! `onepipeline` uses it twice, and the two are not the same thing:
 //!
@@ -30,7 +32,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::error::{Error, Result};
 use crate::event::Source;
 
-pub use onemessagebus_agent::event::{EventFilter, Matcher};
+pub use crate::vocabulary::{EventFilter, Matcher};
 
 /// The profile `next` and `monitor` read through when a caller names none.
 pub const DEFAULT_PROFILE: &str = "planner";
