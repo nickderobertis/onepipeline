@@ -5,15 +5,21 @@
 //! linked library — and a `workspaces.yml` naming a `maintain` command that
 //! writes a marker into the slot's worktree. What is asserted is the sibling's
 //! own account, read through its own commands: `onevcs pool status` for the
-//! stamp the schedule is a function of, the marker for what ran, and the
-//! `onevcs repos` calls the engine makes for how many sweeps a driver made.
-//! Nothing stands in for `onevcs`; the recording executable runs the real one.
+//! stamp the schedule is a function of, and the marker for what ran.
+//!
+//! **How many sweeps a driver made is the driver's own count.** The identities a
+//! sweep visits come off `onevcs::registered_identities`, so nothing is spawned
+//! per sweep any more and there is no call record to count; and a sweep that
+//! finds every slot not due is invisible by design — it writes no journal record
+//! and moves no stamp. So the number comes from `loop-stats.json`, the driver's
+//! report of what its reconcile loop did, which is where the release probes it
+//! asks are already counted.
 //!
 // llmlint: ignore-file[e2e_not_mocked] the sibling under test is *not* substituted:
-// `onevcs` is the library this crate links, and the executable the engine spawns to
-// list identities is the real one, wrapped only to record that it was asked.
-// `oneagentgraph` is still the double, because what these journeys are about is the
-// idle capacity beside a dispatch and a real agent turn is a paid one.
+// `onevcs` is the library this crate links, and every answer these journeys read is
+// the linked release's own. `oneagentgraph` is still the double, because what these
+// journeys are about is the idle capacity beside a dispatch and a real agent turn is
+// a paid one.
 
 use std::path::{Path, PathBuf};
 
@@ -24,49 +30,36 @@ use crate::harness::{agent, onevcs_binary, plan_of, repo_file, Run, World, REFUS
 /// The identity the world's `service` checkout registers as.
 const SERVICE_IDENTITY: &str = "github.com/owner/service";
 
-/// The environment the recording `onevcs` reads its two paths from.
-const CALLS_ENV: &str = "ONEPIPELINE_E2E_ONEVCS_CALLS";
-const REAL_ENV: &str = "ONEPIPELINE_E2E_ONEVCS_REAL";
-
 /// The pace the paced journeys run under: every second, so a second sweep is
 /// something a journey can wait for rather than a thing that happens next week.
 const FAST_PACE: &str = "1";
 
-/// A world whose driver names its pool-maintenance schedule and whose `onevcs`
-/// records every call the engine makes to it.
+/// A world whose driver names its pool-maintenance schedule and reports what its
+/// reconcile loop did.
 ///
 /// `pace` is [`onepipeline::maintenance::PACE_ENV`], or `None` for the shipped
 /// default.
 fn pooled_world(name: &str, pace: Option<&str>) -> World {
-    let world = World::new(name);
-    let calls = calls_log(&world);
-    let recorder = interpreted_script(&world, "onevcs_recording");
     // Held still: the host's own load is its neighbours' — every other journey
     // this suite runs at once — and a driver reading it as no free slot withholds
     // exactly what these journeys exist to see.
-    let mut world = world
-        .with_env("ONEPIPELINE_ONEVCS_BIN", &recorder)
-        .with_env(CALLS_ENV, &calls.to_string_lossy())
-        .with_env(REAL_ENV, &onevcs_binary().to_string_lossy())
-        .with_env(onepipeline::executor::LOAD1_ENV, "0");
+    let mut world = World::new(name)
+        .with_env(onepipeline::executor::LOAD1_ENV, "0")
+        .with_env(crate::harness::LOOP_STATS_ENV, "1");
     if let Some(pace) = pace {
         world = world.with_env(onepipeline::maintenance::PACE_ENV, pace);
     }
     world
 }
 
-/// Where the recording `onevcs` writes one line per call.
-fn calls_log(world: &World) -> PathBuf {
-    world.root.join("onevcs-calls.log")
-}
-
-/// How many times the engine asked `onevcs repos` — one per sweep.
-fn sweeps(world: &World) -> usize {
-    std::fs::read_to_string(calls_log(world))
-        .unwrap_or_default()
-        .lines()
-        .filter(|line| line.trim() == "repos")
-        .count()
+/// How many pool-maintenance sweeps `run`'s driver has started.
+///
+/// The driver's own count, waited for rather than read optimistically: a driver
+/// writes its counts on its first wait, so a read taken before that is a read of
+/// a file that is not there yet rather than a driver that has swept nothing.
+fn sweeps(world: &World, run: &str) -> u64 {
+    crate::harness::reporting(world, run);
+    crate::harness::counts(world, run).maintenance_sweeps
 }
 
 /// One of this suite's script fixtures, written into the world's scratch as the
@@ -120,15 +113,21 @@ fn pooled_with_maintenance_bounded(world: &World, hold: Option<&Path>, timeout: 
 /// Size the host's pools and name the `service` identity's `maintain` command
 /// verbatim, as the argv's JSON.
 fn pooled_with_command(world: &World, command: &str, timeout: &str) {
-    std::fs::write(
-        world.onevcs_home().join("workspaces.yml"),
-        format!(
-            "version: 1\nrules:\n  - match: {{host: github.com, owner: owner, name: service}}\n    \
-             pool: 1\n    overflow: 0\n    maintain:\n      command: {command}\n      timeout: \
-             {timeout}\n"
-        ),
-    )
-    .expect("the workspaces file is written");
+    pooled_with_commands(world, &[("service", command)], timeout);
+}
+
+/// The same, for each identity named: one warm slot, no overflow, and that
+/// identity's own argv verbatim.
+fn pooled_with_commands(world: &World, named: &[(&str, &str)], timeout: &str) {
+    let mut document = "version: 1\nrules:\n".to_owned();
+    for (name, command) in named {
+        document.push_str(&format!(
+            "  - match: {{host: github.com, owner: owner, name: {name}}}\n    pool: 1\n    \
+             overflow: 0\n    maintain:\n      command: {command}\n      timeout: {timeout}\n"
+        ));
+    }
+    std::fs::write(world.onevcs_home().join("workspaces.yml"), document)
+        .expect("the workspaces file is written");
 }
 
 /// Cut the identity's one slot: a real session opened and closed through the
@@ -163,10 +162,9 @@ fn schedule(world: &World, name: &str, every: &str, rules: &str) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// The sibling's own account of the identity's pool.
-fn pool_status(world: &World) -> Value {
+fn pool_status_of(world: &World, repo: &str) -> Value {
     let output = world
-        .cmd_on(&onevcs_binary(), &["pool", "status", "service", "--json"])
+        .cmd_on(&onevcs_binary(), &["pool", "status", repo, "--json"])
         .output()
         .expect("onevcs runs");
     assert!(
@@ -177,23 +175,27 @@ fn pool_status(world: &World) -> Value {
     serde_json::from_slice(&output.stdout).expect("the status is JSON")
 }
 
-/// The one slot, as the sibling reports it.
 fn the_slot(world: &World) -> Value {
-    let status = pool_status(world);
+    the_slot_of(world, "service")
+}
+
+fn the_slot_of(world: &World, repo: &str) -> Value {
+    let status = pool_status_of(world, repo);
     let slots = status["slots"].as_array().expect("slots");
     assert_eq!(slots.len(), 1, "{status}");
     slots[0].clone()
 }
 
-/// The marker the maintain command leaves in the slot's worktree, one line per
-/// run of it.
+/// Everything the maintain command has left in the slot's worktree, one line per
+/// run of it — each carrying the arguments that run was given.
+fn marker_text(world: &World, repo: &str) -> String {
+    let worktree = Path::new(the_slot_of(world, repo)["path"].as_str().expect("a slot path"))
+        .join("worktree");
+    std::fs::read_to_string(worktree.join("maintained.log")).unwrap_or_default()
+}
+
 fn marker_lines(world: &World) -> usize {
-    let slot = the_slot(world);
-    let worktree = Path::new(slot["path"].as_str().expect("a slot path")).join("worktree");
-    std::fs::read_to_string(worktree.join("maintained.log"))
-        .unwrap_or_default()
-        .lines()
-        .count()
+    marker_text(world, "service").lines().count()
 }
 
 /// Every `pool-maintenance` record one run wrote.
@@ -226,11 +228,11 @@ fn release(world: &World, name: &str) {
     });
 }
 
-/// Wait until the engine has made at least `n` sweeps.
-fn until_sweeps(world: &World, n: usize) {
+/// Wait until `run`'s driver has made at least `n` sweeps.
+fn until_sweeps(world: &World, run: &str, n: u64) {
     world.until(
-        &format!("the driver to have swept the registry {n} time(s)"),
-        |world| sweeps(world) >= n,
+        &format!("{run}'s driver to have swept the registry {n} time(s)"),
+        |world| sweeps(world, run) >= n,
     );
 }
 
@@ -330,8 +332,8 @@ fn an_idle_driver_maintains_a_due_slot_once_and_a_fresh_driver_inside_every_runs
 
     // Further idle ticks inside `every`: the registry is swept again, and the
     // sibling answers not-due — nothing runs, nothing is written.
-    let swept = sweeps(&world);
-    until_sweeps(&world, swept + 2);
+    let swept = sweeps(&world, "first");
+    until_sweeps(&world, "first", swept + 2);
     assert_eq!(marker_lines(&world), 1);
     assert_eq!(records(&world, "first").len(), 1, "{}", world.dump());
     let stamped = the_slot(&world)["last_maintained"].clone();
@@ -346,8 +348,8 @@ fn an_idle_driver_maintains_a_due_slot_once_and_a_fresh_driver_inside_every_runs
     // slot's own stamp says not due.
     let hour = schedule(&world, "hour", "1h", "");
     held_run(&world, "second", 2, &["--maintenance-config", &hour]).exited(0);
-    let swept = sweeps(&world);
-    until_sweeps(&world, swept + 2);
+    let swept = sweeps(&world, "second");
+    until_sweeps(&world, "second", swept + 2);
     assert!(records(&world, "second").is_empty(), "{}", world.dump());
     assert_eq!(marker_lines(&world), 1);
     assert_eq!(the_slot(&world)["last_maintained"], stamped);
@@ -414,9 +416,23 @@ fn two_drivers_idle_at_once_maintain_the_slot_once_between_them() {
         .exited(0)
         .out_has("claimed — another pool maintain (pid");
 
-    // Every further sweep of either driver is answered not-due.
-    let swept = sweeps(&world);
-    until_sweeps(&world, swept + 3);
+    // Every further sweep of either driver is answered not-due. Counted per driver,
+    // because each keeps its own account of what its loop did — and waited for
+    // **together** rather than in turn: two waits in sequence take twice the
+    // wall-clock of one, and what this then asserts is that the slot was not
+    // maintained again, which stops being true the moment `every` elapses. A wait
+    // whose length decides its own assertion is a wait that passes on an idle host
+    // and fails on a loaded one.
+    let before: Vec<u64> = ["one", "two"]
+        .iter()
+        .map(|driver| sweeps(&world, driver))
+        .collect();
+    world.until("both drivers to have swept the registry twice more", |world| {
+        ["one", "two"]
+            .iter()
+            .zip(&before)
+            .all(|(driver, swept)| sweeps(world, driver) >= swept + 2)
+    });
     assert_eq!(marker_lines(&world), 1);
     assert_eq!(records(&world, "one").len(), 1, "{}", world.dump());
 
@@ -462,14 +478,14 @@ fn maintenance_is_withheld_at_the_ceiling_without_a_free_slot_and_under_no_sched
     });
     std::thread::sleep(paces);
     assert_eq!(
-        sweeps(&world),
+        sweeps(&world, "ceiling"),
         0,
         "a driver at its ceiling swept the registry"
     );
     assert!(!sweeping(&world, "ceiling"));
     assert_eq!(marker_lines(&world), 0);
     release(&world, "ceiling");
-    assert_eq!(sweeps(&world), 0);
+    assert_eq!(sweeps(&world, "ceiling"), 0);
     assert!(records(&world, "ceiling").is_empty(), "{}", world.dump());
 
     // No free slot: a load average of every core the host has, which the
@@ -487,7 +503,7 @@ fn maintenance_is_withheld_at_the_ceiling_without_a_free_slot_and_under_no_sched
     });
     std::thread::sleep(paces);
     assert_eq!(
-        sweeps(&full),
+        sweeps(&full, "full"),
         0,
         "a driver with no free slot swept the registry"
     );
@@ -505,7 +521,7 @@ fn maintenance_is_withheld_at_the_ceiling_without_a_free_slot_and_under_no_sched
     });
     std::thread::sleep(paces);
     assert_eq!(
-        sweeps(&world),
+        sweeps(&world, "unscheduled"),
         0,
         "a driver naming no schedule swept the registry"
     );
@@ -556,7 +572,7 @@ fn idle_passes_inside_the_pace_sweep_no_second_time_and_an_unmaintained_identity
     let hour = schedule(&world, "hour", "1h", "");
 
     held_run(&world, "paced", 2, &["--maintenance-config", &hour]).exited(0);
-    until_sweeps(&world, 1);
+    until_sweeps(&world, "paced", 1);
     world.until("the sweep to end", |world| !sweeping(world, "paced"));
     crate::harness::reporting(&world, "paced");
     let before = crate::harness::counts(&world, "paced");
@@ -584,14 +600,14 @@ fn idle_passes_inside_the_pace_sweep_no_second_time_and_an_unmaintained_identity
         crate::harness::counts(&world, "paced")
     );
     assert_eq!(
-        sweeps(&world),
+        sweeps(&world, "paced"),
         1,
         "the idle passes inside the pace swept again"
     );
     assert!(records(&world, "paced").is_empty(), "{}", world.dump());
     assert_eq!(marker_lines(&world), 1);
     release(&world, "paced");
-    assert_eq!(sweeps(&world), 1);
+    assert_eq!(sweeps(&world, "paced"), 1);
     assert!(records(&world, "paced").is_empty(), "{}", world.dump());
 }
 
@@ -641,8 +657,8 @@ fn a_rules_every_beats_the_default_for_the_identity_it_matches() {
     // And under the default alone the slot is left as it is.
     let unruled = schedule(&world, "unruled", "7d", "");
     held_run(&world, "unruled", 2, &["--maintenance-config", &unruled]).exited(0);
-    let swept = sweeps(&world);
-    until_sweeps(&world, swept + 2);
+    let swept = sweeps(&world, "unruled");
+    until_sweeps(&world, "unruled", swept + 2);
     assert!(records(&world, "unruled").is_empty(), "{}", world.dump());
     assert_eq!(marker_lines(&world), 2);
     release(&world, "unruled");
@@ -707,7 +723,7 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
         json!({"version": 1, "default": {"every": "1h"}}),
         "{launch}"
     );
-    assert_eq!(sweeps(&world), 1, "{}", world.dump());
+    assert_eq!(sweeps(&world, "configured"), 1, "{}", world.dump());
     assert_eq!(records(&world, "configured").len(), 1, "{}", world.dump());
     assert_eq!(marker_lines(&world), 1);
     assert!(!sweeping(&world, "configured"));
@@ -830,13 +846,13 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
             ],
         ),
     );
-    let swept = sweeps(&world);
     world
         .run(&["start", &path, "--attach", "--launch-config", &config])
         .settled();
+    // A fresh run, so a fresh driver and a fresh account of what its loop did.
     assert_eq!(
-        sweeps(&world),
-        swept,
+        sweeps(&world, "adopted"),
+        0,
         "a run paused on a human gate swept the registry"
     );
     world.run(&["attest", "adopted", "approve"]).exited(0);
@@ -845,7 +861,9 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
         .cmd(&["adopt", "adopted"])
         .spawn()
         .expect("adopt starts");
-    until_sweeps(&world, swept + 1);
+    // The adopting driver is a second process, and the counts are one process's
+    // own: it opens the account at nothing and sweeps once.
+    until_sweeps(&world, "adopted", 1);
     world.release("build.go");
     crate::harness::ended(adopting);
     assert_eq!(
@@ -922,9 +940,10 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
         ));
     release(&world, "timing");
 
-    // An identity the sibling could not maintain: a workspaces file it refuses
-    // — a maintain command naming no program — is that identity's error, and
-    // the sweep's one record carries it.
+    // An identity the sibling could not maintain: a workspaces file it refuses —
+    // a `maintain.command` that is the empty sequence, which names no program to
+    // spawn — is that identity's error, and the sweep's one record carries it,
+    // naming the key an operator edits.
     pooled_with_command(&world, "[]", "120s");
     std::thread::sleep(std::time::Duration::from_millis(1_100));
     held_run(
@@ -942,47 +961,307 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
     assert_eq!(identity["identity"], SERVICE_IDENTITY, "{refused}");
     assert!(identity.get("outcome").is_none(), "{refused}");
     let error = identity["error"].as_str().expect("an error");
-    // The **key an operator edits**, which is what the sibling's own refusal is
-    // written to name and the only part of it this crate depends on: `onevcs`
-    // 0.32.0 states it as `maintain.command is an empty list: name the program
-    // to run and its arguments`, where 0.30.1 said `naming a maintain command
-    // with no …`. The sentence is that library's to word and it moved; what must
-    // not move is that the sentence reaches the record whole, and that it tells
-    // a reader which key to go and fix. The constant behind it is private there,
-    // so this is a literal rather than a re-export.
     assert!(error.contains("maintain.command"), "{refused}");
+    assert!(error.contains("empty list"), "{refused}");
     world
         .run(&["results", "unmaintainable"])
         .exited(0)
         .out_has(&format!("{SERVICE_IDENTITY} (every 1s): failed — "));
     release(&world, "unmaintainable");
 
-    // A host whose identities could not be enumerated: the executable the engine
-    // asks refuses, and the record says so with no identity at all.
-    let mut unlistable = world.as_session(&world.session);
-    unlistable.environment.retain(|(key, _)| key != CALLS_ENV);
-    held_run(
-        &unlistable,
-        "unlistable",
-        2,
-        &["--maintenance-config", &second],
-    )
-    .exited(0);
-    unlistable.until("the record of the enumeration failure", |world| {
-        !records(world, "unlistable").is_empty()
+    // A host whose registered identities could not be enumerated: the registry
+    // the sibling keys them by is not a document it can read while the sweep
+    // asks, and the record says so with no identity at all.
+    //
+    // Made unreadable after the dispatch is placed and put back before the run is
+    // let go, because that one document is what every other thing a run does over
+    // a repository resolves through — so a world that never had it would have no
+    // run to sweep beside.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] the registry is written to directly
+    // because no command of the sibling's leaves a host with one it cannot read: every
+    // verb that writes that document writes a valid one, and `register` is how a host
+    // arrives at a *readable* registry rather than this. What is arranged is the state a
+    // truncated write or a half-restored state root hands the loader, which is the state
+    // the sweep's refusal exists for; everything asserted about it is read back off the
+    // compiled binary — its own journal record and its own `results`.
+    pooled_with_maintenance(&world, None);
+    let registry = world.onevcs_home().join("registry.json");
+    let saved = std::fs::read_to_string(&registry).expect("the host has a registry");
+    held_run(&world, "unlistable", 2, &["--maintenance-config", &second]).exited(0);
+    world.until("the dispatch", |world| {
+        !world.events_of("unlistable", "node-dispatched").is_empty()
     });
-    let unlisted = &records(&unlistable, "unlistable")[0];
+    std::fs::write(&registry, "{ not a registry").expect("the registry is made unreadable");
+    let failed = |record: &Value| record["payload"].get("error").is_some();
+    world.until("the record of the enumeration failure", |world| {
+        records(world, "unlistable").iter().any(failed)
+    });
+    let unlisted = records(&world, "unlistable")
+        .into_iter()
+        .find(failed)
+        .expect("the record of the enumeration failure");
     assert_eq!(unlisted["payload"]["identities"], json!([]), "{unlisted}");
     let error = unlisted["payload"]["error"].as_str().expect("an error");
     assert!(
-        error.contains("repos") && error.contains("refused"),
+        error.contains("registered identities could not be read"),
         "{unlisted}"
     );
-    unlistable
+    // Read back while the registry is still unreadable, so the last sweep that
+    // did something is this one.
+    world
         .run(&["results", "unlistable"])
         .exited(0)
         .out_has("the host's identities could not be enumerated:");
-    release(&unlistable, "unlistable");
+    std::fs::write(&registry, &saved).expect("the registry is put back");
+    release(&world, "unlistable");
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A slot something else holds right now is reported **busy**, and one whose
+/// worktree is gone is reported **broken**.
+///
+/// The one distinction `onevcs` added the `unavailable` outcome for: a healthy
+/// slot a later sweep finds clear, against a clone, worktree or record that is
+/// not usable and that nothing waiting clears. Reported as breakage, a busy pool
+/// sends a supervisor looking for damaged worktrees on a host where nothing is
+/// wrong, so the two are driven apart here rather than only held apart in a unit
+/// test.
+///
+/// The slot's occupancy lease is taken by this journey, for the reason
+/// `session_reuse.rs` gives for taking a run root's: a lease is one the OS
+/// releases with the process, so no verb of the sibling's holds one past its own
+/// exit and no sequence of them leaves a slot occupied. The name is computed the
+/// way `onevcs` computes it and the file has to already exist, which catches a
+/// rename; and what proves it is still the lock occupancy is decided by is the
+/// outcome itself — a sweep that claimed the slot anyway would run the command
+/// and be recorded as having run it.
+// llmlint: ignore-block[tests_mirror_real_usage] the lease alone, for the reason above:
+// there is no command that leaves a slot occupied past its own exit, so there is no
+// interface to reach this state through. Everything else here is the compiled binary
+// driven the way a host drives it.
+#[test]
+fn a_slot_another_process_holds_is_busy_and_one_whose_worktree_is_gone_is_broken() {
+    use sha2::{Digest, Sha256};
+
+    let world = pooled_world("maintenance-busy", Some(FAST_PACE));
+    let repo = world.repository("local-direct", &[]);
+    pooled_with_maintenance(&world, None);
+    cut_a_slot(&world, &repo.checkout);
+    let slot = the_slot(&world);
+    let run_root = slot["path"].as_str().expect("a slot path").to_owned();
+
+    // The lease the sibling names the slot's occupancy after.
+    let lease = format!("run:{run_root}");
+    let digest: String = Sha256::digest(lease.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let path: PathBuf = world
+        .onevcs_home()
+        .join("locks")
+        .join(format!("{digest}.lock"));
+    assert!(
+        path.is_file(),
+        "onevcs keeps no lease for {lease} at {}; the lock it names a slot's occupancy \
+         after has moved, and this journey is no longer holding one",
+        path.display()
+    );
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap_or_else(|e| panic!("cannot open the lease at {}: {e}", path.display()));
+    assert!(
+        matches!(fs4::fs_std::FileExt::try_lock_exclusive(&held), Ok(true)),
+        "the lease at {} is already held, so this journey never made the slot busy",
+        path.display()
+    );
+
+    // The slot has never been maintained, so it is due; the sweep meets the lease
+    // and keeps it.
+    assert_eq!(slot["last_maintained"], Value::Null, "{slot}");
+    let second = schedule(&world, "busy", "1s", "");
+    held_run(&world, "busy", 2, &["--maintenance-config", &second]).exited(0);
+    world.until("the record of the busy slot", |world| {
+        !records(world, "busy").is_empty()
+    });
+    let record = &records(&world, "busy")[0];
+    let outcome = &record["payload"]["identities"][0]["outcome"]["slots"][0]["outcome"];
+    let holder = outcome["unavailable"]["holder"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the slot was not reported unavailable: {record}"));
+    assert!(holder.contains("working in it"), "{record}");
+    assert!(outcome.get("broken").is_none(), "{record}");
+    assert!(outcome.get("ran").is_none(), "{record}");
+
+    // Busy in the words a reader gets, and nothing that reads as damage.
+    world
+        .run(&["results", "busy"])
+        .exited(0)
+        .out_has(&format!(
+            "{SERVICE_IDENTITY} (every 1s): slot 1 kept: busy — "
+        ))
+        .out_lacks("kept: broken");
+
+    // Nothing ran, nothing was stamped, and the sibling still calls the slot
+    // healthy — which is what separates busy from broken.
+    assert_eq!(marker_lines(&world), 0);
+    let after = the_slot(&world);
+    assert_eq!(after["last_maintained"], Value::Null, "{after}");
+    assert_eq!(after["state"]["state"], "idle", "{after}");
+
+    drop(held);
+    world.until("the slot to be maintained once the lease goes", |world| {
+        marker_lines(world) == 1
+    });
+
+    // The other half of the distinction, arranged the way a host arrives at it and
+    // not by forging a record: the slot's worktree is gone — a scratch directory
+    // cleaned out, a clone that never finished — so the next sweep that finds the
+    // slot due finds it unusable and says broken rather than busy. Nothing waiting
+    // clears this one, which is what the two words are for.
+    std::fs::remove_dir_all(Path::new(&run_root).join("worktree"))
+        .expect("the slot's worktree is removed");
+    let broke = |record: &Value| {
+        record["payload"]["identities"][0]["outcome"]["slots"][0]["outcome"]
+            .get("broken")
+            .is_some()
+    };
+    world.until("the record of the broken slot", |world| {
+        records(world, "busy").iter().any(broke)
+    });
+    let record = records(&world, "busy")
+        .into_iter()
+        .find(broke)
+        .expect("the record of the broken slot");
+    let reason = record["payload"]["identities"][0]["outcome"]["slots"][0]["outcome"]["broken"]
+        ["reason"]
+        .as_str()
+        .expect("a reason");
+    assert!(reason.contains("worktree"), "{record}");
+    world
+        .run(&["results", "busy"])
+        .exited(0)
+        .out_has(&format!(
+            "{SERVICE_IDENTITY} (every 1s): slot 1 kept: broken — "
+        ))
+        .out_lacks("kept: busy");
+    release(&world, "busy");
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// Every identity this host has registered is discovered and maintained, in one
+/// sweep.
+///
+/// The enumeration is `onevcs::registered_identities` rather than the display
+/// lines of a spawned `onevcs repos`, so what is asserted is that the library
+/// answer reaches every identity: three registered, three pooled with a slot and
+/// a maintain command, and one record naming all three with a command that ran in
+/// each.
+#[test]
+fn every_registered_identity_is_discovered_and_maintained_in_one_sweep() {
+    let world = pooled_world("maintenance-identities", Some(FAST_PACE));
+    let service = world.repository("local-direct", &[]);
+    let other = world.extra_repository("other");
+    let third = world.extra_repository("third");
+    let maintain = interpreted_script(&world, "maintain");
+    let command = serde_json::to_string(&[maintain.as_str()]).expect("an argv serializes");
+    pooled_with_commands(
+        &world,
+        &[
+            ("service", command.as_str()),
+            ("other", command.as_str()),
+            ("third", command.as_str()),
+        ],
+        "120s",
+    );
+    for checkout in [&service.checkout, &other.checkout, &third.checkout] {
+        cut_a_slot(&world, checkout);
+    }
+
+    let second = schedule(&world, "all", "1s", "");
+    held_run(&world, "all", 2, &["--maintenance-config", &second]).exited(0);
+    world.until("the record of the sweep", |world| {
+        !records(world, "all").is_empty()
+    });
+    let record = &records(&world, "all")[0];
+    let identities = record["payload"]["identities"]
+        .as_array()
+        .expect("identities");
+    assert_eq!(
+        identities
+            .iter()
+            .map(|entry| entry["identity"].as_str().expect("a key"))
+            .collect::<Vec<_>>(),
+        [
+            "github.com/owner/other",
+            SERVICE_IDENTITY,
+            "github.com/owner/third"
+        ],
+        "{record}"
+    );
+    for entry in identities {
+        assert_eq!(
+            entry["outcome"]["slots"][0]["outcome"]["ran"]["outcome"],
+            "succeeded",
+            "{record}"
+        );
+    }
+    for repo in ["service", "other", "third"] {
+        assert_eq!(
+            marker_text(&world, repo).lines().count(),
+            1,
+            "{repo} was not maintained"
+        );
+        let slot = the_slot_of(&world, repo);
+        assert!(slot["last_maintained"].is_string(), "{repo}: {slot}");
+    }
+    release(&world, "all");
+}
+
+/// A non-empty command is spawned with the program and the argument the document
+/// named, and neither is mangled on the way.
+///
+/// `maintain.command` is an argv — a program beside its arguments — spawned with no
+/// shell, and what a journey has to see is that both elements arrive. So the
+/// argument is a path **with a space in it**, and the program's only way past its
+/// own wait is to have received that path byte for byte as one argument: split on
+/// the space, or quoted, or shell-expanded, it would be a program waiting for a
+/// file nothing will ever write, which the sibling records as a maintenance that
+/// failed rather than one that ran.
+///
+/// Read off the sibling's own account in both directions — the slot claimed for
+/// maintenance while the program waits, and a run that succeeded once the path is
+/// written — so the claim rests on what the spawn did rather than on anything the
+/// program was made to print about itself.
+#[test]
+fn a_non_empty_command_runs_with_the_program_and_argument_the_document_named() {
+    let world = pooled_world("maintenance-argv", Some(FAST_PACE));
+    let repo = world.repository("local-direct", &[]);
+    let hold = world.root.join("release this sweep.go");
+    pooled_with_maintenance(&world, Some(&hold));
+    cut_a_slot(&world, &repo.checkout);
+    let second = schedule(&world, "argv", "1s", "");
+    held_run(&world, "argv", 2, &["--maintenance-config", &second]).exited(0);
+
+    // The program was spawned, and it is inside the wait its argument names.
+    world.until("the sibling to report the slot maintaining", |world| {
+        the_slot(world)["state"]["state"] == "maintaining"
+    });
+    assert_eq!(marker_lines(&world), 0);
+    assert!(records(&world, "argv").is_empty(), "{}", world.dump());
+
+    std::fs::write(&hold, "go").expect("the hold is released");
+    world.until("the record of the run", |world| {
+        !records(world, "argv").is_empty()
+    });
+    let record = &records(&world, "argv")[0];
+    assert_eq!(
+        record["payload"]["identities"][0]["outcome"]["slots"][0]["outcome"]["ran"]["outcome"],
+        "succeeded",
+        "{record}"
+    );
+    assert_eq!(marker_lines(&world), 1);
+    release(&world, "argv");
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
@@ -1002,18 +1281,11 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
 // and by the engine, in every journey of this module.
 #[test]
 fn both_halves_of_each_fixture_take_the_same_arguments() {
-    for (sh, bat, marks) in [
-        (
-            "maintain.sh",
-            "maintain.bat",
-            ["maintained.log", "ONEPIPELINE_E2E_MAINTAIN_EXIT"],
-        ),
-        (
-            "onevcs_recording.sh",
-            "onevcs_recording.bat",
-            [CALLS_ENV, REAL_ENV],
-        ),
-    ] {
+    for (sh, bat, marks) in [(
+        "maintain.sh",
+        "maintain.bat",
+        ["maintained.log", "ONEPIPELINE_E2E_MAINTAIN_EXIT"],
+    )] {
         let shell = std::fs::read_to_string(repo_file(&format!("tests/e2e/{sh}")))
             .expect("the shell half ships");
         let batch = std::fs::read_to_string(repo_file(&format!("tests/e2e/{bat}")))

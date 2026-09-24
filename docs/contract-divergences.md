@@ -11,14 +11,14 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80 and 84–88 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80 and 84–89 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80 and 84 to 88 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80 and 84 to 89 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -7195,3 +7195,96 @@ sentence, ignored a caller's body on `recover`, hid why a draft could not start,
 swallowed a worktree it could not remove, left an interrupted draft's worktree in
 the checkout's list, released its lock before git's add finished, handled a
 signal it was started ignoring, or printed a synopsis other than the one above.
+
+## 89. A due slot the sweep could not maintain is silent, and `unavailable` has nowhere to be read — OPEN
+
+**Proposal (for the planner who owns the contract): amend the pool-maintenance
+line's record clause so a `pool-maintenance` record is written when some slot
+ran, **some due slot could not be maintained** — `unavailable` or `broken` —
+some identity was `claimed`, or one failed; and so the silent set is
+`no-maintain-command`, `no-slots`, `not-due` and `in-use`.**
+
+The linked `onevcs` release splits what was one answer in two. `SlotOutcome`
+gains `Unavailable { holder }` — a healthy slot something else holds right now,
+which a later sweep finds clear — and `Broken { reason }` is narrowed to a clone,
+worktree or record that is not usable and that nothing waiting clears. That is
+the distinction a consumer reads breakage off, and it is why this crate phrases
+the two apart (`kept: busy — …` against `kept: broken — …`) rather than
+rendering both as a reason a reader has to classify.
+
+The contract's record clause predates that split and reads:
+
+> only when some slot ran or some identity was `claimed` or failed; nothing is
+> written when every identity answered `no-maintain-command`, `no-slots` or
+> `not-due`.
+
+Two things about it. Its clauses are **not complements** — `in-use` and `broken`
+appear in neither list, so which of the two decides them is not stated — and
+`unavailable` did not exist when it was written. Compiled as the positive clause
+states it, a sweep that came up due, met a slot something held, and maintained
+nothing writes nothing at all: the outcome is answered by the sibling, phrased by
+this crate, and then reaches no reader, because `results` renders the last record
+and there is none.
+
+**What this build does.** `Maintained::is_recorded` records a `Slots` outcome
+where some slot `Ran`, is `Unavailable`, or is `Broken`. `NotDue` and `InUse` stay
+silent beside `NoMaintainCommand` and `NoSlots`.
+
+The reasoning is a symmetry the contract already contains. `claimed` — another
+`pool maintain` holding the whole identity — **is** recorded, and it is exactly
+"a maintenance this sweep meant to do and did not"; `unavailable` is that same
+fact one level down, at a slot rather than an identity, and it arises only where
+the slot came up **due**, so it is not the common case a record of it would be a
+record of nothing. `broken` is the other half: since the sibling narrowed it,
+nothing else anywhere tells an operator that a slot needs a person, and a silent
+`broken` is a pool quietly losing a slot per identity. `in-use` stays silent on
+the opposite ground — a session working in a slot is the pool being used, which
+is what the pool is for and the common case on a busy host.
+
+Driven by `tests/e2e/maintenance.rs`'s
+`a_slot_another_process_holds_is_busy_and_one_whose_worktree_is_gone_is_broken`,
+over both loud answers and neither of them forged. It takes the slot's occupancy
+lease the way `session_reuse.rs` takes a run root's — no verb of the sibling's
+holds one past its own exit — and drives the compiled binary through a sweep that
+finds the slot due and meets that lease: the record carries `unavailable` with the
+holder, carries neither `broken` nor `ran`, `results` says `kept: busy — …` and not
+`kept: broken`, nothing ran, nothing was stamped, and the sibling still calls the
+slot `idle`. Released, the next sweep takes the slot and maintains it. Then the
+slot's worktree is removed — a scratch directory cleaned out, a clone that never
+finished — and the next sweep due records `broken`, naming the worktree, with
+`results` saying `kept: broken — …` and not `kept: busy`. `tests::a_sweep_is_recorded_where_something_ran_or_a_due_slot_could_not_and_never_otherwise`
+holds the silent set beside it, and it was seen to fail against the build that
+recorded only a slot that ran — which is the build this entry is about.
+
+**Were the proposal declined**, the phrase would exist and be reachable by
+nothing: the journey could still show the pass met the slot and kept it — no
+command ran, no stamp, the slot still `idle` — but not which outcome the sibling
+answered, since neither `unavailable` nor `broken` would be on any record. That
+is the cost of the narrower reading, stated so the owner is choosing rather than
+discovering it.
+
+**Put to the owner twice and unanswered.** The node that opened this entry asked
+over the run's planner channel at correlation
+`c-6a04137e944f1cfd9f964acfaf54279b`, with a 120-second window, and again at
+`c-f9ad62d9b1ed68adacd920d7061348b0`, with a 900-second one, naming the three
+options above. Both returned `timeout`; both questions stand on the channel,
+marked abandoned, and either can still be answered with `onepipeline reply
+<run> --correlation <id>`. So this entry is OPEN in the ordinary way this file
+means it — the code took the nearest thing that exists and the proposal is
+waiting — rather than because nobody put it.
+
+**No declared document's shape changed with it, so nothing here is owed a schema
+version or a golden.** Worth writing down, because the opposite is the natural
+assumption about a change that puts a new word on a record. The
+`pool-maintenance` payload is registered at `SchemaId::literal("agent",
+"pipeline.pool-maintenance", 2)` and generated from `payload::PoolMaintenance`,
+which carries the slot outcome as `MaintainedAnswer::Outcome { outcome: Value }`
+— an opaque value, deliberately, for the reason the directive over it gives: a
+restatement would be a second copy of the sibling's vocabulary to drift. So a new
+variant arriving in that vocabulary is invisible to the document, and the change
+that added it touches no file under `schemas/`, `tests/golden/`, `src/payload.rs`
+or `src/event.rs`. Bumping that id to `3` would announce a change no consumer can
+observe. What the read side owes instead is proof that a record written before
+the vocabulary existed still reads, which
+`maintenance::tests::busy_is_not_broken_and_a_record_written_before_the_vocabulary_still_reads`
+gives by parsing such a payload verbatim rather than round-tripping today's type.
