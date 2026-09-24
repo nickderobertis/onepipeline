@@ -78,14 +78,10 @@ mod unix {
     /// A step of the capture that fails reports what the command itself said,
     /// on whichever stream the command chose to say it on.
     ///
-    /// This is the exact command a refused push died at — `git -C <world>/repo-1
-    /// commit --quiet -m seed` — and the exact reason it said nothing: `git
-    /// commit` with nothing staged exits non-zero having written its whole
-    /// message to **stdout**, so a diagnostic quoting `stderr` alone arrives as
-    /// the words "Fix what its own error below names" followed by a blank line.
-    /// The failure is reproduced here rather than described: the seed commit is
-    /// made to fail for git's own reason, and the refusal must carry git's own
-    /// words.
+    /// `git commit` with nothing staged exits non-zero having written its whole
+    /// message to **stdout**, so a refusal quoting `stderr` alone arrives
+    /// blank. The seed commit is made to fail for git's own reason rather than
+    /// simulated, and what the refusal carries must be git's own words.
     #[test]
     fn a_failed_world_step_reports_what_the_command_said_on_stdout() {
         let (_scratch, root) = scratch("diagnostic");
@@ -144,12 +140,10 @@ raise SystemExit("the seed commit succeeded, so nothing was reported and this pr
     /// commands act on.
     ///
     /// Git runs every hook with `GIT_DIR` naming the repository being pushed,
-    /// and `GIT_DIR` beats `-C` and beats discovery — so when the capture ran
-    /// from the pre-push guard, the `git init` / `add -A` / `commit` that seed
-    /// each throwaway repository acted on the repository under push and
-    /// committed its whole tree away. The hazard is real, so it is demonstrated
-    /// here first and then closed: the same `git` question is asked from the
-    /// throwaway directory on either side of the capture's own
+    /// and `GIT_DIR` beats `-C` and beats discovery, so the `git init` / `add
+    /// -A` / `commit` that seed each throwaway repository would act on that one
+    /// instead. The hazard is demonstrated before it is closed: the same `git`
+    /// question is asked from the throwaway directory on either side of
     /// `clear_inherited_settings`, and the answer must move from the caller's
     /// repository to the throwaway one.
     #[test]
@@ -456,12 +450,10 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
     /// this push" ending, and it answers to the same switch.
     ///
     /// It is reached from a tree whose `[capture].arches` names a lane no
-    /// machine is, rather than waited for on a runner of the right shape,
-    /// because the asymmetry IS the defect: on `x86_64` this ending is
-    /// unreachable, so the journey above passed on every leg but macOS, where an
-    /// arm64 runner hit this refusal before the switch had been read and was
-    /// blocked while holding `SCREENCOMP_GUARD_REQUIRE=0`. Driven from a
-    /// fixture, both answers are observed on whatever CPU this host has.
+    /// machine is, rather than from a runner that happens to be the wrong
+    /// shape: the journey above reaches this ending on `arm64` alone, which
+    /// makes it a property only one leg of the matrix ever checks. Driven from
+    /// a fixture, both answers are observed on whatever CPU this host has.
     #[test]
     fn a_host_with_no_declared_lane_answers_to_the_same_strictness_switch() {
         let (_scratch, root) = scratch("no-lane");

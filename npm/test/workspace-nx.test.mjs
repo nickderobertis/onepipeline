@@ -31,12 +31,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 /**
  * Every project's Nx declaration, discovered rather than restated.
  *
- * This was a hand-written list of three paths, and a hand-written list of the
- * workspace's projects is the one thing this file exists to catch going stale:
- * adding the capture project left the streaming case below comparing Nx's
- * four-project answer against a three-name expectation — a red gate that said
- * nothing about the capture — while the uniform-target cases quietly never
- * looked at the new project at all.
+ * A restated list is the one thing this file exists to catch going stale: the
+ * cases below would then measure Nx against a set nobody updated, and say
+ * nothing about whichever project was missing from it.
  *
  * `git ls-files` is the source Nx itself agrees with: a declaration Nx loads is
  * one committed in the tree, so a project added without its `project.json`
