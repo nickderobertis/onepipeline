@@ -58,6 +58,7 @@
       "{workspaceRoot}/tests/recorded/run-root/**/*",
       "{workspaceRoot}/screenshots/**/*",
       "{workspaceRoot}/screencomp.toml",
+      "{workspaceRoot}/.github/workflows/visual-docs.yml",
       "{workspaceRoot}/Cargo.toml",
       "{workspaceRoot}/Cargo.lock",
       "{workspaceRoot}/rust-toolchain.toml",

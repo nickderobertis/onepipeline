@@ -36,6 +36,12 @@ embed_limit = 10             # embed images inline when <= N shots differ (0 dis
 #   - the fixtures the capture drives, because they decide what run is being
 #     photographed;
 #   - the capture machinery and this file.
+# A fourth thing decides whether there is a shot at all: the visual-docs workflow
+# carries the two screencomp pins `capture.py` reconciles, and a capture that
+# never ran that reconciliation is the one way the gallery and the gate can come
+# from two releases. So it is listed below, and — because `capture.py` refuses a
+# guard path no `visualDocsSource` entry covers — in `nx.json` beside it, which
+# is what stops a cached target replaying a capture from before the pins parted.
 # llmlint: ignore[changed_behavior_has_e2e] this list decides only whether the *local*
 # hook pays for a capture before a push. CI re-captures on every pull request whatever it
 # says, so a path missing here costs one developer one slow round trip and can never
@@ -67,5 +73,6 @@ paths = [
   "tests/recorded/run-root/**",
   "screenshots/**",
   "screencomp.toml",
+  ".github/workflows/visual-docs.yml",
 ]
 gallery = "shots/review"
