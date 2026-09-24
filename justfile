@@ -21,7 +21,7 @@ set positional-arguments := true
 # clippy, rustdoc, or cargo-deny inherit those tools' diagnostics, which already
 # name the exact problem and its fix; a wrapper message would bury them. The
 # recipes whose failure needs project-level context (_crate-fmt-check,
-# _crate-coverage, msrv) add one explicitly.
+# _crate-coverage-clean, _crate-coverage, msrv) add one explicitly.
 
 # The released `onetaskgraph` this build's own checks read their plans through.
 # A plan is one project of that store and this crate *drives* the binary rather
@@ -242,10 +242,45 @@ offline-tiers := "(" + rest-tier + ") or (" + note-tier + ")"
 # AGENTS.md. It is measured over the **whole** offline tier, which is why the two
 # runs below report nothing and one merge reports both: the note journeys are
 # their own Nx project, and splitting the run must not split the floor.
-# `--profraw-only` clears the profile set they share without touching the build
-# artifacts they also share.
-_crate-coverage-clean:
-    @cargo llvm-cov clean --workspace --profraw-only
+
+# cargo-llvm-cov's instrumented tree; `tests/coverage.rs` holds this path against
+# `LLVM_PROFILE_FILE`, so a drift fails there rather than cleaning the wrong tree.
+llvm-cov-target-dir := justfile_directory() / "target" / "llvm-cov-target"
+export ONEPIPELINE_COVERAGE_ROOT := justfile_directory()
+
+# Remove the tree before either test tier: a stale binary retains a coverage
+# map and would count as uncovered in the later report.
+#
+# Resolve existing arguments before removal so symlinks cannot reach outside
+# this clone's build directory. A missing tree is normal on the first run, even
+# with no build directory yet, so it is bounded through its nearest existing
+# ancestor; existing paths that cannot be entered fail instead of silently passing.
+# llmlint: ignore-block[cli_output_contract] Both invalid-path refusals are
+# one error class to the caller, so both exit 1 like adjacent _crate-coverage;
+# distinct stderr names the invalid input that needs correcting.
+_crate-coverage-clean dir=llvm-cov-target-dir:
+    @if [ -z "$1" ]; then echo "refusing to clean an empty target path" >&2; exit 1; fi; \
+      root="$(cd -P -- "$ONEPIPELINE_COVERAGE_ROOT" && pwd -P)"; \
+      if [ "$(pwd -P)" != "$root" ]; then echo "refusing to clean from outside this clone's root ($root)" >&2; exit 1; fi; \
+      built="$root/target"; \
+      if [ ! -e "$1" ] && [ ! -L "$1" ]; then \
+        base="$1"; rest=""; \
+        while [ ! -e "$base" ] && [ ! -L "$base" ]; do \
+          part="$(basename -- "$base")"; \
+          if [ "$part" = ".." ]; then echo "refusing to clean '$1': it climbs out of a directory that does not exist" >&2; exit 1; fi; \
+          rest="/$part$rest"; base="$(dirname -- "$base")"; \
+        done; \
+        reached_base="$(cd -P -- "$base" && pwd -P)" || { echo "refusing to clean '$1': its nearest existing ancestor cannot be entered" >&2; exit 1; }; \
+        case "$reached_base$rest" in "$built"/?*) exit 0;; \
+          *) echo "refusing to clean '$1': it is outside this clone's build directory ($built)" >&2; exit 1;; \
+        esac; \
+      fi; \
+      reached="$(cd -P -- "$1" && pwd -P)" || { echo "refusing to remove '$1': it is there but is not a directory this step can enter, so where it leads cannot be held against this clone's build directory — nothing was removed" >&2; exit 1; }; \
+      case "$reached" in "$built"/?*) ;; \
+        *) echo "refusing to remove '$reached': the instrumented tree has to sit under this clone's build directory ($built), which is where .cargo/config.toml pins every build in it — nothing was removed" >&2; exit 1;; \
+      esac; \
+      rm -rf -- "$reached" || { echo "could not remove instrumented tree '$reached'" >&2; exit 1; }
+# llmlint: ignore-end[cli_output_contract]
 
 # The crate's own half of the offline suite, instrumented, reporting nothing.
 _crate-test-rest:
