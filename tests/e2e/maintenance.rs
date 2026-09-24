@@ -611,6 +611,174 @@ fn idle_passes_inside_the_pace_sweep_no_second_time_and_an_unmaintained_identity
     assert!(records(&world, "paced").is_empty(), "{}", world.dump());
 }
 
+/// A sweep whose every answer is one of the quiet ones journals nothing, and the
+/// same identities journal a record once one of them has something to say.
+///
+/// The silent half of the contract's record clause, driven through the compiled
+/// binary rather than only the predicate's unit test: `service`'s one slot is due
+/// but a session is working in it (`in-use`), `other` names a maintain command but
+/// has no slot (`no-slots`), and `third` names none (`no-maintain-command`). Each
+/// state is arranged the way a host arrives at it — a session opened through the
+/// linked library and left open, a pool nothing has placed into, a workspaces file
+/// naming no command. The sweep is seen to finish, the slot is still the session's
+/// and nothing ran, and no record is written. Closing the session is the control:
+/// the next sweep finds the slot due and idle, runs the command, and journals it,
+/// so the silence was the outcomes' and not a driver that never recorded.
+#[test]
+fn a_sweep_answered_in_use_no_slots_and_no_command_journals_nothing() {
+    let world = pooled_world("maintenance-quiet", Some(FAST_PACE));
+    let service = world.repository("local-direct", &[]);
+    let _other = world.extra_repository("other");
+    let _third = world.extra_repository("third");
+    let maintain = interpreted_script(&world, "maintain");
+    let command = serde_json::to_string(&[maintain.as_str()]).expect("an argv serializes");
+    pooled_with_commands(
+        &world,
+        &[("service", command.as_str()), ("other", command.as_str())],
+        "120s",
+    );
+    cut_a_slot(&world, &service.checkout);
+    // The slot, due because it was never maintained, taken by a session that stays
+    // open: the survey reads it as the session's.
+    let token = world.on_onevcs(|| {
+        onevcs::Providers::real()
+            .vcs
+            .open_session(onevcs::SessionRequest {
+                repo: service.checkout.to_string_lossy().into_owned(),
+                branch: None,
+                base: None,
+                execution_checkout: None,
+                pool: None,
+                overflow: None,
+                labels: Default::default(),
+            })
+            .expect("a session opens into the slot")
+            .token
+    });
+    assert_eq!(the_slot(&world)["state"]["state"], "in-use");
+    assert_eq!(the_slot(&world)["last_maintained"], Value::Null);
+
+    let every = schedule(&world, "quiet", "1s", "");
+    held_run(&world, "quiet", 2, &["--maintenance-config", &every]).exited(0);
+    until_sweeps(&world, "quiet", 2);
+    world.until("the second sweep to end", |world| !sweeping(world, "quiet"));
+    assert!(records(&world, "quiet").is_empty(), "{}", world.dump());
+    assert_eq!(marker_lines(&world), 0);
+    assert_eq!(the_slot(&world)["state"]["state"], "in-use");
+
+    world.on_onevcs(|| {
+        onevcs::Providers::real()
+            .vcs
+            .close_session(&token)
+            .expect("the session closes and hands the slot back")
+    });
+    world.until("the record of the slot once it is free", |world| {
+        !records(world, "quiet").is_empty()
+    });
+    let record = &records(&world, "quiet")[0];
+    let identities = record["payload"]["identities"]
+        .as_array()
+        .expect("identities");
+    assert_eq!(identities.len(), 1, "only the identity that ran is written: {record}");
+    assert_eq!(identities[0]["identity"], SERVICE_IDENTITY, "{record}");
+    assert_eq!(
+        identities[0]["outcome"]["slots"][0]["outcome"]["ran"]["outcome"],
+        "succeeded",
+        "{record}"
+    );
+    release(&world, "quiet");
+}
+
+/// A sweep over session records this host cannot read records that refusal
+/// rather than maintaining a slot as though no session held it.
+///
+/// `pool_maintain` reads the host's open sessions to decide whether a due slot is
+/// free; a listing it could not make is not a listing of none, and a sweep that
+/// read it as one would run a command in a worktree a session may be working in.
+/// So each of the two unreadable states — the sessions directory not a directory,
+/// and one record in it not a document — is met by a due slot and a maintain
+/// command, and the sweep's record carries the identity's error naming the session
+/// records, with nothing run and nothing stamped. Put back, the next sweep
+/// maintains the slot, so what the refusal named was the records.
+///
+/// Broken after the dispatch is placed and mended before the run is let go, as the
+/// unlistable-registry journey does, because opening that dispatch reads the same
+/// records.
+// llmlint: ignore-block[tests_mirror_real_usage] the two states are written onto the
+// state root directly because no verb of the sibling's leaves a sessions directory that is
+// not a directory or a record that is not a document; `tests/e2e/unreadable_sessions.rs`
+// gives the same reason for the same two states. Everything asserted is read back off the
+// compiled binary's own journal and the sibling's own `pool status`.
+#[test]
+fn a_sweep_over_session_records_it_cannot_read_records_the_refusal_and_runs_nothing() {
+    let world = pooled_world("maintenance-unreadable", Some(FAST_PACE));
+    let repo = world.repository("local-direct", &[]);
+    pooled_with_maintenance(&world, None);
+    cut_a_slot(&world, &repo.checkout);
+    // Read off the worktree rather than through `pool status`, which refuses the
+    // same records the sweep does.
+    let marker = Path::new(the_slot(&world)["path"].as_str().expect("a slot path"))
+        .join("worktree")
+        .join("maintained.log");
+    let ran = || {
+        std::fs::read_to_string(&marker)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+    let every = schedule(&world, "unreadable", "1s", "");
+    let sessions = world.onevcs_home().join("sessions");
+    let aside = world.onevcs_home().join("sessions.aside");
+    let record = sessions.join("s-unreadable.json");
+    let refused = |record: &Value| {
+        record["payload"]["identities"]
+            .as_array()
+            .is_some_and(|identities| identities.iter().any(|entry| entry.get("error").is_some()))
+    };
+
+    for (run, directory) in [("unreadable-directory", true), ("unreadable-record", false)] {
+        held_run(&world, run, 2, &["--maintenance-config", &every]).exited(0);
+        world.until("the dispatch", |world| {
+            !world.events_of(run, "node-dispatched").is_empty()
+        });
+        let before = ran();
+        if directory {
+            std::fs::rename(&sessions, &aside).expect("the sessions directory moves aside");
+            std::fs::write(&sessions, "this is not a directory")
+                .expect("a file takes the sessions directory's place");
+        } else {
+            std::fs::write(&record, "{ not a session record")
+                .expect("the unreadable record is written");
+        }
+        world.until("the record of the refusal", |world| {
+            records(world, run).iter().any(refused)
+        });
+        let met = records(&world, run)
+            .into_iter()
+            .find(|record| refused(record))
+            .expect("the record of the refusal");
+        let entry = &met["payload"]["identities"][0];
+        assert_eq!(entry["identity"], SERVICE_IDENTITY, "{met}");
+        assert!(entry.get("outcome").is_none(), "{met}");
+        let error = entry["error"].as_str().expect("an error");
+        assert!(error.contains("session"), "{met}");
+        assert_eq!(ran(), before, "a command ran in the slot: {met}");
+        if directory {
+            std::fs::remove_file(&sessions).expect("the file in the directory's place goes");
+            std::fs::rename(&aside, &sessions).expect("the sessions directory comes back");
+        } else {
+            std::fs::remove_file(&record).expect("the unreadable record goes");
+        }
+        release(&world, run);
+    }
+
+    // Readable again, a sweep maintains the slot the refusals kept.
+    let before = ran();
+    held_run(&world, "readable", 2, &["--maintenance-config", &every]).exited(0);
+    world.until("the slot to be maintained", |_| ran() > before);
+    release(&world, "readable");
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
 /// A rule's `every` beats the default for the identity it matches, resolved
 /// through the linked sibling's matcher: a default measured in days and a rule
 /// of one second for `service` maintains the slot the rule names.
