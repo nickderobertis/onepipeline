@@ -122,11 +122,11 @@ pub const EVALUATOR_OPENING: &str = "You are a strict, careful evaluator";
 /// A failure panics, because every caller is a test whose fixture could not be
 /// made.
 pub fn executable(path: &Path, body: impl AsRef<[u8]>) {
-    staged(path, body.as_ref());
+    create(path, body.as_ref());
 }
 
 #[cfg(unix)]
-fn staged(path: &Path, body: &[u8]) {
+fn create(path: &Path, body: &[u8]) {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let mut name = path
@@ -170,7 +170,7 @@ fn staged(path: &Path, body: &[u8]) {
 }
 
 #[cfg(not(unix))]
-fn staged(path: &Path, body: &[u8]) {
+fn create(path: &Path, body: &[u8]) {
     std::fs::write(path, body)
         .unwrap_or_else(|error| panic!("{} could not be written: {error}", path.display()));
 }
