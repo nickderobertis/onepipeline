@@ -9,8 +9,12 @@
 //! sibling's recorded stamp, so a slot is due exactly when
 //! `last_maintained < now − every`, and the sibling decides it. That is what makes
 //! late fine, never twice, and two drivers on one host safe by the same fact: a
-//! second driver meeting the first inside an identity is answered `Claimed`, and
-//! one arriving after it is answered `NotDue`. Between runs nothing runs and
+//! sweep meeting another inside an identity is answered `Claimed`, and one that
+//! has the identity to itself after the stamp is answered `NotDue`. `Claimed`
+//! is not only a sweep that is running a command: the sibling takes the
+//! identity's lock before it asks whether any slot is due, so a sweep that finds
+//! nothing due holds it too, and two drivers pacing one host meet each other
+//! that way long after the slot was maintained. Between runs nothing runs and
 //! nothing needs to — a per-run timer would sweep on every run of a busy host
 //! and never on a quiet one, and maintenance intervals are usually longer than a
 //! DAG run.

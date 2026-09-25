@@ -2254,13 +2254,16 @@ pub(crate) fn established(teardown: Option<sys::Teardown>) -> journal::StopTeard
 // llmlint: ignore-block[changed_behavior_has_e2e] every branch is driven end to end in
 // `tests/e2e/driver.rs`, against real drivers and real dispatches: the proved claims and the
 // stale record in `stopping_a_run_ends_the_tree_its_lock_names_when_the_record_names_a_dead_driver`,
-// the reissued pid in `a_stop_never_signals_a_pid_the_host_has_given_to_another_process`, and
-// the unprovable pid in `a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryable`,
+// the reissued pid in `a_stop_never_signals_a_pid_the_host_has_given_to_another_process` and
+// `a_dispatch_an_earlier_stop_ended_is_over_once_its_pid_is_reissued`, and the unprovable pid in `a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryable`,
 // whose faulty `ps` is a host that will not say when anything started. What has no journey is a
-// stop of two *live* roots, and that is a state a run cannot be in: the ownership lock is a
-// single-writer lock, so one run has one driver, and the pair a stop can meet — the pid a
-// stale record names beside the pid the lock stamps — is what the first of those walks over
-// one listing.
+// stop of two *live drivers*, and that is a state a run cannot be in: the ownership lock is a
+// single-writer lock, so one run has one driver, and the pair of driver claims a stop can meet —
+// the pid a stale record names beside the pid the lock stamps — is what the first of those walks
+// over one listing. A root recorded as ended is one the signal was delivered to: a root that
+// went before its ask is not, and what that leaves, a reissued pid declined, is the refusal
+// `a_stop_that_signalled_nothing_leaves_a_reissued_pid_declined` drives for a teardown whose
+// signal reached nothing.
 pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
     let Aim::Here {
         roots,
@@ -2273,7 +2276,38 @@ pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Optio
     if roots.is_empty() && unproven.is_empty() && !declined.is_empty() {
         return Ok(Some(sys::Teardown::IdentityDeclined));
     }
-    let established = sys::stop_and_confirm(&roots, sys::Stop::Politely, TEARDOWN_PATIENCE);
+    let pids: Vec<u32> = roots.iter().map(|root| root.pid).collect();
+    let (established, delivered) =
+        sys::stop_and_confirm(&pids, sys::Stop::Politely, TEARDOWN_PATIENCE);
+    // Each root this teardown's own signal reached and then saw end is one this
+    // run ended — so a later teardown that meets its pid reissued knows it for a
+    // reissue. A root that went of its own accord before its ask, or that this
+    // teardown never signalled, ended by nothing this run did, and is left to be
+    // declined as it always was. Best effort: failing to write it costs a later
+    // teardown only what this record adds, and is said where it happens.
+    let ended: Vec<ledger::Ended> = roots
+        .into_iter()
+        .filter(|root| {
+            delivered.contains(&root.pid)
+                && sys::claim_on(root.pid, root.started.as_str()).is_over()
+        })
+        .flat_map(|root| {
+            std::iter::once(root.claim)
+                .chain(root.also)
+                .map(move |claim| ledger::Ended {
+                    claim,
+                    started: root.started.clone(),
+                })
+        })
+        .collect();
+    if let Err(why) = ledger::record_ended(paths, &ended) {
+        eprintln!(
+            "onepipeline: run '{}': which processes this teardown ended could not be \
+             recorded — {why}; a later teardown that meets one of their pids reissued \
+             will decline it rather than read it as over",
+            paths.run
+        );
+    }
     if unproven.is_empty() {
         return Ok(Some(established));
     }
@@ -2314,9 +2348,9 @@ enum Aim {
     Elsewhere,
     /// The run is this host's, as far as its records say.
     Here {
-        /// The roots, in the order they are signalled: every claim whose own
-        /// stamp proves its pid is still the process the record named.
-        roots: Vec<u32>,
+        /// The roots, in the order they are signalled: every process a claim's
+        /// own stamp proves is still the one its record named.
+        roots: Vec<Root>,
         /// Live pids on this host that no record could place either way. What
         /// stood in the way of proving each is said on stderr where it is met.
         ///
@@ -2329,6 +2363,20 @@ enum Aim {
         /// what distinguishes an all-declined walk from an empty one.
         declined: Vec<u32>,
     },
+}
+
+/// One process a stop aims at, and every claim whose stamp proved it.
+///
+/// The claims rather than one of them, because the launch record and the lock
+/// usually name the same driver: a teardown that ended it has ended what both
+/// named, and records it against each.
+#[derive(Debug, PartialEq, Eq)]
+struct Root {
+    pid: u32,
+    started: ledger::Stamp,
+    claim: ledger::ClaimedBy,
+    /// Every other claim naming it under the same stamp.
+    also: Vec<ledger::ClaimedBy>,
 }
 
 /// Every process on this host a stop of this run aims at, or why this build
@@ -2354,39 +2402,80 @@ enum Aim {
 fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
     let here = sys::hostname();
     let mut on_this_host = false;
-    let mut roots: Vec<u32> = Vec::new();
+    let mut roots: Vec<Root> = Vec::new();
     let mut unproven: Vec<u32> = Vec::new();
     let mut declined: Vec<u32> = Vec::new();
+    // Read once, before any claim is judged: what an earlier teardown of this
+    // run ended is what tells a pid it has since reissued from a record gone
+    // wrong.
+    let ended = ledger::ended_by_teardown(paths);
     // Each claim in turn, and the launch record first, so a teardown asks the
     // driver to go before the work it started: the record's driver, then the
     // lock's holder, then every dispatch the run has recorded.
     let claimed = std::iter::once((
         RECORDED_DRIVER,
+        ledger::ClaimedBy::LaunchRecord { pid: record.pid },
         record.pid,
         record.host.clone(),
         record.started.clone(),
     ))
-    .chain(lock_held_on(paths).map(|held| (LOCK_HOLDER, held.pid, held.host, held.started)))
+    .chain(lock_held_on(paths).map(|held| {
+        (
+            LOCK_HOLDER,
+            ledger::ClaimedBy::OwnershipLock { pid: held.pid },
+            held.pid,
+            held.host,
+            held.started,
+        )
+    }))
     .chain(ledger::dispatches_of(paths)?.into_iter().map(|running| {
         (
             REGISTERED_DISPATCH,
+            ledger::ClaimedBy::Dispatch {
+                pid: running.pid,
+                node: running.node,
+                dispatched_at: running.dispatched_at,
+            },
             running.pid,
             running.host,
             running.started,
         )
     }));
-    for (named_by, pid, host, started) in claimed {
+    for (named_by, claim, pid, host, started) in claimed {
         if host != here {
             continue;
         }
         on_this_host = true;
-        if roots.contains(&pid) || unproven.contains(&pid) {
+        if let Some(root) = roots.iter_mut().find(|root| root.pid == pid) {
+            // A second record naming a process already proved: under the same
+            // stamp it named the same process, and ending it ends both claims.
+            if root.started.as_str() == started {
+                root.also.push(claim);
+            }
             continue;
         }
-        match sys::claim_on(pid, &started) {
-            Claim::Proved => roots.push(pid),
-            Claim::Gone => {}
-            Claim::Reissued => {
+        if unproven.contains(&pid) {
+            continue;
+        }
+        match (sys::claim_on(pid, &started), ledger::Stamp::of(&started)) {
+            (Claim::Proved, Some(started)) => roots.push(Root {
+                pid,
+                started,
+                claim,
+                also: Vec::new(),
+            }),
+            (Claim::Gone, _) => {}
+            // This run's own teardown signalled the process this very claim
+            // named and saw it end, so the stranger on its pid now is the host's
+            // reissue and nothing of this run's: the claim is over, exactly as a
+            // pid nobody holds is. Another claim that only shares its stamp is
+            // not that process, and is judged on its own.
+            (Claim::Reissued, Some(stamp))
+                if ended.contains(&ledger::Ended {
+                    claim: claim.clone(),
+                    started: stamp.clone(),
+                }) => {}
+            (Claim::Reissued, _) => {
                 eprintln!(
                     "onepipeline: run '{}': the {named_by} names pid {pid}, which this host has \
                      since given to another process, so it was not signalled",
@@ -2394,7 +2483,9 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
                 );
                 declined.push(pid);
             }
-            Claim::Unstamped => {
+            // A record with no stamp, which is also the only way a proof could
+            // come back without one: nothing says the pid is still this run's.
+            (Claim::Unstamped | Claim::Proved, _) => {
                 left_alone(
                     &paths.run,
                     named_by,
@@ -2403,7 +2494,7 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
                 );
                 unproven.push(pid);
             }
-            Claim::HostSilent => {
+            (Claim::HostSilent, _) => {
                 left_alone(
                     &paths.run,
                     named_by,
@@ -3537,7 +3628,7 @@ mod tests {
         let aimed_at =
             |record: &LaunchRecord| roots_to_stop(&paths, record).expect("this run's records read");
         let roots = |record: &LaunchRecord| match aimed_at(record) {
-            Aim::Here { roots, .. } => roots,
+            Aim::Here { roots, .. } => roots.into_iter().map(|root| root.pid).collect::<Vec<_>>(),
             Aim::Elsewhere => panic!("a run this host's own records name read as another host's"),
         };
 
@@ -3574,6 +3665,28 @@ mod tests {
             },
             "a stop aimed at a pid the host has since given to another process"
         );
+        // The same stranger on a pid whose stamped process an earlier teardown of
+        // this run ended: a reissue, over like a pid nobody holds, and neither
+        // aimed at nor declined.
+        let reissued = "the dispatch an earlier stop ended, which is not this process";
+        ledger::record_ended(
+            &paths,
+            &[ledger::Ended {
+                claim: ledger::ClaimedBy::LaunchRecord { pid: sys::pid() },
+                started: ledger::Stamp::of(reissued).expect("a stamp"),
+            }],
+        )
+        .expect("the ended record is written");
+        assert_eq!(
+            aimed_at(&launched_by(sys::pid(), &here, reissued)),
+            Aim::Here {
+                roots: Vec::new(),
+                unproven: Vec::new(),
+                declined: Vec::new(),
+            },
+            "a pid this run's own teardown ended was declined once the host reissued it"
+        );
+        std::fs::remove_file(paths.ended()).expect("the ended record is taken back");
         // A record from a build that predates the stamp proves nothing about its
         // pid either way, so it is not aimed at — and, unlike the two above, the
         // stop may not call that pid gone.
@@ -3726,7 +3839,7 @@ mod tests {
                 "node": "build",
                 "pid": sys::pid(),
                 "host": here,
-                "dispatched_at": sys::now_rfc3339(),
+                "dispatched_at": usable.dispatched_at,
                 "started": usable.started,
                 "reaped_by": "a build that came later",
             }))
@@ -3736,7 +3849,16 @@ mod tests {
         assert_eq!(
             roots_to_stop(&paths, &launch).expect("an entry from a newer writer reads"),
             Aim::Here {
-                roots: vec![usable.pid],
+                roots: vec![Root {
+                    pid: usable.pid,
+                    started: ledger::Stamp::of(&usable.started).expect("a stamp"),
+                    claim: ledger::ClaimedBy::Dispatch {
+                        pid: usable.pid,
+                        node: "build".into(),
+                        dispatched_at: usable.dispatched_at.clone(),
+                    },
+                    also: Vec::new(),
+                }],
                 unproven: Vec::new(),
                 declined: Vec::new(),
             },

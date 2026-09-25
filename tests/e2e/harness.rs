@@ -3180,12 +3180,39 @@ pub fn synced_fixture<'a>(root: &Path, runs: impl IntoIterator<Item = &'a Path>)
                 // Opened for writing, and never written: Windows flushes a file
                 // only through a handle that may write it, and refuses the
                 // flush on a read-only one with `Access is denied`.
-                synced(&path, std::fs::OpenOptions::new().write(true).open(&path));
+                synced(&path, opened_past_replacement(&path));
             }
         }
         synced_dir(dir);
     }
     synced_dir(root);
+}
+
+/// Open one of the fixture's files for writing, past the moment a replacement
+/// refuses it.
+///
+/// The fixture's documents are the product's own, published by a rename, and the
+/// commands the journey ran over them republish them as they read. Windows
+/// refuses an open that lands while such a rename is replacing the name —
+/// `Access is denied`, which a listing journey's fixture met on
+/// `checkpoint.json` — for as long as anything holds the file being replaced.
+/// What the name holds a moment later is the file to sync; a refusal that
+/// outlasts the wait is reported as the host gave it.
+fn opened_past_replacement(path: &Path) -> std::io::Result<std::fs::File> {
+    let open = || std::fs::OpenOptions::new().write(true).open(path);
+    let mut opened = open();
+    waited_for(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(10),
+        || {
+            if !matches!(&opened, Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied) {
+                return true;
+            }
+            opened = open();
+            false
+        },
+    );
+    opened
 }
 
 fn synced(path: &Path, opened: std::io::Result<std::fs::File>) {

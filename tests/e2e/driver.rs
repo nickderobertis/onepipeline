@@ -2527,7 +2527,7 @@ fn started_at_of(pid: u32) -> String {
 /// against loopback is what the crate's own process-tree tests hold open, and it
 /// outlives every assertion made about it.
 #[cfg(windows)]
-fn stranger_started_after(_stamps: &[String]) -> std::process::Child {
+pub(crate) fn stranger_started_after(_stamps: &[String]) -> std::process::Child {
     std::process::Command::new("ping")
         .args(["-n", "300", "127.0.0.1"])
         .stdout(std::process::Stdio::null())
@@ -2550,7 +2550,7 @@ fn stranger_started_after(_stamps: &[String]) -> std::process::Child {
 /// those seconds behind, so the stand-in is a stranger by construction rather
 /// than by luck.
 #[cfg(unix)]
-fn stranger_started_after(stamps: &[String]) -> std::process::Child {
+pub(crate) fn stranger_started_after(stamps: &[String]) -> std::process::Child {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let mut child = std::process::Command::new("sleep")
@@ -3318,6 +3318,514 @@ fn a_stop_that_declines_every_live_identity_does_not_report_success() {
     );
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this asks for
+// does not exist here, on the grounds the directive before the handover journeys below
+// states: `noteJourneySource`, the one separately edged Rust test project's input, begins
+// `{workspaceRoot}/src/**/*`. These journeys drive the real `stop` and `runs` over
+// `driver`'s teardown, `ledger`'s ended record, `summary` and `sys`'s process table, which
+// any change under `src/` can move, so a narrower project would drop them out of
+// `nx affected` for the very changes they exist to catch.
+
+/// A dispatch an earlier stop of this run ended is over, even once the host
+/// has given its pid to a stranger — and a stranger on a pid this run never
+/// ended is still declined. A stop ends the driver that would have taken the
+/// dispatch's registry entry back, so the entry outlives its process.
+// llmlint: ignore-block[tests_mirror_real_usage] PID reuse is a host transition, not a
+// product operation, and waiting for this particular pid to be recycled is unbounded. The
+// fixture moves the pid the dispatch's registry entry names onto a real process this test
+// started, everywhere the run wrote it — that entry and the record of what the first stop ended,
+// through `ended_follows_the_pid` — with every stamp untouched, and adds one entry for the second
+// half. The record of what the first stop ended is otherwise replaced by hand only to stand for a host
+// that will not read it and for lines a newer writer or a torn append leaves, which no verb of
+// this build writes. The real `stop` command reads the real run root each time and must leave
+// the stranger alive.
+#[cfg(unix)]
+#[test]
+fn a_dispatch_an_earlier_stop_ended_is_over_once_its_pid_is_reissued() {
+    let world = World::new("driver-stop-reissued-after-kill");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "reissue", vec![agent("build", &[])]);
+    world.until("the dispatch to be registered", |world| {
+        !world.dispatch_records(&run).is_empty()
+    });
+    let entry = world.dispatch_records(&run).remove(0);
+    let recorded: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&entry).expect("the entry reads"))
+            .expect("the entry is JSON");
+    let dispatch =
+        u32::try_from(recorded["pid"].as_u64().expect("the entry names a pid")).expect("a pid");
+    let stamp = recorded["started"]
+        .as_str()
+        .expect("the entry carries its stamp")
+        .to_string();
+
+    world
+        .run(&["stop", &run])
+        .exited(0)
+        .out_has("\"teardown\":\"signalled\"");
+    world.until("the run's processes to end", |_| {
+        !still_listed(driver) && !still_listed(dispatch)
+    });
+
+    // The host hands the dispatch's pid on. What the registry is left holding is
+    // the entry the dispatch wrote, stamp and all, now naming the stranger.
+    let mut stranger = stranger_started_after(std::slice::from_ref(&stamp));
+    let taken = stranger.id();
+    let mut reissued = recorded.clone();
+    reissued["pid"] = json!(taken);
+    std::fs::write(&entry, reissued.to_string()).expect("the reissued pid is planted");
+    ended_follows_the_pid(
+        &world.run_file(&run, "ended.jsonl"),
+        u64::from(dispatch),
+        u64::from(taken),
+    );
+
+    // What the first stop ended is the run's own record of it. One this host
+    // will not read is said where it is met and costs only what it adds: the
+    // claim is judged on its stamp alone, and declined as it always was.
+    let ended = world.run_file(&run, "ended.jsonl");
+    let kept = std::fs::read_to_string(&ended).expect("the first stop recorded what it ended");
+    assert!(
+        kept.contains(&stamp),
+        "the first stop did not record the dispatch it ended:\n{kept}"
+    );
+    // And the driver, under both records that named it: the launch record and
+    // the ownership lock each claimed one process, under one stamp, and ending
+    // it ended both claims.
+    let lines: Vec<serde_json::Value> = kept
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("the first stop wrote JSON lines"))
+        .collect();
+    let driver_stamps: Vec<&serde_json::Value> = ["launch-record", "ownership-lock"]
+        .iter()
+        .map(|claim| {
+            lines
+                .iter()
+                .find(|line| line["claim"][claim]["pid"] == json!(driver))
+                .map(|line| &line["started"])
+                .unwrap_or_else(|| {
+                    panic!("the first stop did not record the driver's {claim} claim:\n{kept}")
+                })
+        })
+        .collect();
+    assert_eq!(
+        driver_stamps[0], driver_stamps[1],
+        "the driver's two claims were recorded under two stamps:\n{kept}"
+    );
+    std::fs::remove_file(&ended).expect("the record is moved aside");
+    std::fs::create_dir(&ended).expect("a directory where the record belongs");
+    world
+        .run(&["stop", &run])
+        .exited(REFUSED)
+        .err_has("ended.jsonl could not be read")
+        .err_has("judged on its stamp alone")
+        .err_has("every recorded identity disagreed");
+    std::fs::remove_dir(&ended).expect("the directory is taken away");
+    // A line this build does not know — a newer writer's field beside the very
+    // claim and stamp the first stop recorded — is not read as the process
+    // having ended.
+    let foreign: Vec<String> = kept
+        .lines()
+        .map(|line| {
+            let mut known: serde_json::Value =
+                serde_json::from_str(line).expect("the first stop wrote JSON lines");
+            known["by"] = json!("a newer writer");
+            known.to_string()
+        })
+        .collect();
+    std::fs::write(&ended, format!("{}\n", foreign.join("\n"))).expect("lines from a newer writer");
+    world
+        .run(&["stop", &run])
+        .exited(REFUSED)
+        .err_has("every recorded identity disagreed");
+    // A dispatch line an earlier build of this record wrote, naming the dispatch
+    // by its node and instant alone. Read as naming any pid, it would place the
+    // stranger as surely as a line naming every dispatch of that node in that
+    // millisecond, which is what the pid was added to stop; so it is not read, the
+    // claim is judged on its stamp alone, and the stranger is declined as it was
+    // before this record existed.
+    let legacy: Vec<String> = kept
+        .lines()
+        .map(|line| {
+            let mut line: serde_json::Value =
+                serde_json::from_str(line).expect("the first stop wrote JSON lines");
+            if let Some(dispatch) = line["claim"]["dispatch"].as_object_mut() {
+                dispatch.remove("pid");
+            }
+            line.to_string()
+        })
+        .collect();
+    assert!(
+        legacy.iter().any(|line| line.contains("\"dispatch\"")),
+        "the first stop recorded no dispatch line to stand for the earlier build's:\n{kept}"
+    );
+    std::fs::write(&ended, format!("{}\n", legacy.join("\n"))).expect("the earlier build's lines");
+    world
+        .run(&["stop", &run])
+        .exited(REFUSED)
+        .err_has(&format!(
+            "the dispatch registry names pid {taken}, which this host has since given to another process"
+        ))
+        .err_has("every recorded identity disagreed");
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about the stranger")
+            .is_none(),
+        "a stop signalled pid {taken} on an earlier build's record"
+    );
+    // And one that does not parse at all is passed over, while the lines around
+    // it still say what they say.
+    std::fs::write(&ended, format!("not json at all\n{kept}")).expect("the record is restored");
+
+    world
+        .run(&["stop", &run])
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"nothing-to-stop\"")
+        .err_lacks("since given to another process");
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about the stranger")
+            .is_none(),
+        "a stop signalled pid {taken}, which the host had reissued"
+    );
+
+    // The same stranger under a stamp no teardown of this run ever ended is a
+    // claim nothing places, and is declined exactly as it always was.
+    let mut stray = recorded;
+    stray["pid"] = json!(taken);
+    stray["started"] = json!("a process no teardown of this run ended");
+    std::fs::write(
+        entry.with_file_name(format!("{taken}-stray.json")),
+        stray.to_string(),
+    )
+    .expect("the stray claim is planted");
+    let refused = world.run(&["stop", &run]);
+    refused
+        .exited(REFUSED)
+        .err_has("since given to another process")
+        .err_has("every recorded identity disagreed");
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about the stranger")
+            .is_none(),
+        "a declined stranger was signalled"
+    );
+    stranger.kill().expect("this test ends its own process");
+    stranger.wait().expect("the stranger is reaped");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// Ending one dispatch does not end another that shares its start stamp: a
+/// stranger on the other's pid is still declined.
+///
+/// A start stamp names when a process started, not which dispatch it was — two
+/// processes can start in one clock tick. So what a stop records as ended is the
+/// claim that named the process as well as its stamp — a dispatch by the pid its
+/// entry was written for, its node and the instant it was recorded, the launch
+/// record by the pid it was written for —
+/// and a second dispatch carrying the same stamp, or a later driver at another
+/// pid under the ended driver's stamp, is a claim no stop of this run ended.
+// llmlint: ignore-block[tests_mirror_real_usage] the second entry and the later driver's record
+// are written by hand, because no verb can make two processes start in one clock tick; each names
+// a real process this test started, and every `stop` is the real binary over the real run root.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_dispatch_sharing_a_stamp_with_one_a_stop_ended_is_still_declined() {
+    let world = World::new("driver-stop-shared-stamp");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "shared", vec![agent("build", &[])]);
+    world.until("the dispatch to be registered", |world| {
+        !world.dispatch_records(&run).is_empty()
+    });
+    let entry = world.dispatch_records(&run).remove(0);
+    let recorded: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&entry).expect("the entry reads"))
+            .expect("the entry is JSON");
+    let dispatch =
+        u32::try_from(recorded["pid"].as_u64().expect("the entry names a pid")).expect("a pid");
+    let stamp = recorded["started"]
+        .as_str()
+        .expect("the entry carries its stamp")
+        .to_string();
+
+    world
+        .run(&["stop", &run])
+        .exited(0)
+        .out_has("\"teardown\":\"signalled\"");
+    world.until("the run's processes to end", |_| {
+        !still_listed(driver) && !still_listed(dispatch)
+    });
+
+    // Another dispatch of the same node, recorded in the same millisecond and
+    // started in the same tick as the one the stop ended — differing from it in
+    // nothing but its pid, which the host has since handed to a stranger.
+    let mut stranger = stranger_started_after(std::slice::from_ref(&stamp));
+    let taken = stranger.id();
+    let mut other = recorded;
+    other["pid"] = json!(taken);
+    let planted = entry.with_file_name(format!("{taken}-1.json"));
+    std::fs::write(&planted, other.to_string()).expect("the other dispatch's entry is planted");
+
+    world
+        .run(&["stop", &run])
+        .exited(REFUSED)
+        .out_lacks("\"stopped\":true")
+        .err_has(&format!(
+            "the dispatch registry names pid {taken}, which this host has since given to another process"
+        ))
+        .err_has("every recorded identity disagreed");
+
+    // And a later driver of the run, at another pid, under the stamp of the
+    // driver the stop ended: the launch record names a process no stop ended.
+    std::fs::remove_file(&planted).expect("the other dispatch's entry is taken back");
+    let record = world.run_file(&run, "launch.json");
+    let mut relaunched = world.run_json(&run, "launch.json");
+    assert_ne!(relaunched["pid"], json!(taken));
+    relaunched["pid"] = json!(taken);
+    std::fs::write(&record, relaunched.to_string()).expect("the later driver's record");
+    world
+        .run(&["stop", &run])
+        .exited(REFUSED)
+        .err_has(&format!(
+            "the launch record names pid {taken}, which this host has since given to another process"
+        ))
+        .err_has("every recorded identity disagreed");
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about the stranger")
+            .is_none(),
+        "a stop signalled pid {taken}, which the host had reissued"
+    );
+    stranger.kill().expect("this test ends its own process");
+    stranger.wait().expect("the stranger is reaped");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A stop that cannot record what it ended still stops the run, and says what
+/// that record will not be there to answer.
+///
+/// The record is only ever an answer to a later teardown, so failing to write it
+/// changes nothing about this one.
+// llmlint: ignore-block[tests_mirror_real_usage] a directory where the run keeps its record of
+// what a teardown ended stands in for a host that refuses the write, which no verb of this build
+// arranges; the run, its driver and dispatch, and the `stop` are all real.
+#[cfg(unix)]
+#[test]
+fn a_stop_that_cannot_record_what_it_ended_still_stops_the_run_and_says_so() {
+    let world = World::new("driver-stop-unrecorded-end");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "unrecorded", vec![agent("build", &[])]);
+    world.until("the dispatch to be registered", |world| {
+        !world.dispatch_records(&run).is_empty()
+    });
+    std::fs::create_dir(world.run_file(&run, "ended.jsonl"))
+        .expect("a directory where the record belongs");
+
+    world
+        .run(&["stop", &run])
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"signalled\"")
+        .err_has("which processes this teardown ended could not be recorded")
+        .err_has("will decline it rather than read it as over");
+    world.until("the driver to end", |_| !still_listed(driver));
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A stop that signalled nothing ended nothing, whatever went while it tried: a
+/// stranger later found on that process's pid is still declined.
+///
+/// The host's process listing ends the dispatch and then fails, so the stop
+/// proves the dispatch, signals nobody, and finds it gone afterwards.
+// llmlint: ignore-block[tests_mirror_real_usage] a `ps` that ends a process and then
+// fails stands in for a host whose listing broke while one of the run's processes exited
+// by itself, and the reissued pid is planted for the reason
+// `a_dispatch_an_earlier_stop_ended_is_over_once_its_pid_is_reissued` gives; both `stop`s
+// are the real binary over the real run root.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_stop_that_signalled_nothing_leaves_a_reissued_pid_declined() {
+    let world = World::new("driver-stop-signalled-nothing");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "unsignalled", vec![agent("build", &[])]);
+    world.until("the dispatch to be registered", |world| {
+        !world.dispatch_records(&run).is_empty()
+    });
+    let entry = world.dispatch_records(&run).remove(0);
+    let recorded: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&entry).expect("the entry reads"))
+            .expect("the entry is JSON");
+    let dispatch = recorded["pid"].as_u64().expect("the entry names a pid");
+    let stamp = recorded["started"]
+        .as_str()
+        .expect("the entry carries its stamp")
+        .to_string();
+
+    let mut command = world.cmd(&["stop", &run]);
+    let inherited = env_of(&command, "PATH");
+    let listing = world.root.join("listing-ends-the-dispatch");
+    std::fs::create_dir_all(&listing).expect("a directory for the ps stand-in");
+    onepipeline_testfakes::executable(
+        &listing.join("ps"),
+        format!(
+            "#!/bin/sh\ncase \" $* \" in\n  *\" -A \"*)\n    kill -9 {dispatch}\n    while kill -0 {dispatch} 2>/dev/null; do sleep 0.02; done\n    exit 1 ;;\nesac\nexec '{}' \"$@\"\n",
+            found_on(&inherited, "ps").display()
+        ),
+    );
+    command.env("PATH", leading(&listing, &inherited));
+    world
+        .run_on(command, "stop while the listing fails")
+        .exited(REFUSED)
+        .err_has("was not stopped");
+    assert!(
+        still_listed(driver),
+        "a stop that signalled nothing ended the driver"
+    );
+
+    let mut stranger = stranger_started_after(std::slice::from_ref(&stamp));
+    let taken = stranger.id();
+    let mut reissued = recorded;
+    reissued["pid"] = json!(taken);
+    std::fs::write(&entry, reissued.to_string()).expect("the reissued pid is planted");
+    ended_follows_the_pid(
+        &world.run_file(&run, "ended.jsonl"),
+        dispatch,
+        u64::from(taken),
+    );
+    world.run(&["stop", &run]).exited(0).err_has(&format!(
+        "names pid {taken}, which this host has since given to another process"
+    ));
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about the stranger")
+            .is_none(),
+        "a stop signalled pid {taken}, which the host had reissued"
+    );
+    stranger.kill().expect("this test ends its own process");
+    stranger.wait().expect("the stranger is reaped");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The run's record of what its teardowns ended, following a pid the host has
+/// handed on: every claim in it naming `from` is made to name `to`, and every
+/// stamp is left as it was.
+///
+/// Each claim is named by the pid its record was written for, so a journey that
+/// stages a reissue by moving that pid onto a stranger it started moves it here
+/// too, and the record says what it would have said had the host given `from`
+/// away. An absent record is left absent, so a teardown that recorded nothing
+/// is refused by the command rather than by the fixture.
+#[cfg(unix)]
+pub(crate) fn ended_follows_the_pid(ended: &Path, from: u64, to: u64) {
+    let kept = std::fs::read_to_string(ended).unwrap_or_default();
+    let lines: Vec<String> = kept
+        .lines()
+        .map(|line| {
+            let mut line: serde_json::Value =
+                serde_json::from_str(line).expect("a stop writes JSON lines");
+            // Whichever record the claim names: every claim carries the pid it
+            // was written for, and one that did not could not follow it.
+            let claim = line["claim"]
+                .as_object_mut()
+                .expect("every line names the claim it ended");
+            for (named_by, body) in claim.iter_mut() {
+                let pid = body
+                    .get_mut("pid")
+                    .unwrap_or_else(|| panic!("a {named_by} claim carries no pid to follow"));
+                if *pid == json!(from) {
+                    *pid = json!(to);
+                }
+            }
+            line.to_string()
+        })
+        .collect();
+    if !lines.is_empty() {
+        std::fs::write(ended, format!("{}\n", lines.join("\n")))
+            .expect("the record follows the pid");
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn env_of(command: &std::process::Command, name: &str) -> std::ffi::OsString {
+    command
+        .get_envs()
+        .find(|(each, _)| *each == name)
+        .and_then(|(_, value)| value.map(ToOwned::to_owned))
+        .unwrap_or_else(|| panic!("the world wires no {name}"))
+}
+
+#[cfg(target_os = "linux")]
+fn found_on(path: &std::ffi::OsStr, name: &str) -> PathBuf {
+    std::env::split_paths(path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| panic!("no {name} on {path:?}"))
+}
+
+#[cfg(target_os = "linux")]
+fn leading(dir: &Path, path: &std::ffi::OsStr) -> std::ffi::OsString {
+    std::env::join_paths(std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(path)))
+        .expect("a PATH")
+}
+
+/// A run listed while its driver is on its way up belongs to the session that
+/// launched it.
+///
+/// The launcher appends the run's first record before it writes the launch
+/// record, and its driver claims the run before it appends anything of its own
+/// — so between the two the run's journal holds the launcher's record alone.
+/// The driver is held there, at its store's version check, which is the state a
+/// slow host leaves a reader in.
+// llmlint: ignore-block[tests_mirror_real_usage] an `onetaskgraph` that holds a driver's
+// version check stands in for a host slow to start one, the only way to keep a driver where a
+// Windows runner left it; everything else is the real binary and the real store behind it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_run_listed_while_its_driver_is_on_its_way_up_is_the_launching_sessions() {
+    let world = World::new("driver-ownership-rising");
+    let plan = world.plan("rising", &plan_of("rising", vec![human("approve", &[])]));
+    let mut command = world.cmd(&["start", &plan, "--detach"]);
+    let real = env_of(&command, "ONETASKGRAPH_BIN");
+    let store = world.root.join("store-holds-the-driver");
+    std::fs::create_dir_all(&store).expect("a directory for the store stand-in");
+    let (held, go) = (world.root.join("driver-held"), world.root.join("driver-go"));
+    onepipeline_testfakes::executable(
+        &store.join("onetaskgraph"),
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ] && tr '\\0' ' ' < /proc/$PPID/cmdline | grep -q ' drive-run '; then\n  : > '{}'\n  while [ ! -f '{}' ]; do sleep 0.05; done\nfi\nexec '{}' \"$@\"\n",
+            held.display(),
+            go.display(),
+            Path::new(&real).display()
+        ),
+    );
+    command.env("ONETASKGRAPH_BIN", store.join("onetaskgraph"));
+    world.run_on(command, "start --detach").exited(0);
+    world.until("the driver to be held on its way up", |_| held.is_file());
+    assert_eq!(
+        world.journal("rising").len(),
+        1,
+        "the driver appended before it was held, so this journey proves nothing"
+    );
+
+    world
+        .run(&["runs"])
+        .exited(0)
+        .out_has("[mine]")
+        .out_lacks("[unknown]");
+
+    std::fs::write(&go, "").expect("the driver is let go");
+    world.until("the driver to append", |world| {
+        world.journal("rising").len() > 1
+    });
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A stop reaches a dispatch whose driver is gone.
 ///

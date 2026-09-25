@@ -370,6 +370,10 @@ fn an_idle_driver_maintains_a_due_slot_once_and_a_fresh_driver_inside_every_runs
     assert_ne!(the_slot(&world)["last_maintained"], stamped);
     release(&world, "third");
 }
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] This
+// src/maintenance.rs journey has no narrower Nx edge: noteJourneySource includes src/**/*,
+// and the two real drivers it paces read `maintenance`, `pool` and the linked `onevcs`
+// together, so the crate is the narrowest edge it can honestly sit behind.
 
 /// Two drivers idle at once on one state root maintain the slot once between
 /// them: the second meets the first inside the identity and is answered
@@ -419,13 +423,20 @@ fn two_drivers_idle_at_once_maintain_the_slot_once_between_them() {
         .exited(0)
         .out_has("claimed — another pool maintain (pid");
 
-    // Every further sweep of either driver is answered not-due. Counted per driver,
-    // because each keeps its own account of what its loop did — and waited for
-    // **together** rather than in turn: two waits in sequence take twice the
-    // wall-clock of one, and what this then asserts is that the slot was not
-    // maintained again, which stops being true the moment `every` elapses. A wait
-    // whose length decides its own assertion is a wait that passes on an idle host
-    // and fails on a loaded one.
+    // Never twice: however many further sweeps either driver makes, the slot's
+    // command ran once. A sweep answered not-due writes no record, so every
+    // other record either run holds is a sweep that met the other inside the
+    // identity — `claimed`. Not *when* it met it: `onevcs` takes the identity's
+    // lock before it asks whether any slot is due, so a sweep that finds nothing
+    // due still holds it, and a sweep of either driver can be answered `claimed`
+    // long after the slot was maintained.
+    //
+    // Further sweeps are counted per driver, because each keeps its own account
+    // of what its loop did, and waited for **together** rather than in turn: two
+    // waits in sequence take twice the wall-clock of one, and what this then
+    // asserts is that the slot was not maintained again, which stops being true
+    // the moment `every` elapses. A wait whose length decides its own assertion
+    // is a wait that passes on an idle host and fails on a loaded one.
     let before: Vec<u64> = ["one", "two"]
         .iter()
         .map(|driver| sweeps(&world, driver))
@@ -440,27 +451,35 @@ fn two_drivers_idle_at_once_maintain_the_slot_once_between_them() {
         },
     );
     assert_eq!(marker_lines(&world), 1);
-    assert_eq!(records(&world, "one").len(), 1, "{}", world.dump());
-
-    // Until the first driver's command exits — on a slow host a pace or more
-    // after the hold is released — a sweep of the second meets the claim again
-    // and is answered `claimed` again. So its records may be several, but each
-    // is `claimed`, from a sweep started before the first driver recorded.
-    let recorded_at = ran["ts"].as_str().expect("a record's timestamp");
-    for met in records(&world, "two") {
-        let started = met["payload"]["started_at"]
-            .as_str()
-            .expect("a sweep's start");
-        assert!(
-            met["payload"]["identities"][0]["outcome"]["claimed"].is_object()
-                && started < recorded_at,
-            "{}",
-            world.dump()
-        );
+    let (mut ran, mut claimed) = (0, 0);
+    for met in records(&world, "one")
+        .into_iter()
+        .chain(records(&world, "two"))
+    {
+        let outcome = &met["payload"]["identities"][0]["outcome"];
+        if outcome["claimed"].is_object() {
+            claimed += 1;
+        } else {
+            assert_eq!(
+                outcome["slots"][0]["outcome"]["ran"]["outcome"],
+                "succeeded",
+                "{}",
+                world.dump()
+            );
+            ran += 1;
+        }
     }
+    assert_eq!(
+        ran,
+        1,
+        "the slot was maintained {ran} times: {}",
+        world.dump()
+    );
+    assert!(claimed >= 1, "{}", world.dump());
     release(&world, "one");
     release(&world, "two");
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Maintenance is withheld — no thread, no process, no record — while a pass is
 /// not idle: the run at its own concurrency ceiling, or the local executor

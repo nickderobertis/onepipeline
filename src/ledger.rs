@@ -383,6 +383,12 @@ impl RunPaths {
     pub fn dispatch(&self, pid: u32, claim: u64) -> PathBuf {
         self.dispatches().join(format!("{pid}-{claim}.json"))
     }
+
+    /// Every process a teardown of this run signalled and then saw end. See
+    /// [`ended_by_teardown`].
+    pub(crate) fn ended(&self) -> PathBuf {
+        self.dir.join("ended.jsonl")
+    }
 }
 
 /// A run root this build refused, and the reason it gave.
@@ -1271,9 +1277,49 @@ pub(crate) fn owner_label(launcher: &str, recorded: &str, reader: &str) -> Strin
     }
 }
 
+/// How long a read of a published document the filesystem refuses is tried
+/// again before the refusal is reported as the filesystem said it.
+///
+/// Every document here is published by [`write_atomic`]'s rename, and Windows
+/// refuses an open that lands while that rename is replacing the destination —
+/// answering access denied rather than handing over either document — for as
+/// long as anything still holds the one being replaced. What the name holds a
+/// moment later is the answer; a refusal that outlasts this is not that. The
+/// same patience [`LOCK_READ_PATIENCE`] gives a lock, for the same reason.
+const PUBLISHED_READ_PATIENCE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Read a document [`write_atomic`] publishes, past the moment a replacement
+/// refuses the open.
+///
+/// Only a refusal is tried again: a document that is absent, or bytes that are
+/// not text, are the answer the first time.
+// llmlint: ignore-block[changed_behavior_has_e2e] no host this suite's journeys run on
+// under a credential-free tier refuses an open mid-rename on demand: Linux never does, and
+// Windows does only when a replacement and a reader happen to meet, which is how the
+// host-sized listing journey met it rather than something it can arrange. The block covers
+// `read_json` and `read_json_opt` below, whose only change is to read through this: every
+// command's document reads come through them, so each journey drives the success; the refusal is
+// induced at the real open in `a_published_document_read_mid_replacement_is_read_whole_rather_than_missed`,
+// beside a real writer, and one that does not end in
+// `a_published_document_the_host_goes_on_refusing_is_reported_as_the_refusal`.
+fn read_published(path: &Path) -> io::Result<String> {
+    let deadline = std::time::Instant::now() + PUBLISHED_READ_PATIENCE;
+    loop {
+        match disk::read(path) {
+            Err(e)
+                if e.kind() == io::ErrorKind::PermissionDenied
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            read => return read,
+        }
+    }
+}
+
 /// Read a JSON document, refusing anything the type does not accept.
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    let text = fs::read_to_string(path).map_err(|e| Error::Ledger {
+    let text = read_published(path).map_err(|e| Error::Ledger {
         path: path.to_path_buf(),
         source: e,
     })?;
@@ -1286,11 +1332,12 @@ pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 /// Used only where the contract says an unreadable input withholds a verdict
 /// rather than ending the read: a view must still render the rest of a run.
 pub fn read_json_opt<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
-    fs::read_to_string(path)
+    read_published(path)
         .ok()
         .map(|text| counted(text.len(), text))
         .and_then(|text| serde_json::from_str(&text).ok())
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Write a JSON document so no reader can observe it half-written.
 ///
@@ -1413,6 +1460,7 @@ pub(crate) mod disk {
         Contents,
         Publish,
         Entry,
+        Read,
     }
 
     pub(super) fn sync_contents(file: &fs::File) -> io::Result<()> {
@@ -1423,6 +1471,11 @@ pub(crate) mod disk {
     pub(super) fn publish(temp: &Path, path: &Path) -> io::Result<()> {
         record(Step::Publish)?;
         fs::rename(temp, path)
+    }
+
+    pub(super) fn read(path: &Path) -> io::Result<String> {
+        record(Step::Read)?;
+        fs::read_to_string(path)
     }
 
     pub(super) fn sync_entry(dir: &Path) -> io::Result<()> {
@@ -1465,6 +1518,8 @@ pub(crate) mod disk {
     struct Watched {
         asked: Vec<Step>,
         refusing: Option<Step>,
+        /// How many more occurrences of the refused step are refused.
+        refusals: usize,
     }
 
     #[cfg(test)]
@@ -1474,10 +1529,14 @@ pub(crate) mod disk {
                 return Ok(());
             };
             watched.asked.push(step);
-            if watched.refusing == Some(step) {
-                return Err(io::Error::other(format!(
-                    "this host will not {step:?} for the test that asked"
-                )));
+            if watched.refusing == Some(step) && watched.refusals > 0 {
+                watched.refusals -= 1;
+                // The kind Windows gives an open that lands mid-replacement, and
+                // the one a host that will not sync or rename gives too.
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("this host will not {step:?} for the test that asked"),
+                ));
             }
             Ok(())
         })
@@ -1486,13 +1545,26 @@ pub(crate) mod disk {
     #[cfg(test)]
     pub(crate) struct Watch;
 
-    /// Watch this thread's writes, refusing every occurrence of the selected step.
+    /// Watch this thread's writes and reads, refusing every occurrence of the selected step.
     ///
     /// Panics on a watch already installed on this thread rather than replacing
     /// it: the steps read back would be a mix of two writes, which is a test
     /// passing on somebody else's evidence.
     #[cfg(test)]
     pub(crate) fn watching(refusing: Option<Step>) -> Watch {
+        refusing_times(refusing, usize::MAX)
+    }
+
+    /// Watch this thread's writes and reads, refusing only the first `times`
+    /// occurrences of `step` — a refusal the host stops giving, as Windows stops
+    /// refusing a destination once the rename replacing it is done.
+    #[cfg(test)]
+    pub(crate) fn refusing(step: Step, times: usize) -> Watch {
+        refusing_times(Some(step), times)
+    }
+
+    #[cfg(test)]
+    fn refusing_times(refusing: Option<Step>, refusals: usize) -> Watch {
         WATCHED.with_borrow_mut(|watched| {
             assert!(
                 watched.is_none(),
@@ -1501,6 +1573,7 @@ pub(crate) mod disk {
             *watched = Some(Watched {
                 asked: Vec::new(),
                 refusing,
+                refusals,
             });
         });
         Watch
@@ -2937,6 +3010,132 @@ pub fn dispatches_of(paths: &RunPaths) -> Result<Vec<DispatchRecord>> {
     Ok(found)
 }
 
+/// A start stamp a record carried: never blank, because a blank one proves
+/// nothing about any process — the same reading the registry gives one.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub(crate) struct Stamp(String);
+
+impl Stamp {
+    /// The stamp a record carried, where it carried one.
+    pub(crate) fn of(recorded: &str) -> Option<Self> {
+        (!recorded.trim().is_empty()).then(|| Self(recorded.to_string()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for Stamp {
+    type Error = String;
+
+    fn try_from(recorded: String) -> std::result::Result<Self, String> {
+        Self::of(&recorded).ok_or_else(|| "a blank start stamp names no process".to_string())
+    }
+}
+
+impl From<Stamp> for String {
+    fn from(stamp: Stamp) -> Self {
+        stamp.0
+    }
+}
+
+/// Which of a run's records named a process.
+///
+/// Each is named by what its record fixed when it was written, never by what the
+/// pid it names is now, because a reissue is that pid naming another process:
+/// the launch record and the lock by the pid they were written for, and a
+/// dispatch by that pid, its node and the instant it was recorded. The pid is
+/// what makes a claim one process — two dispatches of one node can be recorded
+/// in one millisecond, and one driver process can hold several entries, so only
+/// entries naming the same pid under the same stamp share a claim, and those
+/// name the same process.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub(crate) enum ClaimedBy {
+    /// The launch record, naming its driver.
+    LaunchRecord { pid: u32 },
+    /// The ownership lock, naming its holder.
+    OwnershipLock { pid: u32 },
+    /// One dispatch's registry entry.
+    ///
+    /// `pid` is required rather than optional-when-empty, and that is the
+    /// compatibility decision: a line without it could only be read as naming
+    /// every pid, which is the collision it was added to end, or none, which is
+    /// what refusing the line already does. A refused line leaves the claim
+    /// judged on its stamp alone, as it was before this record existed.
+    Dispatch {
+        pid: u32,
+        node: String,
+        dispatched_at: String,
+    },
+}
+
+/// One line of [`RunPaths::ended`]: a process a teardown of this run proved and
+/// then saw end, as the claim that named it and the stamp that proved it.
+///
+/// Strict on read like every record here, so a line a newer or foreign writer
+/// left does not parse; [`ended_by_teardown`] says what that costs.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Ended {
+    pub claim: ClaimedBy,
+    pub started: Stamp,
+}
+
+/// Record that a teardown of this run ended each of `ended`.
+///
+/// Why a teardown keeps this at all: the records that name a run's processes
+/// outlive them. A dispatch's registry entry is removed by the dispatch's own
+/// thread, and a teardown ends the driver that thread lives in, so the entry is
+/// left naming a pid the host is free to hand on — and Windows does, within
+/// seconds. The next stop or shutdown then meets a live pid whose stamp disagrees
+/// with the record, and with nothing else to go on it has to decline it as a
+/// claim it cannot place. This is the something else: *this run ended that
+/// process*, which is what makes a later stranger on its pid a reissue rather
+/// than a record gone wrong.
+pub(crate) fn record_ended(paths: &RunPaths, ended: &[Ended]) -> Result<()> {
+    for one in ended {
+        let line = serde_json::to_string(one)
+            .map_err(|e| Error::Invalid(format!("{}: {e}", paths.ended().display())))?;
+        append_line_healed(&paths.ended(), &line)?;
+    }
+    Ok(())
+}
+
+/// Every claim a teardown of this run recorded as having ended, with the stamp
+/// it proved.
+///
+/// The claim as well as the stamp, because a stamp names only when a process
+/// started: two dispatches can start in one clock tick, and a later driver can
+/// carry an ended one's stamp at another pid.
+///
+/// Read toward *not ended*, never the other way: a record that is not there, a
+/// file this host will not read, and a line that does not parse all leave a
+/// claim to be judged on its stamp alone, which is exactly what a teardown did
+/// before this record existed. So a read that fails is said on stderr and costs
+/// only the difference this record makes.
+pub(crate) fn ended_by_teardown(paths: &RunPaths) -> std::collections::BTreeSet<Ended> {
+    let path = paths.ended();
+    match fs::read_to_string(&path) {
+        Ok(text) => text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Ended>(line).ok())
+            .collect(),
+        Err(why) if why.kind() == io::ErrorKind::NotFound => std::collections::BTreeSet::new(),
+        Err(why) => {
+            eprintln!(
+                "onepipeline: run '{}': {} could not be read — {why}; a pid a teardown of \
+                 this run already ended is judged on its stamp alone",
+                paths.run,
+                path.display()
+            );
+            std::collections::BTreeSet::new()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{body_of_entry, entry_named, identity_of_body, number_of_entry, Handover};
@@ -3144,6 +3343,31 @@ mod tests {
     }
 
     use super::*;
+
+    /// A line of the ended record whose stamp is blank, or that names no claim,
+    /// is refused at the parse, so no reader can hold it as a process that ended.
+    #[test]
+    fn an_ended_line_with_a_blank_stamp_no_claim_or_a_pidless_dispatch_does_not_parse() {
+        let whole = r#"{"claim":{"launch-record":{"pid":7}},"started":"linux-proc-stat:1"}"#;
+        assert!(
+            serde_json::from_str::<Ended>(whole).is_ok(),
+            "a whole line was refused"
+        );
+        for refused in [
+            r#"{"claim":{"launch-record":{"pid":7}},"started":""}"#,
+            r#"{"claim":{"launch-record":{"pid":7}},"started":"   "}"#,
+            r#"{"started":"linux-proc-stat:1"}"#,
+            r#"{"claim":{"a-record-this-build-does-not-know":{}},"started":"linux-proc-stat:1"}"#,
+            // A dispatch named without the pid its entry was written for, as an
+            // earlier build of this record wrote it: it names no one process.
+            r#"{"claim":{"dispatch":{"node":"build","dispatched_at":"2026-09-25T00:00:00.000Z"}},"started":"linux-proc-stat:1"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Ended>(refused).is_err(),
+                "{refused} was read as a process that ended"
+            );
+        }
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("onepipeline-ledger-{name}-{}", sys::pid()));
@@ -4225,16 +4449,11 @@ mod tests {
             start.wait();
             let mut reads = 0;
             while !first.is_finished() || !second.is_finished() {
-                let seen = match fs::read(&path) {
-                    Ok(seen) => seen,
-                    // Windows refuses an open that lands while a rename is replacing
-                    // the destination; that read observed no document at all.
-                    Err(e) if cfg!(windows) && e.kind() == io::ErrorKind::PermissionDenied => {
-                        std::thread::yield_now();
-                        continue;
-                    }
-                    Err(e) => panic!("the published document reads: {e:?}"),
-                };
+                // Through the reader every published document is read with, which
+                // waits out an open Windows refuses mid-replacement.
+                let seen = read_published(&path)
+                    .unwrap_or_else(|e| panic!("the published document reads: {e:?}"))
+                    .into_bytes();
                 // A run lock serializes write-back phases for one run, so no CLI
                 // journey can aim two phases at one shadow path. These real
                 // threads exercise the shared writer at that filesystem boundary.
@@ -4250,6 +4469,108 @@ mod tests {
             second.join().expect("second writer completed");
             assert!(reads > 0, "the reader did not overlap the writers");
         });
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A reader beside a writer replacing one document reads a whole one each
+    /// time, however many of its opens the host refuses mid-replacement.
+    ///
+    /// Windows refuses an open that lands while a rename replaces the destination
+    /// — the `cross (windows-latest)` failures of this module's concurrent-writer
+    /// test and of the host-sized listing journey, each `Access is denied` on a
+    /// document being republished. Linux never refuses that open, so the reader's
+    /// opens are refused at the real call, as that host refuses them, while a real
+    /// writer goes on replacing the file under it.
+    #[test]
+    fn a_published_document_read_mid_replacement_is_read_whole_rather_than_missed() {
+        let root = scratch("read-mid-replacement");
+        let path = root.join("checkpoint.json");
+        let documents = [
+            serde_json::json!({"written": "before", "pad": "a".repeat(64 * 1024)}),
+            serde_json::json!({"written": "after", "pad": "b".repeat(64 * 1024)}),
+        ];
+        write_json(&path, &documents[0]).expect("the first document exists");
+        let replacing = std::sync::atomic::AtomicBool::new(true);
+        // Stops the writer however the reads end, so a read that fails ends the
+        // test with its message rather than leaving the scope waiting on a
+        // writer that never stops.
+        struct Stops<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for Stops<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                let mut replaced = 0_usize;
+                while replacing.load(std::sync::atomic::Ordering::Relaxed) {
+                    write_atomic(
+                        &path,
+                        documents[replaced % 2].to_string().as_bytes(),
+                        Durability::Projection,
+                    )
+                    .expect("the writer replaces the document");
+                    replaced += 1;
+                }
+                replaced
+            });
+            let stops = Stops(&replacing);
+            for _ in 0..50 {
+                let watch = disk::refusing(disk::Step::Read, 2);
+                let read = read_json_opt::<serde_json::Value>(&path);
+                let strict = read_json::<serde_json::Value>(&path);
+                let asked = watch.asked();
+                drop(watch);
+                for (how, seen) in [("read_json_opt", read), ("read_json", strict.ok())] {
+                    assert!(
+                        seen.as_ref().is_some_and(|seen| documents.contains(seen)),
+                        "{how} read a document mid-replacement as {:?} rather than a \
+                         whole one",
+                        seen.map(|seen| seen["written"].clone())
+                    );
+                }
+                assert_eq!(
+                    asked.len(),
+                    4,
+                    "the two refused opens were not each tried again: {asked:?}"
+                );
+            }
+            drop(stops);
+            assert!(
+                writer.join().expect("the writer completed") > 0,
+                "the writer never replaced the document the reads were beside"
+            );
+        });
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A refusal that outlasts a replacement is the host's answer, reported as
+    /// it gave it and naming the document, rather than waited on for ever.
+    #[test]
+    fn a_published_document_the_host_goes_on_refusing_is_reported_as_the_refusal() {
+        let root = scratch("read-refused");
+        let path = root.join("launch.json");
+        write_json(&path, &serde_json::json!({"ok": true})).expect("a document");
+
+        let watch = disk::watching(Some(disk::Step::Read));
+        let began = std::time::Instant::now();
+        let strict = read_json::<serde_json::Value>(&path);
+        let missed = read_json_opt::<serde_json::Value>(&path);
+        drop(watch);
+
+        match strict {
+            Err(Error::Ledger {
+                path: named,
+                source,
+            }) if named == path && source.kind() == io::ErrorKind::PermissionDenied => {}
+            other => panic!("a refusal that did not end was not reported as it: {other:?}"),
+        }
+        assert!(missed.is_none(), "a refused read produced a document");
+        assert!(
+            began.elapsed() >= PUBLISHED_READ_PATIENCE * 2,
+            "a refusal was given up on before the replacement it could be had ended"
+        );
         fs::remove_dir_all(&root).ok();
     }
 
