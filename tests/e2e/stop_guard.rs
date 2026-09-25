@@ -930,9 +930,9 @@ fn declaring<'a>(sources: &'a [&'a str], rest: &[&'a str]) -> Vec<&'a str> {
     args
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] Measured at 5.0s on a
-// host at load 57 over 20 cores, beside four journeys in this module that each hold a real
-// run for 23-26s on the same run. It holds a run because what it proves is a source's
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] Measured at 4.4s on a
+// host at load 32 over 20 cores, beside the journeys in this module that hold a real run
+// for 19-24s each on the same run. It holds a run because what it proves is a source's
 // verdict combined with the verb's own `unwatched` block, which only a real unwatched run
 // makes; the code it guards is `src/stopguard.rs`, under the crate's own edge, so a
 // narrower project would drop it out of `nx affected` for the changes it exists to catch.
@@ -1220,9 +1220,9 @@ fn a_hook_rendering_asks_a_source_about_the_payloads_session_and_its_continuatio
     assert!(source.environments().iter().all(|named| named == session));
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] Measured at 14.6s on a
-// host at load 57 over 20 cores, beside four journeys in this module that each hold a real
-// run for 23-26s on the same run; its cost is two one-second deadlines and short-lived
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] Measured at 14.9s on a
+// host at load 32 over 20 cores, beside the journeys in this module that hold a real run
+// for 19-24s each on the same run; its cost is two one-second deadlines and short-lived
 // scripts. What it guards is `src/stopguard.rs` and the clap surface in `src/cli.rs`, both
 // under the crate's own edge, so a narrower project would drop it out of `nx affected` for
 // the changes it exists to catch — the ground `tests/e2e/session_reuse.rs` carries too.
