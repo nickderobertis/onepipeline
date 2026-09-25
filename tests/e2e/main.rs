@@ -177,9 +177,8 @@ mod watch;
 // journeys in `mod store` above do.
 mod writeback_budget;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
-// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] four journeys, measured at under
-// ten seconds together on this host, driving the compiled binary against its own write-back
-// worker and the real store exactly as `mod store` above does. What they exercise is
-// `writeback`, `engine` and `taskgraph`, so a project edged narrower than the crate would drop
-// them out of `nx affected` for the very changes they exist to catch.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] These journeys exercise
+// writeback, engine, and taskgraph together; a narrower project edge would omit them
+// from nx affected when the projection changes.
 mod writeback_projections;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
