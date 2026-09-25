@@ -448,4 +448,159 @@ esac
             "the hook reported a tracer the host has:\n{with}"
         );
     }
+
+    /// The committed visual guard is **activated** by provisioning, not merely
+    /// committed.
+    ///
+    /// `core.hooksPath` is per-clone state that is never committed, so the one
+    /// thing a fresh clone does not inherit is the setting that makes
+    /// `.githooks/pre-push` run at all. Hence a real clone rather than this
+    /// worktree, and hence the assertion that it starts without one: without
+    /// that, this would pass over a clone that had been configured by hand.
+    ///
+    /// Only `_hooks` is run, not the whole bootstrap: the rest installs
+    /// toolchains onto this host and none of it decides where a hook lives.
+    #[test]
+    fn provisioning_a_fresh_clone_activates_the_committed_visual_guard() {
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-hooks-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("a fresh hook-activation scratch directory");
+        let _scratch = Scratch(root.clone());
+        let clone = root.join("clone");
+
+        let cloned = Command::new("git")
+            .args([
+                "clone",
+                "--quiet",
+                "--no-hardlinks",
+                "--depth",
+                "1",
+                "--no-single-branch",
+            ])
+            .arg(env!("CARGO_MANIFEST_DIR"))
+            .arg(&clone)
+            .output()
+            .expect("git clones this repository");
+        assert!(
+            cloned.status.success(),
+            "the fresh clone could not be made:\n{}",
+            String::from_utf8_lossy(&cloned.stderr)
+        );
+
+        // A clone starts with no hooks path of its own. If that ever stopped
+        // being true this journey would pass without provisioning anything.
+        let before = Command::new("git")
+            .args(["config", "--get", "core.hooksPath"])
+            .current_dir(&clone)
+            .output()
+            .expect("git reads the clone's config");
+        assert!(
+            !before.status.success(),
+            "a fresh clone already carries core.hooksPath ({}), so this journey \
+             would pass without the recipe having done anything",
+            String::from_utf8_lossy(&before.stdout).trim()
+        );
+
+        // The committed guard, and only the guard, is what the directory holds:
+        // the complete pre-push bar stays unhooked, which is a promise
+        // `screenshots/AGENTS.md` makes to anyone whose push this now runs on.
+        let hooks: Vec<String> = fs::read_dir(clone.join(".githooks"))
+            .expect("the clone carries the committed hooks directory")
+            .map(|entry| {
+                entry
+                    .expect("a hooks directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(
+            hooks,
+            vec!["pre-push".to_string()],
+            "the committed hooks directory holds something other than the visual guard"
+        );
+        let guard =
+            fs::read_to_string(clone.join(".githooks/pre-push")).expect("the guard is readable");
+        // What it *runs*, not what it says about itself: the hook's own header
+        // explains in prose that the complete bar is deliberately left out, so a
+        // substring search over the whole file matches that sentence.
+        let runs_the_bar = guard
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .any(|line| line.contains("just gate") || line.contains("just check"));
+        assert!(
+            !runs_the_bar,
+            "the visual guard runs the complete pre-push bar, which this repository \
+             deliberately leaves unhooked"
+        );
+
+        // `just bootstrap` is what a clean clone runs, and it activates the hook
+        // through a dependency. Running the whole thing here would install
+        // toolchains onto this host, so what is held is the dependency itself —
+        // read off `just`'s own plan for that recipe — and then the step it
+        // names is run for real below. Dropped from `bootstrap`, the recipe
+        // would still work and this journey would still fail.
+        let planned = Command::new("just")
+            .args(["--dry-run", "bootstrap"])
+            .current_dir(&clone)
+            .output()
+            .expect("just plans the bootstrap recipe");
+        let plan = format!(
+            "{}{}",
+            String::from_utf8_lossy(&planned.stdout),
+            String::from_utf8_lossy(&planned.stderr)
+        );
+        assert!(
+            planned.status.success(),
+            "`just --dry-run bootstrap` failed, so what a clean clone runs cannot \
+             be read:\n{plan}"
+        );
+        assert!(
+            plan.contains("core.hooksPath .githooks"),
+            "`just bootstrap` no longer activates the committed guard, so a clean \
+             clone would push with nothing watching the screenshots:\n{plan}"
+        );
+
+        let provisioned = Command::new("just")
+            .arg("_hooks")
+            .current_dir(&clone)
+            .output()
+            .expect("the provisioning recipe runs");
+        assert!(
+            provisioned.status.success(),
+            "the hook-activation recipe exited non-zero:\n{}",
+            String::from_utf8_lossy(&provisioned.stderr)
+        );
+
+        let after = Command::new("git")
+            .args(["config", "--get", "core.hooksPath"])
+            .current_dir(&clone)
+            .output()
+            .expect("git reads the clone's config");
+        assert!(
+            after.status.success(),
+            "provisioning left the clone with no core.hooksPath, so the committed \
+             guard would never run"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&after.stdout).trim(),
+            ".githooks",
+            "provisioning pointed git at a hooks directory this repository does not commit"
+        );
+
+        // And what git *resolves* for that clone, rather than only what the
+        // config says: a value naming a directory git would not run is a guard
+        // that is configured and inert.
+        let resolved = clone.join(String::from_utf8_lossy(&after.stdout).trim());
+        assert!(
+            resolved.join("pre-push").is_file(),
+            "the activated hooks path has no pre-push hook in it: {}",
+            resolved.display()
+        );
+    }
 }

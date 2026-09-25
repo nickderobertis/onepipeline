@@ -30,3 +30,13 @@ REPO_PLAN.md
 # absolute paths and a live pid — so it belongs to the machine that made it, not
 # to the repository. `ONEPIPELINE_RUNS_DIR` moves it somewhere deliberate.
 /runs/
+
+# screencomp (the visual-docs capture): commit the digest baseline
+# (shots/baseline/*.json) and the images the README embeds
+# (screenshots/images/), but never the regenerated capture trees, the local
+# review gallery, or a rendered site.
+/shots/current/
+/shots/review/
+/shots/verify/
+/site/
+__pycache__/
