@@ -6859,7 +6859,7 @@ outside the vocabulary — **blocks**, naming itself and what went wrong: the on
 place the stand-aside rule above is turned around, because a declared source is
 a condition the host asked to be enforced, and a warning would let the turn end
 over it unshown. The per-source memory bounds that to one refused stop per
-unchanged failure. `docs/stop-guard.md` states the whole of it.
+unchanged failure.
 
 `docs/stop-guard.md` states the neutral contract and then the wiring for each
 harness, so a reader wires either without reading this crate's source. Both

@@ -75,6 +75,31 @@ fn memory(world: &World, session: &str) -> PathBuf {
         .join(hex(&Sha256::digest(session.as_bytes())))
 }
 
+/// Where the guard remembers what `command`, declared as a source, last
+/// blocked `session` on: beside the verb's own memory, under the file name the
+/// page spells for it.
+#[cfg(unix)]
+fn source_memory(world: &World, session: &str, command: &str) -> PathBuf {
+    let name = page()
+        .split("## Declared sources")
+        .nth(1)
+        .and_then(|section| {
+            section
+                .split('`')
+                .find(|span| span.starts_with("<sha256(session)>."))
+        })
+        .expect("the page spells a source memory's file name")
+        .replace(
+            "<sha256(session)>",
+            &hex(&Sha256::digest(session.as_bytes())),
+        )
+        .replace(
+            "<sha256(command)>",
+            &hex(&Sha256::digest(command.as_bytes())),
+        );
+    memory(world, session).with_file_name(name)
+}
+
 /// Every `--flag` a synopsis or a `--help` names, `--help` itself aside.
 pub(crate) fn flags_of(text: &str) -> std::collections::BTreeSet<String> {
     text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
@@ -880,7 +905,6 @@ impl Source {
     }
 }
 
-/// `stop-guard` with `sources` declared, and `rest` after them.
 fn declaring<'a>(sources: &'a [&'a str], rest: &[&'a str]) -> Vec<&'a str> {
     let mut args = vec!["stop-guard"];
     for source in sources {
@@ -962,7 +986,6 @@ fn declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source()
 
     // Each source was handed the verb's own neutral input — the very shape the
     // page documents — naming the input's session, never the environment's.
-    // Byte for byte, as the page spells the input a source is handed.
     let template = page()
         .split("## Declared sources")
         .nth(1)
@@ -1188,6 +1211,13 @@ fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_pa
             "`reason` is blank",
         ),
         (
+            answering(
+                "blank-message",
+                "echo '{\"verdict\":\"warn\",\"message\":\"\"}'",
+            ),
+            "`message` is blank",
+        ),
+        (
             answering("crossed", "echo '{\"verdict\":\"warn\",\"reason\":\"x\"}'"),
             "unknown field `reason`",
         ),
@@ -1294,13 +1324,30 @@ fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_pa
         );
     }
 
+    // A shell that cannot be found to run a source in is the same refusal.
+    let unstartable = answering("unstartable", "echo '{\"verdict\":\"none\"}'");
+    let mut shell_less = world.cmd(&declaring(&[unstartable.as_str()], &[]));
+    shell_less.env("PATH", world.empty_path());
+    let shell_less = world.run_with_stdin_on(shell_less, &json!({"session": session}).to_string());
+    shell_less.exited(0);
+    let told = verdict(&shell_less.stdout).expect("a verdict");
+    assert_eq!(told["verdict"], json!("block"), "{told}");
+    assert!(
+        told["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("could not be consulted")
+                && reason.contains("it could not be started")
+                && reason.contains(&unstartable)),
+        "{told}"
+    );
+
     // And a source whose memory cannot be kept stands aside in a warning that
     // still names what it would refuse on, exactly as the verb's own does.
     let refusing = answering(
         "refusing",
         "echo '{\"verdict\":\"block\",\"reason\":\"branch b-1 preserved\"}'",
     );
-    let path = memory(&world, session).with_extension(hex(&Sha256::digest(refusing.as_bytes())));
+    let path = source_memory(&world, session, &refusing);
     // llmlint: ignore-block[tests_mirror_real_usage] nothing writes a directory at a
     // memory's path; the same stand-in the verb's own memory journey above uses for a
     // record this process cannot write.
@@ -1336,7 +1383,7 @@ fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_pa
     // One that answers nothing to refuse over that same unremovable memory
     // says so rather than letting a later continuation through in silence.
     let quiet = answering("quiet-refusing", "echo '{\"verdict\":\"none\"}'");
-    let stuck = memory(&world, session).with_extension(hex(&Sha256::digest(quiet.as_bytes())));
+    let stuck = source_memory(&world, session, &quiet);
     // llmlint: ignore-block[tests_mirror_real_usage] the same directory-in-the-way.
     std::fs::create_dir_all(stuck.join("held")).expect("something in the way");
     // llmlint: ignore-end[tests_mirror_real_usage]
