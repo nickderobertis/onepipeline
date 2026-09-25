@@ -3052,8 +3052,8 @@ try {
         );
 
         assert_eq!(
-            stop_and_confirm(&roots, Stop::Now, std::time::Duration::from_secs(10)).0,
-            Teardown::Signalled,
+            stop_and_confirm(&roots, Stop::Now, std::time::Duration::from_secs(10)),
+            (Teardown::Signalled, roots.to_vec()),
             "a stop that ended the trees {every:?} did not report reaching them"
         );
         assert!(
