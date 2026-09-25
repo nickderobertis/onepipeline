@@ -1035,9 +1035,7 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
 /// test.
 ///
 /// The slot's occupancy lease is taken by this journey, for the reason
-/// `session_reuse.rs` gives for taking a run root's: a lease is one the OS
-/// releases with the process, so no verb of the sibling's holds one past its own
-/// exit and no sequence of them leaves a slot occupied. The name is computed the
+/// `session_reuse.rs` gives for taking a run root's. The name is computed the
 /// way `onevcs` computes it and the file has to already exist, which catches a
 /// rename; and what proves it is still the lock occupancy is decided by is the
 /// outcome itself — a sweep that claimed the slot anyway would run the command
