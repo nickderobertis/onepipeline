@@ -841,8 +841,9 @@ pub struct StopGuardArgs {
     /// for more. It is handed `{"session":…,"continuation":…}` for this stop's
     /// session on standard input and answers one neutral verdict object on
     /// standard output. Every answer combines with this verb's own, the
-    /// strongest winning, and a source that is missing, exits non-zero, times
-    /// out, writes nothing or answers outside the vocabulary **blocks**, naming
+    /// strongest winning, and a source that is missing, is not delivered its
+    /// whole input, exits non-zero, times out, writes nothing or answers
+    /// outside the vocabulary **blocks**, naming
     /// itself and what went wrong — never passes.
     #[arg(long = "source", value_name = "COMMAND")]
     pub sources: Vec<String>,

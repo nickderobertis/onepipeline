@@ -438,17 +438,24 @@ fn consult(command: &str, asked: &Asked, timeout: Duration) -> Result<Answer, St
     let mut child = spawning
         .spawn()
         .map_err(|error| format!("it could not be started ({error})"))?;
-    let input = source_input(asked);
-    if let Some(mut stdin) = child.stdin.take() {
-        // On a thread of its own, so a source that never reads its input cannot
-        // hold this wait on a full pipe. A write it refused is not a failure
-        // to consult it: the input is offered, a source whose question does not
-        // turn on the session may close it unread, and what it answers is
-        // still read and held to the vocabulary like any other.
-        std::thread::spawn(move || {
-            let _ = stdin.write_all(input.as_bytes());
-            let _ = stdin.write_all(b"\n");
-        });
+    let mut input = source_input(asked);
+    input.push('\n');
+    // Written on a thread of its own, so a source that never reads its input
+    // cannot hold this wait on a full pipe, and reported back rather than
+    // discarded: a source that did not receive the whole of its input answered
+    // without knowing whose stop it was, and nothing it says is taken.
+    let (wrote, delivered) = std::sync::mpsc::channel();
+    match child.stdin.take() {
+        Some(mut stdin) => {
+            std::thread::spawn(move || {
+                // Dropped at the end, which is the end of input the source
+                // reads to.
+                let _ = wrote.send(stdin.write_all(input.as_bytes()));
+            });
+        }
+        None => {
+            let _ = wrote.send(Err(std::io::Error::other("no pipe to its standard input")));
+        }
     }
     // Read on a thread too, and waited for no longer than the deadline: a
     // source that leaves something behind it holding standard output would
@@ -503,6 +510,17 @@ fn consult(command: &str, asked: &Asked, timeout: Duration) -> Result<Answer, St
             None => "it was ended by a signal".to_owned(),
         });
     }
+    // Asked after it exited, when every reader of the pipe has gone, so a
+    // write it never took has by now been refused rather than left pending —
+    // unless something it left behind still holds the pipe, which the deadline
+    // bounds as it does the answer.
+    delivered
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|_| {
+            end_group(child.id());
+            late()
+        })?
+        .map_err(|error| format!("its input could not be delivered to it in full ({error})"))?;
     let bytes = answer
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .map_err(|_| {

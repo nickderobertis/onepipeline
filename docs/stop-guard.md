@@ -83,9 +83,12 @@ unfinished'`. With none declared the verb is exactly the contract above.
   payload's under `--format claude-code` and `codex`, never the environment's.
   `ONEPIPELINE_LAUNCHER_SESSION` in its environment is set to that same session.
   Those are the bytes to hand it by hand, and a source is drivable that way with
-  no guard in front of it. A source need not read it — one whose question does
-  not turn on the session may close it unread, and its answer is taken as any
-  other's. Its standard error is discarded. Sources are asked
+  no guard in front of it. A source must take the whole of it: one that closes
+  its standard input before the input was delivered in full has answered
+  without knowing whose stop this is, so whatever it answered is not taken and
+  it is a source that [could not be consulted](#declared-sources). Input the
+  pipe accepted before the source exited counts as delivered, whether or not it
+  was read. Its standard error is discarded. Sources are asked
   concurrently with each other and with `unwatched`, and the same command
   declared twice is asked once.
 - **What it may answer.** One object on standard output, in the vocabulary this
@@ -108,7 +111,8 @@ unfinished'`. With none declared the verb is exactly the contract above.
   has its memory removed. A source memory that cannot be read, written or
   removed is a `warn`, exactly as the verb's own is.
 - **A source that cannot be consulted blocks.** A source that is missing, cannot
-  be started, exits non-zero, does not answer within `--source-timeout` seconds
+  be started, is not delivered its whole input, exits non-zero, does not answer
+  within `--source-timeout` seconds
   (default `10`, at most `3600`; it is then ended, with everything it started —
   and one that exits leaving something behind holding its standard output past
   that deadline is the same unanswered source, with what it left ended too, on

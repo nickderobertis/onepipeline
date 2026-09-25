@@ -1382,29 +1382,6 @@ fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_pa
         );
     }
 
-    // One that closes its input unread is still asked, and its answer taken:
-    // the input is offered, not owed.
-    let unread = world.root.join("sources/closes-its-input");
-    onepipeline_testfakes::executable(
-        &unread,
-        "#!/bin/sh\nexec 0<&-\necho '{\"verdict\":\"block\",\"reason\":\"host-wide freeze\"}'\n",
-    );
-    let unread = unread.display().to_string();
-    let taken = world.run_with_stdin(
-        &declaring(&[unread.as_str()], &[]),
-        &json!({"session": session}).to_string(),
-    );
-    taken.exited(0);
-    let told = verdict(&taken.stdout).expect("a verdict");
-    assert_eq!(told["verdict"], json!("block"), "{told}");
-    assert!(
-        told["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("host-wide freeze")
-                && !reason.contains("could not be consulted")),
-        "{told}"
-    );
-
     // A shell that cannot be found to run a source in is the same refusal.
     let unstartable = answering("unstartable", "echo '{\"verdict\":\"none\"}'");
     let mut shell_less = world.cmd(&declaring(&[unstartable.as_str()], &[]));
@@ -1522,5 +1499,60 @@ fn declared_sources_are_consulted_together() {
         Some(json!({"verdict": "none"})),
         "{}",
         met.stdout
+    );
+}
+
+/// A source that closes its standard input before its input was delivered in
+/// full answered without knowing whose stop this is, so its `none` is not
+/// taken: the stop is refused naming the failed delivery, and the continuation
+/// after that refusal ends the turn.
+///
+/// The session is longer than a pipe buffer (64 KiB on Linux), so the input
+/// cannot sit whole in the pipe ahead of the source's closing it: the write is
+/// refused every time rather than racing the source's start. It stays under
+/// the 128 KiB one environment string may hold, because the source's
+/// environment names the session too.
+#[cfg(unix)]
+#[test]
+fn a_source_not_delivered_its_whole_input_refuses_the_stop_and_its_continuation_ends_the_turn() {
+    let owner = World::new("stop-guard-source-undelivered");
+    let world = guarded(&owner);
+    let path = world.root.join("sources/closes-its-input");
+    std::fs::create_dir_all(path.parent().expect("a directory")).expect("the directory");
+    onepipeline_testfakes::executable(
+        &path,
+        "#!/bin/sh\nexec 0<&-\necho '{\"verdict\":\"none\"}'\n",
+    );
+    let source = path.display().to_string();
+    let session = format!("s-{}", "x".repeat(100_000));
+    let sources = [source.as_str()];
+
+    let refused = world.run_with_stdin(
+        &declaring(&sources, &[]),
+        &json!({"session": session}).to_string(),
+    );
+    refused.exited(0);
+    let told = verdict(&refused.stdout).expect("a verdict");
+    assert_eq!(told["verdict"], json!("block"), "the `none` was taken");
+    documented(&told);
+    let reason = told["reason"].as_str().expect("a reason");
+    let head: String = reason.chars().take(400).collect();
+    assert!(
+        reason.contains(&source)
+            && reason.contains("could not be consulted")
+            && reason.contains("its input could not be delivered to it in full"),
+        "the refusal does not name the source and the failed delivery: {head}"
+    );
+    assert!(refused.stderr.is_empty(), "{}", refused.stderr);
+
+    let ended = world.run_with_stdin(
+        &declaring(&sources, &[]),
+        &json!({"session": session, "continuation": true}).to_string(),
+    );
+    ended.exited(0);
+    assert_eq!(
+        verdict(&ended.stdout),
+        Some(json!({"verdict": "none"})),
+        "the continuation did not end the turn"
     );
 }

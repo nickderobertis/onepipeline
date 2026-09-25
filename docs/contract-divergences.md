@@ -6854,8 +6854,9 @@ verb's own neutral input for the session it is answering about and answering
 one neutral verdict object. The answers combine with the verb's own, the
 strongest winning and every block's reason kept; the continuation rule holds
 per source, under a memory keyed by the session and the command. A source that
-cannot be consulted — missing, non-zero, past `--source-timeout`, silent, or
-outside the vocabulary — **blocks**, naming itself and what went wrong: the one
+cannot be consulted — missing, not delivered its whole input, non-zero, past
+`--source-timeout`, silent, or outside the vocabulary — **blocks**, naming
+itself and what went wrong: the one
 place the stand-aside rule above is turned around, because a declared source is
 a condition the host asked to be enforced, and a warning would let the turn end
 over it unshown. The per-source memory bounds that to one refused stop per
@@ -6883,8 +6884,9 @@ neutral format, each handed the input's session in the verb's own input bytes;
 a continuation over unchanged answers ends the turn and one where a single
 source moved refuses on it alone; both hook renderings ask a source about the
 payload's session and end the turn on the continuation after its block; and a
-source that is missing, exits non-zero, times out, writes nothing, or answers
-any of seven shapes outside the vocabulary refuses the stop naming itself, with
+source that is missing, is not delivered its whole input, exits non-zero, times
+out, writes nothing, or answers any of seven shapes outside the vocabulary
+refuses the stop naming itself, with
 the continuation after it ending the turn.
 
 <!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
