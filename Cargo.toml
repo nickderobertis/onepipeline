@@ -539,20 +539,17 @@ resolver = "2"
 # `oneagentgraph` 0.4.10 is the relink onto the `oneharness-core` 0.18.0 that
 # block asks for, and nothing else: nothing here reads anything new from it.
 #
-# `onevcs` 0.32.1 is the release carrying onevcs #173-#177, which
+# `onevcs` 0.32.2 is the floor. It carries onevcs #173-#177, which
 # `src/maintenance.rs` is written to: `registered_identities()` in place of a
 # spawned `onevcs repos`, `SlotOutcome::Unavailable` beside a narrowed `Broken`,
 # a non-empty `maintain.command` argv, and listings that refuse unreadable
-# session records rather than read them as empty. `onevcs-testing` 0.8.1
+# session records rather than read them as empty. And its `git fetch` into a
+# checkout takes turns under a lock in that checkout's common directory: below
+# it, a session opening and a landing could fetch into one identity's shared
+# checkout at once, and git failed the loser with `cannot lock ref` even where
+# the ref already held what it wanted — on Windows, every time, in
+# `tests/e2e/lifecycle.rs`'s pooled-identity journey. `onevcs-testing` 0.8.2
 # requires exactly it, so the two move together.
-#
-# `onevcs` 0.32.2 is the floor because its `git fetch` into a checkout takes
-# turns under a lock in that checkout's common directory. Below it, a session
-# opening and a landing could fetch into one identity's shared checkout at once,
-# and git's ref transaction failed the loser with `cannot lock ref` even where
-# the ref already held what it wanted. On Windows that settled a pooled node
-# `publication-failed` every time. `onevcs-testing` 0.8.2 requires exactly it.
-# `tests/e2e/lifecycle.rs`'s pooled-identity journey drives that overlap.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
