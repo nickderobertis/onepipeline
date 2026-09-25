@@ -109,6 +109,9 @@ pub const EVALUATOR_OPENING: &str = "You are a strict, careful evaluator";
 /// from it in a child. Once that child has been waited for, nothing anywhere holds
 /// the program open, and nothing has changed a mode after the fact.
 ///
+/// Owner-only (`0700`): the test process and the children it starts are the only
+/// things that run a fixture, and they all run as its owner.
+///
 /// A file already at `path` is unlinked first rather than truncated, so a
 /// rewrite is a fresh file too: `cp` onto an existing file keeps that file's mode
 /// and writes through its inode, which is the in-place write this exists to avoid.
@@ -136,7 +139,7 @@ fn staged(path: &Path, body: &[u8]) {
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o755)
+        .mode(0o700)
         .open(&staging)
         .and_then(|mut file| file.write_all(body))
         .unwrap_or_else(|error| panic!("{} could not be staged: {error}", path.display()));
