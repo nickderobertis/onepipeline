@@ -3059,6 +3059,12 @@ pub(crate) enum ClaimedBy {
     /// The ownership lock, naming its holder.
     OwnershipLock { pid: u32 },
     /// One dispatch's registry entry.
+    ///
+    /// `pid` is required rather than optional-when-empty, and that is the
+    /// compatibility decision: a line without it could only be read as naming
+    /// every pid, which is the collision it was added to end, or none, which is
+    /// what refusing the line already does. A refused line leaves the claim
+    /// judged on its stamp alone, as it was before this record existed.
     Dispatch {
         pid: u32,
         node: String,
@@ -3341,7 +3347,7 @@ mod tests {
     /// A line of the ended record whose stamp is blank, or that names no claim,
     /// is refused at the parse, so no reader can hold it as a process that ended.
     #[test]
-    fn an_ended_line_with_a_blank_stamp_or_no_claim_does_not_parse() {
+    fn an_ended_line_with_a_blank_stamp_no_claim_or_a_pidless_dispatch_does_not_parse() {
         let whole = r#"{"claim":{"launch-record":{"pid":7}},"started":"linux-proc-stat:1"}"#;
         assert!(
             serde_json::from_str::<Ended>(whole).is_ok(),
@@ -3352,6 +3358,9 @@ mod tests {
             r#"{"claim":{"launch-record":{"pid":7}},"started":"   "}"#,
             r#"{"started":"linux-proc-stat:1"}"#,
             r#"{"claim":{"a-record-this-build-does-not-know":{}},"started":"linux-proc-stat:1"}"#,
+            // A dispatch named without the pid its entry was written for, as an
+            // earlier build of this record wrote it: it names no one process.
+            r#"{"claim":{"dispatch":{"node":"build","dispatched_at":"2026-09-25T00:00:00.000Z"}},"started":"linux-proc-stat:1"}"#,
         ] {
             assert!(
                 serde_json::from_str::<Ended>(refused).is_err(),

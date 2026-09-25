@@ -3438,6 +3438,42 @@ fn a_dispatch_an_earlier_stop_ended_is_over_once_its_pid_is_reissued() {
         .run(&["stop", &run])
         .exited(REFUSED)
         .err_has("every recorded identity disagreed");
+    // A dispatch line an earlier build of this record wrote, naming the dispatch
+    // by its node and instant alone. Read as naming any pid, it would place the
+    // stranger as surely as a line naming every dispatch of that node in that
+    // millisecond, which is what the pid was added to stop; so it is not read, the
+    // claim is judged on its stamp alone, and the stranger is declined as it was
+    // before this record existed.
+    let legacy: Vec<String> = kept
+        .lines()
+        .map(|line| {
+            let mut line: serde_json::Value =
+                serde_json::from_str(line).expect("the first stop wrote JSON lines");
+            if let Some(dispatch) = line["claim"]["dispatch"].as_object_mut() {
+                dispatch.remove("pid");
+            }
+            line.to_string()
+        })
+        .collect();
+    assert!(
+        legacy.iter().any(|line| line.contains("\"dispatch\"")),
+        "the first stop recorded no dispatch line to stand for the earlier build's:\n{kept}"
+    );
+    std::fs::write(&ended, format!("{}\n", legacy.join("\n"))).expect("the earlier build's lines");
+    world
+        .run(&["stop", &run])
+        .exited(REFUSED)
+        .err_has(&format!(
+            "the dispatch registry names pid {taken}, which this host has since given to another process"
+        ))
+        .err_has("every recorded identity disagreed");
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about the stranger")
+            .is_none(),
+        "a stop signalled pid {taken} on an earlier build's record"
+    );
     // And one that does not parse at all is passed over, while the lines around
     // it still say what they say.
     std::fs::write(&ended, format!("not json at all\n{kept}")).expect("the record is restored");
