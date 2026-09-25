@@ -2914,6 +2914,21 @@ fn write_dispatch(
 /// Ordered because a caller acts on them — a teardown signals what they name —
 /// and a directory listing comes in whatever order the host gives.
 pub fn dispatches_of(paths: &RunPaths) -> Result<Vec<DispatchRecord>> {
+    Ok(dispatch_entries_of(paths)?
+        .into_iter()
+        .map(|(_, held)| held)
+        .collect())
+}
+
+/// [`dispatches_of`], each record beside the name of the registry entry that
+/// holds it.
+///
+/// The entry's name is the dispatch's own identity in the registry — the pid it
+/// ran in and the claim that process minted for it — and it is fixed when the
+/// entry is written. It is what a teardown records a process it ended against,
+/// because a start stamp alone names only when a process started, and two
+/// dispatches can start in one clock tick.
+pub(crate) fn dispatch_entries_of(paths: &RunPaths) -> Result<Vec<(String, DispatchRecord)>> {
     let registry = paths.dispatches();
     let listed = fs::read_dir(&registry).map_err(|source| Error::Ledger {
         path: registry.clone(),
@@ -2940,24 +2955,28 @@ pub fn dispatches_of(paths: &RunPaths) -> Result<Vec<DispatchRecord>> {
                 held.pid
             )));
         }
-        found.push(held);
+        found.push((entry.file_name().to_string_lossy().into_owned(), held));
     }
-    found.sort_by_key(|held| held.pid);
+    found.sort_by(|(a, held_a), (b, held_b)| held_a.pid.cmp(&held_b.pid).then_with(|| a.cmp(b)));
     Ok(found)
 }
 
-/// A pid and the stamp that proves which process it named: a claim a teardown
-/// proved, and — once that teardown saw it end — a line of [`RunPaths::ended`].
+/// One line of [`RunPaths::ended`]: a process a teardown of this run proved and
+/// then saw end, as the claim that named it.
 ///
 /// Strict on read like every record here, so a line a newer or foreign writer
 /// left does not parse; [`ended_by_teardown`] says what a line that does not
 /// parse costs.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Stamped {
-    /// The process's pid on this host.
+pub(crate) struct Ended {
+    /// The record that named the process: the launch record, the ownership
+    /// lock, or one dispatch's registry entry by its name.
+    pub claim: String,
+    /// The pid it named, for a reader of the file; not part of the identity,
+    /// because a reissue is that pid naming another process.
     pub pid: u32,
-    /// Its start stamp, as the record that named it carried it.
+    /// The stamp that proved it was that claim's process.
     pub started: String,
 }
 
@@ -2972,7 +2991,7 @@ pub(crate) struct Stamped {
 /// claim it cannot place. This is the something else: *this run ended that
 /// process*, which is what makes a later stranger on its pid a reissue rather
 /// than a record gone wrong.
-pub(crate) fn record_ended(paths: &RunPaths, ended: &[Stamped]) -> Result<()> {
+pub(crate) fn record_ended(paths: &RunPaths, ended: &[Ended]) -> Result<()> {
     for one in ended {
         let line = serde_json::to_string(one)
             .map_err(|e| Error::Invalid(format!("{}: {e}", paths.ended().display())))?;
@@ -2981,31 +3000,29 @@ pub(crate) fn record_ended(paths: &RunPaths, ended: &[Stamped]) -> Result<()> {
     Ok(())
 }
 
-/// The stamp of every process a teardown of this run recorded as ended.
+/// Every claim a teardown of this run recorded as having ended, with the stamp
+/// it proved: `(claim, started)`.
 ///
-/// The stamp and not the pid, because the stamp is what names the process: the
-/// pid is only where it ran, and a reissue is by definition that pid naming
-/// something else. A claim whose stamp is here is one whose process this run
-/// has already seen end, wherever its record says it was.
+/// Both halves, and not the pid. The claim is which record named the process —
+/// one dispatch's entry is not another's, even where the two started in one
+/// clock tick and carry one stamp — and the stamp is which process that record
+/// named. The pid is left out because a reissue is by definition that pid
+/// naming something else.
 ///
 /// Read toward *not ended*, never the other way: a record that is not there, a
 /// file this host will not read, and a line that does not parse all leave a
 /// claim to be judged on its stamp alone, which is exactly what a teardown did
 /// before this record existed. So a read that fails is said on stderr and costs
 /// only the difference this record makes.
-pub(crate) fn ended_by_teardown(paths: &RunPaths) -> std::collections::BTreeSet<String> {
+pub(crate) fn ended_by_teardown(paths: &RunPaths) -> std::collections::BTreeSet<(String, String)> {
     let path = paths.ended();
     match fs::read_to_string(&path) {
-        // llmlint: ignore-block[boundary_inputs_validated] lines are parsed strictly and the pid
-        // is dropped by design, for the reason above; comparing it too would leave the journey in
-        // `tests/e2e/driver.rs` waiting on the host to reuse one particular pid.
         Ok(text) => text
             .lines()
-            .filter_map(|line| serde_json::from_str::<Stamped>(line).ok())
-            .map(|ended| ended.started)
-            .filter(|started| !started.is_empty())
+            .filter_map(|line| serde_json::from_str::<Ended>(line).ok())
+            .filter(|ended| !ended.claim.is_empty() && !ended.started.is_empty())
+            .map(|ended| (ended.claim, ended.started))
             .collect(),
-        // llmlint: ignore-end[boundary_inputs_validated]
         Err(why) if why.kind() == io::ErrorKind::NotFound => std::collections::BTreeSet::new(),
         Err(why) => {
             eprintln!(

@@ -2284,9 +2284,16 @@ pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Optio
         established,
         sys::Teardown::Signalled | sys::Teardown::PartlySignalled
     );
-    let ended: Vec<ledger::Stamped> = roots
+    let ended: Vec<ledger::Ended> = roots
         .into_iter()
         .filter(|root| signalled && sys::claim_on(root.pid, &root.started).is_over())
+        .flat_map(|root| {
+            root.claims.into_iter().map(move |claim| ledger::Ended {
+                claim,
+                pid: root.pid,
+                started: root.started.clone(),
+            })
+        })
         .collect();
     if let Err(why) = ledger::record_ended(paths, &ended) {
         eprintln!(
@@ -2336,10 +2343,9 @@ enum Aim {
     Elsewhere,
     /// The run is this host's, as far as its records say.
     Here {
-        /// The roots, in the order they are signalled: every claim whose own
-        /// stamp proves its pid is still the process the record named, with
-        /// that stamp.
-        roots: Vec<ledger::Stamped>,
+        /// The roots, in the order they are signalled: every process a claim's
+        /// own stamp proves is still the one its record named.
+        roots: Vec<Root>,
         /// Live pids on this host that no record could place either way. What
         /// stood in the way of proving each is said on stderr where it is met.
         ///
@@ -2352,6 +2358,19 @@ enum Aim {
         /// what distinguishes an all-declined walk from an empty one.
         declined: Vec<u32>,
     },
+}
+
+/// One process a stop aims at, and every claim whose stamp proved it.
+///
+/// The claims rather than one of them, because the launch record and the lock
+/// usually name the same driver: a teardown that ended it has ended what both
+/// named, and records it against each.
+#[derive(Debug, PartialEq, Eq)]
+struct Root {
+    pid: u32,
+    started: String,
+    /// Each as [`ledger::Ended::claim`] names it.
+    claims: Vec<String>,
 }
 
 /// Every process on this host a stop of this run aims at, or why this build
@@ -2377,7 +2396,7 @@ enum Aim {
 fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
     let here = sys::hostname();
     let mut on_this_host = false;
-    let mut roots: Vec<ledger::Stamped> = Vec::new();
+    let mut roots: Vec<Root> = Vec::new();
     let mut unproven: Vec<u32> = Vec::new();
     let mut declined: Vec<u32> = Vec::new();
     // Read once, before any claim is judged: what an earlier teardown of this
@@ -2389,37 +2408,62 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
     // lock's holder, then every dispatch the run has recorded.
     let claimed = std::iter::once((
         RECORDED_DRIVER,
+        RECORDED_DRIVER.to_string(),
         record.pid,
         record.host.clone(),
         record.started.clone(),
     ))
-    .chain(lock_held_on(paths).map(|held| (LOCK_HOLDER, held.pid, held.host, held.started)))
-    .chain(ledger::dispatches_of(paths)?.into_iter().map(|running| {
+    .chain(lock_held_on(paths).map(|held| {
         (
-            REGISTERED_DISPATCH,
-            running.pid,
-            running.host,
-            running.started,
+            LOCK_HOLDER,
+            LOCK_HOLDER.to_string(),
+            held.pid,
+            held.host,
+            held.started,
         )
-    }));
-    for (named_by, pid, host, started) in claimed {
+    }))
+    .chain(
+        ledger::dispatch_entries_of(paths)?
+            .into_iter()
+            .map(|(entry, running)| {
+                (
+                    REGISTERED_DISPATCH,
+                    format!("{REGISTERED_DISPATCH} entry {entry}"),
+                    running.pid,
+                    running.host,
+                    running.started,
+                )
+            }),
+    );
+    for (named_by, claim, pid, host, started) in claimed {
         if host != here {
             continue;
         }
         on_this_host = true;
-        if roots.iter().any(|root| root.pid == pid) || unproven.contains(&pid) {
+        if let Some(root) = roots.iter_mut().find(|root| root.pid == pid) {
+            // A second record naming a process already proved: under the same
+            // stamp it named the same process, and ending it ends both claims.
+            if root.started == started {
+                root.claims.push(claim);
+            }
             continue;
         }
-        let claim = ledger::Stamped { pid, started };
-        match sys::claim_on(pid, &claim.started) {
-            Claim::Proved => roots.push(claim),
+        if unproven.contains(&pid) {
+            continue;
+        }
+        match sys::claim_on(pid, &started) {
+            Claim::Proved => roots.push(Root {
+                pid,
+                started,
+                claims: vec![claim],
+            }),
             Claim::Gone => {}
-            // This run's own teardown signalled that very process and saw it
-            // end, so the stranger on its pid now is the host's reissue and
-            // nothing of this run's: the claim is over, exactly as a pid
-            // nobody holds is.
-            // llmlint: ignore[boundary_inputs_validated] matched on the stamp alone as `ledger::ended_by_teardown` says; this arm is reached only once the host has answered that the pid holds another process, so a stamp two pids share can only read a claim whose process is already over as over, and matching the pid too would leave the journey in `tests/e2e/driver.rs` waiting on the host to reuse one particular pid.
-            Claim::Reissued if ended.contains(&claim.started) => {}
+            // This run's own teardown signalled the process this very claim
+            // named and saw it end, so the stranger on its pid now is the host's
+            // reissue and nothing of this run's: the claim is over, exactly as a
+            // pid nobody holds is. Another claim that only shares its stamp is
+            // not that process, and is judged on its own.
+            Claim::Reissued if ended.contains(&(claim, started)) => {}
             Claim::Reissued => {
                 eprintln!(
                     "onepipeline: run '{}': the {named_by} names pid {pid}, which this host has \
@@ -3614,7 +3658,8 @@ mod tests {
         let reissued = "the dispatch an earlier stop ended, which is not this process";
         ledger::record_ended(
             &paths,
-            &[ledger::Stamped {
+            &[ledger::Ended {
+                claim: RECORDED_DRIVER.into(),
                 pid: sys::pid(),
                 started: reissued.into(),
             }],
@@ -3792,9 +3837,10 @@ mod tests {
         assert_eq!(
             roots_to_stop(&paths, &launch).expect("an entry from a newer writer reads"),
             Aim::Here {
-                roots: vec![ledger::Stamped {
+                roots: vec![Root {
                     pid: usable.pid,
                     started: usable.started.clone(),
+                    claims: vec![format!("{REGISTERED_DISPATCH} entry {}-0.json", usable.pid)],
                 }],
                 unproven: Vec::new(),
                 declined: Vec::new(),

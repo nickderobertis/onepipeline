@@ -3386,15 +3386,18 @@ fn a_dispatch_an_earlier_stop_ended_is_over_once_its_pid_is_reissued() {
         .err_has("every recorded identity disagreed");
     std::fs::remove_dir(&ended).expect("the directory is taken away");
     // A line this build does not know — a newer writer's field beside the very
-    // stamp — is not read as the process having ended.
-    std::fs::write(
-        &ended,
-        format!(
-            "{}\n",
-            json!({"pid": dispatch, "started": stamp, "by": "a newer writer"})
-        ),
-    )
-    .expect("a line from a newer writer");
+    // claim and stamp the first stop recorded — is not read as the process
+    // having ended.
+    let foreign: Vec<String> = kept
+        .lines()
+        .map(|line| {
+            let mut known: serde_json::Value =
+                serde_json::from_str(line).expect("the first stop wrote JSON lines");
+            known["by"] = json!("a newer writer");
+            known.to_string()
+        })
+        .collect();
+    std::fs::write(&ended, format!("{}\n", foreign.join("\n"))).expect("lines from a newer writer");
     world
         .run(&["stop", &run])
         .exited(REFUSED)
@@ -3438,6 +3441,77 @@ fn a_dispatch_an_earlier_stop_ended_is_over_once_its_pid_is_reissued() {
             .expect("this host answers about the stranger")
             .is_none(),
         "a declined stranger was signalled"
+    );
+    stranger.kill().expect("this test ends its own process");
+    stranger.wait().expect("the stranger is reaped");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// Ending one dispatch does not end another that shares its start stamp: a
+/// stranger on the other's pid is still declined.
+///
+/// A start stamp names when a process started, not which dispatch it was — two
+/// processes can start in one clock tick. So what a stop records as ended is the
+/// claim that named the process as well as its stamp, and a second registry
+/// entry carrying the same stamp is a claim no stop of this run ended.
+// llmlint: ignore-block[tests_mirror_real_usage] the second entry is written by hand, because
+// no verb can make two dispatches start in one clock tick; it names a real process this test
+// started, and both `stop`s are the real binary over the real run root.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_dispatch_sharing_a_stamp_with_one_a_stop_ended_is_still_declined() {
+    let world = World::new("driver-stop-shared-stamp");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "shared", vec![agent("build", &[])]);
+    world.until("the dispatch to be registered", |world| {
+        !world.dispatch_records(&run).is_empty()
+    });
+    let entry = world.dispatch_records(&run).remove(0);
+    let recorded: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&entry).expect("the entry reads"))
+            .expect("the entry is JSON");
+    let dispatch =
+        u32::try_from(recorded["pid"].as_u64().expect("the entry names a pid")).expect("a pid");
+    let stamp = recorded["started"]
+        .as_str()
+        .expect("the entry carries its stamp")
+        .to_string();
+
+    world
+        .run(&["stop", &run])
+        .exited(0)
+        .out_has("\"teardown\":\"signalled\"");
+    world.until("the run's processes to end", |_| {
+        !still_listed(driver) && !still_listed(dispatch)
+    });
+
+    // Another dispatch of this run, started in the same tick as the one the
+    // stop ended, whose pid the host has since handed to a stranger.
+    let mut stranger = stranger_started_after(std::slice::from_ref(&stamp));
+    let taken = stranger.id();
+    let mut other = recorded;
+    other["node"] = json!("ship");
+    other["pid"] = json!(taken);
+    std::fs::write(
+        entry.with_file_name(format!("{taken}-1.json")),
+        other.to_string(),
+    )
+    .expect("the other dispatch's entry is planted");
+
+    world
+        .run(&["stop", &run])
+        .exited(REFUSED)
+        .out_lacks("\"stopped\":true")
+        .err_has(&format!(
+            "the dispatch registry names pid {taken}, which this host has since given to another process"
+        ))
+        .err_has("every recorded identity disagreed");
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about the stranger")
+            .is_none(),
+        "a stop signalled pid {taken}, which the host had reissued"
     );
     stranger.kill().expect("this test ends its own process");
     stranger.wait().expect("the stranger is reaped");
