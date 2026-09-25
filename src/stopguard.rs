@@ -216,7 +216,8 @@ fn named(session: String, continuation: bool) -> Option<Asked> {
 /// — per source — before it is made.
 ///
 /// The sources are consulted concurrently with `unwatched` and with each other,
-/// so the whole stop is bounded by one `timeout` rather than by their sum.
+/// so what they add to the stop is at most one `timeout` rather than the sum of
+/// theirs; `unwatched` itself is bounded as the verb always was, by its cost.
 ///
 /// `unresolved` is what the ordinary verb would have written on standard error
 /// for the same question, handed back so the caller writes exactly that and
