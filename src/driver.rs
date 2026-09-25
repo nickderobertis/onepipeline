@@ -2283,7 +2283,7 @@ pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Optio
     // saw end is one this run ended — so a later teardown that meets its pid
     // reissued knows it for a reissue. Best effort: failing to write it costs a
     // later teardown only what this record adds, and is said where it happens.
-    let ended: Vec<ledger::Ended> = roots
+    let ended: Vec<ledger::Stamped> = roots
         .into_iter()
         .filter(|root| sys::claim_on(root.pid, &root.started).is_over())
         .collect();
@@ -2338,7 +2338,7 @@ enum Aim {
         /// The roots, in the order they are signalled: every claim whose own
         /// stamp proves its pid is still the process the record named, with
         /// that stamp.
-        roots: Vec<ledger::Ended>,
+        roots: Vec<ledger::Stamped>,
         /// Live pids on this host that no record could place either way. What
         /// stood in the way of proving each is said on stderr where it is met.
         ///
@@ -2376,7 +2376,7 @@ enum Aim {
 fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
     let here = sys::hostname();
     let mut on_this_host = false;
-    let mut roots: Vec<ledger::Ended> = Vec::new();
+    let mut roots: Vec<ledger::Stamped> = Vec::new();
     let mut unproven: Vec<u32> = Vec::new();
     let mut declined: Vec<u32> = Vec::new();
     // Read once, before any claim is judged: what an earlier teardown of this
@@ -2409,7 +2409,7 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
         if roots.iter().any(|root| root.pid == pid) || unproven.contains(&pid) {
             continue;
         }
-        let claim = ledger::Ended { pid, started };
+        let claim = ledger::Stamped { pid, started };
         match sys::claim_on(pid, &claim.started) {
             Claim::Proved => roots.push(claim),
             Claim::Gone => {}
@@ -3612,7 +3612,7 @@ mod tests {
         let reissued = "the dispatch an earlier stop ended, which is not this process";
         ledger::record_ended(
             &paths,
-            &[ledger::Ended {
+            &[ledger::Stamped {
                 pid: sys::pid(),
                 started: reissued.into(),
             }],
@@ -3790,7 +3790,7 @@ mod tests {
         assert_eq!(
             roots_to_stop(&paths, &launch).expect("an entry from a newer writer reads"),
             Aim::Here {
-                roots: vec![ledger::Ended {
+                roots: vec![ledger::Stamped {
                     pid: usable.pid,
                     started: usable.started.clone(),
                 }],

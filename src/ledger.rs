@@ -2946,13 +2946,18 @@ pub fn dispatches_of(paths: &RunPaths) -> Result<Vec<DispatchRecord>> {
     Ok(found)
 }
 
-/// One process a teardown of this run aimed at, proved by its stamp, and then
-/// saw end.
+/// A pid and the stamp that proves which process it named: a claim a teardown
+/// proved, and — once that teardown saw it end — a line of [`RunPaths::ended`].
+///
+/// Strict on read like every record here, so a line a newer or foreign writer
+/// left does not parse; [`ended_by_teardown`] says what a line that does not
+/// parse costs.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub(crate) struct Ended {
-    /// The pid the teardown signalled.
+#[serde(deny_unknown_fields)]
+pub(crate) struct Stamped {
+    /// The process's pid on this host.
     pub pid: u32,
-    /// The stamp that proved the pid was this run's process when it was.
+    /// Its start stamp, as the record that named it carried it.
     pub started: String,
 }
 
@@ -2967,7 +2972,7 @@ pub(crate) struct Ended {
 /// claim it cannot place. This is the something else: *this run ended that
 /// process*, which is what makes a later stranger on its pid a reissue rather
 /// than a record gone wrong.
-pub(crate) fn record_ended(paths: &RunPaths, ended: &[Ended]) -> Result<()> {
+pub(crate) fn record_ended(paths: &RunPaths, ended: &[Stamped]) -> Result<()> {
     for one in ended {
         let line = serde_json::to_string(one)
             .map_err(|e| Error::Invalid(format!("{}: {e}", paths.ended().display())))?;
@@ -2993,7 +2998,7 @@ pub(crate) fn ended_by_teardown(paths: &RunPaths) -> std::collections::BTreeSet<
     match fs::read_to_string(&path) {
         Ok(text) => text
             .lines()
-            .filter_map(|line| serde_json::from_str::<Ended>(line).ok())
+            .filter_map(|line| serde_json::from_str::<Stamped>(line).ok())
             .map(|ended| ended.started)
             .filter(|started| !started.is_empty())
             .collect(),

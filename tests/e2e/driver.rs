@@ -3332,8 +3332,10 @@ fn a_stop_that_declines_every_live_identity_does_not_report_success() {
 // product operation, and waiting for this particular pid to be recycled is unbounded. The
 // fixture moves only the pid a registry entry names — the entry the dispatch itself wrote,
 // stamp untouched — onto a real process this test started, and adds one entry for the second
-// half; the real `stop` command reads the real run root either way and must leave the
-// stranger alive.
+// half. The record of what the first stop ended is replaced by hand only to stand for a host
+// that will not read it and for lines a newer writer or a torn append leaves, which no verb of
+// this build writes. The real `stop` command reads the real run root each time and must leave
+// the stranger alive.
 #[cfg(unix)]
 #[test]
 fn a_dispatch_an_earlier_stop_ended_is_over_once_its_pid_is_reissued() {
@@ -3369,6 +3371,42 @@ fn a_dispatch_an_earlier_stop_ended_is_over_once_its_pid_is_reissued() {
     let mut reissued = recorded.clone();
     reissued["pid"] = json!(taken);
     std::fs::write(&entry, reissued.to_string()).expect("the reissued pid is planted");
+
+    // What the first stop ended is the run's own record of it. One this host
+    // will not read is said where it is met and costs only what it adds: the
+    // claim is judged on its stamp alone, and declined as it always was.
+    let ended = world.run_file(&run, "ended.jsonl");
+    let kept = std::fs::read_to_string(&ended).expect("the first stop recorded what it ended");
+    assert!(
+        kept.contains(&stamp),
+        "the first stop did not record the dispatch it ended:\n{kept}"
+    );
+    std::fs::remove_file(&ended).expect("the record is moved aside");
+    std::fs::create_dir(&ended).expect("a directory where the record belongs");
+    world
+        .run(&["stop", &run])
+        .exited(REFUSED)
+        .err_has("ended.jsonl could not be read")
+        .err_has("judged on its stamp alone")
+        .err_has("every recorded identity disagreed");
+    std::fs::remove_dir(&ended).expect("the directory is taken away");
+    // A line this build does not know — a newer writer's field beside the very
+    // stamp — is not read as the process having ended.
+    std::fs::write(
+        &ended,
+        format!(
+            "{}\n",
+            json!({"pid": dispatch, "started": stamp, "by": "a newer writer"})
+        ),
+    )
+    .expect("a line from a newer writer");
+    world
+        .run(&["stop", &run])
+        .exited(REFUSED)
+        .err_has("every recorded identity disagreed");
+    // And one that does not parse at all is passed over, while the lines around
+    // it still say what they say.
+    std::fs::write(&ended, format!("not json at all\n{kept}")).expect("the record is restored");
 
     world
         .run(&["stop", &run])
