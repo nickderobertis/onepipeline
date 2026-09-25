@@ -2955,26 +2955,66 @@ pub(crate) fn dispatch_entries_of(paths: &RunPaths) -> Result<Vec<(String, Dispa
                 held.pid
             )));
         }
-        found.push((entry.file_name().to_string_lossy().into_owned(), held));
+        let Ok(name) = entry.file_name().into_string() else {
+            return Err(Error::Invalid(format!(
+                "{}: the entry's name is not text, so nothing can name the dispatch it records",
+                entry.path().display()
+            )));
+        };
+        found.push((name, held));
     }
     found.sort_by(|(a, held_a), (b, held_b)| held_a.pid.cmp(&held_b.pid).then_with(|| a.cmp(b)));
     Ok(found)
 }
 
+/// Which of a run's records named a process, and the pid it was written for.
+///
+/// The pid is the one the record was **written** for, fixed with it: the launch
+/// record's and the lock's are the pid each named when a teardown proved it, and
+/// a registry entry's is in its name, `<pid>-<claim>.json`, which the dispatch
+/// wrote once and nothing renames. So a reissue — that pid now naming another
+/// process — is still the same claim, and a later driver or dispatch at another
+/// pid is a different one, whatever stamp it carries.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub(crate) enum ClaimedBy {
+    /// The launch record, naming its driver.
+    LaunchRecord { pid: u32 },
+    /// The ownership lock, naming its holder.
+    OwnershipLock { pid: u32 },
+    /// One entry of the dispatch registry, by its name.
+    DispatchEntry { entry: String },
+}
+
+impl ClaimedBy {
+    /// Whether this claim was written for `pid`.
+    fn written_for(&self, pid: u32) -> bool {
+        match self {
+            Self::LaunchRecord { pid: named } | Self::OwnershipLock { pid: named } => *named == pid,
+            Self::DispatchEntry { entry } => entry
+                .strip_suffix(".json")
+                .and_then(|stem| stem.split_once('-'))
+                .is_some_and(|(named, claim)| {
+                    named.parse::<u32>() == Ok(pid)
+                        && !claim.is_empty()
+                        && claim.bytes().all(|byte| byte.is_ascii_digit())
+                }),
+        }
+    }
+}
+
 /// One line of [`RunPaths::ended`]: a process a teardown of this run proved and
 /// then saw end, as the claim that named it.
 ///
-/// Strict on read like every record here, so a line a newer or foreign writer
-/// left does not parse; [`ended_by_teardown`] says what a line that does not
-/// parse costs.
+/// Strict on read like every record here: a line a newer or foreign writer left
+/// does not parse, and one whose pid is not the pid its claim was written for is
+/// not a record of that claim. [`ended_by_teardown`] says what either costs.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Ended {
-    /// The record that named the process: the launch record, the ownership
-    /// lock, or one dispatch's registry entry by its name.
-    pub claim: String,
-    /// The pid it named, for a reader of the file; not part of the identity,
-    /// because a reissue is that pid naming another process.
+    /// The record that named the process.
+    pub claim: ClaimedBy,
+    /// The pid it named, which the claim was written for.
     pub pid: u32,
     /// The stamp that proved it was that claim's process.
     pub started: String,
@@ -3003,24 +3043,24 @@ pub(crate) fn record_ended(paths: &RunPaths, ended: &[Ended]) -> Result<()> {
 /// Every claim a teardown of this run recorded as having ended, with the stamp
 /// it proved: `(claim, started)`.
 ///
-/// Both halves, and not the pid. The claim is which record named the process —
-/// one dispatch's entry is not another's, even where the two started in one
-/// clock tick and carry one stamp — and the stamp is which process that record
-/// named. The pid is left out because a reissue is by definition that pid
-/// naming something else.
+/// The claim carries the pid it was written for, so one dispatch's entry is not
+/// another's even where the two started in one clock tick and carry one stamp,
+/// and a later driver at another pid is not the one that ended.
 ///
 /// Read toward *not ended*, never the other way: a record that is not there, a
 /// file this host will not read, and a line that does not parse all leave a
 /// claim to be judged on its stamp alone, which is exactly what a teardown did
 /// before this record existed. So a read that fails is said on stderr and costs
 /// only the difference this record makes.
-pub(crate) fn ended_by_teardown(paths: &RunPaths) -> std::collections::BTreeSet<(String, String)> {
+pub(crate) fn ended_by_teardown(
+    paths: &RunPaths,
+) -> std::collections::BTreeSet<(ClaimedBy, String)> {
     let path = paths.ended();
     match fs::read_to_string(&path) {
         Ok(text) => text
             .lines()
             .filter_map(|line| serde_json::from_str::<Ended>(line).ok())
-            .filter(|ended| !ended.claim.is_empty() && !ended.started.is_empty())
+            .filter(|ended| !ended.started.is_empty() && ended.claim.written_for(ended.pid))
             .map(|ended| (ended.claim, ended.started))
             .collect(),
         Err(why) if why.kind() == io::ErrorKind::NotFound => std::collections::BTreeSet::new(),

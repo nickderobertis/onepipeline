@@ -2369,8 +2369,7 @@ enum Aim {
 struct Root {
     pid: u32,
     started: String,
-    /// Each as [`ledger::Ended::claim`] names it.
-    claims: Vec<String>,
+    claims: Vec<ledger::ClaimedBy>,
 }
 
 /// Every process on this host a stop of this run aims at, or why this build
@@ -2408,7 +2407,7 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
     // lock's holder, then every dispatch the run has recorded.
     let claimed = std::iter::once((
         RECORDED_DRIVER,
-        RECORDED_DRIVER.to_string(),
+        ledger::ClaimedBy::LaunchRecord { pid: record.pid },
         record.pid,
         record.host.clone(),
         record.started.clone(),
@@ -2416,7 +2415,7 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
     .chain(lock_held_on(paths).map(|held| {
         (
             LOCK_HOLDER,
-            LOCK_HOLDER.to_string(),
+            ledger::ClaimedBy::OwnershipLock { pid: held.pid },
             held.pid,
             held.host,
             held.started,
@@ -2428,7 +2427,7 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
             .map(|(entry, running)| {
                 (
                     REGISTERED_DISPATCH,
-                    format!("{REGISTERED_DISPATCH} entry {entry}"),
+                    ledger::ClaimedBy::DispatchEntry { entry },
                     running.pid,
                     running.host,
                     running.started,
@@ -3659,7 +3658,7 @@ mod tests {
         ledger::record_ended(
             &paths,
             &[ledger::Ended {
-                claim: RECORDED_DRIVER.into(),
+                claim: ledger::ClaimedBy::LaunchRecord { pid: sys::pid() },
                 pid: sys::pid(),
                 started: reissued.into(),
             }],
@@ -3840,7 +3839,9 @@ mod tests {
                 roots: vec![Root {
                     pid: usable.pid,
                     started: usable.started.clone(),
-                    claims: vec![format!("{REGISTERED_DISPATCH} entry {}-0.json", usable.pid)],
+                    claims: vec![ledger::ClaimedBy::DispatchEntry {
+                        entry: format!("{}-0.json", usable.pid),
+                    }],
                 }],
                 unproven: Vec::new(),
                 declined: Vec::new(),

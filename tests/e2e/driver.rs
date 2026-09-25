@@ -3452,11 +3452,13 @@ fn a_dispatch_an_earlier_stop_ended_is_over_once_its_pid_is_reissued() {
 ///
 /// A start stamp names when a process started, not which dispatch it was — two
 /// processes can start in one clock tick. So what a stop records as ended is the
-/// claim that named the process as well as its stamp, and a second registry
-/// entry carrying the same stamp is a claim no stop of this run ended.
-// llmlint: ignore-block[tests_mirror_real_usage] the second entry is written by hand, because
-// no verb can make two dispatches start in one clock tick; it names a real process this test
-// started, and both `stop`s are the real binary over the real run root.
+/// claim that named the process, with the pid it was written for, as well as its
+/// stamp: a second registry entry carrying the same stamp, and a later driver at
+/// another pid under the ended driver's stamp, are claims no stop of this run
+/// ended.
+// llmlint: ignore-block[tests_mirror_real_usage] the second entry and the later driver's record
+// are written by hand, because no verb can make two processes start in one clock tick; each names
+// a real process this test started, and every `stop` is the real binary over the real run root.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_dispatch_sharing_a_stamp_with_one_a_stop_ended_is_still_declined() {
@@ -3492,11 +3494,8 @@ fn a_dispatch_sharing_a_stamp_with_one_a_stop_ended_is_still_declined() {
     let mut other = recorded;
     other["node"] = json!("ship");
     other["pid"] = json!(taken);
-    std::fs::write(
-        entry.with_file_name(format!("{taken}-1.json")),
-        other.to_string(),
-    )
-    .expect("the other dispatch's entry is planted");
+    let planted = entry.with_file_name(format!("{taken}-1.json"));
+    std::fs::write(&planted, other.to_string()).expect("the other dispatch's entry is planted");
 
     world
         .run(&["stop", &run])
@@ -3504,6 +3503,22 @@ fn a_dispatch_sharing_a_stamp_with_one_a_stop_ended_is_still_declined() {
         .out_lacks("\"stopped\":true")
         .err_has(&format!(
             "the dispatch registry names pid {taken}, which this host has since given to another process"
+        ))
+        .err_has("every recorded identity disagreed");
+
+    // And a later driver of the run, at another pid, under the stamp of the
+    // driver the stop ended: the launch record names a process no stop ended.
+    std::fs::remove_file(&planted).expect("the other dispatch's entry is taken back");
+    let record = world.run_file(&run, "launch.json");
+    let mut relaunched = world.run_json(&run, "launch.json");
+    assert_ne!(relaunched["pid"], json!(taken));
+    relaunched["pid"] = json!(taken);
+    std::fs::write(&record, relaunched.to_string()).expect("the later driver's record");
+    world
+        .run(&["stop", &run])
+        .exited(REFUSED)
+        .err_has(&format!(
+            "the launch record names pid {taken}, which this host has since given to another process"
         ))
         .err_has("every recorded identity disagreed");
     assert!(
