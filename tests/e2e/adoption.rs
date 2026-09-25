@@ -5389,6 +5389,113 @@ fn a_squash_merge_commit_no_release_can_be_attributed_through_is_answered_at_the
         Spelling::Commit,
     );
 }
+
+/// A node settled at the **squash-merge commit** its own change request landed as
+/// is answered through that change request, with nothing restated — and the
+/// release that follows starts the node waiting on it.
+///
+/// The ordinary case, and the one the journeys above leave out: no release exists
+/// when the work is published, so the landing `onevcs` finds from the change
+/// request's number is baselined at *no release*, and the first release of any
+/// version carries it. The squash commit sits on the base alone, so `onevcs`
+/// answers that it cannot resolve it — and the run already knows the change
+/// request that carried it, from the node's own settlement. Before the release
+/// asker fell back to it, this was a hold nothing lifted, and the settle printed
+/// acknowledgement advice for a landing that needed none.
+///
+/// The consumer is held behind a person until after the settle, so the first
+/// question anything asks about its dependency is asked at the stated commit: no
+/// answer the branch gave before the statement can stand in for it.
+#[test]
+fn a_squash_commit_baselined_before_any_release_is_answered_through_its_change_request() {
+    let name = "adoption-squash-fallback";
+    let world = watching(name);
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    the_engine_publishes_by_opening_a_change(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    // No answer file at all: nothing has been released, and that is what the
+    // landing's baseline is captured against.
+
+    let mut landed = engine();
+    landed["id"] = json!("landed");
+    let mut consumer = consumer(Some("published"));
+    consumer["deps"] = json!(["landed", "approve"]);
+    world.script("hold.wait", "hold");
+    let run = start(
+        &world,
+        name,
+        vec![landed, human("approve", &[]), consumer, agent("hold", &[])],
+    );
+    world.until("the published node to settle", |world| {
+        settled_status(world, &run, "landed") == Some("done".to_owned())
+    });
+    let url = change_url_of(&world, &run, "landed");
+    let branch = branch_of(&world, &run, "landed");
+
+    // A person squash-merges the change request, and the manager states the
+    // commit the merge made — which no branch of the work carries.
+    let squash = squash_land(&world, &engine_repo.checkout, &branch);
+    assert!(
+        release_status_of(&world, &squash).is_none(),
+        "`onevcs` resolved the squash commit, so nothing here would fall back"
+    );
+    let settled = world.run_with_stdin(
+        &["reply", &run],
+        &json!({"version": onepipeline::channel::REPLY_ENVELOPE_VERSION, "commands": [{
+            "op": "settle", "id": "landed", "outcome": "done",
+            "evidence": "its change request was squash-merged",
+            "landing": squash,
+        }]})
+        .to_string(),
+    );
+    settled.exited(0).out_has("\"applied\"");
+    for unsaid in [
+        "no release baseline",
+        "cannot resolve to landed work",
+        "onevcs release acknowledge",
+        "<CHANGE-REQUEST-URL>",
+    ] {
+        assert!(
+            !settled.stderr.contains(unsaid),
+            "a squash commit the run knows the change request of was answered with a hold \
+             ({unsaid:?}):\n{}",
+            settled.stderr
+        );
+    }
+    // What the fallback answers is the sibling's own record at the change request:
+    // a baseline of no release at all.
+    match release_status_of(&world, &url) {
+        Some(onevcs::ReleaseStatus::NotReleased { at_landing, .. }) => assert_eq!(
+            at_landing,
+            onevcs::Baseline::NoRelease,
+            "the landing was not baselined before any release"
+        ),
+        other => panic!("the change request does not answer against a baseline: {other:?}"),
+    }
+
+    // The consumer becomes ready, and its wait is answered through the change
+    // request — `not-released`, which a release lifts — rather than `not-answered`.
+    world.run(&["attest", &run, "approve"]).exited(0);
+    world.until("the wait to answer through the change request", |world| {
+        answered(world, &run, "consumer") == Some("not-released".to_owned())
+    });
+    assert!(!dispatched(&world, &run, "consumer"));
+
+    // The first release of any version carries the work, and starts the node
+    // with nobody having restated or recorded anything.
+    releases_at(&answer, "0.1.0");
+    world.until("the first release to start the held node", |world| {
+        dispatched(world, &run, "consumer")
+    });
+    assert_eq!(arrived_version(&world, &run, "consumer"), json!("0.1.0"));
+
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+}
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs is the crate under test itself — its own reply, its own release watch, a real `onevcs` store and a real probe subprocess — so a narrower project would declare the same dependency and skip nothing.
