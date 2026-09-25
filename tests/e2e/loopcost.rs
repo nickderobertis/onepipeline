@@ -401,7 +401,8 @@ fn the_board_and_the_frontier_are_recomputed_once_per_recorded_state_change() {
 ///
 /// Two consumers of the same upstream, one woken twenty times a second by a
 /// narrating dispatch and one twice a second. Their pass counts are an order of
-/// magnitude apart and what they read out of the upstream is not.
+/// magnitude apart on an idle host, and what they read out of the upstream is
+/// not on any host.
 ///
 /// Measured over [`WINDOW`], the same minute every other bound here is stated
 /// over: a paced read is a **rate**, and a window of a few seconds bounds it at a
@@ -449,15 +450,20 @@ fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
         .map(|(nth, run)| counts(&world, run).since(before[nth]))
         .collect();
 
-    // The pass rates really are far apart, which is what makes the next claim
-    // mean anything.
-    assert!(
-        did[0].passes > did[1].passes * 4,
-        "the two loops did not run at different rates: {did:?}"
-    );
     // Two reads answer one edge — has the node settled, and how far has that run
     // got — so twice a second is four reads a second and no more.
     let ceiling = 4 * WINDOW.as_secs() + 4;
+    // The chatty loop ran more passes than the ceiling allows reads, which is
+    // what makes the claims below mean anything: a loop that read on every pass
+    // would have read at least that often and broken the ceiling. Stated against
+    // the ceiling rather than against the quiet loop's passes, because the quiet
+    // loop is paced by deadlines and the chatty one by how fast this host runs a
+    // pass — on a loaded Windows runner a third of the idle rate, which put a
+    // ratio between the two below any fixed multiple while every claim here held.
+    assert!(
+        did[0].passes > ceiling,
+        "the chatty loop ran too few passes for its reads to say anything: {did:?}"
+    );
     for (nth, run) in ["chatty", "quiet"].iter().enumerate() {
         assert!(
             did[nth].upstream_reads <= ceiling,
