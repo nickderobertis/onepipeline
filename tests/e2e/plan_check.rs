@@ -98,12 +98,8 @@ fn check_script(world: &World, name: &str, body: &str) -> PathBuf {
 /// directory the verb runs in.
 #[cfg(unix)]
 fn check_in(directory: &Path, name: &str, body: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
     let path = directory.join(format!("{name}.sh"));
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("the check is written");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-        .expect("the check is executable");
+    onepipeline_testfakes::executable(&path, format!("#!/bin/sh\n{body}\n"));
     path
 }
 

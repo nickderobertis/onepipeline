@@ -155,6 +155,11 @@ mod store;
 mod summary;
 mod surface;
 mod turns;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys reach
+// every caller of the workspace-listing operations across `src/`, so the crate's edge is
+// the narrowest they fit behind.
+mod unreadable_sessions;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the
 // head of `tests/e2e/unwatched.rs` and is not restated here; this declaration is the other
 // site the rule reads, and what it adds is only that the module belongs to this binary for

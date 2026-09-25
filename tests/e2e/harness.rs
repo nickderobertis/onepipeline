@@ -1464,13 +1464,7 @@ impl World {
         let hooks = hooks_dir(self);
         std::fs::create_dir_all(&hooks).expect("a hooks directory");
         let path = hooks.join("commit-msg");
-        std::fs::write(&path, COMMIT_MSG_POLICY).expect("the commit-msg hook is written");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("the commit-msg hook is executable");
-        }
+        onepipeline_testfakes::executable(&path, COMMIT_MSG_POLICY);
         git(
             self,
             &repository.checkout,
@@ -1500,18 +1494,11 @@ impl World {
         let answer = self.root.join(format!("{name}.version"));
         let (script, body) = probe_script();
         let path = repository.checkout.join(script);
-        std::fs::write(
+        onepipeline_testfakes::executable(
             &path,
             body.replace("@VERSION_FILE@", &answer.to_string_lossy())
                 .replace("@RUNS_FILE@", &self.probe_runs_file(name).to_string_lossy()),
-        )
-        .expect("the probe script is written");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("the probe script is executable");
-        }
+        );
         git(self, &repository.checkout, &["add", "-A"]);
         git(
             self,
@@ -1981,13 +1968,9 @@ impl World {
     /// to leave every other question alone.
     #[cfg(unix)]
     fn path_with_ps(&self, name: &str, script: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let dir = self.root.join(name);
         std::fs::create_dir_all(&dir).expect("a directory for the ps stand-in");
-        let ps = dir.join("ps");
-        std::fs::write(&ps, format!("#!/bin/sh\n{script}\n")).expect("the ps stand-in is written");
-        std::fs::set_permissions(&ps, std::fs::Permissions::from_mode(0o755))
-            .expect("the ps stand-in is executable");
+        onepipeline_testfakes::executable(&dir.join("ps"), format!("#!/bin/sh\n{script}\n"));
         dir
     }
 
@@ -3169,75 +3152,82 @@ pub fn ended(child: std::process::Child) {
     child.wait_with_output().expect("the child ends");
 }
 
-/// Give the kernel time to finish writing back what a fixture just wrote, saying
-/// so on a line where the bound rather than the disk ended the wait.
+/// Put a host-sized fixture on the device before a clock is started over it:
+/// every file directly inside each of `runs`, each of those directories, and the
+/// `root` that holds them — exactly what the fixture wrote, and nothing else.
 ///
 /// For the host-sized journeys: each grows four hundred journals to ten gibibytes
-/// and then times a command against them, and the pages of that write are still on
-/// their way to the disk when the first invocation starts, so the clock reads the
-/// fixture's write rather than the command. `fsync` per file does not cover it —
-/// that puts *one file's* pages on the device while the rest of the machine's
-/// dirty pages are still being written — and this waits for the whole of it.
+/// and then times a command against them, and pages of that write still on their
+/// way to the disk would put the fixture's write in the clock rather than the
+/// command. Returning is the signal — the timing starts after this does — so there
+/// is no deadline here and nothing to poll.
 ///
-/// **Bounded, and it says when the bound was what ended it** — which is why it is
-/// spelled as letting the writeback settle rather than as waiting until it has: a
-/// disk that is still busy after [`SETTLING`] gets the measurement it would have
-/// got anyway, on a line saying how much was left, rather than a suite that hangs.
+/// **This fixture's own files, never the host's.** What it replaced waited on the
+/// machine-wide `Dirty` and `Writeback` counters, which every other process on the
+/// host moves: another repository compiling beside this suite could spend a
+/// journey's whole budget waiting on bytes this journey never wrote.
 ///
-/// **Linux, where the kernel says so.** `/proc/meminfo` carries `Dirty` and
-/// `Writeback` in kilobytes; everywhere else this returns at once, because there is
-/// no portable way to ask and a wait that guessed would be a sleep.
-pub fn let_writeback_settle() {
-    let settled = waited_for(SETTLING, std::time::Duration::from_millis(200), || {
-        dirty_bytes().is_none_or(|held| held <= SETTLED_BYTES)
-    });
-    if !settled {
-        println!(
-            "  the kernel is still writing back {:?} byte(s) after {SETTLING:?}; what follows \
-             is measured over a disk that is still busy",
-            dirty_bytes()
-        );
+/// Directories are synced on Unix only, which is where a new entry needs its
+/// directory's `fsync` to be durable; Windows opens no directory for writing
+/// through `std`, and its filesystem journals the entry with the file.
+pub fn synced_fixture<'a>(root: &Path, runs: impl IntoIterator<Item = &'a Path>) {
+    for dir in runs {
+        for entry in std::fs::read_dir(dir)
+            .unwrap_or_else(|error| panic!("{} cannot be listed: {error}", dir.display()))
+        {
+            let path = entry.expect("an entry of the fixture's run").path();
+            if path.is_file() {
+                // Opened for writing, and never written: Windows flushes a file
+                // only through a handle that may write it, and refuses the
+                // flush on a read-only one with `Access is denied`.
+                synced(&path, opened_past_replacement(&path));
+            }
+        }
+        synced_dir(dir);
     }
+    synced_dir(root);
 }
 
-/// What the kernel may still be holding before a measurement is its own.
+/// Open one of the fixture's files for writing, past the moment a replacement
+/// refuses it.
 ///
-/// Thirty-two mebibytes: far below the ten gibibytes a host-sized fixture writes,
-/// and far above the ordinary churn of a machine that is doing nothing in
-/// particular — so this waits for the fixture and not for idleness.
-const SETTLED_BYTES: u64 = 32 * 1024 * 1024;
-
-/// How long that wait may take before the measurement is made anyway.
-///
-/// Sixty seconds, twice: a journey that waited longer could reach nextest's own
-/// `terminate-after` — six sixty-second periods — and be killed rather than
-/// measured, which is worse than a measurement taken over a disk that is still
-/// busy.
-///
-/// **Nothing establishes what the wait is worth**: no run has been taken with it
-/// and without it, all else equal. It is kept as hygiene rather than as a
-/// demonstrated correction, and nothing this suite asserts rests on it.
-const SETTLING: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// How many bytes this host says it has yet to write back, or `None` where it will
-/// not say.
-#[cfg(target_os = "linux")]
-fn dirty_bytes() -> Option<u64> {
-    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let held = |key: &str| -> Option<u64> {
-        meminfo
-            .lines()
-            .find_map(|line| line.strip_prefix(key)?.split_whitespace().next())
-            .and_then(|kilobytes| kilobytes.parse::<u64>().ok())
-            .map(|kilobytes| kilobytes * 1024)
-    };
-    Some(held("Dirty:")? + held("Writeback:")?)
+/// The fixture's documents are the product's own, published by a rename, and the
+/// commands the journey ran over them republish them as they read. Windows
+/// refuses an open that lands while such a rename is replacing the name —
+/// `Access is denied`, which a listing journey's fixture met on
+/// `checkpoint.json` — for as long as anything holds the file being replaced.
+/// What the name holds a moment later is the file to sync; a refusal that
+/// outlasts the wait is reported as the host gave it.
+fn opened_past_replacement(path: &Path) -> std::io::Result<std::fs::File> {
+    let open = || std::fs::OpenOptions::new().write(true).open(path);
+    let mut opened = open();
+    waited_for(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(10),
+        || {
+            if !matches!(&opened, Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied) {
+                return true;
+            }
+            opened = open();
+            false
+        },
+    );
+    opened
 }
 
-#[cfg(not(target_os = "linux"))]
-fn dirty_bytes() -> Option<u64> {
-    None
+fn synced(path: &Path, opened: std::io::Result<std::fs::File>) {
+    opened
+        .and_then(|file| file.sync_all())
+        .unwrap_or_else(|error| panic!("{} is not on the device: {error}", path.display()));
 }
+
+#[cfg(unix)]
+fn synced_dir(dir: &Path) {
+    synced(dir, std::fs::File::open(dir));
+}
+
+#[cfg(not(unix))]
+fn synced_dir(_dir: &Path) {}
 
 /// Poll until `ready` holds, reporting whether it did before the deadline.
 ///
@@ -4616,7 +4606,9 @@ fn place(published: &Path, mine: &Path) -> std::io::Result<()> {
         std::process::id(),
         STAGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     ));
-    std::fs::copy(published, &staging)?;
+    // Through the shared helper rather than `std::fs::copy`, which would hold the
+    // copy open for writing in this process — the `ETXTBSY` its doc explains.
+    onepipeline_testfakes::executable(&staging, std::fs::read(published)?);
     std::fs::rename(&staging, mine).inspect_err(|_| {
         // A rename that did not happen leaves the staging file next to the
         // destination, where the next `build` would sweep nothing: the directory
@@ -4967,21 +4959,14 @@ fn install_hook(path: &Path, argv: &[&str]) {
         .iter()
         .map(|word| format!("'{}'", word.replace('\'', r"'\''")))
         .collect();
-    std::fs::write(
+    onepipeline_testfakes::executable(
         path,
         format!(
             "#!/bin/sh\n{}exec {}\n",
             VERBATIM_ARGUMENTS,
             quoted.join(" ")
         ),
-    )
-    .expect("the pre-push hook is written");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-            .expect("the pre-push hook is executable");
-    }
+    );
 }
 
 /// The two halves of the hook answer the same verbs.
@@ -5750,6 +5735,8 @@ pub struct Counts {
     pub publications: u64,
     pub upstream_reads: u64,
     pub release_asks: u64,
+    /// Pool-maintenance sweeps the driver started.
+    pub maintenance_sweeps: u64,
     pub store_bytes: u64,
     /// Journal records the loop folded into the run's state.
     ///
@@ -5769,6 +5756,7 @@ impl Counts {
             publications: self.publications - before.publications,
             upstream_reads: self.upstream_reads - before.upstream_reads,
             release_asks: self.release_asks - before.release_asks,
+            maintenance_sweeps: self.maintenance_sweeps - before.maintenance_sweeps,
             store_bytes: self.store_bytes - before.store_bytes,
             records_folded: self.records_folded - before.records_folded,
         }
@@ -5800,6 +5788,7 @@ pub fn counts(world: &World, run: &str) -> Counts {
         publications: count("publications"),
         upstream_reads: count("upstream_reads"),
         release_asks: count("release_asks"),
+        maintenance_sweeps: count("maintenance_sweeps"),
         store_bytes: count("store_bytes"),
         records_folded: count("records_folded"),
     }

@@ -2447,7 +2447,8 @@ fn the_pool_maintenance_schedule_is_what_the_divergence_record_names() {
         "the flag beats the config, and a blank value, flag or key, is this launch saying it has none",
         "`every` is the **only** key a rule or the default carries",
         "a slot is due when `last_maintained < now − every`, and the sibling decides it",
-        "nothing is written when every identity answered `no-maintain-command`, `no-slots` or `not-due`",
+        "only when some slot ran, is `unavailable` or is `broken`, or some identity was `claimed` or failed",
+        "nothing is written when every identity answered `no-maintain-command` or `no-slots`, or every slot it reported was `not-due` or `in-use`",
         "A launch naming no schedule runs no maintenance, spawns no thread, and behaves exactly as before",
     ] {
         assert!(CONTRACT.contains(names), "the contract no longer states {names}");
@@ -6246,6 +6247,7 @@ const RULINGS: &[(&str, &str)] = &[
     ("81.", "the CLI is argument parsing over them"),
     ("82.", "held under `workspace`"),
     ("83.", "pool-maintenance"),
+    ("89.", "some slot ran, is `unavailable` or is `broken`"),
 ];
 
 #[test]

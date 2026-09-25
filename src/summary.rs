@@ -1022,6 +1022,18 @@ impl Maintainer {
     /// refused because the document beside it could not be written would be this
     /// cache taking a run's own record down with it.
     fn write(&mut self) {
+        // No row at all rather than one whose attribution is made up. A launcher
+        // appends the run's first records before it writes the launch record, so
+        // a row written then would name nobody — and it would be stamped current
+        // against the journal, and so served, `[unknown]`, until the next append:
+        // on a Windows runner, after the driver had long since started and a
+        // reader had asked whose run it was. Without a row a reader folds, and a
+        // fold reads the launch record it needs or says it cannot.
+        //
+        // llmlint: ignore[changed_behavior_has_e2e] the launcher's window is driven through `runs` by `driver::a_run_listed_while_its_driver_is_on_its_way_up_is_the_launching_sessions`; a record torn under a live driver has no journey because the driver's two appenders each stamp only what they folded, so a reader refolds and reads the record strictly with or without this arm.
+        let Some(launch) = self.launch() else {
+            return;
+        };
         let mut folded = self.current();
         // Cross-DAG edges are resolved the way a view resolves them, so a row
         // and the graph it opens cannot describe different graphs. A graph
@@ -1057,7 +1069,7 @@ impl Maintainer {
         }
         let summary = RunSummary::derive(
             &self.paths.run,
-            &self.launch(),
+            &launch,
             &Store {
                 state: &folded.state,
                 name: self.name.clone(),
@@ -1071,49 +1083,15 @@ impl Maintainer {
         let _ = ledger::write_json(&self.paths.summary(), &summary);
     }
 
-    /// The run's launch record, as the row's attribution needs it.
+    /// The run's launch record, as the row's attribution needs it — or `None`
+    /// where there is none this build can read, and so no row to write.
     ///
     /// Read from the file on each write rather than held: the record is rewritten
     /// under a live run — an adoption claims the run for a fresh driver, and the
     /// observer's graph run is recorded after the launch that made it — and a
-    /// copy taken once would go on naming the driver that died. A record this
-    /// build cannot read leaves the row with the launch's defaults, which say
-    /// exactly what they say everywhere else: the record does not say.
-    fn launch(&self) -> LaunchRecord {
-        ledger::read_json_opt::<LaunchRecord>(&self.paths.launch()).unwrap_or(LaunchRecord {
-            run_id: self.paths.run.clone(),
-            project: String::new(),
-            dir: PathBuf::new(),
-            graph: String::new(),
-            graph_run: String::new(),
-            observer_runs: Vec::new(),
-            observer_ending: String::new(),
-            node_graph: String::new(),
-            pr_author_graph: String::new(),
-            node_validator: String::new(),
-            envelope_reviewer: String::new(),
-            launcher: crate::sys::UNKNOWN_LAUNCHER.to_string(),
-            session: String::new(),
-            pid: 0,
-            host: String::new(),
-            started: String::new(),
-            started_at: String::new(),
-            heartbeat_interval: 0,
-            writeback_item_budget: 0,
-            success_hook: String::new(),
-            failure_hook: String::new(),
-            hook_timeout: 0,
-            dispatch_env_hook: String::new(),
-            dispatch_env_hook_timeout: 0,
-            dag_sets: Vec::new(),
-            node_sets: Vec::new(),
-            adoptions: 0,
-            filters: crate::filter::Filters::default(),
-            bus_config: Default::default(),
-            maintenance_config: None,
-            oneharness_sessions: None,
-            envelope_reviewer_bar: Default::default(),
-        })
+    /// copy taken once would go on naming the driver that died.
+    fn launch(&self) -> Option<LaunchRecord> {
+        ledger::read_json_opt::<LaunchRecord>(&self.paths.launch())
     }
 }
 
@@ -1282,6 +1260,35 @@ mod tests {
         let before = ledger::bytes_read();
         let summary = RunSummary::of(paths).expect("the run reads");
         (summary, ledger::bytes_read() - before)
+    }
+
+    /// A launcher appends a run's first records **before** it writes the launch
+    /// record, and what the run is read as once that record exists is whose it
+    /// says the run is. The order is the launcher's own, through the real
+    /// journal writer.
+    #[test]
+    fn a_record_appended_before_the_launch_record_leaves_no_row_attributed_to_nobody() {
+        let root = scratch("attributed");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let mut journal = Journal::open(&paths);
+        journal
+            .emit(
+                PipelineKind::RunStarted,
+                crate::journal::labels("demo", None),
+                crate::journal::payload(&[("plan", json!(plan(&["build"])))]),
+            )
+            .expect("appended");
+        a_run(&root, "demo");
+
+        let row = RunSummary::of(&paths).expect("the run reads");
+        assert_eq!(
+            row.session, "a-session",
+            "the run was read as nobody's after its launch record said whose it was"
+        );
+        assert_eq!(row.launcher, "e2e");
+        assert_eq!(row.event_count, 1);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// The whole point of the document: a listing's cost does not grow with the

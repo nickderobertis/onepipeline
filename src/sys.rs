@@ -216,9 +216,22 @@ pub fn stop(pid: u32, how: Stop) -> Teardown {
 /// anything was signalled, since afterwards there is no tree left to descend. A
 /// tree still standing when `patience` runs out is
 /// [`Teardown::PartlySignalled`].
-pub fn stop_and_confirm(pids: &[u32], how: Stop, patience: Duration) -> Teardown {
-    let (established, aimed) = platform_stop(pids, how);
-    confirmed(established, || gone_within(&aimed, patience))
+///
+/// Beside that answer, which of `pids` this teardown's own signal was delivered
+/// to. The answer is about the whole tree, and a caller that records what *it*
+/// ended needs it per root: a root that went of its own accord before its ask
+/// was in a tree reported [`Teardown::Signalled`] all the same, and was not ended
+/// by this teardown.
+pub fn stop_and_confirm(pids: &[u32], how: Stop, patience: Duration) -> (Teardown, Vec<u32>) {
+    let (established, aimed, delivered) = platform_stop(pids, how);
+    let roots = delivered
+        .into_iter()
+        .filter(|pid| pids.contains(pid))
+        .collect();
+    (
+        confirmed(established, || gone_within(&aimed, patience)),
+        roots,
+    )
 }
 
 /// What the bounded liveness probe makes of what one round of signalling
@@ -326,21 +339,25 @@ fn aimable(roots: &[u32]) -> Vec<u32> {
     aimed
 }
 
+/// What one round of signalling established, the pids it aimed at, and the pids
+/// its signal was delivered to.
+type Signalling = (Teardown, Vec<u32>, Vec<u32>);
+
 #[cfg(unix)]
-fn platform_stop(roots: &[u32], how: Stop) -> (Teardown, Vec<u32>) {
+fn platform_stop(roots: &[u32], how: Stop) -> Signalling {
     let signal = match how {
         Stop::Politely => libc::SIGTERM,
         Stop::Now => libc::SIGKILL,
     };
     let mut aimed = aimable(roots);
     if aimed.is_empty() {
-        return (Teardown::NothingToStop, aimed);
+        return (Teardown::NothingToStop, aimed, Vec::new());
     }
     // The table is read **before** anything is signalled: a process whose parent
     // has died is reparented at once, so a table read after any root is gone no
     // longer descends to what was under it.
     let Some(table) = process_table() else {
-        return (Teardown::NotAttempted, Vec::new());
+        return (Teardown::NotAttempted, Vec::new(), Vec::new());
     };
     // The roots first, so what is left has stopped growing while its members are
     // taken down.
@@ -357,7 +374,13 @@ fn platform_stop(roots: &[u32], how: Stop) -> (Teardown, Vec<u32>) {
     // nothing but processes already gone reached no tree at all, which is the
     // answer a caller reports as such rather than as a stop it made.
     let answers: Vec<Reached> = aimed.iter().map(|pid| signal_one(*pid, signal)).collect();
-    (established(&answers), aimed)
+    let delivered = aimed
+        .iter()
+        .zip(&answers)
+        .filter(|(_, answer)| **answer == Reached::Delivered)
+        .map(|(pid, _)| *pid)
+        .collect();
+    (established(&answers), aimed, delivered)
 }
 
 /// What the answers from one round of signalling establish about the tree.
@@ -563,16 +586,16 @@ fn parse_table(listed: &str) -> Option<Vec<(u32, u32)>> {
 // real `stop` there, and `a_confirmed_stop_answers_only_once_every_descendant_is_gone` holds the
 // enumeration below on both platforms.
 #[cfg(windows)]
-fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
+fn platform_stop(roots: &[u32], _how: Stop) -> Signalling {
     let aimed_roots: Vec<u32> = aimable(roots)
         .into_iter()
         .filter(|pid| platform_process_may_be_live(*pid))
         .collect();
     if aimed_roots.is_empty() {
-        return (Teardown::NothingToStop, aimed_roots);
+        return (Teardown::NothingToStop, aimed_roots, Vec::new());
     }
     let Some(table) = process_table() else {
-        return (Teardown::NotAttempted, Vec::new());
+        return (Teardown::NotAttempted, Vec::new(), Vec::new());
     };
     let mut tree = aimed_roots.clone();
     for root in &aimed_roots {
@@ -588,7 +611,7 @@ fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
         .filter(|pid| platform_process_may_be_live(*pid))
         .collect();
     if aimed.is_empty() {
-        return (Teardown::NothingToStop, aimed);
+        return (Teardown::NothingToStop, aimed, Vec::new());
     }
     // Every process is asked separately, because `taskkill` takes one root, and
     // the answers are folded the way a teardown of several trees has to be: one
@@ -607,13 +630,20 @@ fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
     // since the listing is what `/T` still reaches there.
     let mut walked = true;
     let mut attempted = false;
+    let mut delivered = Vec::new();
     for pid in &aimed {
         let reach = if aimed_roots.contains(pid) {
             Reach::Alone
         } else {
             Reach::Tree
         };
-        match taskkill_established(taskkill(*pid, reach), || platform_process_may_be_live(*pid)) {
+        let ran = taskkill(*pid, reach);
+        // Delivered only where `taskkill` itself succeeded: one that failed on a
+        // process already gone ended nothing, whatever the fold makes of it.
+        if matches!(&ran, Ok(status) if status.success()) {
+            delivered.push(*pid);
+        }
+        match taskkill_established(ran, || platform_process_may_be_live(*pid)) {
             Teardown::Signalled => attempted = true,
             Teardown::PartlySignalled => {
                 attempted = true;
@@ -634,7 +664,7 @@ fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
         (false, true) => Teardown::PartlySignalled,
         (false, false) => Teardown::NotAttempted,
     };
-    (established, aimed)
+    (established, aimed, delivered)
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
@@ -2424,7 +2454,7 @@ mod tests {
                 Stop::Politely,
                 std::time::Duration::from_millis(300)
             ),
-            Teardown::PartlySignalled,
+            (Teardown::PartlySignalled, vec![deaf]),
             "a stop watched pid {deaf} never go and still called it a clean stop"
         );
         assert!(
@@ -2434,12 +2464,37 @@ mod tests {
 
         assert_eq!(
             stop_and_confirm(&[deaf], Stop::Now, std::time::Duration::from_secs(10)),
-            Teardown::Signalled,
+            (Teardown::Signalled, vec![deaf]),
             "a tree that went was not reported as reached"
         );
         assert!(
             !process_may_be_live(deaf),
             "the forceful ask left pid {deaf} running"
+        );
+    }
+
+    /// A root that went before its ask is in the teardown's answer — the tree was
+    /// reached, and nothing is left of it — but not among the roots this
+    /// teardown's signal was delivered to, so a caller recording what *it* ended
+    /// does not record that root.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_gone_before_its_ask_is_not_one_the_signal_was_delivered_to() {
+        let mut gone = std::process::Command::new("true")
+            .spawn()
+            .expect("a process that exits at once");
+        let went = gone.id();
+        gone.wait().expect("it is reaped, so nothing holds its pid");
+        let live = orphaned("sh -c 'echo $$; sleep 120'", 1)[0];
+
+        assert_eq!(
+            stop_and_confirm(&[went, live], Stop::Now, std::time::Duration::from_secs(10)),
+            (Teardown::Signalled, vec![live]),
+            "the root that went before its ask, pid {went}, was reported as signalled"
+        );
+        assert!(
+            !process_may_be_live(live),
+            "the forceful ask left pid {live} running"
         );
     }
 
@@ -2472,7 +2527,7 @@ mod tests {
 
         assert_eq!(
             stop_and_confirm(&roots, Stop::Now, std::time::Duration::from_secs(10)),
-            Teardown::Signalled,
+            (Teardown::Signalled, roots.clone()),
             "a stop that ended {every:?} did not report reaching them"
         );
         let surviving: Vec<u32> = every
@@ -2519,11 +2574,12 @@ mod tests {
     /// child's pid on its own stdout, and waits for it. The root's stdout is a
     /// pipe every level beneath inherits, so every announcement arrives on one
     /// stream and each is made by the process that started the level it names
-    /// — the same shape the Unix fixtures take with `echo $$`. What the stream
-    /// does **not** promise is order: `Start-Process` returns with the child
-    /// already running, so a deeper level's announcement, or the leaf's own
-    /// output, can land ahead of the line naming the level above it.
-    /// [`reported_levels`] is what reads the stream, and it says how.
+    /// — the same shape the Unix fixtures take with `echo $$`. The leaf alone is
+    /// kept off it, for the reason [`LEVEL_SCRIPT`] gives. What the stream does
+    /// **not** promise is order: `Start-Process` returns with the child already
+    /// running, so a deeper level's announcement can land ahead of the line
+    /// naming the level above it. [`reported_levels`] is what reads the stream,
+    /// and it says how.
     ///
     /// Nothing here asks the operating system where the tree is — `tests/AGENTS.md`
     /// says why — so there is no image name to tell a level from the
@@ -2552,12 +2608,11 @@ mod tests {
             Ok(pids) => pids,
             Err(why) => abandon(root, &why),
         };
-        // The leaf goes on writing — `ping` reports every reply — into the pipe
-        // every level inherited, so the pipe is drained for as long as the tree
-        // lasts rather than closed once the pids are in. A reader that went away
-        // would turn the leaf's next write into an error it exits on, and a full
-        // pipe would block it: either is a tree changing shape under a test that
-        // has not touched it yet. The thread ends when the last writer does.
+        // Every level still holds the pipe it inherited, so it is drained for as
+        // long as the tree lasts rather than closed once the pids are in: a
+        // level that wrote into a pipe nobody reads would fail or block on it,
+        // which is a tree changing shape under a test that has not touched it
+        // yet. The thread ends when the last writer does.
         std::thread::spawn(move || for _ in lines {});
         (root, pids)
     }
@@ -2572,7 +2627,15 @@ mod tests {
     /// the leaf writes. A level that cannot start says why on the same stream,
     /// under the same `level <n>` prefix, and exits, so the fixture reading pids
     /// fails quoting the reason rather than blocking on a line that never comes.
-    /// `-NoNewWindow` is
+    ///
+    /// Each line is **one** write, its terminator included, and the leaf's output
+    /// goes to a file of its own rather than down the pipe. Both are what keep a
+    /// line whole: several processes write into that pipe, `WriteLine` writes the
+    /// text and the newline as two, and `ping` writes its banner in pieces — so
+    /// an announcement landed inside the banner on a Windows runner, as
+    /// `Pinging 127.0.0.1 with 32 bytes of data:level 1 started <pid>`, and the
+    /// reader waited out all 120 of `ping`'s replies for a line it had already
+    /// been given. `-NoNewWindow` is
     /// what keeps every level a console process on the one console with the
     /// pipe inherited down the tree, and `-PassThru` is what hands the pid back.
     /// The script's own path is quoted by hand, because `Start-Process` joins
@@ -2585,13 +2648,14 @@ try {
   if ($below -gt 1) {
     $child = Start-Process -FilePath 'powershell' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'), ($below - 1)) -PassThru -NoNewWindow
   } else {
-    $child = Start-Process -FilePath 'ping' -ArgumentList @('-n', '120', '127.0.0.1') -PassThru -NoNewWindow
+    $child = Start-Process -FilePath 'ping' -ArgumentList @('-n', '120', '127.0.0.1') -PassThru -NoNewWindow -RedirectStandardOutput ([System.IO.Path]::GetTempFileName())
   }
-  [Console]::Out.WriteLine("level " + $below + " started " + $child.Id)
+  [Console]::Out.Write("level " + $below + " started " + $child.Id + "`r`n")
   [Console]::Out.Flush()
   $child.WaitForExit()
 } catch {
-  [Console]::Out.WriteLine("level " + $below + " could not start the one below it: " + $_.Exception.Message)
+  [Console]::Out.Write("level " + $below + " could not start the one below it: " + $_.Exception.Message + "`r`n")
+  [Console]::Out.Flush()
   exit 1
 }
 "#;
@@ -2602,12 +2666,12 @@ try {
     /// Placed by what each line says rather than by when it arrived: the level
     /// given `below` announces the one directly under the root and the level
     /// given `1` announces the leaf, and the stream carries them in whatever
-    /// order the scheduler ran the levels. Every line without the `level`
-    /// prefix is the leaf's — `ping` writes a blank line and a banner before
-    /// its first reply — and is passed over. A prefixed line that is not an
-    /// announcement is a level saying it could not start, or a stream this
-    /// cannot trust, and either is a failure quoted whole; so is a level heard
-    /// twice, and a stream that ends before every level has spoken.
+    /// order the scheduler ran the levels. Only the levels write here, so a
+    /// blank line is passed over and any other line that is not an announcement
+    /// is a failure quoted whole: a level saying it could not start, or two
+    /// writes run together, which is a line this cannot trust and must not wait
+    /// past. So is a level heard twice, and a stream that ends before every
+    /// level has spoken.
     ///
     /// Not `#[cfg(windows)]`: the fixture that reads through it is, but what it
     /// promises about order and about noise is held on every platform.
@@ -2627,8 +2691,13 @@ try {
                     ))
                 }
             };
-            let Some(said) = line.trim().strip_prefix("level ") else {
+            if line.trim().is_empty() {
                 continue;
+            }
+            let Some(said) = line.trim().strip_prefix("level ") else {
+                return Err(format!(
+                    "the tree said {line:?} where a level's pid was due"
+                ));
             };
             let announced = said.split_once(" started ").and_then(|(level, pid)| {
                 Some((level.parse::<usize>().ok()?, pid.parse::<u32>().ok()?))
@@ -2660,23 +2729,17 @@ try {
         lines.iter().map(|line| Ok((*line).to_owned())).collect()
     }
 
-    /// The tree's levels are placed by what each announcement says, so the
-    /// leaf's own output arriving first and a deeper level announcing before
-    /// the one above it change nothing about the answer.
+    /// The tree's levels are placed by what each announcement says, so a deeper
+    /// level announcing before the one above it changes nothing about the
+    /// answer.
     ///
-    /// The stream is the one a root that is slow to announce produces: the
-    /// leaf's blank line and banner, the middle level naming the leaf, the root
-    /// naming the middle, then a reply.
+    /// The stream is the one a root that is slow to announce produces: a blank
+    /// line, the middle level naming the leaf, the root naming the middle, then
+    /// whatever comes after.
     #[test]
     fn a_trees_levels_are_read_by_what_they_say_and_not_by_when_they_arrive() {
-        let mut stream = a_stream_of(&[
-            "",
-            "Pinging 127.0.0.1 with 32 bytes of data:",
-            "level 1 started 4242",
-            "level 2 started 1717",
-            "Reply from 127.0.0.1: bytes=32 time<1ms TTL=128",
-        ])
-        .into_iter();
+        let mut stream =
+            a_stream_of(&["", "level 1 started 4242", "level 2 started 1717", ""]).into_iter();
         let levels = reported_levels(
             &mut stream,
             std::num::NonZeroUsize::new(2).expect("two levels"),
@@ -2739,6 +2802,25 @@ try {
         assert!(
             elsewhere.contains("level 3"),
             "the failure did not name the level: {elsewhere}"
+        );
+
+        // Two writes run together — the Windows runner's failure, an announcement
+        // landed inside `ping`'s banner — is a failure that quotes the line at
+        // once, never a line passed over while the reader waits for one it has
+        // already been given.
+        let merged = reported_levels(
+            &mut a_stream_of(&[
+                "",
+                "Pinging 127.0.0.1 with 32 bytes of data:level 1 started 4242",
+                "Reply from 127.0.0.1: bytes=32 time<1ms TTL=128",
+            ])
+            .into_iter(),
+            std::num::NonZeroUsize::MIN,
+        )
+        .expect_err("a merged announcement was read as a pid");
+        assert!(
+            merged.contains("of data:level 1 started 4242"),
+            "the failure did not quote the merged line: {merged}"
         );
 
         let twice = reported_levels(
@@ -2971,7 +3053,7 @@ try {
 
         assert_eq!(
             stop_and_confirm(&roots, Stop::Now, std::time::Duration::from_secs(10)),
-            Teardown::Signalled,
+            (Teardown::Signalled, roots.to_vec()),
             "a stop that ended the trees {every:?} did not report reaching them"
         );
         assert!(
@@ -3155,7 +3237,8 @@ try {
             let _ = tree.wait();
         });
 
-        let established = stop_and_confirm(&[root], Stop::Now, std::time::Duration::from_secs(30));
+        let (established, _) =
+            stop_and_confirm(&[root], Stop::Now, std::time::Duration::from_secs(30));
 
         // Read the instant the answer came back, and only then clean up:
         // anything that outlived the stop is what this exists to catch, and a

@@ -393,14 +393,12 @@ fn a_host_with_no_resolution_verb_says_the_node_was_not_checked_rather_than_pass
 /// world scripts, so one program serves every arm below.
 #[cfg(unix)]
 fn onevcs_answering(world: &World) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
     let path = world.root.join("onevcs-answering");
     // Shell builtins only — no `cat`, no `sed` — because one journey runs this
     // with an empty `PATH` to be a host without git. The `|| [ -n "$line" ]`
     // is what carries a file whose last line has no newline, which every JSON
     // answer below is.
-    std::fs::write(
+    onepipeline_testfakes::executable(
         &path,
         format!(
             r#"#!/bin/sh
@@ -422,10 +420,7 @@ esac
 "#,
             fakes = world.fakes.display()
         ),
-    )
-    .expect("the answering onevcs is written");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-        .expect("it is executable");
+    );
     path
 }
 
@@ -630,9 +625,7 @@ fn a_hook_git_would_skip_and_a_hook_that_cannot_start_are_told_apart() {
         .err_lacks("the plan loaded without that check having run");
 
     // Executable, and no interpreter to start it with: nobody was asked.
-    std::fs::write(&hook, "#!/nonexistent/interpreter\nexit 0\n").expect("the hook is rewritten");
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
-        .expect("the hook is executable");
+    onepipeline_testfakes::executable(&hook, "#!/nonexistent/interpreter\nexit 0\n");
     world
         .run(&["plan", "check", &project])
         .exited(0)
@@ -877,8 +870,6 @@ fn a_verb_that_answers_bytes_that_are_not_utf8_leaves_the_node_unchecked() {
 #[cfg(unix)]
 #[test]
 fn a_git_that_names_no_hooks_path_leaves_the_title_unchecked() {
-    use std::os::unix::fs::PermissionsExt;
-
     let world = World::new("destination-empty-git-path");
     let service = world.repository("change-auto", &[]);
     world.commit_msg_hook(&service);
@@ -886,10 +877,7 @@ fn a_git_that_names_no_hooks_path_leaves_the_title_unchecked() {
 
     let elsewhere = world.root.join("only-this-git");
     std::fs::create_dir_all(&elsewhere).expect("a directory to lead the PATH with");
-    let git = elsewhere.join("git");
-    std::fs::write(&git, "#!/bin/sh\nexit 0\n").expect("a git that answers nothing");
-    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755))
-        .expect("it is executable");
+    onepipeline_testfakes::executable(&elsewhere.join("git"), "#!/bin/sh\nexit 0\n");
 
     let stand_in = onevcs_answering(&world);
     script_the_answers(
@@ -952,8 +940,6 @@ fn a_node_that_names_local_direct_itself_is_refused_on_a_change_request_reposito
 #[cfg(unix)]
 #[test]
 fn a_hook_is_quoted_whole_whichever_stream_it_wrote_on() {
-    use std::os::unix::fs::PermissionsExt;
-
     let world = World::new("destination-hook-streams");
     let service = world.repository("change-auto", &[]);
     world.commit_msg_hook(&service);
@@ -972,9 +958,7 @@ fn a_hook_is_quoted_whole_whichever_stream_it_wrote_on() {
             vec!["said on stdout", "said on stderr"],
         ),
     ] {
-        std::fs::write(&hook, body).expect("the hook is written");
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
-            .expect("it is executable");
+        onepipeline_testfakes::executable(&hook, body);
         let checked = world.run(&["plan", "check", &project, "--json"]);
         checked.exited(HAS_REFUSALS);
         let answered = answer(&checked);
@@ -1011,7 +995,6 @@ fn a_hook_is_quoted_whole_whichever_stream_it_wrote_on() {
 fn a_hooks_directory_whose_name_is_not_unicode_is_found_and_its_hook_answers() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::PermissionsExt;
 
     let world = World::new("destination-hooks-not-unicode");
     let service = world.repository("change-auto", &[]);
@@ -1021,9 +1004,7 @@ fn a_hooks_directory_whose_name_is_not_unicode_is_found_and_its_hook_answers() {
     let hooks = world.root.join(OsStr::from_bytes(b"hooks-\xff"));
     std::fs::create_dir_all(&hooks).expect("a hooks directory named in bytes");
     let hook = hooks.join("commit-msg");
-    std::fs::write(&hook, crate::harness::COMMIT_MSG_POLICY).expect("the hook is written");
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
-        .expect("it is executable");
+    onepipeline_testfakes::executable(&hook, crate::harness::COMMIT_MSG_POLICY);
     // Through `OsStr` rather than the harness's `git`, whose arguments are `&str`:
     // routing this name through one would mangle it before git ever saw it, and
     // the journey would be about a path that was already text.

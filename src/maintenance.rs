@@ -9,8 +9,12 @@
 //! sibling's recorded stamp, so a slot is due exactly when
 //! `last_maintained < now − every`, and the sibling decides it. That is what makes
 //! late fine, never twice, and two drivers on one host safe by the same fact: a
-//! second driver meeting the first inside an identity is answered `Claimed`, and
-//! one arriving after it is answered `NotDue`. Between runs nothing runs and
+//! sweep meeting another inside an identity is answered `Claimed`, and one that
+//! has the identity to itself after the stamp is answered `NotDue`. `Claimed`
+//! is not only a sweep that is running a command: the sibling takes the
+//! identity's lock before it asks whether any slot is due, so a sweep that finds
+//! nothing due holds it too, and two drivers pacing one host meet each other
+//! that way long after the slot was maintained. Between runs nothing runs and
 //! nothing needs to — a per-run timer would sweep on every run of a busy host
 //! and never on a quiet one, and maintenance intervals are usually longer than a
 //! DAG run.
@@ -25,19 +29,20 @@
 //! else default) and calls `onevcs::pool_maintain(Scope::Repo(identity),
 //! Some(every))`. It is bounded by construction — every command runs under the
 //! identity's own `timeout` — and a driver closing out joins it. Which identities
-//! exist is read off the sibling's own `onevcs repos`, spawned the way
-//! `destination.rs` spawns that library's resolution verbs: at the pinned
-//! release the registry's loader is not on the library surface.
+//! exist is [`onevcs::registered_identities`], the library form of the unindented
+//! lines `onevcs repos` prints: the registry is keyed by normalized origin, so
+//! what it answers is already the sorted order a sweep visits in, and a registry
+//! this host cannot read is an error rather than a host with nothing registered.
 //!
 //! What reaches the run's record is **one** `pool-maintenance` entry per sweep
-//! that did something — a slot ran, an identity was `Claimed`, or one failed —
-//! carrying per identity and slot what ran and how it ended. A sweep on which
-//! every identity answered `NoMaintainCommand`, `NoSlots` or `NotDue` writes
-//! nothing: it is the common case on a schedule measured in days, and a record
-//! of it would be a record of nothing.
+//! that did something — a slot ran, a due slot could not be maintained, an
+//! identity was `Claimed`, or one failed — carrying per identity and slot what
+//! ran and how it ended. A sweep on which every identity answered
+//! `NoMaintainCommand`, `NoSlots`, `NotDue` or `InUse` writes nothing: those are
+//! the schedule and the pool working, they are the common case on a schedule
+//! measured in days, and a record of them would be a record of nothing.
 
 use std::path::Path;
-use std::process::Command;
 use std::sync::mpsc::Sender;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -275,14 +280,17 @@ pub(crate) struct Maintained {
 }
 
 impl Maintained {
-    /// Whether this identity is written into the record: a slot ran, another run
-    /// had it, or it failed.
     fn is_recorded(&self) -> bool {
         match &self.outcome {
             Err(_) | Ok(IdentityOutcome::Claimed { .. }) => true,
-            Ok(IdentityOutcome::Slots(slots)) => slots
-                .iter()
-                .any(|slot| matches!(slot.outcome, SlotOutcome::Ran { .. })),
+            Ok(IdentityOutcome::Slots(slots)) => slots.iter().any(|slot| {
+                matches!(
+                    slot.outcome,
+                    SlotOutcome::Ran { .. }
+                        | SlotOutcome::Unavailable { .. }
+                        | SlotOutcome::Broken { .. }
+                )
+            }),
             Ok(IdentityOutcome::NoMaintainCommand | IdentityOutcome::NoSlots) => false,
         }
     }
@@ -350,64 +358,9 @@ impl Swept {
     }
 }
 
-/// The identities this host has registered, in sorted order, off the sibling's
-/// own listing.
-///
-/// `onevcs repos` prints one line per identity — the key, a tab, its gate —
-/// and, indented under each, its checkouts; an empty registry says so in a
-/// sentence. Only the unindented lines are identities, and a listing this
-/// build cannot read that way is a sweep that could not be made rather than
-/// one that found nothing.
 fn identities() -> std::result::Result<Vec<String>, String> {
-    let binary = crate::destination::binary();
-    let output = Command::new(&binary)
-        .arg("repos")
-        .output()
-        .map_err(|error| {
-            format!(
-                "`{} repos` could not be run: {error} (set {} to an executable one)",
-                binary.to_string_lossy(),
-                crate::destination::BINARY_ENV
-            )
-        })?;
-    if !output.status.success() {
-        return Err(format!(
-            "`{} repos` refused: {}",
-            binary.to_string_lossy(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    // llmlint: ignore-block[changed_behavior_has_e2e] the two refusals below are of a
-    // listing the *linked* release does not print — one that is not UTF-8, and an
-    // unindented line with no tab in it — so no invocation of this build reaches them,
-    // and a fixture printing one would prove the fixture. Each is the failure the
-    // reachable refusal above is, recorded and rendered the same way, which
-    // `tests/e2e/maintenance.rs` drives through an executable that refuses.
-    let listed = String::from_utf8(output.stdout).map_err(|error| {
-        format!(
-            "`{} repos` answered bytes that are not UTF-8: {error}",
-            binary.to_string_lossy()
-        )
-    })?;
-    let mut keys: Vec<String> = Vec::new();
-    for line in listed.lines() {
-        if line.is_empty() || line.starts_with(char::is_whitespace) {
-            continue;
-        }
-        if line == "no repositories registered" {
-            continue;
-        }
-        let Some((key, _gate)) = line.split_once('\t') else {
-            return Err(format!(
-                "`{} repos` printed a line this build does not read as an identity: {line:?}",
-                binary.to_string_lossy()
-            ));
-        };
-        keys.push(key.to_owned());
-    } // llmlint: ignore-end[changed_behavior_has_e2e]
-    keys.sort_unstable();
-    keys.dedup();
-    Ok(keys)
+    onevcs::registered_identities()
+        .map_err(|error| format!("the host's registered identities could not be read: {error}"))
 }
 
 /// Maintain every registered identity once, on the schedule.
@@ -504,10 +457,18 @@ impl Sweep {
                 let _ = tx.send(Message::Maintained(Box::new(swept)));
             });
         match handle {
-            Ok(handle) => Some(Self {
-                handle: Some(handle),
-                paths: paths.clone(),
-            }),
+            Ok(handle) => {
+                // Counted here rather than above, so the count is of sweeps this
+                // driver **started**: a host that would not give it a thread did
+                // not sweep, and the arm below says so. Still before the thread is
+                // joined, because what a reader of the counts is asking is whether
+                // the driver asked at all, not whether the asking has finished.
+                crate::loopstats::maintenance_sweep_started();
+                Some(Self {
+                    handle: Some(handle),
+                    paths: paths.clone(),
+                })
+            }
             // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can
             // type reaches this arm: it is a host that will not start a thread at all,
             // which no plan, flag or environment of this crate's decides. What it does
@@ -638,16 +599,20 @@ fn identity_phrase(outcome: &IdentityOutcome) -> String {
 
 /// One slot's outcome, in the sibling's own words.
 ///
-/// Every arm is one the sibling can answer, and `tests::every_slot_outcome_has_a_phrase`
-/// holds each spelling; `tests/e2e/maintenance.rs` drives the ones a journey can
-/// produce — a command that succeeded, failed, and timed out — through `results`.
-// llmlint: ignore-block[changed_behavior_has_e2e] `in-use`, `unavailable`, `broken` and a
-// command ended by a signal are answered by the sibling under conditions a journey cannot
-// schedule from this crate's interface — a session opened into the slot between the survey
-// and the claim, another maintain holding the slot's claim at that instant, a slot whose
-// record the sibling cannot read, a process the host killed —
-// and a fixture that forged the record would prove the fixture; each phrase is held
-// by the unit test the doc names, over the sibling's own type.
+/// **Busy is not broken.** A slot the sibling answers `unavailable` for is a
+/// healthy one something else holds right now — a live maintenance claim, an
+/// occupancy this run could not take, a process still working inside it — and a
+/// later sweep finds it clear; `broken` is the slot whose clone, worktree or
+/// record is not usable, which nothing waiting clears. So the two are phrased
+/// apart here rather than both rendered as a reason a reader has to classify, and
+/// a supervisor reading a busy pool is not told its worktrees are damaged.
+// llmlint: ignore-block[changed_behavior_has_e2e] `in-use` and a command ended by a signal
+// are answered by the sibling under conditions a journey cannot schedule from this
+// crate's interface — a session opened into the slot between the survey and the claim, a
+// process the host killed — and a fixture that forged the record would prove the
+// fixture; each phrase is held by the unit test the doc names, over the sibling's own
+// type. `unavailable` and `broken` are not in that list: a journey drives each,
+// `a_slot_another_process_holds_is_busy_and_one_whose_worktree_is_gone_is_broken`.
 fn slot_phrase(outcome: &SlotOutcome) -> String {
     match outcome {
         SlotOutcome::NotDue { last_maintained } => {
@@ -663,9 +628,11 @@ fn slot_phrase(outcome: &SlotOutcome) -> String {
             )
         }
         SlotOutcome::Unavailable { holder } => {
-            format!("kept: held by {}", crate::views::one_line(holder))
+            format!("kept: busy — {}", crate::views::one_line(holder))
         }
-        SlotOutcome::Broken { reason } => format!("kept: {}", crate::views::one_line(reason)),
+        SlotOutcome::Broken { reason } => {
+            format!("kept: broken — {}", crate::views::one_line(reason))
+        }
         SlotOutcome::Ran {
             outcome,
             duration_ms,
@@ -983,11 +950,12 @@ mod tests {
         }
     }
 
-    /// A sweep on which nothing ran writes nothing; one on which a slot ran, an
-    /// identity was claimed or one failed writes one record carrying exactly
-    /// those identities, each with the sibling's own outcome shape.
+    /// A sweep on which nothing was due and nothing was wrong writes nothing; one
+    /// on which a slot ran, a due slot could not be maintained, an identity was
+    /// claimed or one failed writes one record carrying exactly those identities,
+    /// each with the sibling's own outcome shape.
     #[test]
-    fn a_sweep_is_recorded_only_where_something_ran_was_claimed_or_failed() {
+    fn a_sweep_is_recorded_where_something_ran_or_a_due_slot_could_not_and_never_otherwise() {
         let nothing = Swept {
             started_at: "2026-09-20T00:00:00.000Z".into(),
             identities: vec![
@@ -995,17 +963,50 @@ mod tests {
                 quiet("b", IdentityOutcome::NoSlots),
                 quiet(
                     "c",
-                    IdentityOutcome::Slots(vec![SlotMaintenance {
-                        number: 1,
-                        outcome: SlotOutcome::NotDue {
-                            last_maintained: "2026-09-19T00:00:00.000Z".into(),
+                    IdentityOutcome::Slots(vec![
+                        SlotMaintenance {
+                            number: 1,
+                            outcome: SlotOutcome::NotDue {
+                                last_maintained: "2026-09-19T00:00:00.000Z".into(),
+                            },
                         },
-                    }]),
+                        SlotMaintenance {
+                            number: 2,
+                            outcome: SlotOutcome::InUse {
+                                session: onevcs::SessionToken("s-working".into()),
+                            },
+                        },
+                    ]),
                 ),
             ],
             failure: None,
         };
         assert!(!nothing.is_recorded());
+
+        // A **due** slot the sweep could not maintain is news on its own, with
+        // nothing beside it that ran: something else held it, or it is not
+        // usable.
+        for kept in [
+            SlotOutcome::Unavailable {
+                holder: "a command is working in it right now".into(),
+            },
+            SlotOutcome::Broken {
+                reason: "its worktree is not a repository".into(),
+            },
+        ] {
+            let held = Swept {
+                started_at: "2026-09-20T00:00:00.000Z".into(),
+                identities: vec![quiet(
+                    "a",
+                    IdentityOutcome::Slots(vec![SlotMaintenance {
+                        number: 1,
+                        outcome: kept.clone(),
+                    }]),
+                )],
+                failure: None,
+            };
+            assert!(held.is_recorded(), "{kept:?} was not recorded");
+        }
 
         let something = Swept {
             started_at: "2026-09-20T00:00:00.000Z".into(),
@@ -1058,11 +1059,14 @@ mod tests {
         let failed = Swept {
             started_at: "2026-09-20T00:00:00.000Z".into(),
             identities: Vec::new(),
-            failure: Some("`onevcs repos` could not be run".into()),
+            failure: Some("the host's registered identities could not be read".into()),
         };
         assert!(failed.is_recorded());
         let payload = Value::Object(failed.payload());
-        assert_eq!(payload["error"], "`onevcs repos` could not be run");
+        assert_eq!(
+            payload["error"],
+            "the host's registered identities could not be read"
+        );
         assert_eq!(payload["identities"], json!([]));
     }
 
@@ -1086,15 +1090,15 @@ mod tests {
             ),
             (
                 SlotOutcome::Unavailable {
-                    holder: "pid 91 is working in it".into(),
+                    holder: "a command is working in it right now".into(),
                 },
-                "kept: held by pid 91 is working in it",
+                "kept: busy — a command is working in it right now",
             ),
             (
                 SlotOutcome::Broken {
                     reason: "its record could not be read".into(),
                 },
-                "kept: its record could not be read",
+                "kept: broken — its record could not be read",
             ),
             (
                 SlotOutcome::Ran {
@@ -1154,7 +1158,69 @@ mod tests {
                     outcome: SlotOutcome::Broken { reason: "r".into() },
                 },
             ])),
-            "slot 1 not due, last maintained t; slot 2 kept: r"
+            "slot 1 not due, last maintained t; slot 2 kept: broken — r"
+        );
+    }
+
+    /// A slot the sibling reports **busy** reads as a slot something holds, and a
+    /// stored record written before that vocabulary existed still reads.
+    ///
+    /// Two facts about the same boundary. `unavailable` is the transient state —
+    /// a live claim, an occupancy, a process inside the slot — that a later sweep
+    /// finds clear, and reporting it as breakage is what would send a supervisor
+    /// looking for a damaged worktree on a merely busy host; so the two phrases
+    /// are held apart here rather than only held to exist. And the payload a
+    /// driver wrote at the previous pin carries only the variants that pin had, so
+    /// this parses one of those documents verbatim — no round trip through
+    /// today's type, which would prove the type and not the record — and reads its
+    /// phrase, because `results` renders a run's stored history and a record it
+    /// cannot read renders as an outcome this build does not read.
+    #[test]
+    fn busy_is_not_broken_and_a_record_written_before_the_vocabulary_still_reads() {
+        let busy = slot_phrase(&SlotOutcome::Unavailable {
+            holder: "a maintenance run this one did not start (pid 7) has claimed it since t"
+                .to_owned(),
+        });
+        let broken = slot_phrase(&SlotOutcome::Broken {
+            reason: "its worktree is not a repository".to_owned(),
+        });
+        assert!(busy.contains("busy"), "{busy}");
+        assert!(!busy.contains("broken"), "{busy}");
+        assert!(broken.contains("broken"), "{broken}");
+        assert_ne!(busy, broken);
+
+        // The `outcome` object of a `pool-maintenance` record as a driver at the
+        // previous pin wrote it: every variant that pin could answer, and none of
+        // the one it could not.
+        let stored = json!({
+            "slots": [
+                {"number": 1, "outcome": {"ran": {
+                    "outcome": "succeeded", "duration_ms": 12, "log": "a-1"
+                }}},
+                {"number": 2, "outcome": {"not-due": {"last_maintained": "2026-09-19T00:00:00.000Z"}}},
+                {"number": 3, "outcome": {"in-use": {"session": "s-old"}}},
+                {"number": 4, "outcome": {"broken": {"reason": "its record could not be read"}}},
+            ]
+        });
+        let read: IdentityOutcome = serde_json::from_value(stored)
+            .expect("a record written before this change still reads");
+        assert_eq!(
+            identity_phrase(&read),
+            "slot 1 ran — succeeded in 12 ms, log a-1; \
+             slot 2 not due, last maintained 2026-09-19T00:00:00.000Z; \
+             slot 3 kept: session s-old is working in it; \
+             slot 4 kept: broken — its record could not be read"
+        );
+
+        // And one written by this build, read back the same way.
+        let now = json!({"slots": [
+            {"number": 1, "outcome": {"unavailable": {"holder": "a command is working in it right now"}}}
+        ]});
+        let read: IdentityOutcome =
+            serde_json::from_value(now).expect("the vocabulary this build writes reads back");
+        assert_eq!(
+            identity_phrase(&read),
+            "slot 1 kept: busy — a command is working in it right now"
         );
     }
 

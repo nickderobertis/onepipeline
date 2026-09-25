@@ -3192,6 +3192,16 @@ fn a_ready_nodes_own_fields_change_in_place_with_its_lineage_intact() {
             .iter()
             .any(|event| event["labels"]["node"] == "hog")
     });
+    // `attest` validates against what the journal wrote, and the pass that
+    // dispatched `hog` records `approve` as waiting only after that dispatch.
+    world.until("the human action to be recorded as waiting", |world| {
+        world
+            .events_of("readyfields", "node-settled")
+            .iter()
+            .any(|event| {
+                event["labels"]["node"] == "approve" && event["payload"]["status"] == "waiting"
+            })
+    });
 
     // The person acts, so `consume` is eligible — and the concurrency cap holds
     // it there, which is what makes it ready rather than merely unstarted.

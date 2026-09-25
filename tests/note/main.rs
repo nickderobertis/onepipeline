@@ -1330,8 +1330,14 @@ fn a_retry_replacement_spends_the_notes_the_node_it_supersedes_read_and_says_so(
     let mut launch = world.agentgraph_cmd(&["start", &path, "--detach"]);
     launch.env(CANCEL_GRACE_ENV, "1");
     world.run_on(launch, "start --detach").exited(0);
-    world.until("the worker's turn to open", |world| {
-        !world.events_of(run, "turn-started").is_empty()
+    // `build`'s own turn, not the first of either node's: `keep` is ready
+    // beside it, and a note to `build` offered before `build` has named a turn
+    // is carried rather than delivered — the Windows gate's failure, where
+    // `keep` opened first and the note read back `carried`. The driver takes a
+    // turn's address before it relays the turn, so once this is in the store
+    // the note has a conversation to reach.
+    world.until("build's worker turn to open", |world| {
+        !openings_of(world, run, "build").is_empty()
     });
 
     let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
@@ -1444,8 +1450,9 @@ fn a_note_a_running_turn_took_is_not_carried_to_that_nodes_next_dispatch() {
     let mut launch = world.agentgraph_cmd(&["start", &path, "--detach"]);
     launch.env(CANCEL_GRACE_ENV, "1");
     world.run_on(launch, "start --detach").exited(0);
-    world.until("the worker's turn to open", |world| {
-        !world.events_of(run, "turn-started").is_empty()
+    // `build`'s own turn, for the reason the retry journey above gives.
+    world.until("build's worker turn to open", |world| {
+        !openings_of(world, run, "build").is_empty()
     });
 
     let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);

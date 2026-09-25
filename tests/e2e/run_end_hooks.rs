@@ -82,11 +82,8 @@ pub(crate) fn records(world: &World) -> PathBuf {
 /// The run-end hook fixture, placed in the world, as the command a launch names.
 #[cfg(unix)]
 pub(crate) fn hook(world: &World) -> String {
-    use std::os::unix::fs::PermissionsExt;
     let path = world.root.join("run_end_hook.sh");
-    std::fs::write(&path, include_str!("run_end_hook.sh")).expect("the hook is written");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-        .expect("the hook is executable");
+    onepipeline_testfakes::executable(&path, include_str!("run_end_hook.sh"));
     path.to_string_lossy().into_owned()
 }
 

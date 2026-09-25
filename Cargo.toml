@@ -539,6 +539,18 @@ resolver = "2"
 # `oneagentgraph` 0.4.10 is the relink onto the `oneharness-core` 0.18.0 that
 # block asks for, and nothing else: nothing here reads anything new from it.
 #
+# `onevcs` 0.32.2 is the floor. It carries onevcs #173-#177, which
+# `src/maintenance.rs` is written to: `registered_identities()` in place of a
+# spawned `onevcs repos`, `SlotOutcome::Unavailable` beside a narrowed `Broken`,
+# a non-empty `maintain.command` argv, and listings that refuse unreadable
+# session records rather than read them as empty. And its `git fetch` into a
+# checkout takes turns under a lock in that checkout's common directory: below
+# it, a session opening and a landing could fetch into one identity's shared
+# checkout at once, and git failed the loser with `cannot lock ref` even where
+# the ref already held what it wanted — on Windows, every time, in
+# `tests/e2e/lifecycle.rs`'s pooled-identity journey. `onevcs-testing` 0.8.2
+# requires exactly it, so the two move together.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -559,7 +571,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.2"
-onevcs = "0.32.0"
+onevcs = "0.32.2"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -724,7 +736,7 @@ oneharness-core = "0.18.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.8.0"
+onevcs-testing = "0.8.2"
 # **Test-support only**, and linked by `crates/testfakes` alone: the crate under test
 # still reads every plan by *driving* the `onetaskgraph` binary. These host the real
 # `local-md` plugin inside `label-strict-source`; that fake says why.

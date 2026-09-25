@@ -53,7 +53,6 @@ fn the_e2e_recipe_narrows_the_binary_to_a_filter_and_runs_all_of_it_without_one(
 #[cfg(unix)]
 mod unix {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::process::{Command, Output};
 
@@ -92,11 +91,10 @@ mod unix {
         }
 
         fn executable(&self, name: &str, body: &str) {
-            let path = self.0.join("bin").join(name);
-            fs::write(&path, format!("#!/bin/sh\nset -eu\n{body}"))
-                .expect("the program is written");
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
-                .expect("the program is runnable");
+            onepipeline_testfakes::executable(
+                &self.0.join("bin").join(name),
+                format!("#!/bin/sh\nset -eu\n{body}"),
+            );
         }
 
         fn run(&self, args: &[&str]) -> Output {
