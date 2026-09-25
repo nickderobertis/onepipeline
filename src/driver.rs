@@ -2275,13 +2275,18 @@ pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Optio
     }
     let pids: Vec<u32> = roots.iter().map(|root| root.pid).collect();
     let established = sys::stop_and_confirm(&pids, sys::Stop::Politely, TEARDOWN_PATIENCE);
-    // Whatever the teardown established as a whole, each root it proved and then
-    // saw end is one this run ended — so a later teardown that meets its pid
-    // reissued knows it for a reissue. Best effort: failing to write it costs a
-    // later teardown only what this record adds, and is said where it happens.
+    // Where this teardown signalled, each root it proved and then saw end is one
+    // this run ended — so a later teardown that meets its pid reissued knows it
+    // for a reissue. A teardown that signalled nothing ended nothing, whatever
+    // went meanwhile. Best effort: failing to write it costs a later teardown
+    // only what this record adds, and is said where it happens.
+    let signalled = matches!(
+        established,
+        sys::Teardown::Signalled | sys::Teardown::PartlySignalled
+    );
     let ended: Vec<ledger::Stamped> = roots
         .into_iter()
-        .filter(|root| sys::claim_on(root.pid, &root.started).is_over())
+        .filter(|root| signalled && sys::claim_on(root.pid, &root.started).is_over())
         .collect();
     if let Err(why) = ledger::record_ended(paths, &ended) {
         eprintln!(

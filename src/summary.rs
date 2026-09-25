@@ -1264,14 +1264,8 @@ mod tests {
 
     /// A launcher appends a run's first records **before** it writes the launch
     /// record, and what the run is read as once that record exists is whose it
-    /// says the run is.
-    ///
-    /// The Windows gate's failure in
-    /// `driver::a_run_belongs_to_the_session_that_launched_it`: the append wrote a
-    /// row with no launch record to attribute it from, stamped it current against
-    /// the journal, and `runs` served that row — `[unknown]` — to the session that
-    /// had launched the run, until the driver's next append replaced it. The
-    /// order here is the launcher's own, through the real journal writer.
+    /// says the run is. The order is the launcher's own, through the real
+    /// journal writer.
     #[test]
     fn a_record_appended_before_the_launch_record_leaves_no_row_attributed_to_nobody() {
         let root = scratch("attributed");

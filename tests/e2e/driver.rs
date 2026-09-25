@@ -3321,13 +3321,8 @@ fn a_stop_that_declines_every_live_identity_does_not_report_success() {
 
 /// A dispatch an earlier stop of this run ended is over, even once the host
 /// has given its pid to a stranger — and a stranger on a pid this run never
-/// ended is still declined.
-///
-/// The first half is the Windows gate's failure: a stop ends the driver, the
-/// driver is what would have taken the dispatch's registry entry back, so the
-/// entry is left naming a pid the host hands on within seconds. Read with
-/// nothing but its stamp, the next stop found a live pid whose stamp disagreed
-/// and refused, over a run it had itself already ended.
+/// ended is still declined. A stop ends the driver that would have taken the
+/// dispatch's registry entry back, so the entry outlives its process.
 // llmlint: ignore-block[tests_mirror_real_usage] PID reuse is a host transition, not a
 // product operation, and waiting for this particular pid to be recycled is unbounded. The
 // fixture moves only the pid a registry entry names — the entry the dispatch itself wrote,

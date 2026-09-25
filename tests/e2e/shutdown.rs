@@ -1496,14 +1496,8 @@ fn status_and_results_read_the_latest_shutdown_and_name_an_unreadable_one() {
 
 /// A dispatch an earlier shutdown killed is over, even once the host has given
 /// its pid to a stranger — and a stranger on a pid this run never ended is still
-/// declined.
-///
-/// The Windows gate's failure in
-/// `status_and_results_read_the_latest_shutdown_and_name_an_unreadable_one`: the
-/// first shutdown killed the worker and its driver, so nothing took the worker's
-/// registry entry back, and the host reissued its pid within seconds. The
-/// second shutdown, with nothing but the entry's stamp to go on, declined the
-/// stranger and refused a run it had itself already ended.
+/// declined. The first shutdown kills the worker and its driver, so nothing
+/// takes the worker's registry entry back.
 // llmlint: ignore-block[tests_mirror_real_usage] PID reuse is a host transition, not a
 // product operation, and waiting for this particular pid to be recycled is unbounded. The
 // fixture moves only the pid a registry entry names — the entry the worker itself wrote,
