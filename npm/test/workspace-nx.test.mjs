@@ -22,18 +22,40 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-/** Every project's Nx declaration, by the name Nx knows it as. */
-const projects = [
-  "project.json",
-  join("npm", "project.json"),
-  join("tests", "note", "project.json"),
-].map((path) => JSON.parse(readFileSync(join(root, path), "utf8")));
+/**
+ * Every project's Nx declaration, discovered rather than restated.
+ *
+ * A restated list is the one thing this file exists to catch going stale: the
+ * cases below would then measure Nx against a set nobody updated, and say
+ * nothing about whichever project was missing from it.
+ *
+ * `git ls-files` is the source Nx itself agrees with: a declaration Nx loads is
+ * one committed in the tree, so a project added without its `project.json`
+ * staged fails here rather than passing and then failing on somebody's clone.
+ * The basename filter keeps the pathspec from also matching a `*-project.json`
+ * that is not one of these.
+ */
+const declarations = execFileSync("git", ["ls-files", "--", "*project.json"], {
+  cwd: root,
+  encoding: "utf8",
+})
+  .split("\n")
+  .filter((path) => basename(path) === "project.json")
+  .sort();
+
+const projects = declarations.map((path) => JSON.parse(readFileSync(join(root, path), "utf8")));
+
+function project(name) {
+  const found = projects.find((candidate) => candidate.name === name);
+  assert.ok(found, `no committed project.json declares \`${name}\``);
+  return found;
+}
 
 const justfile = readFileSync(join(root, "justfile"), "utf8");
 const nxJson = JSON.parse(readFileSync(join(root, "nx.json"), "utf8"));
@@ -71,13 +93,45 @@ function run(args, env = {}) {
 // documentation to render.
 const UNIFORM_TARGETS = ["bootstrap", "build", "format", "format-check", "lint", "test", "check"];
 
+// The projects that carry none of that set, and are meant not to. `scope:docs`
+// is the whole of the exemption: the capture produces documentation images
+// rather than an artifact this repository ships or tests, and naming its capture
+// `build` would fan `freeze` and `screencomp` — two third-party tools `just
+// bootstrap` deliberately does not install — into a verb a clean clone must be
+// able to run. Its `project.json` says the same thing as a file-scoped llmlint
+// directive; this is that exemption spelled where the gate can see it, so a
+// project that declares no targets for any *other* reason still fails below.
+const UNIFORM_EXEMPT = ["onepipeline-visual-docs"];
+
+const uniform = projects.filter((declared) => !UNIFORM_EXEMPT.includes(declared.name));
+
 describe("the uniform target set", () => {
+  // An exemption that stops being true is worse than no exemption: it would
+  // hide a project that had grown half the set and so runs in some repo-wide
+  // verbs and not others. Opting out is all-or-nothing, and this is what holds
+  // it there.
+  for (const name of UNIFORM_EXEMPT) {
+    it(`is declined in full by \`${name}\``, () => {
+      const declared = project(name);
+      const carried = UNIFORM_TARGETS.filter((target) => declared.targets[target]);
+      assert.deepEqual(
+        carried,
+        [],
+        `${name} is exempt from the uniform target set but declares ${carried.join(", ")}, so it runs in some repo-wide verbs and not others`,
+      );
+      assert.ok(
+        declared.tags?.includes("scope:docs"),
+        `${name} is exempt from the uniform target set, which only a \`scope:docs\` project may be`,
+      );
+    });
+  }
+
   for (const target of UNIFORM_TARGETS) {
     it(`is declared by every project for \`${target}\``, () => {
-      for (const project of projects) {
+      for (const declared of uniform) {
         assert.ok(
-          project.targets[target],
-          `${project.name} declares no \`${target}\` target, so the repo-wide verb skips it`,
+          declared.targets[target],
+          `${declared.name} declares no \`${target}\` target, so the repo-wide verb skips it`,
         );
       }
     });
@@ -220,7 +274,8 @@ describe("the build targets", () => {
   });
 
   it("declares the command each project's build target actually runs", () => {
-    const [crate, packaging] = projects;
+    const crate = project("onepipeline");
+    const packaging = project("onepipeline-npm");
     // The Rust half is what the journey above drives; the npm half is what
     // `launcher.test.mjs` assembles, packs, installs, and executes. Pinning the
     // declarations here is what stops a target from being rewired to something
