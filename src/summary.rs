@@ -1030,7 +1030,7 @@ impl Maintainer {
         // reader had asked whose run it was. Without a row a reader folds, and a
         // fold reads the launch record it needs or says it cannot.
         //
-        // llmlint: ignore[changed_behavior_has_e2e] the state this arm answers exists only inside `start`, between its first journal append and the launch record two statements later, and no verb or fixture can hold a launcher there; `a_record_appended_before_the_launch_record_leaves_no_row_attributed_to_nobody` drives that exact order through the real journal writer and the real `RunSummary::of`, and `driver::a_run_belongs_to_the_session_that_launched_it` reads the row after real launches.
+        // llmlint: ignore[changed_behavior_has_e2e] a served row is one whose writer alone appended since it stamped it, and the only single appender with no readable launch record is `start`, between its first journal append and the record two statements later — no verb or fixture can hold a launcher there. A record torn under a live run is met by a driver's engine and relay appending together, whose rows each stamp only what they folded, so the reader refolds and reads the record strictly with or without this arm (a journey tearing one under a heartbeating driver passed on both trees and was dropped). `a_record_appended_before_the_launch_record_leaves_no_row_attributed_to_nobody` drives the launcher's order through the real journal writer and the real `RunSummary::of`.
         let Some(launch) = self.launch() else {
             return;
         };
