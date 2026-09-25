@@ -413,28 +413,42 @@ fn two_drivers_idle_at_once_maintain_the_slot_once_between_them() {
         .exited(0)
         .out_has("claimed — another pool maintain (pid");
 
-    // Every further sweep of either driver is answered not-due.
+    // Never twice: however many further sweeps either driver makes, the slot's
+    // command ran once, and every other thing either run recorded is having met
+    // another sweep inside the identity. Not *when* it met one — `onevcs` takes
+    // the identity's lock before it asks whether any slot is due, so a sweep that
+    // finds nothing due still holds it, and a sweep of either driver that meets
+    // one is answered `claimed` long after the slot was maintained. The Windows
+    // gate met exactly that, a `claimed` five seconds after the first driver's
+    // record; the ordering is that library's to change.
     let swept = sweeps(&world);
     until_sweeps(&world, swept + 3);
     assert_eq!(marker_lines(&world), 1);
-    assert_eq!(records(&world, "one").len(), 1, "{}", world.dump());
-
-    // Until the first driver's command exits — on a slow host a pace or more
-    // after the hold is released — a sweep of the second meets the claim again
-    // and is answered `claimed` again. So its records may be several, but each
-    // is `claimed`, from a sweep started before the first driver recorded.
-    let recorded_at = ran["ts"].as_str().expect("a record's timestamp");
-    for met in records(&world, "two") {
-        let started = met["payload"]["started_at"]
-            .as_str()
-            .expect("a sweep's start");
-        assert!(
-            met["payload"]["identities"][0]["outcome"]["claimed"].is_object()
-                && started < recorded_at,
-            "{}",
-            world.dump()
-        );
+    let (mut ran, mut claimed) = (0, 0);
+    for met in records(&world, "one")
+        .into_iter()
+        .chain(records(&world, "two"))
+    {
+        let outcome = &met["payload"]["identities"][0]["outcome"];
+        if outcome["claimed"].is_object() {
+            claimed += 1;
+        } else {
+            assert_eq!(
+                outcome["slots"][0]["outcome"]["ran"]["outcome"],
+                "succeeded",
+                "{}",
+                world.dump()
+            );
+            ran += 1;
+        }
     }
+    assert_eq!(
+        ran,
+        1,
+        "the slot was maintained {ran} times: {}",
+        world.dump()
+    );
+    assert!(claimed >= 1, "{}", world.dump());
     release(&world, "one");
     release(&world, "two");
 }
