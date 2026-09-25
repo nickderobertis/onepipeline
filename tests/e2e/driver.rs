@@ -3545,7 +3545,6 @@ fn a_stop_that_signalled_nothing_leaves_a_reissued_pid_declined() {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// The value a command was wired with for `name`.
 fn env_of(command: &std::process::Command, name: &str) -> std::ffi::OsString {
     command
         .get_envs()
@@ -3554,7 +3553,6 @@ fn env_of(command: &std::process::Command, name: &str) -> std::ffi::OsString {
         .unwrap_or_else(|| panic!("the world wires no {name}"))
 }
 
-/// The first `name` on `path`.
 fn found_on(path: &std::ffi::OsStr, name: &str) -> PathBuf {
     std::env::split_paths(path)
         .map(|dir| dir.join(name))
@@ -3562,7 +3560,6 @@ fn found_on(path: &std::ffi::OsStr, name: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("no {name} on {path:?}"))
 }
 
-/// `path` with `dir` in front of it.
 fn leading(dir: &Path, path: &std::ffi::OsStr) -> std::ffi::OsString {
     std::env::join_paths(std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(path)))
         .expect("a PATH")
