@@ -2410,6 +2410,14 @@ impl Stated {
 ///
 /// Beside the answer, the spelling it was answered at, which is the one a person
 /// is told to acknowledge a release against.
+///
+/// Driven end to end by `tests/e2e/adoption.rs`: the fallback answering, by
+/// `a_squash_commit_baselined_before_any_release_is_answered_through_its_change_request`
+/// and both `…_no_release_baseline_…`/`…_no_release_can_be_attributed_…` journeys;
+/// a commit that resolves, by
+/// `a_node_settled_from_evidence_is_correlated_through_the_commit_it_names`; and an
+/// unresolvable commit with nothing to fall back to, by the squash-merge journey's
+/// first settle, whose node the run knows no change request for.
 fn release_status_falling_back<'a>(
     reference: &'a str,
     fallback: Option<&'a str>,
@@ -2420,6 +2428,7 @@ fn release_status_falling_back<'a>(
         (Err(onevcs::Error::UnresolvableReference { .. }), Some(fallback)) => {
             (ask(fallback, target), fallback)
         }
+        // llmlint: ignore[changed_behavior_has_e2e] the one branch here no invocation reaches on purpose: a refusal of another kind from a stated commit is a store this host cannot read or a host that failed, and no plan, flag or reply puts a run into either in the instant the question is asked. That it stands rather than falling back is held by `a_stated_commit_falls_back_to_its_change_request_only_when_it_cannot_be_resolved` below, over two such refusals carrying the unresolvable one's own words.
         (answered, _) => (answered, reference),
     }
 }

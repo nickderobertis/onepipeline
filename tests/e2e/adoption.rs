@@ -5221,6 +5221,13 @@ fn arrived_version(world: &World, run: &str, node: &str) -> Value {
 /// tag contains it — so the reply owes no command, the wait it raised answers
 /// `not-released` rather than `not-answered`, and the next release lifts it with
 /// nothing recorded by hand.
+///
+/// `broken`'s dispatch failed before it published, so the run knows no change
+/// request for it until a settle states one: the first squash-commit settle has
+/// nothing to fall back to, and its command keeps the placeholder. Once a settle
+/// has stated a change request, a later commit `onevcs` cannot resolve is asked
+/// again at that change request — `docs/contract-divergences.md` entry 40 — and
+/// what the line says and names is that change request's answer.
 fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spelling: Spelling) {
     let (world, run, engine_repo, branch, answer) = a_released_landing_nobody_published(name);
     let url = change_url_of(&world, &run, "landed");
@@ -5231,6 +5238,11 @@ fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spel
             url.clone()
         }
     };
+    // The merge commit a `--no-ff` landing made, which no branch of the work
+    // carries either: a commit `onevcs` cannot resolve, for either spelling.
+    let merge = crate::harness::git(&world, &engine_repo.checkout, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
     // A node nothing outside its own repository waits on is still told about the
     // repository's default target: `landed`'s only dependent is `broken`, in the
     // same repository, so no wait in this run names a target — and a consumer added
@@ -5277,12 +5289,7 @@ fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spel
         ),
     };
     settled.err_has(&said);
-    let pasted = settled
-        .stderr
-        .lines()
-        .map(str::trim)
-        .find(|line| line.starts_with("onevcs release acknowledge "))
-        .unwrap_or_else(|| panic!("the reply printed no command to paste:\n{}", settled.stderr));
+    let pasted = pasted_command(&settled.stderr);
     let expected = match placeholder {
         None => {
             format!("onevcs release acknowledge '{landing}' --target crate --version <VERSION>")
@@ -5311,6 +5318,32 @@ fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spel
     // tag contains — and the reply has no hold to warn about: nothing on stderr
     // names a baseline, a command, or a reference it could not resolve.
     if placeholder.is_some() {
+        // A change request `onevcs` never opened — a mistyped number — is stated
+        // first, and then the squash commit again: the run now knows a change
+        // request for `broken`, so the commit is asked again there, and where that
+        // does not resolve either the command names it rather than the placeholder.
+        let mistyped = format!(
+            "{}/pull/99",
+            url.rsplit_once("/pull/").expect("a pull URL").0
+        );
+        settle_broken(&world, &run, &mistyped, json!({}))
+            .exited(0)
+            .err_has(&format!(
+                "was settled at {mistyped}, which `onevcs` cannot resolve"
+            ));
+        let again = settle_broken(&world, &run, &landing, json!({}));
+        again
+            .exited(0)
+            .err_has(&format!(
+                "was settled at {landing}, which `onevcs` cannot resolve"
+            ))
+            .err_lacks("<CHANGE-REQUEST-URL>");
+        assert_eq!(
+            pasted_command(&again.stderr),
+            format!("onevcs release acknowledge '{mistyped}' --target crate --version <VERSION>"),
+            "the command does not name the change request the run knows"
+        );
+
         let restated = settle_broken(&world, &run, &url, json!({}));
         restated.exited(0).out_has("\"applied\"");
         for unsaid in [
@@ -5356,6 +5389,27 @@ fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spel
             pasted,
             format!("onevcs release acknowledge '{url}' --target crate --version <VERSION>")
         );
+        // Settled again at the merge commit, which `onevcs` cannot resolve: the
+        // change request the earlier settle stated is kept past it, so the question
+        // is asked again there — and it is that landing's missing baseline the line
+        // reports, with the command naming the change request that answered.
+        assert!(
+            release_status_of(&world, &merge).is_none(),
+            "`onevcs` resolved the merge commit, so nothing here would fall back"
+        );
+        let at_merge = settle_broken(&world, &run, &merge, json!({}));
+        at_merge
+            .exited(0)
+            .err_has(&format!(
+                "was settled at the landing {merge}, and that landing has no release baseline \
+                 for the release target 'crate'"
+            ))
+            .err_lacks("cannot resolve to landed work");
+        let pasted = pasted_command(&at_merge.stderr);
+        assert_eq!(
+            pasted, expected,
+            "the command does not name the change request"
+        );
 
         // A person verifies the version and pastes the command into a shell, filling
         // in only what the line left for them — so the quoting is the shell's to read.
@@ -5370,6 +5424,16 @@ fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spel
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
     });
+}
+
+/// The one command a settle's advice prints for a person to paste.
+fn pasted_command(stderr: &str) -> String {
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("onevcs release acknowledge "))
+        .unwrap_or_else(|| panic!("the reply printed no command to paste:\n{stderr}"))
+        .to_owned()
 }
 
 /// A change request's URL with no release baseline: said, with the command.
