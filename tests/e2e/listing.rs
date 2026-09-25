@@ -44,7 +44,7 @@
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, let_writeback_settle, lifecycle, plan_of, rows, World};
+use crate::harness::{agent, lifecycle, plan_of, rows, synced_fixture, World};
 
 use onepipeline::views::{RunPaths, GROUP_HEADER, SUMMARY_SCHEMA_VERSION};
 
@@ -1078,11 +1078,14 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
         );
     }
 
-    // Before the first measurement, so both are taken over a disk that has finished
-    // with the fixture rather than one still writing it: what is being compared is
+    // Before the first measurement, so both are taken over a fixture that is on the
+    // device rather than one still being written back: what is being compared is
     // the render, and the ten gibibytes written below would otherwise be in the
     // second figure and not the first.
-    let_writeback_settle();
+    synced_fixture(
+        &world.runs,
+        assembled.iter().map(|(paths, _)| paths.dir.as_path()),
+    );
     binary_in_cache();
 
     let mut before = Vec::new();
@@ -1122,8 +1125,11 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
         }
     }
     // And again, for the write that just happened — this is the one the ratio is
-    // about, and `fsync` per file only puts that file's pages on the device.
-    let_writeback_settle();
+    // about, and the documents stamped after each journal are in it too.
+    synced_fixture(
+        &world.runs,
+        assembled.iter().map(|(paths, _)| paths.dir.as_path()),
+    );
     let grown = held(&assembled);
     assert!(
         grown >= bytes * JOURNAL_MULTIPLE,

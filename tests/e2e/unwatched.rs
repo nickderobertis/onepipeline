@@ -41,9 +41,7 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use crate::harness::{
-    agent, let_writeback_settle, plan_of, waited, World, NODE_SETTLED, RUNS_UNWATCHED,
-};
+use crate::harness::{agent, plan_of, synced_fixture, waited, World, NODE_SETTLED, RUNS_UNWATCHED};
 
 use onepipeline::views::{RunPaths, SUMMARY_SCHEMA_VERSION, WATCHER_SCHEMA_VERSION};
 
@@ -1767,11 +1765,14 @@ fn a_host_sized_runs_root_is_answered_in_well_under_a_second_whatever_its_journa
     // reader who cannot see what they are cannot weigh it.
     println!("  the rows this bound is measured over:\n{rows}");
 
-    // Before the first measurement, so both are taken over a disk that has finished
-    // with the fixture rather than one still writing it: what is being compared is
+    // Before the first measurement, so both are taken over a fixture that is on the
+    // device rather than one still being written back: what is being compared is
     // the verb, and the ten gibibytes written below would otherwise be in the second
     // figure and not the first.
-    let_writeback_settle();
+    synced_fixture(
+        &world.runs,
+        assembled.iter().map(|paths| paths.dir.as_path()),
+    );
     binary_in_cache();
     let before = median(&world, &["unwatched"], RUNS_UNWATCHED);
     assert!(
@@ -1798,8 +1799,11 @@ fn a_host_sized_runs_root_is_answered_in_well_under_a_second_whatever_its_journa
         }
     }
     // And again, for the write that just happened — this is the one the ratio is
-    // about, and `fsync` per file only puts that file's pages on the device.
-    let_writeback_settle();
+    // about, and the documents stamped after each journal are in it too.
+    synced_fixture(
+        &world.runs,
+        assembled.iter().map(|paths| paths.dir.as_path()),
+    );
     let grown = held_bytes(&assembled);
     assert!(
         grown >= bytes * JOURNAL_MULTIPLE,
