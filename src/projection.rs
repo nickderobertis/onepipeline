@@ -178,8 +178,12 @@ pub struct RunState {
     /// settlement the run records itself. See [`known_change_url`](Self::known_change_url).
     ///
     /// Omitted when empty, which is every run nobody settled at a change request.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` every neighbouring map of this struct keys by — `landings`, `branches`, `change_urls` — and it was validated where the graph took the node; a node-id newtype on this one field would disagree with each of them and convert at every read, which `src/AGENTS.md` names as drift. The value is the typed half: `StatedLanding` holds only a spelling its own parser accepted, and only the change-request one is folded in here.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "change_requests_only"
+    )]
+    // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` every neighbouring map of this struct keys by — `landings`, `branches`, `change_urls` — and it was validated where the graph took the node; a node-id newtype on this one field would disagree with each of them and convert at every read, which `src/AGENTS.md` names as drift. The value is the typed half: `StatedLanding` holds only a spelling its own parser accepted, and `change_requests_only` refuses the commit one here.
     pub stated_change_urls: BTreeMap<String, crate::edits::StatedLanding>,
     /// The declared steps each node's attempt finished.
     ///
@@ -655,6 +659,25 @@ impl DriverClaim {
     pub(crate) fn is(&self, host: Option<&str>, pid: Option<std::num::NonZeroU32>) -> bool {
         host == Some(self.host.as_str()) && pid == Some(self.pid)
     }
+}
+
+/// [`RunState::stated_change_urls`] as a checkpoint holds it, refusing a commit
+/// where only a change request's URL belongs.
+fn change_requests_only<'de, D: serde::Deserializer<'de>>(
+    reader: D,
+) -> Result<BTreeMap<String, edits::StatedLanding>, D::Error> {
+    let read = BTreeMap::<String, edits::StatedLanding>::deserialize(reader)?;
+    if let Some((node, commit)) = read
+        .iter()
+        .find(|(_, stated)| matches!(stated, edits::StatedLanding::Commit(_)))
+    {
+        return Err(serde::de::Error::custom(format!(
+            "stated_change_urls names the commit {commit:?} for node {node:?}, where only a \
+             change request's URL belongs",
+            commit = commit.reference()
+        )));
+    }
+    Ok(read)
 }
 
 impl RunState {
@@ -3826,8 +3849,13 @@ mod tests {
         // And a checkpoint is held to it too: a stated change request that is no
         // URL is refused where the cached fold is read, rather than asked about.
         let mut cached = serde_json::to_value(RunState::default()).expect("it serialises");
-        cached["stated_change_urls"] = json!({"publish": "not a change request"});
-        assert!(serde_json::from_value::<RunState>(cached.clone()).is_err());
+        for unusable in ["not a change request", "3f9a1c2ab"] {
+            cached["stated_change_urls"] = json!({"publish": unusable});
+            assert!(
+                serde_json::from_value::<RunState>(cached.clone()).is_err(),
+                "{unusable:?} was read as a stated change request"
+            );
+        }
         cached["stated_change_urls"] = json!({"publish": url});
         let read = serde_json::from_value::<RunState>(cached).expect("a URL is read");
         assert_eq!(read.known_change_url("publish").as_deref(), Some(url));

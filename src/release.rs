@@ -2394,24 +2394,11 @@ impl Stated {
     }
 }
 
-/// What `onevcs` answers about one release, asked at `reference` and — only where
-/// it answers that it cannot resolve that reference — asked again at `fallback`.
-///
-/// **Matched on the typed kind, never on the refusal's prose**, which the sibling
-/// is free to reword: [`onevcs::Error::UnresolvableReference`] is the one answer
-/// that says the spelling is the problem. Every other refusal — the host, the
-/// filesystem, input the sibling would not take — is kept as it was, because
-/// asking the same thing another way would not change it; and a reference that
-/// resolves is never second-guessed. With no fallback the refusal stands, which
-/// [`Answer::of`] reads as `not-answered`. `ask` is `onevcs::release_status`
+/// What `onevcs` answers about one release asked at `reference`, asked again at
+/// `fallback` only on the typed unresolvable-reference refusal — never on its
+/// prose — and the spelling that answered. The order is
+/// `docs/contract-divergences.md` entry 40's; `ask` is `onevcs::release_status`
 /// everywhere but this module's tests.
-///
-/// Beside the answer, the spelling it was answered at, which is the one a person
-/// is told to acknowledge a release against.
-///
-/// The branches a person can reach — the fallback, a commit that resolves, and one
-/// with nothing to fall back to — are each driven by `tests/e2e/adoption.rs`'s
-/// stated-landing journeys.
 fn release_status_falling_back<'a>(
     reference: &'a str,
     fallback: Option<&'a str>,
