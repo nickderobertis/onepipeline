@@ -100,10 +100,8 @@ use crate::projection::{self, RunState};
 /// (`RunState::stop`): a cached fold of a stopped-then-adopted run from before it
 /// still carries the stop, and resumed from it would go on reporting the
 /// adopting driver dead and the run settled. Version 6 was cut when the fold
-/// started keeping the change request a settle stated past a later stated commit
-/// (`RunState::stated_change_urls`): a cached fold from before it holds none, and
-/// resumed from it would ask a release question at an unresolvable squash commit
-/// with nothing to fall back to.
+/// started keeping a stated change request past a later stated commit
+/// (`RunState::stated_change_urls`), the fallback a version-5 fold does not hold.
 // llmlint: ignore[changed_behavior_has_e2e] a version-1 document is one the build before
 // this one wrote, which no invocation of this build can produce: what a user can reach —
 // a checkpoint at this version being resumed from, and one at a version this build does
@@ -1453,7 +1451,8 @@ mod tests {
             // the name it is written under cannot move without the version.
             stated_change_urls: BTreeMap::from([(
                 "build".to_string(),
-                "https://example.invalid/owner/engine/pull/12".to_string(),
+                crate::edits::StatedLanding::parse("https://example.invalid/owner/engine/pull/12")
+                    .expect("a change request"),
             )]),
             last_write_at: Some(1_786_000_000_000),
             strict: true,

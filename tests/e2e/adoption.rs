@@ -5426,7 +5426,6 @@ fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spel
     });
 }
 
-/// The one command a settle's advice prints for a person to paste.
 fn pasted_command(stderr: &str) -> String {
     stderr
         .lines()
@@ -6121,6 +6120,72 @@ fn a_cross_dag_dependency_settled_from_evidence_is_correlated_through_its_landin
     world.until("the held node to run", |world| {
         dispatched(world, &run, "consumer")
     });
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+}
+
+/// The same fallback across runs: an upstream node settled at the squash commit
+/// its own change request landed as is answered, for a consumer in another run,
+/// through the change request the **upstream** run knows it by.
+///
+/// The downstream run starts after the settle, so the first question it puts is at
+/// the stated commit — which `onevcs` cannot resolve — and no earlier answer about
+/// the branch can stand in for the one the fallback gives.
+#[test]
+fn a_cross_dag_squash_commit_is_answered_through_the_upstream_change_request() {
+    let world = watching("adoption-squash-crossdag");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    the_engine_publishes_by_opening_a_change(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+
+    let mut landed = engine();
+    landed["id"] = json!("landed");
+    world.script("hold.wait", "hold");
+    let upstream = start(
+        &world,
+        "adoption-squash-upstream",
+        vec![landed, agent("hold", &[])],
+    );
+    world.until("the upstream node to settle", |world| {
+        settled_status(world, &upstream, "landed") == Some("done".to_owned())
+    });
+    let branch = branch_of(&world, &upstream, "landed");
+    let squash = squash_land(&world, &engine_repo.checkout, &branch);
+    assert!(
+        release_status_of(&world, &squash).is_none(),
+        "`onevcs` resolved the squash commit, so nothing here would fall back"
+    );
+    let settled = world.run_with_stdin(
+        &["reply", &upstream],
+        &json!({"version": onepipeline::channel::REPLY_ENVELOPE_VERSION, "commands": [{
+            "op": "settle", "id": "landed", "outcome": "done",
+            "evidence": "its change request was squash-merged",
+            "landing": squash,
+        }]})
+        .to_string(),
+    );
+    settled.exited(0).out_has("\"reply\":0");
+    settled.err_lacks("onevcs release acknowledge");
+    world.release("hold.go");
+    world.until("the upstream run to settle", |world| {
+        world.run_file(&upstream, "result.json").is_file()
+    });
+
+    let mut consumer = consumer(Some("published"));
+    consumer["deps"] = json!([format!("run:{upstream}#landed")]);
+    let run = start(&world, "adoption-squash-crossdag", vec![consumer]);
+    world.until("the wait to answer through the change request", |world| {
+        answered(world, &run, "consumer") == Some("not-released".to_owned())
+    });
+    assert!(!dispatched(&world, &run, "consumer"));
+    releases_at(&answer, "0.1.0");
+    world.until("the first release to start the held node", |world| {
+        dispatched(world, &run, "consumer")
+    });
+    assert_eq!(arrived_version(&world, &run, "consumer"), json!("0.1.0"));
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
     });

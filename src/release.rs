@@ -1954,6 +1954,7 @@ pub(crate) fn hold_warnings_for_stated_landings(
             Some(crate::edits::StatedLanding::Commit(_)) => state.known_change_url(id),
             _ => None,
         };
+        let fallback = fallback.as_deref();
         for target in awaited {
             let named = target.to_string();
             let asked = release_status_falling_back(
@@ -2366,9 +2367,7 @@ fn stated_landings(events: &[crate::event::Envelope]) -> BTreeMap<String, Stated
         .iter()
         .filter_map(|(node, stated)| {
             let fallback = match stated {
-                crate::edits::StatedLanding::Commit(_) => {
-                    state.known_change_url(node).map(str::to_owned)
-                }
+                crate::edits::StatedLanding::Commit(_) => state.known_change_url(node),
                 crate::edits::StatedLanding::ChangeRequest(_) => None,
             };
             let landing = stated.reference().to_owned();
@@ -2388,7 +2387,6 @@ struct Stated {
 }
 
 impl Stated {
-    /// The two halves a [`Dependency`] carries.
     fn split(stated: Option<Self>) -> (Option<String>, Option<String>) {
         stated.map_or((None, None), |stated| {
             (Some(stated.landing), stated.fallback)
@@ -2411,13 +2409,9 @@ impl Stated {
 /// Beside the answer, the spelling it was answered at, which is the one a person
 /// is told to acknowledge a release against.
 ///
-/// Driven end to end by `tests/e2e/adoption.rs`: the fallback answering, by
-/// `a_squash_commit_baselined_before_any_release_is_answered_through_its_change_request`
-/// and both `…_no_release_baseline_…`/`…_no_release_can_be_attributed_…` journeys;
-/// a commit that resolves, by
-/// `a_node_settled_from_evidence_is_correlated_through_the_commit_it_names`; and an
-/// unresolvable commit with nothing to fall back to, by the squash-merge journey's
-/// first settle, whose node the run knows no change request for.
+/// The branches a person can reach — the fallback, a commit that resolves, and one
+/// with nothing to fall back to — are each driven by `tests/e2e/adoption.rs`'s
+/// stated-landing journeys.
 fn release_status_falling_back<'a>(
     reference: &'a str,
     fallback: Option<&'a str>,
