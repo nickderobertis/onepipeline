@@ -1170,7 +1170,11 @@ fn a_hook_rendering_asks_a_source_about_the_payloads_session_and_its_continuatio
         })
         .to_string()
     };
-    let sources = [source.command.as_str()];
+    // A second refusing source, so each rendering's refusal is a combined one
+    // and carries every block rather than the first.
+    let other = Source::new(&world, "unpushed");
+    other.answers(&json!({"verdict": "block", "reason": "stash s-1 never pushed"}));
+    let sources = [source.command.as_str(), other.command.as_str()];
     for (format, turn) in [("claude-code", 0), ("codex", 1)] {
         // Each rendering's first stop blocks; a fresh reason per rendering
         // keeps the one before it from being this one's continuation.
@@ -1187,7 +1191,9 @@ fn a_hook_rendering_asks_a_source_about_the_payloads_session_and_its_continuatio
             told["reason"]
                 .as_str()
                 .is_some_and(|reason| reason.contains(&format!("b-{turn}"))
-                    && reason.contains(&source.command)),
+                    && reason.contains(&source.command)
+                    && reason.contains("stash s-1 never pushed")
+                    && reason.contains(&other.command)),
             "{format}: {told}"
         );
         let ended =
@@ -1204,6 +1210,7 @@ fn a_hook_rendering_asks_a_source_about_the_payloads_session_and_its_continuatio
         assert!(!input.contains(INHERITED), "{input}");
     }
     assert_eq!(source.inputs().len(), 4);
+    assert_eq!(other.inputs(), source.inputs());
     assert!(source.environments().iter().all(|named| named == session));
 }
 
