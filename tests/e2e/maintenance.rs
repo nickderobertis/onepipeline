@@ -1608,3 +1608,89 @@ fn the_maintenance_journeys_take_the_whole_group() {
         "the first group assignment no longer takes every test of this binary: {grouped}"
     );
 } // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The rate journeys take the whole of the `e2e` group too, so on the four-core
+/// Windows leg nothing shares the machine with the window each one counts passes
+/// across.
+///
+/// Held the way the test above holds this module's override, plus one thing that
+/// test does not need: each journey the override names still exists under that
+/// name. nextest refuses a `binary()` that matches nothing but accepts a `test(=…)`
+/// that does, so a renamed rate journey would quietly lose its override.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is the runner's
+// configuration, which only nextest executes; running nextest from inside a test
+// it is running is the nesting `.config/nextest.toml` already declines.
+#[test]
+fn the_rate_journeys_take_the_whole_group() {
+    const RATE_JOURNEYS: [(&str, &str); 4] = [
+        (
+            "adoption",
+            "a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs",
+        ),
+        (
+            "loopcost",
+            "a_converged_run_does_no_scheduling_work_while_it_records_nothing",
+        ),
+        (
+            "loopcost",
+            "an_idle_pass_does_not_grow_with_the_run_it_is_idling_on",
+        ),
+        (
+            "loopcost",
+            "another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops",
+        ),
+    ];
+    let text = std::fs::read_to_string(repo_file(".config/nextest.toml"))
+        .expect("the runner's configuration ships");
+    let config: toml::Value = toml::from_str(&text).expect("the configuration parses");
+    let cap = config["test-groups"]["e2e"]["max-threads"]
+        .as_integer()
+        .expect("the e2e group has a cap");
+    let overrides = config["profile"]["default"]["overrides"]
+        .as_array()
+        .expect("the default profile has overrides");
+    let filter = |entry: &toml::Value| entry["filter"].as_str().unwrap_or_default().to_owned();
+    let terms: Vec<String> = RATE_JOURNEYS
+        .iter()
+        .map(|(module, name)| format!("test(={module}::{name})"))
+        .collect();
+    let required = overrides
+        .iter()
+        .find(|entry| filter(entry).contains(&terms[0]))
+        .expect("an override names the rate journeys");
+    assert_eq!(
+        filter(required),
+        format!("binary(e2e) and ({})", terms.join(" or "))
+    );
+    assert_eq!(
+        required
+            .get("threads-required")
+            .and_then(toml::Value::as_integer),
+        Some(cap)
+    );
+    for (module, name) in RATE_JOURNEYS {
+        let source = std::fs::read_to_string(repo_file(&format!("tests/e2e/{module}.rs")))
+            .expect("the rate journey's module ships");
+        assert!(
+            source.contains(&format!("\nfn {name}() {{")),
+            "{module}::{name} is no longer a journey, so the override naming it holds nothing"
+        );
+    }
+    // No earlier override decides these journeys' threads: the two before it
+    // name the host-sized journeys and this module.
+    for earlier in overrides
+        .iter()
+        .take_while(|entry| filter(entry) != filter(required))
+    {
+        if earlier.get("threads-required").is_some() {
+            assert!(
+                [
+                    "test(/a_host_sized/)",
+                    "binary(e2e) and test(/^maintenance::/)"
+                ]
+                .contains(&filter(earlier).as_str()),
+                "{earlier}"
+            );
+        }
+    }
+} // llmlint: ignore-end[tests_mirror_real_usage]

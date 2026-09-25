@@ -113,6 +113,18 @@ threads-required = 4
 filter = 'binary(e2e) and test(/^maintenance::/)'
 threads-required = 4
 
+# The four journeys that hold a loop's pass **rate** to a floor take the whole
+# group as well. Each counts passes across a wall-clock window, so anything else
+# sharing the machine then lowers the count, and the journey cannot tell that from
+# a slower loop. On the 4-core Windows leg, 4 is the whole runner: run 36158473768
+# failed the `adoption` one at 26 chatty passes in 60s against 119 quiet, while it
+# shared the leg with `summary::tests`' CPU-bound folds. Those ran 1.4-1.6x their
+# time on main's passing leg, and every `adoption` journey ran faster than it did
+# there. `maintenance::the_rate_journeys_take_the_whole_group` holds this in place.
+[[profile.default.overrides]]
+filter = 'binary(e2e) and (test(=adoption::a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs) or test(=loopcost::a_converged_run_does_no_scheduling_work_while_it_records_nothing) or test(=loopcost::an_idle_pass_does_not_grow_with_the_run_it_is_idling_on) or test(=loopcost::another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops))'
+threads-required = 4
+
 # Declared on `default` and inherited by `ci`, so the cap holds on the
 # cross-platform legs too. Asked of the runner rather than assumed: `cargo nextest
 # show-config test-groups --profile ci` reports `group: e2e (max threads = 4)`.
