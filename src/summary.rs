@@ -1030,7 +1030,7 @@ impl Maintainer {
         // reader had asked whose run it was. Without a row a reader folds, and a
         // fold reads the launch record it needs or says it cannot.
         //
-        // llmlint: ignore[changed_behavior_has_e2e] only a lone appender's row is served, and the only lone appender with no readable launch record is `start` between two of its statements, where nothing can hold it; a record torn under a live driver meets two appenders and is refolded strictly either way. `a_record_appended_before_the_launch_record_leaves_no_row_attributed_to_nobody` drives the launcher's order through the real writer and reader.
+        // llmlint: ignore[changed_behavior_has_e2e] the launcher's window is driven through `runs` by `driver::a_run_listed_while_its_driver_is_on_its_way_up_is_the_launching_sessions`; a record torn under a live driver has no journey because the driver's two appenders each stamp only what they folded, so a reader refolds and reads the record strictly with or without this arm.
         let Some(launch) = self.launch() else {
             return;
         };

@@ -3475,6 +3475,151 @@ fn a_stop_that_cannot_record_what_it_ended_still_stops_the_run_and_says_so() {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// A stop that signalled nothing ended nothing, whatever went while it tried: a
+/// stranger later found on that process's pid is still declined.
+///
+/// The host's process listing ends the dispatch and then fails, so the stop
+/// proves the dispatch, signals nobody, and finds it gone afterwards.
+// llmlint: ignore-block[tests_mirror_real_usage] a `ps` that ends a process and then
+// fails stands in for a host whose listing broke while one of the run's processes exited
+// by itself, and the reissued pid is planted for the reason
+// `a_dispatch_an_earlier_stop_ended_is_over_once_its_pid_is_reissued` gives; both `stop`s
+// are the real binary over the real run root.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_stop_that_signalled_nothing_leaves_a_reissued_pid_declined() {
+    let world = World::new("driver-stop-signalled-nothing");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "unsignalled", vec![agent("build", &[])]);
+    world.until("the dispatch to be registered", |world| {
+        !world.dispatch_records(&run).is_empty()
+    });
+    let entry = world.dispatch_records(&run).remove(0);
+    let recorded: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&entry).expect("the entry reads"))
+            .expect("the entry is JSON");
+    let dispatch = recorded["pid"].as_u64().expect("the entry names a pid");
+    let stamp = recorded["started"]
+        .as_str()
+        .expect("the entry carries its stamp")
+        .to_string();
+
+    let mut command = world.cmd(&["stop", &run]);
+    let inherited = env_of(&command, "PATH");
+    let listing = world.root.join("listing-ends-the-dispatch");
+    std::fs::create_dir_all(&listing).expect("a directory for the ps stand-in");
+    onepipeline_testfakes::executable(
+        &listing.join("ps"),
+        format!(
+            "#!/bin/sh\ncase \" $* \" in\n  *\" -A \"*)\n    kill -9 {dispatch}\n    while kill -0 {dispatch} 2>/dev/null; do sleep 0.02; done\n    exit 1 ;;\nesac\nexec '{}' \"$@\"\n",
+            found_on(&inherited, "ps").display()
+        ),
+    );
+    command.env("PATH", leading(&listing, &inherited));
+    world
+        .run_on(command, "stop while the listing fails")
+        .exited(REFUSED)
+        .err_has("was not stopped");
+    assert!(
+        still_listed(driver),
+        "a stop that signalled nothing ended the driver"
+    );
+
+    let mut stranger = stranger_started_after(std::slice::from_ref(&stamp));
+    let taken = stranger.id();
+    let mut reissued = recorded;
+    reissued["pid"] = json!(taken);
+    std::fs::write(&entry, reissued.to_string()).expect("the reissued pid is planted");
+    world.run(&["stop", &run]).exited(0).err_has(&format!(
+        "names pid {taken}, which this host has since given to another process"
+    ));
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about the stranger")
+            .is_none(),
+        "a stop signalled pid {taken}, which the host had reissued"
+    );
+    stranger.kill().expect("this test ends its own process");
+    stranger.wait().expect("the stranger is reaped");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The value a command was wired with for `name`.
+fn env_of(command: &std::process::Command, name: &str) -> std::ffi::OsString {
+    command
+        .get_envs()
+        .find(|(each, _)| *each == name)
+        .and_then(|(_, value)| value.map(ToOwned::to_owned))
+        .unwrap_or_else(|| panic!("the world wires no {name}"))
+}
+
+/// The first `name` on `path`.
+fn found_on(path: &std::ffi::OsStr, name: &str) -> PathBuf {
+    std::env::split_paths(path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| panic!("no {name} on {path:?}"))
+}
+
+/// `path` with `dir` in front of it.
+fn leading(dir: &Path, path: &std::ffi::OsStr) -> std::ffi::OsString {
+    std::env::join_paths(std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(path)))
+        .expect("a PATH")
+}
+
+/// A run listed while its driver is on its way up belongs to the session that
+/// launched it.
+///
+/// The launcher appends the run's first record before it writes the launch
+/// record, and its driver claims the run before it appends anything of its own
+/// — so between the two the run's journal holds the launcher's record alone.
+/// The driver is held there, at its store's version check, which is the state a
+/// slow host leaves a reader in.
+// llmlint: ignore-block[tests_mirror_real_usage] an `onetaskgraph` that holds a driver's
+// version check stands in for a host slow to start one, the only way to keep a driver where a
+// Windows runner left it; everything else is the real binary and the real store behind it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_run_listed_while_its_driver_is_on_its_way_up_is_the_launching_sessions() {
+    let world = World::new("driver-ownership-rising");
+    let plan = world.plan("rising", &plan_of("rising", vec![human("approve", &[])]));
+    let mut command = world.cmd(&["start", &plan, "--detach"]);
+    let real = env_of(&command, "ONETASKGRAPH_BIN");
+    let store = world.root.join("store-holds-the-driver");
+    std::fs::create_dir_all(&store).expect("a directory for the store stand-in");
+    let (held, go) = (world.root.join("driver-held"), world.root.join("driver-go"));
+    onepipeline_testfakes::executable(
+        &store.join("onetaskgraph"),
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ] && tr '\\0' ' ' < /proc/$PPID/cmdline | grep -q ' drive-run '; then\n  : > '{}'\n  while [ ! -f '{}' ]; do sleep 0.05; done\nfi\nexec '{}' \"$@\"\n",
+            held.display(),
+            go.display(),
+            Path::new(&real).display()
+        ),
+    );
+    command.env("ONETASKGRAPH_BIN", store.join("onetaskgraph"));
+    world.run_on(command, "start --detach").exited(0);
+    world.until("the driver to be held on its way up", |_| held.is_file());
+    assert_eq!(
+        world.journal("rising").len(),
+        1,
+        "the driver appended before it was held, so this journey proves nothing"
+    );
+
+    world
+        .run(&["runs"])
+        .exited(0)
+        .out_has("[mine]")
+        .out_lacks("[unknown]");
+
+    std::fs::write(&go, "").expect("the driver is let go");
+    world.until("the driver to append", |world| {
+        world.journal("rising").len() > 1
+    });
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// A stop reaches a dispatch whose driver is gone.
 ///
 /// The launch record and the ownership lock name a driver, and a dispatch
