@@ -227,8 +227,6 @@ pub(crate) fn guard(
 ) -> (Verdict, Vec<String>) {
     let mut declared: Vec<&str> = Vec::new();
     for command in sources {
-        // The same command declared twice is one source asked once: it would
-        // answer the same, and be remembered under the same name.
         if !declared.contains(&command.as_str()) {
             declared.push(command);
         }
@@ -391,8 +389,6 @@ fn source_input(asked: &Asked) -> String {
     .to_string()
 }
 
-/// The platform shell running `command`, as the harness runs the hook command
-/// this verb is itself registered as.
 #[cfg(unix)]
 fn shell(command: &str) -> Command {
     let mut shell = Command::new("sh");

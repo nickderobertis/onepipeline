@@ -963,7 +963,6 @@ fn declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source()
     second
         .answers(&json!({"verdict": "block", "reason": "branch b-2 preserved, never published\n"}));
     warning.answers(&json!({"verdict": "warn", "message": "the registry is stale"}));
-    // The first declared twice: one source, asked once.
     let sources = [
         refusing.command.as_str(),
         second.command.as_str(),
@@ -1427,7 +1426,6 @@ fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_pa
     refused_on(&stop("echo 'all good'", true), "not one JSON object");
     assert_eq!(stop("echo 'all good'", true), json!({"verdict": "none"}));
 
-    // A shell that cannot be found to run a source in is the same refusal.
     let unstartable = answering("unstartable", "echo '{\"verdict\":\"none\"}'");
     let mut shell_less = world.cmd(&declaring(&[unstartable.as_str()], &[]));
     shell_less.env("PATH", world.empty_path());
