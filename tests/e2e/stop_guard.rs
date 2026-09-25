@@ -890,6 +890,12 @@ fn declaring<'a>(sources: &'a [&'a str], rest: &[&'a str]) -> Vec<&'a str> {
     args
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] Measured at 5.0s on a
+// host at load 57 over 20 cores, beside four journeys in this module that each hold a real
+// run for 23-26s on the same run. It holds a run because what it proves is a source's
+// verdict combined with the verb's own `unwatched` block, which only a real unwatched run
+// makes; the code it guards is `src/stopguard.rs`, under the crate's own edge, so a
+// narrower project would drop it out of `nx affected` for the changes it exists to catch.
 /// Declared sources are asked about this stop's session with the verb's own
 /// input bytes, and every answer is combined into one verdict with the verb's
 /// own: the strongest wins and no reason is dropped. The continuation rule
@@ -956,11 +962,23 @@ fn declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source()
 
     // Each source was handed the verb's own neutral input — the very shape the
     // page documents — naming the input's session, never the environment's.
+    // Byte for byte, as the page spells the input a source is handed.
+    let template = page()
+        .split("## Declared sources")
+        .nth(1)
+        .and_then(|section| {
+            section
+                .split('`')
+                .find(|span| span.starts_with("{\"session\""))
+        })
+        .expect("the page spells the input a source is handed")
+        .to_owned();
+    let bytes = template
+        .replace("<ID>", &session)
+        .replace("<bool>", "false");
     for source in [&refusing, &second, &warning, &quiet] {
-        let inputs = source.inputs();
-        assert_eq!(inputs.len(), 1, "{inputs:?}");
-        let handed: Value = serde_json::from_str(&inputs[0]).expect("the input is JSON");
-        assert_eq!(handed, json!({"session": session, "continuation": false}));
+        assert_eq!(source.inputs(), vec![bytes.clone()]);
+        let handed: Value = serde_json::from_str(&bytes).expect("the input is JSON");
         let mut documented = documented_input(&session);
         documented["continuation"] = json!(false);
         assert_eq!(handed, documented);
@@ -1046,6 +1064,8 @@ fn declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source()
         .is_some_and(|message| message.contains("the registry is stale")));
     owner.release("build.go");
 }
+
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Feed one neutral input object to the guard with `sources` declared.
 #[cfg(unix)]
@@ -1158,18 +1178,18 @@ fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_pa
         ),
         (
             answering("reasonless", "echo '{\"verdict\":\"block\"}'"),
-            "non-blank `reason`",
+            "missing field `reason`",
         ),
         (
             answering(
                 "blank-reason",
                 "echo '{\"verdict\":\"block\",\"reason\":\"  \"}'",
             ),
-            "non-blank `reason`",
+            "`reason` is blank",
         ),
         (
             answering("crossed", "echo '{\"verdict\":\"warn\",\"reason\":\"x\"}'"),
-            "`warn` carries `message`",
+            "unknown field `reason`",
         ),
         (
             answering("extra", "echo '{\"verdict\":\"none\",\"why\":\"x\"}'"),

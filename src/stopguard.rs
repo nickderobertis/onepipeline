@@ -332,24 +332,14 @@ enum Answer {
     None,
 }
 
-/// The neutral verdict object as a source writes it, read closed: the three
-/// field names this verb renders under `--format neutral`, and no other.
+/// The neutral verdict object as a source writes it, read closed: each word
+/// with exactly the field `--format neutral` renders beside it, and no other.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Answered {
-    verdict: Word,
-    reason: Option<String>,
-    message: Option<String>,
-}
-
-/// A verdict word as a source spells it, so a fourth word is refused by the
-/// reader rather than carried as a string to be matched later.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Word {
-    Block,
-    Warn,
-    None,
+#[serde(tag = "verdict", rename_all = "lowercase", deny_unknown_fields)]
+enum Answered {
+    Block { reason: String },
+    Warn { message: String },
+    None {},
 }
 
 /// What a source's standard output says, or why it says nothing this verb can
@@ -378,18 +368,17 @@ fn answer_of(stdout: &[u8]) -> Result<Answer, String> {
     }
     let answered: Answered =
         serde_json::from_str(text).map_err(|error| outside(&error.to_string()))?;
-    let said = |text: Option<String>| text.filter(|text| !text.trim().is_empty());
-    match (answered.verdict, answered.reason, answered.message) {
-        (Word::Block, reason, None) => said(reason)
-            .map(Answer::Block)
-            .ok_or_else(|| outside("a block carries a non-blank `reason`")),
-        (Word::Warn, None, message) => said(message)
-            .map(Answer::Warn)
-            .ok_or_else(|| outside("a warn carries a non-blank `message`")),
-        (Word::None, None, None) => Ok(Answer::None),
-        _ => Err(outside(
-            "`block` carries `reason`, `warn` carries `message`, and `none` carries neither",
-        )),
+    let said = |text: String, field: &str| {
+        if text.trim().is_empty() {
+            Err(outside(&format!("`{field}` is blank")))
+        } else {
+            Ok(text)
+        }
+    };
+    match answered {
+        Answered::Block { reason } => said(reason, "reason").map(Answer::Block),
+        Answered::Warn { message } => said(message, "message").map(Answer::Warn),
+        Answered::None {} => Ok(Answer::None),
     }
 }
 
