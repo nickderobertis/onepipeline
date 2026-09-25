@@ -12,6 +12,14 @@ files:
     - "**/.git/**"
     # A recorded journal the recorded-channel journey reads byte for byte; it quotes another repository's directives, which the parser would read as this one's.
     - "tests/recorded/run-root/**"
+    # The visual-docs capture's committed output and its vendored renderer font.
+    # All of it is generated or third-party: each SVG is a few hundred kilobytes
+    # of `freeze`'s markup around a base64 font, the GIF is binary, and the
+    # baseline is a list of digests. None of it is this repository's prose, and
+    # the images are already gated on their own content hash by screencomp.
+    - "screenshots/images/**"
+    - "screenshots/fonts/**"
+    - "shots/baseline/**"
 rationales: true
 # No `agents` block: the harness/model are NOT pinned here. `oneharness.toml`
 # (composed alongside this file) selects them in fallback mode — codex + gpt-5.5

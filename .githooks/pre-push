@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# screencomp local visual guard (adapted from `screencomp init`).
+#
+# The local half of the STRICT gate: `.github/workflows/visual-docs.yml` fails on
+# unexpected screenshot drift, and this hook lets you regenerate and commit the
+# baseline BEFORE pushing so that workflow stays green. It re-captures only when
+# a file that can change a rendered shot changes (`[guard].paths` in
+# screencomp.toml) and blocks the push on drift.
+#
+# **This directory carries the visual guard and nothing else.** `just gate` — the
+# complete pre-push bar — is deliberately NOT wired in here: hooking a whole gate
+# into `git push` changes this repository's development loop, and that is a
+# separate decision nobody has made. Enabling this directory takes no existing
+# hook out of service either; this clone had none.
+#
+# Enabled by `just bootstrap` (`core.hooksPath` is per-clone state and is never
+# committed, so a guard nothing activates runs nothing). Enable it by hand with
+#   git config core.hooksPath .githooks
+# and check it with `screencomp doctor --env`.
+#
+# Unlike the scaffold's web-app capture, this repository's shots are
+# deterministic SVGs — a vendored, version-pinned font embedded into each file —
+# so the capture runs NATIVELY here, with no Docker and no pinned container, and
+# still produces byte-identical output to CI.
+#
+# llmlint: ignore-file[changed_behavior_has_e2e] every command this script runs is a
+# third-party tool this repository neither installs in `just check` nor ships —
+# `screencomp` and `freeze` — driven over a capture that takes about a minute of real
+# subprocess work; an offline journey of it could only assert against stubs of those two
+# tools, which is a test of the stubs. What the guard guards is itself checked: `just
+# screenshots` and `screencomp classify` are the two commands here and the visual-docs
+# workflow runs both on every pull request.
+set -euo pipefail
+
+# `SCREENCOMP_GUARD_REQUIRE` is external input and it decides which way this hook
+# answers when it cannot evaluate the push. Present-means-on would read
+# `SCREENCOMP_GUARD_REQUIRE=0` as "require", which is the opposite of what that
+# typed, so it too is held to a value it can have.
+#
+# It is read before anything else can refuse, because EVERY ending that could not
+# evaluate the push consults it — the undeclared-lane one below included. Read
+# after one of them, "may this push go" is answered by whichever ending the host
+# reached first rather than by the switch.
+#
+# Two refusals below pass it by, and neither is one of those endings: an
+# `[capture].arches` this tree does not state exactly once as a list of lane
+# names, and a CPU `host-arch.sh` has no spelling for, which dies here under
+# `set -e`. Each says this tree or this host cannot support the guard at all
+# rather than that the guard declined to evaluate a push, and no value of a
+# switch makes either one true or false.
+case "${SCREENCOMP_GUARD_REQUIRE:-0}" in
+  0 | false | no) GUARD_REQUIRE=0 ;;
+  1 | true | yes) GUARD_REQUIRE=1 ;;
+  *)
+    echo "pre-push: SCREENCOMP_GUARD_REQUIRE is '${SCREENCOMP_GUARD_REQUIRE}', which is" >&2
+    echo "          neither 0/false/no nor 1/true/yes. Refusing rather than guessing" >&2
+    echo "          whether this push may go without the guard having evaluated it." >&2
+    exit 1
+    ;;
+esac
+
+# The declared `[capture].arches` lanes, read out of screencomp.toml so a lane
+# name lives in exactly one place, and this host's own lane among them.
+# `host-arch.sh` refuses a CPU it has no spelling for and keeps that refusal: a
+# lane this repository has never heard of is a different fact from a lane it
+# knows and has not blessed, and only the second is a state a developer can be in.
+# Counted before it is read, because `sed` answers with *every* line that
+# matched: a screencomp.toml carrying a second `arches` — a duplicate in
+# `[capture]`, or one belonging to another table this pattern is not scoped to —
+# would arrive below as the two lists run together, and the guard would then
+# classify against a lane neither declaration names. Exactly one is what this
+# reads, and the alternative to counting is combining.
+DECLARED_ARCHES="$(grep -cE '^arches *=' screencomp.toml || true)"
+LANES="$(sed -n 's/^arches *= *\[\(.*\)\].*/\1/p' screencomp.toml \
+  | tr -d '"[:blank:]' | tr ',' '\n' | grep -v '^$' || true)"
+# A `[capture].arches` that did not parse to lane names is this tree's own file
+# being wrong rather than this host being unusual, so it is refused outright
+# like an architecture `host-arch.sh` has no spelling for. Read leniently, it
+# would arrive below as "no lane matches", which reads as a host to add a lane
+# for and is a different thing to go and do.
+if [ "$DECLARED_ARCHES" != 1 ] || [ -z "$LANES" ] ||
+  printf '%s\n' "$LANES" | grep -qvE '^[A-Za-z0-9_]+$'; then
+  echo "pre-push: screencomp.toml states 'arches' on $DECLARED_ARCHES line(s), and the" >&2
+  echo "          lanes read [${LANES//$'\n'/, }] — which is not one list of lane" >&2
+  echo "          names. The guard classifies this host's lane against" >&2
+  echo "          shots/baseline/<lane>.json and cannot pick one out of that." >&2
+  exit 1
+fi
+LANE="$(bash screenshots/host-arch.sh)"
+MANIFEST="shots/baseline/${LANE}.json"
+GALLERY="shots/review"
+CURRENT="shots/current"
+
+# The guard stops here under CI: the visual-docs workflow is the source of truth
+# there. Only the guard does — the two refusals above stand wherever this hook
+# runs, because a screencomp.toml that does not parse and a CPU with no spelling
+# are facts about this checkout and this host, not about the push. `CI` is
+# the platform's variable rather than this repository's — GitHub spells it
+# `true`, others `1` — so it is read for the values that say "this is CI" and
+# nothing else. An unrecognised one is not a claim that this is CI, and the
+# answer to it is to run the guard: being wrong that way costs a capture, and
+# being wrong the other way turns the gate off without saying so.
+case "${CI:-}" in
+  1 | true | yes | on) exit 0 ;;
+esac
+
+# llmlint: ignore-block[cli_output_contract] every ending below reports that the guard
+# could not evaluate this push and then lets the push through, and that is the contract a
+# git hook's status has: it answers "may this push go", not "did the guard run". The four
+# things that reach these endings — a host whose architecture no declared lane covers, an
+# optional third-party CLI this repository deliberately does not install for `just check`,
+# a `screencomp scope` that could not answer, and git handing this hook something that is
+# not an object name — are all conditions under which refusing would make `git push`
+# depend on hardware, on tooling, or on input the developer did not choose, while the
+# visual-docs workflow re-captures on the pull request either way. The message says the
+# guard did not evaluate it, which is the fact a reader needs; SCREENCOMP_GUARD_REQUIRE=1
+# is how a machine that *is* a declared lane and *has* provisioned the tool asks for the
+# stricter answer.
+#
+# A lane with no committed baseline gives the guard nothing to classify against, so it
+# CANNOT evaluate the push. Say so; do NOT skip silently.
+if ! printf '%s\n' "$LANES" | grep -qxF "$LANE"; then
+  {
+    echo "pre-push: this host's architecture ($LANE) has no lane in [capture].arches"
+    echo "          of screencomp.toml, so it has no committed baseline to classify"
+    echo "          against. Declared: [${LANES//$'\n'/, }]"
+    echo "          Add \"$LANE\" there (CI fans one job out per lane), capture it"
+    echo "          with 'just screenshots-bless', and commit shots/baseline/$LANE.json."
+    echo "          Set SCREENCOMP_GUARD_REQUIRE=1 to fail here instead."
+  } >&2
+  [ "$GUARD_REQUIRE" = 1 ] && exit 1
+  exit 0
+fi
+
+# Without the CLI the guard CANNOT evaluate the push, so do NOT skip silently.
+if ! command -v screencomp >/dev/null 2>&1; then
+  {
+    echo "pre-push: screencomp is NOT on PATH — the visual guard cannot run."
+    echo "          Install it: https://github.com/nickderobertis/screencomp#install"
+    echo "          then enable the hook: just bootstrap"
+    echo "          Set SCREENCOMP_GUARD_REQUIRE=1 to fail here instead."
+  } >&2
+  [ "$GUARD_REQUIRE" = 1 ] && exit 1
+  exit 0
+fi
+
+# Everything below reaches `git diff` as an argument, and all of it is input:
+# the refs and object names git writes on this hook's stdin, and the override a
+# test or a developer sets. Each is held to the shape it is supposed to have —
+# a hex object name, or `<hex>..<hex>` — before it is used, so nothing
+# option-shaped and nothing revision-shaped-but-not-this-push can be passed in.
+# `git diff` reads a leading dash as a flag however the arguments are ordered,
+# so the check is the guard rather than a `--` after the value.
+object_name='^[0-9a-f]{7,64}$'
+range='^[0-9a-f]{7,64}\.\.[0-9a-f]{7,64}$'
+
+ranges=()
+if [ -n "${SCREENCOMP_GUARD_RANGE:-}" ]; then
+  if ! [[ "$SCREENCOMP_GUARD_RANGE" =~ $range || "$SCREENCOMP_GUARD_RANGE" =~ $object_name ]]; then
+    echo "pre-push: SCREENCOMP_GUARD_RANGE is '$SCREENCOMP_GUARD_RANGE', which is" >&2
+    echo "          not an object name or a '<sha>..<sha>' range. Resolve the refs" >&2
+    echo "          first ('git rev-parse') and set it to the resolved form, or" >&2
+    echo "          unset it to let git's own push refs decide." >&2
+    exit 1
+  fi
+  ranges+=("$SCREENCOMP_GUARD_RANGE")
+else
+  zero='^0+$'
+  while read -r _local_ref local_sha _remote_ref remote_sha; do
+    [ -z "${local_sha:-}" ] && continue
+    if [[ "$local_sha" =~ $zero ]]; then
+      continue                            # branch deletion: nothing to capture
+    fi
+    if ! [[ "$local_sha" =~ $object_name ]]; then
+      echo "pre-push: git named '$local_sha' as the commit being pushed, which is" >&2
+      echo "          not an object name. Skipping the visual guard; the" >&2
+      echo "          visual-docs workflow still gates this on the pull request." >&2
+      exit 0
+    fi
+    if [[ "$remote_sha" =~ $zero ]] || ! [[ "$remote_sha" =~ $object_name ]]; then
+      # Forty zeroes is git saying the remote does not carry this branch yet.
+      # Anything else that is not an object name is git saying something this
+      # hook has no reading of, and it decides the range below — so say that it
+      # did rather than let the base change silently.
+      if ! [[ "$remote_sha" =~ $zero ]]; then
+        echo "pre-push: git named '$remote_sha' as the remote's tip, which is not an" >&2
+        echo "          object name. Taking the range from origin/HEAD instead, which" >&2
+        echo "          captures more than this push rather than less." >&2
+      fi
+      base="$(git merge-base origin/HEAD "$local_sha" 2>/dev/null || true)"
+      [ -n "$base" ] && ranges+=("${base}..${local_sha}") || ranges+=("$local_sha")
+    else
+      ranges+=("${remote_sha}..${local_sha}")
+    fi
+  done
+fi
+[ "${#ranges[@]}" -eq 0 ] && exit 0
+
+changed="$(for r in "${ranges[@]}"; do git diff --name-only "$r" --; done | sort -u)"
+
+# `scope` exits 3 when a changed path matches [guard].paths, 0 when none do, and
+# any OTHER non-zero on error. Treat ONLY exit 3 as relevant; on an error, warn
+# and skip rather than force a slow capture — the workflow is the backstop.
+set +e
+printf '%s\n' "$changed" | screencomp scope --changed-from - --exit-code --quiet
+scope_status=$?
+set -e
+case "$scope_status" in
+  0) exit 0 ;;
+  3) : ;;
+  *)
+    echo "pre-push: 'screencomp scope' failed (exit $scope_status); skipping the" >&2
+    echo "          visual guard. Is screencomp current? The visual-docs workflow" >&2
+    echo "          still gates this on the pull request." >&2
+    exit 0
+    ;;
+esac
+# llmlint: ignore-end[cli_output_contract]
+
+if ! command -v freeze >/dev/null 2>&1; then
+  echo "pre-push: a file that can change a rendered shot changed, and 'freeze' is" >&2
+  echo "          not installed to re-capture. Install it: just screenshots-tools" >&2
+  echo "          then retry, or bypass with: git push --no-verify" >&2
+  exit 1
+fi
+SHOTS_OUT="$CURRENT/$LANE" bash screenshots/capture.sh
+
+set +e
+screencomp classify --baseline-manifest "$MANIFEST" --current "$CURRENT" --arch "$LANE" --exit-code
+status=$?
+set -e
+
+if [ "$status" -eq 0 ]; then
+  echo "pre-push: screenshots unchanged against $MANIFEST — ok to push"
+  exit 0
+elif [ "$status" -ne 3 ]; then
+  echo "pre-push: screencomp classify failed (exit $status)" >&2
+  exit "$status"
+fi
+
+# Drift, which is classify's exit 3: regenerate this lane, build the review
+# gallery, and block the push so the refresh is committed deliberately.
+SHOTS_CURRENT="$CURRENT" bash screenshots/bless.sh        # rewrites $MANIFEST
+screencomp gallery --input "$CURRENT" --arch "$LANE" \
+  --output "$GALLERY" --title "Pre-push screenshot review" >/dev/null
+
+{
+  echo
+  echo "  SCREENSHOTS CHANGED — push blocked for review"
+  echo "  Review the rendered gallery: $GALLERY/index.html"
+  echo "  Also commit the refreshed README images in screenshots/images/."
+  echo "  If intended: git add $MANIFEST screenshots/images && git commit, push again."
+  echo "  If not: investigate the diff. Bypass with: git push --no-verify"
+  echo
+} >&2
+exit 1

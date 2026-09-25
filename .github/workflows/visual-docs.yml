@@ -1,0 +1,118 @@
+# Terminal screenshots, through screencomp's reusable workflow. The capture step
+# is ours; screencomp owns the classify gate, the gallery and the PR comment.
+#
+# Informational and **not a required check** — AGENTS.md says why, beside the two
+# other workflows this repository keeps out of its required set.
+
+name: Visual docs
+
+# llmlint: ignore-block[changed_behavior_has_e2e] the two gh-pages behaviours these
+# triggers reach — deleting a closed pull request's preview, and pruning the branch's
+# history on a schedule — are screencomp's own, tested there; what this repository adds
+# is two literal inputs. What they do is mutate a branch on GitHub from a scheduled
+# runner, which no offline journey in this repository can observe and no journey should
+# arrange, and the alternative to configuring them is an unbounded branch of committed
+# images. `screencomp doctor --env` is what checks this call is wired correctly here.
+on:
+  pull_request:
+    # `closed` lets screencomp delete this PR's gh-pages preview once it closes,
+    # so stale /pr-<n>/ galleries do not accumulate on the branch.
+    types: [opened, synchronize, reopened, closed]
+  push:
+    branches: [main]
+  schedule:
+    # Monthly: prune the gh-pages gallery history so committed images do not
+    # grow the branch without bound (keeps the 20 most recent versions).
+    - cron: "19 5 1 * *"
+# llmlint: ignore-end[changed_behavior_has_e2e]
+
+jobs:
+  visual-docs:
+    # llmlint: ignore-block[least_privilege_grants] granted on the job rather than the
+    # workflow, and neither can be narrowed further by event here: `permissions` values
+    # are literals — GitHub accepts no expression in them — and a reusable-workflow call
+    # takes its permissions from the calling job. A `pull_request`-only
+    # `pull-requests: write` therefore means a *second job* duplicating this whole `with:`
+    # block; that duplicate drifts, and it renames the check this workflow reports, which
+    # is the context branch protection is meant to require.
+    permissions:
+      contents: write       # push the gh-pages gallery
+      pull-requests: write  # post the sticky diff comment on a pull request
+    # llmlint: ignore-end[least_privilege_grants]
+    # The next two lines name one screencomp release twice — GitHub resolves a
+    # reusable workflow by ref and the workflow installs the CLI by version, and
+    # neither can be derived from the other in YAML. `screenshots/capture.py`
+    # reconciles them: it reads both out of this file and refuses the capture
+    # when they have parted, so the drift fails the guard and this workflow
+    # rather than producing a gallery from one release and a gate from another.
+    uses: nickderobertis/screencomp/.github/workflows/visual-docs-reusable.yml@v0.4.8
+    with:
+      screencomp-version: v0.4.8
+      fail-on-drift: true
+      gh-pages-maintenance: true
+      gh-pages-history-versions: 20
+      # The capture-command runs INSIDE this container (the reusable workflow's
+      # default is a Playwright image for web apps). This one has to build the
+      # release binaries it drives, so it is a Rust image. The tag is the major
+      # line only, deliberately: what the *capture* is pinned to is the renderer
+      # and the font, and the compiler cannot change a line of text a verb
+      # prints. The exact toolchain the build uses is still this repository's
+      # one source for it — rust-toolchain.toml, read below — so nothing here
+      # restates a version.
+      container: rust:1-bookworm
+      # Three derivations and no restatements. The toolchain comes from
+      # rust-toolchain.toml's own `channel`; `freeze` comes from the justfile's
+      # `freeze-version` line, read by the script, because the renderer's
+      # version decides the bytes of every shot; and `onetaskgraph` comes from
+      # the justfile's `onetaskgraph-version`, which `src/taskgraph.rs` holds to
+      # being named exactly once. The capture reads its plan through that real
+      # binary, exactly as the e2e suite does.
+      #
+      # The reusable workflow exports $SHOTS_OUT as shots/current/<arch>;
+      # screenshots/capture.sh writes captures.json and the SVGs there.
+      #
+      # **These lines run under `sh`, not bash**: the reusable workflow gives
+      # this step `shell: sh -e` and offers no input to ask for another, and the
+      # image named above is Debian-based, so that `sh` is dash.
+      # `screenshots/AGENTS.md` holds what a bashism here costs and what catches
+      # the next one. The two scripts below are bash only because each is handed
+      # to `bash` by name; nothing else on these lines may assume it.
+      capture-command: |
+        # The shape both derivations below are held to: exactly one line naming
+        # an exact release. The *whole* value is matched rather than any line of
+        # it — `grep -q` answers "some line matched", so a file that pinned the
+        # channel twice would pass and export both — and `case` is what matches a
+        # whole value under the shell this runs in. It takes two refusals to say
+        # it, because a glob can say "only digits and dots" and "not a fourth
+        # component" but cannot say "three groups" on its own.
+        exact_release() {
+          case "$1" in
+            *[!0-9.]* | *.*.*.*) return 1 ;;
+            [0-9]*.[0-9]*.[0-9]*) return 0 ;;
+            *) return 1 ;;
+          esac
+        }
+        RUSTUP_TOOLCHAIN="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+        # An exact release is what this repository pins and what `cargo
+        # +<channel>` resolves identically everywhere. Read leniently, an empty
+        # value silently builds with the image's own toolchain and anything else
+        # exports a string rustup either cannot resolve or resolves to a moving
+        # channel.
+        exact_release "$RUSTUP_TOOLCHAIN" || {
+          echo "rust-toolchain.toml does not name exactly one pinned channel: '$RUSTUP_TOOLCHAIN'" >&2
+          exit 1
+        }
+        export RUSTUP_TOOLCHAIN
+        # llmlint: ignore[work_goes_through_command_surface] this container is a bare `rust:1-bookworm` with no `just`; this is the body of `just screenshots-tools`, which additionally needs Go, and it reads the same `freeze-version` line that recipe does
+        bash screenshots/install-freeze.sh
+        release="$(sed -n 's/^onetaskgraph-version *:= *"\([^"]*\)".*/\1/p' justfile)"
+        # The same shape again: a justfile naming the release twice must refuse
+        # here rather than install one of the two.
+        exact_release "$release" || {
+          echo "the justfile does not name exactly one onetaskgraph release: '$release'" >&2
+          exit 1
+        }
+        # llmlint: ignore[work_goes_through_command_surface, diagnostics_error_or_absent] this is the body of `_ensure-onetaskgraph`, reading the same `onetaskgraph-version` line that recipe reads; `just bootstrap` owns it and additionally installs rustup components, cargo-nextest, cargo-llvm-cov and strace — none of which a capture uses — through Nx, which this container has no Node for. And the diagnostics are a published sibling's own: `-D warnings` over another crate's source fails this capture on a warning nobody here can fix, and that crate's own gate is where they are answered
+        cargo install onetaskgraph --locked --version "$release"
+        # llmlint: ignore[work_goes_through_command_surface] no `just` in this container; `just screenshots` wraps exactly this line
+        bash screenshots/capture.sh
