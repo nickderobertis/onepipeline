@@ -2288,10 +2288,12 @@ pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Optio
         .into_iter()
         .filter(|root| signalled && sys::claim_on(root.pid, root.started.as_str()).is_over())
         .flat_map(|root| {
-            root.claims.into_iter().map(move |claim| ledger::Ended {
-                claim,
-                started: root.started.clone(),
-            })
+            std::iter::once(root.claim)
+                .chain(root.also)
+                .map(move |claim| ledger::Ended {
+                    claim,
+                    started: root.started.clone(),
+                })
         })
         .collect();
     if let Err(why) = ledger::record_ended(paths, &ended) {
@@ -2368,7 +2370,10 @@ enum Aim {
 struct Root {
     pid: u32,
     started: ledger::Stamp,
-    claims: Vec<ledger::ClaimedBy>,
+    /// The claim that proved it.
+    claim: ledger::ClaimedBy,
+    /// Every other claim naming it under the same stamp.
+    also: Vec<ledger::ClaimedBy>,
 }
 
 /// Every process on this host a stop of this run aims at, or why this build
@@ -2441,7 +2446,7 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
             // A second record naming a process already proved: under the same
             // stamp it named the same process, and ending it ends both claims.
             if root.started.as_str() == started {
-                root.claims.push(claim);
+                root.also.push(claim);
             }
             continue;
         }
@@ -2452,7 +2457,8 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
             (Claim::Proved, Some(started)) => roots.push(Root {
                 pid,
                 started,
-                claims: vec![claim],
+                claim,
+                also: Vec::new(),
             }),
             (Claim::Gone, _) => {}
             // This run's own teardown signalled the process this very claim
@@ -3842,10 +3848,11 @@ mod tests {
                 roots: vec![Root {
                     pid: usable.pid,
                     started: ledger::Stamp::of(&usable.started).expect("a stamp"),
-                    claims: vec![ledger::ClaimedBy::Dispatch {
+                    claim: ledger::ClaimedBy::Dispatch {
                         node: "build".into(),
                         dispatched_at: usable.dispatched_at.clone(),
-                    }],
+                    },
+                    also: Vec::new(),
                 }],
                 unproven: Vec::new(),
                 declined: Vec::new(),

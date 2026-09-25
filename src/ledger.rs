@@ -2943,8 +2943,8 @@ pub fn dispatches_of(paths: &RunPaths) -> Result<Vec<DispatchRecord>> {
     Ok(found)
 }
 
-/// A start stamp a record carried: never empty, because an empty one proves
-/// nothing about any process.
+/// A start stamp a record carried: never blank, because a blank one proves
+/// nothing about any process — the same reading the registry gives one.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub(crate) struct Stamp(String);
@@ -2952,7 +2952,7 @@ pub(crate) struct Stamp(String);
 impl Stamp {
     /// The stamp a record carried, where it carried one.
     pub(crate) fn of(recorded: &str) -> Option<Self> {
-        (!recorded.is_empty()).then(|| Self(recorded.to_string()))
+        (!recorded.trim().is_empty()).then(|| Self(recorded.to_string()))
     }
 
     pub(crate) fn as_str(&self) -> &str {
@@ -2964,7 +2964,7 @@ impl TryFrom<String> for Stamp {
     type Error = String;
 
     fn try_from(recorded: String) -> std::result::Result<Self, String> {
-        Self::of(&recorded).ok_or_else(|| "an empty start stamp names no process".to_string())
+        Self::of(&recorded).ok_or_else(|| "a blank start stamp names no process".to_string())
     }
 }
 
@@ -3263,6 +3263,28 @@ mod tests {
     }
 
     use super::*;
+
+    /// A line of the ended record whose stamp is blank, or that names no claim,
+    /// is refused at the parse, so no reader can hold it as a process that ended.
+    #[test]
+    fn an_ended_line_with_a_blank_stamp_or_no_claim_does_not_parse() {
+        let whole = r#"{"claim":{"launch-record":{"pid":7}},"started":"linux-proc-stat:1"}"#;
+        assert!(
+            serde_json::from_str::<Ended>(whole).is_ok(),
+            "a whole line was refused"
+        );
+        for refused in [
+            r#"{"claim":{"launch-record":{"pid":7}},"started":""}"#,
+            r#"{"claim":{"launch-record":{"pid":7}},"started":"   "}"#,
+            r#"{"started":"linux-proc-stat:1"}"#,
+            r#"{"claim":{"a-record-this-build-does-not-know":{}},"started":"linux-proc-stat:1"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Ended>(refused).is_err(),
+                "{refused} was read as a process that ended"
+            );
+        }
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("onepipeline-ledger-{name}-{}", sys::pid()));
