@@ -18,6 +18,10 @@
 // binary, and every claim is read off that binary's own output, journal or result.
 // llmlint: ignore-file[e2e_not_mocked] `oneagentgraph` is the established double, because
 // a real agent turn is a paid one and these journeys are about the host's records.
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] these journeys reach
+// every caller of the workspace-listing operations across `src/` — the launch, the views,
+// the shutdown, the dispatch and the sweep — so no Nx edge narrower than the crate's own
+// covers what they exercise: even `noteJourneySource`, the narrowest, includes `src/**/*`.
 
 use std::path::PathBuf;
 

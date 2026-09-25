@@ -185,7 +185,7 @@ fn the_slot_of(world: &World, repo: &str) -> Value {
 }
 
 /// Everything the maintain command has left in the slot's worktree, one line per
-/// run of it — each carrying the arguments that run was given.
+/// run of it.
 fn marker_text(world: &World, repo: &str) -> String {
     let worktree = Path::new(
         the_slot_of(world, repo)["path"]
@@ -1425,20 +1425,22 @@ fn a_sweep_over_session_records_it_cannot_read_records_the_refusal_and_runs_noth
 // llmlint: ignore-end[tests_mirror_real_usage]
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
-/// A pass on which no sweep is due lists nothing: not the registry, not the
-/// session records, not the workspaces.
+/// A pass on which no sweep is due reads neither the registry, nor the session
+/// records, nor the workspaces document, and starts no sweep.
 ///
-/// A sweep is what reads all three, and the one sweep the pace allows has ended
-/// before the window opens. The registry and the session records are then made
-/// unreadable, so a pass that read either would meet the break, and a sweep
-/// that met it would journal the refusal. Passes driven across the window with
-/// the driver's own sweep count unmoved, nothing journalled and nothing about
-/// either in the driver's log are passes that never looked.
+/// A sweep is what reads all three and lists the slots, and the one sweep the
+/// pace allows has ended before the window opens. All three are then made
+/// unreadable, so a pass that read any of them would meet the break, and a
+/// sweep that met it would journal the refusal. Passes driven across the window
+/// with the driver's own sweep count unmoved, nothing journalled and nothing
+/// about any of the three in the driver's log are passes that never looked.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] This
+// src/maintenance.rs journey has no narrower Nx edge: noteJourneySource includes src/**/*.
 // llmlint: ignore-block[tests_mirror_real_usage] no verb of the sibling's leaves the
-// registry or the session records unreadable, so the state root is written directly;
-// the passes, the count and the log are the compiled driver's own.
+// registry, the session records or the workspaces document unreadable, so the state root
+// is written directly; the passes, the count and the log are the compiled driver's own.
 #[test]
-fn a_pass_with_no_sweep_due_lists_nothing() {
+fn a_pass_with_no_sweep_due_reads_no_registry_sessions_or_workspaces_document() {
     let world = pooled_world("maintenance-no-listing", None);
     let repo = world.repository("local-direct", &[]);
     pooled_with_maintenance(&world, None);
@@ -1461,6 +1463,8 @@ fn a_pass_with_no_sweep_due_lists_nothing() {
     let saved = std::fs::read_to_string(&registry).expect("the host has a registry");
     let sessions = world.onevcs_home().join("sessions");
     let aside = world.onevcs_home().join("sessions.aside");
+    let workspaces = world.onevcs_home().join("workspaces.yml");
+    let configured = std::fs::read_to_string(&workspaces).expect("the host has a workspaces file");
     let log = world.run_file("listless", "driver.log");
     let logged = std::fs::read_to_string(&log).unwrap_or_default().len();
     let before = crate::harness::counts(&world, "listless");
@@ -1468,6 +1472,7 @@ fn a_pass_with_no_sweep_due_lists_nothing() {
     std::fs::rename(&sessions, &aside).expect("the sessions directory moves aside");
     std::fs::write(&sessions, "this is not a directory")
         .expect("a file takes the sessions directory's place");
+    std::fs::write(&workspaces, "version: [").expect("the workspaces file is made unreadable");
 
     // Idle passes, each provoked by a channel command the loop consumes and then
     // sits idle after, across a window rather than a burst.
@@ -1497,6 +1502,7 @@ fn a_pass_with_no_sweep_due_lists_nothing() {
     std::fs::remove_file(&sessions).expect("the file in the directory's place goes");
     std::fs::rename(&aside, &sessions).expect("the sessions directory comes back");
     std::fs::write(&registry, &saved).expect("the registry is put back");
+    std::fs::write(&workspaces, &configured).expect("the workspaces file is put back");
 
     assert!(did.passes >= 5, "{did:?}");
     assert_eq!(
@@ -1506,12 +1512,15 @@ fn a_pass_with_no_sweep_due_lists_nothing() {
     assert!(records(&world, "listless").is_empty(), "{}", world.dump());
     let since = &said[logged.min(said.len())..];
     assert!(
-        !since.contains("registry") && !since.contains("session"),
+        !["registry", "session", "workspaces"]
+            .iter()
+            .any(|broken| since.contains(broken)),
         "a pass with no sweep due read what was broken:\n{since}"
     );
     release(&world, "listless");
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Both halves of the maintain fixture answer the same way: what one platform's
 /// half names, the other's names too, so a name added to one alone fails here
