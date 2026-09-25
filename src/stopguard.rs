@@ -483,7 +483,14 @@ fn consult(command: &str, asked: &Asked, timeout: Duration) -> Result<Answer, St
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(match waited {
+                    // llmlint: ignore-block[changed_behavior_has_e2e] no source can provoke this:
+                    // `try_wait` is a non-blocking `waitpid` on this verb's own unreaped child, which
+                    // fails only with `ECHILD` or `EINVAL` — another reaper or a bad pid, neither of
+                    // which a script a journey runs can cause. It refuses the stop naming the source
+                    // rather than reading an unknown status as finished; the deadline refusal beside
+                    // it is what `tests/e2e/stop_guard.rs` drives.
                     Err(error) => format!("whether it had finished could not be read ({error})"),
+                    // llmlint: ignore-end[changed_behavior_has_e2e]
                     Ok(_) => late(),
                 });
             }
