@@ -168,6 +168,19 @@ pub struct RunState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` every neighbouring map of this struct keys by — `landings`, `branches`, `change_urls` — and it was validated where the graph took the node; a node-id newtype on this one field would disagree with each of them and convert at every read, which `src/AGENTS.md` names as drift. The value is the typed half: `StatedLanding` holds only a spelling its own parser accepted.
     pub stated_landings: BTreeMap<String, crate::edits::StatedLanding>,
+    /// The change request an operator settling each node from evidence last stated
+    /// its work landed in — kept when a later statement names a commit instead.
+    ///
+    /// What a release question about a stated commit falls back to when `onevcs`
+    /// cannot resolve that commit: a squash commit sitting only on the base is not
+    /// a spelling the sibling resolves work by, and the change request that carried
+    /// it is. Superseded with [`stated_landings`](Self::stated_landings), by a later
+    /// settlement the run records itself. See [`known_change_url`](Self::known_change_url).
+    ///
+    /// Omitted when empty, which is every run nobody settled at a change request.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` every neighbouring map of this struct keys by — `landings`, `branches`, `change_urls` — and it was validated where the graph took the node; the value is the URL half of a `StatedLanding::ChangeRequest`, which only that parser produced.
+    pub stated_change_urls: BTreeMap<String, String>,
     /// The declared steps each node's attempt finished.
     ///
     /// What a continuation may skip, and the only record of it: a step is not a
@@ -654,6 +667,19 @@ impl RunState {
         self.stop != StopState::NotStopped
     }
 
+    /// The change request the run knows one node's work by: the one an operator
+    /// last stated it landed in, or else the one its own settlement opened.
+    ///
+    /// What a release question asked at a stated **commit** is asked again at when
+    /// `onevcs` answers that it cannot resolve the commit — see
+    /// `docs/contract-divergences.md` entry 40.
+    pub(crate) fn known_change_url(&self, node: &str) -> Option<&str> {
+        self.stated_change_urls
+            .get(node)
+            .or_else(|| self.change_urls.get(node))
+            .map(String::as_str)
+    }
+
     /// The frontier an edit is judged against, as far as the *ledger* says.
     ///
     /// Which dispatches are still running is not in it, because the journal
@@ -984,6 +1010,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 && state.stated_landings.remove(node).is_some()
             {
                 state.landings.remove(node);
+                state.stated_change_urls.remove(node);
             } // llmlint: ignore-end[changed_behavior_has_e2e]
               // What the dispatch left behind, which nothing else records: a
               // later continuation has no other way to find the branch the work
@@ -1549,6 +1576,11 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
             Operation::LandingFromEvidence { node, landing } => {
                 if let Some(stated) = edits::StatedLanding::parse(landing) {
                     state.landings.insert(node.clone(), Landing::Landed);
+                    // Kept past a later statement of a commit, which is the one the
+                    // release question falls back from.
+                    if let edits::StatedLanding::ChangeRequest(url) = &stated {
+                        state.stated_change_urls.insert(node.clone(), url.clone());
+                    }
                     state.stated_landings.insert(node.clone(), stated);
                 }
             }
@@ -3698,6 +3730,68 @@ mod tests {
             assert!(state.stated_landings.is_empty(), "{unusable:?} was folded");
             assert_eq!(state.landings.get("publish"), None, "{unusable:?} landed");
         }
+    }
+
+    /// The change request a node's work is known by: one an operator stated
+    /// survives a later statement of a commit, stands ahead of the one the run's
+    /// own settlement opened, and goes when the run settles the node again.
+    #[test]
+    fn a_stated_change_request_is_kept_past_a_later_stated_commit() {
+        let stated = |seq: u64, landing: &str| {
+            pipeline(
+                journal::PipelineKind::EditCommitted,
+                seq,
+                None,
+                &[(
+                    "operations",
+                    json!([Operation::LandingFromEvidence {
+                        node: "publish".into(),
+                        landing: landing.into(),
+                    }]),
+                )],
+            )
+        };
+        let settled = |seq: u64, fields: &[(&str, Value)]| {
+            pipeline(
+                journal::PipelineKind::NodeSettled,
+                seq,
+                Some("publish"),
+                fields,
+            )
+        };
+        let opened = "https://example.invalid/owner/engine/pull/11";
+        let url = "https://example.invalid/owner/engine/pull/12";
+
+        // Nothing stated and nothing opened: nothing known.
+        assert_eq!(
+            fold(&[stated(1, "3f9a1c2ab")]).known_change_url("publish"),
+            None
+        );
+
+        // The run's own settlement opened one, and a stated commit keeps it known.
+        let published = settled(
+            1,
+            &[("status", json!("done")), ("change_url", json!(opened))],
+        );
+        let state = fold(&[published.clone(), stated(2, "3f9a1c2ab")]);
+        assert_eq!(
+            state.stated_landings.get("publish"),
+            Some(&edits::StatedLanding::Commit("3f9a1c2ab".into()))
+        );
+        assert_eq!(state.known_change_url("publish"), Some(opened));
+
+        // One an operator stated outlives a later stated commit, ahead of the opened one.
+        let state = fold(&[published, stated(2, url), stated(3, "3f9a1c2ab")]);
+        assert_eq!(
+            state.stated_landings.get("publish"),
+            Some(&edits::StatedLanding::Commit("3f9a1c2ab".into()))
+        );
+        assert_eq!(state.known_change_url("publish"), Some(url));
+
+        // A later settlement the run records itself supersedes the statement's URL too.
+        let state = fold(&[stated(1, url), settled(3, &[("status", json!("failed"))])]);
+        assert!(state.stated_change_urls.is_empty());
+        assert_eq!(state.known_change_url("publish"), None);
     }
 
     #[test]
