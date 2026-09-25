@@ -248,13 +248,12 @@ fn a_shutdown_names_the_read_it_could_not_make_and_the_branch_it_could_not_prese
 /// A dispatch over records this host cannot read is refused by its open, and the
 /// advisory read before it says it was the one that could not be made.
 ///
-/// Three callers on one path, in the order the driver reaches them.
+/// Two callers on one path, in the order the driver reaches them.
 /// `pool::Workspaces::admit` asks `workspace_capacity` before the dispatch — an
 /// advisory read whose refusal is **never** a reading that found room, so it is
-/// said out loud and the open is left to decide; `vcs::session_open` is that
-/// open, and its refusal is the node's, so the node is settled on it rather than
-/// dispatched into a workspace nothing could account for; and `vcs::session` is
-/// how the driver reads a session's record, which is what ends a follow.
+/// said out loud and the open is left to decide; and `vcs::session_open` is that
+/// open, whose refusal is the node's, so the node is settled on it rather than
+/// dispatched into a workspace nothing could account for.
 ///
 /// The run is minted behind a human gate and then **adopted**, for two reasons a
 /// simpler shape cannot give: the launch interlock asks the same records and
