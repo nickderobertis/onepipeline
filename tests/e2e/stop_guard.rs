@@ -1223,7 +1223,7 @@ fn a_hook_rendering_asks_a_source_about_the_payloads_session_and_its_continuatio
 /// A source that cannot be consulted is reported in the verdict — naming the
 /// source and what went wrong — and refuses the stop rather than letting it
 /// pass; the continuation after that refusal ends the turn, so a broken source
-/// cannot hold one in a loop.
+/// cannot hold one in a loop — unless the failure moved, which refuses again.
 #[cfg(unix)]
 #[test]
 fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_passes() {
@@ -1388,6 +1388,37 @@ fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_pa
             ended.stdout
         );
     }
+
+    // A failure that *moves* is a new condition: a continuation over a
+    // different failure refuses again on it, and only an unchanged one ends
+    // the turn.
+    let failing = world.root.join("sources/failing.how");
+    let moving = answering("moving", &format!(". '{}'", failing.display()));
+    let stop = |how: &str, continuation: bool| {
+        std::fs::write(&failing, format!("{how}\n")).expect("how it fails is written");
+        let run = world.run_with_stdin(
+            &declaring(&[moving.as_str()], &[]),
+            &json!({"session": session, "continuation": continuation}).to_string(),
+        );
+        run.exited(0);
+        verdict(&run.stdout).expect("a verdict")
+    };
+    let refused_on = |told: &Value, what: &str| {
+        assert_eq!(told["verdict"], json!("block"), "{what}: {told}");
+        assert!(
+            told["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("could not be consulted")
+                    && reason.contains(what)
+                    && reason.contains(&moving)),
+            "{what}: {told}"
+        );
+    };
+    refused_on(&stop("exit 3", false), "exited with status 3");
+    assert_eq!(stop("exit 3", true), json!({"verdict": "none"}));
+    refused_on(&stop("exit 4", true), "exited with status 4");
+    refused_on(&stop("echo 'all good'", true), "not one JSON object");
+    assert_eq!(stop("echo 'all good'", true), json!({"verdict": "none"}));
 
     // A shell that cannot be found to run a source in is the same refusal.
     let unstartable = answering("unstartable", "echo '{\"verdict\":\"none\"}'");
