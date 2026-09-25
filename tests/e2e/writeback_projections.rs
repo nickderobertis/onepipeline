@@ -20,7 +20,7 @@
 // report stand in only for what an offline store cannot be made to answer. `harness.rs` carries
 // the same suppression and the full rationale.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -1253,3 +1253,243 @@ fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item(
     reused_by_a_whole_projection(&world, "the adopted driver's whole projection");
     reused_by_a_whole_projection(&world, "a second whole projection over the rewritten board");
 }
+
+/// How many nodes each run of the concurrency journey below carries.
+///
+/// A full phase replaces this many tasks and the project item. The readiness wait
+/// uses the count to ensure both stores have projected before reading them.
+const CONCURRENT_NODES: usize = 12;
+
+/// The body each run's project carries in the concurrency journey below, which its
+/// projected project document has to restate whole.
+///
+/// Long enough that a document published by writing in place could be read with its
+/// front matter closed and its body cut short.
+fn concurrent_project_body() -> String {
+    (0..512)
+        .map(|line| format!("Project body line {line:04} of the concurrency journey."))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `path`'s text, re-read past the refusal Windows gives an open that lands while a
+/// rename is replacing the file: that open observed no document, whole or torn. The
+/// rename finishes in microseconds, so the deadline is only a backstop.
+fn read_published(path: &Path) -> std::io::Result<String> {
+    let backstop = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match std::fs::read_to_string(path) {
+            Err(denied)
+                if cfg!(windows)
+                    && denied.kind() == std::io::ErrorKind::PermissionDenied
+                    && std::time::Instant::now() < backstop =>
+            {
+                std::thread::yield_now();
+            }
+            read => return read,
+        }
+    }
+}
+
+fn shadow_document(path: &Path) -> Result<Value, String> {
+    let text = match read_published(path) {
+        Ok(text) => text,
+        // Absent is not torn: the projection removes a shadow task no snapshot wrote, and
+        // a listing taken a moment before the removal names a file that has since gone.
+        // That one kind and no other — every other refusal is this reader failing rather
+        // than the store changing under it, and taken for absence it would let the journey
+        // pass having read nothing at all.
+        Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => return Ok(Value::Null),
+        Err(refused) => return Err(format!("{} could not be read: {refused}", path.display())),
+    };
+    let (front, body) = text
+        .strip_prefix("---\n")
+        .ok_or_else(|| format!("{} opens no front matter: {text:?}", path.display()))?
+        .split_once("---\n")
+        .ok_or_else(|| format!("{} closes no front matter: {text:?}", path.display()))?;
+    let parsed: Value = serde_norway::from_str(front)
+        .map_err(|error| format!("{} is not YAML ({error}): {text:?}", path.display()))?;
+    if parsed.get("title").is_none() {
+        return Err(format!(
+            "{} carries no title, so it is not a whole document: {text:?}",
+            path.display()
+        ));
+    }
+    if path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("projects")) {
+        if body != concurrent_project_body() {
+            return Err(format!(
+                "{} has a partial project body of {} bytes",
+                path.display(),
+                body.len()
+            ));
+        }
+    } else {
+        let id = parsed["metadata"]["onepipeline.id"]
+            .as_str()
+            .ok_or_else(|| format!("{} carries no task id: {text:?}", path.display()))?;
+        let expected = agent(id, &[])["task"].as_str().unwrap().to_owned();
+        if body != expected {
+            return Err(format!(
+                "{} has a partial task body: {body:?}",
+                path.display()
+            ));
+        }
+    }
+    Ok(parsed)
+}
+
+/// Every `.md` document under `dir`, in path order, or a panic naming what it could not
+/// list.
+///
+/// `.md` and nothing else, because that is what a `local-md` source lists: an atomic write
+/// leaves a temporary beside its destination until the rename publishes it, and a reader
+/// that took one of those for a document would be reading a file nobody published.
+///
+/// A directory that is not there is a state of a live store — the projection writes one
+/// per project and takes it away with the project — so it is stepped over. Anything else
+/// the host refuses is this listing failing, and it says so rather than returning a
+/// shorter list, which would read here as a store with fewer documents in it.
+fn shadow_documents(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        let entries = match std::fs::read_dir(&next) {
+            Ok(entries) => entries,
+            Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(refused) => panic!("{} could not be listed: {refused}", next.display()),
+        };
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|refused| {
+                panic!(
+                    "{} holds an entry that could not be read: {refused}",
+                    next.display()
+                )
+            });
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("md") {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+// llmlint: ignore-block[tests_mirror_real_usage] no CLI output reports a torn file, and a
+// window microseconds wide is caught only by reading at rate, as `local-md` itself reads.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] Measured at 7.5s
+// within this module's 36.2s, this uses the same compiled binary and store fixture as
+// its six peer write-back journeys. The only separate test edge is for conversational
+// note journeys; moving this filesystem race there loses this module's crateSource
+// coverage when the projection code changes.
+#[test]
+fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
+    let world = World::new("writeback-concurrent-shadow");
+    world.script(
+        "onetaskgraph.delegate",
+        &onetaskgraph_binary().to_string_lossy(),
+    );
+    let world = world.with_env(
+        STORE_BINARY_ENV,
+        &double("fake-onetaskgraph").to_string_lossy(),
+    );
+    let copies = world.rendezvous("onetaskgraph.project-copy");
+    let runs = ["left", "right"];
+    let shadows: Vec<PathBuf> = runs
+        .iter()
+        .map(|run| {
+            let store = world.store_apart(run);
+            let nodes = (0..CONCURRENT_NODES)
+                .map(|n| agent(&format!("{run}{n}"), &[]))
+                .collect();
+            let project = world.plan_in(&store, run, &plan_of(run, nodes));
+            let fixture = store
+                .join("projects")
+                .join(format!("{}.md", project_id(run)));
+            let written = std::fs::read_to_string(&fixture).expect("the project fixture reads");
+            std::fs::write(&fixture, written + &concurrent_project_body())
+                .expect("the project fixture takes a body");
+            world
+                .run_in(&store, &["start", &project, "--detach"])
+                .exited(0);
+            world.run_file(run, "writeback")
+        })
+        .collect();
+
+    let left_copy = copies.arrived();
+    let right_copy = copies.arrived();
+    assert_ne!(left_copy.pid, right_copy.pid, "the same copy arrived twice");
+    world.unscript("onetaskgraph.project-copy.rendezvous");
+    left_copy.release();
+    right_copy.release();
+
+    // Cache the paths after the first projection so each pass spends its time
+    // reading documents during the remaining write-back phases.
+    world.until("both runs to project a shadow store", |_| {
+        shadows
+            .iter()
+            .all(|shadow| shadow_documents(shadow).len() > CONCURRENT_NODES)
+    });
+    let watched: Vec<Vec<PathBuf>> = shadows
+        .iter()
+        .map(|shadow| shadow_documents(shadow))
+        .collect();
+
+    let mut passes = 0_usize;
+    let mut observed_changes = 0_usize;
+    let mut last: Vec<Vec<Value>> = vec![Vec::new(); runs.len()];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        passes += 1;
+        for (nth, documents) in watched.iter().enumerate() {
+            let mut seen = Vec::with_capacity(documents.len());
+            for document in documents {
+                match shadow_document(document) {
+                    Ok(read) => seen.push(read),
+                    Err(torn) => panic!(
+                        "a reader caught a shadow document half-written, {passes} passes and \
+                         {observed_changes} changes in: {torn}"
+                    ),
+                }
+            }
+            if seen != last[nth] {
+                observed_changes += 1;
+                last[nth] = seen;
+            }
+        }
+        // Asked every so often rather than every pass: two stats between two reads of one
+        // document is the same interval spent elsewhere the listing was.
+        if passes.is_multiple_of(200) {
+            if runs
+                .iter()
+                .all(|run| world.run_file(run, "result.json").is_file())
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the two runs did not settle; the runs root held:\n{}",
+                world.dump()
+            );
+        }
+    }
+
+    // Both halves, because either alone is passable by a journey that raced nothing: a
+    // reader that read across no rewrite saw one settled state, and a run that published
+    // nothing gave it none to read.
+    assert!(
+        observed_changes >= 10,
+        "the reader never overlapped the projections it is about: {observed_changes} changes read \
+         across {passes} passes"
+    );
+    for run in runs {
+        assert!(
+            records(&world, run).len() >= 2,
+            "{run} published no board while the reader was reading it"
+        );
+    }
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-end[tests_mirror_real_usage]

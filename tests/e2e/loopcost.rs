@@ -238,14 +238,26 @@ fn a_converged_run_does_no_scheduling_work_while_it_records_nothing() {
 fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
     let world = measured("loopcost-scale");
     world.script("hold.wait", "hold");
-    let small = world.plan("small", &plan_of("small", vec![agent("hold", &[])]));
+    // Each live run projects into its source root. Separate roots prevent one run's
+    // board from changing the other's workload while they share this engine process.
+    let small_store = world.store_apart("small");
+    let large_store = world.store_apart("large");
+    let small = world.plan_in(
+        &small_store,
+        "small",
+        &plan_of("small", vec![agent("hold", &[])]),
+    );
 
     let mut many: Vec<Value> = (0..99).map(|n| agent(&format!("n{n}"), &[])).collect();
     many.push(agent("hold", &[]));
-    let large = world.plan("large", &plan_of("large", many));
+    let large = world.plan_in(&large_store, "large", &plan_of("large", many));
 
-    world.run(&["start", &small, "--detach"]).exited(0);
-    world.run(&["start", &large, "--detach"]).exited(0);
+    world
+        .run_in(&small_store, &["start", &small, "--detach"])
+        .exited(0);
+    world
+        .run_in(&large_store, &["start", &large, "--detach"])
+        .exited(0);
     for run in ["small", "large"] {
         world.until_within(QUEUED_DISPATCHES, "both dispatches to start", |world| {
             recorded(world, run, "node-dispatched", "hold")
