@@ -2286,11 +2286,10 @@ pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Optio
     );
     let ended: Vec<ledger::Ended> = roots
         .into_iter()
-        .filter(|root| signalled && sys::claim_on(root.pid, &root.started).is_over())
+        .filter(|root| signalled && sys::claim_on(root.pid, root.started.as_str()).is_over())
         .flat_map(|root| {
             root.claims.into_iter().map(move |claim| ledger::Ended {
                 claim,
-                pid: root.pid,
                 started: root.started.clone(),
             })
         })
@@ -2368,7 +2367,7 @@ enum Aim {
 #[derive(Debug, PartialEq, Eq)]
 struct Root {
     pid: u32,
-    started: String,
+    started: ledger::Stamp,
     claims: Vec<ledger::ClaimedBy>,
 }
 
@@ -2421,19 +2420,18 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
             held.started,
         )
     }))
-    .chain(
-        ledger::dispatch_entries_of(paths)?
-            .into_iter()
-            .map(|(entry, running)| {
-                (
-                    REGISTERED_DISPATCH,
-                    ledger::ClaimedBy::DispatchEntry { entry },
-                    running.pid,
-                    running.host,
-                    running.started,
-                )
-            }),
-    );
+    .chain(ledger::dispatches_of(paths)?.into_iter().map(|running| {
+        (
+            REGISTERED_DISPATCH,
+            ledger::ClaimedBy::Dispatch {
+                node: running.node,
+                dispatched_at: running.dispatched_at,
+            },
+            running.pid,
+            running.host,
+            running.started,
+        )
+    }));
     for (named_by, claim, pid, host, started) in claimed {
         if host != here {
             continue;
@@ -2442,7 +2440,7 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
         if let Some(root) = roots.iter_mut().find(|root| root.pid == pid) {
             // A second record naming a process already proved: under the same
             // stamp it named the same process, and ending it ends both claims.
-            if root.started == started {
+            if root.started.as_str() == started {
                 root.claims.push(claim);
             }
             continue;
@@ -2450,20 +2448,24 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
         if unproven.contains(&pid) {
             continue;
         }
-        match sys::claim_on(pid, &started) {
-            Claim::Proved => roots.push(Root {
+        match (sys::claim_on(pid, &started), ledger::Stamp::of(&started)) {
+            (Claim::Proved, Some(started)) => roots.push(Root {
                 pid,
                 started,
                 claims: vec![claim],
             }),
-            Claim::Gone => {}
+            (Claim::Gone, _) => {}
             // This run's own teardown signalled the process this very claim
             // named and saw it end, so the stranger on its pid now is the host's
             // reissue and nothing of this run's: the claim is over, exactly as a
             // pid nobody holds is. Another claim that only shares its stamp is
             // not that process, and is judged on its own.
-            Claim::Reissued if ended.contains(&(claim, started)) => {}
-            Claim::Reissued => {
+            (Claim::Reissued, Some(stamp))
+                if ended.contains(&ledger::Ended {
+                    claim: claim.clone(),
+                    started: stamp.clone(),
+                }) => {}
+            (Claim::Reissued, _) => {
                 eprintln!(
                     "onepipeline: run '{}': the {named_by} names pid {pid}, which this host has \
                      since given to another process, so it was not signalled",
@@ -2471,7 +2473,9 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
                 );
                 declined.push(pid);
             }
-            Claim::Unstamped => {
+            // A record with no stamp, which is also the only way a proof could
+            // come back without one: nothing says the pid is still this run's.
+            (Claim::Unstamped | Claim::Proved, _) => {
                 left_alone(
                     &paths.run,
                     named_by,
@@ -2480,7 +2484,7 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
                 );
                 unproven.push(pid);
             }
-            Claim::HostSilent => {
+            (Claim::HostSilent, _) => {
                 left_alone(
                     &paths.run,
                     named_by,
@@ -3659,8 +3663,7 @@ mod tests {
             &paths,
             &[ledger::Ended {
                 claim: ledger::ClaimedBy::LaunchRecord { pid: sys::pid() },
-                pid: sys::pid(),
-                started: reissued.into(),
+                started: ledger::Stamp::of(reissued).expect("a stamp"),
             }],
         )
         .expect("the ended record is written");
@@ -3826,7 +3829,7 @@ mod tests {
                 "node": "build",
                 "pid": sys::pid(),
                 "host": here,
-                "dispatched_at": sys::now_rfc3339(),
+                "dispatched_at": usable.dispatched_at,
                 "started": usable.started,
                 "reaped_by": "a build that came later",
             }))
@@ -3838,9 +3841,10 @@ mod tests {
             Aim::Here {
                 roots: vec![Root {
                     pid: usable.pid,
-                    started: usable.started.clone(),
-                    claims: vec![ledger::ClaimedBy::DispatchEntry {
-                        entry: format!("{}-0.json", usable.pid),
+                    started: ledger::Stamp::of(&usable.started).expect("a stamp"),
+                    claims: vec![ledger::ClaimedBy::Dispatch {
+                        node: "build".into(),
+                        dispatched_at: usable.dispatched_at.clone(),
                     }],
                 }],
                 unproven: Vec::new(),
