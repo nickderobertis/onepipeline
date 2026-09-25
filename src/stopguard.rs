@@ -322,7 +322,9 @@ fn own(root: &Path, asked: &Asked) -> (Verdict, Vec<String>) {
     (Verdict::Block(report), unresolved)
 }
 
-/// A declared source's answer, in the vocabulary this verb renders.
+/// A declared source's answer once it has been read and checked: kept apart
+/// from [`Verdict`] because a source's words are not yet this stop's — they
+/// are still to be labelled with the source and held to its continuation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Answer {
     Block(String),
@@ -340,7 +342,8 @@ struct Answered {
     message: Option<String>,
 }
 
-/// The three verdict words, and no fourth.
+/// A verdict word as a source spells it, so a fourth word is refused by the
+/// reader rather than carried as a string to be matched later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Word {
@@ -390,8 +393,9 @@ fn answer_of(stdout: &[u8]) -> Result<Answer, String> {
     }
 }
 
-/// The input a source is handed: this verb's own neutral input object, naming
-/// the session this verb is answering about.
+/// The input a source is handed. It is this verb's own neutral input rather
+/// than the harness's payload, so a source reads one shape under every
+/// `--format` and can be driven by hand with the same bytes.
 fn source_input(asked: &Asked) -> String {
     json!({
         "session": asked.session.as_str(),
@@ -433,6 +437,9 @@ fn shell(command: &str) -> Command {
 /// carries exactly what `unwatched` would write and nothing else.
 fn consult(command: &str, asked: &Asked, timeout: Duration) -> Result<Answer, String> {
     let mut spawning = shell(command);
+    // Its own group, so what it leaves behind when it exits can still be ended
+    // at the deadline, after descent from it is lost.
+    crate::sys::in_own_process_group(&mut spawning);
     spawning
         .env(crate::sys::LAUNCHER_SESSION_ENV, asked.session.as_str())
         .stdin(Stdio::piped())
@@ -481,6 +488,7 @@ fn consult(command: &str, asked: &Asked, timeout: Duration) -> Result<Answer, St
             Ok(None) if Instant::now() < deadline => {}
             waited => {
                 let _ = crate::sys::stop(child.id(), crate::sys::Stop::Now);
+                end_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(match waited {
@@ -504,7 +512,10 @@ fn consult(command: &str, asked: &Asked, timeout: Duration) -> Result<Answer, St
     }
     let bytes = answer
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        .map_err(|_| late())?
+        .map_err(|_| {
+            end_group(child.id());
+            late()
+        })?
         .map_err(|error| format!("its standard output could not be read ({error})"))?;
     if bytes.len() as u64 > SOURCE_ANSWER_LIMIT {
         return Err(format!(
@@ -513,6 +524,27 @@ fn consult(command: &str, asked: &Asked, timeout: Duration) -> Result<Answer, St
     }
     answer_of(&bytes)
 }
+
+/// End every process left in the group a source was started in.
+#[cfg(unix)]
+fn end_group(leader: u32) {
+    if let Ok(group) = i32::try_from(leader) {
+        // SAFETY: `kill` takes no pointers; a negative pid names the process
+        // group `consult` put the source in, whose id is the source's own pid,
+        // and a group already gone is an error the result is discarded for.
+        unsafe {
+            libc::kill(-group, libc::SIGKILL);
+        }
+    }
+}
+
+// llmlint: ignore-block[changed_behavior_has_e2e] Windows has no process group a signal can
+// end; its `CREATE_NEW_PROCESS_GROUP` only keeps a console's Ctrl-C off the source. What a
+// source leaves running there after it exits is out of reach, which `docs/stop-guard.md`
+// states. The Unix arm is driven by the left-behind journey in `tests/e2e/stop_guard.rs`.
+#[cfg(not(unix))]
+fn end_group(_leader: u32) {}
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// One source's contribution to the verdict, with the continuation rule held
 /// for it alone: a block — the source's own, or the report that it could not

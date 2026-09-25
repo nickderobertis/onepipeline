@@ -1112,6 +1112,12 @@ fn a_hook_rendering_asks_a_source_about_the_payloads_session_and_its_continuatio
     assert!(source.environments().iter().all(|named| named == session));
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] Measured at 14.6s on a
+// host at load 57 over 20 cores, beside four journeys in this module that each hold a real
+// run for 23-26s on the same run; its cost is two one-second deadlines and short-lived
+// scripts. What it guards is `src/stopguard.rs` and the clap surface in `src/cli.rs`, both
+// under the crate's own edge, so a narrower project would drop it out of `nx affected` for
+// the changes it exists to catch — the ground `tests/e2e/session_reuse.rs` carries too.
 /// A source that cannot be consulted is reported in the verdict — naming the
 /// source and what went wrong — and refuses the stop rather than letting it
 /// pass; the continuation after that refusal ends the turn, so a broken source
@@ -1128,6 +1134,7 @@ fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_pa
         onepipeline_testfakes::executable(&path, format!("#!/bin/sh\ncat > /dev/null\n{body}\n"));
         path.display().to_string()
     };
+    let left_behind = world.root.join("left-behind.pid");
     let missing = world
         .root
         .join("sources/nothing-here")
@@ -1200,7 +1207,13 @@ fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_pa
         // It exits at once, and what it left behind holds its standard output
         // past the deadline.
         (
-            answering("left-behind", "sleep 3 & echo '{\"verdict\":\"none\"}'"),
+            answering(
+                "left-behind",
+                &format!(
+                    "sleep 300 &\necho $! > '{}'\necho '{{\"verdict\":\"none\"}}'",
+                    left_behind.display()
+                ),
+            ),
             "did not answer within 1 second(s)",
         ),
     ];
@@ -1234,8 +1247,20 @@ fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_pa
             "{command}: the refusal does not say what to hand it by hand: {reason}"
         );
         assert!(refused.stderr.is_empty(), "{command}: {}", refused.stderr);
+        if command.ends_with("/left-behind") {
+            let pid = std::fs::read_to_string(&left_behind).expect("the pid it left behind");
+            owner.until("what the source left behind to be ended", |_| {
+                !std::process::Command::new("kill")
+                    .args(["-0", pid.trim()])
+                    .status()
+                    .expect("kill runs")
+                    .success()
+            });
+        }
 
-        // The continuation after it ends the turn.
+        // Were the refusal's report to move between a stop and its
+        // continuation, this would refuse again, and a broken source would
+        // hold the turn until the harness gave up on it.
         let ended = world.run_with_stdin(
             &declaring(&sources, &["--source-timeout", "1"]),
             &json!({"session": session, "continuation": true}).to_string(),
@@ -1261,6 +1286,20 @@ fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_pa
     // record this process cannot write.
     std::fs::create_dir_all(path.join("held")).expect("something in the way");
     // llmlint: ignore-end[tests_mirror_real_usage]
+    let unread = world.run_with_stdin(
+        &declaring(&[refusing.as_str()], &[]),
+        &json!({"session": session, "continuation": true}).to_string(),
+    );
+    unread.exited(0);
+    let told = verdict(&unread.stdout).expect("a verdict");
+    assert_eq!(told["verdict"], json!("warn"), "{told}");
+    assert!(
+        told["message"].as_str().is_some_and(|message| message
+            .contains("could not read what it last blocked on")
+            && message.contains("branch b-1 preserved")
+            && message.contains(&refusing)),
+        "{told}"
+    );
     let aside = world.run_with_stdin(
         &declaring(&[refusing.as_str()], &[]),
         &json!({"session": session}).to_string(),
@@ -1293,5 +1332,47 @@ fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_pa
             .as_str()
             .is_some_and(|message| message.contains("could not remove what it last blocked on")),
         "{told}"
+    );
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// Declared sources are consulted together, so the stop is bounded by the
+/// slowest of them rather than by their sum: each of these two answers only
+/// once it has seen the other start, which consulting them one after the other
+/// could never satisfy.
+#[cfg(unix)]
+#[test]
+fn declared_sources_are_consulted_together() {
+    let owner = World::new("stop-guard-source-together");
+    let world = guarded(&owner);
+    let dir = world.root.join("sources");
+    std::fs::create_dir_all(&dir).expect("the sources directory");
+    let meeting = |mine: &str, theirs: &str| {
+        let path = dir.join(mine);
+        onepipeline_testfakes::executable(
+            &path,
+            format!(
+                "#!/bin/sh\ncat > /dev/null\ntouch '{}'\nuntil [ -f '{}' ]; do sleep 0.1; done\necho '{{\"verdict\":\"none\"}}'\n",
+                dir.join(format!("{mine}.started")).display(),
+                dir.join(format!("{theirs}.started")).display()
+            ),
+        );
+        path.display().to_string()
+    };
+    let first = meeting("first", "second");
+    let second = meeting("second", "first");
+    let met = world.run_with_stdin(
+        &declaring(
+            &[first.as_str(), second.as_str()],
+            &["--source-timeout", "20"],
+        ),
+        &json!({"session": "a-session-owning-nothing"}).to_string(),
+    );
+    met.exited(0);
+    assert_eq!(
+        verdict(&met.stdout),
+        Some(json!({"verdict": "none"})),
+        "{}",
+        met.stdout
     );
 }

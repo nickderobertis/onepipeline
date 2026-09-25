@@ -109,7 +109,8 @@ unfinished'`. With none declared the verb is exactly the contract above.
   be started, exits non-zero, does not answer within `--source-timeout` seconds
   (default `10`, at most `3600`; it is then ended, with everything it started —
   and one that exits leaving something behind holding its standard output past
-  that deadline is the same unanswered source), writes nothing,
+  that deadline is the same unanswered source, with what it left ended too, on
+  Unix, where the source runs in a process group of its own), writes nothing,
   or answers outside the vocabulary is a `block` whose reason names the source,
   what went wrong, and the input to hand it by hand. It never reads as `none`.
   Block rather than warn is the safe choice here, and the opposite of the rule
