@@ -3318,6 +3318,13 @@ fn a_stop_that_declines_every_live_identity_does_not_report_success() {
     );
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this asks for
+// does not exist here, on the grounds the directive before the handover journeys below
+// states: `noteJourneySource`, the one separately edged Rust test project's input, begins
+// `{workspaceRoot}/src/**/*`. These journeys drive the real `stop` and `runs` over
+// `driver`'s teardown, `ledger`'s ended record, `summary` and `sys`'s process table, which
+// any change under `src/` can move, so a narrower project would drop them out of
+// `nx affected` for the very changes they exist to catch.
 
 /// A dispatch an earlier stop of this run ended is over, even once the host
 /// has given its pid to a stranger — and a stranger on a pid this run never
@@ -3375,6 +3382,29 @@ fn a_dispatch_an_earlier_stop_ended_is_over_once_its_pid_is_reissued() {
     assert!(
         kept.contains(&stamp),
         "the first stop did not record the dispatch it ended:\n{kept}"
+    );
+    // And the driver, under both records that named it: the launch record and
+    // the ownership lock each claimed one process, under one stamp, and ending
+    // it ended both claims.
+    let lines: Vec<serde_json::Value> = kept
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("the first stop wrote JSON lines"))
+        .collect();
+    let driver_stamps: Vec<&serde_json::Value> = ["launch-record", "ownership-lock"]
+        .iter()
+        .map(|claim| {
+            lines
+                .iter()
+                .find(|line| line["claim"][claim]["pid"] == json!(driver))
+                .map(|line| &line["started"])
+                .unwrap_or_else(|| {
+                    panic!("the first stop did not record the driver's {claim} claim:\n{kept}")
+                })
+        })
+        .collect();
+    assert_eq!(
+        driver_stamps[0], driver_stamps[1],
+        "the driver's two claims were recorded under two stamps:\n{kept}"
     );
     std::fs::remove_file(&ended).expect("the record is moved aside");
     std::fs::create_dir(&ended).expect("a directory where the record belongs");
@@ -3705,6 +3735,7 @@ fn a_run_listed_while_its_driver_is_on_its_way_up_is_the_launching_sessions() {
     });
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A stop reaches a dispatch whose driver is gone.
 ///

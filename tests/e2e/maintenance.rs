@@ -364,6 +364,10 @@ fn an_idle_driver_maintains_a_due_slot_once_and_a_fresh_driver_inside_every_runs
     assert_ne!(the_slot(&world)["last_maintained"], stamped);
     release(&world, "third");
 }
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] This
+// src/maintenance.rs journey has no narrower Nx edge: noteJourneySource includes src/**/*,
+// and the two real drivers it paces read `maintenance`, `pool` and the linked `onevcs`
+// together, so the crate is the narrowest edge it can honestly sit behind.
 
 /// Two drivers idle at once on one state root maintain the slot once between
 /// them: the second meets the first inside the identity and is answered
@@ -451,6 +455,7 @@ fn two_drivers_idle_at_once_maintain_the_slot_once_between_them() {
     release(&world, "one");
     release(&world, "two");
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Maintenance is withheld — no thread, no process, no record — while a pass is
 /// not idle: the run at its own concurrency ceiling, or the local executor

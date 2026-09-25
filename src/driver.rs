@@ -2260,7 +2260,11 @@ pub(crate) fn established(teardown: Option<sys::Teardown>) -> journal::StopTeard
 // stop of two *live drivers*, and that is a state a run cannot be in: the ownership lock is a
 // single-writer lock, so one run has one driver, and the pair of driver claims a stop can meet —
 // the pid a stale record names beside the pid the lock stamps — is what the first of those walks
-// over one listing.
+// over one listing. A teardown that reached only part of the tree records nothing it ended,
+// and that answer is one no journey can ask a host for — `sys::confirmed` says why — so the
+// arm is the plain comparison with `Teardown::Signalled` below; what it leaves, a reissued
+// pid declined, is the refusal `a_stop_that_signalled_nothing_leaves_a_reissued_pid_declined`
+// drives for a teardown that signalled nothing.
 pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
     let Aim::Here {
         roots,
@@ -2275,18 +2279,20 @@ pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Optio
     }
     let pids: Vec<u32> = roots.iter().map(|root| root.pid).collect();
     let established = sys::stop_and_confirm(&pids, sys::Stop::Politely, TEARDOWN_PATIENCE);
-    // Where this teardown signalled, each root it proved and then saw end is one
-    // this run ended — so a later teardown that meets its pid reissued knows it
-    // for a reissue. A teardown that signalled nothing ended nothing, whatever
-    // went meanwhile. Best effort: failing to write it costs a later teardown
-    // only what this record adds, and is said where it happens.
-    let signalled = matches!(
-        established,
-        sys::Teardown::Signalled | sys::Teardown::PartlySignalled
-    );
+    // Where this teardown reached every process and then saw the tree go, each
+    // root it proved is one this run ended — so a later teardown that meets its
+    // pid reissued knows it for a reissue. One that reached only part of the tree
+    // cannot say which of its roots went of their own accord, and one that
+    // signalled nothing ended nothing, whatever went meanwhile; both record none,
+    // and leave a reissued pid declined as it always was. Best effort: failing to
+    // write it costs a later teardown only what this record adds, and is said
+    // where it happens.
     let ended: Vec<ledger::Ended> = roots
         .into_iter()
-        .filter(|root| signalled && sys::claim_on(root.pid, root.started.as_str()).is_over())
+        .filter(|root| {
+            established == sys::Teardown::Signalled
+                && sys::claim_on(root.pid, root.started.as_str()).is_over()
+        })
         .flat_map(|root| {
             std::iter::once(root.claim)
                 .chain(root.also)

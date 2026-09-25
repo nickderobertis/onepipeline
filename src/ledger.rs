@@ -1293,6 +1293,14 @@ const PUBLISHED_READ_PATIENCE: std::time::Duration = std::time::Duration::from_s
 ///
 /// Only a refusal is tried again: a document that is absent, or bytes that are
 /// not text, are the answer the first time.
+// llmlint: ignore-block[changed_behavior_has_e2e] no host this suite's journeys run on
+// under a credential-free tier refuses an open mid-rename on demand: Linux never does, and
+// Windows does only when a replacement and a reader happen to meet, which is how the
+// host-sized listing journey met it rather than something it can arrange. Every command's
+// reads come through here, so each journey drives this path's success; the refusal is
+// induced at the real open in `a_published_document_read_mid_replacement_is_read_whole_rather_than_missed`,
+// beside a real writer, and one that does not end in
+// `a_published_document_the_host_goes_on_refusing_is_reported_as_the_refusal`.
 fn read_published(path: &Path) -> io::Result<String> {
     let deadline = std::time::Instant::now() + PUBLISHED_READ_PATIENCE;
     loop {
@@ -1307,6 +1315,7 @@ fn read_published(path: &Path) -> io::Result<String> {
         }
     }
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Read a JSON document, refusing anything the type does not accept.
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
