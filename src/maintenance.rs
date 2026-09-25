@@ -602,12 +602,6 @@ fn identity_phrase(outcome: &IdentityOutcome) -> String {
 /// record is not usable, which nothing waiting clears. So the two are phrased
 /// apart here rather than both rendered as a reason a reader has to classify, and
 /// a supervisor reading a busy pool is not told its worktrees are damaged.
-///
-/// Every arm is one the sibling can answer, and `tests::every_slot_outcome_has_a_phrase`
-/// holds each spelling; `tests/e2e/maintenance.rs` drives the ones a journey can
-/// produce — a command that succeeded, failed, and timed out, a slot whose
-/// occupancy another process holds, and one whose worktree is gone — through
-/// `results`.
 // llmlint: ignore-block[changed_behavior_has_e2e] `in-use` and a command ended by a signal
 // are answered by the sibling under conditions a journey cannot schedule from this
 // crate's interface — a session opened into the slot between the survey and the claim, a

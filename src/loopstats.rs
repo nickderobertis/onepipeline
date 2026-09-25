@@ -37,15 +37,8 @@ static STATUSES: AtomicU64 = AtomicU64::new(0);
 static PUBLICATIONS: AtomicU64 = AtomicU64::new(0);
 static UPSTREAM_READS: AtomicU64 = AtomicU64::new(0);
 static RELEASE_ASKS: AtomicU64 = AtomicU64::new(0);
-/// Pool-maintenance sweeps this driver started.
-///
-/// The idle work the reconcile loop pays for beside [`RELEASE_ASKS`], and counted
-/// for the same reason: a sweep on a schedule measured in days answers not-due for
-/// every slot almost every time it is asked, so it writes no journal record and
-/// leaves the slots' own stamps exactly as they were. Nothing else a host can read
-/// says whether the driver asked at all — which is what the pace is a bound on —
-/// and "asked and found nothing to do" and "never asked" are the two states that
-/// bound tells apart.
+/// Pool-maintenance sweeps this driver started — counted because a sweep finding
+/// nothing due writes nothing, so no other reading tells "asked" from "never asked".
 static MAINTENANCE_SWEEPS: AtomicU64 = AtomicU64::new(0);
 /// Bytes read out of a run store by this process, whichever run's they came from
 /// — this one's journal, or another's answering a cross-DAG edge.

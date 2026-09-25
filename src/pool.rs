@@ -281,7 +281,6 @@ impl Workspaces {
         }
         let capacity = match crate::vcs::workspace_capacity(request) {
             Ok(capacity) => capacity,
-            // See [`Admission::Unread`].
             Err(why) => {
                 eprintln!(
                     "onepipeline: cannot read what the '{}' workspace admits, so '{node}' is \
