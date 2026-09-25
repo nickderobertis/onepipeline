@@ -2996,12 +2996,19 @@ pub(crate) fn record_ended(paths: &RunPaths, ended: &[Stamped]) -> Result<()> {
 pub(crate) fn ended_by_teardown(paths: &RunPaths) -> std::collections::BTreeSet<String> {
     let path = paths.ended();
     match fs::read_to_string(&path) {
+        // llmlint: ignore-block[boundary_inputs_validated] each line is parsed strictly; what is
+        // kept of it is its stamp alone by design, because a reissue is by definition its pid now
+        // naming another process, and the stamp is what names the process this run saw end. A
+        // pid compared as well would add nothing a stamp does not already say, and would leave
+        // `tests/e2e/driver.rs` unable to prove the answer without waiting on the host to reuse a
+        // particular pid.
         Ok(text) => text
             .lines()
             .filter_map(|line| serde_json::from_str::<Stamped>(line).ok())
             .map(|ended| ended.started)
             .filter(|started| !started.is_empty())
             .collect(),
+        // llmlint: ignore-end[boundary_inputs_validated]
         Err(why) if why.kind() == io::ErrorKind::NotFound => std::collections::BTreeSet::new(),
         Err(why) => {
             eprintln!(

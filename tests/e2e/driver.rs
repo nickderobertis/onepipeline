@@ -3449,6 +3449,37 @@ fn a_dispatch_an_earlier_stop_ended_is_over_once_its_pid_is_reissued() {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// A stop that cannot record what it ended still stops the run, and says what
+/// that record will not be there to answer.
+///
+/// The record is only ever an answer to a later teardown, so failing to write it
+/// changes nothing about this one.
+// llmlint: ignore-block[tests_mirror_real_usage] a directory where the run keeps its record of
+// what a teardown ended stands in for a host that refuses the write, which no verb of this build
+// arranges; the run, its driver and dispatch, and the `stop` are all real.
+#[cfg(unix)]
+#[test]
+fn a_stop_that_cannot_record_what_it_ended_still_stops_the_run_and_says_so() {
+    let world = World::new("driver-stop-unrecorded-end");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "unrecorded", vec![agent("build", &[])]);
+    world.until("the dispatch to be registered", |world| {
+        !world.dispatch_records(&run).is_empty()
+    });
+    std::fs::create_dir(world.run_file(&run, "ended.jsonl"))
+        .expect("a directory where the record belongs");
+
+    world
+        .run(&["stop", &run])
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"signalled\"")
+        .err_has("which processes this teardown ended could not be recorded")
+        .err_has("will decline it rather than read it as over");
+    world.until("the driver to end", |_| !still_listed(driver));
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// A stop reaches a dispatch whose driver is gone.
 ///
 /// The launch record and the ownership lock name a driver, and a dispatch

@@ -418,9 +418,7 @@ fn two_drivers_idle_at_once_maintain_the_slot_once_between_them() {
     // another sweep inside the identity. Not *when* it met one — `onevcs` takes
     // the identity's lock before it asks whether any slot is due, so a sweep that
     // finds nothing due still holds it, and a sweep of either driver that meets
-    // one is answered `claimed` long after the slot was maintained. The Windows
-    // gate met exactly that, a `claimed` five seconds after the first driver's
-    // record; the ordering is that library's to change.
+    // one is answered `claimed` long after the slot was maintained.
     let swept = sweeps(&world);
     until_sweeps(&world, swept + 3);
     assert_eq!(marker_lines(&world), 1);

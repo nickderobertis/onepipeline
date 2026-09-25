@@ -1029,6 +1029,8 @@ impl Maintainer {
         // on a Windows runner, after the driver had long since started and a
         // reader had asked whose run it was. Without a row a reader folds, and a
         // fold reads the launch record it needs or says it cannot.
+        //
+        // llmlint: ignore[changed_behavior_has_e2e] the state this arm answers exists only inside `start`, between its first journal append and the launch record two statements later, and no verb or fixture can hold a launcher there; `a_record_appended_before_the_launch_record_leaves_no_row_attributed_to_nobody` drives that exact order through the real journal writer and the real `RunSummary::of`, and `driver::a_run_belongs_to_the_session_that_launched_it` reads the row after real launches.
         let Some(launch) = self.launch() else {
             return;
         };

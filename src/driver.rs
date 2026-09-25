@@ -2254,12 +2254,8 @@ pub(crate) fn established(teardown: Option<sys::Teardown>) -> journal::StopTeard
 // llmlint: ignore-block[changed_behavior_has_e2e] every branch is driven end to end in
 // `tests/e2e/driver.rs`, against real drivers and real dispatches: the proved claims and the
 // stale record in `stopping_a_run_ends_the_tree_its_lock_names_when_the_record_names_a_dead_driver`,
-// the reissued pid in `a_stop_never_signals_a_pid_the_host_has_given_to_another_process`, the
-// reissued pid of a dispatch an earlier stop of the run ended — over, where one it never ended
-// is declined — in `a_dispatch_an_earlier_stop_ended_is_over_once_its_pid_is_reissued` (and
-// through `shutdown` in `a_dispatch_an_earlier_shutdown_killed_is_over_once_its_pid_is_reissued`),
-// and
-// the unprovable pid in `a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryable`,
+// the reissued pid in `a_stop_never_signals_a_pid_the_host_has_given_to_another_process` and
+// `a_dispatch_an_earlier_stop_ended_is_over_once_its_pid_is_reissued`, and the unprovable pid in `a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryable`,
 // whose faulty `ps` is a host that will not say when anything started. What has no journey is a
 // stop of two *live* roots, and that is a state a run cannot be in: the ownership lock is a
 // single-writer lock, so one run has one driver, and the pair a stop can meet — the pid a
