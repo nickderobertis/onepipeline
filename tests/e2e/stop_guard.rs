@@ -904,10 +904,11 @@ impl Source {
         std::fs::write(&self.answer, format!("{verdict}\n")).expect("the answer is written");
     }
 
+    /// Each input it was handed, byte for byte, its closing newline kept.
     fn inputs(&self) -> Vec<String> {
         std::fs::read_to_string(&self.asked)
             .unwrap_or_default()
-            .lines()
+            .split_inclusive('\n')
             .map(str::to_owned)
             .collect()
     }
@@ -991,7 +992,6 @@ fn declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source()
         assert!(reason.contains(said), "{said:?} is missing from {reason}");
     }
     assert!(!reason.contains(&quiet.command), "{reason}");
-    // Every block in the order declared, and the warning after them all.
     let at = |said: &str| reason.find(said).expect("said");
     assert!(
         at(&report) < at("branch b-1")
@@ -1019,9 +1019,14 @@ fn declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source()
         })
         .expect("the page spells the input a source is handed")
         .to_owned();
+    assert!(
+        page().contains(&format!("`{template}`\n  and a newline")),
+        "the page no longer says the input closes with a newline"
+    );
     let bytes = template
         .replace("<ID>", &session)
-        .replace("<bool>", "false");
+        .replace("<bool>", "false")
+        + "\n";
     for source in [&refusing, &second, &warning, &quiet] {
         assert_eq!(source.inputs(), vec![bytes.clone()]);
         let handed: Value = serde_json::from_str(&bytes).expect("the input is JSON");
@@ -1060,7 +1065,13 @@ fn declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source()
     );
     ended.exited(0);
     assert_eq!(verdict(&ended.stdout), Some(json!({"verdict": "none"})));
-    assert!(refusing.inputs()[1].contains("\"continuation\":true"));
+    let inputs = refusing.inputs();
+    assert_eq!(
+        inputs.len(),
+        3,
+        "the stop, the run by hand, the continuation"
+    );
+    assert!(inputs[2].contains("\"continuation\":true"), "{inputs:?}");
 
     // One source's condition moves: the continuation refuses on it alone, and
     // neither the verb's unchanged report nor the other source's is repeated.
@@ -1118,7 +1129,7 @@ fn declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source()
     ask_with(&world, &alone, &idle).exited(0);
     assert!(!remembered.exists(), "a source now warning kept its block");
 
-    // Warnings alone are one warning carrying each, under every rendering.
+    // Warnings alone are one warning carrying each, under the neutral rendering and a hook's.
     refusing.answers(&json!({"verdict": "none"}));
     second.answers(&json!({"verdict": "warn", "message": "the origin is unreachable"}));
     warning.answers(&json!({"verdict": "warn", "message": "the registry is stale"}));
