@@ -2933,17 +2933,10 @@ fn refuse_pushed_branches(world: &World, repo: &Repository) {
     let hook = repo.origin.join("hooks").join("pre-receive");
     std::fs::create_dir_all(hook.parent().expect("hooks has a directory"))
         .expect("the hooks directory");
-    std::fs::write(
+    onepipeline_testfakes::executable(
         &hook,
         "#!/bin/sh\necho \"this origin does not take onevcs branches\" >&2\nexit 1\n",
-    )
-    .expect("the hook is written");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
-            .expect("the hook is executable");
-    }
+    );
     let _ = world;
 }
 
@@ -7602,9 +7595,8 @@ fn a_workspace_held_node_reads_as_held_for_concurrency_while_the_host_is_full_an
 /// of a one-off fixture would be one nothing here runs.
 #[cfg(unix)]
 fn opens_the_last_slot_on(world: &World, record: &std::path::Path, nth: u32) -> String {
-    use std::os::unix::fs::PermissionsExt;
     let hook = world.root.join("open_the_last_slot.sh");
-    std::fs::write(
+    onepipeline_testfakes::executable(
         &hook,
         format!(
             "#!/bin/sh\nset -eu\nn=0\n[ -f {record}/count ] && n=$(cat {record}/count)\n\
@@ -7615,10 +7607,7 @@ fn opens_the_last_slot_on(world: &World, record: &std::path::Path, nth: u32) -> 
             record = record.display(),
             onevcs = crate::harness::onevcs_binary().display(),
         ),
-    )
-    .expect("the hook is written");
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
-        .expect("the hook is executable");
+    );
     hook.to_string_lossy().into_owned()
 }
 

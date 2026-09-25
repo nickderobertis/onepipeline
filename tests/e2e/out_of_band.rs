@@ -1053,8 +1053,6 @@ fn a_landing_interrupted_mid_draft_takes_its_drafting_worktree_out_of_the_checko
 #[cfg(unix)]
 #[test]
 fn a_landing_signalled_while_its_worktree_is_being_added_still_removes_it() {
-    use std::os::unix::fs::PermissionsExt;
-
     let world = world_with_its_own_tmp("oob-interrupted-adding");
     let repository = world.repository("change-open", &[]);
     branch_with_work(&world, &repository);
@@ -1062,7 +1060,7 @@ fn a_landing_signalled_while_its_worktree_is_being_added_still_removes_it() {
     let hooks = world.root.join("adding-hooks");
     std::fs::create_dir_all(&hooks).expect("a hooks directory");
     let hook = hooks.join("post-checkout");
-    std::fs::write(
+    onepipeline_testfakes::executable(
         &hook,
         format!(
             "#!/bin/sh\n\
@@ -1072,10 +1070,7 @@ fn a_landing_signalled_while_its_worktree_is_being_added_still_removes_it() {
             adding = world.fakes.join("adding").display(),
             go = world.fakes.join("adding.go").display(),
         ),
-    )
-    .expect("the hook is written");
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
-        .expect("the hook is executable");
+    );
     git(
         &world,
         &repository.checkout,

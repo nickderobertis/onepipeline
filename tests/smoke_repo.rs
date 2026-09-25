@@ -17,7 +17,6 @@ mod repo;
 #[cfg(unix)]
 mod unix {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
     use crate::repo;
@@ -77,10 +76,7 @@ mod unix {
     fn stand_in(root: &Path, name: &str, present: bool) -> PathBuf {
         let bin = root.join(name);
         fs::create_dir(&bin).expect("the stand-in has a bin directory");
-        let gh = bin.join("gh");
-        fs::write(&gh, stand_in_program()).expect("the stand-in is written");
-        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755))
-            .expect("the stand-in is runnable");
+        onepipeline_testfakes::executable(&bin.join("gh"), stand_in_program());
         let record = bin.join("record");
         std::env::set_var(RECORD_ENV, &record);
         std::env::set_var(PROBE_ENV, if present { "0" } else { "1" });

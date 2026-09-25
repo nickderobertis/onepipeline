@@ -15,7 +15,6 @@
 #[cfg(unix)]
 mod unix {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
 
@@ -74,10 +73,7 @@ mod unix {
             "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'onepipeline {version}' ;;\n  \
              --help) echo 'Commands: {listed}' ;;\n  *) exit 1 ;;\nesac\n"
         );
-        let path = bin.join("onepipeline");
-        fs::write(&path, contents).expect("the stub binary is written");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
-            .expect("the stub binary is runnable");
+        onepipeline_testfakes::executable(&bin.join("onepipeline"), contents);
     }
 
     fn run_smoke(bin: &Path, args: &[&str]) -> Output {

@@ -1059,10 +1059,7 @@ mod tests {
         );
 
         let install = |body: &str| {
-            let path = hooks.join(COMMIT_MSG_HOOK);
-            std::fs::write(&path, body).expect("the hook is written");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("the hook is executable");
+            onepipeline_testfakes::executable(&hooks.join(COMMIT_MSG_HOOK), body);
         };
 
         install(

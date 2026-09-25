@@ -1464,13 +1464,7 @@ impl World {
         let hooks = hooks_dir(self);
         std::fs::create_dir_all(&hooks).expect("a hooks directory");
         let path = hooks.join("commit-msg");
-        std::fs::write(&path, COMMIT_MSG_POLICY).expect("the commit-msg hook is written");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("the commit-msg hook is executable");
-        }
+        onepipeline_testfakes::executable(&path, COMMIT_MSG_POLICY);
         git(
             self,
             &repository.checkout,
@@ -1500,18 +1494,11 @@ impl World {
         let answer = self.root.join(format!("{name}.version"));
         let (script, body) = probe_script();
         let path = repository.checkout.join(script);
-        std::fs::write(
+        onepipeline_testfakes::executable(
             &path,
             body.replace("@VERSION_FILE@", &answer.to_string_lossy())
                 .replace("@RUNS_FILE@", &self.probe_runs_file(name).to_string_lossy()),
-        )
-        .expect("the probe script is written");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("the probe script is executable");
-        }
+        );
         git(self, &repository.checkout, &["add", "-A"]);
         git(
             self,
@@ -1981,13 +1968,9 @@ impl World {
     /// to leave every other question alone.
     #[cfg(unix)]
     fn path_with_ps(&self, name: &str, script: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let dir = self.root.join(name);
         std::fs::create_dir_all(&dir).expect("a directory for the ps stand-in");
-        let ps = dir.join("ps");
-        std::fs::write(&ps, format!("#!/bin/sh\n{script}\n")).expect("the ps stand-in is written");
-        std::fs::set_permissions(&ps, std::fs::Permissions::from_mode(0o755))
-            .expect("the ps stand-in is executable");
+        onepipeline_testfakes::executable(&dir.join("ps"), format!("#!/bin/sh\n{script}\n"));
         dir
     }
 
@@ -4616,7 +4599,9 @@ fn place(published: &Path, mine: &Path) -> std::io::Result<()> {
         std::process::id(),
         STAGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     ));
-    std::fs::copy(published, &staging)?;
+    // Through the shared helper rather than `std::fs::copy`, which would hold the
+    // copy open for writing in this process — the `ETXTBSY` its doc explains.
+    onepipeline_testfakes::executable(&staging, std::fs::read(published)?);
     std::fs::rename(&staging, mine).inspect_err(|_| {
         // A rename that did not happen leaves the staging file next to the
         // destination, where the next `build` would sweep nothing: the directory
@@ -4967,21 +4952,14 @@ fn install_hook(path: &Path, argv: &[&str]) {
         .iter()
         .map(|word| format!("'{}'", word.replace('\'', r"'\''")))
         .collect();
-    std::fs::write(
+    onepipeline_testfakes::executable(
         path,
         format!(
             "#!/bin/sh\n{}exec {}\n",
             VERBATIM_ARGUMENTS,
             quoted.join(" ")
         ),
-    )
-    .expect("the pre-push hook is written");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-            .expect("the pre-push hook is executable");
-    }
+    );
 }
 
 /// The two halves of the hook answer the same verbs.

@@ -3,9 +3,10 @@
 #[cfg(unix)]
 mod unix {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+
+    use onepipeline_testfakes::executable;
 
     struct Scratch(PathBuf);
 
@@ -13,12 +14,6 @@ mod unix {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).expect("the provisioning scratch directory is removed");
         }
-    }
-
-    fn executable(path: &Path, contents: &str) {
-        fs::write(path, contents).expect("the executable is written");
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-            .expect("the executable is runnable");
     }
 
     /// A cached binary is not evidence that it is the pinned release.
@@ -122,8 +117,11 @@ chmod +x "$root/bin/onetaskgraph"
             &cargo_bin.join("onetaskgraph"),
             "#!/bin/sh\nprintf '%s\\n' wrong-version\n",
         );
-        fs::copy(root.join("bin/cargo"), tools.join("cargo"))
-            .expect("the same recording installer is ahead of Cargo's bin");
+        executable(
+            &tools.join("cargo"),
+            fs::read(root.join("bin/cargo"))
+                .expect("the same recording installer is ahead of Cargo's bin"),
+        );
         let mut default_paths = vec![tools, cargo_bin];
         default_paths.extend(std::env::split_paths(&host_path));
         let default_path = std::env::join_paths(default_paths).expect("the default PATH joins");
@@ -155,8 +153,10 @@ chmod +x "$root/bin/onetaskgraph"
         let configured_home = root.join("configured-cargo-home");
         let configured_tools = root.join("configured-tools");
         fs::create_dir(&configured_tools).expect("the configured installer directory exists");
-        fs::copy(root.join("bin/cargo"), configured_tools.join("cargo"))
-            .expect("the configured-path installer is available");
+        executable(
+            &configured_tools.join("cargo"),
+            fs::read(root.join("bin/cargo")).expect("the configured-path installer is available"),
+        );
         let mut configured_paths = vec![configured_tools];
         configured_paths.extend(std::env::split_paths(&host_path));
         let configured_path =
@@ -241,7 +241,7 @@ chmod +x "$root/bin/onetaskgraph"
         // as a package manager with no route to its mirror does.
         executable(
             &bin.join("apt-get"),
-            &format!(
+            format!(
                 "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$*\" >> {asked}\n[ ! -e {refusing} ] || {{ echo 'E: Unable to locate package strace' >&2; exit 100; }}\ncase \"$*\" in\n  *install*strace*) printf '#!/bin/sh\\nexit 0\\n' > {bin}/strace; chmod 0755 {bin}/strace ;;\nesac\n",
                 asked = asked.display(),
                 refusing = refusing.display(),

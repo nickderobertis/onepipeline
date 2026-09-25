@@ -87,6 +87,91 @@ pub const CODEX_SERVER_OVERLOADED: &str =
 // quietly answers the wrong question.
 pub const EVALUATOR_OPENING: &str = "You are a strict, careful evaluator";
 
+/// Create `path` holding `body`, runnable — and spawnable the moment this
+/// returns, whatever else the calling process is spawning.
+///
+/// This is how every test in this repository makes a program it then runs: a
+/// hook, a stand-in on a `PATH`, a probe, a validator. It exists because the
+/// obvious way — write the file, chmod it, spawn it — fails intermittently in a
+/// multithreaded test process, and fails as the test rather than as the code
+/// under test.
+///
+/// The file that is run is never open for writing in the calling process. Linux
+/// refuses to execute a file any process holds open for writing (`ETXTBSY`), and
+/// a fork inherits every open descriptor: a script written here would be
+/// inherited by any child another thread spawned while it was open, and that
+/// child holds it until it execs — later, under load, than the caller execs the
+/// script. Closing the descriptor here does not close the inherited copy;
+/// measured under four threads spawning continuously, a script written in
+/// process failed about one spawn in thirty. So the body is staged in a file this
+/// process creates with its mode and never runs, and `cp` — which creates its copy
+/// with the source's mode in the one `open(2)` that creates it — makes the program
+/// from it in a child. Once that child has been waited for, nothing anywhere holds
+/// the program open, and nothing has changed a mode after the fact.
+///
+/// A file already at `path` is unlinked first rather than truncated, so a
+/// rewrite is a fresh file too: `cp` onto an existing file keeps that file's mode
+/// and writes through its inode, which is the in-place write this exists to avoid.
+///
+/// Elsewhere the file is written in process: Windows decides what is runnable by
+/// extension and forks nothing, so there is no descriptor to inherit.
+///
+/// A failure panics, because every caller is a test whose fixture could not be
+/// made.
+pub fn executable(path: &Path, body: impl AsRef<[u8]>) {
+    staged(path, body.as_ref());
+}
+
+#[cfg(unix)]
+fn staged(path: &Path, body: &[u8]) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut name = path
+        .file_name()
+        .unwrap_or_else(|| panic!("{} names no file", path.display()))
+        .to_owned();
+    name.push(format!(".staged.{}", std::process::id()));
+    let staging = path.with_file_name(name);
+    let _ = std::fs::remove_file(&staging);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o755)
+        .open(&staging)
+        .and_then(|mut file| file.write_all(body))
+        .unwrap_or_else(|error| panic!("{} could not be staged: {error}", path.display()));
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("{} could not be replaced: {error}", path.display()),
+    }
+    let copied = std::process::Command::new("cp")
+        .arg(&staging)
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .unwrap_or_else(|error| {
+            panic!(
+                "the copy that creates {} did not run: {error}",
+                path.display()
+            )
+        });
+    let _ = std::fs::remove_file(&staging);
+    assert!(
+        copied.success(),
+        "{} was not created: {copied}",
+        path.display()
+    );
+}
+
+#[cfg(not(unix))]
+fn staged(path: &Path, body: &[u8]) {
+    std::fs::write(path, body)
+        .unwrap_or_else(|error| panic!("{} could not be written: {error}", path.display()));
+}
+
 /// The directory this double reads its script from and records into.
 ///
 /// A double with no script directory has nothing to act out, which is a

@@ -99,11 +99,8 @@ fn records(world: &World) -> PathBuf {
 /// names.
 #[cfg(unix)]
 fn hook(world: &World) -> String {
-    use std::os::unix::fs::PermissionsExt;
     let path = world.root.join("dispatch_env_hook.sh");
-    std::fs::write(&path, include_str!("dispatch_env_hook.sh")).expect("the hook is written");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-        .expect("the hook is executable");
+    onepipeline_testfakes::executable(&path, include_str!("dispatch_env_hook.sh"));
     path.to_string_lossy().into_owned()
 }
 
