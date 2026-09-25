@@ -1296,8 +1296,9 @@ const PUBLISHED_READ_PATIENCE: std::time::Duration = std::time::Duration::from_s
 // llmlint: ignore-block[changed_behavior_has_e2e] no host this suite's journeys run on
 // under a credential-free tier refuses an open mid-rename on demand: Linux never does, and
 // Windows does only when a replacement and a reader happen to meet, which is how the
-// host-sized listing journey met it rather than something it can arrange. Every command's
-// reads come through here, so each journey drives this path's success; the refusal is
+// host-sized listing journey met it rather than something it can arrange. The block covers
+// `read_json` and `read_json_opt` below, whose only change is to read through this: every
+// command's document reads come through them, so each journey drives the success; the refusal is
 // induced at the real open in `a_published_document_read_mid_replacement_is_read_whole_rather_than_missed`,
 // beside a real writer, and one that does not end in
 // `a_published_document_the_host_goes_on_refusing_is_reported_as_the_refusal`.
@@ -1315,7 +1316,6 @@ fn read_published(path: &Path) -> io::Result<String> {
         }
     }
 }
-// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Read a JSON document, refusing anything the type does not accept.
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
@@ -1337,6 +1337,7 @@ pub fn read_json_opt<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
         .map(|text| counted(text.len(), text))
         .and_then(|text| serde_json::from_str(&text).ok())
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Write a JSON document so no reader can observe it half-written.
 ///
