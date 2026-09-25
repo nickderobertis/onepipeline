@@ -2459,6 +2459,18 @@ mod tests {
                 }),
                 "not-answered",
             ),
+            // And the reference naming no work the host knows, which the linked
+            // release answers with a variant of its own rather than the `Invalid`
+            // it used to. Read the same way, because [`Answer::of`] is total over
+            // the refusal and never over its variants — so a sibling that names a
+            // refusal more precisely cannot change what this crate does with it.
+            (
+                Err(onevcs::Error::UnresolvableReference {
+                    reference: "not-a-landing".to_owned(),
+                    reason: "no landed work answers to it".to_owned(),
+                }),
+                "not-answered",
+            ),
         ];
         for (status, expected) in cases {
             assert_eq!(
