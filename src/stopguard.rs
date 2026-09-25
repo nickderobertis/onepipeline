@@ -445,8 +445,6 @@ fn consult(command: &str, asked: &Asked, timeout: Duration) -> Result<Answer, St
     match child.stdin.take() {
         Some(mut stdin) => {
             std::thread::spawn(move || {
-                // Dropped at the end, which is the end of input the source
-                // reads to.
                 let _ = wrote.send(stdin.write_all(input.as_bytes()));
             });
         }
@@ -523,8 +521,15 @@ fn consult(command: &str, asked: &Asked, timeout: Duration) -> Result<Answer, St
         .map_err(|_| {
             end_group(child.id());
             late()
-        })?
-        .map_err(|error| format!("its standard output could not be read ({error})"))?;
+        })?;
+    // llmlint: ignore-block[changed_behavior_has_e2e] no source can provoke this: `read_to_end`
+    // retries `EINTR`, and a pipe whose writer exits or is ended reads as end of file, not as
+    // an error, so no script a journey runs reaches it. It is here so that an error the kernel
+    // does raise still refuses the stop naming the source, rather than being read as an empty
+    // answer — the `wrote nothing` refusal the journeys in `tests/e2e/stop_guard.rs` do drive.
+    let bytes =
+        bytes.map_err(|error| format!("its standard output could not be read ({error})"))?;
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     if bytes.len() as u64 > SOURCE_ANSWER_LIMIT {
         return Err(format!(
             "it answered more than {SOURCE_ANSWER_LIMIT} bytes, which is no verdict object"

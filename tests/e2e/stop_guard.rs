@@ -1624,4 +1624,34 @@ fn a_source_not_delivered_its_whole_input_refuses_the_stop_and_its_continuation_
         Some(json!({"verdict": "none"})),
         "the continuation did not end the turn"
     );
+
+    // One that stays alive and never reads an input larger than the pipe holds
+    // cannot hold the stop on that full pipe: it is ended at the deadline.
+    let stalled = world.root.join("sources/never-reads");
+    onepipeline_testfakes::executable(
+        &stalled,
+        "#!/bin/sh
+exec sleep 30
+",
+    );
+    let stalled = stalled.display().to_string();
+    let started = std::time::Instant::now();
+    let late = world.run_with_stdin(
+        &declaring(&[stalled.as_str()], &["--source-timeout", "1"]),
+        &json!({"session": session}).to_string(),
+    );
+    late.exited(0);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "the stop was held {:?}",
+        started.elapsed()
+    );
+    let told = verdict(&late.stdout).expect("a verdict");
+    assert_eq!(told["verdict"], json!("block"), "the stall was taken");
+    let reason = told["reason"].as_str().expect("a reason");
+    assert!(
+        reason.contains(&stalled) && reason.contains("did not answer within 1 second(s)"),
+        "the refusal does not name the source and its deadline: {}",
+        reason.chars().take(400).collect::<String>()
+    );
 }
