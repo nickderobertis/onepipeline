@@ -1,0 +1,134 @@
+# Terminal screenshots
+
+The README's images: deterministic SVGs of the real CLI's real output, gated on
+their content hash by [screencomp](https://github.com/nickderobertis/screencomp),
+plus one animated GIF that is not. Informational, like `deps-check` — never in
+`just check`, `just gate`, or `ci.yml`'s `gate` job.
+
+> `CLAUDE.md` is a symlink to this file — edit `AGENTS.md` only.
+
+## Which scenes, and why not the others
+
+`status`, `watch`, `monitor`, `results`, `runs`, `telemetry --breakdown`, the
+`--help` verb list, and `demo.gif` of `start --attach`. Each sits in the README
+section that explains that surface.
+
+**The bar for a new one: it must say more than the sentence it would sit
+beside.** `agents` fails it (the offline fixture runs no real `oneharness`, so
+it reads `no sessions recorded`), and so do `transcript`, `goals`, `host` and
+`channel queue`. The stills are monochrome because the output is — `clap`'s help
+is the only coloured surface in this stack — so a shot that merely repeats its
+paragraph earns nothing, and a shorter set is the better README.
+
+## Two fixture layers
+
+**Driven** — the shipped `examples/plan-store` `tracked-release` plan, executed
+by the real binary: six nodes, two human approvals, real repositories on real
+bare origins. Feeds every view that exists to show a *graph*.
+
+**Recorded** — `tests/recorded/run-root/onemessagebus-repair-2`, read as
+`tests/parity.rs` reads it. Feeds `telemetry --breakdown` and nothing else,
+because its buckets and its cost are a real run's and no offline drive of a
+scripted double can be. It is one node, which is why there are two layers.
+
+Two subprocesses are substituted and they are the two this repository's own
+offline tier substitutes — `fake-oneagentgraph` and `fake-gh`. **Keep it that
+way**: no model call, no harness turn, no network, no credential, no real GitHub,
+and a scene that cannot be had on those terms is the wrong scene.
+
+**Every wait polls a file** (`tests/AGENTS.md`'s one rule). A capture that slept
+to let output settle is what that note forbids; hold a dispatch with the doubles'
+own `<key>.wait`/`<key>.go` and release one at a time, so the order the run
+settles in is stated rather than decided by the host.
+
+## What the bytes are pinned to, and where each pin lives
+
+| pinned | its one source |
+| --- | --- |
+| renderer (`freeze`) | the justfile's `freeze-version`; `install-freeze.sh` reads that line for CI |
+| font | `fonts/JetBrainsMono-Regular.ttf` (OFL), vendored and embedded, named in `capture.py` |
+| arch lane | `[capture].arches` in `screencomp.toml`; `host-arch.sh` derives this host's |
+| screencomp | named twice in the workflow, which YAML cannot avoid — `capture.py` refuses a capture when the two have parted |
+
+Beyond those, the world clears every ambient `ONE*_` setting before setting its
+own, and `normalise.py` replaces each per-run or per-host value with a fixed one.
+**No clock override, deterministic-id switch, `--no-color`, `--width` or demo
+flag may be added to make a capture easier**: the CLI surface is the approved
+`docs/contract.md`'s, so such a flag is a contract change. Normalise instead.
+
+## Why a generated capture is not a second statement of the contract
+
+`contracts_have_one_source_or_a_drift_gate` fires on a second spelling of a
+contract, and a committed screenshot of CLI output would be one **if it were
+hand-made**. It is not: every image is what the real binary printed, and CI
+refuses the change the moment its bytes leave `shots/baseline/<arch>.json`. The
+baseline is the drift gate; the binary stays the one source. For the same reason
+a capture that *contradicted* `docs/contract.md` is a contract bug to report, not
+a shot to adjust.
+
+<!-- llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the GIF is the one
+image here with no gate, and that is a ruling rather than an omission: a GIF is not
+byte-reproducible across Pillow versions, so hashing one would fail every capture on a
+machine with a different Pillow and say nothing about the tool. The stack-wide decision
+is to regenerate and commit it — `llmlint`, the reference adoption, does exactly this
+with its own hero — and the restatement it carries is bounded to a rendering of the same
+run the gated stills come from. Changing that is the contract owner's, not this
+repository's. -->
+**The GIF is the one image with no gate.** The hash-gated `monitor` scene covers
+most of what it shows — the attached stream is `views::monitor`'s own lines — so
+a red `monitor` is usually the signal to re-render. It is not the whole signal:
+the launcher's own `-- <run> …` status lines and this renderer's own layout are
+outside it. So re-render on purpose — `just screenshots-gif` — whenever what the
+attached stream prints changes, and commit the new hero beside the new baseline.
+
+## Working on it
+
+`just --list` indexes the recipes. What it does not say:
+
+- **Bless only after an intended output change**, and commit the refreshed
+  baseline together with `images/` — CI compares the two against each other.
+- The capture is the `onepipeline-visual-docs` project's own target, which
+  declares no `check`, `build` or `test` because it has none: declaring the
+  uniform set and running nothing would drop it out of every repo-wide verb
+  while appearing covered by it. A new path that can change a shot belongs in
+  `visualDocsSource` in `nx.json` **and** in `[guard].paths`; the capture
+  refuses when a guard path is under no named input, which is the direction that
+  would otherwise let a cached target replay a stale result. It refuses a
+  `[guard].paths` stated more than once for the same reason the pin
+  reconciliation beside it does: reading the first block leaves the rest
+  deciding pushes unreconciled. The hook counts `arches` before reading it, on
+  the same grounds — `sed` answers with every line that matched, so two
+  declarations would run together into a lane neither states.
+- **No image goes under `docs/`** — that directory is machine-consumed and named
+  in a cached build input.
+- **The workflow's `capture-command` runs under `sh`, and `sh` there is dash.**
+  screencomp's reusable workflow gives that step `shell: sh -e` and offers no
+  input to ask for another, while its `container:` input is what lets this
+  repository name `rust:1-bookworm` — whose `/bin/sh` is dash. So `[[`, `=~` and
+  the rest of bash's grammar are `not found` on those lines, and the guard the
+  shell skipped past then refuses a value it never read. What keeps the next
+  edit from assuming bash is `tests/visual_docs.rs`: it runs the *committed*
+  command under dash, both halves of both guards included, so the assumption
+  fails in `just check` rather than in the capture. The `screenshots/*.sh` that
+  command calls are bash, and stay bash, because it hands each to `bash` by
+  name.
+- The guard runs only where `core.hooksPath` points at `.githooks`, per-clone
+  state `just bootstrap` sets. That directory carries the visual guard **and
+  nothing else**: `just gate` stays unhooked.
+- **A hook's environment is not a shell's:** it carries a `GIT_DIR`, which beats
+  `-C` and beats discovery, so the world states its whole git environment and
+  inherits none.
+- **A failed step reports both streams**, because git refuses on *stdout*.
+- The two above are reached only from a hook, so `just screenshots-guard`
+  rehearses one; `tests/visual_docs.rs` holds both.
+- **The two switches are spelled, not merely present.** `SCREENSHOTS_NO_BUILD`
+  (`capture.sh`) and `SCREENCOMP_GUARD_REQUIRE` (the hook) each read a written-out
+  yes or no — the spellings are the `case` statement beside each — and refuse
+  anything else. Present-means-on would read a `=0` as "on", and a skipped build
+  photographs whatever binary was lying in `target/`, which is a baseline blessed
+  for code nobody here has.
+- **`SCREENCOMP_GUARD_REQUIRE` is parsed before any path that can refuse**, so
+  every "could not evaluate this push" ending answers to it — a host whose arch
+  `[capture].arches` does not declare included. Reach a host-dependent ending
+  from a fixture tree rather than from a runner of that shape: a journey only
+  one platform can reach is one only that platform checks.

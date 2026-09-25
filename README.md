@@ -1,5 +1,10 @@
 # onepipeline
 
+![the stderr of onepipeline start --attach driving a six-node plan: node-ready, node-dispatched and node-settled lines arriving as each node runs, a decision-pending line pausing the run on a human approval and clearing once it is attested, and a closing status line reading 6/6 done, 1 not landed, SETTLED, complete](screenshots/images/demo.gif) <!-- llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the hero renders the same
+run the hash-gated stills come from, and a GIF is not byte-reproducible, so it is
+deliberately the one image with no hash gate. `screenshots/AGENTS.md` holds that ruling
+and what to re-render on. -->
+
 Execute a task DAG over [`oneagentgraph`](https://github.com/nickderobertis/oneagentgraph)
 and [`onevcs`](https://github.com/nickderobertis/onevcs), merging their event
 streams into one.
@@ -211,6 +216,10 @@ execution or an edit ruling.
 
 ## What it does
 
+The verbs, in one screen:
+
+![the onepipeline command list: start, plan, adopt, channel, next, reply, surface, attest, stop, shutdown, runs, status, host, monitor, watch, unwatched, stop-guard, ask, publish-branch, repo-recover, results, goals, transcript, agents and telemetry, each with a one-line description](screenshots/images/help.svg)
+
 `start` **drives the run itself**: a node — and each step within a lifecycle
 node — dispatches the moment its dependencies settle, and settlement triggers
 integration and publication immediately. No agent is required. The only pauses
@@ -301,6 +310,10 @@ success, and an amended task sends it back to produce a diff. Settled `done` as
 in every view. A branch that *is* ahead and whose tree the base already carries
 still reaches `onevcs`'s own `NothingToPublish` at publication and settles
 `no-changes` as it always did.
+
+![a finished six-node run's per-node outcomes: design and design-approval done, docs done (change-open) carrying a NOT landed note and the change request's URL, readiness-handoff done (no-changes), release-approval done, and service done with its landing reported UNDECIDED](screenshots/images/results.svg)
+
+> Every picture on this page is a capture of the real CLI reading a real run offline — the shipped example plan above, driven end to end, and for the timing view a finished run this repository checks in — [with no model, no network and no credential](screenshots/AGENTS.md). The stills are gated on their content hash by [screencomp](https://github.com/nickderobertis/screencomp), so a change to what a verb prints refreshes them deliberately or fails; the animation above is regenerated from the same run on demand.
 
 A dispatch that ends for a reason that is **not the agent's verdict on its task**
 settles `dispatch-died` rather than `task-failed`: a rate limit twenty seconds after
@@ -542,6 +555,12 @@ renders a dispatched turn's tools and its words; `telemetry` reports what each
 party spent and where the wall clock went, in eight buckets that sum exactly.
 Anything nothing in the stack measures is reported absent, never as a zero.
 
+![a live run's state: ACTIVE, NO OBSERVER, 2 of 6 nodes done, then one line each for docs and service saying how long it has been running, how many events it has produced and how long ago the last one was, then the free space on the filesystem holding the runs root and a provider-health line](screenshots/images/status.svg)
+
+Where a run's wall clock went, and what each party spent, is its own view:
+
+![a finished run's wall clock split into eight buckets — agent, judge, llmlint, gate, publication_wait, lock_wait, setup and scheduling — three of which read 'not measured' rather than zero, above a usage line giving input, output and cache-read tokens and the run's cost in dollars](screenshots/images/telemetry.svg)
+
 **Every agent a run launches is visible, automatically, whatever the agent
 structure of the target repository.** Every dispatch the engine starts — a
 node's, each lifecycle step's, the observer graph's and the drafting graph's —
@@ -574,6 +593,8 @@ the flat one. `channel queue RUN` reads a run's channel as one JSON object —
 every surface and where it is, the replies, and the command queue with the
 reconciler's answers — and consumes nothing.
 
+![two project header lines, each with its own run beneath it: plans:single-node with a run at 1/1 done, and plans:tracked-release with a run at 6/6 done, 1 not landed — both marked SETTLED and owned by this session](screenshots/images/runs.svg)
+
 **Every post-launch verb is a typed call in the library, and the binary is
 argument parsing over it.** `onepipeline::verbs` carries one function per verb
 with a renderer beside each that produces exactly what the binary prints —
@@ -599,6 +620,8 @@ would refuse (malformed, another run's, past the journal's end, or inside a
 record) is refused the same way, exiting `2` with the reason on stderr and nothing
 on stdout.
 
+![a run's whole event document: one line per event carrying its timestamp, its stream and its kind — run-started, node-ready, node-dispatched, node-held, decision-pending, human-attested, node-settled, driver-adopted — closed by a status trailer and a resume line reading -- cursor 1:tracked-release:48219](screenshots/images/monitor.svg)
+
 `onepipeline watch RUN` is the bounded wait a supervisor puts in a wake loop, and
 it takes the same `--filter NAME|SPEC` / `--all` profile selection `monitor` does.
 It blocks, writing one line per event a supervisor acts on — a graph edit whichever
@@ -614,6 +637,8 @@ The human lines go to standard error and one NDJSON record per line to standard
 output — a `watch` of `event`, of `heartbeat`, and one final `return` carrying
 `run_id`, `condition`, `exit`, `node` when the condition names one, `cursor` and
 `unread` — so nothing has to match prose.
+
+![a bounded wait's human half, on standard error: four event lines, a heartbeat reading -- watching tracked-release ACTIVE 0 unread planner surfaces, the docs node settling done, and a closing return line reading -- watch tracked-release node-settled docs, 0 unread planner surfaces, and the cursor to resume from](screenshots/images/watch.svg)
 
 It returns on the first of five conditions to fire, each with a status of its own:
 exit `0` when the run settled complete, `3` when nothing is driving it — the same

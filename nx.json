@@ -49,6 +49,20 @@
       "{workspaceRoot}/rustfmt.toml",
       "{workspaceRoot}/.config/nextest.toml",
       "sharedGlobals"
+    ],
+    "visualDocsSource": [
+      "{workspaceRoot}/src/**/*",
+      "{workspaceRoot}/crates/testfakes/**/*",
+      "{workspaceRoot}/examples/**/*",
+      "{workspaceRoot}/graphs/**/*",
+      "{workspaceRoot}/tests/recorded/run-root/**/*",
+      "{workspaceRoot}/screenshots/**/*",
+      "{workspaceRoot}/screencomp.toml",
+      "{workspaceRoot}/.github/workflows/visual-docs.yml",
+      "{workspaceRoot}/Cargo.toml",
+      "{workspaceRoot}/Cargo.lock",
+      "{workspaceRoot}/rust-toolchain.toml",
+      "sharedGlobals"
     ]
   },
   "targetDefaults": {
@@ -116,6 +130,15 @@
         "lint",
         "test"
       ]
+    },
+    "screenshots": {
+      "cache": true,
+      "inputs": [
+        "visualDocsSource"
+      ]
+    },
+    "screenshots-bless": {
+      "cache": false
     }
   }
 }

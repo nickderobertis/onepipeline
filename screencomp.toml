@@ -1,0 +1,78 @@
+# screencomp configuration. See https://github.com/nickderobertis/screencomp.
+#
+# The durable explanation of what these scenes are and why each one documents
+# the surface it shows is `screenshots/AGENTS.md`.
+
+[capture]
+# One lane. The shots are deterministic SVGs — a vendored, version-pinned font
+# embedded into each file as base64, and a version-pinned renderer — so the
+# bytes are pure layout maths and are identical on every CPU. A second lane
+# would be a second CI job proving the same bytes twice.
+#
+# `x86_64` rather than this developer's own arch because that is what the
+# repository's own CI runners are, and because the local pre-push guard
+# classifies **the lane of the host it runs on**: a host whose arch no lane
+# declares has nothing to classify against, so the guard says on every push that
+# it did not evaluate it, rather than guarding nothing silently. That is one of
+# its "could not evaluate" endings and answers to `SCREENCOMP_GUARD_REQUIRE`
+# like the rest — an `arm64` developer adds that lane here and blesses it once.
+arches = ["x86_64"]
+
+[comment]
+title = "Terminal screenshots"
+marker = "screencomp"        # [A-Za-z0-9_-]; one sticky comment per marker
+embed_limit = 10             # embed images inline when <= N shots differ (0 disables)
+
+# No `[[toggle]]`. Every scene here is one view of one surface: there is no
+# axis this tool renders the same scene along — no theme, no viewport, no
+# verbosity level that changes a view's shape — so a toggle would be an axis
+# invented for the gallery rather than one the product has.
+
+[guard]
+# Local pre-push guard (.githooks/pre-push): re-capture only when something that
+# can change a rendered shot changes. Three kinds of thing can:
+#   - the renderers and the engine, because they decide what a view prints and
+#     in what order the events behind it are written;
+#   - the fixtures the capture drives, because they decide what run is being
+#     photographed;
+#   - the capture machinery and this file.
+# A fourth thing decides whether there is a shot at all: the visual-docs workflow
+# carries the two screencomp pins `capture.py` reconciles, and a capture that
+# never ran that reconciliation is the one way the gallery and the gate can come
+# from two releases. So it is listed below, and — because `capture.py` refuses a
+# guard path no `visualDocsSource` entry covers — in `nx.json` beside it, which
+# is what stops a cached target replaying a capture from before the pins parted.
+# llmlint: ignore[changed_behavior_has_e2e] this list decides only whether the *local*
+# hook pays for a capture before a push. CI re-captures on every pull request whatever it
+# says, so a path missing here costs one developer one slow round trip and can never
+# reach the committed baseline — and a journey over it would be asserting that
+# `screencomp scope`, a third-party matcher this repository does not ship, still matches
+# globs.
+paths = [
+  "src/cli.rs",
+  "src/main.rs",
+  "src/views.rs",
+  "src/verbs.rs",
+  "src/watch.rs",
+  "src/telemetry.rs",
+  "src/channel.rs",
+  "src/freespace.rs",
+  "src/report.rs",
+  "src/payload.rs",
+  "src/driver.rs",
+  "src/engine.rs",
+  "src/event.rs",
+  "src/journal.rs",
+  "src/graph.rs",
+  # Read by `capture.py` rather than rendered: it declares the exit code the
+  # bounded-watch scene holds its wait to.
+  "src/error.rs",
+  "examples/plan-store/**",
+  "graphs/**",
+  "crates/testfakes/**",
+  "tests/recorded/run-root/**",
+  "screenshots/**",
+  "screencomp.toml",
+  ".github/workflows/visual-docs.yml",
+]
+gallery = "shots/review"
