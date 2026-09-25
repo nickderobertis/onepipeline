@@ -2527,7 +2527,7 @@ fn started_at_of(pid: u32) -> String {
 /// against loopback is what the crate's own process-tree tests hold open, and it
 /// outlives every assertion made about it.
 #[cfg(windows)]
-fn stranger_started_after(_stamps: &[String]) -> std::process::Child {
+pub(crate) fn stranger_started_after(_stamps: &[String]) -> std::process::Child {
     std::process::Command::new("ping")
         .args(["-n", "300", "127.0.0.1"])
         .stdout(std::process::Stdio::null())
@@ -2550,7 +2550,7 @@ fn stranger_started_after(_stamps: &[String]) -> std::process::Child {
 /// those seconds behind, so the stand-in is a stranger by construction rather
 /// than by luck.
 #[cfg(unix)]
-fn stranger_started_after(stamps: &[String]) -> std::process::Child {
+pub(crate) fn stranger_started_after(stamps: &[String]) -> std::process::Child {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let mut child = std::process::Command::new("sleep")
@@ -3316,6 +3316,98 @@ fn a_stop_that_declines_every_live_identity_does_not_report_success() {
         "the driver to finish after its dispatch is released",
         |_| !still_listed(driver),
     );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A dispatch an earlier stop of this run ended is over, even once the host
+/// has given its pid to a stranger — and a stranger on a pid this run never
+/// ended is still declined.
+///
+/// The first half is the Windows gate's failure: a stop ends the driver, the
+/// driver is what would have taken the dispatch's registry entry back, so the
+/// entry is left naming a pid the host hands on within seconds. Read with
+/// nothing but its stamp, the next stop found a live pid whose stamp disagreed
+/// and refused, over a run it had itself already ended.
+// llmlint: ignore-block[tests_mirror_real_usage] PID reuse is a host transition, not a
+// product operation, and waiting for this particular pid to be recycled is unbounded. The
+// fixture moves only the pid a registry entry names — the entry the dispatch itself wrote,
+// stamp untouched — onto a real process this test started, and adds one entry for the second
+// half; the real `stop` command reads the real run root either way and must leave the
+// stranger alive.
+#[cfg(unix)]
+#[test]
+fn a_dispatch_an_earlier_stop_ended_is_over_once_its_pid_is_reissued() {
+    let world = World::new("driver-stop-reissued-after-kill");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "reissue", vec![agent("build", &[])]);
+    world.until("the dispatch to be registered", |world| {
+        !world.dispatch_records(&run).is_empty()
+    });
+    let entry = world.dispatch_records(&run).remove(0);
+    let recorded: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&entry).expect("the entry reads"))
+            .expect("the entry is JSON");
+    let dispatch =
+        u32::try_from(recorded["pid"].as_u64().expect("the entry names a pid")).expect("a pid");
+    let stamp = recorded["started"]
+        .as_str()
+        .expect("the entry carries its stamp")
+        .to_string();
+
+    world
+        .run(&["stop", &run])
+        .exited(0)
+        .out_has("\"teardown\":\"signalled\"");
+    world.until("the run's processes to end", |_| {
+        !still_listed(driver) && !still_listed(dispatch)
+    });
+
+    // The host hands the dispatch's pid on. What the registry is left holding is
+    // the entry the dispatch wrote, stamp and all, now naming the stranger.
+    let mut stranger = stranger_started_after(std::slice::from_ref(&stamp));
+    let taken = stranger.id();
+    let mut reissued = recorded.clone();
+    reissued["pid"] = json!(taken);
+    std::fs::write(&entry, reissued.to_string()).expect("the reissued pid is planted");
+
+    world
+        .run(&["stop", &run])
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"nothing-to-stop\"")
+        .err_lacks("since given to another process");
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about the stranger")
+            .is_none(),
+        "a stop signalled pid {taken}, which the host had reissued"
+    );
+
+    // The same stranger under a stamp no teardown of this run ever ended is a
+    // claim nothing places, and is declined exactly as it always was.
+    let mut stray = recorded;
+    stray["pid"] = json!(taken);
+    stray["started"] = json!("a process no teardown of this run ended");
+    std::fs::write(
+        entry.with_file_name(format!("{taken}-stray.json")),
+        stray.to_string(),
+    )
+    .expect("the stray claim is planted");
+    let refused = world.run(&["stop", &run]);
+    refused
+        .exited(REFUSED)
+        .err_has("since given to another process")
+        .err_has("every recorded identity disagreed");
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about the stranger")
+            .is_none(),
+        "a declined stranger was signalled"
+    );
+    stranger.kill().expect("this test ends its own process");
+    stranger.wait().expect("the stranger is reaped");
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 

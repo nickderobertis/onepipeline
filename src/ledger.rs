@@ -383,6 +383,15 @@ impl RunPaths {
     pub fn dispatch(&self, pid: u32, claim: u64) -> PathBuf {
         self.dispatches().join(format!("{pid}-{claim}.json"))
     }
+
+    /// Every process a teardown of this run signalled and then saw end, by pid
+    /// and stamp.
+    ///
+    /// Crate-visible, like [`checkpoint`](Self::checkpoint): one private module
+    /// writes it and one reads it. See [`ended_by_teardown`].
+    pub(crate) fn ended(&self) -> PathBuf {
+        self.dir.join("ended.jsonl")
+    }
 }
 
 /// A run root this build refused, and the reason it gave.
@@ -2935,6 +2944,70 @@ pub fn dispatches_of(paths: &RunPaths) -> Result<Vec<DispatchRecord>> {
     }
     found.sort_by_key(|held| held.pid);
     Ok(found)
+}
+
+/// One process a teardown of this run aimed at, proved by its stamp, and then
+/// saw end.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) struct Ended {
+    /// The pid the teardown signalled.
+    pub pid: u32,
+    /// The stamp that proved the pid was this run's process when it was.
+    pub started: String,
+}
+
+/// Record that a teardown of this run ended each of `ended`.
+///
+/// Why a teardown keeps this at all: the records that name a run's processes
+/// outlive them. A dispatch's registry entry is removed by the dispatch's own
+/// thread, and a teardown ends the driver that thread lives in, so the entry is
+/// left naming a pid the host is free to hand on — and Windows does, within
+/// seconds. The next stop or shutdown then meets a live pid whose stamp disagrees
+/// with the record, and with nothing else to go on it has to decline it as a
+/// claim it cannot place. This is the something else: *this run ended that
+/// process*, which is what makes a later stranger on its pid a reissue rather
+/// than a record gone wrong.
+pub(crate) fn record_ended(paths: &RunPaths, ended: &[Ended]) -> Result<()> {
+    for one in ended {
+        let line = serde_json::to_string(one)
+            .map_err(|e| Error::Invalid(format!("{}: {e}", paths.ended().display())))?;
+        append_line_healed(&paths.ended(), &line)?;
+    }
+    Ok(())
+}
+
+/// The stamp of every process a teardown of this run recorded as ended.
+///
+/// The stamp and not the pid, because the stamp is what names the process: the
+/// pid is only where it ran, and a reissue is by definition that pid naming
+/// something else. A claim whose stamp is here is one whose process this run
+/// has already seen end, wherever its record says it was.
+///
+/// Read toward *not ended*, never the other way: a record that is not there, a
+/// file this host will not read, and a line that does not parse all leave a
+/// claim to be judged on its stamp alone, which is exactly what a teardown did
+/// before this record existed. So a read that fails is said on stderr and costs
+/// only the difference this record makes.
+pub(crate) fn ended_by_teardown(paths: &RunPaths) -> std::collections::BTreeSet<String> {
+    let path = paths.ended();
+    match fs::read_to_string(&path) {
+        Ok(text) => text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Ended>(line).ok())
+            .map(|ended| ended.started)
+            .filter(|started| !started.is_empty())
+            .collect(),
+        Err(why) if why.kind() == io::ErrorKind::NotFound => std::collections::BTreeSet::new(),
+        Err(why) => {
+            eprintln!(
+                "onepipeline: run '{}': {} could not be read — {why}; a pid a teardown of \
+                 this run already ended is judged on its stamp alone",
+                paths.run,
+                path.display()
+            );
+            std::collections::BTreeSet::new()
+        }
+    }
 }
 
 #[cfg(test)]

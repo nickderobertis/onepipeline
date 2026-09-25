@@ -1494,6 +1494,96 @@ fn status_and_results_read_the_latest_shutdown_and_name_an_unreadable_one() {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// A dispatch an earlier shutdown killed is over, even once the host has given
+/// its pid to a stranger — and a stranger on a pid this run never ended is still
+/// declined.
+///
+/// The Windows gate's failure in
+/// `status_and_results_read_the_latest_shutdown_and_name_an_unreadable_one`: the
+/// first shutdown killed the worker and its driver, so nothing took the worker's
+/// registry entry back, and the host reissued its pid within seconds. The
+/// second shutdown, with nothing but the entry's stamp to go on, declined the
+/// stranger and refused a run it had itself already ended.
+// llmlint: ignore-block[tests_mirror_real_usage] PID reuse is a host transition, not a
+// product operation, and waiting for this particular pid to be recycled is unbounded. The
+// fixture moves only the pid a registry entry names — the entry the worker itself wrote,
+// stamp untouched — onto a real process this test started, and adds one entry for the second
+// half; the real `shutdown` command reads the real run root either way and must leave the
+// stranger alive.
+#[cfg(unix)]
+#[test]
+fn a_dispatch_an_earlier_shutdown_killed_is_over_once_its_pid_is_reissued() {
+    let world = World::new("shutdown-reissued-after-kill");
+    held(&world, "build");
+    let run = launch(&world, "reissue", vec![agent("build", &[])]);
+    until_in_flight(&world, &run, &["build"]);
+    let entry = world.dispatch_records(&run).remove(0);
+    let recorded: Value =
+        serde_json::from_str(&std::fs::read_to_string(&entry).expect("the entry reads"))
+            .expect("the entry is JSON");
+    let stamp = recorded["started"]
+        .as_str()
+        .expect("the entry carries its stamp")
+        .to_string();
+
+    world
+        .run(&["shutdown", &run, "--force"])
+        .exited(0)
+        .out_has("signalled — every process this run named was reached");
+    assert_eq!(
+        stopped_for(&world, &run, "build")["payload"]["ended"],
+        "killed"
+    );
+
+    // The host hands the worker's pid on. What the registry is left holding is
+    // the entry the worker wrote, stamp and all, now naming the stranger.
+    let mut stranger = crate::driver::stranger_started_after(std::slice::from_ref(&stamp));
+    let taken = stranger.id();
+    let mut reissued = recorded.clone();
+    reissued["pid"] = json!(taken);
+    std::fs::write(&entry, reissued.to_string()).expect("the reissued pid is planted");
+
+    world
+        .run(&["shutdown", &run, "--force"])
+        .exited(0)
+        .out_has("nothing-to-stop — every process this run named was reached")
+        .out_has("no live dispatch to interrupt")
+        .err_lacks("since given to another process");
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about the stranger")
+            .is_none(),
+        "a shutdown signalled pid {taken}, which the host had reissued"
+    );
+
+    // The same stranger under a stamp no teardown of this run ever ended is a
+    // claim nothing places, and is declined exactly as it always was.
+    let mut stray = recorded;
+    stray["pid"] = json!(taken);
+    stray["started"] = json!("a process no teardown of this run ended");
+    std::fs::write(
+        entry.with_file_name(format!("{taken}-stray.json")),
+        stray.to_string(),
+    )
+    .expect("the stray claim is planted");
+    world
+        .run(&["shutdown", &run, "--force"])
+        .exited(REFUSED)
+        .out_has("every recorded identity disagreed")
+        .err_has("since given to another process");
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about the stranger")
+            .is_none(),
+        "a declined stranger was signalled"
+    );
+    stranger.kill().expect("this test ends its own process");
+    stranger.wait().expect("the stranger is reaped");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// A shutdown that names no `--grace` gives each dispatch the ten-minute
 /// default, and says so on its report and its record.
 ///
