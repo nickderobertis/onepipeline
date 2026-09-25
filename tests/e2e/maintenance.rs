@@ -424,18 +424,19 @@ fn two_drivers_idle_at_once_maintain_the_slot_once_between_them() {
         .out_has("claimed — another pool maintain (pid");
 
     // Never twice: however many further sweeps either driver makes, the slot's
-    // command ran once. A sweep answered not-due writes no record, so every other
-    // record either run holds is a sweep that met another inside the identity.
-    // Not *when* it met one — `onevcs` takes
-    // the identity's lock before it asks whether any slot is due, so a sweep that
-    // finds nothing due still holds it, and a sweep of either driver that meets
-    // one is answered `claimed` long after the slot was maintained.
-    // Further sweeps are counted per driver, because each keeps its own account of what its loop did — and waited for
-    // **together** rather than in turn: two waits in sequence take twice the
-    // wall-clock of one, and what this then asserts is that the slot was not
-    // maintained again, which stops being true the moment `every` elapses. A wait
-    // whose length decides its own assertion is a wait that passes on an idle host
-    // and fails on a loaded one.
+    // command ran once. A sweep answered not-due writes no record, so every
+    // other record either run holds is a sweep that met the other inside the
+    // identity — `claimed`. Not *when* it met it: `onevcs` takes the identity's
+    // lock before it asks whether any slot is due, so a sweep that finds nothing
+    // due still holds it, and a sweep of either driver can be answered `claimed`
+    // long after the slot was maintained.
+    //
+    // Further sweeps are counted per driver, because each keeps its own account
+    // of what its loop did, and waited for **together** rather than in turn: two
+    // waits in sequence take twice the wall-clock of one, and what this then
+    // asserts is that the slot was not maintained again, which stops being true
+    // the moment `every` elapses. A wait whose length decides its own assertion
+    // is a wait that passes on an idle host and fails on a loaded one.
     let before: Vec<u64> = ["one", "two"]
         .iter()
         .map(|driver| sweeps(&world, driver))
