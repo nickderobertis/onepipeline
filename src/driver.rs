@@ -2257,10 +2257,10 @@ pub(crate) fn established(teardown: Option<sys::Teardown>) -> journal::StopTeard
 // the reissued pid in `a_stop_never_signals_a_pid_the_host_has_given_to_another_process` and
 // `a_dispatch_an_earlier_stop_ended_is_over_once_its_pid_is_reissued`, and the unprovable pid in `a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryable`,
 // whose faulty `ps` is a host that will not say when anything started. What has no journey is a
-// stop of two *live* roots, and that is a state a run cannot be in: the ownership lock is a
-// single-writer lock, so one run has one driver, and the pair a stop can meet — the pid a
-// stale record names beside the pid the lock stamps — is what the first of those walks over
-// one listing.
+// stop of two *live drivers*, and that is a state a run cannot be in: the ownership lock is a
+// single-writer lock, so one run has one driver, and the pair of driver claims a stop can meet —
+// the pid a stale record names beside the pid the lock stamps — is what the first of those walks
+// over one listing.
 pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
     let Aim::Here {
         roots,
