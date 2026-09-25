@@ -836,6 +836,27 @@ mod tests {
         );
     }
 
+    /// What a source answers is read in exactly the vocabulary this verb
+    /// renders: every verdict's neutral rendering reads back as the same
+    /// answer, so the reader and the renderer cannot drift apart.
+    #[test]
+    fn every_neutral_rendering_reads_back_as_a_source_answer() {
+        for (rendered, read) in [
+            (
+                Verdict::Block("run-1\n".into()),
+                Answer::Block("run-1\n".into()),
+            ),
+            (Verdict::Warn("stale".into()), Answer::Warn("stale".into())),
+            (Verdict::None, Answer::None),
+        ] {
+            assert_eq!(
+                answer_of(rendered.render(Format::Neutral).as_bytes()),
+                Ok(read),
+                "{rendered:?}"
+            );
+        }
+    }
+
     /// The hook payload reader takes the two names the harnesses share and
     /// ignores the rest of their payload.
     #[test]

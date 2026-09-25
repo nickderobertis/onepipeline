@@ -862,8 +862,8 @@ fn the_documented_claude_code_wiring_reads_real_stop_payloads_and_answers_its_de
 /// was handed and the session its environment names, and answers whatever the
 /// journey last put in its answer file.
 ///
-/// POSIX shell, because `--source` is run by the platform shell and this is
-/// that shell's script; the Windows arm differs only in which shell it spawns.
+/// A POSIX shell script, because `--source` is run by the platform shell and
+/// `cmd` would not run one — which is why the journeys that use it are Unix's.
 #[cfg(unix)]
 struct Source {
     command: String,
@@ -1103,6 +1103,14 @@ fn declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source()
         "{}",
         returned.stdout
     );
+    // A warning in its place clears it just the same.
+    assert!(
+        remembered.is_file(),
+        "the returned block was not remembered"
+    );
+    refusing.answers(&json!({"verdict": "warn", "message": "the origin is slow"}));
+    ask_with(&world, &alone, &idle).exited(0);
+    assert!(!remembered.exists(), "a source now warning kept its block");
 
     // Warnings alone are one warning carrying each, under every rendering.
     refusing.answers(&json!({"verdict": "none"}));
@@ -1230,10 +1238,16 @@ fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_pa
     let cases: Vec<(String, &str)> = vec![
         (missing, "could not find"),
         (
-            answering("fails", "echo '{\"verdict\":\"none\"}'; exit 3"),
+            answering(
+                "fails",
+                "echo '{\"verdict\":\"none\"}'; echo 'what went wrong' >&2; exit 3",
+            ),
             "exited with status 3",
         ),
         (answering("silent", "true"), "wrote nothing"),
+        // A command line rather than a script, so the shell running it is
+        // what the signal ends.
+        ("kill -9 $$".to_owned(), "ended by a signal"),
         (
             answering("slow", "exec sleep 30"),
             "did not answer within 1 second(s)",
