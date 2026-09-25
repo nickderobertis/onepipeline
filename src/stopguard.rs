@@ -14,12 +14,9 @@
 //! never a block and never silence, because a guard that fails silent is worse
 //! than none.
 //!
-//! A host may declare further verdict sources with `--source`; each is asked
-//! about the same session, answers in the same three words, and is combined
-//! into the one verdict by [`combined`], with the continuation rule held per
-//! source. The one place this module turns the rule above around is a source
-//! that cannot be consulted, which blocks rather than warns — [`settle`] says
-//! why.
+//! Declared `--source`s are combined into the one verdict by [`combined`]; a
+//! source that cannot be consulted blocks rather than warns, the one exception
+//! to the rule above.
 //!
 //! The verb is harness-neutral in and out. What it reads is a session and
 //! whether this stop continues a block it made; what it answers is one verdict.
@@ -560,19 +557,9 @@ fn end_group(leader: u32) {
 fn end_group(_leader: u32) {}
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
-/// One source's contribution to the verdict, with the continuation rule held
-/// for it alone: a block — the source's own, or the report that it could not
-/// be consulted — is remembered under this session *and* this source before
-/// it is made, and a continuation over the same report from the same source is
-/// `none` for it.
-///
-/// **A source that could not be consulted blocks.** The host declared it
-/// because its condition must hold before a turn ends; a failed consultation
-/// leaves that condition unshown, and letting the turn end over it would be the
-/// guard failing open while looking answered. The block names the source and
-/// what went wrong, and the continuation rule bounds it to one refused stop per
-/// unchanged failure — so a broken source costs a turn in which the agent is
-/// told so, and cannot hold a session in a loop.
+/// One source's contribution to the verdict, under its own memory. Why a
+/// failed consultation blocks rather than warns is `docs/stop-guard.md`'s
+/// "Declared sources".
 fn settle(asked: &Asked, command: &str, answer: Result<Answer, String>) -> Verdict {
     let session = asked.session.as_str();
     let name = source_memory(session, command);

@@ -904,7 +904,6 @@ impl Source {
         std::fs::write(&self.answer, format!("{verdict}\n")).expect("the answer is written");
     }
 
-    /// Every input it was handed, one per line.
     fn inputs(&self) -> Vec<String> {
         std::fs::read_to_string(&self.asked)
             .unwrap_or_default()
@@ -993,6 +992,14 @@ fn declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source()
         assert!(reason.contains(said), "{said:?} is missing from {reason}");
     }
     assert!(!reason.contains(&quiet.command), "{reason}");
+    // Every block in the order declared, and the warning after them all.
+    let at = |said: &str| reason.find(said).expect("said");
+    assert!(
+        at(&report) < at("branch b-1")
+            && at("branch b-1") < at("branch b-2")
+            && at("branch b-2") < at("the registry is stale"),
+        "not in the order declared: {reason}"
+    );
     assert_eq!(
         reason.matches("branch b-1").count(),
         1,
@@ -1564,6 +1571,30 @@ fn a_source_not_delivered_its_whole_input_refuses_the_stop_and_its_continuation_
     let source = path.display().to_string();
     let session = format!("s-{}", "x".repeat(100_000));
     let sources = [source.as_str()];
+
+    // Input the pipe took is delivered whether or not it was read: this one
+    // reads a single byte — which a write this size lands whole behind — and
+    // leaves the rest, and its answer is taken.
+    let partly = world.root.join("sources/reads-one-byte");
+    onepipeline_testfakes::executable(
+        &partly,
+        "#!/bin/sh\nhead -c 1 > /dev/null\necho '{\"verdict\":\"block\",\"reason\":\"host-wide freeze\"}'\n",
+    );
+    let partly = partly.display().to_string();
+    let taken = world.run_with_stdin(
+        &declaring(&[partly.as_str()], &[]),
+        &json!({"session": "a-short-session"}).to_string(),
+    );
+    taken.exited(0);
+    let told = verdict(&taken.stdout).expect("a verdict");
+    assert_eq!(told["verdict"], json!("block"), "{told}");
+    assert!(
+        told["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("host-wide freeze")
+                && !reason.contains("could not be consulted")),
+        "{told}"
+    );
 
     let refused = world.run_with_stdin(
         &declaring(&sources, &[]),
