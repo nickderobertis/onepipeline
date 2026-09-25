@@ -317,13 +317,15 @@ fn an_idle_driver_maintains_a_due_slot_once_and_a_fresh_driver_inside_every_runs
     assert!(slot["last_maintained"].is_string(), "{slot}");
     assert_eq!(slot["last_outcome"], "succeeded", "{slot}");
     assert_eq!(slot["state"]["state"], "idle", "{slot}");
-    world.until("the sweep's marker to be taken back", |world| {
-        !sweeping(world, "first")
+    // Polled rather than read once: the pace is one second and the sweep above
+    // held for longer, so the next idle pass may already have started a
+    // not-due sweep by the time `status` is asked, and names it while it is live.
+    world.until("`status` to stop naming a sweep", |world| {
+        !sweeping(world, "first") && {
+            let status = world.run(&["status", "first"]);
+            !status.exited(0).stdout.contains("pool maintenance")
+        }
     });
-    world
-        .run(&["status", "first"])
-        .exited(0)
-        .out_lacks("pool maintenance");
     world
         .run(&["results", "first"])
         .exited(0)
