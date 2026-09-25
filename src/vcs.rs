@@ -1572,11 +1572,24 @@ pub fn follow(
 ///
 /// A session whose record cannot be read is treated as settled: a follow that
 /// kept reading a stream nobody will ever close is a thread this process would
-/// never collect.
+/// never collect. **Said out loud**, the way [`working_session`] says it: the
+/// sibling refuses an unreadable record rather than answering that no such
+/// session is open, and a follow that ended because this host could not read the
+/// record is not a follow that ended because the session closed. Ending it is
+/// still the safe direction; ending it in silence is what leaves a reader
+/// thinking the stream ran out.
 fn settled(session: &SessionToken) -> bool {
-    onevcs::session(&providers(), session)
-        .map(|record| record.lifecycle == Lifecycle::Closed)
-        .unwrap_or(true)
+    match onevcs::session(&providers(), session) {
+        Ok(record) => record.lifecycle == Lifecycle::Closed,
+        Err(error) => {
+            eprintln!(
+                "onepipeline: cannot read session {}'s record, so the follow of its stream ends \
+                 here: {error}",
+                session.0
+            );
+            true
+        }
+    }
 }
 
 /// How far a reader got into each stream it relayed from.
