@@ -1380,7 +1380,6 @@ fn a_sweep_over_session_records_it_cannot_read_records_the_refusal_and_runs_noth
         world.until("the dispatch", |world| {
             !world.events_of(run, "node-dispatched").is_empty()
         });
-        let before = ran();
         if directory {
             std::fs::rename(&sessions, &aside).expect("the sessions directory moves aside");
             std::fs::write(&sessions, "this is not a directory")
@@ -1389,6 +1388,13 @@ fn a_sweep_over_session_records_it_cannot_read_records_the_refusal_and_runs_noth
             std::fs::write(&record, "{ not a session record")
                 .expect("the unreadable record is written");
         }
+        // A sweep live across the break read the records whole and may still be
+        // running the command it rightly chose; every sweep after its marker goes
+        // meets the break, so the count is taken there.
+        world.until("the sweep live across the break to end", |world| {
+            !sweeping(world, run)
+        });
+        let before = ran();
         world.until("the record of the refusal", |world| {
             records(world, run).iter().any(refused)
         });
