@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.45.1](https://github.com/nickderobertis/onepipeline/compare/v0.45.0...v0.45.1) - 2026-09-25
+
+### Added
+
+- *(shots)* capture the CLI's real views and rebuild the README around them ([#486](https://github.com/nickderobertis/onepipeline/pull/486))
+
+### Fixed
+
+- *(writeback)* publish projected task files atomically, and give the loopcost runs their own stores ([#492](https://github.com/nickderobertis/onepipeline/pull/492))
+
 ## [0.45.0](https://github.com/nickderobertis/onepipeline/compare/v0.44.4...v0.45.0) - 2026-09-24
 
 ### Added
