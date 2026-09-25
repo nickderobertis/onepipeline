@@ -3692,9 +3692,17 @@ pub(crate) fn ended_follows_the_pid(ended: &Path, from: u64, to: u64) {
         .map(|line| {
             let mut line: serde_json::Value =
                 serde_json::from_str(line).expect("a stop writes JSON lines");
-            for claim in ["launch-record", "ownership-lock", "dispatch"] {
-                if line["claim"][claim]["pid"] == json!(from) {
-                    line["claim"][claim]["pid"] = json!(to);
+            // Whichever record the claim names: every claim carries the pid it
+            // was written for, and one that did not could not follow it.
+            let claim = line["claim"]
+                .as_object_mut()
+                .expect("every line names the claim it ended");
+            for (named_by, body) in claim.iter_mut() {
+                let pid = body
+                    .get_mut("pid")
+                    .unwrap_or_else(|| panic!("a {named_by} claim carries no pid to follow"));
+                if *pid == json!(from) {
+                    *pid = json!(to);
                 }
             }
             line.to_string()
