@@ -3721,6 +3721,7 @@ fn a_stop_that_signalled_nothing_leaves_a_reissued_pid_declined() {
 /// too, and the record says what it would have said had the host given `from`
 /// away. An absent record is left absent, so a teardown that recorded nothing
 /// is refused by the command rather than by the fixture.
+#[cfg(unix)]
 pub(crate) fn ended_follows_the_pid(ended: &Path, from: u64, to: u64) {
     let kept = std::fs::read_to_string(ended).unwrap_or_default();
     let lines: Vec<String> = kept
@@ -3750,6 +3751,7 @@ pub(crate) fn ended_follows_the_pid(ended: &Path, from: u64, to: u64) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn env_of(command: &std::process::Command, name: &str) -> std::ffi::OsString {
     command
         .get_envs()
@@ -3758,6 +3760,7 @@ fn env_of(command: &std::process::Command, name: &str) -> std::ffi::OsString {
         .unwrap_or_else(|| panic!("the world wires no {name}"))
 }
 
+#[cfg(target_os = "linux")]
 fn found_on(path: &std::ffi::OsStr, name: &str) -> PathBuf {
     std::env::split_paths(path)
         .map(|dir| dir.join(name))
@@ -3765,6 +3768,7 @@ fn found_on(path: &std::ffi::OsStr, name: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("no {name} on {path:?}"))
 }
 
+#[cfg(target_os = "linux")]
 fn leading(dir: &Path, path: &std::ffi::OsStr) -> std::ffi::OsString {
     std::env::join_paths(std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(path)))
         .expect("a PATH")
