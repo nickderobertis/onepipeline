@@ -2418,6 +2418,7 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
             // end, so the stranger on its pid now is the host's reissue and
             // nothing of this run's: the claim is over, exactly as a pid
             // nobody holds is.
+            // llmlint: ignore[boundary_inputs_validated] matched on the stamp alone as `ledger::ended_by_teardown` says; this arm is reached only once the host has answered that the pid holds another process, so a stamp two pids share can only read a claim whose process is already over as over, and matching the pid too would leave the journey in `tests/e2e/driver.rs` waiting on the host to reuse one particular pid.
             Claim::Reissued if ended.contains(&claim.started) => {}
             Claim::Reissued => {
                 eprintln!(
