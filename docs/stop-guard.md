@@ -13,7 +13,7 @@ let the turn end.
 ## The contract
 
 ```
-onepipeline stop-guard [--session <ID>] [--continuation] [--format <FORMAT>]
+onepipeline stop-guard [--session <ID>] [--continuation] [--format <FORMAT>] [--source <COMMAND>]... [--source-timeout <SECONDS>]
 ```
 
 **Input** — the session whose stop this is, and whether the stop continues a
@@ -38,7 +38,7 @@ running under. `--session ""` is that same nothing.
 
 | Verdict | Object | When |
 | --- | --- | --- |
-| block | `{"verdict":"block","reason":"<report>"}` | A run the session owns is **proven** unwatched. `reason` is `onepipeline unwatched`'s own lines, byte for byte: one per run, naming it, its standing word, why nothing counts as watching it, and the `onepipeline watch <run>` that does. |
+| block | `{"verdict":"block","reason":"<report>"}` | A run the session owns is **proven** unwatched, or a [declared source](#declared-sources) refuses the stop or could not be consulted. With no source declared, `reason` is `onepipeline unwatched`'s own lines, byte for byte: one per run, naming it, its standing word, why nothing counts as watching it, and the `onepipeline watch <run>` that does. With sources declared it is the [combination](#declared-sources). |
 | warn | `{"verdict":"warn","message":"<one sentence>"}` | Something that is not evidence: the runs root could not be read, the question was refused, the engine answered with an error, or the guard's own memory could not be read, written or removed. The sentence names what could not be answered and the exact command to ask it by hand — `onepipeline unwatched --session <ID>` — and, where runs *are* unwatched over a memory the guard could not keep, names them and the `onepipeline watch <run>` for each. |
 | none | `{"verdict":"none"}` | Nothing to say: the session owns nothing unwatched, the input could not be read or named no session, or this stop continues a block on a report that has not changed. |
 
@@ -60,13 +60,64 @@ safe to make. One that cannot be removed is a `warn` too, because left behind it
 would let a later continuation over that same report through unrefused.
 
 **Cost** is `unwatched`'s: proportional to the run roots under the runs root,
-and no run's merged event store is read.
+and no run's merged event store is read — plus the slowest [declared
+source](#declared-sources), bounded by `--source-timeout`.
 
 **Renderings.** `--format neutral` is the contract above and the default.
 `--format claude-code` and `--format codex` read the harness's own `Stop`
 payload off standard input and render the same verdict in the harness's
 decision shape. They are presentation over the one verdict — the decision path
 is the same — and they are the whole of the harness-specific text in this crate.
+
+## Declared sources
+
+A host whose "may this turn end" question is wider than `unwatched` declares the
+rest of it on the same registration, as one `--source <COMMAND>` per question —
+for example `onepipeline stop-guard --format claude-code --source 'just
+unfinished'`. With none declared the verb is exactly the contract above.
+
+- **What a source is asked.** On every stop, each declared source is run through
+  the platform shell (`sh -c`, or `cmd /C` on Windows) and handed this verb's own
+  neutral input on standard input — `{"session":"<ID>","continuation":<bool>}`
+  and a newline — naming the session *this verb* is answering about: the
+  payload's under `--format claude-code` and `codex`, never the environment's.
+  `ONEPIPELINE_LAUNCHER_SESSION` in its environment is set to that same session.
+  Those are the bytes to hand it by hand, and a source is drivable that way with
+  no guard in front of it. Its standard error is discarded. Sources are asked
+  concurrently with each other and with `unwatched`, and the same command
+  declared twice is asked once.
+- **What it may answer.** One object on standard output, in the vocabulary this
+  verb renders under `--format neutral` — `{"verdict":"block","reason":"…"}`,
+  `{"verdict":"warn","message":"…"}` or `{"verdict":"none"}` — and exit `0`. The
+  object is read closed: no other field, and a `reason` or `message` that is not
+  blank. A source never needs to know which `--format` the harness asked for.
+- **How answers combine.** The strongest wins: `block` over `warn` over `none`.
+  A combined block's `reason` carries every block — the verb's own report first,
+  byte for byte, then each refusing source's, in the order declared, each headed
+  by the source's command — followed by every warning, because a block's
+  rendering has nowhere else to carry one. A combined warn joins every warning.
+  Each `--format` renders that one verdict in the shape it documents.
+- **Block once per condition, per source.** Each source's block is remembered
+  under its own file beside the verb's —
+  `<sha256(session)>.<sha256(command)>` in the same directory — before it is made,
+  and a continuation over an unchanged report *from that source* is `none` for
+  it. So a continuation after a block ends the turn unless some condition moved,
+  and then it refuses on what moved alone. A source answering `warn` or `none`
+  has its memory removed. A source memory that cannot be read, written or
+  removed is a `warn`, exactly as the verb's own is.
+- **A source that cannot be consulted blocks.** A source that is missing, cannot
+  be started, exits non-zero, does not answer within `--source-timeout` seconds
+  (default `10`; it is then ended, with everything it started), writes nothing,
+  or answers outside the vocabulary is a `block` whose reason names the source,
+  what went wrong, and the input to hand it by hand. It never reads as `none`.
+  Block rather than warn is the safe choice here, and the opposite of the rule
+  for the verb's own question, because the host *declared* the source: its
+  condition must hold before a turn ends, and a failed consultation leaves it
+  unshown — a `warn` would let the turn end with the condition unenforced while
+  the host believes it enforced. The per-source memory bounds the cost: an
+  unchanged failure refuses one stop, and its continuation ends the turn, so a
+  broken source cannot hold a session in a loop. Keep `--source-timeout` inside
+  the hook's own `timeout`, or the harness kills the whole hook first.
 
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the two harness
 sections below restate contracts owned by Claude Code and Codex, neither of which publishes

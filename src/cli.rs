@@ -207,8 +207,8 @@ pub enum Command {
     // engine owns, or runs its drafter in front of the `onevcs` library it already links,
     // through the crate's private modules, and ships in the same artifact on the same three
     // registries — the same shape as `unwatched` above.
-    /// Whether a session's turn may end: one verdict over `unwatched`, for a
-    /// harness's stop hook.
+    /// Whether a session's turn may end: one verdict over `unwatched` and every
+    /// declared `--source`, for a harness's stop hook.
     StopGuard(StopGuardArgs),
     /// Ask the manager a blocking question over the run's planner channel, and
     /// answer with theirs.
@@ -836,7 +836,26 @@ pub struct StopGuardArgs {
     /// How the input is read and the verdict rendered.
     #[arg(long, value_enum, default_value_t = StopGuardFormat::Neutral)]
     pub format: StopGuardFormat,
+    /// A further verdict source to consult on every stop, as a command line
+    /// the platform shell runs (`sh -c`, or `cmd /C` on Windows); repeat it
+    /// for more. It is handed `{"session":…,"continuation":…}` for this stop's
+    /// session on standard input and answers one neutral verdict object on
+    /// standard output. Every answer combines with this verb's own, the
+    /// strongest winning, and a source that is missing, exits non-zero, times
+    /// out, writes nothing or answers outside the vocabulary **blocks**, naming
+    /// itself and what went wrong — never passes.
+    #[arg(long = "source", value_name = "COMMAND")]
+    pub sources: Vec<String>,
+    /// Seconds each `--source` has to answer before it is ended and reported
+    /// as unanswered.
+    #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_SOURCE_TIMEOUT)]
+    pub source_timeout: NonZeroU64,
 }
+
+/// How long a `stop-guard --source` has to answer: a third of the 30-second
+/// hook timeout `docs/stop-guard.md` wires, so a slow source is reported by
+/// this verb rather than the whole hook being killed by the harness.
+pub const DEFAULT_SOURCE_TIMEOUT: NonZeroU64 = NonZeroU64::new(10).unwrap();
 
 /// How the verdict is rendered: the neutral object, or a harness's own shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
