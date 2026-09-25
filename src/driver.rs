@@ -278,7 +278,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 &ledger::runs_root(),
                 &asked,
                 &args.sources,
-                args.source_timeout,
+                std::time::Duration::from_secs(args.source_timeout),
             );
             // Standard error carries what the ordinary `unwatched` writes there for
             // the same question, and nothing else: the verdict is the whole of

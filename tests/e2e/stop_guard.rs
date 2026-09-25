@@ -204,6 +204,30 @@ fn the_documented_synopsis_is_the_verbs_own() {
             "entry 85 does not propose `--format {format}`"
         );
     }
+    // The source timeout's default is the one the page states, and a timeout
+    // no clock could hold, or none at all, is refused at the flag.
+    let default = page
+        .split("(default `")
+        .nth(1)
+        .and_then(|rest| rest.split('`').next())
+        .expect("the page states the source timeout's default");
+    let offered = help
+        .stdout
+        .split("--source-timeout <SECONDS>")
+        .nth(1)
+        .and_then(|rest| rest.split("[default: ").nth(1))
+        .and_then(|rest| rest.split(']').next())
+        .expect("`--help` states the source timeout's default");
+    assert_eq!(
+        default, offered,
+        "the page and `--help` differ on the default"
+    );
+    for refused in ["0", "3601"] {
+        world
+            .run(&["stop-guard", "--session", "s", "--source-timeout", refused])
+            .exited(2)
+            .err_has("--source-timeout");
+    }
     for format in ["neutral", "claude-code", "codex"] {
         assert!(
             page.contains(&format!("`--format {format}`")) && help.stdout.contains(format),
@@ -893,11 +917,13 @@ fn declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source()
     second
         .answers(&json!({"verdict": "block", "reason": "branch b-2 preserved, never published\n"}));
     warning.answers(&json!({"verdict": "warn", "message": "the registry is stale"}));
+    // The first declared twice: one source, asked once.
     let sources = [
         refusing.command.as_str(),
         second.command.as_str(),
         warning.command.as_str(),
         quiet.command.as_str(),
+        refusing.command.as_str(),
     ];
 
     let first = ask_with(&world, &sources, &json!({"session": session}));
@@ -920,6 +946,11 @@ fn declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source()
         assert!(reason.contains(said), "{said:?} is missing from {reason}");
     }
     assert!(!reason.contains(&quiet.command), "{reason}");
+    assert_eq!(
+        reason.matches("branch b-1").count(),
+        1,
+        "a source declared twice was asked twice: {reason}"
+    );
     assert!(reason.contains(&run), "{reason}");
     assert!(first.stderr.is_empty(), "{}", first.stderr);
 
@@ -1116,7 +1147,7 @@ fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_pa
         (answering("prose", "echo 'all good'"), "not one JSON object"),
         (
             answering("unknown-word", "echo '{\"verdict\":\"maybe\"}'"),
-            "one of `block`, `warn` or `none`",
+            "unknown variant `maybe`",
         ),
         (
             answering("reasonless", "echo '{\"verdict\":\"block\"}'"),
@@ -1147,6 +1178,30 @@ fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_pa
         (
             answering("array", "echo '[{\"verdict\":\"none\"}]'"),
             "not one JSON object",
+        ),
+        (
+            answering(
+                "repeated-key",
+                "echo '{\"verdict\":\"none\",\"verdict\":\"block\",\"reason\":\"x\"}'",
+            ),
+            "duplicate field `verdict`",
+        ),
+        (
+            answering("binary", "printf '\\377\\n'"),
+            "bytes that are not text",
+        ),
+        (
+            answering(
+                "flood",
+                "head -c 1100000 /dev/zero | tr '\\0' ' '; echo '{\"verdict\":\"none\"}'",
+            ),
+            "more than 1048576 bytes",
+        ),
+        // It exits at once, and what it left behind holds its standard output
+        // past the deadline.
+        (
+            answering("left-behind", "sleep 3 & echo '{\"verdict\":\"none\"}'"),
+            "did not answer within 1 second(s)",
         ),
     ];
     for (command, what) in &cases {

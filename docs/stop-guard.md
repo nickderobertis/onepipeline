@@ -89,8 +89,8 @@ unfinished'`. With none declared the verb is exactly the contract above.
 - **What it may answer.** One object on standard output, in the vocabulary this
   verb renders under `--format neutral` — `{"verdict":"block","reason":"…"}`,
   `{"verdict":"warn","message":"…"}` or `{"verdict":"none"}` — and exit `0`. The
-  object is read closed: no other field, and a `reason` or `message` that is not
-  blank. A source never needs to know which `--format` the harness asked for.
+  object is read closed: no other field, no field twice, and a `reason` or
+  `message` that is not blank. A source never needs to know which `--format` the harness asked for.
 - **How answers combine.** The strongest wins: `block` over `warn` over `none`.
   A combined block's `reason` carries every block — the verb's own report first,
   byte for byte, then each refusing source's, in the order declared, each headed
@@ -107,7 +107,9 @@ unfinished'`. With none declared the verb is exactly the contract above.
   removed is a `warn`, exactly as the verb's own is.
 - **A source that cannot be consulted blocks.** A source that is missing, cannot
   be started, exits non-zero, does not answer within `--source-timeout` seconds
-  (default `10`; it is then ended, with everything it started), writes nothing,
+  (default `10`, at most `3600`; it is then ended, with everything it started —
+  and one that exits leaving something behind holding its standard output past
+  that deadline is the same unanswered source), writes nothing,
   or answers outside the vocabulary is a `block` whose reason names the source,
   what went wrong, and the input to hand it by hand. It never reads as `none`.
   Block rather than warn is the safe choice here, and the opposite of the rule

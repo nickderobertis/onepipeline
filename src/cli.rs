@@ -847,15 +847,25 @@ pub struct StopGuardArgs {
     #[arg(long = "source", value_name = "COMMAND")]
     pub sources: Vec<String>,
     /// Seconds each `--source` has to answer before it is ended and reported
-    /// as unanswered.
-    #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_SOURCE_TIMEOUT)]
-    pub source_timeout: NonZeroU64,
+    /// as unanswered, from 1 to 3600.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        default_value_t = DEFAULT_SOURCE_TIMEOUT_SECONDS,
+        value_parser = clap::value_parser!(u64).range(1..=MAX_SOURCE_TIMEOUT_SECONDS)
+    )]
+    pub source_timeout: u64,
 }
 
 /// How long a `stop-guard --source` has to answer: a third of the 30-second
 /// hook timeout `docs/stop-guard.md` wires, so a slow source is reported by
 /// this verb rather than the whole hook being killed by the harness.
-pub const DEFAULT_SOURCE_TIMEOUT: NonZeroU64 = NonZeroU64::new(10).unwrap();
+pub const DEFAULT_SOURCE_TIMEOUT_SECONDS: u64 = 10;
+
+/// The longest `stop-guard --source-timeout` accepted. Bounded, so every
+/// deadline is one the clock can hold and no source can hold a stop open
+/// without end; an hour is past any harness's own hook timeout.
+pub const MAX_SOURCE_TIMEOUT_SECONDS: u64 = 3600;
 
 /// How the verdict is rendered: the neutral object, or a harness's own shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]

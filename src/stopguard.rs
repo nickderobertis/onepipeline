@@ -27,10 +27,9 @@
 //! [`Format`], and the decision is made in [`guard`] alone.
 
 use std::io::{Read, Write};
-use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::json;
@@ -226,7 +225,7 @@ pub(crate) fn guard(
     root: &Path,
     asked: &Asked,
     sources: &[String],
-    timeout: NonZeroU64,
+    timeout: Duration,
 ) -> (Verdict, Vec<String>) {
     let mut declared: Vec<&str> = Vec::new();
     for command in sources {
@@ -336,9 +335,18 @@ enum Answer {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Answered {
-    verdict: String,
+    verdict: Word,
     reason: Option<String>,
     message: Option<String>,
+}
+
+/// The three verdict words, and no fourth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Word {
+    Block,
+    Warn,
+    None,
 }
 
 /// What a source's standard output says, or why it says nothing this verb can
@@ -358,26 +366,27 @@ fn answer_of(stdout: &[u8]) -> Result<Answer, String> {
             if shown.len() < text.len() { "…" } else { "" }
         )
     };
-    let answered: Answered = serde_json::from_str::<serde_json::Value>(text)
-        .ok()
-        .filter(serde_json::Value::is_object)
-        .ok_or_else(|| outside("not one JSON object"))
-        .and_then(|object| {
-            serde_json::from_value(object).map_err(|error| outside(&error.to_string()))
-        })?;
+    // One object and nothing else, asked first because serde would read a
+    // struct out of an array by position. The text itself is then read into
+    // the closed type — not the parsed value, which would have kept only the
+    // last of a key written twice.
+    if !serde_json::from_str::<serde_json::Value>(text).is_ok_and(|value| value.is_object()) {
+        return Err(outside("not one JSON object"));
+    }
+    let answered: Answered =
+        serde_json::from_str(text).map_err(|error| outside(&error.to_string()))?;
     let said = |text: Option<String>| text.filter(|text| !text.trim().is_empty());
-    match (answered.verdict.as_str(), answered.reason, answered.message) {
-        ("block", reason, None) => said(reason)
+    match (answered.verdict, answered.reason, answered.message) {
+        (Word::Block, reason, None) => said(reason)
             .map(Answer::Block)
             .ok_or_else(|| outside("a block carries a non-blank `reason`")),
-        ("warn", None, message) => said(message)
+        (Word::Warn, None, message) => said(message)
             .map(Answer::Warn)
             .ok_or_else(|| outside("a warn carries a non-blank `message`")),
-        ("none", None, None) => Ok(Answer::None),
-        ("block" | "warn" | "none", _, _) => Err(outside(
+        (Word::None, None, None) => Ok(Answer::None),
+        _ => Err(outside(
             "`block` carries `reason`, `warn` carries `message`, and `none` carries neither",
         )),
-        _ => Err(outside("the verdict is one of `block`, `warn` or `none`")),
     }
 }
 
@@ -422,7 +431,7 @@ fn shell(command: &str) -> Command {
 /// carries whichever session launched the harness — for a dispatched worker,
 /// its manager's. Its standard error is discarded, because this verb's own
 /// carries exactly what `unwatched` would write and nothing else.
-fn consult(command: &str, asked: &Asked, timeout: NonZeroU64) -> Result<Answer, String> {
+fn consult(command: &str, asked: &Asked, timeout: Duration) -> Result<Answer, String> {
     let mut spawning = shell(command);
     spawning
         .env(crate::sys::LAUNCHER_SESSION_ENV, asked.session.as_str())
@@ -448,19 +457,28 @@ fn consult(command: &str, asked: &Asked, timeout: NonZeroU64) -> Result<Answer, 
     if let Some(stdout) = child.stdout.take() {
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
-            let read = stdout
+            let mut stdout = stdout;
+            // Past the limit the rest is drained rather than the pipe closed,
+            // so an overlong answer is reported as that and not as the source
+            // dying of a write nobody read.
+            let read = (&mut stdout)
                 .take(SOURCE_ANSWER_LIMIT + 1)
                 .read_to_end(&mut bytes)
+                .and_then(|_| std::io::copy(&mut stdout, &mut std::io::sink()))
                 .map(|_| bytes);
             let _ = sent.send(read);
         });
     }
-    let deadline = crate::hooks::deadline_after(timeout);
-    let late = || format!("it did not answer within {timeout} second(s)");
+    // `--source-timeout` is bounded at the flag, so this is an instant the
+    // clock holds; were it not, the stop is refused rather than left unbounded.
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| format!("its timeout of {timeout:?} is past what the clock can count"))?;
+    let late = || format!("it did not answer within {} second(s)", timeout.as_secs());
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if deadline.is_none_or(|deadline| Instant::now() < deadline) => {}
+            Ok(None) if Instant::now() < deadline => {}
             waited => {
                 let _ = crate::sys::stop(child.id(), crate::sys::Stop::Now);
                 let _ = child.kill();
@@ -484,11 +502,8 @@ fn consult(command: &str, asked: &Asked, timeout: NonZeroU64) -> Result<Answer, 
             None => "it was ended by a signal".to_owned(),
         });
     }
-    let remaining = deadline.map_or(std::time::Duration::MAX, |deadline| {
-        deadline.saturating_duration_since(Instant::now())
-    });
     let bytes = answer
-        .recv_timeout(remaining)
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .map_err(|_| late())?
         .map_err(|error| format!("its standard output could not be read ({error})"))?;
     if bytes.len() as u64 > SOURCE_ANSWER_LIMIT {
