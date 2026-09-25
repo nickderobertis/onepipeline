@@ -1368,6 +1368,29 @@ fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_pa
         );
     }
 
+    // One that closes its input unread is still asked, and its answer taken:
+    // the input is offered, not owed.
+    let unread = world.root.join("sources/closes-its-input");
+    onepipeline_testfakes::executable(
+        &unread,
+        "#!/bin/sh\nexec 0<&-\necho '{\"verdict\":\"block\",\"reason\":\"host-wide freeze\"}'\n",
+    );
+    let unread = unread.display().to_string();
+    let taken = world.run_with_stdin(
+        &declaring(&[unread.as_str()], &[]),
+        &json!({"session": session}).to_string(),
+    );
+    taken.exited(0);
+    let told = verdict(&taken.stdout).expect("a verdict");
+    assert_eq!(told["verdict"], json!("block"), "{told}");
+    assert!(
+        told["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("host-wide freeze")
+                && !reason.contains("could not be consulted")),
+        "{told}"
+    );
+
     // A shell that cannot be found to run a source in is the same refusal.
     let unstartable = answering("unstartable", "echo '{\"verdict\":\"none\"}'");
     let mut shell_less = world.cmd(&declaring(&[unstartable.as_str()], &[]));

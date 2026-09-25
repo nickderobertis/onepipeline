@@ -83,7 +83,9 @@ unfinished'`. With none declared the verb is exactly the contract above.
   payload's under `--format claude-code` and `codex`, never the environment's.
   `ONEPIPELINE_LAUNCHER_SESSION` in its environment is set to that same session.
   Those are the bytes to hand it by hand, and a source is drivable that way with
-  no guard in front of it. Its standard error is discarded. Sources are asked
+  no guard in front of it. A source need not read it — one whose question does
+  not turn on the session may close it unread, and its answer is taken as any
+  other's. Its standard error is discarded. Sources are asked
   concurrently with each other and with `unwatched`, and the same command
   declared twice is asked once.
 - **What it may answer.** One object on standard output, in the vocabulary this

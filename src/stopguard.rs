@@ -441,7 +441,10 @@ fn consult(command: &str, asked: &Asked, timeout: Duration) -> Result<Answer, St
     let input = source_input(asked);
     if let Some(mut stdin) = child.stdin.take() {
         // On a thread of its own, so a source that never reads its input cannot
-        // hold this wait on a full pipe.
+        // hold this wait on a full pipe. A write it refused is not a failure
+        // to consult it: the input is offered, a source whose question does not
+        // turn on the session may close it unread, and what it answers is
+        // still read and held to the vocabulary like any other.
         std::thread::spawn(move || {
             let _ = stdin.write_all(input.as_bytes());
             let _ = stdin.write_all(b"\n");
