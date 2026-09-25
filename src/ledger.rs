@@ -1403,13 +1403,13 @@ fn publish(
 }
 
 /// Record host calls in unit tests; production calls the filesystem directly.
-mod disk {
+pub(crate) mod disk {
     #[cfg(test)]
     use std::cell::RefCell;
     use std::{fs, io, path::Path};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(super) enum Step {
+    pub(crate) enum Step {
         Contents,
         Publish,
         Entry,
@@ -1484,7 +1484,7 @@ mod disk {
     }
 
     #[cfg(test)]
-    pub(super) struct Watch;
+    pub(crate) struct Watch;
 
     /// Watch this thread's writes, refusing every occurrence of the selected step.
     ///
@@ -1492,7 +1492,7 @@ mod disk {
     /// it: the steps read back would be a mix of two writes, which is a test
     /// passing on somebody else's evidence.
     #[cfg(test)]
-    pub(super) fn watching(refusing: Option<Step>) -> Watch {
+    pub(crate) fn watching(refusing: Option<Step>) -> Watch {
         WATCHED.with_borrow_mut(|watched| {
             assert!(
                 watched.is_none(),
@@ -1508,7 +1508,7 @@ mod disk {
 
     #[cfg(test)]
     impl Watch {
-        pub(super) fn asked(&self) -> Vec<Step> {
+        pub(crate) fn asked(&self) -> Vec<Step> {
             WATCHED.with_borrow(|watched| {
                 watched
                     .as_ref()

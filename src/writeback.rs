@@ -2241,7 +2241,6 @@ fn task_document(
 /// the `project copy` below reads it as a `local-md` source, and a document replaced in
 /// place is truncated first, so a listing arriving in that window parses an empty file and
 /// reports the run's own board as malformed.
-///
 fn document(path: &Path, front: &Value, body: &str) -> Result<(), String> {
     let yaml = serde_norway::to_string(front).map_err(|e| e.to_string())?;
     crate::ledger::write_atomic(
@@ -4375,6 +4374,29 @@ mod tests {
         let (design, _) = fixture.task_document("design");
         assert_eq!(design["title"], "feat: design it");
         assert_eq!(design["metadata"]["onepipeline.id"], "design");
+    }
+
+    /// A write-back pass publishes each shadow document by its rename alone: the
+    /// journal rebuilds the shadow store, and a sync per document is what pushed the
+    /// loopcost scale journey past its bound.
+    #[test]
+    fn a_shadow_projection_asks_the_disk_for_renames_and_no_syncs() {
+        use crate::ledger::disk::{watching, Step};
+
+        let fixture = Fixture::new("unsynced");
+        let watch = watching(None);
+        fixture.project();
+        let asked = watch.asked();
+        drop(watch);
+
+        // The project document and one task document per node.
+        let documents = 1 + fixture.snapshot.nodes.len();
+        assert_eq!(
+            asked,
+            vec![Step::Publish; documents],
+            "the shadow projection synced a document it only has to publish"
+        );
+        assert_eq!(fixture.task_document("build").0["title"], "feat: build it");
     }
 
     /// A node carrying no title is written under its **id**, and a blank one is
