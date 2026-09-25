@@ -247,9 +247,26 @@ fn the_documented_synopsis_is_the_verbs_own() {
         default, offered,
         "the page and `--help` differ on the default"
     );
-    for refused in ["0", "3601"] {
+    let most: u64 = page
+        .split("at most `")
+        .nth(1)
+        .and_then(|rest| rest.split('`').next())
+        .and_then(|most| most.parse().ok())
+        .expect("the page states the longest source timeout");
+    for accepted in ["1".to_owned(), most.to_string()] {
         world
-            .run(&["stop-guard", "--session", "s", "--source-timeout", refused])
+            .run(&[
+                "stop-guard",
+                "--session",
+                "s",
+                "--source-timeout",
+                &accepted,
+            ])
+            .exited(0);
+    }
+    for refused in ["0".to_owned(), (most + 1).to_string()] {
+        world
+            .run(&["stop-guard", "--session", "s", "--source-timeout", &refused])
             .exited(2)
             .err_has("--source-timeout");
     }
@@ -1059,12 +1076,39 @@ fn declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source()
         "{reason}"
     );
 
-    // A warning alone is a warning, under every rendering.
-    refusing.answers(&json!({"verdict": "none"}));
-    second.answers(&json!({"verdict": "none"}));
-    warning.answers(&json!({"verdict": "warn", "message": "the registry is stale"}));
-    let only = [warning.command.as_str()];
+    // Its condition clears: nothing to refuse on, and what it last blocked
+    // on is forgotten — so should that same condition return, even a
+    // continuation refuses on it again.
     let idle = json!({"session": "a-session-owning-nothing"});
+    let alone = [refusing.command.as_str()];
+    ask_with(&world, &alone, &idle).exited(0);
+    let remembered = source_memory(&world, "a-session-owning-nothing", &refusing.command);
+    assert!(remembered.is_file(), "the block was not remembered");
+    refusing.answers(&json!({"verdict": "none"}));
+    let cleared = ask_with(&world, &alone, &idle);
+    cleared.exited(0);
+    assert_eq!(verdict(&cleared.stdout), Some(json!({"verdict": "none"})));
+    assert!(!remembered.exists(), "a cleared source kept its memory");
+    refusing
+        .answers(&json!({"verdict": "block", "reason": "branch b-3 preserved, never published"}));
+    let returned = ask_with(
+        &world,
+        &alone,
+        &json!({"session": "a-session-owning-nothing", "continuation": true}),
+    );
+    returned.exited(0);
+    assert_eq!(
+        verdict(&returned.stdout).expect("a verdict")["verdict"],
+        json!("block"),
+        "{}",
+        returned.stdout
+    );
+
+    // Warnings alone are one warning carrying each, under every rendering.
+    refusing.answers(&json!({"verdict": "none"}));
+    second.answers(&json!({"verdict": "warn", "message": "the origin is unreachable"}));
+    warning.answers(&json!({"verdict": "warn", "message": "the registry is stale"}));
+    let only = [warning.command.as_str(), second.command.as_str()];
     let warned = ask_with(&world, &only, &idle);
     warned.exited(0);
     let told = verdict(&warned.stdout).expect("a verdict");
@@ -1072,7 +1116,8 @@ fn declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source()
     assert!(
         told["message"]
             .as_str()
-            .is_some_and(|message| message.contains("the registry is stale")),
+            .is_some_and(|message| message.contains("the registry is stale")
+                && message.contains("the origin is unreachable")),
         "{told}"
     );
     let hooked = world.run_with_stdin(
@@ -1090,7 +1135,6 @@ fn declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source()
 
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
-/// Feed one neutral input object to the guard with `sources` declared.
 #[cfg(unix)]
 fn ask_with(world: &World, sources: &[&str], input: &Value) -> crate::harness::Run {
     world.run_with_stdin(&declaring(sources, &[]), &input.to_string())

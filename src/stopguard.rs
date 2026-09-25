@@ -514,7 +514,10 @@ fn consult(command: &str, asked: &Asked, timeout: Duration) -> Result<Answer, St
     answer_of(&bytes)
 }
 
-/// End every process left in the group a source was started in.
+/// End what a source left running once descent from it is lost: a process
+/// it started and then exited from is reparented, so its group is the one
+/// handle left on it. `SIGKILL`, because this runs only past a deadline the
+/// source was already given to finish in.
 #[cfg(unix)]
 fn end_group(leader: u32) {
     if let Ok(group) = i32::try_from(leader) {
