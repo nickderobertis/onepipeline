@@ -187,8 +187,12 @@ fn the_slot_of(world: &World, repo: &str) -> Value {
 /// Everything the maintain command has left in the slot's worktree, one line per
 /// run of it — each carrying the arguments that run was given.
 fn marker_text(world: &World, repo: &str) -> String {
-    let worktree = Path::new(the_slot_of(world, repo)["path"].as_str().expect("a slot path"))
-        .join("worktree");
+    let worktree = Path::new(
+        the_slot_of(world, repo)["path"]
+            .as_str()
+            .expect("a slot path"),
+    )
+    .join("worktree");
     std::fs::read_to_string(worktree.join("maintained.log")).unwrap_or_default()
 }
 
@@ -425,12 +429,15 @@ fn two_drivers_idle_at_once_maintain_the_slot_once_between_them() {
         .iter()
         .map(|driver| sweeps(&world, driver))
         .collect();
-    world.until("both drivers to have swept the registry twice more", |world| {
-        ["one", "two"]
-            .iter()
-            .zip(&before)
-            .all(|(driver, swept)| sweeps(world, driver) >= swept + 2)
-    });
+    world.until(
+        "both drivers to have swept the registry twice more",
+        |world| {
+            ["one", "two"]
+                .iter()
+                .zip(&before)
+                .all(|(driver, swept)| sweeps(world, driver) >= swept + 2)
+        },
+    );
     assert_eq!(marker_lines(&world), 1);
     assert_eq!(records(&world, "one").len(), 1, "{}", world.dump());
 
@@ -1187,8 +1194,7 @@ fn every_registered_identity_is_discovered_and_maintained_in_one_sweep() {
     );
     for entry in identities {
         assert_eq!(
-            entry["outcome"]["slots"][0]["outcome"]["ran"]["outcome"],
-            "succeeded",
+            entry["outcome"]["slots"][0]["outcome"]["ran"]["outcome"], "succeeded",
             "{record}"
         );
     }
@@ -1305,11 +1311,14 @@ fn a_sweep_answered_in_use_no_slots_and_no_command_journals_nothing() {
     let identities = record["payload"]["identities"]
         .as_array()
         .expect("identities");
-    assert_eq!(identities.len(), 1, "only the identity that ran is written: {record}");
+    assert_eq!(
+        identities.len(),
+        1,
+        "only the identity that ran is written: {record}"
+    );
     assert_eq!(identities[0]["identity"], SERVICE_IDENTITY, "{record}");
     assert_eq!(
-        identities[0]["outcome"]["slots"][0]["outcome"]["ran"]["outcome"],
-        "succeeded",
+        identities[0]["outcome"]["slots"][0]["outcome"]["ran"]["outcome"], "succeeded",
         "{record}"
     );
     release(&world, "quiet");
@@ -1399,7 +1408,8 @@ fn a_sweep_over_session_records_it_cannot_read_records_the_refusal_and_runs_noth
     held_run(&world, "readable", 2, &["--maintenance-config", &every]).exited(0);
     world.until("the slot to be maintained", |_| ran() > before);
     release(&world, "readable");
-} // llmlint: ignore-end[tests_mirror_real_usage]
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Both halves of each script fixture answer the same way: what one platform's

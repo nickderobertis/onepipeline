@@ -106,7 +106,10 @@ fn a_launch_refuses_where_the_hosts_session_records_cannot_be_read() {
     // Readable, the plan launches and settles, leaving nobody holding the
     // workspace — so what the refusals below name is the records and not the
     // plan, the repository, or the interlock itself.
-    let admitted = world.plan("admitted", &plan_of("admitted", vec![lifecycle("build", &[])]));
+    let admitted = world.plan(
+        "admitted",
+        &plan_of("admitted", vec![lifecycle("build", &[])]),
+    );
     world
         .run(&["start", &admitted, "--attach"])
         .exited(0)
@@ -345,7 +348,10 @@ fn a_follow_interrupted_by(which: Unreadable) {
     let held = crate::harness::held_publication(&world, &go);
     world.repository("local-direct", &held.argv());
     world.script("build.work", "the follow saw this\n");
-    let path = world.plan("followed", &plan_of("followed", vec![lifecycle("build", &[])]));
+    let path = world.plan(
+        "followed",
+        &plan_of("followed", vec![lifecycle("build", &[])]),
+    );
 
     // Attached, so the child *is* the run's driver and the follow thread it starts
     // writes to a stderr this journey can read; in a file, so the read is a poll
@@ -358,9 +364,10 @@ fn a_follow_interrupted_by(which: Unreadable) {
         .stderr(std::process::Stdio::from(errors))
         .spawn()
         .expect("the driver starts");
-    world.until("the follow to relay the publication it is following", |world| {
-        !world.events_of("followed", "merge-queued").is_empty()
-    });
+    world.until(
+        "the follow to relay the publication it is following",
+        |world| !world.events_of("followed", "merge-queued").is_empty(),
+    );
     let token = world.events_of("followed", "session-opened")[0]["payload"]["token"]
         .as_str()
         .expect("the session names itself")

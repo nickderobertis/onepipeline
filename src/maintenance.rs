@@ -1206,8 +1206,8 @@ mod tests {
                 {"number": 4, "outcome": {"broken": {"reason": "its record could not be read"}}},
             ]
         });
-        let read: IdentityOutcome =
-            serde_json::from_value(stored).expect("a record written before this change still reads");
+        let read: IdentityOutcome = serde_json::from_value(stored)
+            .expect("a record written before this change still reads");
         assert_eq!(
             identity_phrase(&read),
             "slot 1 ran — succeeded in 12 ms, log a-1; \
