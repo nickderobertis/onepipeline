@@ -24,7 +24,6 @@ mod unix {
     use std::env;
     use std::fs;
     use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output, Stdio};
 
@@ -611,10 +610,7 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
         // refusal after it is where this fixture stops.
         let bin = root.join("bin");
         fs::create_dir_all(&bin).expect("the fixture has a stand-in bin");
-        let renderer = bin.join("freeze");
-        fs::write(&renderer, "#!/bin/sh\nexit 1\n").expect("the renderer stand-in is written");
-        fs::set_permissions(&renderer, PermissionsExt::from_mode(0o755))
-            .expect("the renderer stand-in is executable");
+        onepipeline_testfakes::executable(&bin.join("freeze"), "#!/bin/sh\nexit 1\n");
     }
 
     /// Run the committed `capture.py` in `root`, the way `capture.sh` does,
@@ -768,11 +764,10 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
             ),
             ("bin/cargo", r#"printf 'cargo %s\n' "$*""#),
         ] {
-            let at = root.join(path);
-            fs::write(&at, format!("#!/bin/sh\n{reports} >> \"$REACHED\"\n"))
-                .expect("the stand-in is written");
-            fs::set_permissions(&at, PermissionsExt::from_mode(0o755))
-                .expect("the stand-in is executable");
+            onepipeline_testfakes::executable(
+                &root.join(path),
+                format!("#!/bin/sh\n{reports} >> \"$REACHED\"\n"),
+            );
         }
     }
 

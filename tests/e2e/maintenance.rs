@@ -78,12 +78,11 @@ fn interpreted_script(world: &World, stem: &str) -> String {
     }
     #[cfg(not(windows))]
     {
-        use std::os::unix::fs::PermissionsExt;
         let path = world.root.join(format!("{stem}.sh"));
-        std::fs::copy(repo_file(&format!("tests/e2e/{stem}.sh")), &path)
-            .expect("the fixture ships");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-            .expect("the script is executable");
+        onepipeline_testfakes::executable(
+            &path,
+            std::fs::read(repo_file(&format!("tests/e2e/{stem}.sh"))).expect("the fixture ships"),
+        );
         path.to_string_lossy().into_owned()
     }
 }
