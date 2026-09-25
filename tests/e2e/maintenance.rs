@@ -1426,15 +1426,8 @@ fn a_sweep_over_session_records_it_cannot_read_records_the_refusal_and_runs_noth
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Both halves of the maintain fixture answer the same way: what one platform's
-/// half names, the other's names too.
-///
-/// One contract in two languages, because no platform runs both — so a name
-/// added to one and not the other is a journey that passes here and fails on the
-/// Windows leg, a fortnight later, with nothing pointing at the fixture. Held by
-/// reading the scripts, on `harness::both_hook_scripts_answer_the_same_verbs`'s
-/// grounds: no platform executes both halves, and reading them is the only way
-/// to compare them; the half this platform runs is the maintain command `onevcs`
-/// spawns in the journeys above.
+/// half names, the other's names too, so a name added to one alone fails here
+/// rather than on the other platform's leg with nothing pointing at the fixture.
 // llmlint: ignore-block[tests_mirror_real_usage] the subject is the suite's own
 // scaffolding — that its two halves agree — which no platform can execute both sides
 // of; the fixture itself is run the way its caller runs it, as the maintain command

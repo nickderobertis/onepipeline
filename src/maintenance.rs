@@ -607,10 +607,8 @@ fn identity_phrase(outcome: &IdentityOutcome) -> String {
 // crate's interface — a session opened into the slot between the survey and the claim, a
 // process the host killed — and a fixture that forged the record would prove the
 // fixture; each phrase is held by the unit test the doc names, over the sibling's own
-// type. `unavailable` and `broken` are **not** in that list any more:
-// `a_slot_another_process_holds_is_busy_and_one_whose_worktree_is_gone_is_broken` takes
-// the slot's occupancy lease the way `session_reuse.rs` takes a run root's, and then
-// removes the slot's worktree, driving the real binary into each.
+// type. `unavailable` and `broken` are not in that list: a journey drives each,
+// `a_slot_another_process_holds_is_busy_and_one_whose_worktree_is_gone_is_broken`.
 fn slot_phrase(outcome: &SlotOutcome) -> String {
     match outcome {
         SlotOutcome::NotDue { last_maintained } => {

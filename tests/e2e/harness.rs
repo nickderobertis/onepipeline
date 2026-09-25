@@ -5751,10 +5751,6 @@ pub struct Counts {
     pub upstream_reads: u64,
     pub release_asks: u64,
     /// Pool-maintenance sweeps the driver started.
-    ///
-    /// What says a sweep was *made*: one that finds every slot not due writes no
-    /// journal record and leaves every stamp as it was, so this is the only thing
-    /// a journey can read to tell the driver having asked from its never having.
     pub maintenance_sweeps: u64,
     pub store_bytes: u64,
     /// Journal records the loop folded into the run's state.
