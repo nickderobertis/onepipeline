@@ -1500,9 +1500,10 @@ fn status_and_results_read_the_latest_shutdown_and_name_an_unreadable_one() {
 /// takes the worker's registry entry back.
 // llmlint: ignore-block[tests_mirror_real_usage] PID reuse is a host transition, not a
 // product operation, and waiting for this particular pid to be recycled is unbounded. The
-// fixture moves only the pid a registry entry names — the entry the worker itself wrote,
-// stamp untouched — onto a real process this test started, and adds one entry for the second
-// half; the real `shutdown` command reads the real run root either way and must leave the
+// fixture moves the pid the worker's registry entry names onto a real process this test
+// started, everywhere the run wrote it — that entry and the record of what the first shutdown
+// ended, through `ended_follows_the_pid` — with every stamp untouched, and adds one entry for
+// the second half; the real `shutdown` command reads the real run root either way and must leave the
 // stranger alive.
 #[cfg(unix)]
 #[test]
@@ -1536,6 +1537,11 @@ fn a_dispatch_an_earlier_shutdown_killed_is_over_once_its_pid_is_reissued() {
     let mut reissued = recorded.clone();
     reissued["pid"] = json!(taken);
     std::fs::write(&entry, reissued.to_string()).expect("the reissued pid is planted");
+    crate::driver::ended_follows_the_pid(
+        &world.run_file(&run, "ended.jsonl"),
+        recorded["pid"].as_u64().expect("the entry names a pid"),
+        u64::from(taken),
+    );
 
     world
         .run(&["shutdown", &run, "--force"])
@@ -1630,28 +1636,13 @@ fn a_driver_an_earlier_shutdown_killed_is_over_once_its_pid_is_reissued() {
         record["pid"] = taken.clone();
         std::fs::write(path, record.to_string()).expect("the reissued pid is planted");
     }
-    // And so does the record of what the first shutdown ended, which is the run's
-    // own and follows the pid wherever it names the driver. Read as it is rather
-    // than required, so a shutdown that recorded nothing is refused by the
-    // command below rather than by this fixture.
-    let ended = world.run_file(&run, "ended.jsonl");
-    let kept = std::fs::read_to_string(&ended).unwrap_or_default();
-    let lines: Vec<String> = kept
-        .lines()
-        .map(|line| {
-            let mut line: Value = serde_json::from_str(line).expect("a JSON line");
-            for claim in ["launch-record", "ownership-lock"] {
-                if line["claim"][claim]["pid"] == driver {
-                    line["claim"][claim]["pid"] = taken.clone();
-                }
-            }
-            line.to_string()
-        })
-        .collect();
-    if !lines.is_empty() {
-        std::fs::write(&ended, format!("{}\n", lines.join("\n")))
-            .expect("the record follows the pid");
-    }
+    // And so does the record of what the first shutdown ended, which is the
+    // run's own and follows the pid wherever it names the driver.
+    crate::driver::ended_follows_the_pid(
+        &world.run_file(&run, "ended.jsonl"),
+        driver.as_u64().expect("the launch record names a pid"),
+        taken.as_u64().expect("a pid"),
+    );
 
     world
         .run(&["shutdown", &run, "--force"])

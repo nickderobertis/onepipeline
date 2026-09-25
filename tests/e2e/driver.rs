@@ -3332,9 +3332,10 @@ fn a_stop_that_declines_every_live_identity_does_not_report_success() {
 /// dispatch's registry entry back, so the entry outlives its process.
 // llmlint: ignore-block[tests_mirror_real_usage] PID reuse is a host transition, not a
 // product operation, and waiting for this particular pid to be recycled is unbounded. The
-// fixture moves only the pid a registry entry names — the entry the dispatch itself wrote,
-// stamp untouched — onto a real process this test started, and adds one entry for the second
-// half. The record of what the first stop ended is replaced by hand only to stand for a host
+// fixture moves the pid the dispatch's registry entry names onto a real process this test
+// started, everywhere the run wrote it — that entry and the record of what the first stop ended,
+// through `ended_follows_the_pid` — with every stamp untouched, and adds one entry for the second
+// half. The record of what the first stop ended is otherwise replaced by hand only to stand for a host
 // that will not read it and for lines a newer writer or a torn append leaves, which no verb of
 // this build writes. The real `stop` command reads the real run root each time and must leave
 // the stranger alive.
@@ -3373,6 +3374,11 @@ fn a_dispatch_an_earlier_stop_ended_is_over_once_its_pid_is_reissued() {
     let mut reissued = recorded.clone();
     reissued["pid"] = json!(taken);
     std::fs::write(&entry, reissued.to_string()).expect("the reissued pid is planted");
+    ended_follows_the_pid(
+        &world.run_file(&run, "ended.jsonl"),
+        u64::from(dispatch),
+        u64::from(taken),
+    );
 
     // What the first stop ended is the run's own record of it. One this host
     // will not read is said where it is met and costs only what it adds: the
@@ -3482,8 +3488,9 @@ fn a_dispatch_an_earlier_stop_ended_is_over_once_its_pid_is_reissued() {
 ///
 /// A start stamp names when a process started, not which dispatch it was — two
 /// processes can start in one clock tick. So what a stop records as ended is the
-/// claim that named the process as well as its stamp — a dispatch by its node and
-/// the instant it was recorded, the launch record by the pid it was written for —
+/// claim that named the process as well as its stamp — a dispatch by the pid its
+/// entry was written for, its node and the instant it was recorded, the launch
+/// record by the pid it was written for —
 /// and a second dispatch carrying the same stamp, or a later driver at another
 /// pid under the ended driver's stamp, is a claim no stop of this run ended.
 // llmlint: ignore-block[tests_mirror_real_usage] the second entry and the later driver's record
@@ -3517,12 +3524,12 @@ fn a_dispatch_sharing_a_stamp_with_one_a_stop_ended_is_still_declined() {
         !still_listed(driver) && !still_listed(dispatch)
     });
 
-    // Another dispatch of this run, started in the same tick as the one the
-    // stop ended, whose pid the host has since handed to a stranger.
+    // Another dispatch of the same node, recorded in the same millisecond and
+    // started in the same tick as the one the stop ended — differing from it in
+    // nothing but its pid, which the host has since handed to a stranger.
     let mut stranger = stranger_started_after(std::slice::from_ref(&stamp));
     let taken = stranger.id();
     let mut other = recorded;
-    other["node"] = json!("ship");
     other["pid"] = json!(taken);
     let planted = entry.with_file_name(format!("{taken}-1.json"));
     std::fs::write(&planted, other.to_string()).expect("the other dispatch's entry is planted");
@@ -3649,6 +3656,11 @@ fn a_stop_that_signalled_nothing_leaves_a_reissued_pid_declined() {
     let mut reissued = recorded;
     reissued["pid"] = json!(taken);
     std::fs::write(&entry, reissued.to_string()).expect("the reissued pid is planted");
+    ended_follows_the_pid(
+        &world.run_file(&run, "ended.jsonl"),
+        dispatch,
+        u64::from(taken),
+    );
     world.run(&["stop", &run]).exited(0).err_has(&format!(
         "names pid {taken}, which this host has since given to another process"
     ));
@@ -3663,6 +3675,36 @@ fn a_stop_that_signalled_nothing_leaves_a_reissued_pid_declined() {
     stranger.wait().expect("the stranger is reaped");
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The run's record of what its teardowns ended, following a pid the host has
+/// handed on: every claim in it naming `from` is made to name `to`, and every
+/// stamp is left as it was.
+///
+/// Each claim is named by the pid its record was written for, so a journey that
+/// stages a reissue by moving that pid onto a stranger it started moves it here
+/// too, and the record says what it would have said had the host given `from`
+/// away. An absent record is left absent, so a teardown that recorded nothing
+/// is refused by the command rather than by the fixture.
+pub(crate) fn ended_follows_the_pid(ended: &Path, from: u64, to: u64) {
+    let kept = std::fs::read_to_string(ended).unwrap_or_default();
+    let lines: Vec<String> = kept
+        .lines()
+        .map(|line| {
+            let mut line: serde_json::Value =
+                serde_json::from_str(line).expect("a stop writes JSON lines");
+            for claim in ["launch-record", "ownership-lock", "dispatch"] {
+                if line["claim"][claim]["pid"] == json!(from) {
+                    line["claim"][claim]["pid"] = json!(to);
+                }
+            }
+            line.to_string()
+        })
+        .collect();
+    if !lines.is_empty() {
+        std::fs::write(ended, format!("{}\n", lines.join("\n")))
+            .expect("the record follows the pid");
+    }
+}
 
 fn env_of(command: &std::process::Command, name: &str) -> std::ffi::OsString {
     command

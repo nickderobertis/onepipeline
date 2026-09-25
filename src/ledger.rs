@@ -3043,11 +3043,14 @@ impl From<Stamp> for String {
 
 /// Which of a run's records named a process.
 ///
-/// Each is named by what its record fixed when it was written, never by the pid
-/// it names now, because a reissue is that pid naming another process: the
-/// launch record and the lock by the pid they were written for, and a dispatch
-/// by its node and the instant it was recorded, which two dispatches sharing a
-/// start stamp still differ in.
+/// Each is named by what its record fixed when it was written, never by what the
+/// pid it names is now, because a reissue is that pid naming another process:
+/// the launch record and the lock by the pid they were written for, and a
+/// dispatch by that pid, its node and the instant it was recorded. The pid is
+/// what makes a claim one process — two dispatches of one node can be recorded
+/// in one millisecond, and one driver process can hold several entries, so only
+/// entries naming the same pid under the same stamp share a claim, and those
+/// name the same process.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum ClaimedBy {
@@ -3056,7 +3059,11 @@ pub(crate) enum ClaimedBy {
     /// The ownership lock, naming its holder.
     OwnershipLock { pid: u32 },
     /// One dispatch's registry entry.
-    Dispatch { node: String, dispatched_at: String },
+    Dispatch {
+        pid: u32,
+        node: String,
+        dispatched_at: String,
+    },
 }
 
 /// One line of [`RunPaths::ended`]: a process a teardown of this run proved and

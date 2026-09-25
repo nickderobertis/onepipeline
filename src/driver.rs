@@ -2374,7 +2374,6 @@ enum Aim {
 struct Root {
     pid: u32,
     started: ledger::Stamp,
-    /// The claim that proved it.
     claim: ledger::ClaimedBy,
     /// Every other claim naming it under the same stamp.
     also: Vec<ledger::ClaimedBy>,
@@ -2433,6 +2432,7 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
         (
             REGISTERED_DISPATCH,
             ledger::ClaimedBy::Dispatch {
+                pid: running.pid,
                 node: running.node,
                 dispatched_at: running.dispatched_at,
             },
@@ -3853,6 +3853,7 @@ mod tests {
                     pid: usable.pid,
                     started: ledger::Stamp::of(&usable.started).expect("a stamp"),
                     claim: ledger::ClaimedBy::Dispatch {
+                        pid: usable.pid,
                         node: "build".into(),
                         dispatched_at: usable.dispatched_at.clone(),
                     },
