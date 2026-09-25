@@ -246,8 +246,8 @@ fn until_sweeps(world: &World, run: &str, n: u64) {
 /// marker appears, the sibling's `pool status` carries `last_maintained`, the
 /// run's journal carries one `pool-maintenance` record with the slot's outcome,
 /// and `status` names the sweep while its thread is live. Further idle ticks
-/// inside `every` sweep the registry again — the sibling's call record says so
-/// — and run nothing and write nothing. A fresh driver launched inside `every`
+/// inside `every` sweep the registry again — the driver's own sweep count says
+/// so — and run nothing and write nothing. A fresh driver launched inside `every`
 /// of the recorded stamp runs nothing and writes nothing, and one launched after
 /// `every` has elapsed maintains the slot again: the only state is the slot's.
 #[test]
@@ -550,8 +550,8 @@ fn maintenance_is_withheld_at_the_ceiling_without_a_free_slot_and_under_no_sched
 /// Successive sweeps respect the driver's in-memory pace: with every identity
 /// answering not-due the first sweep finishes at once, and the idle passes that
 /// follow inside the shipped pace start no second thread and sweep the registry
-/// no second time — read off the driver's own pass counts and the sibling's
-/// call record rather than a clock.
+/// no second time — read off the driver's own pass and sweep counts rather than
+/// a clock.
 ///
 /// Also the identity that names no maintain command: it is visited inside the
 /// one thread and skipped, with no process and no record for it.
@@ -1419,7 +1419,7 @@ fn a_sweep_over_session_records_it_cannot_read_records_the_refusal_and_runs_noth
 // llmlint: ignore-end[tests_mirror_real_usage]
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
-/// Both halves of each script fixture answer the same way: what one platform's
+/// Both halves of the maintain fixture answer the same way: what one platform's
 /// half names, the other's names too.
 ///
 /// One contract in two languages, because no platform runs both — so a name
@@ -1427,12 +1427,12 @@ fn a_sweep_over_session_records_it_cannot_read_records_the_refusal_and_runs_noth
 /// Windows leg, a fortnight later, with nothing pointing at the fixture. Held by
 /// reading the scripts, on `harness::both_hook_scripts_answer_the_same_verbs`'s
 /// grounds: no platform executes both halves, and reading them is the only way
-/// to compare them; each half is driven as a real subprocess by every journey
-/// above.
+/// to compare them; the half this platform runs is the maintain command `onevcs`
+/// spawns in the journeys above.
 // llmlint: ignore-block[tests_mirror_real_usage] the subject is the suite's own
 // scaffolding — that its two halves agree — which no platform can execute both sides
-// of; the fixtures themselves are run the way their callers run them, by `onevcs`
-// and by the engine, in every journey of this module.
+// of; the fixture itself is run the way its caller runs it, as the maintain command
+// `onevcs` spawns, in this module's journeys.
 #[test]
 fn both_halves_of_each_fixture_take_the_same_arguments() {
     for (sh, bat, marks) in [(
