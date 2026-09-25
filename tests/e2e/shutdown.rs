@@ -63,17 +63,10 @@ fn hooks(world: &World) -> [String; 6] {
     // `hook.sh` in the same directory, and one overwriting the other turns a
     // held publication into one that goes straight through.
     let script = world.root.join("run-end-hook.sh");
-    std::fs::write(
+    onepipeline_testfakes::executable(
         &script,
         format!("#!/bin/sh\necho fired >> '{}'\n", log.display()),
-    )
-    .expect("the hook is written");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .expect("the hook is executable");
-    }
+    );
     let script = script.to_string_lossy().into_owned();
     [
         "--success-hook".into(),

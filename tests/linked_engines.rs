@@ -2062,13 +2062,7 @@ fn the_shell_the_check_runs_in_is_never_the_bash_windows_keeps_in_its_system_dir
     for dir in [&system32, &elsewhere] {
         fs::create_dir_all(dir).expect("a fixture directory");
         let candidate = dir.join(if cfg!(windows) { "bash.exe" } else { "bash" });
-        fs::write(&candidate, "#!/bin/sh\nexit 1\n").expect("a fixture bash");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755))
-                .expect("a fixture bash this host would start");
-        }
+        onepipeline_testfakes::executable(&candidate, "#!/bin/sh\nexit 1\n");
         candidates.push(candidate);
     }
     let path = std::env::join_paths([&system32, &elsewhere]).expect("a fixture PATH");

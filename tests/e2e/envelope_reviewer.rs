@@ -55,7 +55,10 @@ fn reviewer_named(world: &World, name: &str) -> String {
     let path = world
         .root
         .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    std::fs::copy(double("envelope-reviewer"), &path).expect("the reviewer is placed");
+    onepipeline_testfakes::executable(
+        &path,
+        std::fs::read(double("envelope-reviewer")).expect("the reviewer is built"),
+    );
     path.to_string_lossy().into_owned()
 }
 
