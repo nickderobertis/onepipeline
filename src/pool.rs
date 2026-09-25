@@ -179,6 +179,12 @@ pub(crate) enum Admission {
     /// not read. The dispatch goes ahead exactly as before there was a pool,
     /// because `open` is what decides and refuses on its own account, with the
     /// sibling's own reason.
+    ///
+    /// **Never a reading that found room.** The sibling refuses an unreadable
+    /// session record rather than counting the slot it names as free, and this
+    /// carries that refusal through rather than dropping it: the pass says what
+    /// it could not read, on stderr, so a host whose sessions directory has gone
+    /// is not a host whose pool reads have merely gone quiet.
     Unread,
 }
 
@@ -273,8 +279,16 @@ impl Workspaces {
             }
             self.refused.remove(node);
         }
-        let Ok(capacity) = crate::vcs::workspace_capacity(request) else {
-            return Admission::Unread;
+        let capacity = match crate::vcs::workspace_capacity(request) {
+            Ok(capacity) => capacity,
+            Err(why) => {
+                eprintln!(
+                    "onepipeline: cannot read what the '{}' workspace admits, so '{node}' is \
+                     dispatched without that reading and its own open decides: {why}",
+                    request.repo
+                );
+                return Admission::Unread;
+            }
         };
         self.read_at = Some(Instant::now());
         let already = u32::try_from(

@@ -5708,6 +5708,8 @@ pub struct Counts {
     pub publications: u64,
     pub upstream_reads: u64,
     pub release_asks: u64,
+    /// Pool-maintenance sweeps the driver started.
+    pub maintenance_sweeps: u64,
     pub store_bytes: u64,
     /// Journal records the loop folded into the run's state.
     ///
@@ -5727,6 +5729,7 @@ impl Counts {
             publications: self.publications - before.publications,
             upstream_reads: self.upstream_reads - before.upstream_reads,
             release_asks: self.release_asks - before.release_asks,
+            maintenance_sweeps: self.maintenance_sweeps - before.maintenance_sweeps,
             store_bytes: self.store_bytes - before.store_bytes,
             records_folded: self.records_folded - before.records_folded,
         }
@@ -5758,6 +5761,7 @@ pub fn counts(world: &World, run: &str) -> Counts {
         publications: count("publications"),
         upstream_reads: count("upstream_reads"),
         release_asks: count("release_asks"),
+        maintenance_sweeps: count("maintenance_sweeps"),
         store_bytes: count("store_bytes"),
         records_folded: count("records_folded"),
     }
