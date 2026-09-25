@@ -3177,7 +3177,10 @@ pub fn synced_fixture<'a>(root: &Path, runs: impl IntoIterator<Item = &'a Path>)
         {
             let path = entry.expect("an entry of the fixture's run").path();
             if path.is_file() {
-                synced(&path);
+                // Opened for writing, and never written: Windows flushes a file
+                // only through a handle that may write it, and refuses the
+                // flush on a read-only one with `Access is denied`.
+                synced(&path, std::fs::OpenOptions::new().write(true).open(&path));
             }
         }
         synced_dir(dir);
@@ -3185,15 +3188,15 @@ pub fn synced_fixture<'a>(root: &Path, runs: impl IntoIterator<Item = &'a Path>)
     synced_dir(root);
 }
 
-fn synced(path: &Path) {
-    std::fs::File::open(path)
+fn synced(path: &Path, opened: std::io::Result<std::fs::File>) {
+    opened
         .and_then(|file| file.sync_all())
         .unwrap_or_else(|error| panic!("{} is not on the device: {error}", path.display()));
 }
 
 #[cfg(unix)]
 fn synced_dir(dir: &Path) {
-    synced(dir);
+    synced(dir, std::fs::File::open(dir));
 }
 
 #[cfg(not(unix))]
