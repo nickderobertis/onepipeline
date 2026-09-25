@@ -696,15 +696,21 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
         world.dump()
     );
 
-    // The config alone names it, retained as the parsed document. This run is
-    // idle beside its one quick dispatch, so its driver sweeps — and, the run
-    // ending under it, closes out only once the sweep is joined and its record
-    // written: a driver closing out waits for the sweep it started.
+    // The config alone names it, retained as the parsed document. Hold its
+    // dispatch until the driver sweeps: on a busy host a quick dispatch can
+    // finish before the first idle pass. Closing out then waits for the sweep
+    // it started and its record.
     let path = plan("configured");
-    world
-        .run(&["start", &path, "--attach", "--launch-config", &config])
-        .exited(0)
-        .settled();
+    let meeting = world.rendezvous("build");
+    let configured = world
+        .cmd(&["start", &path, "--attach", "--launch-config", &config])
+        .spawn()
+        .expect("configured run starts");
+    let held = meeting.arrived();
+    until_sweeps(&world, 1);
+    held.release();
+    crate::harness::ended(configured);
+    world.unscript("build.rendezvous");
     let launch = world.run_json("configured", "launch.json");
     assert_eq!(
         launch["maintenance_config"],
@@ -845,13 +851,14 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
         "a run paused on a human gate swept the registry"
     );
     world.run(&["attest", "adopted", "approve"]).exited(0);
-    world.script("build.wait", "hold");
+    let meeting = world.rendezvous("build");
     let adopting = world
         .cmd(&["adopt", "adopted"])
         .spawn()
         .expect("adopt starts");
+    let held = meeting.arrived();
     until_sweeps(&world, swept + 1);
-    world.release("build.go");
+    held.release();
     crate::harness::ended(adopting);
     assert_eq!(
         world.run_json("adopted", "launch.json")["maintenance_config"]["default"]["every"],
