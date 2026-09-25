@@ -1578,6 +1578,117 @@ fn a_dispatch_an_earlier_shutdown_killed_is_over_once_its_pid_is_reissued() {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// A driver an earlier shutdown killed is over, even once the host has given its
+/// pid to a stranger — the `cross (windows-latest)` failure of
+/// `status_and_results_read_the_latest_shutdown_and_name_an_unreadable_one`,
+/// whose second `shutdown --force` met the killed driver's pid reissued under
+/// both the launch record and the ownership lock and refused the run. A record
+/// naming that pid under a stamp this run never ended is still declined.
+// llmlint: ignore-block[tests_mirror_real_usage] PID reuse is a host transition, not a
+// product operation, and waiting for this particular pid to be recycled is unbounded. A
+// driver's claims are named by the pid they were written for, so the host handing that pid
+// on is staged as the one pid changing everywhere this run wrote it — the launch record, the
+// lock, and the record of what the first shutdown ended — to a real process this test
+// started, every stamp untouched. The real `shutdown` command reads the real run root each
+// time and must leave the stranger alive.
+#[cfg(unix)]
+#[test]
+fn a_driver_an_earlier_shutdown_killed_is_over_once_its_pid_is_reissued() {
+    let world = World::new("shutdown-driver-reissued");
+    held(&world, "build");
+    let run = launch(&world, "driverreissue", vec![agent("build", &[])]);
+    until_in_flight(&world, &run, &["build"]);
+    let launch_record = world.run_file(&run, "launch.json");
+    let read = |path: &Path| -> Value {
+        serde_json::from_str(&std::fs::read_to_string(path).expect("the record reads"))
+            .expect("the record is JSON")
+    };
+    let driver = read(&launch_record)["pid"].clone();
+    let stamp = read(&launch_record)["started"]
+        .as_str()
+        .expect("the launch record carries its stamp")
+        .to_string();
+
+    world
+        .run(&["shutdown", &run, "--force"])
+        .exited(0)
+        .out_has("signalled — every process this run named was reached");
+
+    // The host hands the driver's pid on. Every record that named it now names
+    // the stranger; the lock is where the killed driver left it.
+    let mut stranger = crate::driver::stranger_started_after(std::slice::from_ref(&stamp));
+    let taken = json!(stranger.id());
+    let lock = world.run_file(&run, "owner.lock");
+    for path in [&launch_record, &lock] {
+        let mut record = read(path);
+        assert_eq!(
+            record["pid"],
+            driver,
+            "{} named another pid",
+            path.display()
+        );
+        record["pid"] = taken.clone();
+        std::fs::write(path, record.to_string()).expect("the reissued pid is planted");
+    }
+    // And so does the record of what the first shutdown ended, which is the run's
+    // own and follows the pid wherever it names the driver. Read as it is rather
+    // than required, so a shutdown that recorded nothing is refused by the
+    // command below rather than by this fixture.
+    let ended = world.run_file(&run, "ended.jsonl");
+    let kept = std::fs::read_to_string(&ended).unwrap_or_default();
+    let lines: Vec<String> = kept
+        .lines()
+        .map(|line| {
+            let mut line: Value = serde_json::from_str(line).expect("a JSON line");
+            for claim in ["launch-record", "ownership-lock"] {
+                if line["claim"][claim]["pid"] == driver {
+                    line["claim"][claim]["pid"] = taken.clone();
+                }
+            }
+            line.to_string()
+        })
+        .collect();
+    if !lines.is_empty() {
+        std::fs::write(&ended, format!("{}\n", lines.join("\n")))
+            .expect("the record follows the pid");
+    }
+
+    world
+        .run(&["shutdown", &run, "--force"])
+        .exited(0)
+        .out_has("nothing-to-stop — every process this run named was reached")
+        .err_lacks("since given to another process");
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about the stranger")
+            .is_none(),
+        "a shutdown signalled pid {taken}, which the host had reissued"
+    );
+
+    // The launch record under a stamp no teardown of this run ended is a claim
+    // nothing places, and is declined exactly as it always was.
+    let mut stray = read(&launch_record);
+    stray["started"] = json!("a process no teardown of this run ended");
+    std::fs::write(&launch_record, stray.to_string()).expect("the stray stamp is planted");
+    world
+        .run(&["shutdown", &run, "--force"])
+        .exited(REFUSED)
+        .out_has("every recorded identity disagreed")
+        .err_has(&format!("the launch record names pid {taken}, which this host has since given to another process"));
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about the stranger")
+            .is_none(),
+        "a declined stranger was signalled"
+    );
+    stranger.kill().expect("this test ends its own process");
+    stranger.wait().expect("the stranger is reaped");
+    world.release("build.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// A shutdown that names no `--grace` gives each dispatch the ten-minute
 /// default, and says so on its report and its record.
 ///
