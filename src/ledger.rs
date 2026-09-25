@@ -1277,9 +1277,40 @@ pub(crate) fn owner_label(launcher: &str, recorded: &str, reader: &str) -> Strin
     }
 }
 
+/// How long a read of a published document the filesystem refuses is tried
+/// again before the refusal is reported as the filesystem said it.
+///
+/// Every document here is published by [`write_atomic`]'s rename, and Windows
+/// refuses an open that lands while that rename is replacing the destination —
+/// answering access denied rather than handing over either document — for as
+/// long as anything still holds the one being replaced. What the name holds a
+/// moment later is the answer; a refusal that outlasts this is not that. The
+/// same patience [`LOCK_READ_PATIENCE`] gives a lock, for the same reason.
+const PUBLISHED_READ_PATIENCE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Read a document [`write_atomic`] publishes, past the moment a replacement
+/// refuses the open.
+///
+/// Only a refusal is tried again: a document that is absent, or bytes that are
+/// not text, are the answer the first time.
+fn read_published(path: &Path) -> io::Result<String> {
+    let deadline = std::time::Instant::now() + PUBLISHED_READ_PATIENCE;
+    loop {
+        match disk::read(path) {
+            Err(e)
+                if e.kind() == io::ErrorKind::PermissionDenied
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            read => return read,
+        }
+    }
+}
+
 /// Read a JSON document, refusing anything the type does not accept.
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    let text = fs::read_to_string(path).map_err(|e| Error::Ledger {
+    let text = read_published(path).map_err(|e| Error::Ledger {
         path: path.to_path_buf(),
         source: e,
     })?;
@@ -1292,7 +1323,7 @@ pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 /// Used only where the contract says an unreadable input withholds a verdict
 /// rather than ending the read: a view must still render the rest of a run.
 pub fn read_json_opt<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
-    fs::read_to_string(path)
+    read_published(path)
         .ok()
         .map(|text| counted(text.len(), text))
         .and_then(|text| serde_json::from_str(&text).ok())
@@ -1419,6 +1450,7 @@ pub(crate) mod disk {
         Contents,
         Publish,
         Entry,
+        Read,
     }
 
     pub(super) fn sync_contents(file: &fs::File) -> io::Result<()> {
@@ -1429,6 +1461,11 @@ pub(crate) mod disk {
     pub(super) fn publish(temp: &Path, path: &Path) -> io::Result<()> {
         record(Step::Publish)?;
         fs::rename(temp, path)
+    }
+
+    pub(super) fn read(path: &Path) -> io::Result<String> {
+        record(Step::Read)?;
+        fs::read_to_string(path)
     }
 
     pub(super) fn sync_entry(dir: &Path) -> io::Result<()> {
@@ -1471,6 +1508,8 @@ pub(crate) mod disk {
     struct Watched {
         asked: Vec<Step>,
         refusing: Option<Step>,
+        /// How many more occurrences of the refused step are refused.
+        refusals: usize,
     }
 
     #[cfg(test)]
@@ -1480,10 +1519,14 @@ pub(crate) mod disk {
                 return Ok(());
             };
             watched.asked.push(step);
-            if watched.refusing == Some(step) {
-                return Err(io::Error::other(format!(
-                    "this host will not {step:?} for the test that asked"
-                )));
+            if watched.refusing == Some(step) && watched.refusals > 0 {
+                watched.refusals -= 1;
+                // The kind Windows gives an open that lands mid-replacement, and
+                // the one a host that will not sync or rename gives too.
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("this host will not {step:?} for the test that asked"),
+                ));
             }
             Ok(())
         })
@@ -1492,13 +1535,26 @@ pub(crate) mod disk {
     #[cfg(test)]
     pub(crate) struct Watch;
 
-    /// Watch this thread's writes, refusing every occurrence of the selected step.
+    /// Watch this thread's writes and reads, refusing every occurrence of the selected step.
     ///
     /// Panics on a watch already installed on this thread rather than replacing
     /// it: the steps read back would be a mix of two writes, which is a test
     /// passing on somebody else's evidence.
     #[cfg(test)]
     pub(crate) fn watching(refusing: Option<Step>) -> Watch {
+        refusing_times(refusing, usize::MAX)
+    }
+
+    /// Watch this thread's writes and reads, refusing only the first `times`
+    /// occurrences of `step` — a refusal the host stops giving, as Windows stops
+    /// refusing a destination once the rename replacing it is done.
+    #[cfg(test)]
+    pub(crate) fn refusing(step: Step, times: usize) -> Watch {
+        refusing_times(Some(step), times)
+    }
+
+    #[cfg(test)]
+    fn refusing_times(refusing: Option<Step>, refusals: usize) -> Watch {
         WATCHED.with_borrow_mut(|watched| {
             assert!(
                 watched.is_none(),
@@ -1507,6 +1563,7 @@ pub(crate) mod disk {
             *watched = Some(Watched {
                 asked: Vec::new(),
                 refusing,
+                refusals,
             });
         });
         Watch
@@ -4366,16 +4423,11 @@ mod tests {
             start.wait();
             let mut reads = 0;
             while !first.is_finished() || !second.is_finished() {
-                let seen = match fs::read(&path) {
-                    Ok(seen) => seen,
-                    // Windows refuses an open that lands while a rename is replacing
-                    // the destination; that read observed no document at all.
-                    Err(e) if cfg!(windows) && e.kind() == io::ErrorKind::PermissionDenied => {
-                        std::thread::yield_now();
-                        continue;
-                    }
-                    Err(e) => panic!("the published document reads: {e:?}"),
-                };
+                // Through the reader every published document is read with, which
+                // waits out an open Windows refuses mid-replacement.
+                let seen = read_published(&path)
+                    .unwrap_or_else(|e| panic!("the published document reads: {e:?}"))
+                    .into_bytes();
                 // A run lock serializes write-back phases for one run, so no CLI
                 // journey can aim two phases at one shadow path. These real
                 // threads exercise the shared writer at that filesystem boundary.
@@ -4391,6 +4443,108 @@ mod tests {
             second.join().expect("second writer completed");
             assert!(reads > 0, "the reader did not overlap the writers");
         });
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A reader beside a writer replacing one document reads a whole one each
+    /// time, however many of its opens the host refuses mid-replacement.
+    ///
+    /// Windows refuses an open that lands while a rename replaces the destination
+    /// — the `cross (windows-latest)` failures of this module's concurrent-writer
+    /// test and of the host-sized listing journey, each `Access is denied` on a
+    /// document being republished. Linux never refuses that open, so the reader's
+    /// opens are refused at the real call, as that host refuses them, while a real
+    /// writer goes on replacing the file under it.
+    #[test]
+    fn a_published_document_read_mid_replacement_is_read_whole_rather_than_missed() {
+        let root = scratch("read-mid-replacement");
+        let path = root.join("checkpoint.json");
+        let documents = [
+            serde_json::json!({"written": "before", "pad": "a".repeat(64 * 1024)}),
+            serde_json::json!({"written": "after", "pad": "b".repeat(64 * 1024)}),
+        ];
+        write_json(&path, &documents[0]).expect("the first document exists");
+        let replacing = std::sync::atomic::AtomicBool::new(true);
+        // Stops the writer however the reads end, so a read that fails ends the
+        // test with its message rather than leaving the scope waiting on a
+        // writer that never stops.
+        struct Stops<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for Stops<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                let mut replaced = 0_usize;
+                while replacing.load(std::sync::atomic::Ordering::Relaxed) {
+                    write_atomic(
+                        &path,
+                        documents[replaced % 2].to_string().as_bytes(),
+                        Durability::Projection,
+                    )
+                    .expect("the writer replaces the document");
+                    replaced += 1;
+                }
+                replaced
+            });
+            let stops = Stops(&replacing);
+            for _ in 0..50 {
+                let watch = disk::refusing(disk::Step::Read, 2);
+                let read = read_json_opt::<serde_json::Value>(&path);
+                let strict = read_json::<serde_json::Value>(&path);
+                let asked = watch.asked();
+                drop(watch);
+                for (how, seen) in [("read_json_opt", read), ("read_json", strict.ok())] {
+                    assert!(
+                        seen.as_ref().is_some_and(|seen| documents.contains(seen)),
+                        "{how} read a document mid-replacement as {:?} rather than a \
+                         whole one",
+                        seen.map(|seen| seen["written"].clone())
+                    );
+                }
+                assert_eq!(
+                    asked.len(),
+                    4,
+                    "the two refused opens were not each tried again: {asked:?}"
+                );
+            }
+            drop(stops);
+            assert!(
+                writer.join().expect("the writer completed") > 0,
+                "the writer never replaced the document the reads were beside"
+            );
+        });
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A refusal that outlasts a replacement is the host's answer, reported as
+    /// it gave it and naming the document, rather than waited on for ever.
+    #[test]
+    fn a_published_document_the_host_goes_on_refusing_is_reported_as_the_refusal() {
+        let root = scratch("read-refused");
+        let path = root.join("launch.json");
+        write_json(&path, &serde_json::json!({"ok": true})).expect("a document");
+
+        let watch = disk::watching(Some(disk::Step::Read));
+        let began = std::time::Instant::now();
+        let strict = read_json::<serde_json::Value>(&path);
+        let missed = read_json_opt::<serde_json::Value>(&path);
+        drop(watch);
+
+        match strict {
+            Err(Error::Ledger {
+                path: named,
+                source,
+            }) if named == path && source.kind() == io::ErrorKind::PermissionDenied => {}
+            other => panic!("a refusal that did not end was not reported as it: {other:?}"),
+        }
+        assert!(missed.is_none(), "a refused read produced a document");
+        assert!(
+            began.elapsed() >= PUBLISHED_READ_PATIENCE * 2,
+            "a refusal was given up on before the replacement it could be had ended"
+        );
         fs::remove_dir_all(&root).ok();
     }
 
