@@ -922,6 +922,9 @@ impl Source {
     }
 }
 
+// Every call site of this helper sits inside a `#[cfg(unix)]` item, so on a target
+// without those items it is dead code and the crate's own `-D warnings` refuses it.
+#[cfg(unix)]
 fn declaring<'a>(sources: &'a [&'a str], rest: &[&'a str]) -> Vec<&'a str> {
     let mut args = vec!["stop-guard"];
     for source in sources {
