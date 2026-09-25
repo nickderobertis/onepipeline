@@ -2519,11 +2519,12 @@ mod tests {
     /// child's pid on its own stdout, and waits for it. The root's stdout is a
     /// pipe every level beneath inherits, so every announcement arrives on one
     /// stream and each is made by the process that started the level it names
-    /// — the same shape the Unix fixtures take with `echo $$`. What the stream
-    /// does **not** promise is order: `Start-Process` returns with the child
-    /// already running, so a deeper level's announcement, or the leaf's own
-    /// output, can land ahead of the line naming the level above it.
-    /// [`reported_levels`] is what reads the stream, and it says how.
+    /// — the same shape the Unix fixtures take with `echo $$`. The leaf alone is
+    /// kept off it, for the reason [`LEVEL_SCRIPT`] gives. What the stream does
+    /// **not** promise is order: `Start-Process` returns with the child already
+    /// running, so a deeper level's announcement can land ahead of the line
+    /// naming the level above it. [`reported_levels`] is what reads the stream,
+    /// and it says how.
     ///
     /// Nothing here asks the operating system where the tree is — `tests/AGENTS.md`
     /// says why — so there is no image name to tell a level from the
@@ -2552,12 +2553,11 @@ mod tests {
             Ok(pids) => pids,
             Err(why) => abandon(root, &why),
         };
-        // The leaf goes on writing — `ping` reports every reply — into the pipe
-        // every level inherited, so the pipe is drained for as long as the tree
-        // lasts rather than closed once the pids are in. A reader that went away
-        // would turn the leaf's next write into an error it exits on, and a full
-        // pipe would block it: either is a tree changing shape under a test that
-        // has not touched it yet. The thread ends when the last writer does.
+        // Every level still holds the pipe it inherited, so it is drained for as
+        // long as the tree lasts rather than closed once the pids are in: a
+        // level that wrote into a pipe nobody reads would fail or block on it,
+        // which is a tree changing shape under a test that has not touched it
+        // yet. The thread ends when the last writer does.
         std::thread::spawn(move || for _ in lines {});
         (root, pids)
     }
@@ -2572,7 +2572,15 @@ mod tests {
     /// the leaf writes. A level that cannot start says why on the same stream,
     /// under the same `level <n>` prefix, and exits, so the fixture reading pids
     /// fails quoting the reason rather than blocking on a line that never comes.
-    /// `-NoNewWindow` is
+    ///
+    /// Each line is **one** write, its terminator included, and the leaf's output
+    /// goes to a file of its own rather than down the pipe. Both are what keep a
+    /// line whole: several processes write into that pipe, `WriteLine` writes the
+    /// text and the newline as two, and `ping` writes its banner in pieces — so
+    /// an announcement landed inside the banner on a Windows runner, as
+    /// `Pinging 127.0.0.1 with 32 bytes of data:level 1 started <pid>`, and the
+    /// reader waited out all 120 of `ping`'s replies for a line it had already
+    /// been given. `-NoNewWindow` is
     /// what keeps every level a console process on the one console with the
     /// pipe inherited down the tree, and `-PassThru` is what hands the pid back.
     /// The script's own path is quoted by hand, because `Start-Process` joins
@@ -2585,13 +2593,14 @@ try {
   if ($below -gt 1) {
     $child = Start-Process -FilePath 'powershell' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'), ($below - 1)) -PassThru -NoNewWindow
   } else {
-    $child = Start-Process -FilePath 'ping' -ArgumentList @('-n', '120', '127.0.0.1') -PassThru -NoNewWindow
+    $child = Start-Process -FilePath 'ping' -ArgumentList @('-n', '120', '127.0.0.1') -PassThru -NoNewWindow -RedirectStandardOutput ([System.IO.Path]::GetTempFileName())
   }
-  [Console]::Out.WriteLine("level " + $below + " started " + $child.Id)
+  [Console]::Out.Write("level " + $below + " started " + $child.Id + "`r`n")
   [Console]::Out.Flush()
   $child.WaitForExit()
 } catch {
-  [Console]::Out.WriteLine("level " + $below + " could not start the one below it: " + $_.Exception.Message)
+  [Console]::Out.Write("level " + $below + " could not start the one below it: " + $_.Exception.Message + "`r`n")
+  [Console]::Out.Flush()
   exit 1
 }
 "#;
@@ -2602,12 +2611,12 @@ try {
     /// Placed by what each line says rather than by when it arrived: the level
     /// given `below` announces the one directly under the root and the level
     /// given `1` announces the leaf, and the stream carries them in whatever
-    /// order the scheduler ran the levels. Every line without the `level`
-    /// prefix is the leaf's — `ping` writes a blank line and a banner before
-    /// its first reply — and is passed over. A prefixed line that is not an
-    /// announcement is a level saying it could not start, or a stream this
-    /// cannot trust, and either is a failure quoted whole; so is a level heard
-    /// twice, and a stream that ends before every level has spoken.
+    /// order the scheduler ran the levels. Only the levels write here, so a
+    /// blank line is passed over and any other line that is not an announcement
+    /// is a failure quoted whole: a level saying it could not start, or two
+    /// writes run together, which is a line this cannot trust and must not wait
+    /// past. So is a level heard twice, and a stream that ends before every
+    /// level has spoken.
     ///
     /// Not `#[cfg(windows)]`: the fixture that reads through it is, but what it
     /// promises about order and about noise is held on every platform.
@@ -2627,8 +2636,13 @@ try {
                     ))
                 }
             };
-            let Some(said) = line.trim().strip_prefix("level ") else {
+            if line.trim().is_empty() {
                 continue;
+            }
+            let Some(said) = line.trim().strip_prefix("level ") else {
+                return Err(format!(
+                    "the tree said {line:?} where a level's pid was due"
+                ));
             };
             let announced = said.split_once(" started ").and_then(|(level, pid)| {
                 Some((level.parse::<usize>().ok()?, pid.parse::<u32>().ok()?))
@@ -2660,23 +2674,17 @@ try {
         lines.iter().map(|line| Ok((*line).to_owned())).collect()
     }
 
-    /// The tree's levels are placed by what each announcement says, so the
-    /// leaf's own output arriving first and a deeper level announcing before
-    /// the one above it change nothing about the answer.
+    /// The tree's levels are placed by what each announcement says, so a deeper
+    /// level announcing before the one above it changes nothing about the
+    /// answer.
     ///
-    /// The stream is the one a root that is slow to announce produces: the
-    /// leaf's blank line and banner, the middle level naming the leaf, the root
-    /// naming the middle, then a reply.
+    /// The stream is the one a root that is slow to announce produces: a blank
+    /// line, the middle level naming the leaf, the root naming the middle, then
+    /// whatever comes after.
     #[test]
     fn a_trees_levels_are_read_by_what_they_say_and_not_by_when_they_arrive() {
-        let mut stream = a_stream_of(&[
-            "",
-            "Pinging 127.0.0.1 with 32 bytes of data:",
-            "level 1 started 4242",
-            "level 2 started 1717",
-            "Reply from 127.0.0.1: bytes=32 time<1ms TTL=128",
-        ])
-        .into_iter();
+        let mut stream =
+            a_stream_of(&["", "level 1 started 4242", "level 2 started 1717", ""]).into_iter();
         let levels = reported_levels(
             &mut stream,
             std::num::NonZeroUsize::new(2).expect("two levels"),
@@ -2739,6 +2747,25 @@ try {
         assert!(
             elsewhere.contains("level 3"),
             "the failure did not name the level: {elsewhere}"
+        );
+
+        // Two writes run together — the Windows runner's failure, an announcement
+        // landed inside `ping`'s banner — is a failure that quotes the line at
+        // once, never a line passed over while the reader waits for one it has
+        // already been given.
+        let merged = reported_levels(
+            &mut a_stream_of(&[
+                "",
+                "Pinging 127.0.0.1 with 32 bytes of data:level 1 started 4242",
+                "Reply from 127.0.0.1: bytes=32 time<1ms TTL=128",
+            ])
+            .into_iter(),
+            std::num::NonZeroUsize::MIN,
+        )
+        .expect_err("a merged announcement was read as a pid");
+        assert!(
+            merged.contains("of data:level 1 started 4242"),
+            "the failure did not quote the merged line: {merged}"
         );
 
         let twice = reported_levels(
