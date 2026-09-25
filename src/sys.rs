@@ -216,9 +216,22 @@ pub fn stop(pid: u32, how: Stop) -> Teardown {
 /// anything was signalled, since afterwards there is no tree left to descend. A
 /// tree still standing when `patience` runs out is
 /// [`Teardown::PartlySignalled`].
-pub fn stop_and_confirm(pids: &[u32], how: Stop, patience: Duration) -> Teardown {
-    let (established, aimed) = platform_stop(pids, how);
-    confirmed(established, || gone_within(&aimed, patience))
+///
+/// Beside that answer, which of `pids` this teardown's own signal was delivered
+/// to. The answer is about the whole tree, and a caller that records what *it*
+/// ended needs it per root: a root that went of its own accord before its ask
+/// was in a tree reported [`Teardown::Signalled`] all the same, and was not ended
+/// by this teardown.
+pub fn stop_and_confirm(pids: &[u32], how: Stop, patience: Duration) -> (Teardown, Vec<u32>) {
+    let (established, aimed, delivered) = platform_stop(pids, how);
+    let roots = delivered
+        .into_iter()
+        .filter(|pid| pids.contains(pid))
+        .collect();
+    (
+        confirmed(established, || gone_within(&aimed, patience)),
+        roots,
+    )
 }
 
 /// What the bounded liveness probe makes of what one round of signalling
@@ -326,21 +339,25 @@ fn aimable(roots: &[u32]) -> Vec<u32> {
     aimed
 }
 
+/// What one round of signalling established, the pids it aimed at, and the pids
+/// its signal was delivered to.
+type Signalling = (Teardown, Vec<u32>, Vec<u32>);
+
 #[cfg(unix)]
-fn platform_stop(roots: &[u32], how: Stop) -> (Teardown, Vec<u32>) {
+fn platform_stop(roots: &[u32], how: Stop) -> Signalling {
     let signal = match how {
         Stop::Politely => libc::SIGTERM,
         Stop::Now => libc::SIGKILL,
     };
     let mut aimed = aimable(roots);
     if aimed.is_empty() {
-        return (Teardown::NothingToStop, aimed);
+        return (Teardown::NothingToStop, aimed, Vec::new());
     }
     // The table is read **before** anything is signalled: a process whose parent
     // has died is reparented at once, so a table read after any root is gone no
     // longer descends to what was under it.
     let Some(table) = process_table() else {
-        return (Teardown::NotAttempted, Vec::new());
+        return (Teardown::NotAttempted, Vec::new(), Vec::new());
     };
     // The roots first, so what is left has stopped growing while its members are
     // taken down.
@@ -357,7 +374,13 @@ fn platform_stop(roots: &[u32], how: Stop) -> (Teardown, Vec<u32>) {
     // nothing but processes already gone reached no tree at all, which is the
     // answer a caller reports as such rather than as a stop it made.
     let answers: Vec<Reached> = aimed.iter().map(|pid| signal_one(*pid, signal)).collect();
-    (established(&answers), aimed)
+    let delivered = aimed
+        .iter()
+        .zip(&answers)
+        .filter(|(_, answer)| **answer == Reached::Delivered)
+        .map(|(pid, _)| *pid)
+        .collect();
+    (established(&answers), aimed, delivered)
 }
 
 /// What the answers from one round of signalling establish about the tree.
@@ -563,16 +586,16 @@ fn parse_table(listed: &str) -> Option<Vec<(u32, u32)>> {
 // real `stop` there, and `a_confirmed_stop_answers_only_once_every_descendant_is_gone` holds the
 // enumeration below on both platforms.
 #[cfg(windows)]
-fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
+fn platform_stop(roots: &[u32], _how: Stop) -> Signalling {
     let aimed_roots: Vec<u32> = aimable(roots)
         .into_iter()
         .filter(|pid| platform_process_may_be_live(*pid))
         .collect();
     if aimed_roots.is_empty() {
-        return (Teardown::NothingToStop, aimed_roots);
+        return (Teardown::NothingToStop, aimed_roots, Vec::new());
     }
     let Some(table) = process_table() else {
-        return (Teardown::NotAttempted, Vec::new());
+        return (Teardown::NotAttempted, Vec::new(), Vec::new());
     };
     let mut tree = aimed_roots.clone();
     for root in &aimed_roots {
@@ -588,7 +611,7 @@ fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
         .filter(|pid| platform_process_may_be_live(*pid))
         .collect();
     if aimed.is_empty() {
-        return (Teardown::NothingToStop, aimed);
+        return (Teardown::NothingToStop, aimed, Vec::new());
     }
     // Every process is asked separately, because `taskkill` takes one root, and
     // the answers are folded the way a teardown of several trees has to be: one
@@ -607,13 +630,20 @@ fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
     // since the listing is what `/T` still reaches there.
     let mut walked = true;
     let mut attempted = false;
+    let mut delivered = Vec::new();
     for pid in &aimed {
         let reach = if aimed_roots.contains(pid) {
             Reach::Alone
         } else {
             Reach::Tree
         };
-        match taskkill_established(taskkill(*pid, reach), || platform_process_may_be_live(*pid)) {
+        let ran = taskkill(*pid, reach);
+        // Delivered only where `taskkill` itself succeeded: one that failed on a
+        // process already gone ended nothing, whatever the fold makes of it.
+        if matches!(&ran, Ok(status) if status.success()) {
+            delivered.push(*pid);
+        }
+        match taskkill_established(ran, || platform_process_may_be_live(*pid)) {
             Teardown::Signalled => attempted = true,
             Teardown::PartlySignalled => {
                 attempted = true;
@@ -634,7 +664,7 @@ fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
         (false, true) => Teardown::PartlySignalled,
         (false, false) => Teardown::NotAttempted,
     };
-    (established, aimed)
+    (established, aimed, delivered)
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
@@ -2424,7 +2454,7 @@ mod tests {
                 Stop::Politely,
                 std::time::Duration::from_millis(300)
             ),
-            Teardown::PartlySignalled,
+            (Teardown::PartlySignalled, vec![deaf]),
             "a stop watched pid {deaf} never go and still called it a clean stop"
         );
         assert!(
@@ -2434,12 +2464,37 @@ mod tests {
 
         assert_eq!(
             stop_and_confirm(&[deaf], Stop::Now, std::time::Duration::from_secs(10)),
-            Teardown::Signalled,
+            (Teardown::Signalled, vec![deaf]),
             "a tree that went was not reported as reached"
         );
         assert!(
             !process_may_be_live(deaf),
             "the forceful ask left pid {deaf} running"
+        );
+    }
+
+    /// A root that went before its ask is in the teardown's answer — the tree was
+    /// reached, and nothing is left of it — but not among the roots this
+    /// teardown's signal was delivered to, so a caller recording what *it* ended
+    /// does not record that root.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_gone_before_its_ask_is_not_one_the_signal_was_delivered_to() {
+        let mut gone = std::process::Command::new("true")
+            .spawn()
+            .expect("a process that exits at once");
+        let went = gone.id();
+        gone.wait().expect("it is reaped, so nothing holds its pid");
+        let live = orphaned("sh -c 'echo $$; sleep 120'", 1)[0];
+
+        assert_eq!(
+            stop_and_confirm(&[went, live], Stop::Now, std::time::Duration::from_secs(10)),
+            (Teardown::Signalled, vec![live]),
+            "the root that went before its ask, pid {went}, was reported as signalled"
+        );
+        assert!(
+            !process_may_be_live(live),
+            "the forceful ask left pid {live} running"
         );
     }
 
@@ -2472,7 +2527,7 @@ mod tests {
 
         assert_eq!(
             stop_and_confirm(&roots, Stop::Now, std::time::Duration::from_secs(10)),
-            Teardown::Signalled,
+            (Teardown::Signalled, roots.clone()),
             "a stop that ended {every:?} did not report reaching them"
         );
         let surviving: Vec<u32> = every
@@ -2997,7 +3052,7 @@ try {
         );
 
         assert_eq!(
-            stop_and_confirm(&roots, Stop::Now, std::time::Duration::from_secs(10)),
+            stop_and_confirm(&roots, Stop::Now, std::time::Duration::from_secs(10)).0,
             Teardown::Signalled,
             "a stop that ended the trees {every:?} did not report reaching them"
         );
@@ -3182,7 +3237,8 @@ try {
             let _ = tree.wait();
         });
 
-        let established = stop_and_confirm(&[root], Stop::Now, std::time::Duration::from_secs(30));
+        let (established, _) =
+            stop_and_confirm(&[root], Stop::Now, std::time::Duration::from_secs(30));
 
         // Read the instant the answer came back, and only then clean up:
         // anything that outlived the stop is what this exists to catch, and a
