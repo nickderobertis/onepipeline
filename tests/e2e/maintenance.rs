@@ -1425,6 +1425,94 @@ fn a_sweep_over_session_records_it_cannot_read_records_the_refusal_and_runs_noth
 // llmlint: ignore-end[tests_mirror_real_usage]
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
+/// A pass on which no sweep is due lists nothing: not the registry, not the
+/// session records, not the workspaces.
+///
+/// A sweep is what reads all three, and the one sweep the pace allows has ended
+/// before the window opens. The registry and the session records are then made
+/// unreadable, so a pass that read either would meet the break, and a sweep
+/// that met it would journal the refusal. Passes driven across the window with
+/// the driver's own sweep count unmoved, nothing journalled and nothing about
+/// either in the driver's log are passes that never looked.
+// llmlint: ignore-block[tests_mirror_real_usage] no verb of the sibling's leaves the
+// registry or the session records unreadable, so the state root is written directly;
+// the passes, the count and the log are the compiled driver's own.
+#[test]
+fn a_pass_with_no_sweep_due_lists_nothing() {
+    let world = pooled_world("maintenance-no-listing", None);
+    let repo = world.repository("local-direct", &[]);
+    pooled_with_maintenance(&world, None);
+    cut_a_slot(&world, &repo.checkout);
+    let stamped = world
+        .cmd_on(&onevcs_binary(), &["pool", "maintain", "service"])
+        .output()
+        .expect("onevcs runs");
+    assert!(
+        stamped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stamped.stderr)
+    );
+    let hour = schedule(&world, "hour", "1h", "");
+    held_run(&world, "listless", 2, &["--maintenance-config", &hour]).exited(0);
+    until_sweeps(&world, "listless", 1);
+    world.until("the sweep to end", |world| !sweeping(world, "listless"));
+
+    let registry = world.onevcs_home().join("registry.json");
+    let saved = std::fs::read_to_string(&registry).expect("the host has a registry");
+    let sessions = world.onevcs_home().join("sessions");
+    let aside = world.onevcs_home().join("sessions.aside");
+    let log = world.run_file("listless", "driver.log");
+    let logged = std::fs::read_to_string(&log).unwrap_or_default().len();
+    let before = crate::harness::counts(&world, "listless");
+    std::fs::write(&registry, "{ not a registry").expect("the registry is made unreadable");
+    std::fs::rename(&sessions, &aside).expect("the sessions directory moves aside");
+    std::fs::write(&sessions, "this is not a directory")
+        .expect("a file takes the sessions directory's place");
+
+    // Idle passes, each provoked by a channel command the loop consumes and then
+    // sits idle after, across a window rather than a burst.
+    let window = std::time::Instant::now();
+    let mut nth = 0;
+    while nth < 5 || window.elapsed() < std::time::Duration::from_secs(3) {
+        world
+            .run_with_stdin(
+                &["reply", "listless"],
+                &json!({"version": 2, "commands": [
+                    {"op": "note", "id": "listless-build", "addressee": "worker",
+                     "text": format!("idle pass {nth}"), "deliver": "next"}
+                ]})
+                .to_string(),
+            )
+            .exited(0);
+        world.until("the loop to pass again", |world| {
+            crate::harness::counts(world, "listless")
+                .since(before)
+                .passes
+                > nth
+        });
+        nth += 1;
+    }
+    let did = crate::harness::counts(&world, "listless").since(before);
+    let said = std::fs::read_to_string(&log).unwrap_or_default();
+    std::fs::remove_file(&sessions).expect("the file in the directory's place goes");
+    std::fs::rename(&aside, &sessions).expect("the sessions directory comes back");
+    std::fs::write(&registry, &saved).expect("the registry is put back");
+
+    assert!(did.passes >= 5, "{did:?}");
+    assert_eq!(
+        did.maintenance_sweeps, 0,
+        "a pass inside the pace swept: {did:?}"
+    );
+    assert!(records(&world, "listless").is_empty(), "{}", world.dump());
+    let since = &said[logged.min(said.len())..];
+    assert!(
+        !since.contains("registry") && !since.contains("session"),
+        "a pass with no sweep due read what was broken:\n{since}"
+    );
+    release(&world, "listless");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// Both halves of the maintain fixture answer the same way: what one platform's
 /// half names, the other's names too, so a name added to one alone fails here
 /// rather than on the other platform's leg with nothing pointing at the fixture.
@@ -1448,4 +1536,67 @@ fn both_halves_of_each_fixture_take_the_same_arguments() {
             assert!(batch.contains(mark), "{bat} no longer names {mark}");
         }
     }
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The journeys in this module take the whole of the `e2e` group, so none of
+/// them can run beside a rate journey — `loopcost`'s and `adoption`'s, which
+/// count loop passes across a window and are in that same group.
+///
+/// Held as the runner reads it: the group's cap, the override naming this
+/// module at that cap with no earlier one deciding its threads, and the
+/// assignment putting every test of this binary into the group. A later edit
+/// dropping or narrowing any of the three fails here rather than as a rate
+/// journey that is slow on one platform's leg.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is the runner's
+// configuration, which only nextest executes; running nextest from inside a test
+// it is running is the nesting `.config/nextest.toml` already declines.
+#[test]
+fn the_maintenance_journeys_take_the_whole_group() {
+    let text = std::fs::read_to_string(repo_file(".config/nextest.toml"))
+        .expect("the runner's configuration ships");
+    let config: toml::Value = toml::from_str(&text).expect("the configuration parses");
+    let cap = config["test-groups"]["e2e"]["max-threads"]
+        .as_integer()
+        .expect("the e2e group has a cap");
+    let overrides = config["profile"]["default"]["overrides"]
+        .as_array()
+        .expect("the default profile has overrides");
+    let filter = |entry: &toml::Value| entry["filter"].as_str().unwrap_or_default().to_owned();
+    let required = overrides
+        .iter()
+        .find(|entry| filter(entry).contains("test(/^maintenance::/)"))
+        .expect("an override names this module");
+    assert_eq!(filter(required), "binary(e2e) and test(/^maintenance::/)");
+    assert_eq!(
+        required
+            .get("threads-required")
+            .and_then(toml::Value::as_integer),
+        Some(cap)
+    );
+    assert!(
+        module_path!().ends_with("::maintenance"),
+        "the override's filter no longer names this module: {}",
+        module_path!()
+    );
+    // The first override to set a setting wins it, and the host-sized one before
+    // this names no test of this module.
+    for earlier in overrides
+        .iter()
+        .take_while(|entry| filter(entry) != filter(required))
+    {
+        if earlier.get("threads-required").is_some() {
+            assert_eq!(filter(earlier), "test(/a_host_sized/)", "{earlier}");
+        }
+    }
+    let grouped = overrides
+        .iter()
+        .find(|entry| entry.get("test-group").is_some())
+        .expect("an override assigns the e2e group");
+    assert_eq!(grouped["test-group"].as_str(), Some("e2e"));
+    assert!(
+        filter(grouped)
+            .split(" or ")
+            .any(|term| term == "binary(e2e)"),
+        "the first group assignment no longer takes every test of this binary: {grouped}"
+    );
 } // llmlint: ignore-end[tests_mirror_real_usage]

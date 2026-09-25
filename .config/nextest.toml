@@ -101,6 +101,18 @@ status-level = "pass"
 filter = 'test(/a_host_sized/)'
 threads-required = 4
 
+# The pool-maintenance journeys take the whole group too, so none of them runs
+# beside the `loopcost` and `adoption` journeys that count loop passes per window:
+# a maintenance journey's drivers, slots and `git` work would be contention
+# inside that window, which a rate journey cannot tell from a slower loop. Those
+# are the ones left at one thread because they are the long ones — ~680s of this
+# host's test-time against ~120s for the maintenance module — so the module that
+# is short is the one that waits. `maintenance::the_maintenance_journeys_take_the_whole_group`
+# holds this in place.
+[[profile.default.overrides]]
+filter = 'binary(e2e) and test(/^maintenance::/)'
+threads-required = 4
+
 # Declared on `default` and inherited by `ci`, so the cap holds on the
 # cross-platform legs too. Asked of the runner rather than assumed: `cargo nextest
 # show-config test-groups --profile ci` reports `group: e2e (max threads = 4)`.
