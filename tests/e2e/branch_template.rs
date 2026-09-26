@@ -232,20 +232,44 @@ fn the_flag_beats_the_environment_which_beats_the_launch_config_which_beats_the_
     );
     assert_eq!(cut_branches(&world, &run), ["config/service"]);
 
-    // A blank flag is this launch naming none, over the config beneath it: the
-    // branch is the one `onevcs` derives.
-    let run = settle(
-        &world,
-        "unnamed",
-        vec![lifecycle("service", &[])],
-        &["--launch-config", &config, FLAG, ""],
-    );
-    let derived = cut_branches(&world, &run);
-    assert!(
-        derived.len() == 1 && derived[0].starts_with("onevcs/"),
-        "a blank template still named the branch: {derived:?}"
-    );
-    assert!(world.run_json(&run, "launch.json").get(KEY).is_none());
+    // A blank layer is this launch naming none, over every layer beneath it — the
+    // flag over the config, the variable over the config, and a blank key over the
+    // default: the branch is the one `onevcs` derives, and the record names none.
+    let blank = world.root.join("blank.yaml");
+    std::fs::write(&blank, format!("schema_version: 11\n{KEY}: \"\"\n"))
+        .expect("the blank config is written");
+    let blank = blank.to_string_lossy().into_owned();
+    for (run, extra, variable) in [
+        (
+            "blankflag",
+            vec!["--launch-config", config.as_str(), FLAG, ""],
+            None,
+        ),
+        (
+            "blankenv",
+            vec!["--launch-config", config.as_str()],
+            Some(""),
+        ),
+        ("blankkey", vec!["--launch-config", blank.as_str()], None),
+    ] {
+        let path = world.plan(run, &plan_of(run, vec![lifecycle("service", &[])]));
+        let mut args = vec!["start", path.as_str(), "--attach"];
+        args.extend(extra);
+        let mut command = world.cmd(&args);
+        if let Some(variable) = variable {
+            command.env(ENVIRONMENT, variable);
+        }
+        world.run_on(command, run).settled();
+        let derived = cut_branches(&world, run);
+        assert!(
+            derived.len() == 1 && derived[0].starts_with("onevcs/"),
+            "{run}: a blank template still named the branch: {derived:?}"
+        );
+        assert!(
+            world.run_json(run, "launch.json").get(KEY).is_none(),
+            "{run}"
+        );
+    }
 }
 
 #[test]
@@ -297,8 +321,17 @@ fn a_template_that_does_not_parse_or_a_key_its_version_never_had_is_refused_befo
                 "`{KEY}` is a schema 11 key and this config declares schema_version {earlier}"
             ));
     }
+    // A task stating the record it is read out of, as metadata: refused by the key.
+    let mut stating = lifecycle("service", &[]);
+    stating["task_record"] = json!({"id": "elsewhere", "title": "not this task"});
+    let stated = world.plan("stated", &plan_of("stated", vec![stating]));
+    world
+        .run(&["start", &stated])
+        .exited(REFUSED)
+        .err_has("`onepipeline.task_record` is not a node field");
     // No run was minted by any of them.
     assert!(!world.run_file("refused", "launch.json").is_file());
+    assert!(!world.run_file("stated", "launch.json").is_file());
 
     // `adopt` takes no template of its own.
     world
@@ -414,6 +447,53 @@ fn a_retry_pinned_to_the_branch_its_node_preserved_continues_it_and_renders_noth
         "the pinned retry cut a branch of its own: {branches:?}\n{}",
         world.dump()
     );
+}
+
+#[test]
+fn a_retry_that_cuts_a_branch_names_it_for_the_task_its_node_was_read_out_of() {
+    let world = keyed(publishing("branch-retried"));
+    world.script("service-2.work", "the replacement wrote this\n");
+    // The first attempt cannot be named, so it cuts nothing and preserves no branch:
+    // the replacement is not pinned, and cuts one of its own.
+    let template =
+        "{% if node.id == \"service\" %}{{ nothing }}{% endif %}{{ task.key }}/{{ node.id }}";
+    let run = settle(
+        &world,
+        "retried",
+        vec![lifecycle("service", &[])],
+        &[FLAG, template],
+    );
+    assert_eq!(settlement(&world, &run, "service")["status"], "failed");
+    assert!(cut_branches(&world, &run).is_empty());
+
+    // A planner writes the replacement, so it states no task record — and names the
+    // branch it cuts for the task it replaces, whose key it inherits.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "version": 2,
+                "commands": [{
+                    "op": "retry",
+                    "id": "service",
+                    "node": {"id": "service-2", "repo": "service", "persona": "engineer",
+                             "title": "feat: ship service",
+                             "task": "## What\nShip it.\n\n## Why\nIt failed.\n\n\
+                                      ## Acceptance criteria\n- shipped."},
+                }],
+            })
+            .to_string(),
+        )
+        .exited(0);
+    world.run(&["adopt", &run]).exited(0);
+
+    assert_eq!(
+        cut_branches(&world, &run),
+        [format!("{TASK_KEY}/service-2")],
+        "{}",
+        world.dump()
+    );
+    assert_eq!(settlement(&world, &run, "service-2")["status"], "done");
 }
 
 #[test]

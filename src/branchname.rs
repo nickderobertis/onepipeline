@@ -58,22 +58,35 @@ fn environment() -> minijinja::Environment<'static> {
     environment
 }
 
-/// Refuse a template that does not parse, naming where it came from.
+/// A branch-name template that parses: the one way this crate holds one.
 ///
-/// Asked at the launch, of whichever layer won, before a run is minted.
-///
-/// # Errors
-///
-/// [`Error::Invalid`] naming `whence` and the parser's own error.
-pub(crate) fn parses(template: &str, whence: &str) -> Result<()> {
-    environment()
-        .template_from_str(template)
-        .map(|_| ())
-        .map_err(|error| {
+/// Built only by [`BranchTemplate::parse`], so a template that reaches a render
+/// has crossed the parser once — at the launch, naming the layer it came from, and
+/// again wherever it is read back off the launch record, which is external input
+/// like any other file this process re-reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BranchTemplate(String);
+
+impl BranchTemplate {
+    /// Parse `text`, refusing one that does not parse and naming `whence` — the
+    /// flag, the variable, or the key and the file that carried it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] naming `whence` and the parser's own error.
+    pub(crate) fn parse(text: &str, whence: &str) -> Result<Self> {
+        environment().template_from_str(text).map_err(|error| {
             Error::Invalid(format!(
                 "{whence}: the branch-name template does not parse: {error}"
             ))
-        })
+        })?;
+        Ok(Self(text.to_owned()))
+    }
+
+    /// The template as it was written, which is what the launch record keeps.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// The template a launch renders its branches with, off the first layer that
@@ -94,7 +107,7 @@ pub(crate) fn resolve(
     flag: Option<&str>,
     configured: Option<&str>,
     config: Option<&std::path::Path>,
-) -> Result<Option<String>> {
+) -> Result<Option<BranchTemplate>> {
     let (template, whence) = match flag {
         Some(flag) => (flag.to_owned(), FLAG.to_owned()),
         None => match std::env::var(ENVIRONMENT) {
@@ -123,8 +136,7 @@ pub(crate) fn resolve(
     if template.trim().is_empty() {
         return Ok(None);
     }
-    parses(&template, &whence)?;
-    Ok(Some(template))
+    BranchTemplate::parse(&template, &whence).map(Some)
 }
 
 /// Render a template over the variables a node's branch is named from.
@@ -152,8 +164,8 @@ pub fn render(template: &str, variables: &Value) -> std::result::Result<String, 
 /// the plan and run it renders over.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Naming {
-    /// The template, as the launch record retains it.
-    pub template: String,
+    /// The template the launch record retains.
+    pub template: BranchTemplate,
     /// `plan.name`: `onepipeline.name`, else the project's own title.
     pub plan_name: String,
     /// `plan.id`: the qualified project id the run was launched with.
@@ -162,34 +174,45 @@ pub(crate) struct Naming {
     pub run: String,
 }
 
+/// What a run names its branches with, or why it cannot name one: the sentence a
+/// node that would cut a branch settles on.
+pub(crate) type RunNaming = std::result::Result<Naming, String>;
+
 impl Naming {
     /// What `launch`'s run names its branches with, or `None` for a run whose
     /// launch named no template — including every run launched before there was
     /// one — which proposes no name, so `onevcs` derives each as it always has.
     ///
-    /// `plan.name` is read off the plan the launch recorded, which the store's
-    /// mapping has already given the project's own title where
-    /// `onepipeline.name` states none; a record this build cannot read falls back
-    /// to the project's native id rather than to no name at all.
+    /// Both halves are read off the run's own records, which are external input
+    /// by the time a driver reads them back: the template off the launch record,
+    /// parsed again, and `plan.name` off the plan the launch recorded — which the
+    /// store's mapping has already given the project's own title where
+    /// `onepipeline.name` states none. A record that does not parse or cannot be
+    /// read is `Err`, carrying why: a node that would cut a branch settles on it,
+    /// and no branch is named out of a record this build could not read.
     pub fn of_run(
         paths: &crate::ledger::RunPaths,
         launch: &crate::ledger::LaunchRecord,
-    ) -> Option<Self> {
-        let template = launch.branch_template()?.to_owned();
-        let plan_name = crate::ledger::read_json::<crate::plan::Plan>(&paths.plan())
-            .ok()
-            .and_then(|plan| plan.name)
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or_else(|| {
-                launch
-                    .project
-                    .split_once(':')
-                    .map_or(launch.project.as_str(), |(_, native)| native)
-                    .to_owned()
-            });
-        Some(Self {
+    ) -> Option<RunNaming> {
+        let recorded = launch.branch_template()?;
+        Some(Self::read(paths, launch, recorded))
+    }
+
+    fn read(
+        paths: &crate::ledger::RunPaths,
+        launch: &crate::ledger::LaunchRecord,
+        recorded: &str,
+    ) -> RunNaming {
+        let template = BranchTemplate::parse(recorded, &format!("the launch record's `{KEY}`"))
+            .map_err(|refused| refused.to_string())?;
+        let plan = crate::ledger::read_json::<crate::plan::Plan>(&paths.plan()).map_err(|why| {
+            format!(
+                "the run's recorded plan, which `plan.name` is read from, could not be read: {why}"
+            )
+        })?;
+        Ok(Self {
             template,
-            plan_name,
+            plan_name: plan.name.unwrap_or_default(),
             plan_id: launch.project.clone(),
             run: paths.run.clone(),
         })
@@ -224,14 +247,38 @@ impl Naming {
     /// A sentence naming the node and the template, carrying the renderer's own
     /// error — the settlement's detail as it stands.
     pub fn render(&self, node: &crate::plan::Node) -> std::result::Result<String, String> {
-        render(&self.template, &self.variables(node)).map_err(|error| {
-            format!(
-                "the branch-name template could not name the branch of node '{}', so no \
-                 branch was cut: {error} (template: {})",
-                node.id, self.template
+        render(self.template.as_str(), &self.variables(node)).map_err(|error| {
+            unnamed(
+                node,
+                &format!("{error} (template: {})", self.template.as_str()),
             )
         })
     }
+}
+
+/// The name `node`'s session proposes its branch at, under what `naming` says.
+///
+/// # Errors
+///
+/// A sentence naming the node, carrying why no name could be rendered — the
+/// settlement's detail as it stands.
+pub(crate) fn name_for(
+    naming: &RunNaming,
+    node: &crate::plan::Node,
+) -> std::result::Result<String, String> {
+    match naming {
+        Ok(naming) => naming.render(node),
+        Err(why) => Err(unnamed(node, why)),
+    }
+}
+
+/// The one sentence a node whose branch could not be named settles on.
+fn unnamed(node: &crate::plan::Node, why: &str) -> String {
+    format!(
+        "the branch-name template could not name the branch of node '{}', so no branch was \
+         cut: {why}",
+        node.id
+    )
 }
 
 #[cfg(test)]
@@ -241,7 +288,7 @@ mod tests {
 
     fn naming(template: &str) -> Naming {
         Naming {
-            template: template.to_owned(),
+            template: BranchTemplate(template.to_owned()),
             plan_name: "demo".to_owned(),
             plan_id: "plans:demo".to_owned(),
             run: "demo-1".to_owned(),
@@ -297,10 +344,58 @@ mod tests {
 
     #[test]
     fn a_template_that_does_not_parse_is_refused_naming_where_it_came_from() {
-        let refused = parses("{{ task.key", FLAG).expect_err("unterminated");
+        let refused = BranchTemplate::parse("{{ task.key", FLAG).expect_err("unterminated");
         let message = refused.to_string();
         assert!(message.contains(&format!("{FLAG}: ")), "{message}");
         assert!(message.contains("does not parse"), "{message}");
-        parses(DEFAULT_TEMPLATE, KEY).expect("the default parses");
+        BranchTemplate::parse(DEFAULT_TEMPLATE, KEY).expect("the default parses");
+    }
+
+    #[test]
+    fn a_run_whose_records_cannot_be_read_names_no_branch_and_says_why() {
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-branchname-{}", std::process::id()));
+        let paths = crate::ledger::RunPaths::under(&root, "demo-1");
+        paths.create().expect("a run root");
+        let launch: crate::ledger::LaunchRecord = serde_json::from_value(json!({
+            "run_id": "demo-1",
+            "project": "plans:demo",
+            KEY: DEFAULT_TEMPLATE,
+        }))
+        .expect("a launch record");
+        // No recorded plan, so no `plan.name` to render with.
+        let naming = Naming::of_run(&paths, &launch).expect("the launch named a template");
+        let why = name_for(&naming, &node(None)).expect_err("no plan was recorded");
+        assert!(why.contains("node 'build'"), "{why}");
+        assert!(why.contains("recorded plan"), "{why}");
+        // A recorded template that no longer parses is read back as the refusal.
+        std::fs::write(
+            paths.plan(),
+            r#"{"schema_version": 3, "name": "demo", "tasks": []}"#,
+        )
+        .expect("a recorded plan");
+        let edited = crate::ledger::LaunchRecord {
+            branch_template: "{{ node.id".into(),
+            ..launch.clone()
+        };
+        let why = name_for(
+            &Naming::of_run(&paths, &edited).expect("the launch named a template"),
+            &node(None),
+        )
+        .expect_err("the record does not parse");
+        assert!(
+            why.contains("the launch record's `branch_template`"),
+            "{why}"
+        );
+        // And one it can read names the branch.
+        let naming = Naming::of_run(&paths, &launch).expect("the launch named a template");
+        assert_eq!(name_for(&naming, &node(None)).as_deref(), Ok("demo/build"));
+        // A launch naming none proposes nothing.
+        let none = crate::ledger::LaunchRecord {
+            branch_template: String::new(),
+            ..launch
+        };
+        assert!(Naming::of_run(&paths, &none).is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -1452,12 +1452,51 @@ mod tests {
         let manifest: toml::Value =
             toml::from_str(include_str!("../Cargo.toml")).expect("this manifest is TOML");
         let required = &manifest["workspace"]["dependencies"];
-        for crate_name in ["onetaskgraph-core", "onetaskgraph-local-md"] {
+        for crate_name in [
+            "onetaskgraph-core",
+            "onetaskgraph-local-md",
+            "onetaskgraph-plugin-api",
+        ] {
             assert_eq!(
                 required[crate_name].as_str(),
                 Some(format!("={declared}").as_str()),
                 "{crate_name} is not required at exactly the release the checks install"
             );
+        }
+    }
+
+    /// What this module reads off a task is what the plugin contract declares a task
+    /// to be: a task serialized by the contract's own type, with a key and without one,
+    /// reads back as the key it carries. A rename on that side fails here rather than
+    /// reading every task as keyless.
+    #[test]
+    fn a_task_the_plugin_contract_serializes_reads_back_with_its_key() {
+        use onetaskgraph_plugin_api::{NativeId, Status, StatusCategory, Task};
+        let task = |key: Option<&str>| Task {
+            id: NativeId::from("tasks/build.md"),
+            key: key.map(str::to_owned),
+            title: "Build it".into(),
+            content: None,
+            status: Status {
+                category: StatusCategory::Todo,
+                name: "todo".into(),
+            },
+            labels: Vec::new(),
+            project: None,
+            url: None,
+            location: None,
+            created_at: None,
+            updated_at: None,
+            metadata: BTreeMap::new(),
+            repositories: Vec::new(),
+            delivers: Vec::new(),
+            delivered_by: Vec::new(),
+        };
+        for key in [Some("ENG-123"), None] {
+            let written = serde_json::to_value(task(key)).expect("a task serializes");
+            let read: TaskItem = serde_json::from_value(written).expect("the item reads");
+            assert_eq!(read.key.as_deref(), key);
+            assert_eq!(read.title, "Build it");
         }
     }
 

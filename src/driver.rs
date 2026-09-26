@@ -1008,7 +1008,10 @@ fn start(args: &StartArgs) -> Result<i32> {
         filters,
         bus_config,
         maintenance_config,
-        branch_template: branch_template.unwrap_or_default(),
+        branch_template: branch_template
+            .as_ref()
+            .map(|template| template.as_str().to_owned())
+            .unwrap_or_default(),
         oneharness_sessions: Some(sessions_file(&paths)?),
     };
     record.driven_by_this_process();

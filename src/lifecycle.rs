@@ -52,8 +52,9 @@ pub struct Launch {
     /// What every followed `onevcs` session's stream is read through.
     pub vcs_filter: Option<EventFilter>,
     /// What a branch a session cuts is named from, when the launch named a
-    /// template. `None` proposes no name, and `onevcs` derives one.
-    pub branch_naming: Option<crate::branchname::Naming>,
+    /// template — or why the run's records could not say. `None` proposes no
+    /// name, and `onevcs` derives one.
+    pub branch_naming: Option<crate::branchname::RunNaming>,
 }
 
 /// Run one lifecycle node to settlement, re-dispatching it while its
