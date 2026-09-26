@@ -387,10 +387,8 @@ mod tests {
             why.contains("the launch record's `branch_template`"),
             "{why}"
         );
-        // And one it can read names the branch.
         let naming = Naming::of_run(&paths, &launch).expect("the launch named a template");
         assert_eq!(name_for(&naming, &node(None)).as_deref(), Ok("demo/build"));
-        // A launch naming none proposes nothing.
         let none = crate::ledger::LaunchRecord {
             branch_template: String::new(),
             ..launch

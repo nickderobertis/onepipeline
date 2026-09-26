@@ -335,22 +335,8 @@ fn attempt_once(
 ) -> Attempt {
     let run = paths.run.as_str();
     let vcs_filter = launch.vcs_filter.as_ref();
-    let request = match crate::vcs::opening_for(node, launch.branch_naming.as_ref()) {
-        Some(Ok(request)) => request,
-        // The template could not name the branch this node would cut. Settled
-        // before any session opens — the executor refusing before any work began,
-        // which carries no work to lose — and never answered by cutting the branch
-        // under some other name.
-        Some(Err(why)) => {
-            return Attempt::settled(Settlement {
-                detail: Some(why),
-                ..Settlement::plain(
-                    &node.id,
-                    NodeStatus::Failed,
-                    Some(engine::INFRASTRUCTURE_FAILURE),
-                )
-            })
-        }
+    let request = match crate::vcs::request_for(node) {
+        Some(request) => request,
         None => {
             return Attempt::settled(Settlement {
                 detail: Some("a lifecycle node needs a repo".into()),
@@ -460,7 +446,27 @@ fn attempt_once(
                 branch_name: None,
                 ..request.clone()
             },
-            None => request.clone(),
+            // The branch is about to be cut, so this — and not the node's start,
+            // which a human-first or no-diff node passes without cutting one — is
+            // where the template has to name it. One that cannot is settled before
+            // any session opens: nothing has run, so there is no work to lose, and
+            // the branch is never cut under some other name.
+            None => {
+                match crate::vcs::opening_for(request.clone(), node, launch.branch_naming.as_ref())
+                {
+                    Ok(opening) => opening,
+                    Err(why) => {
+                        return Attempt::settled(Settlement {
+                            detail: Some(why),
+                            ..Settlement::plain(
+                                &node.id,
+                                NodeStatus::Failed,
+                                Some(engine::INFRASTRUCTURE_FAILURE),
+                            )
+                        })
+                    }
+                }
+            }
         };
         // And works in the worktree the first step's session opened, rather than
         // asking for a session of its own. `onevcs` cuts every session its own

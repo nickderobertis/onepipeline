@@ -20,7 +20,7 @@
 // carry. `harness.rs` carries the same suppression and the full rationale.
 
 // llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
-// assumed: the thirteen journeys here take about 50 seconds on the wall under the suite's
+// assumed: the fourteen journeys here take about 50 seconds on the wall under the suite's
 // parallelism, each cutting a real branch through the linked `onevcs` over real git. What
 // they exercise is `branchname`, `vcs::opening_for`, the lifecycle's session open, the
 // launch in `driver`, the store mapping in `taskgraph` and the write-back together, which
@@ -328,7 +328,6 @@ fn a_template_that_does_not_parse_or_a_key_its_version_never_had_is_refused_befo
         .exited(REFUSED)
         .err_has(&format!("`{KEY}` in {}", config.display()))
         .err_has("does not parse");
-    // Under every version before the one it arrived at, by its name.
     for earlier in onepipeline::filter::LAUNCH_CONFIG_SCHEMA_VERSIONS_READ
         .iter()
         .filter(|version| **version < onepipeline::branchname::CONFIG_SCHEMA_VERSION)
@@ -400,6 +399,44 @@ fn a_template_that_fails_or_renders_nothing_at_a_node_fails_it_and_cuts_no_branc
         1,
         "a branch was cut beside the base"
     );
+}
+
+#[test]
+fn a_template_that_cannot_render_holds_back_no_node_that_cuts_no_branch() {
+    let world = World::new("branch-uncut");
+    world.repository("local-direct", &[]);
+    // A key no `local-md` task has, so it renders for no node: only a node that
+    // cuts a branch ever finds that out.
+    let held = json!({
+        "id": "held",
+        "repo": "service",
+        "title": "feat: approve first",
+        "steps": [
+            {"id": "approval", "kind": "human", "task": "Approve the approach."},
+            {
+                "id": "implement",
+                "persona": "engineer",
+                "task": "## What\nimplement",
+                "deps": ["approval"],
+            },
+        ],
+    });
+    let quiet = json!({
+        "id": "quiet",
+        "repo": "service",
+        "title": "feat: change nothing",
+        "steps": [{"id": "note", "expects_no_diff": true, "task": "## What\nChange nothing."}],
+    });
+    let run = settle(
+        &world,
+        "uncut",
+        vec![held, quiet],
+        &[FLAG, "{{ task.key }}"],
+    );
+
+    assert_eq!(settlement(&world, &run, "held")["status"], "waiting");
+    assert_eq!(settlement(&world, &run, "quiet")["status"], "done");
+    assert!(opened_branches(&world, &run).is_empty(), "{}", world.dump());
 }
 
 #[test]

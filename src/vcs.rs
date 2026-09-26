@@ -2020,8 +2020,8 @@ pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
     })
 }
 
-/// The session a lifecycle node **opens**: [`request_for`], proposing the name the
-/// branch it cuts is to carry.
+/// The session a lifecycle node **opens**: its [`request_for`], proposing the name
+/// the branch it cuts is to carry.
 ///
 /// Proposed only where the request pins no `branch`, which is the one place that
 /// answers whether a branch is being cut: a `resume`, a `retry` naming a branch and
@@ -2032,20 +2032,17 @@ pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
 /// rather than silently continuing their work. A run naming no template proposes
 /// nothing, and `onevcs` derives the name as it always has.
 ///
-/// `None` for a node that names no repository, as [`request_for`] answers; `Err`
-/// carries the template's own failure, naming the node, and no session is opened.
+/// `request` is that node's [`request_for`]. `Err` carries the template's own
+/// failure, naming the node, and no session is opened.
 pub(crate) fn opening_for(
+    mut request: SessionRequest,
     node: &crate::plan::Node,
     naming: Option<&crate::branchname::RunNaming>,
-) -> Option<std::result::Result<SessionRequest, String>> {
-    let mut request = request_for(node)?;
+) -> std::result::Result<SessionRequest, String> {
     if let (None, Some(naming)) = (&request.branch, naming) {
-        match crate::branchname::name_for(naming, node) {
-            Ok(name) => request.branch_name = Some(name),
-            Err(why) => return Some(Err(why)),
-        }
+        request.branch_name = Some(crate::branchname::name_for(naming, node)?);
     }
-    Some(Ok(request))
+    Ok(request)
 }
 
 /// Serialises the tests that point `ONEVCS_HOME` at a scratch state root.
@@ -2513,9 +2510,9 @@ mod tests {
             repo: Some("owner/repo".into()),
             ..Node::default()
         };
-        let request = opening_for(&cut, Some(&Ok(naming.clone())))
-            .expect("a lifecycle node opens a session")
-            .expect("the default renders");
+        let asked = |node: &Node| request_for(node).expect("a lifecycle node opens a session");
+        let request =
+            opening_for(asked(&cut), &cut, Some(&Ok(naming.clone()))).expect("the default renders");
         assert_eq!(request.branch_name.as_deref(), Some("demo/service"));
         assert_eq!(
             request.branch, None,
@@ -2526,15 +2523,12 @@ mod tests {
             branch: Some("feature/kept".into()),
             ..cut.clone()
         };
-        let request = opening_for(&pinned, Some(&Ok(naming.clone())))
-            .expect("a lifecycle node opens a session")
+        let request = opening_for(asked(&pinned), &pinned, Some(&Ok(naming.clone())))
             .expect("a pinned branch renders nothing");
         assert_eq!(request.branch.as_deref(), Some("feature/kept"));
         assert_eq!(request.branch_name, None);
 
-        let unnamed = opening_for(&cut, None)
-            .expect("a lifecycle node opens a session")
-            .expect("no template renders nothing");
+        let unnamed = opening_for(asked(&cut), &cut, None).expect("no template renders nothing");
         assert_eq!(unnamed.branch_name, None);
 
         let broken = crate::branchname::Naming {
@@ -2545,8 +2539,7 @@ mod tests {
             .expect("it parses"),
             ..naming.clone()
         };
-        let why = opening_for(&cut, Some(&Ok(broken)))
-            .expect("a lifecycle node opens a session")
+        let why = opening_for(asked(&cut), &cut, Some(&Ok(broken)))
             .expect_err("an undefined key does not render");
         assert!(why.contains("node 'service'"), "{why}");
     }
