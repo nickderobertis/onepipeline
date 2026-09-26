@@ -82,7 +82,7 @@ use sha2::{Digest, Sha256};
 /// The handshake, as far as this program reads it.
 #[derive(Deserialize)]
 struct Handshake {
-    id: Value,
+    id: String,
     /// §1.2: the first request on a connection is `initialize`, and nothing else may be
     /// answered before it, so a first line naming anything else does not read.
     #[allow(
@@ -147,7 +147,7 @@ impl TryFrom<String> for Key {
 /// One request off the engine's wire, its parameters kept as they arrived.
 #[derive(Deserialize)]
 struct Request {
-    id: Value,
+    id: String,
     method: Method,
     params: Value,
 }

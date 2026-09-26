@@ -70,7 +70,7 @@ const DIFFER: &str = "destination labels differ from the labels being written";
 /// hosted plugin's handshake has to carry through unchanged.
 #[derive(Deserialize)]
 struct Handshake {
-    id: Value,
+    id: String,
     method: String,
     params: HandshakeParams,
 }

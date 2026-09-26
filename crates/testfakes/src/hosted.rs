@@ -135,7 +135,7 @@ impl Host {
     /// the release renamed it.
     pub fn initialize(
         &mut self,
-        id: Value,
+        id: String,
         protocol_version: u32,
         engine: Value,
         source_name: &str,
@@ -156,7 +156,7 @@ impl Host {
             },
         });
         let mut answered = self.ask(&hosted)?;
-        answered.insert("id".to_owned(), id);
+        answered.insert("id".to_owned(), Value::String(id));
         Ok(Value::Object(answered))
     }
 
