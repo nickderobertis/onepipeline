@@ -168,6 +168,23 @@ pub struct RunState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` every neighbouring map of this struct keys by — `landings`, `branches`, `change_urls` — and it was validated where the graph took the node; a node-id newtype on this one field would disagree with each of them and convert at every read, which `src/AGENTS.md` names as drift. The value is the typed half: `StatedLanding` holds only a spelling its own parser accepted.
     pub stated_landings: BTreeMap<String, crate::edits::StatedLanding>,
+    /// The change request an operator settling each node from evidence last stated
+    /// its work landed in — kept when a later statement names a commit instead.
+    ///
+    /// What a release question about a stated commit falls back to when `onevcs`
+    /// cannot resolve that commit: a squash commit sitting only on the base is not
+    /// a spelling the sibling resolves work by, and the change request that carried
+    /// it is. Superseded with [`stated_landings`](Self::stated_landings), by a later
+    /// settlement the run records itself. See [`known_change_url`](Self::known_change_url).
+    ///
+    /// Omitted when empty, which is every run nobody settled at a change request.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "change_requests_only"
+    )]
+    // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` every neighbouring map of this struct keys by — `landings`, `branches`, `change_urls` — and it was validated where the graph took the node; a node-id newtype on this one field would disagree with each of them and convert at every read, which `src/AGENTS.md` names as drift. The value is the typed half: `StatedLanding` holds only a spelling its own parser accepted, and `change_requests_only` refuses the commit one here.
+    pub stated_change_urls: BTreeMap<String, crate::edits::StatedLanding>,
     /// The declared steps each node's attempt finished.
     ///
     /// What a continuation may skip, and the only record of it: a step is not a
@@ -644,6 +661,25 @@ impl DriverClaim {
     }
 }
 
+/// [`RunState::stated_change_urls`] as a checkpoint holds it, refusing a commit
+/// where only a change request's URL belongs.
+fn change_requests_only<'de, D: serde::Deserializer<'de>>(
+    reader: D,
+) -> Result<BTreeMap<String, edits::StatedLanding>, D::Error> {
+    let read = BTreeMap::<String, edits::StatedLanding>::deserialize(reader)?;
+    if let Some((node, commit)) = read
+        .iter()
+        .find(|(_, stated)| matches!(stated, edits::StatedLanding::Commit(_)))
+    {
+        return Err(serde::de::Error::custom(format!(
+            "stated_change_urls names the commit {commit:?} for node {node:?}, where only a \
+             change request's URL belongs",
+            commit = commit.reference()
+        )));
+    }
+    Ok(read)
+}
+
 impl RunState {
     /// Whether a stop has been recorded at all, however it went, with no
     /// adoption driving the run since.
@@ -652,6 +688,28 @@ impl RunState {
     /// [`stop`](Self::stop) is what says which, and why an adoption clears it.
     pub fn stop_recorded(&self) -> bool {
         self.stop != StopState::NotStopped
+    }
+
+    /// The change request the run knows one node's work by: the one an operator
+    /// last stated it landed in, or else the one its own settlement opened.
+    ///
+    /// What a release question asked at a stated **commit** is asked again at when
+    /// `onevcs` answers that it cannot resolve the commit — see
+    /// `docs/contract-divergences.md` entry 40.
+    ///
+    /// Only ever a change request's URL: both sources are held to the spelling a
+    /// settle may state, because each is read out of a journal or a checkpoint —
+    /// files another build wrote and a person can edit — and what it becomes is a
+    /// reference `onevcs` is asked about and a word printed onto a command line.
+    pub(crate) fn known_change_url(&self, node: &str) -> Option<String> {
+        self.stated_change_urls
+            .get(node)
+            .cloned()
+            .or_else(|| edits::StatedLanding::parse(self.change_urls.get(node)?))
+            .and_then(|known| match known {
+                edits::StatedLanding::ChangeRequest(url) => Some(url),
+                edits::StatedLanding::Commit(_) => None,
+            })
     }
 
     /// The frontier an edit is judged against, as far as the *ledger* says.
@@ -984,6 +1042,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 && state.stated_landings.remove(node).is_some()
             {
                 state.landings.remove(node);
+                state.stated_change_urls.remove(node);
             } // llmlint: ignore-end[changed_behavior_has_e2e]
               // What the dispatch left behind, which nothing else records: a
               // later continuation has no other way to find the branch the work
@@ -1549,6 +1608,13 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
             Operation::LandingFromEvidence { node, landing } => {
                 if let Some(stated) = edits::StatedLanding::parse(landing) {
                     state.landings.insert(node.clone(), Landing::Landed);
+                    // Kept past a later statement of a commit, which is the one the
+                    // release question falls back from.
+                    if let edits::StatedLanding::ChangeRequest(_) = &stated {
+                        state
+                            .stated_change_urls
+                            .insert(node.clone(), stated.clone());
+                    }
                     state.stated_landings.insert(node.clone(), stated);
                 }
             }
@@ -3698,6 +3764,101 @@ mod tests {
             assert!(state.stated_landings.is_empty(), "{unusable:?} was folded");
             assert_eq!(state.landings.get("publish"), None, "{unusable:?} landed");
         }
+    }
+
+    /// The change request a node's work is known by: one an operator stated
+    /// survives a later statement of a commit, stands ahead of the one the run's
+    /// own settlement opened, and goes when the run settles the node again.
+    #[test]
+    fn a_stated_change_request_is_kept_past_a_later_stated_commit() {
+        let stated = |seq: u64, landing: &str| {
+            pipeline(
+                journal::PipelineKind::EditCommitted,
+                seq,
+                None,
+                &[(
+                    "operations",
+                    json!([Operation::LandingFromEvidence {
+                        node: "publish".into(),
+                        landing: landing.into(),
+                    }]),
+                )],
+            )
+        };
+        let settled = |seq: u64, fields: &[(&str, Value)]| {
+            pipeline(
+                journal::PipelineKind::NodeSettled,
+                seq,
+                Some("publish"),
+                fields,
+            )
+        };
+        let opened = "https://example.invalid/owner/engine/pull/11";
+        let url = "https://example.invalid/owner/engine/pull/12";
+
+        // Nothing stated and nothing opened: nothing known.
+        assert_eq!(
+            fold(&[stated(1, "3f9a1c2ab")]).known_change_url("publish"),
+            None
+        );
+
+        // The run's own settlement opened one, and a stated commit keeps it known.
+        let published = settled(
+            1,
+            &[("status", json!("done")), ("change_url", json!(opened))],
+        );
+        let state = fold(&[published.clone(), stated(2, "3f9a1c2ab")]);
+        assert_eq!(
+            state.stated_landings.get("publish"),
+            Some(&edits::StatedLanding::Commit("3f9a1c2ab".into()))
+        );
+        assert_eq!(state.known_change_url("publish").as_deref(), Some(opened));
+
+        // One an operator stated outlives a later stated commit, ahead of the opened one.
+        let state = fold(&[published, stated(2, url), stated(3, "3f9a1c2ab")]);
+        assert_eq!(
+            state.stated_landings.get("publish"),
+            Some(&edits::StatedLanding::Commit("3f9a1c2ab".into()))
+        );
+        assert_eq!(state.known_change_url("publish").as_deref(), Some(url));
+
+        // A later settlement the run records itself supersedes the statement's URL too.
+        let state = fold(&[stated(1, url), settled(3, &[("status", json!("failed"))])]);
+        assert!(state.stated_change_urls.is_empty());
+        assert_eq!(state.known_change_url("publish"), None);
+
+        // A settlement's own value is held to the spelling a settle may state: one
+        // that is no URL — a line a journal edit forged — is known as nothing.
+        for unusable in [
+            "3f9a1c2ab",
+            "not a change request",
+            "https://x.invalid/1\nforged",
+        ] {
+            let forged = settled(
+                1,
+                &[("status", json!("done")), ("change_url", json!(unusable))],
+            );
+            let state = fold(&[forged, stated(2, "0a1b2c3d4")]);
+            assert_eq!(
+                state.known_change_url("publish"),
+                None,
+                "{unusable:?} was known"
+            );
+        }
+
+        // And a checkpoint is held to it too: a stated change request that is no
+        // URL is refused where the cached fold is read, rather than asked about.
+        let mut cached = serde_json::to_value(RunState::default()).expect("it serialises");
+        for unusable in ["not a change request", "3f9a1c2ab"] {
+            cached["stated_change_urls"] = json!({"publish": unusable});
+            assert!(
+                serde_json::from_value::<RunState>(cached.clone()).is_err(),
+                "{unusable:?} was read as a stated change request"
+            );
+        }
+        cached["stated_change_urls"] = json!({"publish": url});
+        let read = serde_json::from_value::<RunState>(cached).expect("a URL is read");
+        assert_eq!(read.known_change_url("publish").as_deref(), Some(url));
     }
 
     #[test]

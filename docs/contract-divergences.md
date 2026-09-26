@@ -1649,6 +1649,32 @@ landing nobody observed arrives after the fact by definition: a change request
 open when its node settled is merged outside every session, where nothing relays
 it back to this run.
 
+A stated **commit** carries a fallback, because not every commit an operator can
+read off a merge is one `onevcs` resolves: a host's squash merge writes a commit
+onto the base that no branch of the work carries. So beside a stated commit the
+run **retains the change request it already knows for that node** — the one an
+earlier settle stated, kept past the later statement of a commit, or else the
+`change_url` the node's own settlement recorded — and the order is fixed:
+
+1. `onevcs` is asked at the stated commit, and a commit that resolves is answered
+   from the commit alone, whatever it answers;
+2. only where it refuses with the typed `onevcs::Error::UnresolvableReference` is
+   the question put again at the retained change request, and that answer is the
+   one used;
+3. any other refusal of the commit — the host, the filesystem, input it would not
+   take — and a commit with no change request retained both stay `not-answered`,
+   exactly as before there was a fallback.
+
+The variant is matched and never the refusal's prose, which the sibling is free to
+reword. The settle's command and the reply envelope are unchanged: what is
+retained is read off the run's own record. Before it, a dependency settled at a
+squash commit held for ever after its release — three settles of one run in
+2026-09 were restated at their change requests by hand to lift it (onepipeline
+issue #420). `tests/e2e/adoption.rs`'s
+`a_squash_commit_baselined_before_any_release_is_answered_through_its_change_request`
+drives it end to end. The checkpoint moved to version 6 for it, because the
+retained change request is part of the fold a cached one would not hold.
+
 *A release that has been observed is **latched***. Every answer but one holds a
 node and each is a statement about *now* — a probe that failed, a target awaiting
 a person, a version that has not moved — so writing any of them over an answer
@@ -3622,10 +3648,19 @@ from what the engine knows:
 Where what the repository releases cannot be read at all, the line says the
 question was not asked, and names `onevcs release targets` as what says why.
 
+A stated commit is asked the way entry 40 orders it: at the commit, and — only
+where `onevcs` refuses it as an unresolvable reference — again at the change
+request the run retains for the node. So a squash-merge commit whose change request
+the run knows is answered through it, and says nothing where that answer is a hold
+the next answer can lift; where it has no baseline, the command names the change
+request that answered.
+
 Where `onevcs` cannot resolve the stated reference to landed work at all — a
-squash-merge commit that no branch carries is one — the line says that no release
-will ever be attributed through it, and says to settle the node again at the change
-request that carried the work. That second settle is **accepted** although the
+squash-merge commit that no branch carries, with no change request retained or one
+that does not resolve either — the line says that no release will ever be
+attributed through it, and says to settle the node again at the change request that
+carried the work. Its command names the change request the run retains where there
+is one, and the `'<CHANGE-REQUEST-URL>'` placeholder only where there is none. That second settle is **accepted** although the
 node already holds its outcome: the duplicate guard above refuses a settle that
 changes nothing, and one stating a different landing, or a release, changes where
 the record says the work landed. The release watch re-reads a waiting node's stated

@@ -336,6 +336,16 @@ pub(crate) struct Dependency {
     /// them — and for one an operator settled without naming where the work
     /// went, which is exactly the record this run already had.
     pub landing: Option<String>,
+    /// The change request the run knows this work by, where the
+    /// [`landing`](Self::landing) an operator stated is a **commit**: what the
+    /// release question is asked again at when `onevcs` cannot resolve that commit.
+    ///
+    /// A squash commit sitting on the base alone is not a spelling the sibling
+    /// resolves work by, and the change request that carried it is — so a
+    /// dependency settled at one is not held for ever after its release. `None`
+    /// wherever no commit was stated or the run knows no change request for it.
+    /// See `docs/contract-divergences.md` entry 40.
+    pub fallback: Option<String>,
     /// The release target this node consumes that repository at.
     pub target: Option<TargetName>,
     /// How that target is released.
@@ -480,6 +490,9 @@ struct Question {
     keys: Vec<Key>,
     /// What the landed work is named by.
     reference: String,
+    /// What it is asked about again when `onevcs` cannot resolve `reference` —
+    /// see [`Dependency::fallback`].
+    fallback: Option<String>,
     /// The target, or `None` for the repository's own default.
     target: Option<TargetName>,
     /// Which of the two styles this is, which decides only how it is paced.
@@ -594,10 +607,15 @@ fn ask_until_dropped(asked: &Receiver<Vec<Question>>, answered: &Sender<Answered
             // start a subprocess for a human-step target, because the probe
             // lives on the other variant.
             crate::loopstats::release_asked();
-            let answer = Answer::of(&onevcs::release_status(
-                &question.reference,
-                question.target.as_ref(),
-            ));
+            let answer = Answer::of(
+                &release_status_falling_back(
+                    &question.reference,
+                    question.fallback.as_deref(),
+                    question.target.as_ref(),
+                    onevcs::release_status,
+                )
+                .0,
+            );
             if answered.send((question.keys.clone(), answer)).is_err() {
                 return;
             }
@@ -650,7 +668,7 @@ pub(crate) struct Watch {
     /// this run's fold is not the only one it is asked about: a cross-DAG
     /// dependency's landing was stated on the upstream run's journal, and both
     /// are read here through one function.
-    stated: BTreeMap<String, BTreeMap<String, String>>,
+    stated: BTreeMap<String, BTreeMap<String, Stated>>,
     /// When a node's landings were last re-read. `None` before the first read,
     /// which is due immediately.
     read_landings: Option<Instant>,
@@ -1372,7 +1390,7 @@ impl Watch {
     ///
     /// Read once per run per re-read tick and kept for the rest of it, because a
     /// run's journal answers this for every node in it.
-    fn stated_landing(&mut self, paths: &RunPaths, node: &str) -> Option<String> {
+    fn stated_landing(&mut self, paths: &RunPaths, node: &str) -> Option<Stated> {
         if !self.stated.contains_key(&paths.run) {
             self.stated.insert(
                 paths.run.clone(),
@@ -1411,7 +1429,8 @@ impl Watch {
             let re_read: Vec<Dependency> = known
                 .into_iter()
                 .map(|mut dependency| {
-                    dependency.landing = self.landing_of(paths, &dependency.dep);
+                    let stated = self.landing_of(paths, &dependency.dep);
+                    (dependency.landing, dependency.fallback) = Stated::split(stated);
                     dependency
                 })
                 .collect();
@@ -1513,7 +1532,7 @@ impl Watch {
 
     /// Where one dependency's work landed, as an operator stated it — whichever
     /// run's journal that statement is on.
-    fn landing_of(&mut self, paths: &RunPaths, dep: &str) -> Option<String> {
+    fn landing_of(&mut self, paths: &RunPaths, dep: &str) -> Option<Stated> {
         match crate::crossdag::parse(dep) {
             Some(reference) => {
                 let upstream = upstream_paths(paths, &reference)?;
@@ -1530,7 +1549,7 @@ impl Watch {
         repo: &str,
         branch: Option<String>,
         commit: Option<String>,
-        landing: Option<String>,
+        landing: Option<Stated>,
         named: Option<TargetName>,
     ) -> Resolution {
         outside(
@@ -1607,7 +1626,7 @@ fn outside(
     repositories: &mut Repositories,
     dep: &str,
     repo: &str,
-    (branch, commit, landing): (Option<String>, Option<String>, Option<String>),
+    (branch, commit, landing): (Option<String>, Option<String>, Option<Stated>),
     named: Option<TargetName>,
 ) -> Resolution {
     let releases = match repositories.of(repo) {
@@ -1639,12 +1658,14 @@ fn outside(
         ),
         None => (named, None, None, None),
     };
+    let (landing, fallback) = Stated::split(landing);
     Resolution::Outside(Dependency {
         dep: dep.to_owned(),
         identity,
         branch,
         commit,
         landing,
+        fallback,
         target,
         style,
         action,
@@ -1927,37 +1948,76 @@ pub(crate) fn hold_warnings_for_stated_landings(
             .of(&repo)
             .map(|releases| releases.identity.clone())
             .unwrap_or_else(|_| repo.clone());
+        // Asked exactly as the release watch asks it: a stated commit `onevcs`
+        // cannot resolve is asked again at the change request the run knows.
+        let fallback = match crate::edits::StatedLanding::parse(landing) {
+            Some(crate::edits::StatedLanding::Commit(_)) => state.known_change_url(id),
+            _ => None,
+        };
+        let fallback = fallback.as_deref();
         for target in awaited {
             let named = target.to_string();
-            let reference = shell_word(landing);
-            match onevcs::release_status(landing, Some(&target)) {
-                Ok(ReleaseStatus::NotAnswered { reason }) if reason.contains(NO_BASELINE) => {
-                    said.push(format!(
-                        "onepipeline: settle: node '{id}' was settled at the landing {landing}, \
-                         and that landing has no release baseline for the release target \
-                         '{named}' of {identity}: nothing recorded what that target had \
-                         published when the work landed, so no probe answer can show a release \
-                         carries it, and a node waiting on that release holds until one is \
-                         recorded. Once you have verified the version that first carries it, \
-                         record it:\n  onevcs release acknowledge {reference} --target {named} \
-                         --version <VERSION>",
-                    ));
-                }
-                Err(refused) => said.push(format!(
-                    "onepipeline: settle: node '{id}' was settled at {landing}, which `onevcs` \
-                     cannot resolve to landed work, so no release of the release target \
-                     '{named}' of {identity} will be attributed through it and a node waiting \
-                     on that release holds: {refused}. State a landing `onevcs` can resolve \
-                     by settling the node again at the change request that carried the work, \
-                     with the `release` that carries it once you have verified it; or settle it \
-                     there without one and record the release:\n  onevcs release acknowledge \
-                     '<CHANGE-REQUEST-URL>' --target {named} --version <VERSION>",
-                )),
-                Ok(_) => {}
-            }
+            let asked = release_status_falling_back(
+                landing,
+                fallback,
+                Some(&target),
+                onevcs::release_status,
+            );
+            said.extend(hold_warning(
+                id, landing, &identity, fallback, &named, asked,
+            ));
         }
     }
     said
+}
+
+/// The line one release target's answer about a stated landing owes the person
+/// who stated it, if it is one of the two holds nothing in the run will lift — see
+/// [`hold_warnings_for_stated_landings`].
+///
+/// `asked` is the answer and the spelling it was answered at, as
+/// [`release_status_falling_back`] gives them: the acknowledgement a baseline-less
+/// landing is told to record names the spelling that resolved, and a landing
+/// nothing resolved names the change request the run knows — `fallback` — rather
+/// than a placeholder, wherever there is one.
+fn hold_warning(
+    id: &str,
+    landing: &str,
+    identity: &str,
+    fallback: Option<&str>,
+    named: &str,
+    (answered, at): (onevcs::Result<ReleaseStatus>, &str),
+) -> Option<String> {
+    match answered {
+        Ok(ReleaseStatus::NotAnswered { reason }) if reason.contains(NO_BASELINE) => {
+            let reference = shell_word(at);
+            Some(format!(
+                "onepipeline: settle: node '{id}' was settled at the landing {landing}, \
+                 and that landing has no release baseline for the release target \
+                 '{named}' of {identity}: nothing recorded what that target had \
+                 published when the work landed, so no probe answer can show a release \
+                 carries it, and a node waiting on that release holds until one is \
+                 recorded. Once you have verified the version that first carries it, \
+                 record it:\n  onevcs release acknowledge {reference} --target {named} \
+                 --version <VERSION>",
+            ))
+        }
+        Err(refused) => {
+            let change_request =
+                fallback.map_or_else(|| "'<CHANGE-REQUEST-URL>'".to_owned(), shell_word);
+            Some(format!(
+                "onepipeline: settle: node '{id}' was settled at {landing}, which `onevcs` \
+                 cannot resolve to landed work, so no release of the release target \
+                 '{named}' of {identity} will be attributed through it and a node waiting \
+                 on that release holds: {refused}. State a landing `onevcs` can resolve \
+                 by settling the node again at the change request that carried the work, \
+                 with the `release` that carries it once you have verified it; or settle it \
+                 there without one and record the release:\n  onevcs release acknowledge \
+                 {change_request} --target {named} --version <VERSION>",
+            ))
+        }
+        Ok(_) => None,
+    }
 }
 
 /// The release targets a wait on one node's release is asked about, each once — or
@@ -2204,10 +2264,16 @@ fn questions_of(waits: &[(Key, Dependency)]) -> Vec<Question> {
     let mut questions: Vec<Question> = Vec::new();
     // Where the question about one release already stands, so the next wait
     // naming it joins that one. Keyed by everything the answer depends on — the
-    // reference and the target — with the style beside them, so a pairing this
-    // crate has not foreseen joins nothing rather than taking an answer obtained
-    // another way.
-    let mut asked: BTreeMap<(&str, Option<&TargetName>, &'static str), usize> = BTreeMap::new();
+    // reference, what it falls back to, and the target — with the style beside
+    // them, so a pairing this crate has not foreseen joins nothing rather than
+    // taking an answer obtained another way.
+    type About<'a> = (
+        &'a str,
+        Option<&'a str>,
+        Option<&'a TargetName>,
+        &'static str,
+    );
+    let mut asked: BTreeMap<About<'_>, usize> = BTreeMap::new();
     for (key, dependency) in waits {
         let Some(reference) = dependency.reference() else {
             continue;
@@ -2215,7 +2281,12 @@ fn questions_of(waits: &[(Key, Dependency)]) -> Vec<Question> {
         let Some(style) = dependency.style else {
             continue;
         };
-        let about = (reference, dependency.target.as_ref(), style.as_str());
+        let about = (
+            reference,
+            dependency.fallback.as_deref(),
+            dependency.target.as_ref(),
+            style.as_str(),
+        );
         match asked.get(&about) {
             Some(&already) => questions[already].keys.push(key.clone()),
             None => {
@@ -2223,6 +2294,7 @@ fn questions_of(waits: &[(Key, Dependency)]) -> Vec<Question> {
                 questions.push(Question {
                     keys: vec![key.clone()],
                     reference: reference.to_owned(),
+                    fallback: dependency.fallback.clone(),
                     target: dependency.target.clone(),
                     style,
                 });
@@ -2284,12 +2356,62 @@ fn upstream_paths(paths: &RunPaths, reference: &crate::crossdag::Reference) -> O
 ///
 /// A node id that would forge a line where a wait is rendered is passed over here
 /// as well, because this is where it is rendered from.
-fn stated_landings(events: &[crate::event::Envelope]) -> BTreeMap<String, String> {
-    crate::projection::fold(events)
+///
+/// Beside a stated **commit**, the change request the same fold knows the node's
+/// work by — [`RunState::known_change_url`] — which is what the release question
+/// falls back to when `onevcs` cannot resolve the commit.
+fn stated_landings(events: &[crate::event::Envelope]) -> BTreeMap<String, Stated> {
+    let state = crate::projection::fold(events);
+    state
         .stated_landings
-        .into_iter()
-        .filter_map(|(node, stated)| Some((renderable(&node)?, String::from(stated))))
+        .iter()
+        .filter_map(|(node, stated)| {
+            let fallback = match stated {
+                crate::edits::StatedLanding::Commit(_) => state.known_change_url(node),
+                crate::edits::StatedLanding::ChangeRequest(_) => None,
+            };
+            let landing = stated.reference().to_owned();
+            Some((renderable(node)?, Stated { landing, fallback }))
+        })
         .collect()
+}
+
+/// Where one node's work was stated to have landed, and what the release question
+/// about it falls back to — see [`Dependency::fallback`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Stated {
+    /// The reference the operator stated.
+    landing: String,
+    /// The change request the run knows the work by, beside a stated commit.
+    fallback: Option<String>,
+}
+
+impl Stated {
+    fn split(stated: Option<Self>) -> (Option<String>, Option<String>) {
+        stated.map_or((None, None), |stated| {
+            (Some(stated.landing), stated.fallback)
+        })
+    }
+}
+
+/// What `onevcs` answers about one release asked at `reference`, asked again at
+/// `fallback` only on the typed unresolvable-reference refusal — never on its
+/// prose — and the spelling that answered. The order is
+/// `docs/contract-divergences.md` entry 40's; `ask` is `onevcs::release_status`
+/// everywhere but this module's tests.
+fn release_status_falling_back<'a>(
+    reference: &'a str,
+    fallback: Option<&'a str>,
+    target: Option<&TargetName>,
+    ask: impl Fn(&str, Option<&TargetName>) -> onevcs::Result<ReleaseStatus>,
+) -> (onevcs::Result<ReleaseStatus>, &'a str) {
+    match (ask(reference, target), fallback) {
+        (Err(onevcs::Error::UnresolvableReference { .. }), Some(fallback)) => {
+            (ask(fallback, target), fallback)
+        }
+        // llmlint: ignore[changed_behavior_has_e2e] the one branch here no invocation reaches on purpose: a refusal of another kind from a stated commit is a store this host cannot read or a host that failed, and no plan, flag or reply puts a run into either in the instant the question is asked. That it stands rather than falling back is held by `a_stated_commit_falls_back_to_its_change_request_only_when_it_cannot_be_resolved` below, over two such refusals carrying the unresolvable one's own words.
+        (answered, _) => (answered, reference),
+    }
 }
 
 /// How often an automated target's probe is run.
@@ -2386,6 +2508,7 @@ mod tests {
             branch: Some("onevcs/s-1".to_owned()),
             commit: Some("9f3c1ab".to_owned()),
             landing: None,
+            fallback: None,
             target: target.map(|name| name.parse().expect("a target name")),
             style,
             action: style
@@ -2562,6 +2685,241 @@ mod tests {
         assert_eq!(branchless.reference(), None);
     }
 
+    /// A release question asked at a stated commit falls back to the change request
+    /// the run knows **only** on the typed unresolvable-reference refusal: a commit
+    /// that resolves is answered from the commit alone, any other refusal stands,
+    /// and with nothing to fall back to the unresolvable one stands too — each of
+    /// which is `not-answered`, exactly as it was before there was a fallback.
+    #[test]
+    fn a_stated_commit_falls_back_to_its_change_request_only_when_it_cannot_be_resolved() {
+        const COMMIT: &str = "3f9a1c2ab";
+        const URL: &str = "https://example.invalid/owner/engine/pull/12";
+        fn not_released() -> ReleaseStatus {
+            ReleaseStatus::NotReleased {
+                at_landing: Baseline::At {
+                    version: "0.2.0".to_owned(),
+                },
+                now: "0.2.0".to_owned(),
+            }
+        }
+        fn released() -> ReleaseStatus {
+            ReleaseStatus::Released {
+                target: "crate".parse().expect("a target name"),
+                style: ReleaseStyle::Automated,
+                version: "0.3.0".to_owned(),
+                source: onevcs::ReleaseSource::Probed,
+            }
+        }
+        // Answers the URL with a release, and the commit however the case says —
+        // recording every spelling it was asked at.
+        let ask_with = |at_commit: fn() -> onevcs::Result<ReleaseStatus>,
+                        fallback: Option<&str>| {
+            let asked = std::cell::RefCell::new(Vec::<String>::new());
+            let (answered, at) = release_status_falling_back(
+                COMMIT,
+                fallback,
+                None,
+                |reference: &str, _: Option<&TargetName>| {
+                    asked.borrow_mut().push(reference.to_owned());
+                    if reference == URL {
+                        Ok(released())
+                    } else {
+                        at_commit()
+                    }
+                },
+            );
+            (Answer::of(&answered), at.to_owned(), asked.into_inner())
+        };
+        let unresolvable = || {
+            Err(onevcs::Error::UnresolvableReference {
+                reference: COMMIT.to_owned(),
+                reason: "anything at all".to_owned(),
+            })
+        };
+
+        // Unresolvable, with a change request known: answered through it.
+        let (answer, at, asked) = ask_with(unresolvable, Some(URL));
+        assert_eq!(answer.version(), Some("0.3.0"), "{answer:?}");
+        assert_eq!(at, URL);
+        assert_eq!(asked, [COMMIT, URL]);
+
+        // A commit that resolves is never second-guessed, whatever it answers.
+        let resolving: [fn() -> onevcs::Result<ReleaseStatus>; 2] =
+            [|| Ok(not_released()), || Ok(ReleaseStatus::NotLanded)];
+        for resolves in resolving {
+            let (answer, at, asked) = ask_with(resolves, Some(URL));
+            assert_ne!(answer, Answer::NotAnswered);
+            assert_eq!(answer.version(), None, "{answer:?} came from the fallback");
+            assert_eq!(at, COMMIT);
+            assert_eq!(asked, [COMMIT], "a resolving commit was asked again");
+        }
+
+        // Any other refusal stands: the same text as the unresolvable one, under
+        // another kind, so nothing here can be routing on the words.
+        let refusing: [fn() -> onevcs::Result<ReleaseStatus>; 2] = [
+            || {
+                Err(onevcs::Error::Invalid {
+                    reason: "anything at all".to_owned(),
+                })
+            },
+            || {
+                Err(onevcs::Error::HostPrerequisite {
+                    reason: "anything at all".to_owned(),
+                })
+            },
+        ];
+        for refused in refusing {
+            let (answer, at, asked) = ask_with(refused, Some(URL));
+            assert_eq!(answer, Answer::NotAnswered);
+            assert_eq!(at, COMMIT);
+            assert_eq!(
+                asked,
+                [COMMIT],
+                "another refusal was routed to the fallback"
+            );
+        }
+
+        // Unresolvable with no change request known: not answered, as before.
+        let (answer, at, asked) = ask_with(unresolvable, None);
+        assert_eq!(answer, Answer::NotAnswered);
+        assert_eq!(at, COMMIT);
+        assert_eq!(asked, [COMMIT]);
+    }
+
+    /// The hold a stated commit nothing resolves is warned of names the change
+    /// request the run knows, ready to paste, rather than a placeholder — and only
+    /// where the run knows none does it fall back to the placeholder. A baseline-less
+    /// landing names the spelling that answered, and every other answer says nothing.
+    #[test]
+    fn the_hold_warning_names_the_change_request_the_run_knows() {
+        const COMMIT: &str = "3f9a1c2ab";
+        const URL: &str = "https://example.invalid/owner/engine/pull/12?x=1&y=2";
+        let unresolvable = || {
+            Err(onevcs::Error::UnresolvableReference {
+                reference: URL.to_owned(),
+                reason: "nothing here holds it".to_owned(),
+            })
+        };
+        let warn = |fallback: Option<&str>, asked| {
+            hold_warning(
+                "broken",
+                COMMIT,
+                "github.com/owner/engine",
+                fallback,
+                "crate",
+                asked,
+            )
+        };
+        let command = |said: &str| {
+            said.lines()
+                .map(str::trim)
+                .find(|line| line.starts_with("onevcs release acknowledge "))
+                .unwrap_or_else(|| panic!("no command to paste in: {said}"))
+                .to_owned()
+        };
+
+        let said = warn(Some(URL), (unresolvable(), URL)).expect("the hold is warned of");
+        assert!(said.contains(&format!(
+            "was settled at {COMMIT}, which `onevcs` cannot resolve"
+        )));
+        assert_eq!(
+            command(&said),
+            format!("onevcs release acknowledge '{URL}' --target crate --version <VERSION>")
+        );
+        assert!(!said.contains("<CHANGE-REQUEST-URL>"), "{said}");
+
+        let said = warn(None, (unresolvable(), COMMIT)).expect("the hold is warned of");
+        assert_eq!(
+            command(&said),
+            "onevcs release acknowledge '<CHANGE-REQUEST-URL>' --target crate --version <VERSION>"
+        );
+
+        // Answered at the change request with no baseline: that is what to record against.
+        let baseline_less = Ok(ReleaseStatus::NotAnswered {
+            reason: format!("{NO_BASELINE} for this landing"),
+        });
+        let said = warn(Some(URL), (baseline_less, URL)).expect("the hold is warned of");
+        assert!(said.contains("has no release baseline for the release target 'crate'"));
+        assert_eq!(
+            command(&said),
+            format!("onevcs release acknowledge '{URL}' --target crate --version <VERSION>")
+        );
+
+        // An answer the next probe can lift is no hold to warn of.
+        let lifted = Ok(ReleaseStatus::NotReleased {
+            at_landing: Baseline::NoRelease,
+            now: String::new(),
+        });
+        assert_eq!(warn(Some(URL), (lifted, URL)), None);
+    }
+
+    /// The fallback a stated commit carries is the change request the run knows —
+    /// one an operator stated before it, or else the one the run's own settlement
+    /// opened — and it rides with the question the asker puts, which a question
+    /// without it never joins.
+    #[test]
+    fn a_stated_commit_carries_the_change_request_the_run_knows_into_its_question() {
+        let envelope = |kind: journal::PipelineKind, node: Option<&str>, payload: Value| {
+            serde_json::from_value::<crate::event::Envelope>(json!({
+                "v": 1,
+                "ts": "2026-09-07T00:00:00.000Z",
+                "stream": "pipeline",
+                "seq": 0,
+                "source": "pipeline",
+                "kind": kind.as_str(),
+                "labels": {"run_id": "settled", "node": node},
+                "payload": payload,
+            }))
+            .expect("an envelope")
+        };
+        let stated = |node: &str, landing: &str| {
+            envelope(
+                journal::PipelineKind::EditCommitted,
+                None,
+                json!({"operations": [{"kind": "landing-from-evidence", "node": node, "landing": landing}]}),
+            )
+        };
+        let opened = envelope(
+            journal::PipelineKind::NodeSettled,
+            Some("opened"),
+            json!({"status": "done", "change_url": "https://example.invalid/pull/7"}),
+        );
+        let read = stated_landings(&[
+            opened,
+            stated("opened", "3f9a1c2ab"),
+            stated("restated", "https://example.invalid/pull/8"),
+            stated("restated", "9d8c7b6ef"),
+            stated("unknown", "0a1b2c3d4"),
+            stated("url", "https://example.invalid/pull/9"),
+        ]);
+        let fallback = |node: &str| read[node].fallback.as_deref();
+        assert_eq!(fallback("opened"), Some("https://example.invalid/pull/7"));
+        assert_eq!(fallback("restated"), Some("https://example.invalid/pull/8"));
+        assert_eq!(read["restated"].landing, "9d8c7b6ef");
+        assert_eq!(fallback("unknown"), None);
+        // A stated change request is asked about itself, with nothing behind it.
+        assert_eq!(fallback("url"), None);
+
+        let key = |node: &str| -> Key { (node.to_owned(), "engine".to_owned()) };
+        let mut known = dependency(Some("crate"), Some(ReleaseStyle::Automated));
+        (known.landing, known.fallback) = Stated::split(read.get("opened").cloned());
+        let mut none = known.clone();
+        none.fallback = None;
+        let questions = questions_of(&[
+            (key("a"), known.clone()),
+            (key("b"), none),
+            (key("c"), known),
+        ]);
+        assert_eq!(questions.len(), 2, "{questions:?}");
+        assert_eq!(questions[0].reference, "3f9a1c2ab");
+        assert_eq!(
+            questions[0].fallback.as_deref(),
+            Some("https://example.invalid/pull/7")
+        );
+        assert_eq!(questions[0].keys, [key("a"), key("c")]);
+        assert_eq!(questions[1].fallback, None);
+    }
+
     /// A landing an operator stated is asked about ahead of both, in either
     /// spelling of one — and is what makes a dependency the run could not
     /// otherwise name askable at all.
@@ -2616,7 +2974,10 @@ mod tests {
                 edit(stated("other", "https://example.invalid/pull/1")),
                 // A record corrected twice: the newest correction is the one.
                 edit(stated("publish", "9d8c7b6ef")),
-            ]),
+            ])
+            .into_iter()
+            .map(|(node, stated)| (node, stated.landing))
+            .collect::<BTreeMap<String, String>>(),
             [
                 (
                     "other".to_owned(),
