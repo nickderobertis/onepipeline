@@ -2825,6 +2825,31 @@ fn started_at_of(pid: u32) -> String {
         .to_string()
 }
 
+/// When this host says a process started, spelled the way a run's records spell
+/// it, so it can be compared with a stamp one of them carries.
+///
+/// Linux records field 22 of `/proc/<pid>/stat`, the start in clock ticks since
+/// boot, as `linux-proc-stat:<ticks>`: read here from procfs directly rather than
+/// through the crate, which is the reader under test. Compared against the
+/// `lstart` rendering instead, no stamp could ever match and a stand-in started
+/// in the dispatch's own tick would pass for a stranger. Elsewhere a record
+/// carries `lstart`, so that is what is compared.
+#[cfg(target_os = "linux")]
+fn recorded_start_of(pid: u32) -> String {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .expect("this host describes a process it just started");
+    let ticks = stat
+        .rsplit_once(')')
+        .and_then(|(_, fields)| fields.split_whitespace().nth(19))
+        .expect("`/proc/<pid>/stat` carries a start time");
+    format!("linux-proc-stat:{ticks}")
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn recorded_start_of(pid: u32) -> String {
+    started_at_of(pid)
+}
+
 /// The Windows stand-in for the stranger below.
 ///
 /// No oracle is needed here: the crate reads a process's start on Windows as its
@@ -2846,15 +2871,16 @@ pub(crate) fn stranger_started_after(_stamps: &[String]) -> std::process::Child 
 /// a reissued pid to — and one this host describes differently from **every**
 /// `stamp` a record it is about to be planted into carries.
 ///
-/// `lstart` is reported to the **second**, so a process started inside the same
-/// second as a recorded one carries that record's own stamp and would be a pid
-/// the record still proves rather than a stranger. Every stamp is passed rather
-/// than the launch record's alone, because a dispatch runs in a process of its
-/// own: its registry entry carries that child's start, the child was started
-/// moments before the stand-in, and a host whose resolution is a second describes
-/// the two identically. Retried until the host's clock has left every one of
-/// those seconds behind, so the stand-in is a stranger by construction rather
-/// than by luck.
+/// A start is recorded at the host's resolution — a kernel clock tick on Linux,
+/// a second of `lstart` elsewhere — so a process started inside the same tick as
+/// a recorded one carries that record's own stamp and would be a pid the record
+/// still proves rather than a stranger. Every stamp is passed rather than the
+/// launch record's alone, because a dispatch runs in a process of its own: its
+/// registry entry carries that child's start, the child was started moments
+/// before the stand-in, and the two can share a tick. Each candidate is read in
+/// the spelling the stamps are written in ([`recorded_start_of`]) and retried
+/// until the host's clock has left every one of them behind, so the stand-in is a
+/// stranger by construction rather than by luck.
 #[cfg(unix)]
 pub(crate) fn stranger_started_after(stamps: &[String]) -> std::process::Child {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -2863,7 +2889,7 @@ pub(crate) fn stranger_started_after(stamps: &[String]) -> std::process::Child {
             .arg("300")
             .spawn()
             .expect("this host starts a process of its own");
-        let started = started_at_of(child.id());
+        let started = recorded_start_of(child.id());
         if !stamps.contains(&started) {
             return child;
         }
@@ -3579,6 +3605,14 @@ fn a_stop_that_declines_every_live_identity_does_not_report_success() {
                 .to_string()
         })
         .collect();
+    // The stand-in is told apart from these stamps by reading its own start in
+    // their spelling, so that spelling is held here against the one process every
+    // stamp's author is known to be: a reading that could never match a stamp
+    // would let a stand-in started in the dispatch's own tick pass for a stranger.
+    assert!(
+        stamps.contains(&recorded_start_of(driver)),
+        "the driver's start, read as a record spells it, matches none of {stamps:?}"
+    );
     let mut stranger = stranger_started_after(&stamps);
     let stranger_pid = stranger.id();
     for (path, claim) in &mut claims {
