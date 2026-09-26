@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, double, plan_of, repo_file, World, REFUSED};
+use crate::harness::{agent, double, plan_of, repo_file, store_root_env, World, REFUSED};
 
 /// What entry 41 of the divergence record proposes, which is where the three
 /// spellings of this launch-level setting are written down.
@@ -446,7 +446,12 @@ fn the_flag_beats_the_environment_which_beats_the_config_and_naming_none_runs_no
         ),
     ] {
         let name = format!("precedence-{which}");
-        let path = world.plan(&name, &plan_of(&name, vec![agent("slow", &[])]));
+        // A store root of its own per launch: the run before this one is still
+        // projecting its board when this one starts, and `local-md` writes a
+        // copy in place, so a shared root hands this launch's read a document
+        // caught between its truncate and its rewrite.
+        let store = world.store_apart(&name);
+        let path = world.plan_in(&store, &name, &plan_of(&name, vec![agent("slow", &[])]));
         // A fresh hold each time: the rendezvous the previous iteration released
         // is a file, and left in place it satisfies this run's hold the instant
         // the dispatch reaches it.
@@ -462,6 +467,7 @@ fn the_flag_beats_the_environment_which_beats_the_config_and_naming_none_runs_no
         args.push("--detach".to_string());
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
         let mut command = world.cmd(&borrowed);
+        command.env(store_root_env(), &store);
         match &environment {
             Some(value) => command.env(spelling("environment"), value),
             None => command.env_remove(spelling("environment")),
@@ -516,7 +522,8 @@ fn the_flag_beats_the_environment_which_beats_the_config_and_naming_none_runs_no
     {
         let before = offered(&world).len();
         let name = format!("precedence-none-{at}");
-        let path = world.plan(&name, &plan_of(&name, vec![agent("slow", &[])]));
+        let store = world.store_apart(&name);
+        let path = world.plan_in(&store, &name, &plan_of(&name, vec![agent("slow", &[])]));
         let _ = std::fs::remove_file(world.fakes.join("slow.go"));
         world.script("slow.wait", "hold");
         let mut args = vec!["start".to_string(), path.clone()];
@@ -528,6 +535,7 @@ fn the_flag_beats_the_environment_which_beats_the_config_and_naming_none_runs_no
         args.push("--detach".to_string());
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
         let mut command = world.cmd(&borrowed);
+        command.env(store_root_env(), &store);
         match &environment {
             Some(value) => command.env(spelling("environment"), value),
             None => command.env_remove(spelling("environment")),
