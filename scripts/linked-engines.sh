@@ -283,7 +283,7 @@ index_path() {
 # mistaken for the record's own, requires each of the members it reads to
 # appear exactly once and to hold the type it should, and refuses the record
 # otherwise. The shapes it refuses are driven in `tests/linked_engines.rs`, and
-# every run of `just engines-current` reads it over all five engines' real index
+# every run of `just engines-current` reads it over every engine's real index
 # files. The library the rule asks for does not exist in bash — the language this has to be
 # in, because a per-change workflow and a release job both reach it through a recipe
 # — and shelling out to one adds an interpreter to a release job whose whole
