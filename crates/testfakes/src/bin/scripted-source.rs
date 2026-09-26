@@ -227,7 +227,7 @@ fn main() -> ExitCode {
         script: settings.script,
         key: settings.key,
         spent: Metering::default(),
-        answered: std::collections::BTreeSet::new(),
+        handed: std::collections::BTreeSet::new(),
     };
     let ending = source.relay(&mut host, lines).and_then(|()| host.finish());
     match ending {
@@ -241,8 +241,8 @@ struct Scripted {
     key: Key,
     /// What the writes served so far have spent, where the scenario meters them.
     spent: Metering,
-    /// The methods this source has been handed at least once.
-    answered: std::collections::BTreeSet<String>,
+    /// The methods this source has been handed at least once, answered or not.
+    handed: std::collections::BTreeSet<String>,
 }
 
 impl Scripted {
@@ -276,7 +276,7 @@ impl Scripted {
 
     fn answer(&mut self, host: &mut Host, request: &Request) -> Result<Value, String> {
         let method = request.method.0.as_str();
-        let first = self.answered.insert(method.to_owned());
+        let first = self.handed.insert(method.to_owned());
         let mut holds = vec![format!("{}.{method}", self.key.0)];
         if first {
             holds.push(format!("{}.{method}.first", self.key.0));
