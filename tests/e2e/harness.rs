@@ -2479,7 +2479,6 @@ impl World {
             .collect()
     }
 
-    /// How many calls of `method` the scripted store was handed.
     pub fn store_asked(&self, method: &str) -> usize {
         self.store_calls()
             .iter()

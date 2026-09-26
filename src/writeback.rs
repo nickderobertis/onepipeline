@@ -1371,7 +1371,7 @@ impl Attempt {
         let flags = Layer::new(vec![
             setting(
                 &format!("sources.{SHADOW_SOURCE}.plugin"),
-                json!(onetaskgraph_local_md_kind()),
+                json!(onetaskgraph_core::PluginKind::LocalMd.as_str()),
             )?,
             setting(
                 &format!("sources.{SHADOW_SOURCE}.config.root"),
@@ -1409,11 +1409,6 @@ impl Attempt {
             .block_on(async { tokio::time::timeout(deadline.within(), future).await })
             .map_err(|_| Failed::from(deadline.refusal(name)))
     }
-}
-
-/// The plugin kind the shadow store is served by: the store's own name for `local-md`.
-fn onetaskgraph_local_md_kind() -> &'static str {
-    onetaskgraph_core::PluginKind::LocalMd.as_str()
 }
 
 fn project(

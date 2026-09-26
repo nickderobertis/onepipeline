@@ -128,8 +128,30 @@ impl TryFrom<String> for Key {
 #[derive(Deserialize)]
 struct Request {
     id: Value,
-    method: String,
+    method: Method,
     params: Value,
+}
+
+/// A request's method name: lower-case letters and underscores, which is every name the
+/// plugin protocol gives one, so a name can form a scenario file name and never a path.
+// llmlint: ignore[invalid_states_unrepresentable] a grammar rather than a closed set, on
+// purpose: this source relays every method the hosted plugin serves, and a closed set would
+// refuse one the protocol adds before the hosted plugin could answer it — the one failure a
+// relay must not have. What is refused is what could not be a scenario file's name.
+#[derive(Deserialize)]
+#[serde(try_from = "String")]
+struct Method(String);
+
+impl TryFrom<String> for Method {
+    type Error = String;
+
+    fn try_from(method: String) -> Result<Self, Self::Error> {
+        let named =
+            !method.is_empty() && method.chars().all(|c| c.is_ascii_lowercase() || c == '_');
+        named
+            .then_some(Self(method.clone()))
+            .ok_or_else(|| format!("{method:?} is not a method name the plugin protocol gives"))
+    }
 }
 
 // llmlint: ignore-end[boundary_inputs_validated]
@@ -203,7 +225,7 @@ fn main() -> ExitCode {
     }
     let mut source = Scripted {
         script: settings.script,
-        key: settings.key.0,
+        key: settings.key,
         spent: Metering::default(),
         answered: std::collections::BTreeSet::new(),
     };
@@ -216,7 +238,7 @@ fn main() -> ExitCode {
 
 struct Scripted {
     script: PathBuf,
-    key: String,
+    key: Key,
     /// What the writes served so far have spent, where the scenario meters them.
     spent: Metering,
     /// The methods this source has been handed at least once.
@@ -225,7 +247,7 @@ struct Scripted {
 
 impl Scripted {
     fn scenario(&self, name: &str) -> PathBuf {
-        self.script.join(format!("{}.{name}", self.key))
+        self.script.join(format!("{}.{name}", self.key.0))
     }
 
     fn relay(
@@ -243,8 +265,8 @@ impl Scripted {
                 .map_err(|error| format!("unreadable request: {error}"))?;
             fake::record(
                 &self.script,
-                &self.key,
-                &[request.method.clone(), named(&request.params)],
+                &self.key.0,
+                &[request.method.0.clone(), named(&request.params)],
             );
             let answer = self.answer(host, &request)?;
             println!("{answer}");
@@ -253,11 +275,11 @@ impl Scripted {
     }
 
     fn answer(&mut self, host: &mut Host, request: &Request) -> Result<Value, String> {
-        let method = request.method.as_str();
+        let method = request.method.0.as_str();
         let first = self.answered.insert(method.to_owned());
-        let mut holds = vec![format!("{}.{method}", self.key)];
+        let mut holds = vec![format!("{}.{method}", self.key.0)];
         if first {
-            holds.push(format!("{}.{method}.first", self.key));
+            holds.push(format!("{}.{method}.first", self.key.0));
         }
         for hold in holds {
             let script = fake::rendezvous_script(&self.script, &hold);
@@ -307,7 +329,7 @@ impl Scripted {
             return Ok(json!({"id": request.id, "result": {"metering": self.spent}}));
         }
         let relayed = json!({
-            "id": request.id, "method": request.method, "params": request.params,
+            "id": request.id, "method": request.method.0, "params": request.params,
         });
         let answered = host.ask(&relayed)?;
         if answered.contains_key("result") {
@@ -318,7 +340,7 @@ impl Scripted {
         Ok(Value::Object(answered))
     }
 
-    /// Add one request's cost to what this source has spent.
+    /// Budgets are summed by name and unit together, as the engine sums a difference of them.
     fn spend(&mut self, each: &Metering) {
         self.spent.requests += each.requests;
         for budget in &each.budgets {

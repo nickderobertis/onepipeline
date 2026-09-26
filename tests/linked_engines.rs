@@ -2474,7 +2474,6 @@ fn onetaskgraph_packages(lock: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The releases of the `onetaskgraph` family `packages` resolves, each once.
 fn releases(packages: &[(String, String)]) -> std::collections::BTreeSet<&str> {
     packages
         .iter()
@@ -2482,32 +2481,42 @@ fn releases(packages: &[(String, String)]) -> std::collections::BTreeSet<&str> {
         .collect()
 }
 
-/// Every `onetaskgraph` binary this repository's own automation installs, as the
-/// release each names: a `cargo install onetaskgraph`, or an install of the
-/// `onetaskgraph-cli` wheel or package, anywhere a recipe, a workflow or a script
-/// runs one. `None` for an install that names no release at all.
-fn installed_onetaskgraph(text: &str) -> Vec<Option<String>> {
+/// Every line of `text` that installs an `onetaskgraph` binary, as the release it names —
+/// `None` for one that names none.
+///
+/// Read by the words on the line rather than by one spelling of a command: a line is an
+/// install where one word is `install` and another names the package — `onetaskgraph`
+/// itself, as `cargo` spells it, or the `onetaskgraph-cli` wheel and package, as `uv`, `pip`
+/// and `npm` spell it — whatever order the words come in. The release is the word after a
+/// `--version`, or what follows `==` or `@` on the package's own word.
+fn onetaskgraph_installs(text: &str) -> Vec<Option<String>> {
     text.lines()
         .filter(|line| !line.trim_start().starts_with('#'))
-        .filter(|line| {
-            line.contains("cargo install onetaskgraph")
-                || (line.contains("onetaskgraph-cli")
-                    && (line.contains("install") || line.contains("uv tool")))
-        })
-        .map(|line| {
-            let words: Vec<&str> = line.split_whitespace().collect();
-            words
-                .windows(2)
-                .find(|pair| pair[0] == "--version")
-                .map(|pair| pair[1].trim_matches('"').to_owned())
-                .or_else(|| {
-                    words.iter().find_map(|word| {
-                        word.trim_matches(|c| c == '"' || c == '\'')
-                            .split_once("onetaskgraph-cli==")
-                            .or_else(|| word.split_once("onetaskgraph-cli@"))
-                            .map(|(_, version)| version.to_owned())
+        .filter_map(|line| {
+            let words: Vec<&str> = line
+                .split_whitespace()
+                .map(|word| word.trim_matches(|c| c == '"' || c == '\'' || c == ';'))
+                .collect();
+            let package = words.iter().find_map(|word| {
+                ["onetaskgraph-cli", "onetaskgraph"]
+                    .iter()
+                    .find_map(|name| word.strip_prefix(name))
+                    .filter(|rest| {
+                        rest.is_empty() || rest.starts_with("==") || rest.starts_with('@')
                     })
-                })
+            })?;
+            words.contains(&"install").then(|| {
+                words
+                    .windows(2)
+                    .find(|pair| pair[0] == "--version")
+                    .map(|pair| pair[1].to_owned())
+                    .or_else(|| {
+                        package
+                            .strip_prefix("==")
+                            .or_else(|| package.strip_prefix('@'))
+                            .map(str::to_owned)
+                    })
+            })
         })
         .collect()
 }
@@ -2531,13 +2540,23 @@ fn a_split_family_and_an_install_are_each_read_as_the_releases_they_name() {
         "a family split across two releases read as one"
     );
     assert_eq!(
-        installed_onetaskgraph(
+        onetaskgraph_installs(
             "    cargo install onetaskgraph --locked --version 0.2.32\n\
              # cargo install onetaskgraph --version 9.9.9\n\
+             cargo install --version 0.2.31 onetaskgraph\n\
              uv tool install onetaskgraph-cli==0.2.30\n\
-             cargo install onetaskgraph --locked\n"
+             npm install -g onetaskgraph-cli@0.2.29\n\
+             cargo install onetaskgraph --locked\n\
+             cargo install onetaskgraph-core-helper --version 1.0.0\n\
+             cargo build --package onetaskgraph\n"
         ),
-        vec![Some("0.2.32".to_owned()), Some("0.2.30".to_owned()), None]
+        vec![
+            Some("0.2.32".to_owned()),
+            Some("0.2.31".to_owned()),
+            Some("0.2.30".to_owned()),
+            Some("0.2.29".to_owned()),
+            None
+        ]
     );
 }
 
@@ -2603,7 +2622,7 @@ fn every_onetaskgraph_crate_in_the_lock_is_the_one_release_the_manifest_names() 
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
-        for install in installed_onetaskgraph(&text) {
+        for install in onetaskgraph_installs(&text) {
             assert_eq!(
                 install.as_deref(),
                 Some(release),
