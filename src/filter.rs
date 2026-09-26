@@ -509,7 +509,8 @@ pub struct LaunchConfig {
     /// reason the others are: what a team's branches say is a property of how it
     /// works rather than of one launch. `--branch-template` spells the same thing
     /// inline and overrides this, as does `ONEPIPELINE_BRANCH_TEMPLATE` between
-    /// them; naming none at any of the three takes the shipped default.
+    /// them. Where none of the three is there, the launch takes the shipped
+    /// default; one that is there and blank names none.
     ///
     /// A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may
     /// not carry one. Blank is kept as written and read at the launch as naming

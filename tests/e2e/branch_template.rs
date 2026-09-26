@@ -20,7 +20,7 @@
 // carry. `harness.rs` carries the same suppression and the full rationale.
 
 // llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
-// assumed: the twelve journeys here take about 45 seconds on the wall under the suite's
+// assumed: the thirteen journeys here take about 50 seconds on the wall under the suite's
 // parallelism, each cutting a real branch through the linked `onevcs` over real git. What
 // they exercise is `branchname`, `vcs::opening_for`, the lifecycle's session open, the
 // launch in `driver`, the store mapping in `taskgraph` and the write-back together, which
@@ -104,18 +104,29 @@ fn with_no_template_anywhere_a_task_with_no_key_cuts_its_branch_at_the_plan_and_
     // The real released store over `local-md`, which has no task key: this is the
     // case every journey of this repository's own runs is in.
     let world = publishing("branch-default-unkeyed");
-    let run = settle(&world, "unkeyed", vec![lifecycle("service", &[])], &[]);
+    // Named by the project's own title, with no `onepipeline.name` stating one: the
+    // plan's name is the title, and so is the branch's first segment.
+    let mut plan = plan_of("unkeyed", vec![lifecycle("service", &[])]);
+    plan["name"] = json!("titled");
+    let project = world.plan("unkeyed", &plan);
+    let held = world.store_project(&project);
+    assert_eq!(held["items"][0]["item"]["title"], "titled");
+    assert!(held["items"][0]["item"]["metadata"]
+        .get("onepipeline.name")
+        .is_none());
+    world.run(&["start", &project, "--attach"]).settled();
+    let run = "titled";
 
     assert_eq!(
-        cut_branches(&world, &run),
-        ["unkeyed/service"],
+        cut_branches(&world, run),
+        ["titled/service"],
         "{}",
         world.dump()
     );
-    assert_eq!(settlement(&world, &run, "service")["status"], "done");
+    assert_eq!(settlement(&world, run, "service")["status"], "done");
     // The launch resolved the shipped default and retained it.
     assert_eq!(
-        world.run_json(&run, "launch.json")[KEY],
+        world.run_json(run, "launch.json")[KEY],
         json!(DEFAULT_TEMPLATE)
     );
 }
@@ -508,13 +519,13 @@ fn a_retry_that_cuts_a_branch_names_it_for_the_task_its_node_was_read_out_of() {
     assert_eq!(settlement(&world, &run, "service-2")["status"], "done");
 }
 
-// llmlint: ignore-block[tests_mirror_real_usage] the one state set by hand is a run's own
-// record going bad between the launch that wrote it and the driver that adopts it — a
-// template edited into one that no longer parses, a recorded plan removed. No verb writes
-// either: the launch parses the template it records and writes the plan beside it, so a
-// record this build cannot read is reached only by something outside it, which is the
-// condition the adopting driver has to refuse on. Everything else is the real binary
-// against a real run, and the assertion is on how the node settled and what was cut.
+// llmlint: ignore-block[tests_mirror_real_usage] the one state set by hand in each journey
+// below is a run's own launch record or plan as something other than this build left it —
+// a template edited into one that no longer parses, a recorded plan removed, or a record
+// written before the `branch_template` key existed. No verb of this build writes any of
+// them: the launch parses the template it records and writes the plan beside it, and no
+// earlier build can be run here to write the older record. Everything else is the real
+// binary against a real run, and the assertion is on how the node settled and what was cut.
 #[test]
 fn a_run_whose_records_went_bad_before_adoption_settles_the_node_and_cuts_no_branch() {
     let world = publishing("branch-bad-records");
@@ -561,6 +572,40 @@ fn a_run_whose_records_went_bad_before_adoption_settles_the_node_and_cuts_no_bra
         );
         assert!(cut_branches(&world, &run).is_empty(), "{}", world.dump());
     }
+}
+
+/// A run an earlier build launched recorded no template, and an adopting driver of
+/// this build goes on cutting the branches that launch would have: the ones `onevcs`
+/// derives, rather than names the run never asked for.
+#[test]
+fn a_run_launched_before_there_was_a_template_goes_on_cutting_derived_branches() {
+    let world = publishing("branch-older-record");
+    let run = settle(
+        &world,
+        "older",
+        vec![human("approve", &[]), lifecycle("service", &["approve"])],
+        &[],
+    );
+    // The record as a build before this key wrote it: the same document, without it.
+    let path = world.run_file(&run, "launch.json");
+    let mut record: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("the launch record"))
+            .expect("the launch record is JSON");
+    record
+        .as_object_mut()
+        .expect("a record")
+        .remove(KEY)
+        .expect("this build recorded the default");
+    std::fs::write(&path, record.to_string()).expect("the record is rewritten");
+    world.run(&["attest", &run, "approve"]).exited(0);
+    world.run(&["adopt", &run]).exited(0);
+
+    let cut = cut_branches(&world, &run);
+    assert!(
+        cut.len() == 1 && cut[0].starts_with("onevcs/"),
+        "an older run's branch was named by a template it never had: {cut:?}"
+    );
+    assert_eq!(settlement(&world, &run, "service")["status"], "done");
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
