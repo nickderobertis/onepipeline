@@ -1322,14 +1322,14 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
     );
 }
 
-/// An attempt is refused whichever of its calls the store refuses: the read of a member the
-/// copy names, the copy, or the project read answered as a partial response every source of
-/// which refused. Each is reported once under the store's own kind, and none is asked again
+/// A member attempt is refused whichever of the calls it makes the store refuses: the read of
+/// a member the copy names, the copy, or the project read answered as a partial response
+/// every source of which refused. Each is reported once under the store's own kind, and none is asked again
 /// on a timer. The graph change each scenario makes is a member projection, which reads a named
 /// member rather than a page of the project's tasks; a whole projection's page of tasks refused
 /// is `writeback_projections::a_projection_after_a_failed_attempt_is_whole`'s.
 #[test]
-fn a_refusal_from_any_command_of_an_attempt_stops_the_retry_timer() {
+fn a_refusal_of_the_member_read_the_copy_or_the_project_read_stops_the_retry_timer() {
     for (scenario, method, error, kind) in [
         (
             "task-show",

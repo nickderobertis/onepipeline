@@ -1340,8 +1340,9 @@ struct Landed {
     delivered: Vec<Map<String, Value>>,
 }
 
-/// The largest page one destination read asks for: enough that a project of any plan's
-/// size is one page, which is what the page of tasks a whole projection reads spent before.
+/// The largest page one destination read asks for, so an ordinary plan's project is read in
+/// one request against a hosted destination's allowance; a source may answer with less, and
+/// the walk below follows its pages to the end.
 const TASK_PAGE: NonZeroU32 = NonZeroU32::new(10_000).expect("ten thousand is not zero");
 
 /// One attempt's store: the engine its configuration describes, with the shadow source
