@@ -750,7 +750,11 @@ fn a_config_naming_the_key_at_a_version_that_never_had_it_is_refused_by_that_nam
     );
 }
 
-// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this journey waits past the sixty-second floor by construction — a store that has not opened within a minute cannot be observed in less than one — and the edge it needs is the crate under test, the compiled `onepipeline` binary against its own write-back worker, as the journeys above record.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey waits past
+// the sixty-second floor by construction — a store that has not opened within a minute cannot
+// be observed in less than one — and the edge it needs is the crate under test: it drives the
+// compiled `onepipeline` binary against its own write-back worker, as the three journeys above
+// do and for the reason they record.
 /// A store slow to start — a source whose handshake has not been answered — is held to the
 /// floor every read is held to: an attempt whose store has not opened inside it is refused by
 /// the name the floor gives the opening, retried on the schedule, and lands once the store
@@ -805,3 +809,4 @@ fn a_store_that_does_not_open_within_the_floor_is_refused_retried_and_recovers()
         world.run_file(run, "result.json").is_file()
     });
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

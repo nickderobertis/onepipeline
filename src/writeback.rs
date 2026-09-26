@@ -1584,6 +1584,14 @@ fn shown<T>(
     if !answer.errors.is_empty() {
         return Err(Failed::partial(call, &answer.errors));
     }
+    // llmlint: ignore-block[changed_behavior_has_e2e] These refusals defend the linked
+    // store's own answer: `Engine::project` and `Engine::task` answer one page holding at most
+    // one item, under the id asked for, by construction, so no configuration a journey can
+    // write reaches them.
+    if answer.next.is_some() {
+        return Err(format!("{call} of '{id}' claims another page").into());
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     let mut items = answer.items.into_iter();
     let Some(found) = items.next() else {
         return Err(Failed::classed(
@@ -1591,9 +1599,7 @@ fn shown<T>(
             Classified::no_such_item(),
         ));
     };
-    // llmlint: ignore-block[changed_behavior_has_e2e] These refusals defend the linked
-    // store's own answer: `Engine::project` and `Engine::task` answer one item under the id
-    // asked for by construction, so no configuration a journey can write reaches them.
+    // llmlint: ignore-block[changed_behavior_has_e2e] as above.
     if items.next().is_some() || found.id != *id {
         return Err(format!("{call} returned the wrong item for '{id}'").into());
     }

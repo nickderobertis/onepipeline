@@ -56,6 +56,12 @@
 //! handshake included as `initialize`, naming each credential the engine handed over with a
 //! SHA-256 digest of its value — `NAME=<hex>` — never the value itself.
 
+// llmlint: ignore-file[new_code_lands_in_a_project] `crates/testfakes` is a workspace member
+// whose every file is the root `onepipeline` project's `crateSource` input (`nx.json`
+// declares `crates/**/*` there), so each target that builds, lints or tests the crate reads
+// this file, exactly as it reads every double beside it. It ships nowhere, and a project of
+// its own would restate the root project's targets over the same build unit.
+
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
