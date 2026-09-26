@@ -789,6 +789,11 @@ fn a_project_the_schema_refuses_never_starts_a_run() {
                  "title": "feat: ship it", "overflow": "unlimited"}]}),
             "node 'publish': `overflow` is a schema 3 field",
         ),
+        // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these two cases
+        // prove the crate's schema-version refusal of node `sets` in `src/taskgraph.rs` and
+        // `src/graph.rs` — the empty list is refused by the store key's presence, a branch
+        // reached only by reading the plan through the real store — so any change under
+        // `src/` can move them and no project edged narrower than the crate could run them.
         (
             "earlysets",
             json!({"schema_version": 2, "tasks": [
@@ -803,6 +808,7 @@ fn a_project_the_schema_refuses_never_starts_a_run() {
                  "title": "feat: ship it", "sets": []}]}),
             "`sets` is a schema 3 field",
         ),
+        // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
         // A bound that is neither the word nor an integer is refused by the
         // sibling's own reading of it, at whichever version.
         (

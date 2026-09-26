@@ -214,6 +214,97 @@ fn run_wide_edit_refuses_a_future_steps_effective_graph() {
     }));
 }
 
+/// Both lists are edited while a lifecycle node's first step is in flight: that step keeps the
+/// overrides it launched with, and the node's next step dispatches with the replacements.
+#[test]
+fn set_edits_during_a_running_step_reach_the_lifecycle_nodes_next_step() {
+    let world = World::new("edit-sets-between-steps");
+    world.repository("local-direct", &[]);
+    world.script("service.work", "the worker wrote this");
+    world.script("service.build.wait", "hold");
+    let service = json!({
+        "id":"service", "repo":"service", "title":"feat: service",
+        "sets":["members.worker.agent.model=planned"],
+        "steps":[
+            {"id":"build", "persona":"engineer", "task":"## What\nbuild"},
+            {"id":"review", "persona":"reviewer", "task":"## What\nreview", "deps":["build"]}
+        ]
+    });
+    let run = "sets-between-steps";
+    let path = world.plan(run, &plan_of(run, vec![service]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    let step_sets = |world: &World, step: &str| -> Option<Vec<String>> {
+        let call = world.invocations().into_iter().find(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"].as_array().is_some_and(|args| {
+                    args.iter().any(|arg| arg == "onepipeline.node=service")
+                        && args
+                            .iter()
+                            .any(|arg| arg == &format!("onepipeline.step={step}"))
+                })
+        })?;
+        Some(
+            call["args"]
+                .as_array()
+                .expect("argv")
+                .windows(2)
+                .filter(|pair| pair[0] == "--set")
+                .filter_map(|pair| pair[1].as_str().map(str::to_string))
+                .collect(),
+        )
+    };
+    world.until("the first step to dispatch", |world| {
+        step_sets(world, "build").is_some()
+    });
+    let edited = json!({"version":3,"commands":[
+        {"op":"set-run-node-sets","sets":["members.worker.agent.model=run=wide"]},
+        {"op":"set-node-sets","id":"service","sets":["members.worker.agent.model=edited,node"]}
+    ]});
+    world
+        .run_with_stdin(&["reply", run], &edited.to_string())
+        .exited(0);
+    world.until("both list edits to commit", |world| {
+        committed(world, run)
+            .iter()
+            .filter(|op| op.starts_with("set-"))
+            .count()
+            == 2
+    });
+    world.release("service.build.go");
+    world.until("the lifecycle node to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+
+    let build = step_sets(&world, "build").expect("the first step dispatched");
+    assert_eq!(
+        build.last().map(String::as_str),
+        Some("members.worker.agent.model=planned"),
+        "the running step did not launch with the plan's list: {build:?}"
+    );
+    assert!(
+        !build
+            .iter()
+            .any(|set| set.ends_with("run=wide") || set.ends_with("edited,node")),
+        "the running step changed its launch: {build:?}"
+    );
+    let review = step_sets(&world, "review")
+        .unwrap_or_else(|| panic!("the next step never dispatched: {}", world.dump()));
+    let run_wide = review
+        .iter()
+        .position(|set| set == "members.worker.agent.model=run=wide")
+        .unwrap_or_else(|| panic!("the next step lost the run-wide edit: {review:?}"));
+    assert_eq!(
+        review.last().map(String::as_str),
+        Some("members.worker.agent.model=edited,node"),
+        "the next step did not end with the node's replacement: {review:?}"
+    );
+    assert!(run_wide < review.len() - 1, "{review:?}");
+    assert!(
+        !review.iter().any(|set| set.ends_with("=planned")),
+        "the replaced node list still reached the next step: {review:?}"
+    );
+}
+
 #[test]
 fn a_run_wide_set_edit_is_replayed_when_a_driver_adopts() {
     let world = World::new("edit-sets-adopt");
