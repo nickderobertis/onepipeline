@@ -893,6 +893,7 @@ schemars = { version = "1", features = ["preserve_order"] }
 # features are every hosted plugin the store's own CLI offers, so a source an operator's
 # `onetaskgraph.yaml` names is one this build can read; `local-md`, `in-memory` and
 # `subprocess` come with the core.
+# llmlint: ignore[new_command_or_client_gets_its_own_project] no command or client of this repository arrives here: these are two plugins of the linked store library, which the store's own CLI shipped and every launch already reached through it, and the change that links the store requires them in this package so a configured source stays readable and the engine's bill of materials declares what it links. This repository is one Rust build unit, as the directives above record.
 onetaskgraph-core = { workspace = true, features = ["github-projects", "linear"] }
 onetaskgraph-plugin-api = { workspace = true }
 # The store's plugin traits are async, so each call into it runs on a runtime this crate

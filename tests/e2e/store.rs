@@ -308,8 +308,8 @@ fn the_store_is_discovered_from_the_launch_directory_by_the_read_and_by_every_wr
 /// The plans source here is reached through `scripted-source` as a `subprocess` source whose
 /// configuration names a credential; the variable is named in the `onetaskgraph.yaml` the
 /// launch directory holds, beside the settings this world's environment carries, and what
-/// the source was handed is read off its own record of the handshake — the name, never the
-/// value.
+/// the source was handed is read off its own record of the handshake — the name, and a
+/// digest of the value it carried.
 #[test]
 fn a_sources_credential_is_read_from_the_engines_environment_or_its_secrets_file() {
     const TOKEN: &str = "ONEPIPELINE_PLAN_STORE_TOKEN";
@@ -324,18 +324,22 @@ fn a_sources_credential_is_read_from_the_engines_environment_or_its_secrets_file
         ),
     )
     .expect("the configuration naming the credential");
-    let handed = |world: &World| {
+    // How many handshakes handed the source the credential holding `value`: read off the
+    // source's own record of each handshake, which names each credential beside a digest of
+    // the value it arrived with.
+    let handed = |world: &World, value: &str| {
+        use sha2::Digest;
+        let carried = format!("{TOKEN}={:x}", sha2::Sha256::digest(value.as_bytes()));
         world
             .store_calls()
             .iter()
             .filter(|call| call[0] == "initialize")
             .filter(|call| {
                 call.get(1)
-                    .is_some_and(|names| names.split(',').any(|name| name == TOKEN))
+                    .is_some_and(|handed| handed.split(',').any(|one| one == carried))
             })
             .count()
     };
-
     // Nothing defines it: the store cannot be built, and the launch says which variable.
     let project = world.plan("unset", &plan_of("unset", vec![agent("work", &[])]));
     let mut start = world.cmd(&["start", &project, "--detach"]);
@@ -368,10 +372,9 @@ fn a_sources_credential_is_read_from_the_engines_environment_or_its_secrets_file
             .iter()
             .all(|task| task["item"]["metadata"]["onepipeline.settlement"].is_object())
     });
-    let after_filed = handed(&world);
     assert!(
-        after_filed > 0,
-        "the source was never handed the filed credential"
+        handed(&world, "from-the-file") > 0,
+        "the source was never handed the credential the secrets file holds"
     );
 
     // Exported in the engine's own environment.
@@ -391,8 +394,8 @@ fn a_sources_credential_is_read_from_the_engines_environment_or_its_secrets_file
             .all(|task| task["item"]["metadata"]["onepipeline.settlement"].is_object())
     });
     assert!(
-        handed(&world) > after_filed,
-        "the source was never handed the exported credential"
+        handed(&world, "from-the-environment") > 0,
+        "the source was never handed the credential the engine's environment exports"
     );
 }
 

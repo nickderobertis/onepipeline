@@ -55,6 +55,10 @@ serde_norway = "0.9"
 onetaskgraph-core = { workspace = true }
 onetaskgraph-local-md = { workspace = true }
 onetaskgraph-plugin-api = { workspace = true }
+# What `scripted-source` records of a credential it is handed: a digest of the value,
+# so a journey can hold the value that arrived without the fixture writing it down.
+# Already in the graph through the crate under test.
+sha2 = "0.10"
 # The plugin API is async, so hosting one needs a runtime to block on. Nothing
 # under `local-md` is a socket or a timer, so the current-thread runtime is all of
 # it — and onetaskgraph's own network plugins already put tokio in the lock.

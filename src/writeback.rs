@@ -3215,6 +3215,26 @@ mod tests {
                 name: "plans".into(),
                 error: source.clone(),
             },
+            EngineError::MetadataNotWritable {
+                name: "plans".into(),
+                kind: "in-memory".into(),
+                record: onetaskgraph_plugin_api::MetadataRecord::Task,
+            },
+            EngineError::UnrecordedMember {
+                item: id(),
+                member: id(),
+                destination: onetaskgraph_plugin_api::SourceName::new("plans")
+                    .expect("a source name"),
+            },
+            // A copy that could not be undone takes the class and kind of the failure it wraps.
+            EngineError::CopyNotUndone {
+                error: Box::new(EngineError::SourceRefused {
+                    name: "plans".into(),
+                    error: SourceError::Refused { message: words() },
+                }),
+                left_behind: onetaskgraph_core::LeftBehind::new(id()),
+                refusal: source.clone(),
+            },
         ];
         for failure in &failures {
             let classified = Classified::of_engine(failure);

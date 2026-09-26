@@ -51,8 +51,8 @@
 //!
 //! Every call is recorded into the directory's `invocations.jsonl` as
 //! `{"tool": <key>, "args": [<method>, <the id it names, where it names one>]}`, the
-//! handshake included as `initialize`, naming the credentials the engine handed over — their
-//! names, never their values.
+//! handshake included as `initialize`, naming each credential the engine handed over with a
+//! SHA-256 digest of its value — `NAME=<hex>` — never the value itself.
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -60,9 +60,10 @@ use std::process::ExitCode;
 
 use onepipeline_testfakes as fake;
 use onepipeline_testfakes::hosted::Host;
-use onetaskgraph_plugin_api::{Metering, SourceError};
+use onetaskgraph_plugin_api::{Metering, SourceError, SourceName};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 // llmlint: ignore-block[boundary_inputs_validated] These shapes deliberately **ignore**
 // members they do not know, because §2.1 of the plugin protocol requires it: that is how a
@@ -74,8 +75,21 @@ use serde_json::{json, Value};
 #[derive(Deserialize)]
 struct Handshake {
     id: Value,
-    method: String,
+    /// §1.2: the first request on a connection is `initialize`, and nothing else may be
+    /// answered before it, so a first line naming anything else does not read.
+    #[allow(
+        dead_code,
+        reason = "read only to refuse a first line that is not a handshake"
+    )]
+    method: Initialize,
     params: HandshakeParams,
+}
+
+/// The one method a handshake is.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Initialize {
+    Initialize,
 }
 
 #[derive(Deserialize)]
@@ -83,7 +97,7 @@ struct HandshakeParams {
     protocol_version: u32,
     #[serde(default)]
     engine: Value,
-    source_name: String,
+    source_name: SourceName,
     config: Settings,
     /// The credentials the engine resolved for this source, by the variable each is named by.
     #[serde(default)]
@@ -171,14 +185,6 @@ fn main() -> ExitCode {
         Ok(value) => value,
         Err(error) => return stop(&format!("unreadable handshake: {error}")),
     };
-    // §1.2: the first request on a connection is `initialize`, and nothing else may be
-    // answered before it.
-    if handshake.method != "initialize" {
-        return stop(&format!(
-            "the first request is `initialize`, not `{}`",
-            handshake.method
-        ));
-    }
     let settings = handshake.params.config;
     if !settings.script.is_dir() {
         return stop(&format!(
@@ -186,11 +192,13 @@ fn main() -> ExitCode {
             settings.script.display()
         ));
     }
-    let handed: Vec<&str> = handshake
+    // Each credential as its name and a digest of its value, so a journey can hold the value
+    // that arrived without this fixture writing a credential down.
+    let handed: Vec<String> = handshake
         .params
         .secrets
-        .keys()
-        .map(String::as_str)
+        .iter()
+        .map(|(name, value)| format!("{name}={:x}", Sha256::digest(value.as_bytes())))
         .collect();
     fake::record(
         &settings.script,
@@ -209,7 +217,7 @@ fn main() -> ExitCode {
         handshake.id,
         handshake.params.protocol_version,
         handshake.params.engine,
-        &handshake.params.source_name,
+        handshake.params.source_name.as_str(),
         &settings.root,
     ) {
         // A source that meters says so in its handshake (§3.4), or the engine never asks it.

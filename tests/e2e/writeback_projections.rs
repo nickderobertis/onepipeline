@@ -697,10 +697,16 @@ fn a_run_directory_holding_an_older_engines_store_record_adopts_and_projects_by_
         "the running node to reach the board",
         |tasks| board_word(tasks, "work").as_deref() == Some("in-progress"),
     );
+    // llmlint: ignore-block[tests_mirror_real_usage] a record written by **another build** is
+    // the input here, and no invocation of this one produces it: this build never writes the
+    // file. What is written is exactly what an engine that drove the store's binary left in a
+    // run's directory, and everything then asserted is the real compiled binary adopting it —
+    // as `writeback_budget.rs` states an older build's launch record.
     let older = in_run_dir(&proposed()["retired"]["record"]);
     let answer = json!({"version": "0.2.29", "members": false});
     std::fs::write(world.run_file(run, &older), answer.to_string())
         .expect("the older engine's record is left in the run directory");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     let recorded_before = records(&world, run).len();
     adopted(&world, run);
