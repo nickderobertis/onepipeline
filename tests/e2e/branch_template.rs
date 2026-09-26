@@ -458,7 +458,6 @@ fn a_template_that_fails_or_renders_nothing_at_a_node_fails_it_and_cuts_no_branc
             assert!(detail.contains(&names), "{detail} lacks {names:?}");
         }
     }
-    // No session opened and no branch was cut, under any name.
     assert!(opened_branches(&world, &run).is_empty(), "{}", world.dump());
     assert_eq!(git(&world, &repo.origin, &["branch", "--list"]), before);
     assert_eq!(
@@ -761,7 +760,6 @@ fn a_rendered_name_another_branch_carries_takes_the_suffix_and_leaves_that_branc
         world.dump()
     );
     assert_eq!(settlement(&world, &run, "service")["status"], "done");
-    // Untouched: never continued, never moved.
     assert_eq!(git(&world, &repo.origin, &["rev-parse", existing]), tip);
     assert_eq!(git(&world, &repo.checkout, &["rev-parse", existing]), tip);
 }

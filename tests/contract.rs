@@ -2487,7 +2487,6 @@ fn the_branch_name_template_is_what_the_contract_names() {
     assert_eq!(block["config_key"].as_str(), Some(KEY));
     assert_eq!(block["launch_record_key"].as_str(), Some(KEY));
 
-    // The flag, and `adopt` not taking it.
     let Command::Start(started) =
         Cli::try_parse_from(["onepipeline", "start", "plans:demo", FLAG, "{{ node.id }}"])
             .expect("the flag the block names is one `start` takes")
@@ -2500,7 +2499,6 @@ fn the_branch_name_template_is_what_the_contract_names() {
         .expect_err("adopt takes no template");
     assert!(refused.to_string().contains(FLAG), "{refused}");
 
-    // The key, at the version the block states and refused by name before it.
     let at = u32::try_from(
         block["config_schema_version"]
             .as_u64()
@@ -2539,7 +2537,6 @@ fn the_branch_name_template_is_what_the_contract_names() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 
-    // The default, rendered over exactly the namespace the block names.
     assert_eq!(block["default"].as_str(), Some(DEFAULT_TEMPLATE));
     let variables = block["variables"].clone();
     let names = |value: &Value| -> BTreeSet<String> {
@@ -2580,7 +2577,6 @@ fn the_branch_name_template_is_what_the_contract_names() {
             .as_str()
             .expect("the block names what a keyless task renders"))
     );
-    // Each variable reaches the renderer under the name the block gives it.
     for (path, value) in [
         ("task.key", "ENG-123"),
         ("task.id", "demo-board/000-build"),
@@ -2600,7 +2596,6 @@ fn the_branch_name_template_is_what_the_contract_names() {
     // Printing a key a task does not have is a failure, not an empty segment.
     assert!(render("{{ task.key }}", &keyless).is_err());
 
-    // The task record the node carries, and the field a name to cut travels in.
     let record: TaskRecord =
         serde_json::from_value(block["task_record"].clone()).expect("the task record parses");
     assert_eq!(

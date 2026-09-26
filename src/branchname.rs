@@ -316,7 +316,6 @@ mod tests {
             Ok("ENG-123/build")
         );
         assert_eq!(naming.render(&node(None)).as_deref(), Ok("demo/build"));
-        // A node no task was read for has no key either.
         let bare = Node {
             id: "added".into(),
             ..Node::default()
