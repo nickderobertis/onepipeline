@@ -20,7 +20,7 @@
 // carry. `harness.rs` carries the same suppression and the full rationale.
 
 // llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
-// assumed: the fourteen journeys here take about 50 seconds on the wall under the suite's
+// assumed: the sixteen journeys here take about 50 seconds on the wall under the suite's
 // parallelism, each cutting a real branch through the linked `onevcs` over real git. What
 // they exercise is `branchname`, `vcs::opening_for`, the lifecycle's session open, the
 // launch in `driver`, the store mapping in `taskgraph` and the write-back together, which
@@ -57,13 +57,18 @@ fn opened_branches(world: &World, run: &str) -> Vec<String> {
 /// A world whose store is read through the double, every task it lists carrying
 /// [`TASK_KEY`] — what a source with a handle of its own answers with.
 fn keyed(world: World) -> World {
+    keyed_as(world, TASK_KEY)
+}
+
+/// [`keyed`], with every task the double lists carrying `key` instead.
+fn keyed_as(world: World, key: &str) -> World {
     world.script(
         "onetaskgraph.delegate",
         &onetaskgraph_binary().to_string_lossy(),
     );
     world.script(
         "onetaskgraph.task-list.grow",
-        &json!({ "key": TASK_KEY }).to_string(),
+        &json!({ "key": key }).to_string(),
     );
     world.with_env(
         STORE_BINARY_ENV,
@@ -143,6 +148,61 @@ fn with_no_template_anywhere_a_task_with_a_key_cuts_its_branch_at_the_key_and_no
         world.dump()
     );
     assert_eq!(settlement(&world, &run, "service")["status"], "done");
+}
+
+#[test]
+fn a_task_whose_source_answers_a_blank_key_is_named_as_one_with_none() {
+    // A blank key is the store's way of carrying none, as a blank title is: the
+    // shipped default falls back to the plan's name rather than cutting `/service`.
+    let world = keyed_as(publishing("branch-default-blank-key"), "   ");
+    let run = settle(&world, "blanked", vec![lifecycle("service", &[])], &[]);
+    assert_eq!(
+        opened_branches(&world, &run),
+        ["blanked/service"],
+        "{}",
+        world.dump()
+    );
+}
+
+/// A node an edit added was read out of no task, so it renders `task.id` and
+/// `task.title` empty — and the one way an edit could hand it a record of its own,
+/// a `requeue` amending one in, is refused.
+#[test]
+fn a_node_no_task_was_read_for_renders_an_empty_task_and_no_edit_may_state_one() {
+    let world = publishing("branch-unrecorded");
+    world.script("extra.work", "the added node wrote this\n");
+    let template = "t{{ task.id }}{{ task.title }}/{{ node.id }}";
+    let run = settle(
+        &world,
+        "unrecorded",
+        vec![lifecycle("service", &[])],
+        &[FLAG, template],
+    );
+    let reply = |commands: Value| {
+        world.run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "commands": commands}).to_string(),
+        )
+    };
+
+    let mut extra = lifecycle("extra", &[]);
+    extra["parked"] = json!(true);
+    reply(json!([{"op": "add", "node": extra}])).exited(0);
+    reply(json!([{"op": "requeue", "id": "extra", "amend": {
+        "task_record": {"id": "invented", "key": "ENG-999", "title": "not this task"}
+    }}]))
+    .exited(REFUSED)
+    .err_has("requeue: node 'extra' cannot amend `task_record`");
+    reply(json!([{"op": "requeue", "id": "extra"}])).exited(0);
+    world.run(&["adopt", &run]).exited(0);
+
+    let branches = opened_branches(&world, &run);
+    assert!(
+        branches.iter().any(|branch| branch == "t/extra"),
+        "the added node's branch was not rendered over an empty task: {branches:?}\n{}",
+        world.dump()
+    );
+    assert_eq!(settlement(&world, &run, "extra")["status"], "done");
 }
 
 #[test]
