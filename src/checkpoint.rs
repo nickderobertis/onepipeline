@@ -99,7 +99,9 @@ use crate::projection::{self, RunState};
 /// 5 was cut when `driver-adopted` started clearing the run's recorded stop
 /// (`RunState::stop`): a cached fold of a stopped-then-adopted run from before it
 /// still carries the stop, and resumed from it would go on reporting the
-/// adopting driver dead and the run settled.
+/// adopting driver dead and the run settled. Version 6 was cut when the fold
+/// started keeping a stated change request past a later stated commit
+/// (`RunState::stated_change_urls`), the fallback a version-5 fold does not hold.
 // llmlint: ignore[changed_behavior_has_e2e] a version-1 document is one the build before
 // this one wrote, which no invocation of this build can produce: what a user can reach —
 // a checkpoint at this version being resumed from, and one at a version this build does
@@ -1446,6 +1448,13 @@ mod tests {
                 "build".to_string(),
                 crate::projection::Recorded::At(crate::graph::NodeStatus::Done),
             )]),
+            // Written only when a settle stated a change request, and pinned here so
+            // the name it is written under cannot move without the version.
+            stated_change_urls: BTreeMap::from([(
+                "build".to_string(),
+                crate::edits::StatedLanding::parse("https://example.invalid/owner/engine/pull/12")
+                    .expect("a change request"),
+            )]),
             last_write_at: Some(1_786_000_000_000),
             strict: true,
             ..RunState::default()
@@ -1475,8 +1484,9 @@ mod tests {
     /// The documents the builds **before** each fold change wrote, kept exactly as
     /// those builds wrote them: the one before the park-ending fold, the one
     /// before the fold recorded a driver letting go of its run, the one before it
-    /// read a settle's stated landing, and the one before an adoption cleared the
-    /// run's recorded stop.
+    /// read a settle's stated landing, the one before an adoption cleared the
+    /// run's recorded stop, and the one before it kept a stated change request past
+    /// a later stated commit.
     ///
     /// What proves each fold change is a version and not a quiet re-reading: each
     /// is a real document, byte-for-byte the shape this build writes, and the

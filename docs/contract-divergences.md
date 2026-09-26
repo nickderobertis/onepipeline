@@ -1652,6 +1652,32 @@ landing nobody observed arrives after the fact by definition: a change request
 open when its node settled is merged outside every session, where nothing relays
 it back to this run.
 
+A stated **commit** carries a fallback, because not every commit an operator can
+read off a merge is one `onevcs` resolves: a host's squash merge writes a commit
+onto the base that no branch of the work carries. So beside a stated commit the
+run **retains the change request it already knows for that node** — the one an
+earlier settle stated, kept past the later statement of a commit, or else the
+`change_url` the node's own settlement recorded — and the order is fixed:
+
+1. `onevcs` is asked at the stated commit, and a commit that resolves is answered
+   from the commit alone, whatever it answers;
+2. only where it refuses with the typed `onevcs::Error::UnresolvableReference` is
+   the question put again at the retained change request, and that answer is the
+   one used;
+3. any other refusal of the commit — the host, the filesystem, input it would not
+   take — and a commit with no change request retained both stay `not-answered`,
+   exactly as before there was a fallback.
+
+The variant is matched and never the refusal's prose, which the sibling is free to
+reword. The settle's command and the reply envelope are unchanged: what is
+retained is read off the run's own record. Before it, a dependency settled at a
+squash commit held for ever after its release — three settles of one run in
+2026-09 were restated at their change requests by hand to lift it (onepipeline
+issue #420). `tests/e2e/adoption.rs`'s
+`a_squash_commit_baselined_before_any_release_is_answered_through_its_change_request`
+drives it end to end. The checkpoint moved to version 6 for it, because the
+retained change request is part of the fold a cached one would not hold.
+
 *A release that has been observed is **latched***. Every answer but one holds a
 node and each is a statement about *now* — a probe that failed, a target awaiting
 a person, a version that has not moved — so writing any of them over an answer
@@ -3625,10 +3651,19 @@ from what the engine knows:
 Where what the repository releases cannot be read at all, the line says the
 question was not asked, and names `onevcs release targets` as what says why.
 
+A stated commit is asked the way entry 40 orders it: at the commit, and — only
+where `onevcs` refuses it as an unresolvable reference — again at the change
+request the run retains for the node. So a squash-merge commit whose change request
+the run knows is answered through it, and says nothing where that answer is a hold
+the next answer can lift; where it has no baseline, the command names the change
+request that answered.
+
 Where `onevcs` cannot resolve the stated reference to landed work at all — a
-squash-merge commit that no branch carries is one — the line says that no release
-will ever be attributed through it, and says to settle the node again at the change
-request that carried the work. That second settle is **accepted** although the
+squash-merge commit that no branch carries, with no change request retained or one
+that does not resolve either — the line says that no release will ever be
+attributed through it, and says to settle the node again at the change request that
+carried the work. Its command names the change request the run retains where there
+is one, and the `'<CHANGE-REQUEST-URL>'` placeholder only where there is none. That second settle is **accepted** although the
 node already holds its outcome: the duplicate guard above refuses a settle that
 changes nothing, and one stating a different landing, or a release, changes where
 the record says the work landed. The release watch re-reads a waiting node's stated
@@ -6761,9 +6796,10 @@ the SDK call, and `agents::tests` holds the merge rule and the reader against th
 ## 85. A stop hook is the only thing enforcing the watch invariant, and it lives in the consumer as a harness-specific adapter — OPEN
 
 **Proposal (for the planner who owns the contract): add `onepipeline stop-guard
-[--session <ID>] [--continuation] [--format neutral|claude-code|codex]` to the
-Views line beside `unwatched`, as a verb whose contract is one verdict object
-and exit `0` always.**
+[--session <ID>] [--continuation] [--format neutral|claude-code|codex]
+[--source <COMMAND>]... [--source-timeout <SECONDS>]` to the Views line beside
+`unwatched`, as a verb whose contract is one verdict object and exit `0`
+always.**
 
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] a register entry states
 the surface it proposes so the planner who owns `docs/contract.md` can rule on it — that is
@@ -6844,6 +6880,26 @@ harnesses share those field names: Codex's own compiled `stop.command.input` and
 `decision: "block"`, `reason` and `systemMessage`, and its schema annotates the
 last as Claude's rule.
 
+**A host may declare further verdict sources on the same registration.** The
+consumer's own stop condition is two questions — a run nothing is watching, and
+a branch preserved on its origin but never published, which only that host can
+compute — and without a way to name the second here it had three roads, each
+losing something this verb already holds: a wrapper re-implementing the
+renderings and the continuation rule, a second hook whose verdict cannot be
+combined with this one, or dropping the question. So `--source <COMMAND>`,
+repeatable, names a command the platform shell runs on every stop, handed this
+verb's own neutral input for the session it is answering about and answering
+one neutral verdict object. The answers combine with the verb's own, the
+strongest winning and every block's reason kept; the continuation rule holds
+per source, under a memory keyed by the session and the command. A source that
+cannot be consulted — missing, not delivered its whole input, non-zero, past
+`--source-timeout`, silent, or outside the vocabulary — **blocks**, naming
+itself and what went wrong: the one
+place the stand-aside rule above is turned around, because a declared source is
+a condition the host asked to be enforced, and a warning would let the turn end
+over it unshown. The per-source memory bounds that to one refused stop per
+unchanged failure.
+
 `docs/stop-guard.md` states the neutral contract and then the wiring for each
 harness, so a reader wires either without reading this crate's source. Both
 harnesses' claims on that page were verified against the installed Codex CLI
@@ -6860,7 +6916,16 @@ root, an unreadable or unwritable memory, a refused question and an engine error
 are each exactly one `warn` and never a block; a run whose event store cannot be
 read is still decided from its watch state; and the documented Claude Code
 wiring is driven over real `Stop` payloads and read back in that harness's
-decision shape.
+decision shape. Declared sources are driven the same way, as scripts a host
+writes: combined with the verb's own block and with each other under the
+neutral format, each handed the input's session in the verb's own input bytes;
+a continuation over unchanged answers ends the turn and one where a single
+source moved refuses on it alone; both hook renderings ask a source about the
+payload's session and end the turn on the continuation after its block; and a
+source that is missing, is not delivered its whole input, exits non-zero, times
+out, writes nothing, or answers any of seven shapes outside the vocabulary
+refuses the stop naming itself, with
+the continuation after it ending the turn.
 
 <!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
 

@@ -11,7 +11,7 @@
     "streams": {
       "golden-host-1": 41
     },
-    "digest": "58e22f2568d4b3bf6d6e7f2d26e2327d"
+    "digest": "ea7dafa61c6451aaace48ca2d03e73be"
   },
   "state": {
     "graph": {
@@ -24,9 +24,6 @@
         }
       ]
     },
-    "run_node_sets": [
-      "members.worker.agent.model=edited"
-    ],
     "plan": null,
     "recorded": {
       "build": {
@@ -43,6 +40,9 @@
     "heads": {},
     "landing_commits": {},
     "landings": {},
+    "stated_change_urls": {
+      "build": "https://example.invalid/owner/engine/pull/12"
+    },
     "completed_steps": {},
     "dispatched_at": {},
     "settled_at": {},

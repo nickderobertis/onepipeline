@@ -274,7 +274,12 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 print!("{}", crate::stopguard::Verdict::None.render(args.format));
                 return Ok(EXIT_SUCCESS);
             };
-            let (verdict, unresolved) = crate::stopguard::guard(&ledger::runs_root(), &asked);
+            let (verdict, unresolved) = crate::stopguard::guard(
+                &ledger::runs_root(),
+                &asked,
+                &args.sources,
+                std::time::Duration::from_secs(args.source_timeout),
+            );
             // Standard error carries what the ordinary `unwatched` writes there for
             // the same question, and nothing else: the verdict is the whole of
             // standard output, because that stream is the decision.
