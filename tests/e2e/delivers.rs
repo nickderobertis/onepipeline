@@ -506,6 +506,7 @@ fn a_failed_first_projection_does_not_hold_back_the_first_dispatch() {
     assert_eq!(world.run_json(name, "result.json")["state"], "complete");
 }
 
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this journey waits past the sixty-second floor by construction — a claim held past its deadline cannot be observed in less than one — and the edge it needs is the crate under test, the compiled `onepipeline` binary against its own write-back worker, exactly as `writeback_budget.rs`'s minute-long journeys record.
 /// A launch whose first projection the store never answers waits for it only as long as the
 /// store call deadline allows, and then dispatches: nothing is dispatched while the held copy
 /// is inside its deadline, the ready node is dispatched once it has passed, and the planner hears

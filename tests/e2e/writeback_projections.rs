@@ -79,16 +79,20 @@ fn native(id: &str) -> &str {
     id.split_once(':').map_or(id, |(_, native)| native)
 }
 
-/// Whether every attempt the worker has made has been recorded, every record landed, and the
-/// store is quiet — so no attempt is in flight and none failed. Quiet is read off the store's
-/// own record of calls: nothing new across a pause longer than one attempt against a local
-/// folder takes to make its next call.
+/// Whether every attempt the worker has made has been recorded and every record landed — so
+/// no attempt is in flight and none failed.
+///
+/// Counted, not timed: each command that reaches the store opens a connection of its own to
+/// the scripted source, whose handshake is the first thing it records. One of those was the
+/// plan read the launch made; each of the rest is an attempt, which is in flight from its
+/// handshake until the worker appends its record.
 fn every_attempt_landed(world: &World, run: &str) -> bool {
-    let before = (records(world, run).len(), store_calls(world).len());
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    let opened = store_calls(world)
+        .iter()
+        .filter(|call| is_call(call, "initialize"))
+        .count();
     let records = records(world, run);
-    before == (records.len(), store_calls(world).len())
-        && !records.is_empty()
+    records.len() + 1 == opened
         && records
             .iter()
             .all(|record| record["outcome"] == "projected")
