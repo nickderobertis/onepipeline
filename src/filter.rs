@@ -983,12 +983,16 @@ mod tests {
                 LaunchConfig {
                     schema_version: version,
                     // Version 10 declared the graph override lists.
-                    node_sets: (version >= 10)
-                        .then(|| vec!["members.worker.agent.model=node".to_string()])
-                        .unwrap_or_default(),
-                    dag_sets: (version >= 10)
-                        .then(|| vec!["members.observer.agent.model=dag".to_string()])
-                        .unwrap_or_default(),
+                    node_sets: if version >= 10 {
+                        vec!["members.worker.agent.model=node".to_string()]
+                    } else {
+                        Vec::new()
+                    },
+                    dag_sets: if version >= 10 {
+                        vec!["members.observer.agent.model=dag".to_string()]
+                    } else {
+                        Vec::new()
+                    },
                     filters: pinned_filters(),
                     // Version 2 is the one that declared the drafting graph, and
                     // it names one; version 1 never had the key at all. Version 3

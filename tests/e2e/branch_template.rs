@@ -1,0 +1,469 @@
+//! What the branch a lifecycle node's session cuts is named.
+//!
+//! This crate renders a name from the launch's branch-name template and hands it
+//! to `onevcs` as a name to **cut**; the sanitizing, the host's prefix and the
+//! collision suffix are that library's. Every journey here drives the real
+//! binary over the real `onevcs` against a real git origin, and reads the branch
+//! off the session's own record — the name the sibling actually cut, not a string
+//! this crate rendered.
+//!
+//! A plan here is read out of the real `onetaskgraph`, whose `local-md` source
+//! has no task key. The journeys about a keyed task read the same real store
+//! through `fake-onetaskgraph`, delegating every call and growing `key` onto each
+//! task it lists — the one field no offline source can answer with.
+
+// llmlint: ignore-file[e2e_not_mocked] the crate under test is driven as a real compiled
+// binary and `onevcs` — the sibling that cuts the branch — is the real library over real
+// git. `oneagentgraph` is substituted at its subprocess boundary so a journey states a
+// dispatch outcome rather than paying for a model turn, and a keyed task is served by the
+// real store through `fake-onetaskgraph`, which adds the one field a local source cannot
+// carry. `harness.rs` carries the same suppression and the full rationale.
+
+use serde_json::{json, Value};
+
+use crate::harness::{
+    double, git, human, lifecycle, onetaskgraph_binary, plan_of, World, REFUSED, STORE_BINARY_ENV,
+    USAGE_ERROR,
+};
+use onepipeline::branchname::{DEFAULT_TEMPLATE, ENVIRONMENT, FLAG, KEY};
+
+/// The key the double grows onto every task it lists.
+const TASK_KEY: &str = "ENG-123";
+
+/// The branch every session **the sibling itself** opened was cut on, in order.
+///
+/// Told apart from this crate's own `session-opened` by the clone only the
+/// repository side names, so what is read is the branch `onevcs` reports.
+fn cut_branches(world: &World, run: &str) -> Vec<String> {
+    world
+        .journal(run)
+        .iter()
+        .filter(|event| event["source"] == "vcs" && event["kind"] == "session-opened")
+        .filter(|event| event["payload"]["clone"].is_string())
+        .filter_map(|event| event["payload"]["branch"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// A world whose store is read through the double, every task it lists carrying
+/// [`TASK_KEY`] — what a source with a handle of its own answers with.
+fn keyed(world: World) -> World {
+    world.script(
+        "onetaskgraph.delegate",
+        &onetaskgraph_binary().to_string_lossy(),
+    );
+    world.script(
+        "onetaskgraph.task-list.grow",
+        &json!({ "key": TASK_KEY }).to_string(),
+    );
+    world.with_env(
+        STORE_BINARY_ENV,
+        &double("fake-onetaskgraph").to_string_lossy(),
+    )
+}
+
+/// A world with one repository publishing straight onto its base, and a worker
+/// that writes something there.
+fn publishing(name: &str) -> World {
+    let world = World::new(name);
+    world.repository("local-direct", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world
+}
+
+/// Launch `nodes` as the plan `name` with `extra` arguments, attached, and wait
+/// for the run to settle.
+fn settle(world: &World, name: &str, nodes: Vec<Value>, extra: &[&str]) -> String {
+    let path = world.plan(name, &plan_of(name, nodes));
+    let mut args = vec!["start", path.as_str(), "--attach"];
+    args.extend_from_slice(extra);
+    world.run(&args).settled();
+    name.to_string()
+}
+
+/// One node's settlement.
+fn settlement(world: &World, run: &str, node: &str) -> Value {
+    world
+        .events_of(run, "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == node)
+        .unwrap_or_else(|| panic!("{node} never settled\n{}", world.dump()))["payload"]
+        .clone()
+}
+
+#[test]
+fn with_no_template_anywhere_a_task_with_no_key_cuts_its_branch_at_the_plan_and_node() {
+    // The real released store over `local-md`, which has no task key: this is the
+    // case every journey of this repository's own runs is in.
+    let world = publishing("branch-default-unkeyed");
+    let run = settle(&world, "unkeyed", vec![lifecycle("service", &[])], &[]);
+
+    assert_eq!(
+        cut_branches(&world, &run),
+        ["unkeyed/service"],
+        "{}",
+        world.dump()
+    );
+    assert_eq!(settlement(&world, &run, "service")["status"], "done");
+    // The launch resolved the shipped default and retained it.
+    assert_eq!(
+        world.run_json(&run, "launch.json")[KEY],
+        json!(DEFAULT_TEMPLATE)
+    );
+}
+
+#[test]
+fn with_no_template_anywhere_a_task_with_a_key_cuts_its_branch_at_the_key_and_node() {
+    let world = keyed(publishing("branch-default-keyed"));
+    let run = settle(&world, "keyed", vec![lifecycle("service", &[])], &[]);
+
+    assert_eq!(
+        cut_branches(&world, &run),
+        [format!("{TASK_KEY}/service")],
+        "{}",
+        world.dump()
+    );
+    assert_eq!(settlement(&world, &run, "service")["status"], "done");
+}
+
+#[test]
+fn a_template_the_flag_names_reaches_every_variable_it_is_rendered_over() {
+    let world = keyed(publishing("branch-variables"));
+    // A ticket the node delivers, in a project of its own.
+    world.write_store_item(
+        "projects/branch-tickets.md",
+        "---\ntitle: \"Tickets\"\n---\n",
+    );
+    world.write_store_item(
+        "tasks/branch-tickets/eng.md",
+        "---\ntitle: \"The ticket\"\nproject: branch-tickets\nstatus: todo\n---\n",
+    );
+    let ticket = "plans:branch-tickets/eng";
+    let mut node = lifecycle("service", &[]);
+    node["delivers"] = json!([ticket]);
+    let project = world.plan("vars", &plan_of("vars", vec![node]));
+    let native = world
+        .store_tasks(project.split_once(':').expect("a qualified id").1)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "service")
+        .and_then(|task| task["id"].as_str().map(str::to_owned))
+        .expect("the store lists the node's task")
+        .split_once(':')
+        .expect("a qualified task id")
+        .1
+        .to_owned();
+
+    // Each variable held to the value it names, one segment apiece: a comparison
+    // inside the template rather than the value printed, so what is asserted is
+    // this crate's namespace and not the sibling's sanitizer.
+    let checks = [
+        ("key", format!("task.key == {TASK_KEY:?}")),
+        ("id", format!("task.id == {native:?}")),
+        ("title", "task.title == \"feat: ship service\"".to_owned()),
+        ("delivers", format!("task.delivers == [{ticket:?}]")),
+        ("name", "plan.name == \"vars\"".to_owned()),
+        ("plan", format!("plan.id == {project:?}")),
+        ("node", "node.id == \"service\"".to_owned()),
+        ("run", "run == \"vars\"".to_owned()),
+    ];
+    let template: String = std::iter::once("{{ node.id }}/vars".to_owned())
+        .chain(checks.iter().map(|(segment, test)| {
+            format!("{{% if {test} %}}-{segment}{{% else %}}-WRONG{segment}{{% endif %}}")
+        }))
+        .collect();
+    let path = project.clone();
+    world
+        .run(&["start", &path, "--attach", FLAG, &template])
+        .settled();
+
+    assert_eq!(
+        cut_branches(&world, "vars"),
+        ["service/vars-key-id-title-delivers-name-plan-node-run"],
+        "{}",
+        world.dump()
+    );
+    assert_eq!(world.run_json("vars", "launch.json")[KEY], json!(template));
+}
+
+#[test]
+fn the_flag_beats_the_environment_which_beats_the_launch_config_which_beats_the_default() {
+    let world = publishing("branch-layers");
+    let config = world.root.join("launch.yaml");
+    std::fs::write(
+        &config,
+        format!("schema_version: 11\n{KEY}: \"config/{{{{ node.id }}}}\"\n"),
+    )
+    .expect("the launch config is written");
+    let config = config.to_string_lossy().into_owned();
+
+    // Every layer named: the flag.
+    let path = world.plan(
+        "flagged",
+        &plan_of("flagged", vec![lifecycle("service", &[])]),
+    );
+    let mut command = world.cmd(&[
+        "start",
+        &path,
+        "--attach",
+        "--launch-config",
+        &config,
+        FLAG,
+        "flag/{{ node.id }}",
+    ]);
+    command.env(ENVIRONMENT, "env/{{ node.id }}");
+    world.run_on(command, "start flagged").settled();
+    assert_eq!(cut_branches(&world, "flagged"), ["flag/service"]);
+
+    // The environment and the config: the environment.
+    let path = world.plan(
+        "envied",
+        &plan_of("envied", vec![lifecycle("service", &[])]),
+    );
+    let mut command = world.cmd(&["start", &path, "--attach", "--launch-config", &config]);
+    command.env(ENVIRONMENT, "env/{{ node.id }}");
+    world.run_on(command, "start envied").settled();
+    assert_eq!(cut_branches(&world, "envied"), ["env/service"]);
+
+    // The config alone.
+    let run = settle(
+        &world,
+        "configured",
+        vec![lifecycle("service", &[])],
+        &["--launch-config", &config],
+    );
+    assert_eq!(cut_branches(&world, &run), ["config/service"]);
+
+    // A blank flag is this launch naming none, over the config beneath it: the
+    // branch is the one `onevcs` derives.
+    let run = settle(
+        &world,
+        "unnamed",
+        vec![lifecycle("service", &[])],
+        &["--launch-config", &config, FLAG, ""],
+    );
+    let derived = cut_branches(&world, &run);
+    assert!(
+        derived.len() == 1 && derived[0].starts_with("onevcs/"),
+        "a blank template still named the branch: {derived:?}"
+    );
+    assert!(world.run_json(&run, "launch.json").get(KEY).is_none());
+}
+
+#[test]
+fn a_template_that_does_not_parse_or_a_key_its_version_never_had_is_refused_before_a_run() {
+    let world = World::new("branch-refused");
+    let path = world.plan(
+        "refused",
+        &plan_of("refused", vec![lifecycle("service", &[])]),
+    );
+
+    // From the flag, naming the flag.
+    world
+        .run(&["start", &path, FLAG, "{{ node.id"])
+        .exited(REFUSED)
+        .err_has(&format!("{FLAG}: the branch-name template does not parse"));
+    // From the environment, naming the variable.
+    let mut command = world.cmd(&["start", &path]);
+    command.env(ENVIRONMENT, "{% if %}");
+    world
+        .run_on(command, "start refused")
+        .exited(REFUSED)
+        .err_has(&format!(
+            "{ENVIRONMENT}: the branch-name template does not parse"
+        ));
+    // From the launch config, naming the key and the file.
+    let config = world.root.join("broken.yaml");
+    std::fs::write(&config, format!("schema_version: 11\n{KEY}: \"{{{{ x\"\n"))
+        .expect("the config is written");
+    world
+        .run(&["start", &path, "--launch-config", &config.to_string_lossy()])
+        .exited(REFUSED)
+        .err_has(&format!("`{KEY}` in {}", config.display()))
+        .err_has("does not parse");
+    // Under every version before the one it arrived at, by its name.
+    for earlier in onepipeline::filter::LAUNCH_CONFIG_SCHEMA_VERSIONS_READ
+        .iter()
+        .filter(|version| **version < onepipeline::branchname::CONFIG_SCHEMA_VERSION)
+    {
+        let early = world.root.join(format!("early-{earlier}.yaml"));
+        std::fs::write(
+            &early,
+            format!("schema_version: {earlier}\n{KEY}: \"x/{{{{ node.id }}}}\"\n"),
+        )
+        .expect("the config is written");
+        world
+            .run(&["start", &path, "--launch-config", &early.to_string_lossy()])
+            .exited(REFUSED)
+            .err_has(&format!(
+                "`{KEY}` is a schema 11 key and this config declares schema_version {earlier}"
+            ));
+    }
+    // No run was minted by any of them.
+    assert!(!world.run_file("refused", "launch.json").is_file());
+
+    // `adopt` takes no template of its own.
+    world
+        .run(&["adopt", "refused", FLAG, "x"])
+        .exited(USAGE_ERROR)
+        .err_has(FLAG);
+}
+
+#[test]
+fn a_template_that_fails_or_renders_nothing_at_a_node_fails_it_and_cuts_no_branch() {
+    let world = World::new("branch-unrendered");
+    let repo = world.repository("local-direct", &[]);
+    let before = git(&world, &repo.origin, &["branch", "--list"]);
+    // `failing` prints a key its `local-md` task does not have; `empty` renders
+    // nothing at all.
+    let template = "{% if node.id == \"failing\" %}{{ task.key }}{% endif %}";
+    let run = settle(
+        &world,
+        "unrendered",
+        vec![lifecycle("failing", &[]), lifecycle("empty", &[])],
+        &[FLAG, template],
+    );
+
+    for (node, says) in [("failing", "undefined"), ("empty", "empty name")] {
+        let settled = settlement(&world, &run, node);
+        assert_eq!(settled["status"], "failed", "{settled}");
+        assert_eq!(settled["outcome"], "infrastructure-failure", "{settled}");
+        let detail = settled["detail"].as_str().expect("a detail");
+        for names in [
+            format!("node '{node}'"),
+            says.to_owned(),
+            template.to_owned(),
+        ] {
+            assert!(detail.contains(&names), "{detail} lacks {names:?}");
+        }
+    }
+    // No session opened and no branch was cut, under any name.
+    assert!(cut_branches(&world, &run).is_empty(), "{}", world.dump());
+    assert_eq!(git(&world, &repo.origin, &["branch", "--list"]), before);
+    assert_eq!(
+        git(&world, &repo.checkout, &["branch", "--list"])
+            .lines()
+            .count(),
+        1,
+        "a branch was cut beside the base"
+    );
+}
+
+#[test]
+fn an_adopted_run_names_its_branches_by_the_template_it_was_launched_with() {
+    let world = publishing("branch-adopted");
+    let run = settle(
+        &world,
+        "adopted",
+        vec![human("approve", &[]), lifecycle("service", &["approve"])],
+        &[FLAG, "launched/{{ node.id }}"],
+    );
+    world.run(&["attest", &run, "approve"]).exited(0);
+    // The adopting process's environment names a different template, and the
+    // run goes on with the one it retained.
+    let mut command = world.cmd(&["adopt", &run]);
+    command.env(ENVIRONMENT, "adopter/{{ node.id }}");
+    world.run_on(command, "adopt adopted").exited(0);
+
+    assert_eq!(
+        cut_branches(&world, &run),
+        ["launched/service"],
+        "{}",
+        world.dump()
+    );
+    assert_eq!(settlement(&world, &run, "service")["status"], "done");
+}
+
+#[test]
+fn a_retry_pinned_to_the_branch_its_node_preserved_continues_it_and_renders_nothing() {
+    let world = World::new("branch-pinned");
+    // The merge path refuses every push, so the work is left on its branch.
+    world.repository("local-direct", &["false"]);
+    world.script("service.work", "the worker wrote this\n");
+    let run = settle(&world, "pinned", vec![lifecycle("service", &[])], &[]);
+    let preserved = world.run_json(&run, "result.json")["nodes"][0]["branch"]
+        .as_str()
+        .expect("the failed node names the branch it left behind")
+        .to_string();
+    assert_eq!(preserved, "pinned/service");
+
+    // A replacement the reconciler pins to that branch. Rendered, its name would
+    // be `pinned/service-2`; continued, it is the preserved branch.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "version": 2,
+                "commands": [{
+                    "op": "retry",
+                    "id": "service",
+                    "node": {"id": "service-2", "repo": "service", "persona": "engineer",
+                             "title": "feat: ship service",
+                             "task": "## What\nPublish again.\n\n## Why\nIt failed.\n\n\
+                                      ## Acceptance criteria\n- published."},
+                }],
+            })
+            .to_string(),
+        )
+        .exited(0);
+    // It fails again — the merge path still refuses — so what is read is where
+    // it worked, not how it ended.
+    world.run(&["adopt", &run]).settled();
+
+    let branches = cut_branches(&world, &run);
+    assert!(
+        branches.len() >= 2 && branches.iter().all(|branch| *branch == preserved),
+        "the pinned retry cut a branch of its own: {branches:?}\n{}",
+        world.dump()
+    );
+}
+
+#[test]
+fn a_rendered_name_another_branch_carries_takes_the_suffix_and_leaves_that_branch_alone() {
+    let world = World::new("branch-collision");
+    let repo = world.repository("local-direct", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    // Somebody else's branch, already carrying the name the default renders.
+    let existing = "collide/service";
+    git(&world, &repo.checkout, &["branch", existing]);
+    git(&world, &repo.checkout, &["push", "origin", existing]);
+    let tip = git(&world, &repo.origin, &["rev-parse", existing]);
+
+    let run = settle(&world, "collide", vec![lifecycle("service", &[])], &[]);
+
+    assert_eq!(
+        cut_branches(&world, &run),
+        [format!("{existing}-2")],
+        "{}",
+        world.dump()
+    );
+    assert_eq!(settlement(&world, &run, "service")["status"], "done");
+    // Untouched: never continued, never moved.
+    assert_eq!(git(&world, &repo.origin, &["rev-parse", existing]), tip);
+    assert_eq!(git(&world, &repo.checkout, &["rev-parse", existing]), tip);
+}
+
+#[test]
+fn a_name_a_ref_may_not_hold_is_still_cut_as_a_valid_branch() {
+    let world = publishing("branch-sanitized");
+    let mut plan = plan_of("sanitized", vec![lifecycle("service", &[])]);
+    // A plan name holding what a ref name may not: a space, a colon, a `?`, and
+    // a `..`.
+    plan["name"] = json!("Ship it: v2?..now");
+    let path = world.plan("sanitized", &plan);
+    world.run(&["start", &path, "--attach"]).settled();
+    let run = "Ship-it--v2---now";
+
+    let branches = cut_branches(&world, run);
+    assert_eq!(branches.len(), 1, "{branches:?}\n{}", world.dump());
+    let branch = &branches[0];
+    assert_ne!(branch, "Ship it: v2?..now/service");
+    assert!(branch.ends_with("/service"), "{branch}");
+    let checked = std::process::Command::new("git")
+        .args(["check-ref-format", "--branch", branch])
+        .output()
+        .expect("git runs");
+    assert!(
+        checked.status.success(),
+        "the session was cut on a name git refuses: {branch}"
+    );
+    assert_eq!(settlement(&world, run, "service")["status"], "done");
+}

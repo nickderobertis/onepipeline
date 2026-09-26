@@ -934,10 +934,11 @@ fn every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base() {
         Some(unpinned.token.0.as_str()),
         "a node that pinned nothing inherited somebody else's branch: {session}"
     );
-    assert!(
-        session["payload"]["branch"]
-            .as_str()
-            .is_some_and(|branch| branch.starts_with("onevcs/")),
+    // Its own name: the one the shipped branch-name template renders for a task
+    // with no key, `<plan name>/<node id>`.
+    assert_eq!(
+        session["payload"]["branch"].as_str(),
+        Some("unpinned/unpinned"),
         "a node that pinned nothing did not get a name of its own: {session}"
     );
 

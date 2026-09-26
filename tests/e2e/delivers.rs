@@ -402,8 +402,7 @@ fn a_stopped_run_releases_its_unstarted_tickets_and_an_adoption_claims_them_agai
 fn a_refused_ticket_write_raises_the_planner_surface_and_settles_the_run_unchanged() {
     let world = a_world_with_tickets("delivers-refused-ticket");
     let delivered = ticket(&world, "work", "todo");
-    // Read-only on every platform: the store replaces a ticket document in place, so a file it
-    // may not write is a ticket it cannot move, with the directory around it left writable.
+    // Read-only on every platform: a file the store may not replace is a ticket it cannot move.
     let file = tickets_root(&world)
         .join("tasks")
         .join("board")
@@ -414,6 +413,20 @@ fn a_refused_ticket_write_raises_the_planner_surface_and_settles_the_run_unchang
     let mut read_only = writable.clone();
     read_only.set_readonly(true);
     std::fs::set_permissions(&file, read_only).expect("the ticket is made unwritable");
+    // And, where a rename can replace a read-only file, the directory around it: from
+    // onetaskgraph 0.2.44 the store replaces a ticket through a staging file beside it and a
+    // rename, which a read-only file in a writable directory does not stop on a Unix host.
+    #[cfg(unix)]
+    let directory = {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = file.parent().expect("the ticket's directory").to_path_buf();
+        let open = std::fs::metadata(&directory)
+            .expect("the ticket's directory is there")
+            .permissions();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o555))
+            .expect("the ticket's directory is made unwritable");
+        (directory, open)
+    };
     world.script("work.wait", "hold");
     let name = "refused-ticket";
     let project = world.plan(
@@ -475,6 +488,9 @@ fn a_refused_ticket_write_raises_the_planner_surface_and_settles_the_run_unchang
         "the refusal changed scheduling"
     );
 
+    #[cfg(unix)]
+    std::fs::set_permissions(&directory.0, directory.1)
+        .expect("the ticket's directory is writable again");
     std::fs::set_permissions(&file, writable).expect("the ticket is writable again");
 }
 

@@ -2513,7 +2513,10 @@ mod tests {
             .expect("a lifecycle node opens a session")
             .expect("the default renders");
         assert_eq!(request.branch_name.as_deref(), Some("demo/service"));
-        assert_eq!(request.branch, None, "a rendered name is never one to continue");
+        assert_eq!(
+            request.branch, None,
+            "a rendered name is never one to continue"
+        );
 
         let pinned = Node {
             branch: Some("feature/kept".into()),

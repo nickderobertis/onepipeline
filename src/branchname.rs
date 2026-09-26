@@ -113,7 +113,10 @@ pub(crate) fn resolve(
                         None => format!("`{KEY}`"),
                     },
                 ),
-                None => (DEFAULT_TEMPLATE.to_owned(), "the shipped default".to_owned()),
+                None => (
+                    DEFAULT_TEMPLATE.to_owned(),
+                    "the shipped default".to_owned(),
+                ),
             },
         },
     };
@@ -168,7 +171,10 @@ impl Naming {
     /// mapping has already given the project's own title where
     /// `onepipeline.name` states none; a record this build cannot read falls back
     /// to the project's native id rather than to no name at all.
-    pub fn of_run(paths: &crate::ledger::RunPaths, launch: &crate::ledger::LaunchRecord) -> Option<Self> {
+    pub fn of_run(
+        paths: &crate::ledger::RunPaths,
+        launch: &crate::ledger::LaunchRecord,
+    ) -> Option<Self> {
         let template = launch.branch_template()?.to_owned();
         let plan_name = crate::ledger::read_json::<crate::plan::Plan>(&paths.plan())
             .ok()

@@ -449,9 +449,17 @@ fn attempt_once(
         }
         // Every step after the first names the branch the first opened, which
         // is what makes them one workstream rather than several beside it.
-        let request = SessionRequest {
-            branch: branch.clone().or_else(|| request.branch.clone()),
-            ..request.clone()
+        //
+        // Once there is such a branch the name this node proposed has been cut —
+        // it *is* that branch, suffixed or not — so the proposal goes with it:
+        // `onevcs` refuses a request naming a branch to continue and a name to cut.
+        let request = match &branch {
+            Some(continued) => SessionRequest {
+                branch: Some(continued.clone()),
+                branch_name: None,
+                ..request.clone()
+            },
+            None => request.clone(),
         };
         // And works in the worktree the first step's session opened, rather than
         // asking for a session of its own. `onevcs` cuts every session its own

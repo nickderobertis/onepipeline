@@ -423,10 +423,7 @@ impl Store {
         // cuts is named from. A blank key is the store's way of carrying none, as a
         // blank title is.
         let mut record = Map::new();
-        record.insert(
-            "id".to_owned(),
-            Value::String(task.id.native().to_owned()),
-        );
+        record.insert("id".to_owned(), Value::String(task.id.native().to_owned()));
         if let Some(key) = task.item.key.as_ref().filter(|key| !key.trim().is_empty()) {
             record.insert("key".to_owned(), Value::String(key.clone()));
         }

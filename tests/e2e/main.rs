@@ -41,6 +41,7 @@ mod amend;
 mod ask;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod boundary;
+mod branch_template;
 mod bus_config;
 mod cancellation;
 mod channel;
