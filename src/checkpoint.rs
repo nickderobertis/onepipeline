@@ -848,6 +848,7 @@ mod tests {
             filters: crate::filter::Filters::default(),
             bus_config: Default::default(),
             maintenance_config: None,
+            branch_template: String::new(),
             oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         };

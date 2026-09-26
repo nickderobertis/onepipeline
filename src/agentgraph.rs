@@ -3288,6 +3288,8 @@ mod tests {
         let request = onevcs::SessionRequest {
             repo: checkout.to_string_lossy().into_owned(),
             branch: None,
+            branch_name: None,
+            branch_prefix: None,
             base: Some("main".to_owned()),
             execution_checkout: None,
             pool: None,

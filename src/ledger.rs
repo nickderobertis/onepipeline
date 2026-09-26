@@ -992,6 +992,19 @@ pub struct LaunchRecord {
     /// run naming no schedule, and sweeps nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance_config: Option<crate::maintenance::MaintenanceConfig>,
+    /// The minijinja template the branch a lifecycle node's session cuts is named
+    /// from, or empty on a record that names none.
+    ///
+    /// **Resolved once, at the launch**, out of the flag, the environment, the
+    /// launch config and the shipped default in that order, and replayed by every
+    /// driver that adopts the run — `adopt` takes none of its own — so a run's
+    /// branches cannot come to say something else because a different shell
+    /// adopted it. Empty is a launch that named none, whose branches are the ones
+    /// `onevcs` derives; and it is what a record written before this field existed
+    /// reads as, because that launch proposed no name either. Read it through
+    /// [`branch_template`](Self::branch_template). Omitted when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub branch_template: String,
     /// The run's oneharness pointer file — every harness run under every
     /// launch this run starts appends one line to it saying where its session
     /// went — absolute, as the engine names it to each launch.
@@ -1220,6 +1233,12 @@ impl LaunchRecord {
     /// with one. Read as [`success_hook`](Self::success_hook) is.
     pub fn dispatch_env_hook(&self) -> Option<&str> {
         (!self.dispatch_env_hook.is_empty()).then_some(self.dispatch_env_hook.as_str())
+    }
+
+    /// The branch-name template this run was launched with, when it was
+    /// launched with one. Read as [`success_hook`](Self::success_hook) is.
+    pub fn branch_template(&self) -> Option<&str> {
+        (!self.branch_template.is_empty()).then_some(self.branch_template.as_str())
     }
 
     /// How long this run's dispatch-env hook is awaited.
@@ -3485,6 +3504,7 @@ mod tests {
             filters: Filters::default(),
             bus_config: Default::default(),
             maintenance_config: None,
+            branch_template: String::new(),
             oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         }
@@ -4250,6 +4270,7 @@ mod tests {
             filters: Filters::default(),
             bus_config: Default::default(),
             maintenance_config: None,
+            branch_template: String::new(),
             oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         };
@@ -4290,6 +4311,7 @@ mod tests {
             filters: Filters::default(),
             bus_config: Default::default(),
             maintenance_config: None,
+            branch_template: String::new(),
             oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         };

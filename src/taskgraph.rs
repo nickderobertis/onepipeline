@@ -117,6 +117,10 @@ const FILLED_FROM_THE_TASK: &[(&str, &str)] = &[
     ("title", "the task's own `title`"),
     ("task", "the task's own `content`"),
     ("delivers", "the task's own `delivers`"),
+    (
+        "task_record",
+        "the task itself — its native id, its `key` and its `title`",
+    ),
 ];
 
 /// The reserved key a repository identity the store cannot hold is carried
@@ -415,6 +419,16 @@ impl Store {
                 .collect();
             node.insert("delivers".to_owned(), Value::Array(qualified));
         }
+        // The task's human-facing record, which is what a branch this node's session
+        // cuts is named from. A blank key is the store's way of carrying none, as a
+        // blank title is.
+        let mut record = Map::new();
+        record.insert("id".to_owned(), Value::String(task.id.native().to_owned()));
+        if let Some(key) = task.item.key.as_ref().filter(|key| !key.trim().is_empty()) {
+            record.insert("key".to_owned(), Value::String(key.clone()));
+        }
+        record.insert("title".to_owned(), Value::String(task.item.title.clone()));
+        node.insert("task_record".to_owned(), Value::Object(record));
         match (task.item.repositories.first(), node.get("repo")) {
             (Some(_), Some(_)) => {
                 return Err(refused(
@@ -1058,6 +1072,10 @@ struct ProjectItem {
 
 #[derive(Debug, Deserialize)]
 struct TaskItem {
+    /// The short handle the task's source shows people, from `onetaskgraph` 0.2.44 on;
+    /// absent, or null, where the source has none.
+    #[serde(default)]
+    key: Option<String>,
     title: String,
     /// The project this task belongs to, as the store says it does.
     ///
@@ -1434,7 +1452,11 @@ mod tests {
         let manifest: toml::Value =
             toml::from_str(include_str!("../Cargo.toml")).expect("this manifest is TOML");
         let required = &manifest["workspace"]["dependencies"];
-        for crate_name in ["onetaskgraph-core", "onetaskgraph-local-md"] {
+        for crate_name in [
+            "onetaskgraph-core",
+            "onetaskgraph-local-md",
+            "onetaskgraph-plugin-api",
+        ] {
             assert_eq!(
                 required[crate_name].as_str(),
                 Some(format!("={declared}").as_str()),
@@ -1443,9 +1465,45 @@ mod tests {
         }
     }
 
+    /// What this module reads off a task is what the plugin contract declares a task
+    /// to be: a task serialized by the contract's own type, with a key and without one,
+    /// reads back as the key it carries. A rename on that side fails here rather than
+    /// reading every task as keyless.
+    #[test]
+    fn a_task_the_plugin_contract_serializes_reads_back_with_its_key() {
+        use onetaskgraph_plugin_api::{NativeId, Status, StatusCategory, Task};
+        let task = |key: Option<&str>| Task {
+            id: NativeId::from("tasks/build.md"),
+            key: key.map(str::to_owned),
+            title: "Build it".into(),
+            content: None,
+            status: Status {
+                category: StatusCategory::Todo,
+                name: "todo".into(),
+            },
+            labels: Vec::new(),
+            project: None,
+            url: None,
+            location: None,
+            created_at: None,
+            updated_at: None,
+            metadata: BTreeMap::new(),
+            repositories: Vec::new(),
+            delivers: Vec::new(),
+            delivered_by: Vec::new(),
+        };
+        for key in [Some("ENG-123"), None] {
+            let written = serde_json::to_value(task(key)).expect("a task serializes");
+            let read: TaskItem = serde_json::from_value(written).expect("the item reads");
+            assert_eq!(read.key.as_deref(), key);
+            assert_eq!(read.title, "Build it");
+        }
+    }
+
     #[test]
     fn a_task_carrying_no_node_id_is_refused_by_the_key_it_is_missing() {
         let bare = TaskItem {
+            key: None,
             title: "Build it".into(),
             project: None,
             content: None,

@@ -1607,6 +1607,12 @@ fn compile_retry(
     if replacement.delivers.is_empty() {
         replacement.delivers.clone_from(&target.delivers);
     }
+    // And the task it was read out of, on the same terms: a replacement is the
+    // same task's work, so a branch it cuts is named for that task's ticket rather
+    // than falling back to the plan's name for want of a record.
+    if replacement.task_record.is_none() {
+        replacement.task_record.clone_from(&target.task_record);
+    }
 
     let direct = graph.dependents_of(id);
     let mut reset: BTreeSet<String> = direct.iter().cloned().collect();
@@ -4995,6 +5001,34 @@ mod tests {
             graph.get("build-2").expect("the replacement").delivers,
             vec!["tickets:board/other".to_string()],
             "the replacement was given the superseded node's delivers over its own"
+        );
+    }
+
+    /// A replacement names the branch it cuts for the same task the node it
+    /// supersedes was read out of: it states no task record of its own, since a
+    /// planner writes a node rather than reading one out of the store.
+    #[test]
+    fn a_replacement_inherits_the_task_record_it_does_not_state() {
+        let record = crate::plan::TaskRecord {
+            id: "tasks/build.md".into(),
+            key: Some("ENG-7".into()),
+            title: "Build it".into(),
+        };
+        let mut read = agent("build", &[]);
+        read.task_record = Some(record.clone());
+        let mut graph = graph_of(vec![read]);
+        compile(
+            &mut graph,
+            &frontier(&[("build", NodeStatus::Failed)]),
+            &Command::Retry {
+                id: "build".into(),
+                node: agent("build-2", &[]),
+            },
+        )
+        .expect("a replacement is accepted");
+        assert_eq!(
+            graph.get("build-2").expect("the replacement").task_record,
+            Some(record)
         );
     }
 

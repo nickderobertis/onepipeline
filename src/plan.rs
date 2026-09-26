@@ -1075,6 +1075,35 @@ pub struct Node {
     /// ticket is delivered by at most one node of a plan.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delivers: Vec<String>,
+    /// The onetaskgraph task this node was read out of, as that store reports it.
+    ///
+    /// Filled from the task itself where a plan is read, never from metadata: a task
+    /// stating `onepipeline.task_record` is refused as not a node field. What a branch
+    /// this node's session cuts is named from — see [`TaskRecord`]. Absent on a node no
+    /// task was read for, such as one a live edit added, and a `retry` replacement that
+    /// states none inherits the one the node it supersedes carried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_record: Option<TaskRecord>,
+}
+
+/// The human-facing fields of the onetaskgraph task a node was read out of.
+///
+/// Carried so the name of the branch a node's session cuts can say which ticket it
+/// is for: `task.key`, `task.id` and `task.title` of the branch-name template are
+/// these fields, and `task.delivers` is the node's own [`Node::delivers`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskRecord {
+    /// The task's native id in its source: the half of its qualified id after the
+    /// source's name.
+    pub id: String,
+    /// The short handle the task's source shows people — a Linear issue's `ENG-123`,
+    /// a GitHub issue's number. Absent where the source has none, which is every
+    /// `local-md` task; never a copy of [`id`](Self::id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// The task's own title.
+    pub title: String,
 }
 
 /// Whether a repository is one person's or a team's — the vocabulary a schema-3

@@ -99,6 +99,11 @@ enum StoreLocation {
 #[serde(deny_unknown_fields)]
 struct StoreTask {
     id: String,
+    /// The short handle the source shows people, as onetaskgraph 0.2.44 answers it: null
+    /// where the source has none, which every `local-md` task is. Skipped on the way out
+    /// when absent, so a task with no key renders exactly as it did before the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
     title: String,
     content: Option<String>,
     status: StoreStatus,

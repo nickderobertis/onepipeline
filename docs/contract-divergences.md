@@ -7364,3 +7364,25 @@ observe. What the read side owes instead is proof that a record written before
 the vocabulary existed still reads, which
 `maintenance::tests::busy_is_not_broken_and_a_record_written_before_the_vocabulary_still_reads`
 gives by parsing such a payload verbatim rather than round-tripping today's type.
+
+## 90. The branch-name template's launch-config key arrived at version 11, not the 10 its contract names — RESOLVED
+
+**Ruling: `branch_template` is a key of launch-config `schema_version: 11`.** The planner
+who owns the contract ruled it over the run's channel while this build was being written:
+Contract 4 of project `human-readable-branches` was written before #495 shipped launch-config
+version 10, and its intent is *the next launch-config version*, which is now 11.
+`docs/contract.md`'s branch-names paragraph and its block say 11.
+
+Contract 4 states the key as one of launch-config `schema_version: 10`, on the premise that
+this build wrote 9. It did not: #495 had already moved `LAUNCH_CONFIG_SCHEMA_VERSION` to 10
+for `node_sets` and `dag_sets`, released in 0.47.0 with `tests/golden/launch-config-v10.json`.
+Adding the key at 10 would have made two documents declaring 10 — one that 0.47.0 reads and
+one it refuses as naming an unknown field — which is the ambiguity a version exists to
+remove, and the reason every key here is keyed to the version that added it.
+
+**What this build does.** `LAUNCH_CONFIG_SCHEMA_VERSION` is 11, `tests/golden/launch-config-v11.json`
+pins its shape, `tests/golden/launch-config-v10.json` stays as an earlier version this build
+still reads, and a document declaring 10 or below that names `branch_template` is refused by
+the key's name, pointed at 11. `tests/contract.rs`'s
+`the_branch_name_template_is_what_the_contract_names` drives the block, and
+`tests/e2e/branch_template.rs` drives the refusal through the real binary.
