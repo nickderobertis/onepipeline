@@ -551,6 +551,14 @@ resolver = "2"
 # `tests/e2e/lifecycle.rs`'s pooled-identity journey. `onevcs-testing` 0.8.2
 # requires exactly it, so the two move together.
 #
+# `onevcs` 0.33.0 is the floor because it carries `SessionRequest.branch_name` — a
+# name to **cut**, which that library sanitizes, prefixes with the host's branch
+# prefix and suffixes to the first free name — and `branch_prefix` beside it, which
+# every literal here fills. `src/vcs.rs::opening_for` hands it the name
+# `src/branchname.rs` renders, and `tests/e2e/branch_template.rs` drives the cut,
+# the suffix and the sanitizer over real git. A **requirement**, because `^0.32`
+# admits no 0.33.x; `onevcs-testing` 0.8.3 requires exactly it.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
