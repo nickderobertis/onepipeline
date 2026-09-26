@@ -2912,8 +2912,10 @@ fn a_retried_project_launches_again_reading_the_lineage_head_under_the_roots_id(
     assert_eq!(
         launched,
         json!([
-            {"id": "work", "title": "work", "task": "## What\nRedo it.", "persona": "engineer"},
-            {"id": "ship", "title": "ship", "task": "## What\nDo ship.\n\n## Why\nSo the run can settle.\n\n## Acceptance criteria\n- ship is done.", "persona": "engineer", "deps": ["work"]},
+            {"id": "work", "title": "work", "task": "## What\nRedo it.", "persona": "engineer",
+             "task_record": {"id": "writeback-retried-board/000-work", "title": "work"}},
+            {"id": "ship", "title": "ship", "task": "## What\nDo ship.\n\n## Why\nSo the run can settle.\n\n## Acceptance criteria\n- ship is done.", "persona": "engineer", "deps": ["work"],
+             "task_record": {"id": "writeback-retried-board/001-ship", "title": "ship"}},
         ]),
         "{launched}"
     );
@@ -3092,8 +3094,32 @@ fn a_project_reads_as_the_plan_document_of_the_same_content() {
             .sort_by_key(|node| node["id"].as_str().unwrap_or_default().to_owned());
         plan
     };
+    // Beside what the document states, each node carries the record of the task it
+    // was read out of — which no document can state, because it is the task itself:
+    // its native id and its title, and no key, since `local-md` has none.
+    let mut read = world.run_json("mapping", "plan.json");
+    for node in read["tasks"].as_array_mut().expect("nodes") {
+        let record = node
+            .as_object_mut()
+            .expect("a node")
+            .remove("task_record")
+            .unwrap_or_else(|| panic!("{node} carries no task record"));
+        let file = match node["id"].as_str() {
+            Some("publish") => "000-publish",
+            Some("audit") => "001-audit",
+            other => panic!("an unexpected node {other:?}"),
+        };
+        assert_eq!(
+            record,
+            json!({
+                "id": format!("mapping-board/{file}"),
+                "title": node["title"].as_str().unwrap_or_default(),
+            }),
+            "{node}"
+        );
+    }
     assert_eq!(
-        by_id(&world.run_json("mapping", "plan.json")),
+        by_id(&read),
         by_id(&document),
         "the project read as a different plan than the document of the same content"
     );

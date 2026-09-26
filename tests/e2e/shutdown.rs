@@ -1134,7 +1134,14 @@ fn a_branch_with_no_origin_to_go_to_is_reported_with_its_commit() {
     let run = launch(&world, "noremote", vec![lifecycle("service", &[])]);
     until_in_flight(&world, &run, &["service"]);
     let branch = session_branch(&world, &run, "service");
-    let token = branch.trim_start_matches("onevcs/").to_string();
+    // Off the record rather than the branch name: a branch is named by the run's
+    // template, and says nothing about the session that cut it.
+    let token = world
+        .events_of(&run, "session-opened")
+        .iter()
+        .filter(|event| event["labels"]["node"] == "service")
+        .find_map(|event| event["payload"]["token"].as_str().map(str::to_string))
+        .unwrap_or_else(|| panic!("no session opened for service: {}", world.dump()));
     let clone = clone_of(&world.onevcs_home().join("workspaces"), &token)
         .unwrap_or_else(|| panic!("no run clone for session {token}"));
     git(&world, &clone, &["remote", "remove", "origin"]);

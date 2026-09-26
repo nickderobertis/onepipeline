@@ -400,6 +400,23 @@ pub struct StartArgs {
     /// this launch saying it has none.
     #[arg(long, value_name = "FILE")]
     pub maintenance_config: Option<String>,
+    /// The minijinja template the branch a lifecycle node's session cuts is
+    /// named from.
+    ///
+    /// Rendered over `task.key` (absent where the task's source has none),
+    /// `task.id`, `task.title` and `task.delivers` — the node's own task — and
+    /// `plan.name`, `plan.id`, `node.id` and `run`. What it renders is handed to
+    /// `onevcs` as a name to cut, which sanitizes it, puts the host's branch
+    /// prefix in front and takes the first free numeric suffix; a node continuing
+    /// a branch it was pinned to renders nothing. Given here it beats
+    /// ONEPIPELINE_BRANCH_TEMPLATE, which beats the launch config's
+    /// `branch_template`, which beats the shipped default,
+    /// `{% if task.key %}{{ task.key }}{% else %}{{ plan.name }}{% endif %}/{{ node.id }}`.
+    /// Blank is this launch naming none, and its branches are the ones `onevcs`
+    /// derives. One that does not parse is refused before any run exists; one
+    /// that does not render at a node fails that node, and cuts no branch.
+    #[arg(long, value_name = "TEMPLATE")]
+    pub branch_template: Option<String>,
     /// How often the durable planner-update check-in comes due, in seconds.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_HEARTBEAT_INTERVAL_SECONDS)]
     pub heartbeat_interval: u64,

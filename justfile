@@ -43,7 +43,7 @@ set positional-arguments := true
 # The crate under test still drives the binary rather than linking it. What does
 # link onetaskgraph is `crates/testfakes` — see `[workspace.dependencies]`, which
 # requires the same release this line names and is why `rust-version` is 1.97.
-onetaskgraph-version := "0.2.32"
+onetaskgraph-version := "0.2.44"
 
 # The renderer the visual-docs capture draws each scene with (`just screenshots`).
 # NOT part of `check`, `gate` or `bootstrap`: screenshots are informational, and

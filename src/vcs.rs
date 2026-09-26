@@ -2004,6 +2004,10 @@ pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
         // reconciler has already pinned `branch` to it, so there is one answer
         // here rather than two.
         branch: node.branch.clone(),
+        // Named only by [`opening_for`], where the session that cuts it opens.
+        branch_name: None,
+        // The host's own, which is `onevcs`'s to resolve: this crate names none.
+        branch_prefix: None,
         base: node.base_branch.clone(),
         execution_checkout: node.execution_checkout.clone(),
         // The node's own placement overrides, passed through as the sibling's
@@ -2014,6 +2018,31 @@ pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
         // the launch that owns it are known: see `executor::SESSION_RUN_LABEL`.
         labels: std::collections::BTreeMap::new(),
     })
+}
+
+/// The session a lifecycle node **opens**: its [`request_for`], proposing the name
+/// the branch it cuts is to carry.
+///
+/// Proposed only where the request pins no `branch`, which is the one place that
+/// answers whether a branch is being cut: a `resume`, a `retry` naming a branch and
+/// the re-dispatch after a merge-path refusal all arrive pinned, and a pinned branch
+/// is continued, never renamed. And proposed as `branch_name` — a name to cut —
+/// never as `branch`, which `onevcs` continues when anything already carries it: a
+/// rendered name colliding with somebody else's branch takes that library's suffix
+/// rather than silently continuing their work. A run naming no template proposes
+/// nothing, and `onevcs` derives the name as it always has.
+///
+/// `request` is that node's [`request_for`]. `Err` carries the template's own
+/// failure, naming the node, and no session is opened.
+pub(crate) fn opening_for(
+    mut request: SessionRequest,
+    node: &crate::plan::Node,
+    naming: Option<&crate::branchname::RunNaming>,
+) -> std::result::Result<SessionRequest, String> {
+    if let (None, Some(naming)) = (&request.branch, naming) {
+        request.branch_name = Some(crate::branchname::name_for(naming, node)?);
+    }
+    Ok(request)
 }
 
 /// Serialises the tests that point `ONEVCS_HOME` at a scratch state root.
@@ -2462,6 +2491,57 @@ mod tests {
         let request = request_for(&overriding).expect("a lifecycle node asks for a session");
         assert_eq!(request.pool, Some(0));
         assert_eq!(request.overflow, Some(onevcs::Bound::Unlimited));
+    }
+
+    #[test]
+    fn a_cut_proposes_the_rendered_name_and_a_pinned_branch_proposes_none() {
+        let naming = crate::branchname::Naming {
+            template: crate::branchname::BranchTemplate::parse(
+                crate::branchname::DEFAULT_TEMPLATE,
+                crate::branchname::KEY,
+            )
+            .expect("the default parses"),
+            plan_name: "demo".into(),
+            plan_id: "plans:demo".into(),
+            run: "demo-1".into(),
+        };
+        let cut = Node {
+            id: "service".into(),
+            repo: Some("owner/repo".into()),
+            ..Node::default()
+        };
+        let asked = |node: &Node| request_for(node).expect("a lifecycle node opens a session");
+        let request =
+            opening_for(asked(&cut), &cut, Some(&Ok(naming.clone()))).expect("the default renders");
+        assert_eq!(request.branch_name.as_deref(), Some("demo/service"));
+        assert_eq!(
+            request.branch, None,
+            "a rendered name is never one to continue"
+        );
+
+        let pinned = Node {
+            branch: Some("feature/kept".into()),
+            ..cut.clone()
+        };
+        let request = opening_for(asked(&pinned), &pinned, Some(&Ok(naming.clone())))
+            .expect("a pinned branch renders nothing");
+        assert_eq!(request.branch.as_deref(), Some("feature/kept"));
+        assert_eq!(request.branch_name, None);
+
+        let unnamed = opening_for(asked(&cut), &cut, None).expect("no template renders nothing");
+        assert_eq!(unnamed.branch_name, None);
+
+        let broken = crate::branchname::Naming {
+            template: crate::branchname::BranchTemplate::parse(
+                "{{ task.key }}",
+                crate::branchname::KEY,
+            )
+            .expect("it parses"),
+            ..naming.clone()
+        };
+        let why = opening_for(asked(&cut), &cut, Some(&Ok(broken)))
+            .expect_err("an undefined key does not render");
+        assert!(why.contains("node 'service'"), "{why}");
     }
 
     #[test]

@@ -3867,6 +3867,12 @@ fn spawn(
         node_graph: launch.node_graph.clone(),
         pr_author_graph: launch.pr_author_graph().map(str::to_owned),
         vcs_filter: launch.filters.vcs.clone(),
+        // Only a node that opens a session names a branch, so only one reads the
+        // recorded plan for the name it renders over.
+        branch_naming: node
+            .repo
+            .as_ref()
+            .and_then(|_| crate::branchname::Naming::of_run(&paths, launch)),
     };
     std::thread::Builder::new()
         .name(format!("dispatch-{}", node.id))

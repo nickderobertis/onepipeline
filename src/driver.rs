@@ -828,6 +828,17 @@ fn start(args: &StartArgs) -> Result<i32> {
         None => None,
     };
 
+    // The branch-name template, by its four layers: the flag, the environment,
+    // the launch config, and the shipped default. Parsed here — before the run
+    // directory exists, so a template that could not name a branch mints
+    // nothing — and retained whole, so every driver that adopts the run names
+    // branches as this launch did.
+    let branch_template = crate::branchname::resolve(
+        args.branch_template.as_deref(),
+        declared.branch_template.as_deref(),
+        args.launch_config.as_deref(),
+    )?;
+
     // The write-back's per-item budget, by the same three rungs. Every rung is *read*
     // rather than merely present: zero is no budget at all, and each rung refuses it by
     // its own spelling rather than falling through to the one below.
@@ -997,6 +1008,10 @@ fn start(args: &StartArgs) -> Result<i32> {
         filters,
         bus_config,
         maintenance_config,
+        branch_template: branch_template
+            .as_ref()
+            .map(|template| template.as_str().to_owned())
+            .unwrap_or_default(),
         oneharness_sessions: Some(sessions_file(&paths)?),
     };
     record.driven_by_this_process();
@@ -3641,6 +3656,7 @@ mod tests {
             filters: crate::filter::Filters::default(),
             bus_config: Default::default(),
             maintenance_config: None,
+            branch_template: String::new(),
             oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         }

@@ -2128,6 +2128,10 @@ fn task_document(
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
     wire.remove("id");
+    // What the node was read out of rather than anything it says: the destination task's
+    // own id, key and title are that task's, and a relaunch of a project this run projected
+    // onto refuses `onepipeline.task_record` as a key no plan may state.
+    wire.remove("task_record");
     let mut metadata = Map::new();
     metadata.insert(ID_KEY.into(), json!(root));
     metadata.insert(NODE_KEY.into(), json!(head));

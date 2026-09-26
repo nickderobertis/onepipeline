@@ -99,6 +99,11 @@ enum StoreLocation {
 #[serde(deny_unknown_fields)]
 struct StoreTask {
     id: String,
+    /// The short handle the source shows people, as onetaskgraph 0.2.44 answers it: null
+    /// where the source has none, which every `local-md` task is. Skipped on the way out
+    /// when absent, so a task with no key renders exactly as it did before the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
     title: String,
     content: Option<String>,
     status: StoreStatus,
@@ -1008,6 +1013,10 @@ impl World {
             // holds it. Spelled out because the engine's own name for it is not
             // public.
             .env_remove("ONEVCS_SESSION")
+            // And the branch-name template a host may export: a journey about the
+            // shipped default means a launch that names none, and one about the
+            // variable sets it with `.env` of its own.
+            .env_remove(onepipeline::branchname::ENVIRONMENT)
             .envs(self.environment.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null());
         command

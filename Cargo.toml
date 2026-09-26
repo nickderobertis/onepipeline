@@ -551,6 +551,14 @@ resolver = "2"
 # `tests/e2e/lifecycle.rs`'s pooled-identity journey. `onevcs-testing` 0.8.2
 # requires exactly it, so the two move together.
 #
+# `onevcs` 0.33.0 is the floor because it carries `SessionRequest.branch_name` — a
+# name to **cut**, which that library sanitizes, prefixes with the host's branch
+# prefix and suffixes to the first free name — and `branch_prefix` beside it, which
+# every literal here fills. `src/vcs.rs::opening_for` hands it the name
+# `src/branchname.rs` renders, and `tests/e2e/branch_template.rs` drives the cut,
+# the suffix and the sanitizer over real git. A **requirement**, because `^0.32`
+# admits no 0.33.x; `onevcs-testing` 0.8.3 requires exactly it.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -571,7 +579,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.2"
-onevcs = "0.32.2"
+onevcs = "0.33.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -736,7 +744,7 @@ oneharness-core = "0.18.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.8.2"
+onevcs-testing = "0.8.3"
 # **Test-support only**, and linked by `crates/testfakes` alone: the crate under test
 # still reads every plan by *driving* the `onetaskgraph` binary. These host the real
 # `local-md` plugin inside `label-strict-source`; that fake says why.
@@ -748,8 +756,14 @@ onevcs-testing = "0.8.2"
 # here can pin, so
 # `taskgraph::tests::every_onetaskgraph_crate_in_the_lock_is_the_release_the_checks_install`
 # holds the lock's whole family to `justfile`'s `onetaskgraph-version`.
-onetaskgraph-core = "=0.2.32"
-onetaskgraph-local-md = "=0.2.32"
+onetaskgraph-core = "=0.2.44"
+onetaskgraph-local-md = "=0.2.44"
+# The plugin contract's own declaration of a task, which this crate's unit tests
+# serialize and read back through `src/taskgraph.rs`'s `TaskItem`: the one drift
+# gate between the field names that module reads off the store's answer — `key`
+# among them — and the type every source answers with. Test-support only, exact
+# for the family's reason above.
+onetaskgraph-plugin-api = "=0.2.44"
 
 [package]
 name = "onepipeline"
@@ -941,6 +955,7 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 fs4 = "0.13"
 onepipeline-testfakes = { path = "crates/testfakes" }
+onetaskgraph-plugin-api = { workspace = true }
 onevcs-testing = { workspace = true }
 # `tests/patch_pin.rs` holds this manifest's patch block equal to `deny.toml`'s
 # allow-git list, and what it compares are pins — so both sides are parsed as the
