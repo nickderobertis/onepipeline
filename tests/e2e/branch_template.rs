@@ -31,8 +31,8 @@
 use serde_json::{json, Value};
 
 use crate::harness::{
-    double, git, human, lifecycle, onetaskgraph_binary, plan_of, World, REFUSED, STORE_BINARY_ENV,
-    USAGE_ERROR,
+    double, git, human, lifecycle, onetaskgraph_binary, plan_of, World, NOTHING_DRIVING, REFUSED,
+    STORE_BINARY_ENV, USAGE_ERROR,
 };
 use onepipeline::branchname::{DEFAULT_TEMPLATE, ENVIRONMENT, FLAG, KEY};
 
@@ -95,7 +95,6 @@ fn settle(world: &World, name: &str, nodes: Vec<Value>, extra: &[&str]) -> Strin
     name.to_string()
 }
 
-/// One node's settlement.
 fn settlement(world: &World, run: &str, node: &str) -> Value {
     world
         .events_of(run, "node-settled")
@@ -438,15 +437,23 @@ fn a_template_that_fails_or_renders_nothing_at_a_node_fails_it_and_cuts_no_branc
     // `failing` prints a key its `local-md` task does not have; `empty` renders
     // nothing at all.
     let template = "{% if node.id == \"failing\" %}{{ task.key }}{% endif %}";
-    let run = settle(
-        &world,
-        "unrendered",
-        vec![lifecycle("failing", &[]), lifecycle("empty", &[])],
-        &[FLAG, template],
+    let run = "unrendered";
+    let path = world.plan(
+        run,
+        &plan_of(
+            run,
+            vec![lifecycle("failing", &[]), lifecycle("empty", &[])],
+        ),
     );
+    // Both nodes settle failed, so nothing is left to drive: the launch reports
+    // the run unattended, exactly as it does for any node that failed.
+    world
+        .run(&["start", path.as_str(), "--attach", FLAG, template])
+        .exited(NOTHING_DRIVING)
+        .out_has("\"settlement\":\"unattended\"");
 
     for (node, says) in [("failing", "undefined"), ("empty", "empty name")] {
-        let settled = settlement(&world, &run, node);
+        let settled = settlement(&world, run, node);
         assert_eq!(settled["status"], "failed", "{settled}");
         assert_eq!(settled["outcome"], "infrastructure-failure", "{settled}");
         let detail = settled["detail"].as_str().expect("a detail");
@@ -458,7 +465,7 @@ fn a_template_that_fails_or_renders_nothing_at_a_node_fails_it_and_cuts_no_branc
             assert!(detail.contains(&names), "{detail} lacks {names:?}");
         }
     }
-    assert!(opened_branches(&world, &run).is_empty(), "{}", world.dump());
+    assert!(opened_branches(&world, run).is_empty(), "{}", world.dump());
     assert_eq!(git(&world, &repo.origin, &["branch", "--list"]), before);
     assert_eq!(
         git(&world, &repo.checkout, &["branch", "--list"])
