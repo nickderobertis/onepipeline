@@ -5377,8 +5377,13 @@ fn unwritable_shadow_store(world: &World, run: &str) {
     world.until("the first projection to write its shadow store", |_| {
         shadow.is_dir()
     });
+    // llmlint: ignore-block[tests_mirror_real_usage] a shadow store the worker cannot write is
+    // a state a host produces on its own — a full disk, a permission change — and not one any
+    // verb of this CLI can be asked to make; `store.rs`'s
+    // `an_unwritable_shadow_store_is_reported_retried_and_recovered` states it the same way.
     std::fs::remove_dir_all(&shadow).expect("the shadow projects folder is taken away");
     std::fs::write(&shadow, "not a folder").expect("a file makes the shadow store unwritable");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
 /// Type one reply into that window and wait until the run's queue holds it.

@@ -285,7 +285,7 @@ impl Scripted {
             fake::record(
                 &self.script,
                 &self.key.0,
-                &[request.method.0.clone(), named(&request.params)],
+                &[request.method.0.clone(), named(&request.params)?],
             );
             let answer = self.answer(host, &request)?;
             println!("{answer}");
@@ -309,7 +309,7 @@ impl Scripted {
                 .map_err(|why| format!("cannot take {} away: {why}", once.display()))?;
             return Ok(json!({"id": request.id, "error": error}));
         }
-        let item = named(&request.params);
+        let item = named(&request.params)?;
         if !item.is_empty() {
             let one = self.scenario(&format!("{method}@{}.refuse", fake::segment(&item)));
             if let Some(error) = refusal(&one)? {
@@ -363,14 +363,21 @@ impl Scripted {
     }
 }
 
-/// The id one request names — a read's `id`, or a write's `target` — or nothing.
-fn named(params: &Value) -> String {
-    params
+/// The id one request names — a read's `id`, or a write's `target` — or nothing, for a
+/// request that names none or a write that creates. An id that is there and is not a
+/// non-empty string is refused rather than read as none: it would be recorded against no
+/// item and match no scenario a journey scripted for it.
+fn named(params: &Value) -> Result<String, String> {
+    let named = params
         .get("id")
-        .or_else(|| params.get("write").and_then(|write| write.get("target")))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
+        .or_else(|| params.get("write").and_then(|write| write.get("target")));
+    match named {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(id)) if !id.is_empty() => Ok(id.clone()),
+        Some(other) => Err(format!(
+            "a request names its item as {other}, which is not an id"
+        )),
+    }
 }
 
 /// Meet the test at the rendezvous `hold` names, where one is scripted.
