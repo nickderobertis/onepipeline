@@ -2639,6 +2639,36 @@ fn the_branch_name_template_is_what_the_contract_names() {
         );
     }
     assert!(tokens.contains(&format!("{FLAG} TEMPLATE")));
+
+    // The two places that restate the surface for a reader — the flag's own help and
+    // the README — carry the contract's default literal and name the three layers in
+    // the order the contract resolves them.
+    let help = Cli::command()
+        .find_subcommand("start")
+        .expect("`start` is a verb")
+        .get_arguments()
+        .find(|argument| argument.get_long() == FLAG.strip_prefix("--"))
+        .and_then(|argument| argument.get_long_help().or(argument.get_help()))
+        .map(ToString::to_string)
+        .expect("the flag carries help");
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("the README");
+    for (restatement, text) in [("--help", help.as_str()), ("README.md", readme.as_str())] {
+        let flattened = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flattened.contains(DEFAULT_TEMPLATE),
+            "{restatement} does not carry the contract's default template"
+        );
+        let at = |name: &str| {
+            flattened
+                .find(name)
+                .unwrap_or_else(|| panic!("{restatement} does not name {name}"))
+        };
+        let flag_at = if restatement == "--help" { 0 } else { at(FLAG) };
+        assert!(
+            flag_at <= at(ENVIRONMENT) && at(ENVIRONMENT) < at(&format!("`{KEY}`")),
+            "{restatement} names the layers in another order than the contract resolves them"
+        );
+    }
     for names in [
         "**The template applies only when a branch is cut.**",
         "set only where the request sets no `branch`",
