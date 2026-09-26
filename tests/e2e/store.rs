@@ -290,8 +290,7 @@ fn the_store_is_discovered_from_the_launch_directory_by_the_read_and_by_every_wr
         });
         let said = log(&world)
             .lines()
-            .filter(|line| line.contains("onetaskgraph write-back failed"))
-            .last()
+            .rfind(|line| line.contains("onetaskgraph write-back failed"))
             .unwrap_or_default()
             .to_owned();
         assert!(
