@@ -138,6 +138,7 @@ mod plan_check;
 mod real_vcs;
 mod recorded_channel;
 mod recorded_support;
+mod retirement;
 mod run_end_hooks;
 mod scratch;
 mod session;

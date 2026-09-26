@@ -41,6 +41,16 @@
 //! `NoMaintainCommand`, `NoSlots`, `NotDue` or `InUse` writes nothing: those are
 //! the schedule and the pool working, they are the common case on a schedule
 //! measured in days, and a record of them would be a record of nothing.
+//!
+//! **The same sweep retires finished branches.** After `pool_maintain`, each
+//! identity is handed to `onevcs::retire_finished` with every branch a live node
+//! of this run names excluded — its `branch`, its `resume.branch`, and its current
+//! dispatch session's branch — and nothing else of this crate's: which branches
+//! provably hold no work beyond their base is that library's to decide, and it
+//! retires only those, which is why the pass may act host-wide on branches other
+//! runs left behind. What it retired, and any identity whose pass failed, is
+//! written as one `branches-retired` record; a sweep that retired nothing and
+//! failed nowhere writes none, and a failure never fails the run.
 
 use std::path::Path;
 use std::sync::mpsc::Sender;
@@ -54,7 +64,10 @@ use serde_json::{json, Map, Value};
 
 use crate::engine::Message;
 use crate::error::{Error, Result};
+use crate::graph::NodeStatus;
 use crate::ledger::RunPaths;
+use crate::payload::{BranchesRetired, RetiredBranch, UnretiredIdentity};
+use crate::projection::RunState;
 
 /// The flag a launch names the schedule with.
 pub const FLAG: &str = "--maintenance-config";
@@ -317,6 +330,182 @@ impl Maintained {
     }
 }
 
+/// The word `onevcs` stamps a retirement `retire_finished` made with: its
+/// automatic pass. That library's trigger vocabulary is private to it, and this
+/// sweep reaches retirement through that one call and no other.
+const PASS_TRIGGER: &str = "pass";
+
+/// One branch a live node of this run names, which the sweep's retirement pass is
+/// told to leave alone.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Named {
+    /// The repository the node names, as it names it; `None` for a node naming a
+    /// branch and no repository, which is left alone in every identity.
+    pub(crate) repo: Option<String>,
+    /// The branch.
+    pub(crate) branch: String,
+}
+
+/// Every branch a node of this run in a live state names: its `branch`, its
+/// `resume.branch`, and its current dispatch session's branch.
+///
+/// Live is every status a node can still move out of — pending, ready and running,
+/// and the held ones: waiting, blocked, parked and complete-but-draft. A settled
+/// node's branch is `onevcs`'s to judge like any other.
+pub(crate) fn live_branches(
+    state: &RunState,
+    statuses: &std::collections::BTreeMap<String, NodeStatus>,
+) -> Vec<Named> {
+    let mut named = std::collections::BTreeSet::new();
+    for (id, status) in statuses {
+        if matches!(
+            status,
+            NodeStatus::Done | NodeStatus::Failed | NodeStatus::Skipped | NodeStatus::Cancelled
+        ) {
+            continue;
+        }
+        let Some(node) = state.graph.get(id) else {
+            continue;
+        };
+        let session = state
+            .sessions
+            .get(id)
+            .map(|s| s.branch().as_str().to_owned());
+        let resumed = node.resume.as_ref().map(|resume| resume.branch.clone());
+        for branch in [node.branch.clone(), resumed, session]
+            .into_iter()
+            .flatten()
+        {
+            if !branch.is_empty() {
+                named.insert(Named {
+                    repo: node.repo.clone(),
+                    branch,
+                });
+            }
+        }
+    }
+    named.into_iter().collect()
+}
+
+/// What one sweep's retirement pass did across every identity.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Retirements {
+    /// Every branch deleted.
+    pub(crate) retired: Vec<RetiredBranch>,
+    /// Every identity whose pass failed, and every branch whose deletion did not
+    /// finish.
+    pub(crate) failed: Vec<UnretiredIdentity>,
+}
+
+impl Retirements {
+    /// Take up one identity's pass.
+    fn take(&mut self, identity: &str, pass: onevcs::Result<onevcs::RetirementPassReport>) {
+        let report = match pass {
+            Ok(report) => report,
+            Err(error) => {
+                self.failed.push(UnretiredIdentity {
+                    identity: identity.to_owned(),
+                    branch: None,
+                    error: crate::engine::bounded(&error.to_string()),
+                });
+                return;
+            }
+        };
+        for examined in report.examined {
+            let retirement = &examined.retirement;
+            match examined.outcome {
+                onevcs::RetireOutcome::Retired => self.retired.push(RetiredBranch {
+                    identity: retirement.identity.clone(),
+                    branch: retirement.branch.clone(),
+                    class: retirement.class.as_str().to_owned(),
+                    proof: serde_json::to_value(&retirement.proof).unwrap_or(Value::Null),
+                    trigger: PASS_TRIGGER.to_owned(),
+                }),
+                onevcs::RetireOutcome::Incomplete => self.failed.push(UnretiredIdentity {
+                    identity: retirement.identity.clone(),
+                    branch: Some(retirement.branch.clone()),
+                    error: crate::engine::bounded(
+                        &examined
+                            .failed
+                            .iter()
+                            .map(|holder| {
+                                format!(
+                                    "{} {}: {}",
+                                    holder.kind.as_str(),
+                                    holder.location,
+                                    holder.error
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    ),
+                }),
+                onevcs::RetireOutcome::WouldRetire
+                | onevcs::RetireOutcome::AlreadyRetired
+                | onevcs::RetireOutcome::Kept => {}
+            }
+        }
+    }
+
+    /// Whether the pass is written into the record at all.
+    fn is_recorded(&self) -> bool {
+        !self.retired.is_empty() || !self.failed.is_empty()
+    }
+
+    /// The `branches-retired` record's payload.
+    fn payload(&self) -> Map<String, Value> {
+        match serde_json::to_value(BranchesRetired {
+            retired: self.retired.clone(),
+            failed: self.failed.clone(),
+        }) {
+            Ok(Value::Object(payload)) => payload,
+            // llmlint: ignore[changed_behavior_has_e2e] unreachable by construction: a
+            // struct of strings and serialized values serializes to an object.
+            _ => Map::new(),
+        }
+    }
+}
+
+/// The exclusions one identity's pass is told, out of what the run names:
+/// every branch named against a repository resolving to that identity, and every
+/// branch named against no repository at all.
+fn excluded_in(identity: &str, named: &[(Option<String>, String)]) -> Vec<onevcs::BranchRef> {
+    named
+        .iter()
+        .filter(|(key, _)| key.as_deref().is_none_or(|key| key == identity))
+        .map(|(_, branch)| onevcs::BranchRef {
+            identity: identity.to_owned(),
+            branch: branch.clone(),
+        })
+        .collect()
+}
+
+/// Resolve each named branch's repository to the identity key `onevcs` compares
+/// an exclusion by. A repository that does not resolve names no registered
+/// identity, so nothing a pass examines is its branch.
+fn resolved(named: &[Named]) -> Vec<(Option<String>, String)> {
+    let vcs = onevcs::Providers::real().vcs;
+    let mut keys: std::collections::BTreeMap<String, Option<String>> =
+        std::collections::BTreeMap::new();
+    named
+        .iter()
+        .filter_map(|one| {
+            let Some(repo) = &one.repo else {
+                return Some((None, one.branch.clone()));
+            };
+            let key = keys
+                .entry(repo.clone())
+                .or_insert_with(|| {
+                    vcs.resolve_identity(repo)
+                        .ok()
+                        .map(|identity| identity.origin)
+                })
+                .clone()?;
+            Some((Some(key), one.branch.clone()))
+        })
+        .collect()
+}
+
 /// What one sweep did: every identity it visited, and how the enumeration went.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Swept {
@@ -328,6 +517,8 @@ pub(crate) struct Swept {
     pub(crate) identities: Vec<Maintained>,
     /// Why the identities could not be enumerated at all, where they could not.
     pub(crate) failure: Option<String>,
+    /// What the retirement pass did.
+    pub(crate) retirements: Retirements,
 }
 
 impl Swept {
@@ -363,8 +554,9 @@ fn identities() -> std::result::Result<Vec<String>, String> {
         .map_err(|error| format!("the host's registered identities could not be read: {error}"))
 }
 
-/// Maintain every registered identity once, on the schedule.
-fn sweep(config: &MaintenanceConfig) -> Swept {
+/// Maintain every registered identity once, on the schedule, and then retire
+/// its finished branches, leaving alone every branch in `named`.
+fn sweep(config: &MaintenanceConfig, named: &[Named]) -> Swept {
     let started_at = crate::sys::now_rfc3339();
     let keys = match identities() {
         Ok(keys) => keys,
@@ -373,43 +565,65 @@ fn sweep(config: &MaintenanceConfig) -> Swept {
                 started_at,
                 identities: Vec::new(),
                 failure: Some(failure),
+                retirements: Retirements::default(),
             }
         }
     };
+    let named = resolved(named);
+    let mut retirements = Retirements::default();
     let identities = keys
         .into_iter()
         .map(|identity| {
-            let every = match config.every_for(&identity) {
-                Ok(every) => every,
-                Err(why) => {
-                    return Maintained {
-                        identity,
-                        every: config.default.every,
-                        outcome: Err(why),
-                    }
-                }
-            };
-            let outcome = onevcs::pool_maintain(Scope::Repo(identity.clone()), Some(every))
-                .map_err(|failure| failure.to_string())
-                .and_then(|report| {
-                    report
-                        .identities
-                        .into_iter()
-                        .next()
-                        .map(|maintained| maintained.outcome)
-                        .ok_or_else(|| "the sibling answered for no identity".to_owned())
-                });
-            Maintained {
-                identity,
-                every,
-                outcome,
-            }
+            let maintained = maintain(config, identity);
+            let providers = onevcs::Providers::real();
+            retirements.take(
+                &maintained.identity,
+                onevcs::retire_finished(
+                    &providers,
+                    &onevcs::RetirePass {
+                        scope: Scope::Repo(maintained.identity.clone()),
+                        exclude: excluded_in(&maintained.identity, &named),
+                        dry_run: false,
+                    },
+                ),
+            );
+            maintained
         })
         .collect();
     Swept {
         started_at,
         identities,
         failure: None,
+        retirements,
+    }
+}
+
+/// Maintain one identity's pool on the schedule.
+fn maintain(config: &MaintenanceConfig, identity: String) -> Maintained {
+    let every = match config.every_for(&identity) {
+        Ok(every) => every,
+        Err(why) => {
+            return Maintained {
+                identity,
+                every: config.default.every,
+                outcome: Err(why),
+            }
+        }
+    };
+    let outcome = onevcs::pool_maintain(Scope::Repo(identity.clone()), Some(every))
+        .map_err(|failure| failure.to_string())
+        .and_then(|report| {
+            report
+                .identities
+                .into_iter()
+                .next()
+                .map(|maintained| maintained.outcome)
+                .ok_or_else(|| "the sibling answered for no identity".to_owned())
+        });
+    Maintained {
+        identity,
+        every,
+        outcome,
     }
 }
 
@@ -432,7 +646,12 @@ impl Sweep {
     /// Start one sweep. `None` where this host will not start a thread, which
     /// is reported and costs nothing else: the schedule is asked again at the
     /// next pace.
-    fn start(config: MaintenanceConfig, paths: &RunPaths, tx: Sender<Message>) -> Option<Self> {
+    fn start(
+        config: MaintenanceConfig,
+        named: Vec<Named>,
+        paths: &RunPaths,
+        tx: Sender<Message>,
+    ) -> Option<Self> {
         let started_at = crate::sys::now_rfc3339();
         // The marker before the thread, so no reader meets a live sweep with
         // nothing on disk saying so. A marker that could not be written costs
@@ -451,7 +670,7 @@ impl Sweep {
         let handle = std::thread::Builder::new()
             .name("pool-maintenance".to_owned())
             .spawn(move || {
-                let swept = sweep(&config);
+                let swept = sweep(&config, &named);
                 // A loop that has gone has nobody to record it; the slots keep
                 // their own stamps regardless.
                 let _ = tx.send(Message::Maintained(Box::new(swept)));
@@ -698,7 +917,16 @@ impl Maintenance {
     /// room — and what this adds is the pacing: no sweep of this driver's is
     /// running, and the pace has elapsed since it last started one. A launch
     /// naming no schedule starts nothing, ever.
-    pub(crate) fn consider(&mut self, idle: bool, paths: &RunPaths, tx: &Sender<Message>) {
+    ///
+    /// `named` is asked only when a sweep starts: every branch a live node of
+    /// this run names, which the sweep's retirement pass leaves alone.
+    pub(crate) fn consider(
+        &mut self,
+        idle: bool,
+        paths: &RunPaths,
+        tx: &Sender<Message>,
+        named: impl FnOnce() -> Vec<Named>,
+    ) {
         let Some(config) = &self.config else {
             return;
         };
@@ -706,7 +934,7 @@ impl Maintenance {
             return;
         }
         self.last_started = Some(Instant::now());
-        self.sweep = Sweep::start(config.clone(), paths, tx.clone());
+        self.sweep = Sweep::start(config.clone(), named(), paths, tx.clone());
     }
 
     /// How long until this driver could next start a sweep, for the loop's wait.
@@ -748,14 +976,21 @@ impl Maintenance {
         if let Some(failure) = &swept.failure {
             eprintln!("onepipeline: the pool-maintenance sweep could not enumerate this host's identities: {failure}");
         }
-        if !swept.is_recorded() {
-            return Ok(());
+        if swept.is_recorded() {
+            journal.emit(
+                crate::journal::PipelineKind::PoolMaintenance,
+                crate::journal::labels(&paths.run, None),
+                swept.payload(),
+            )?;
         }
-        journal.emit(
-            crate::journal::PipelineKind::PoolMaintenance,
-            crate::journal::labels(&paths.run, None),
-            swept.payload(),
-        )
+        if swept.retirements.is_recorded() {
+            journal.emit(
+                crate::journal::PipelineKind::BranchesRetired,
+                crate::journal::labels(&paths.run, None),
+                swept.retirements.payload(),
+            )?;
+        }
+        Ok(())
     }
 
     /// Wait for a sweep still running as the driver closes out, and record what
@@ -806,6 +1041,7 @@ impl Maintenance {
 mod tests {
     use super::*;
     use onevcs::{IdentityMaintenance, MaintenanceOutcome, SlotMaintenance};
+    use std::collections::BTreeMap;
 
     fn written(text: &str) -> Result<MaintenanceConfig> {
         static NTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -954,6 +1190,136 @@ mod tests {
     /// on which a slot ran, a due slot could not be maintained, an identity was
     /// claimed or one failed writes one record carrying exactly those identities,
     /// each with the sibling's own outcome shape.
+    /// A run whose graph holds one node per status given, each naming the branch
+    /// `<id>/branch` pinned, `<id>/resume` resumed and `<id>/session` as its current
+    /// dispatch session's, against `service`, and one direct node naming a
+    /// branch and no repository.
+    fn named_by(statuses: &[(&str, NodeStatus)]) -> (RunState, BTreeMap<String, NodeStatus>) {
+        let mut state = crate::projection::fold(&[]);
+        let mut derived = BTreeMap::new();
+        for (id, status) in statuses {
+            let node: crate::plan::Node = serde_json::from_value(json!({
+                "id": id, "repo": "service", "task": "## What\nShip.",
+                "branch": format!("{id}/branch"),
+                "resume": {"branch": format!("{id}/resume")},
+            }))
+            .expect("a node parses");
+            state.graph.insert(node);
+            state.sessions.insert(
+                (*id).to_owned(),
+                serde_json::from_value(
+                    json!({"token": format!("s-{id}"), "branch": format!("{id}/session")}),
+                )
+                .expect("a session reads"),
+            );
+            derived.insert((*id).to_owned(), *status);
+        }
+        let direct: crate::plan::Node = serde_json::from_value(json!({
+            "id": "direct", "task": "## What\nShip.", "branch": "direct/branch",
+        }))
+        .expect("a node parses");
+        state.graph.insert(direct);
+        derived.insert("direct".to_owned(), NodeStatus::Running);
+        (state, derived)
+    }
+
+    /// Every live status names all three of a node's branches — its pin, its
+    /// resume and its current dispatch session's — and a settled one names none.
+    /// The session means is held here as well as end to end, because a running
+    /// node's session is open under a live owner and `onevcs` keeps its branch on
+    /// that alone, so a journey cannot tell this exclusion from that hold.
+    #[test]
+    fn a_live_node_names_its_pin_its_resume_and_its_session_and_a_settled_one_names_nothing() {
+        let live = [
+            ("pending", NodeStatus::Pending),
+            ("ready", NodeStatus::Ready),
+            ("running", NodeStatus::Running),
+            ("parked", NodeStatus::Parked),
+            ("waiting", NodeStatus::Waiting),
+            ("blocked", NodeStatus::Blocked),
+            ("draft", NodeStatus::CompleteDraft),
+        ];
+        let settled = [
+            ("done", NodeStatus::Done),
+            ("failed", NodeStatus::Failed),
+            ("skipped", NodeStatus::Skipped),
+            ("cancelled", NodeStatus::Cancelled),
+        ];
+        let (state, statuses) = named_by(&[&live[..], &settled[..]].concat());
+        let named = live_branches(&state, &statuses);
+        for (id, _) in live {
+            for means in ["branch", "resume", "session"] {
+                assert!(
+                    named.contains(&Named {
+                        repo: Some("service".to_owned()),
+                        branch: format!("{id}/{means}"),
+                    }),
+                    "{id}'s {means} is not excluded: {named:?}"
+                );
+            }
+        }
+        for (id, _) in settled {
+            assert!(
+                !named
+                    .iter()
+                    .any(|one| one.branch.starts_with(&format!("{id}/"))),
+                "settled {id} is excluded: {named:?}"
+            );
+        }
+        assert!(named.contains(&Named {
+            repo: None,
+            branch: "direct/branch".to_owned(),
+        }));
+    }
+
+    /// An identity's pass is told the branches named against it and the ones
+    /// named against no repository, and none named against another identity.
+    #[test]
+    fn an_identity_is_told_its_own_exclusions_and_the_unscoped_ones() {
+        let named = vec![
+            (Some("github.com/owner/service".to_owned()), "a".to_owned()),
+            (Some("github.com/owner/other".to_owned()), "b".to_owned()),
+            (None, "c".to_owned()),
+        ];
+        let told: Vec<String> = excluded_in("github.com/owner/service", &named)
+            .into_iter()
+            .map(|excluded| {
+                assert_eq!(excluded.identity, "github.com/owner/service");
+                excluded.branch
+            })
+            .collect();
+        assert_eq!(told, ["a", "c"]);
+    }
+
+    /// A failed pass is recorded against its identity, and a pass that retired
+    /// nothing writes nothing.
+    #[test]
+    fn a_failed_pass_is_recorded_and_an_empty_one_is_not() {
+        let mut retirements = Retirements::default();
+        retirements.take(
+            "github.com/owner/service",
+            Ok(onevcs::RetirementPassReport {
+                dry_run: false,
+                examined: Vec::new(),
+            }),
+        );
+        assert!(!retirements.is_recorded());
+        retirements.take(
+            "github.com/owner/service",
+            Err(onevcs::Error::Invalid {
+                reason: "the registry could not be read".to_owned(),
+            }),
+        );
+        assert!(retirements.is_recorded());
+        let payload = retirements.payload();
+        assert_eq!(payload["retired"], json!([]));
+        assert_eq!(payload["failed"][0]["identity"], "github.com/owner/service");
+        assert!(payload["failed"][0].get("branch").is_none(), "{payload:?}");
+        assert!(payload["failed"][0]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("the registry could not be read")));
+    }
+
     #[test]
     fn a_sweep_is_recorded_where_something_ran_or_a_due_slot_could_not_and_never_otherwise() {
         let nothing = Swept {
@@ -980,6 +1346,7 @@ mod tests {
                 ),
             ],
             failure: None,
+            retirements: Retirements::default(),
         };
         assert!(!nothing.is_recorded());
 
@@ -1004,6 +1371,7 @@ mod tests {
                     }]),
                 )],
                 failure: None,
+                retirements: Retirements::default(),
             };
             assert!(held.is_recorded(), "{kept:?} was not recorded");
         }
@@ -1021,6 +1389,7 @@ mod tests {
                 },
             ],
             failure: None,
+            retirements: Retirements::default(),
         };
         assert!(something.is_recorded());
         let payload = Value::Object(something.payload());
@@ -1060,6 +1429,7 @@ mod tests {
             started_at: "2026-09-20T00:00:00.000Z".into(),
             identities: Vec::new(),
             failure: Some("the host's registered identities could not be read".into()),
+            retirements: Retirements::default(),
         };
         assert!(failed.is_recorded());
         let payload = Value::Object(failed.payload());
@@ -1252,13 +1622,13 @@ mod tests {
         // Due now, and the pass was not idle: nothing starts, and the wait is
         // the recheck rather than zero.
         assert_eq!(scheduled.next_due(), RECHECK);
-        scheduled.consider(false, &paths, &tx);
+        scheduled.consider(false, &paths, &tx, Vec::new);
         assert!(!scheduled.is_sweeping());
         assert_eq!(scheduled.next_due(), RECHECK);
         // Started once: the wait is then the pace, and a second idle pass
         // inside it starts nothing more.
         scheduled.last_started = Some(Instant::now());
-        scheduled.consider(true, &paths, &tx);
+        scheduled.consider(true, &paths, &tx, Vec::new);
         assert!(!scheduled.is_sweeping());
         let until = scheduled.next_due();
         assert!(

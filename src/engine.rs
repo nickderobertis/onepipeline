@@ -997,6 +997,9 @@ pub(crate) fn reconcile_queued(paths: &RunPaths) -> Result<()> {
         &launch,
         &mut BTreeMap::new(),
     )?;
+    // The queue it reconciled may have settled a node at a landing, and no
+    // driver is left to see it.
+    crate::supersession::record_landed(paths, &mut journal)?;
     Ok(())
 }
 
@@ -1041,6 +1044,9 @@ fn converge(
     // the sibling's own stamps. A launch naming none starts nothing, ever.
     let mut maintenance =
         crate::maintenance::Maintenance::of_launch(launch.maintenance_config.clone(), paths);
+    // What each landed lineage told `onevcs` it superseded, seeded from the
+    // journal so a fresh driver records nothing twice.
+    let mut supersessions = crate::supersession::Watch::of_run(paths);
     // What the loop has already said out loud, so each fact is announced once
     // and again only when it becomes true again.
     let mut announced_ready: BTreeSet<String> = BTreeSet::new();
@@ -1108,6 +1114,10 @@ fn converge(
 
     loop {
         crate::loopstats::pass();
+        // A node that landed since the last pass — a settlement, a `settle`, a
+        // relayed `merge-completed` — tells `onevcs` which earlier attempts on
+        // other branches it superseded. Nothing it answers moves the run.
+        supersessions.pass(paths, journal, state)?;
         // Whether this pass moved the run's own state, which is the one change
         // the wait below cannot be woken by: what a pass settles or applies itself
         // has no dispatch left to report it and writes nothing to the channel, so
@@ -1330,7 +1340,9 @@ fn converge(
             && !readied
             && in_flight.len() < state.graph.concurrency as usize
             && crate::maintenance::host_has_room();
-        maintenance.consider(idle, paths, &tx);
+        maintenance.consider(idle, paths, &tx, || {
+            crate::maintenance::live_branches(state, &statuses)
+        });
 
         // Nothing more to do until something happens — unless this pass is what
         // happened, in which case the next one is due now. The longest this loop
@@ -1664,6 +1676,9 @@ fn converge(
         watch_for_quiet(paths, journal, stall_after, &mut in_flight)?;
     }
 
+    // A landing the last pass settled is told to `onevcs` before the driver
+    // lets go, since no pass follows it.
+    supersessions.pass(paths, journal, state)?;
     // A sweep still running is waited for: its commands are bounded by their
     // identities' own timeouts, and a driver that left one behind would leave a
     // slot claimed by a process that had gone.

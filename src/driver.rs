@@ -337,6 +337,15 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             );
             Ok(EXIT_SUCCESS)
         }
+        Verb::Supersessions(args) => {
+            let answered = verbs::supersessions(&resolve(&args.run)?, args.record)?;
+            if args.json {
+                println!("{}", verbs::render_supersessions_json(&answered));
+            } else {
+                print!("{}", verbs::render_supersessions(&answered));
+            }
+            Ok(answered.exit_code())
+        }
         Verb::Goals(args) => {
             print!(
                 "{}",
@@ -3135,6 +3144,9 @@ pub(crate) fn submit_envelope(
                     }
                 }
             }
+            // A `settle` stating a landing is a landing with nothing driving the
+            // run to see it, so what it superseded is told to `onevcs` here.
+            crate::supersession::record_landed(paths, &mut journal)?;
             // This process was the run's writer, so it lets go of it the way a
             // driver does: under the handover, and not while the queue holds
             // something another supervisor's edit put there while this one was
