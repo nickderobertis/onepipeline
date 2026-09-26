@@ -423,7 +423,7 @@ fn a_record_an_older_build_wrote_is_adopted_and_its_copy_runs_under_the_shipped_
 /// the driver's log, and that is what this asserts: the write-back names the script,
 /// and the board is not written as though the store had answered.
 #[test]
-fn a_hold_the_double_cannot_read_refuses_the_copy_by_the_scripts_name() {
+fn a_hold_the_scripted_source_cannot_read_fails_the_copy_by_the_scripts_name() {
     let world = World::new("writeback-budget-unreadable-hold");
     let run = "budgetunreadable";
     let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
