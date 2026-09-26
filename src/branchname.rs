@@ -272,7 +272,6 @@ pub(crate) fn name_for(
     }
 }
 
-/// The one sentence a node whose branch could not be named settles on.
 fn unnamed(node: &crate::plan::Node, why: &str) -> String {
     format!(
         "the branch-name template could not name the branch of node '{}', so no branch was \
