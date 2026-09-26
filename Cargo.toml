@@ -562,7 +562,8 @@ resolver = "2"
 # different one. `just msrv`, CI's `msrv` job, and `clippy.toml` read this line.
 #
 # **1.97 is consumer-visible and it is set by onetaskgraph**, which declares it and
-# which `crates/testfakes` — a dev-dependency of this crate — links. Every other
+# which this crate links as a normal dependency, so a consumer building it builds that
+# floor. Every other
 # engine here declares 1.89 or lower, but a declared minimum is a promise about what
 # builds, and `just msrv` checks `--all-targets`, so this is the floor rather than
 # something to narrow the check around.
@@ -737,19 +738,26 @@ oneharness-core = "0.18.0"
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
 onevcs-testing = "0.8.2"
-# **Test-support only**, and linked by `crates/testfakes` alone: the crate under test
-# still reads every plan by *driving* the `onetaskgraph` binary. These host the real
-# `local-md` plugin inside `label-strict-source`; that fake says why.
+# The store every plan is read out of and every settlement is projected into, **linked**
+# rather than driven: the engine calls `onetaskgraph-core`'s `Engine` in process, so a
+# store answer reaches it as that library's own types and a change in the store's shape
+# is a compile error here rather than a misread at run time. `src/taskgraph.rs` is where
+# it is called from and says what the engine owns that the store's CLI used to decide.
+# `-plugin-api` is named because the values the engine answers with — a `Task`, a
+# `Project`, a `SourceError` — are that crate's, and `-local-md` because
+# `crates/testfakes` hosts the real plugin in process inside `label-strict-source` and
+# `scripted-source`; those fakes say why.
 #
-# **Exact**, because the family is lock-step across patch releases despite the carets
-# in its own manifests — `-local-md` 0.2.30 does not compile against `-plugin-api`
-# 0.2.32 — and because the plugin served in process and the binary `bootstrap`
-# installs must be one release. Four of the six are transitive, which no requirement
-# here can pin, so
-# `taskgraph::tests::every_onetaskgraph_crate_in_the_lock_is_the_release_the_checks_install`
-# holds the lock's whole family to `justfile`'s `onetaskgraph-version`.
-onetaskgraph-core = "=0.2.32"
-onetaskgraph-local-md = "=0.2.32"
+# **Exact, and one release for all three**, because the family is lock-step: each
+# sibling requires the others at exactly its own version, so a caret would admit a split
+# that does not compile. The rest of the family is transitive, which no requirement here
+# can pin, so `tests/linked_engines.rs`'s
+# `every_onetaskgraph_crate_in_the_lock_is_the_one_release_the_manifest_names` holds the
+# lock's whole family to this one release, and fails as well if anything this
+# repository installs as an `onetaskgraph` binary names another.
+onetaskgraph-core = "=0.2.44"
+onetaskgraph-plugin-api = "=0.2.44"
+onetaskgraph-local-md = "=0.2.44"
 
 [package]
 name = "onepipeline"
@@ -886,6 +894,20 @@ onemessagebus = { workspace = true }
 # generated from its type; `preserve_order` is the feature the bus builds it
 # with, so the one copy in the graph is the one the registry compiled against.
 schemars = { version = "1", features = ["preserve_order"] }
+
+# The store, linked — see `[workspace.dependencies]` for why it is exact. The two
+# features are every hosted plugin the store's own CLI offers, so a source an operator's
+# `onetaskgraph.yaml` names is one this build can read; `local-md`, `in-memory` and
+# `subprocess` come with the core.
+onetaskgraph-core = { workspace = true, features = ["github-projects", "linear"] }
+onetaskgraph-plugin-api = { workspace = true }
+# The store's plugin traits are async, so each call into it runs on a runtime this crate
+# builds for that one logical command — a plan read, a write-back attempt — and drops
+# with it: a current-thread runtime, because what the store needs is several sources
+# waiting on I/O at once, which one thread interleaves. `time` is what bounds a copy by
+# its deadline (divergence entry 71). Already in the graph through the store's network
+# plugins, so it adds nothing to what this build resolves.
+tokio = { version = "1", features = ["rt", "time"] }
 
 # Process liveness is the one host fact this crate cannot get from `std` on the
 # MSRV floor, and every `DRIVER DEAD` / `PARKED` verdict rests on it. Both are

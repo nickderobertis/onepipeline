@@ -62,31 +62,47 @@
 //!
 //! Against a hosted destination every item a copy reads or writes spends the same allowance
 //! every other reader of the token needs, so an attempt carries only the nodes whose shadow
-//! task changed since the last attempt that landed, named to the store's `--member`. It
-//! carries the whole project where it has to: when nothing has landed in this worker yet,
-//! after an attempt that failed, and against a store that offers no member copy — decided
-//! once per run, before its first projection, off the version the launch check read. What a
-//! member copy does not name it neither reads nor rewrites, so the ownership rule above still
-//! decides every field of every item a projection writes, and a person's edit on an item the
-//! copy did not name stands until that node next changes. Every attempt is appended to the
-//! run's projection record; see [`ProjectionRecord`].
+//! task changed since the last attempt that landed, named as the copy's members. It carries
+//! the whole project where it has to: when nothing has landed in this worker yet, and after
+//! an attempt that failed. What a member copy does not name it neither reads nor rewrites, so
+//! the ownership rule above still decides every field of every item a projection writes, and
+//! a person's edit on an item the copy did not name stands until that node next changes.
+//! Every attempt is appended to the run's projection record; see [`ProjectionRecord`].
+//!
+//! # The store is linked, and built afresh for every attempt
+//!
+//! Every read and the copy go through `onetaskgraph-core`'s own [`Engine`], in process, and
+//! every answer is that library's own value — a [`CopyReport`], a [`SourceFailure`], an
+//! [`EngineError`] — so what a failure *is* is matched on its type and never read off a
+//! message or an exit status. Each attempt builds its engine from the configuration the
+//! launch record's directory discovers, with the shadow source declared beside it, and
+//! drops it when the attempt ends: a hosted source keeps its whole-board read for as long as
+//! it lives, so an engine that outlived one attempt would answer the next from the board as
+//! it was.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use onetaskgraph_core::config::{Layer, Origin as SettingOrigin, Setting, SettingPath};
+use onetaskgraph_core::{
+    classify, ConfigError, CopyAction, CopyItems, CopyReport, CopyRequest, CopyScope, Delivered,
+    DeliveryOutcome, Engine, EngineError, Failure, Filters, GlobalId, PageToken, Paging,
+    ProjectSelector, Qualified, QueryResponse, SourceFailure, TaskRequest,
+};
+use onetaskgraph_plugin_api::{
+    Label, NativeId, Project, SourceError, SourceName, StatusCategory, Task,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::cli::{
     DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_CLASSIFIED_COMMANDS,
-    WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_DELIVERS_FROM, WRITEBACK_FAILURE_EXIT,
-    WRITEBACK_MEMBERS_FROM, WRITEBACK_MEMBER_READ, WRITEBACK_PARTIAL_EXIT,
-    WRITEBACK_PROJECTIONS_FILE, WRITEBACK_PROJECTIONS_SCHEMA_VERSION, WRITEBACK_REFUSED_CLASS,
-    WRITEBACK_STORE_FILE,
+    WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_MEMBER_READ, WRITEBACK_PROJECTIONS_FILE,
+    WRITEBACK_PROJECTIONS_SCHEMA_VERSION, WRITEBACK_REFUSED_CLASS,
 };
 use crate::edits::Operation;
 use crate::event::Source;
@@ -94,7 +110,7 @@ use crate::graph::{Landing, NodeStatus};
 use crate::ledger::{LaunchRecord, RunPaths};
 use crate::plan::Node;
 use crate::projection::RunState;
-use crate::taskgraph::{QualifiedId, BINARY_ENV, NODE_KEY, SUPERSEDES_KEY};
+use crate::taskgraph::{QualifiedId, Store, NODE_KEY, SUPERSEDES_KEY};
 
 const SHADOW_SOURCE: &str = "onepipeline-writeback";
 /// The reserved key naming the plan node a destination item is the shadow of: the
@@ -123,9 +139,9 @@ const LANDING_EVIDENCE_KEY: &str = "onepipeline.landing_evidence";
 /// The shadow task's own top-level field carrying the tickets a node delivers, held against
 /// the same document as the words and keys above.
 const DELIVERS_FIELD: &str = "delivers";
-// Cross-platform runners have measured real sibling commands taking longer than ten seconds
+// Cross-platform runners have measured real store calls taking longer than ten seconds
 // under suite-wide contention. This remains a backstop for an unreachable store, not a
-// latency target: projection stays off the reconcile loop while the child runs. It is the
+// latency target: projection stays off the reconcile loop while the call runs. It is the
 // whole deadline for the reads, and the floor under the copy's — see [`Deadline`].
 const COMMAND_FLOOR: Duration = Duration::from_secs(WRITEBACK_COMMAND_FLOOR_SECONDS);
 // The retry schedule, chosen from the refusal that produces it in practice: a hosted
@@ -142,15 +158,20 @@ const RETRY_CEILING: Duration = Duration::from_secs(60);
 // Closeout never inherits the duration of a store command. A slow store may keep working in
 // the worker, but it still cannot turn a completed graph into run settlement.
 const CLOSEOUT_WAIT: Duration = Duration::from_millis(2_250);
-// The three store commands one attempt runs, by the name each one's capture files and
-// refusals carry. The store's own class is read off a failure of any of them.
+// The three store calls one attempt makes, by the name each one's refusals carry. Each
+// one's failure is classified by its own type.
 const PROJECT_SHOW: &str = WRITEBACK_CLASSIFIED_COMMANDS[0];
 const TASK_LIST: &str = WRITEBACK_CLASSIFIED_COMMANDS[1];
 const PROJECT_COPY: &str = WRITEBACK_CLASSIFIED_COMMANDS[2];
 // What a member projection reads each named member with, in place of the page of tasks.
 const TASK_SHOW: &str = WRITEBACK_MEMBER_READ;
 
-/// How long one store command may run, and the account a refusal gives of the figure.
+/// How long one store call may run, and the account a refusal gives of the figure.
+///
+/// A call that outlasts it is **cancelled**: the future is dropped where it waits, and the
+/// engine that was driving it — a hosted plugin's child process with it — is dropped before
+/// the attempt is recorded, so nothing the cancelled call started lands after the record says
+/// it was refused.
 ///
 /// The reads are the same size whatever the plan, so [`COMMAND_FLOOR`] alone bounds them.
 /// The copy writes one item per node it carries, so its deadline is the launch's per-item
@@ -190,7 +211,7 @@ impl Deadline {
         }
     }
 
-    /// The one line a command that outlasted this is refused with.
+    /// The one line a call that outlasted this is refused with.
     fn refusal(self, name: &str) -> String {
         let seconds = self.within().as_secs();
         match self {
@@ -269,9 +290,6 @@ struct Snapshot {
     project_metadata: BTreeMap<String, Value>,
     /// Whether a node the run has not started is written as claimed or released.
     claim: Claim,
-    /// What the store's vocabulary offers, which decides whether the shadow task carries
-    /// `delivers`.
-    vocabulary: Vocabulary,
 }
 
 /// What a node the run has not started says about the work it names.
@@ -279,43 +297,11 @@ struct Snapshot {
 /// While a driver drives the run, the run has claimed its whole plan, and an unstarted node
 /// is written `queued`, which the store counts as a claim on every ticket it delivers. At
 /// closeout — settled or stopped — a node that never started is written `todo`, which the
-/// store counts as a release. A store older than [`WRITEBACK_DELIVERS_FROM`] has no `queued`,
-/// so every snapshot projected into one releases.
+/// store counts as a release.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Claim {
     Held,
     Released,
-}
-
-/// Whether the store a run projects into offers `queued` and `delivers`, decided off the version
-/// its `--version` reported against [`WRITEBACK_DELIVERS_FROM`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Vocabulary {
-    /// `queued` is a status, a task carries `delivers`, and the store moves what it delivers.
-    WithDelivers,
-    /// A release before either: an unstarted node is written `todo` and no task carries
-    /// `delivers`.
-    BeforeDelivers,
-}
-
-impl Vocabulary {
-    /// The vocabulary of a store reporting `version`. A version that does not read is taken to
-    /// offer only what every release does.
-    fn of(version: &str) -> Self {
-        if crate::taskgraph::at_least(version, WRITEBACK_DELIVERS_FROM) {
-            Self::WithDelivers
-        } else {
-            Self::BeforeDelivers
-        }
-    }
-
-    /// What an unstarted node is written under while a driver drives the run.
-    fn driving_claim(self) -> Claim {
-        match self {
-            Self::WithDelivers => Claim::Held,
-            Self::BeforeDelivers => Claim::Released,
-        }
-    }
 }
 
 impl Snapshot {
@@ -459,10 +445,13 @@ pub(crate) struct Unprojected {
 ///
 /// `refused` is a failure no retry can change: a projection the store refused never reaches
 /// the board however often it is asked, and each attempt against a hosted destination spends
-/// its allowance for nothing. `transient` is everything a wait can change. The mapping from a
-/// failure to its class is the store's and is never restated here, and the message beside it
-/// is never read to decide. A class this build has never heard of does not parse, which
-/// leaves the failure unclassified and so on the retry schedule rather than off it.
+/// its allowance for nothing. `transient` is everything a wait can change, a rate limit
+/// included. The mapping from a failure to its class is the store's —
+/// [`onetaskgraph_core::classify`] — and is never restated here, and no message is ever read
+/// to decide. This is the record's own vocabulary, which [`ProjectionRecord`] writes and a
+/// reader of it names, so it is converted from the store's by an exhaustive match: a class
+/// the store adds is a compile error here rather than a line this build writes and cannot
+/// read back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FailureClass {
@@ -481,14 +470,23 @@ impl FailureClass {
     }
 }
 
+impl From<onetaskgraph_core::FailureClass> for FailureClass {
+    fn from(class: onetaskgraph_core::FailureClass) -> Self {
+        match class {
+            onetaskgraph_core::FailureClass::Refused => Self::Refused,
+            onetaskgraph_core::FailureClass::Transient => Self::Transient,
+        }
+    }
+}
+
 /// What the store said about one failed attempt: its class, and the kind of failure it was.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Classified {
     pub class: FailureClass,
     // llmlint: ignore[invalid_states_unrepresentable] the store's `kind` is open by its own
-    // contract — a source error's kind is copied through verbatim, and a plugin a release
-    // newer than this build speaks kinds this one has never seen — and it is only ever
-    // named to a reader. `class` is the closed half this worker acts on.
+    // contract — a source error's kind is its own wire tag, and a plugin a release newer than
+    // this build speaks kinds this one has never seen — and it is only ever named to a reader.
+    // `class` is the closed half this worker acts on.
     pub kind: String,
 }
 
@@ -501,21 +499,193 @@ impl Classified {
     fn refused(&self) -> bool {
         self.class == FailureClass::Refused
     }
+
+    /// An engine error, classed by the source error it wraps — or, where it wraps none, as
+    /// the failure the engine decided on its own, which no retry changes.
+    fn of_engine(error: &EngineError) -> Self {
+        let (kind, cause) = cause_of(error);
+        Self {
+            class: classify(cause).into(),
+            kind,
+        }
+    }
+
+    /// A configuration the store will not run on, which no retry changes.
+    fn of_config(error: &ConfigError) -> Self {
+        Self {
+            class: classify(None).into(),
+            kind: match error {
+                ConfigError::Read { .. } => "config-read",
+                ConfigError::Syntax { .. } => "config-syntax",
+                ConfigError::Setting { .. } => "config-setting",
+            }
+            .to_owned(),
+        }
+    }
+
+    /// An answer that is missing the one item a `show` addressed and reports no failure:
+    /// an item that is not there, which the store's own CLI decided and which no retry
+    /// changes.
+    fn no_such_item() -> Self {
+        Self {
+            class: classify(None).into(),
+            kind: "no-such-item".to_owned(),
+        }
+    }
+
+    /// Several failures of one answer, refused only where **every** one is: a source that
+    /// could not be reached beside one that refused could still answer next time. Each kind
+    /// named once, in the order the failures arrived.
+    fn of_all(failures: impl IntoIterator<Item = Self>) -> Option<Self> {
+        let failures: Vec<Self> = failures.into_iter().collect();
+        if failures.is_empty() {
+            return None;
+        }
+        let class = if failures.iter().all(Self::refused) {
+            FailureClass::Refused
+        } else {
+            FailureClass::Transient
+        };
+        let mut kinds: Vec<String> = Vec::new();
+        for failure in failures {
+            if !kinds.contains(&failure.kind) {
+                kinds.push(failure.kind);
+            }
+        }
+        Some(Self {
+            class,
+            kind: kinds.join(", "),
+        })
+    }
+
+    /// One source's failure in a partial answer.
+    fn of_source(error: &SourceError) -> Self {
+        Self {
+            class: classify(Some(error)).into(),
+            kind: source_kind(error).to_owned(),
+        }
+    }
+
+    /// The store's failure for one delivered ticket it could not keep in step.
+    ///
+    /// The one failure that arrives as a [`Failure`] with no [`EngineError`] behind it, and
+    /// whose class that type keeps private, so it is read off the failure's own serialised
+    /// form into the store's own [`onetaskgraph_core::FailureClass`] — a value of the store's
+    /// type written by the store's serialiser, never a document parsed off a process. A
+    /// failure that does not carry a class this build reads leaves the entry unclassified,
+    /// and so on the retry schedule.
+    fn of_delivery(failure: &Failure) -> Option<Self> {
+        #[derive(Deserialize)]
+        struct Classed {
+            class: onetaskgraph_core::FailureClass,
+            // llmlint: ignore[invalid_states_unrepresentable] open by the store's own
+            // contract, for the reason `Classified::kind` records; only ever named.
+            kind: String,
+        }
+        let classed: Classed = serde_json::to_value(failure)
+            .ok()
+            .and_then(|value| serde_json::from_value(value).ok())?;
+        Some(Self {
+            class: classed.class.into(),
+            kind: classed.kind,
+        })
+    }
+}
+
+/// The kind an engine error amounts to, and the source error that caused it, if one did.
+///
+/// A failure that wraps another — a destination that could not be built, a source that
+/// refused part of a copy, a copy that could not be undone — takes the kind and cause of the
+/// failure it wraps, because that is what a caller has to act on; the rest are failures the
+/// engine decided on its own. The words are the store's own kinds for each, so the record
+/// names a failure as the store's failure document did. Exhaustive, so a failure the store
+/// adds is a compile error here rather than one this worker silently misclasses.
+fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
+    let decided = |kind: &str| (kind.to_owned(), None);
+    match error {
+        EngineError::UnknownSource { .. } => decided("unknown-source"),
+        EngineError::Token { .. } => decided("page-token"),
+        EngineError::NoSources => decided("no-sources"),
+        EngineError::NotWritable { .. }
+        | EngineError::CommentsNotWritable { .. }
+        | EngineError::StatusNotWritable { .. }
+        | EngineError::MetadataNotWritable { .. } => decided("not-writable"),
+        EngineError::NoDocuments { .. } => decided("no-documents"),
+        EngineError::NoComments { .. } => decided("no-comments"),
+        EngineError::NoSuchItem { .. }
+        | EngineError::NoSuchTask { .. }
+        | EngineError::NoSuchProject { .. }
+        | EngineError::NoSuchDocument { .. } => decided("no-such-item"),
+        EngineError::NoSuchComment { .. } => decided("no-such-comment"),
+        EngineError::StaleOrigin { .. } => decided("stale-origin"),
+        EngineError::NotAMember { .. } => decided("not-a-member"),
+        EngineError::UnrecordedMember { .. } => decided("unrecorded-member"),
+        EngineError::DestinationUnavailable { error, .. }
+        | EngineError::SourceRefused { error, .. }
+        | EngineError::SourceUnavailable { error, .. }
+        | EngineError::SourceFailed { error, .. } => (source_kind(error).to_owned(), Some(error)),
+        EngineError::CopyNotUndone { error, .. } => cause_of(error),
+    }
+}
+
+/// A source error's kind, as its own wire tag spells it.
+///
+/// Exhaustive, for the reason [`cause_of`] is; `writeback::tests` holds each word to the tag
+/// the store's own serialiser writes.
+fn source_kind(error: &SourceError) -> &'static str {
+    match error {
+        SourceError::Config { .. } => "config",
+        SourceError::Auth { .. } => "auth",
+        SourceError::Refused { .. } => "refused",
+        SourceError::RateLimited { .. } => "rate-limited",
+        SourceError::Unavailable { .. } => "unavailable",
+        SourceError::Malformed { .. } => "malformed",
+    }
 }
 
 struct Failed {
     reason: String,
     classified: Option<Classified>,
-    /// The copy report's `delivered` entries, where a copy that exited unsuccessfully wrote one.
+    /// The copy report's `delivered` entries, where a copy that landed in part wrote one.
     delivered: Vec<Map<String, Value>>,
 }
 
 impl Failed {
-    /// A store command that exited unsuccessfully, classed by what it wrote on stdout.
-    fn answered(output: &Output, reason: String) -> Self {
+    /// A failure the store classed.
+    fn classed(reason: String, classified: Classified) -> Self {
         Self {
             reason,
-            classified: classified(output.status.code(), &output.stdout),
+            classified: Some(classified),
+            delivered: Vec::new(),
+        }
+    }
+
+    /// One store call the engine refused to run.
+    fn engine(call: &str, error: &EngineError) -> Self {
+        Self::classed(
+            format!("{call} failed: {error}"),
+            Classified::of_engine(error),
+        )
+    }
+
+    /// One store call answered in part, naming every source that could not contribute.
+    fn partial(call: &str, errors: &[SourceFailure]) -> Self {
+        let named: Vec<String> = errors
+            .iter()
+            .map(|failure| {
+                format!(
+                    "source {} could not answer: {}",
+                    failure.source, failure.error
+                )
+            })
+            .collect();
+        Self {
+            reason: format!("{call} answered in part: {}", named.join("; ")),
+            classified: Classified::of_all(
+                errors
+                    .iter()
+                    .map(|failure| Classified::of_source(&failure.error)),
+            ),
             delivered: Vec::new(),
         }
     }
@@ -526,7 +696,7 @@ impl Failed {
 
     /// The reason, with the store's class and kind beside it where it gave them.
     ///
-    /// A classified reason is the store's own stderr, which is several lines ending in its
+    /// A classified reason is the store's own words, which are several lines ending in its
     /// `next:` — so it is closed up onto one, or the class, the kind and what the worker does
     /// next would land on a line nobody scanning the log for the failure reads. An
     /// unclassified reason is carried exactly as it always was.
@@ -542,8 +712,8 @@ impl Failed {
     }
 }
 
-/// A failure the store wrote nothing about: this worker's own, or a command that never
-/// answered.
+/// A failure the store said nothing about: this worker's own, or a call that never
+/// answered inside its deadline.
 impl From<String> for Failed {
     fn from(reason: String) -> Self {
         Self {
@@ -622,36 +792,21 @@ impl Pending {
 /// A non-blocking handle owned by the one reconcile loop.
 pub struct Writeback {
     pending: Arc<(Mutex<Pending>, Condvar)>,
-    /// What the store offers, from the version the launch check read.
-    vocabulary: Vocabulary,
     /// The copy's per-item budget, which bounds the launch wait as it bounds the copy.
     per_item: NonZeroU64,
-    /// Whether this driver has said why a plan's tickets are not moved by an older store.
-    told_why_not_delivered: std::sync::atomic::AtomicBool,
 }
 
 impl Writeback {
     /// Start the worker for one driver of a run.
     ///
-    /// `version` is the token the store's `--version` printed for the launch check, which is
-    /// what the worker decides a member copy is offered from where no earlier driver of the
-    /// run has decided it already.
-    pub fn start(
-        binary: PathBuf,
-        version: &str,
-        paths: &RunPaths,
-        launch: &LaunchRecord,
-    ) -> Option<Self> {
+    /// Its store is the one the launch record's directory configures — discovered there,
+    /// exactly as the launch's own plan read discovered it from the directory it ran in —
+    /// and it is built afresh for every attempt, so nothing here reads the store yet.
+    pub fn start(paths: &RunPaths, launch: &LaunchRecord) -> Option<Self> {
         let pending = Arc::new((Mutex::new(Pending::default()), Condvar::new()));
         let worker_pending = Arc::clone(&pending);
         let run_dir = paths.dir.clone();
-        let vocabulary = Vocabulary::of(version);
-        let version = version.to_owned();
-        let launch_dir = if launch.dir.as_os_str().is_empty() {
-            PathBuf::from(".")
-        } else {
-            launch.dir.clone()
-        };
+        let store = Store::at(launch_dir(launch));
         let per_item = per_item_budget(launch);
         // llmlint: ignore-block[changed_behavior_has_e2e] A host refusing one thread while
         // continuing to run this process is resource exhaustion no real CLI journey can
@@ -660,24 +815,10 @@ impl Writeback {
         // the projection and leaves the run unchanged.
         std::thread::Builder::new()
             .name(format!("writeback-{}", paths.run))
-            .spawn(move || {
-                worker(
-                    binary,
-                    &version,
-                    launch_dir,
-                    run_dir,
-                    per_item,
-                    worker_pending,
-                )
-            })
+            .spawn(move || worker(store, run_dir, per_item, worker_pending))
             .ok()?;
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        let writer = Self {
-            pending,
-            vocabulary,
-            per_item,
-            told_why_not_delivered: std::sync::atomic::AtomicBool::new(false),
-        };
+        let writer = Self { pending, per_item };
         // The project is retained in each snapshot rather than in the worker so a malformed
         // old launch record disables projection without weakening LaunchRecord's compatibility.
         Some(writer)
@@ -697,18 +838,9 @@ impl Writeback {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
     ) {
-        let Some(snapshot) = snapshot_of(
-            paths,
-            launch,
-            state,
-            statuses,
-            self.vocabulary.driving_claim(),
-            self.vocabulary,
-        ) else {
-            return;
-        };
-        self.say_once_why_tickets_are_not_moved(&snapshot);
-        self.queue(snapshot);
+        if let Some(snapshot) = snapshot_of(paths, launch, state, statuses, Claim::Held) {
+            self.queue(snapshot);
+        }
     }
 
     /// The same, for the snapshot a closeout projects: a node that never started is written
@@ -720,14 +852,7 @@ impl Writeback {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
     ) {
-        if let Some(snapshot) = snapshot_of(
-            paths,
-            launch,
-            state,
-            statuses,
-            Claim::Released,
-            self.vocabulary,
-        ) {
+        if let Some(snapshot) = snapshot_of(paths, launch, state, statuses, Claim::Released) {
             self.queue(snapshot);
         }
     }
@@ -762,29 +887,6 @@ impl Writeback {
             }
         }
     }
-
-    /// Against a store that has no `delivers`, a plan whose nodes deliver tickets is told once,
-    /// on the driver's standard error, that nothing will move them.
-    fn say_once_why_tickets_are_not_moved(&self, snapshot: &Snapshot) {
-        if self.vocabulary == Vocabulary::WithDelivers
-            || snapshot.nodes.values().all(|node| node.delivers.is_empty())
-        {
-            return;
-        }
-        if self
-            .told_why_not_delivered
-            .swap(true, std::sync::atomic::Ordering::Relaxed)
-        {
-            return;
-        }
-        eprintln!(
-            "onetaskgraph write-back will not move the tickets this plan's tasks deliver for \
-             '{}': the store reports a version older than {WRITEBACK_DELIVERS_FROM}, the first \
-             release carrying `queued` and `delivers`, so unstarted nodes are written `todo` and \
-             no task carries `delivers` — install onetaskgraph {WRITEBACK_DELIVERS_FROM} or newer",
-            snapshot.project
-        );
-    }
 }
 
 /// The snapshot one publish hands the worker, or `None` for a launch naming no project.
@@ -794,7 +896,6 @@ fn snapshot_of(
     state: &RunState,
     statuses: &BTreeMap<String, NodeStatus>,
     claim: Claim,
-    vocabulary: Vocabulary,
 ) -> Option<Snapshot> {
     let Ok(project) = launch.project.parse() else {
         return None;
@@ -832,7 +933,6 @@ fn snapshot_of(
             })
             .unwrap_or_default(),
         claim,
-        vocabulary,
     })
 }
 
@@ -910,7 +1010,7 @@ impl Drop for Writeback {
             // it was not sitting on a stop it has already been told about.
             ready.notify_all();
         }
-        // Deliberately no join: a store process is outside the run's failure and latency
+        // Deliberately no join: a store call is outside the run's failure and latency
         // boundary, and waiting for it here would turn write-back into run settlement.
     }
 }
@@ -924,6 +1024,17 @@ fn per_item_budget(launch: &LaunchRecord) -> NonZeroU64 {
     launch
         .item_budget()
         .unwrap_or(DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS)
+}
+
+/// The directory the run's store is configured from: the launch record's own, which is
+/// where `onepipeline start` read its plan, and this process's where a record written before
+/// the field existed names none.
+fn launch_dir(launch: &LaunchRecord) -> PathBuf {
+    if launch.dir.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        launch.dir.clone()
+    }
 }
 
 /// How long a driver waits for its first projection before it dispatches: the copy deadline of
@@ -954,56 +1065,29 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     if launch.project.parse::<QualifiedId>().is_err() {
         return;
     }
-    let store = match crate::taskgraph::Store::resolve() {
-        Ok(store) => store,
-        Err(error) => {
-            // Said rather than swallowed: every task the run claimed and never started stays
-            // claimed on the board until something writes it again, and this line is the only
-            // place anybody hears that.
-            eprintln!(
-                "onetaskgraph write-back could not release the nodes this stopped run never \
-                 started: {error}"
-            );
-            return;
-        }
-    };
+    let store = Store::at(launch_dir(launch));
     let state = crate::checkpoint::Projected::open(paths);
     let statuses = state.statuses();
-    let vocabulary = Vocabulary::of(store.reported_version());
-    let Some(snapshot) = snapshot_of(
-        paths,
-        launch,
-        &state,
-        &statuses,
-        Claim::Released,
-        vocabulary,
-    ) else {
+    let Some(snapshot) = snapshot_of(paths, launch, &state, &statuses, Claim::Released) else {
         return;
-    };
-    let launch_dir = if launch.dir.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        launch.dir.clone()
     };
     let carry = Carry::Whole(WholeBecause::First);
     let items = carry.items(&snapshot);
     let at = crate::sys::now_rfc3339();
     let started = Instant::now();
     // llmlint: ignore-block[changed_behavior_has_e2e] a stop whose release outlasts its deadline
-    // takes exactly the lines below that a refused release takes: `bounded_output` kills the copy
+    // takes exactly the lines below that a refused release takes: the deadline cancels the copy
     // and answers `Err`, and the attempt is recorded and said on stderr as any failure is. Those
     // lines are driven end to end by
     // `delivers::a_stop_whose_release_the_store_refuses_still_stops_and_says_so`, which asserts
     // the stop's answer, its stderr and the failed record line. The one timeout-specific branch
-    // is `bounded_output`'s kill, driven by
+    // is the deadline's cancellation, driven by
     // `writeback_budget::a_copy_held_past_a_tiny_budget_is_killed_and_the_refusal_names_the_arithmetic`
     // and `delivers::a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch`.
     // A journey holding a `stop` past the sixty-second floor would spend that minute on no line
     // those three do not already reach.
     let attempt = project(
-        &store.binary(),
-        &launch_dir,
-        &paths.dir,
+        &store,
         per_item_budget(launch),
         &snapshot,
         &carry,
@@ -1046,16 +1130,11 @@ enum Standing {
 }
 
 fn worker(
-    binary: PathBuf,
-    version: &str,
-    launch_dir: PathBuf,
+    store: Store,
     run_dir: PathBuf,
     per_item: NonZeroU64,
     pending: Arc<(Mutex<Pending>, Condvar)>,
 ) {
-    // Decided here, on the worker's own thread and before the first snapshot is taken, so
-    // the reconcile loop neither waits on it nor reads it.
-    let members = decide_member_copy_once(&run_dir, version);
     let mut standing = Standing::Landing;
     let mut carried = Carried::default();
     loop {
@@ -1082,7 +1161,6 @@ fn worker(
                 .expect("the worker was woken by a snapshot")
         };
         let carry = Carry::decide(
-            members,
             standing != Standing::Landing,
             carried.last.as_ref(),
             &snapshot,
@@ -1090,15 +1168,7 @@ fn worker(
         let items = carry.items(&snapshot);
         let at = crate::sys::now_rfc3339();
         let started = Instant::now();
-        let attempt = project(
-            &binary,
-            &launch_dir,
-            &run_dir,
-            per_item,
-            &snapshot,
-            &carry,
-            &carried.origins,
-        );
+        let attempt = project(&store, per_item, &snapshot, &carry, &carried.origins);
         append_record(
             &run_dir,
             &ProjectionRecord::of(
@@ -1189,12 +1259,12 @@ fn worker(
                     );
                 }
                 // How soon the planner hears of it, which is this sum and no deadline: the
-                // surface is recorded one [`FIRST_RETRY_AFTER`] after the command that refused,
-                // and the reconcile loop asks for it every `engine::CHANNEL_POLL`. A store that
-                // is not there refuses the first command outright — `onetaskgraph` cannot
-                // resolve a root that is gone, and answers so in milliseconds — so
-                // [`COMMAND_FLOOR`] is no part of it: that is spent only by a command that has
-                // not exited, which is a store answering slowly.
+                // surface is recorded one [`FIRST_RETRY_AFTER`] after the call that failed, and
+                // the reconcile loop asks for it every `engine::CHANNEL_POLL`. A store that is
+                // not there fails the first call outright — `onetaskgraph` cannot resolve a
+                // root that is gone, and answers so in milliseconds — so [`COMMAND_FLOOR`] is
+                // no part of it: that is spent only by a call that has not returned, which is a
+                // store answering slowly.
                 if !should_retry_after(&pending, retry_after(failures.get())) {
                     return;
                 }
@@ -1271,24 +1341,99 @@ fn should_retry_after(pending: &(Mutex<Pending>, Condvar), interval: Duration) -
 /// said it did and spent.
 struct Landed {
     origins: BTreeMap<String, Origin>,
-    actions: Option<ProjectionActions>,
+    actions: ProjectionActions,
     spent: Option<Map<String, Value>>,
     delivered: Vec<Map<String, Value>>,
 }
 
+/// The largest page one destination read asks for: enough that a project of any plan's
+/// size is one page, which is what the page of tasks a whole projection reads spent before.
+const TASK_PAGE: NonZeroU32 = NonZeroU32::new(10_000).expect("ten thousand is not zero");
+
+/// One attempt's store: the engine its configuration describes, with the shadow source
+/// declared beside the operator's own, and the runtime its calls are driven on. Built for
+/// the attempt and dropped with it.
+struct Attempt {
+    runtime: tokio::runtime::Runtime,
+    engine: Engine,
+}
+
+impl Attempt {
+    /// The store the launch directory configures, plus the shadow source this snapshot is
+    /// written into — declared as a layer above every other, which is what the store's
+    /// `--set` was.
+    fn open(store: &Store, snapshot: &Snapshot) -> Result<Self, Failed> {
+        let setting = |key: &str, value: Value| -> Result<Setting, Failed> {
+            Ok(Setting {
+                key: SettingPath::parse(key).map_err(|error| {
+                    Failed::classed(error.to_string(), Classified::of_config(&error))
+                })?,
+                value,
+                origin: SettingOrigin::Flag {
+                    flag: "the write-back's shadow source".to_owned(),
+                },
+            })
+        };
+        let flags = Layer::new(vec![
+            setting(
+                &format!("sources.{SHADOW_SOURCE}.plugin"),
+                json!(onetaskgraph_local_md_kind()),
+            )?,
+            setting(
+                &format!("sources.{SHADOW_SOURCE}.config.root"),
+                json!(snapshot.dir.to_string_lossy()),
+            )?,
+        ]);
+        // The shadow root exists before the source over it is built, so the store never
+        // reads it as a folder that is not there.
+        std::fs::create_dir_all(&snapshot.dir)
+            .map_err(|error| format!("cannot create the shadow store: {error}"))?;
+        let built = store.engine(&flags).map_err(|error| {
+            Failed::classed(
+                format!("the store's configuration cannot be read: {error}"),
+                Classified::of_config(&error),
+            )
+        })?;
+        Ok(Self {
+            runtime: crate::taskgraph::runtime()
+                .map_err(|error| format!("the store cannot be called: {error}"))?,
+            engine: built.engine,
+        })
+    }
+
+    /// Drive one store call to its end, or cancel it at its deadline.
+    ///
+    /// Cancelled, the call's future is dropped where it waits; the engine that drove it goes
+    /// when the attempt does, before the attempt is recorded.
+    fn call<T>(
+        &self,
+        name: &str,
+        deadline: Deadline,
+        future: impl Future<Output = T>,
+    ) -> Result<T, Failed> {
+        self.runtime
+            .block_on(async { tokio::time::timeout(deadline.within(), future).await })
+            .map_err(|_| Failed::from(deadline.refusal(name)))
+    }
+}
+
+/// The plugin kind the shadow store is served by: the store's own name for `local-md`.
+fn onetaskgraph_local_md_kind() -> &'static str {
+    onetaskgraph_core::PluginKind::LocalMd.as_str()
+}
+
 fn project(
-    binary: &Path,
-    launch_dir: &Path,
-    run_dir: &Path,
+    store: &Store,
     per_item: NonZeroU64,
     snapshot: &Snapshot,
     carry: &Carry,
     known: &BTreeMap<String, Origin>,
 ) -> Result<Landed, Failed> {
-    let destination_project = destination_project(binary, launch_dir, run_dir, snapshot)?;
+    let attempt = Attempt::open(store, snapshot)?;
+    let destination_project = destination_project(&attempt, snapshot)?;
     let mut origins = match carry {
-        Carry::Whole(_) => destination_origins(binary, launch_dir, run_dir, snapshot)?,
-        Carry::Members(named) => member_origins(binary, launch_dir, run_dir, named, known)?,
+        Carry::Whole(_) => destination_origins(&attempt, snapshot)?,
+        Carry::Members(named) => member_origins(&attempt, named, known)?,
     };
     // llmlint: ignore-block[changed_behavior_has_e2e] The real outage journey drives
     // destination write failure through onetaskgraph. Making this private, run-owned
@@ -1296,180 +1441,171 @@ fn project(
     // outside the public run interface and unrelated to store availability.
     write_shadow(snapshot, &origins, &destination_project)?;
     // llmlint: ignore-end[changed_behavior_has_e2e]
-    let root = snapshot.dir.to_string_lossy().into_owned();
-    let mut args = vec![
-        "project".to_owned(),
-        "copy".to_owned(),
-        format!("{SHADOW_SOURCE}:{}", project_file(&snapshot.project)),
-        "--to".to_owned(),
-        snapshot.project.source().to_owned(),
-        "--json".to_owned(),
-        "--set".to_owned(),
-        format!("sources.{SHADOW_SOURCE}.plugin=local-md"),
-        "--set".to_owned(),
-        format!("sources.{SHADOW_SOURCE}.config.root={root}"),
-    ];
+    let shadow_project = shadow_id(&project_file(&snapshot.project));
     // A member copy names exactly the nodes that changed. Naming none is not a copy of
     // everything: the project item alone carries what changed at the project's level.
-    if let Carry::Members(named) = carry {
-        // llmlint: ignore-block[changed_behavior_has_e2e] a member projection naming no node is
-        // reached only by a snapshot that moves no node's shadow task — a status moving inside
-        // one board word, pending to ready — because no edit a CLI accepts changes only the
-        // project's metadata, and the run passes through such a move inside a pass no input
-        // holds open. `writeback::tests` holds the decision that names none; `--no-tasks` is the
-        // store's own documented flag for copying the project item alone.
-        if named.is_empty() {
-            args.push("--no-tasks".to_owned());
+    let scope = match carry {
+        Carry::Whole(_) => CopyScope::Projects { tasks: true },
+        Carry::Members(named) => {
+            match CopyItems::new(named.iter().map(|node| member_id(snapshot, node)).collect()) {
+                Some(members) => CopyScope::Members(members),
+                // llmlint: ignore-block[changed_behavior_has_e2e] a member projection naming no
+                // node is reached only by a snapshot that moves no node's shadow task — a status
+                // moving inside one board word, pending to ready — because no edit a CLI accepts
+                // changes only the project's metadata, and the run passes through such a move
+                // inside a pass no input holds open. `writeback::tests` holds the decision that
+                // names none; a project copy without its tasks is the store's own scope for
+                // copying the project item alone.
+                None => CopyScope::Projects { tasks: false },
+                // llmlint: ignore-end[changed_behavior_has_e2e]
+            }
         }
-        // llmlint: ignore-end[changed_behavior_has_e2e]
-        for node in named {
-            args.extend(["--member".to_owned(), member_id(snapshot, node)]);
-        }
-    }
-    // The one command that is linear in what it carries, so the one whose deadline is.
+    };
+    let request = CopyRequest {
+        items: CopyItems::new(vec![shadow_project]).expect("one item is not none"),
+        scope,
+        destination: snapshot.project.global().source,
+        match_by: None,
+        recreate: false,
+        dry_run: false,
+    };
+    // The one call that is linear in what it carries, so the one whose deadline is.
     let deadline = Deadline::Copy {
         per_item,
         items: carry.items(snapshot).len(),
     };
-    let output = bounded_output(binary, launch_dir, run_dir, PROJECT_COPY, &args, deadline)?;
-    // Read for what the copy says it did. A report this build cannot read leaves that unsaid
-    // on the record rather than failing a copy the store says landed.
-    let report: Option<CopyReport> = serde_json::from_slice(&output.stdout).ok();
-    if output.status.success() {
-        // Counted off the origins as the pre-copy read left them, before the report teaches
-        // the run where anything moved: a reopen is decided by what the item read as before
-        // the copy and what the copy wrote onto it.
-        let actions = report
-            .as_ref()
-            .map(|report| report.actions(snapshot, &origins));
-        if let Some(report) = &report {
-            report.learn(&mut origins, snapshot);
-        }
-        let (spent, delivered) = report
-            .map(|report| (report.spent, report.delivered))
-            .unwrap_or_default();
-        Ok(Landed {
-            origins,
-            actions,
-            spent,
-            delivered,
-        })
-    } else {
-        let delivered = report.map(|report| report.delivered).unwrap_or_default();
-        // A copy whose own writes landed and whose delivered tickets the store could not keep
-        // in step exits as a partial answer, and is a projection that did not fully land: the
-        // tickets are behind the run. So it is failed, surfaced and retried whole exactly as
-        // any partial projection is, with the tickets and what the store said of each as the
-        // reason.
-        let reason = match failed_deliveries(&output.stdout) {
-            Some(tickets) if output.status.code() == Some(WRITEBACK_PARTIAL_EXIT) => format!(
-                "the copy landed, but the store could not keep every delivered ticket in step: \
-                 {tickets}"
-            ),
-            _ => format!(
-                "copy exited {}: {}",
-                exit(&output.status),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        };
-        let mut failed = Failed::answered(&output, reason);
+    let report = attempt
+        .call(PROJECT_COPY, deadline, attempt.engine.copy(&request))?
+        .map_err(|error| Failed::engine(PROJECT_COPY, &error))?;
+    let delivered: Vec<Map<String, Value>> = report.delivered.iter().map(verbatim).collect();
+    // A copy whose own writes landed and whose delivered tickets the store could not keep in
+    // step is a projection that did not fully land: the tickets are behind the run. So it is
+    // failed, surfaced and retried whole exactly as any partial projection is, with the
+    // tickets and what the store said of each as the reason.
+    if let Some(tickets) = failed_deliveries(&report.delivered) {
+        let mut failed = Failed::from(format!(
+            "the copy landed, but the store could not keep every delivered ticket in step: \
+             {tickets}"
+        ));
+        failed.classified =
+            Classified::of_all(
+                report
+                    .delivered
+                    .iter()
+                    .filter_map(|entry| match &entry.outcome {
+                        DeliveryOutcome::Failed { failure, .. } => {
+                            Some(Classified::of_delivery(failure).unwrap_or(Classified {
+                                class: FailureClass::Transient,
+                                kind: "unclassified".to_owned(),
+                            }))
+                        }
+                        DeliveryOutcome::Written { .. }
+                        | DeliveryOutcome::Unchanged { .. }
+                        | DeliveryOutcome::Left { .. } => None,
+                    }),
+            );
         failed.delivered = delivered;
-        Err(failed)
+        return Err(failed);
+    }
+    // Counted off the origins as the pre-copy read left them, before the report teaches the
+    // run where anything moved: a reopen is decided by what the item read as before the copy
+    // and what the copy wrote onto it.
+    let actions = actions(&report, snapshot, &origins);
+    learn(&report, &mut origins, snapshot);
+    Ok(Landed {
+        origins,
+        actions,
+        spent: report.spent.as_ref().map(verbatim),
+        delivered,
+    })
+}
+
+/// One of the store's values, as the object the projection record carries it as: the
+/// store's own serialisation, verbatim, so a reader of the record is told what the store
+/// said.
+fn verbatim(value: &impl Serialize) -> Map<String, Value> {
+    match serde_json::to_value(value) {
+        Ok(Value::Object(object)) => object,
+        // Every value handed here is a struct the store serialises as an object.
+        _ => Map::new(),
     }
 }
 
-/// Each ticket a copy report says the store failed to keep in step, named with its deliverer and
-/// the store's own words about it, read through [`DeliveredAnswer`].
-///
-/// `None` where the report failed no ticket, and equally where any failed entry does not read —
-/// an id that is not qualified, an outcome this build has never heard of, a failure with no
-/// class or message. An answer that does not validate is reported by the copy's own exit and
-/// stderr, never by a sentence assembled out of fields that did not.
-fn failed_deliveries(stdout: &[u8]) -> Option<String> {
-    let answer: DeliveredAnswer = serde_json::from_slice(stdout).ok()?;
-    let failed: Vec<String> = answer
-        .delivered
+/// Each ticket a copy report says the store failed to keep in step, named with its deliverer
+/// and the store's own words about it — or `None` where it failed none.
+fn failed_deliveries(delivered: &[Delivered]) -> Option<String> {
+    let failed: Vec<String> = delivered
         .iter()
         .filter_map(|entry| match &entry.outcome {
-            DeliveredOutcome::Failed { failure } => Some(format!(
+            DeliveryOutcome::Failed { failure, .. } => Some(format!(
                 "ticket {} (delivered by {}): {}",
                 entry.ticket,
                 entry.deliverer,
                 failure
-                    .message
+                    .message()
                     .split_whitespace()
                     .collect::<Vec<_>>()
                     .join(" ")
             )),
-            DeliveredOutcome::Written | DeliveredOutcome::Unchanged | DeliveredOutcome::Left => {
-                None
-            }
+            DeliveryOutcome::Written { .. }
+            | DeliveryOutcome::Unchanged { .. }
+            | DeliveryOutcome::Left { .. } => None,
         })
         .collect();
     (!failed.is_empty()).then(|| failed.join("; "))
 }
 
-fn destination_project(
-    binary: &Path,
-    launch_dir: &Path,
-    run_dir: &Path,
-    snapshot: &Snapshot,
-) -> Result<DestinationProjectItem, Failed> {
-    let args = ["project", "show", snapshot.project.as_str(), "--json"];
-    let output = bounded_output(
-        binary,
-        launch_dir,
-        run_dir,
-        PROJECT_SHOW,
-        &args,
-        Deadline::Floor,
-    )?;
-    if !output.status.success() {
-        let reason = format!(
-            "project show exited {}: {}",
-            exit(&output.status),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        return Err(Failed::answered(&output, reason));
+/// The one item a `show` of `id` answered with, under the rules its answer is held to.
+///
+/// Nothing, with no failure beside it, is the item not being there — the store's own reading
+/// of an empty `show`, which no retry changes. Nothing because a source failed is that
+/// failure, classed by the sources that could not answer.
+fn shown<T>(
+    call: &str,
+    id: &GlobalId,
+    answer: QueryResponse<Qualified<T>>,
+) -> Result<Qualified<T>, Failed> {
+    if !answer.errors.is_empty() {
+        return Err(Failed::partial(call, &answer.errors));
     }
-    // llmlint: ignore-block[changed_behavior_has_e2e] These refusals defend the compiled
-    // sibling's machine contract. Producing malformed JSON, partial results, no project,
-    // or a different/duplicate project here requires replacing the real onetaskgraph
-    // executable with a scripted mock; the real-store journey drives the successful read,
-    // total-replacement copy, and preservation of present and absent content end to end.
-    let response: ProjectPage = answered(&output.stdout)?;
-    if !response.errors.is_empty() {
-        return Err("project show returned partial results".to_owned().into());
-    }
-    let mut items = response.items.into_iter();
-    let project = items
-        .next()
-        .ok_or_else(|| format!("project '{}' was not found", snapshot.project))?;
-    if items.next().is_some() || project.id != snapshot.project {
-        return Err(format!(
-            "project show returned the wrong project for '{}'",
-            snapshot.project
-        )
-        .into());
+    let mut items = answer.items.into_iter();
+    let Some(found) = items.next() else {
+        return Err(Failed::classed(
+            format!("{call} of '{id}' found nothing: it is not in the configured sources"),
+            Classified::no_such_item(),
+        ));
+    };
+    // llmlint: ignore-block[changed_behavior_has_e2e] These refusals defend the linked
+    // store's own answer: `Engine::project` and `Engine::task` answer one item under the id
+    // asked for by construction, so no configuration a journey can write reaches them.
+    if items.next().is_some() || found.id != *id {
+        return Err(format!("{call} returned the wrong item for '{id}'").into());
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
-    Ok(project.item)
+    Ok(found)
+}
+
+fn destination_project(attempt: &Attempt, snapshot: &Snapshot) -> Result<Project, Failed> {
+    let id = snapshot.project.global();
+    let answer = attempt
+        .call(PROJECT_SHOW, Deadline::Floor, attempt.engine.project(&id))?
+        .map_err(|error| Failed::engine(PROJECT_SHOW, &error))?;
+    Ok(shown(PROJECT_SHOW, &id, answer)?.item)
 }
 
 /// What the destination already holds for one lineage, keyed by the lineage's root.
 ///
 /// The id is what a projection writes back onto; the labels are what it carries forward
 /// unchanged, because no plan models them; the category is what the item read as *before*
-/// the copy, which is the half of a reopen the copy report cannot say. The id keeps the type
-/// it was read through: every id the store answers with crossed [`QualifiedId`]'s boundary,
-/// and narrowing it to a `String` here would let an unqualified one be written back.
+/// the copy, which is the half of a reopen the copy report cannot say. Each is the store's
+/// own type, exactly as the store answered it.
 #[derive(Clone)]
 struct Origin {
-    id: QualifiedId,
-    labels: Vec<DestinationLabel>,
+    id: GlobalId,
+    labels: Vec<Label>,
     /// The item's normalised status category as the attempt's own pre-copy read reported
-    /// it, or `None` where that read answered without one.
-    category: Option<DestinationCategory>,
+    /// it, or `None` where the run learned the item from a copy report rather than a read.
+    category: Option<StatusCategory>,
 }
 
 impl Origin {
@@ -1477,85 +1613,69 @@ impl Origin {
     /// that rewrote it onto an open word reopened it.
     fn closed(&self) -> bool {
         self.category.is_some_and(|category| {
-            matches!(
-                category,
-                DestinationCategory::Done | DestinationCategory::Cancelled
-            )
+            matches!(category, StatusCategory::Done | StatusCategory::Cancelled)
         })
+    }
+
+    /// What one destination task says about itself.
+    fn of(task: Qualified<Task>) -> Self {
+        Self {
+            id: task.id,
+            labels: task.item.labels,
+            category: Some(task.item.status.category),
+        }
     }
 }
 
 fn destination_origins(
-    binary: &Path,
-    launch_dir: &Path,
-    run_dir: &Path,
+    attempt: &Attempt,
     snapshot: &Snapshot,
 ) -> Result<BTreeMap<String, Origin>, Failed> {
     // Each item placed in its lineage as the page is read, and folded onto lineage roots
     // once the whole page has been.
     let lineages = snapshot.lineages();
     let mut placed: Vec<Placed> = Vec::new();
-    let mut page: Option<String> = None;
-    let mut cursors = BTreeSet::new();
+    let mut token: Option<PageToken> = None;
+    let mut cursors = std::collections::HashSet::new();
+    let project = snapshot.project.global();
+    let selector = if attempt.engine.has(&project.source) {
+        ProjectSelector::Qualified(project)
+    } else {
+        ProjectSelector::Native(NativeId::from(snapshot.project.as_str()))
+    };
     loop {
-        let mut args = vec![
-            "task".to_owned(),
-            "list".to_owned(),
-            "--project".to_owned(),
-            snapshot.project.as_str().to_owned(),
-            "--limit".to_owned(),
-            "10000".to_owned(),
-            "--json".to_owned(),
-        ];
-        if let Some(token) = &page {
-            args.extend(["--page".to_owned(), token.clone()]);
-        }
+        let request = TaskRequest {
+            sources: Vec::new(),
+            filters: Filters::default(),
+            project: selector.clone(),
+            paging: Paging {
+                limit: TASK_PAGE,
+                token: token.clone(),
+            },
+        };
         // llmlint: ignore-block[changed_behavior_has_e2e] The real unavailable-store
-        // journey proves this asynchronous read cannot affect or delay reconciliation.
-        // Making the real sibling hang requires host-level process suspension, not an
-        // input exposed by either CLI, and substituting a hanging script would mock the
-        // exact executable boundary the journey is required to drive.
-        let output = bounded_output(
-            binary,
-            launch_dir,
-            run_dir,
-            TASK_LIST,
-            &args,
-            Deadline::Floor,
-        )?;
+        // journey proves this asynchronous read cannot affect or delay reconciliation; the
+        // deadline that bounds it is the one `writeback_budget` drives against a held copy.
+        let answer = attempt
+            .call(TASK_LIST, Deadline::Floor, attempt.engine.tasks(&request))?
+            .map_err(|error| Failed::engine(TASK_LIST, &error))?;
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        if !output.status.success() {
-            let reason = format!(
-                "task list exited {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-            return Err(Failed::answered(&output, reason));
+        if !answer.errors.is_empty() {
+            return Err(Failed::partial(TASK_LIST, &answer.errors));
         }
-        // llmlint: ignore-block[changed_behavior_has_e2e] These refusals defend the
-        // compiled sibling's machine contract. Producing malformed JSON, partial errors,
-        // invalid qualified ids, missing node ids, or duplicate node ids here requires
-        // replacing the real onetaskgraph executable with a scripted mock; real-store
-        // success and outage/recovery are driven end to end instead.
-        let response: TaskPage = answered(&output.stdout)?;
-        if !response.errors.is_empty() {
-            return Err("task list returned partial results".to_owned().into());
-        }
-        for task in response.items {
+        for task in answer.items {
             placed.push(Placed::of(&lineages, task)?);
         }
-        let Some(next) = response.next else { break };
-        if next.is_empty() {
-            return Err("task list returned an empty next-page cursor"
-                .to_owned()
-                .into());
-        }
+        let Some(next) = answer.next else { break };
+        // llmlint: ignore-block[changed_behavior_has_e2e] The linked store issues a token
+        // that advances by construction; this refuses one that does not rather than walking
+        // the same page for ever.
         if !cursors.insert(next.clone()) {
             return Err("task list repeated a next-page cursor".to_owned().into());
         }
-        page = Some(next);
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+        token = Some(next);
     }
-    // llmlint: ignore-end[changed_behavior_has_e2e]
     Ok(furthest_along(placed)?)
 }
 
@@ -1577,7 +1697,7 @@ struct Placed {
 }
 
 impl Placed {
-    fn of(lineages: &Lineages, task: DestinationTask) -> Result<Self, String> {
+    fn of(lineages: &Lineages, task: Qualified<Task>) -> Result<Self, String> {
         // A reserved key the item carries is a node id, and a node id is a non-empty
         // string: one present as anything else is the destination's answer being wrong,
         // which is refused by name rather than read as the key being absent.
@@ -1587,12 +1707,11 @@ impl Placed {
                 Some(Value::String(id)) if !id.is_empty() => Ok(Some(id.clone())),
                 Some(other) => Err(format!(
                     "task '{}' carries {key} as {other}, and a node id is a non-empty string",
-                    task.id.as_str()
+                    task.id
                 )),
             }
         };
-        let node =
-            named(ID_KEY)?.ok_or_else(|| format!("task '{}' has no {ID_KEY}", task.id.as_str()))?;
+        let node = named(ID_KEY)?.ok_or_else(|| format!("task '{}' has no {ID_KEY}", task.id))?;
         let attempt = named(NODE_KEY)?.unwrap_or_else(|| node.clone());
         let root = lineages.root_of(&node).to_owned();
         let position = lineages
@@ -1603,11 +1722,7 @@ impl Placed {
             root,
             position,
             attempt,
-            origin: Origin {
-                id: task.id,
-                labels: task.item.labels,
-                category: task.item.status.map(|status| status.category),
-            },
+            origin: Origin::of(task),
         })
     }
 }
@@ -1642,384 +1757,6 @@ fn furthest_along(placed: Vec<Placed>) -> Result<BTreeMap<String, Origin>, Strin
     Ok(by_root)
 }
 
-struct Output {
-    status: ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-}
-
-/// Run one sibling command without letting either its duration or output pipes hold the worker.
-fn bounded_output<S: AsRef<std::ffi::OsStr>>(
-    binary: &Path,
-    launch_dir: &Path,
-    run_dir: &Path,
-    name: &str,
-    args: &[S],
-    deadline: Deadline,
-) -> Result<Output, String> {
-    let stdout = run_dir.join(format!("writeback-{name}.stdout"));
-    let stderr = run_dir.join(format!("writeback-{name}.stderr"));
-    let stdout_file = std::fs::File::create(&stdout).map_err(|error| error.to_string())?;
-    let stderr_file = std::fs::File::create(&stderr).map_err(|error| error.to_string())?;
-    // llmlint: ignore-block[changed_behavior_has_e2e] Resolution and version checking
-    // already exercise the real executable. Inducing spawn or wait syscall failure requires
-    // replacing the executable or sabotaging the host; the real-store journey covers the
-    // actionable command refusal, retry, and recovery behavior.
-    let mut child = Command::new(binary)
-        .current_dir(launch_dir)
-        .args(args)
-        .env_remove(BINARY_ENV)
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file))
-        .spawn()
-        .map_err(|error| format!("cannot run {}: {error}", binary.display()))?;
-    let started = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() < deadline.within() => {
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(deadline.refusal(name));
-            }
-            Err(error) => return Err(format!("cannot wait for {name}: {error}")),
-        }
-    };
-    // llmlint: ignore-end[changed_behavior_has_e2e]
-    Ok(Output {
-        status,
-        stdout: std::fs::read(stdout).map_err(|error| error.to_string())?,
-        stderr: std::fs::read(stderr).map_err(|error| error.to_string())?,
-    })
-}
-
-/// Read one of the store's answers, naming the field that refused it.
-///
-/// `serde_json`'s own error says the type it wanted and not where it wanted it, and this
-/// projection reads several fields of several shapes out of one paged response — so a
-/// `labels` answered as a string and a `metadata` answered as one are otherwise the same
-/// sentence. The path is the whole of what makes the refusal actionable, because of where
-/// it lands: write-back is best-effort, so this one line on the driver's own standard
-/// error and the planner surface built from it are all anybody gets. Read the same way
-/// `taskgraph::read` reads a project, for the same reason.
-fn answered<T: serde::de::DeserializeOwned>(stdout: &[u8]) -> Result<T, String> {
-    let mut reading = serde_json::Deserializer::from_slice(stdout);
-    let response: T =
-        serde_path_to_error::deserialize(&mut reading).map_err(|error| {
-            match error.path().to_string() {
-                path if path == "." => error.into_inner().to_string(),
-                path => format!("{path}: {}", error.into_inner()),
-            }
-        })?;
-    // Trailing bytes are still a refusal, exactly as `serde_json::from_slice` made them:
-    // a second document after the answer is not an answer this build can act on.
-    reading.end().map_err(|error| error.to_string())?;
-    Ok(response)
-}
-
-/// What the store classed one failed command as, read off its own answer and nothing else.
-///
-/// Exit [`WRITEBACK_FAILURE_EXIT`] carries one failure document. Exit
-/// [`WRITEBACK_PARTIAL_EXIT`] carries a partial answer each of whose `errors` names a class,
-/// and that answer is refused only where **every** entry is: a source that could not be reached
-/// beside one that refused could still answer next time. Anything else is `None`, and so is an
-/// answer that does not parse — a store release that predates the document, a command killed
-/// at its deadline, and a class this build has never heard of all keep the retry schedule
-/// rather than stopping it.
-fn classified(code: Option<i32>, stdout: &[u8]) -> Option<Classified> {
-    match code? {
-        WRITEBACK_FAILURE_EXIT => {
-            let document: FailureDocument = serde_json::from_slice(stdout).ok()?;
-            Some(Classified {
-                class: document.failure.class,
-                kind: document.failure.kind,
-            })
-        }
-        WRITEBACK_PARTIAL_EXIT => {
-            // A partial read names its failures under `errors`; a copy whose delivered tickets
-            // the store could not keep in step names them under `delivered`, each with the
-            // store's own failure. Either is refused only where every failure it names is.
-            let failures: Vec<(FailureClass, String)> =
-                match serde_json::from_slice::<PartialAnswer>(stdout) {
-                    Ok(answer) if !answer.errors.is_empty() => answer
-                        .errors
-                        .into_iter()
-                        .map(|entry| (entry.class, entry.error.kind))
-                        .collect(),
-                    _ => serde_json::from_slice::<DeliveredAnswer>(stdout)
-                        .ok()?
-                        .delivered
-                        .into_iter()
-                        .filter_map(|entry| match entry.outcome {
-                            DeliveredOutcome::Failed { failure } => {
-                                Some((failure.class, failure.kind))
-                            }
-                            DeliveredOutcome::Written
-                            | DeliveredOutcome::Unchanged
-                            | DeliveredOutcome::Left => None,
-                        })
-                        .collect(),
-                };
-            if failures.is_empty() {
-                return None;
-            }
-            let class = if failures
-                .iter()
-                .all(|(class, _)| *class == FailureClass::Refused)
-            {
-                FailureClass::Refused
-            } else {
-                FailureClass::Transient
-            };
-            let mut kinds: Vec<String> = Vec::new();
-            for (_, kind) in failures {
-                if !kinds.contains(&kind) {
-                    kinds.push(kind);
-                }
-            }
-            Some(Classified {
-                class,
-                kind: kinds.join(", "),
-            })
-        }
-        _ => None,
-    }
-}
-
-fn exit(status: &ExitStatus) -> String {
-    status
-        .code()
-        .map_or_else(|| "on a signal".into(), |code| code.to_string())
-}
-
-// Every type below describes a response `onetaskgraph` composes, so none of them denies
-// unknown fields: that program adds one to its own answer in a patch release — `location`
-// on a project item, at 0.2.14 — and a consumer mirroring a producer's shape under
-// `deny_unknown_fields` makes each of those a hard read failure. A document this crate
-// authors and reads back is the opposite case and keeps the deny; this module authors only
-// the shadow project, which nothing reads back through a type. What the projection
-// consumes stays required and typed, and what it never read is no longer enumerated.
-
-/// What a store command writes on stdout when it exits [`WRITEBACK_FAILURE_EXIT`].
-#[derive(Deserialize)]
-struct FailureDocument {
-    failure: StoreFailure,
-}
-
-/// The two members of a store's failure this worker reads. Its `message` is the stderr line
-/// already carried as the reason, and is never read to decide anything.
-#[derive(Deserialize)]
-struct StoreFailure {
-    class: FailureClass,
-    // llmlint: ignore[invalid_states_unrepresentable] open by the store's own contract, for
-    // the reason `Classified::kind` records; only ever named to a reader.
-    kind: String,
-}
-
-/// The half of a partial answer — exit [`WRITEBACK_PARTIAL_EXIT`] — this worker reads.
-#[derive(Deserialize)]
-struct PartialAnswer {
-    errors: Vec<PartialError>,
-}
-
-/// One source's failure in a partial answer, carrying the store's class for it.
-#[derive(Deserialize)]
-struct PartialError {
-    class: FailureClass,
-    error: PartialCause,
-}
-
-/// The half of a copy report a partial copy is classified by: each delivered ticket's outcome,
-/// and the store's failure for one it could not keep in step.
-#[derive(Deserialize)]
-struct DeliveredAnswer {
-    delivered: Vec<DeliveredEntry>,
-}
-
-/// One entry of a copy report's `delivered`, validated at the boundary before anything is said
-/// about it: both ids are qualified, and the outcome is one this build knows, carrying the
-/// store's failure exactly when it is `failed`. The record keeps the store's entry verbatim; this
-/// is what the worker interprets.
-#[derive(Deserialize)]
-struct DeliveredEntry {
-    ticket: QualifiedId,
-    deliverer: QualifiedId,
-    #[serde(flatten)]
-    outcome: DeliveredOutcome,
-}
-
-/// The store's failure for one delivered ticket it could not keep in step.
-#[derive(Deserialize)]
-struct DeliveredFailure {
-    class: FailureClass,
-    // llmlint: ignore-block[invalid_states_unrepresentable] the store's `kind` is open by its
-    // own contract, for the reason `Classified::kind` records, and its `message` is its own
-    // words; both are only ever named to a reader, and `class` is the closed half acted on.
-    kind: String,
-    message: String,
-    // llmlint: ignore-end[invalid_states_unrepresentable]
-}
-
-/// What the store did to one delivered ticket, tagged by its `outcome`. Only a ticket the store
-/// failed to keep in step carries a failure, and it has to: a `failed` entry without one does not
-/// read, and neither does an outcome this build has never heard of — either leaves the answer
-/// unclassified, and so on the retry schedule.
-#[derive(Deserialize)]
-#[serde(tag = "outcome", rename_all = "kebab-case")]
-enum DeliveredOutcome {
-    Written,
-    Unchanged,
-    Left,
-    Failed { failure: DeliveredFailure },
-}
-
-#[derive(Deserialize)]
-struct PartialCause {
-    // llmlint: ignore[invalid_states_unrepresentable] a source error's kind, copied through
-    // verbatim by the store and open for the reason `Classified::kind` records.
-    kind: String,
-}
-
-/// One page of the store's answer to `task list`.
-#[derive(Deserialize)]
-struct TaskPage {
-    items: Vec<DestinationTask>,
-    next: Option<String>,
-    errors: Vec<Value>,
-}
-
-/// The store's answer to `project show`.
-#[derive(Deserialize)]
-struct ProjectPage {
-    items: Vec<DestinationProject>,
-    errors: Vec<Value>,
-}
-
-#[derive(Deserialize)]
-struct DestinationProject {
-    id: QualifiedId,
-    item: DestinationProjectItem,
-}
-
-#[derive(Deserialize)]
-struct DestinationProjectItem {
-    /// Not declared by a plan, so it is preserved rather than replaced.
-    title: String,
-    /// Not declared by a plan, so it is preserved rather than replaced.
-    content: Option<String>,
-    /// Not modelled by a plan at all, so they are preserved rather than dropped.
-    labels: Vec<DestinationLabel>,
-    /// Only the reserved keys this worker owns are rewritten; the rest are preserved.
-    metadata: BTreeMap<String, Value>,
-    // llmlint: ignore-block[invalid_states_unrepresentable] `location` is onetaskgraph's
-    // own answer about where it keeps an item, and this projection neither mints one nor
-    // reads one. It is named anyway so this boundary *states* the newest field the store
-    // reports rather than leaving it to be inferred from an absence, and it is typed as
-    // the raw document precisely so that it cannot narrow: the shapes are the producer's
-    // to change, and it has already shipped `{"path": …}`, `{"url": …}` and
-    // `{"kind": …, "url": …}` across patch releases. Giving it a type of its own is what
-    // would make a fourth shape a projection failure, which is the defect this field was
-    // added under rather than a stricter form of the fix.
-    // llmlint: ignore-block[changed_behavior_has_e2e] naming it changes no behaviour that
-    // could be driven on its own: the types here no longer deny unknown fields, so a page
-    // carrying `location` was already accepted and naming it accepts exactly the same
-    // pages. What there is to drive is that acceptance, and
-    // `store::a_settlement_reaches_a_store_whose_answer_grew_a_field_this_build_does_not_know`
-    // drives it against the real binary at a release this build was not written against —
-    // on the response, on each item, on that item's body and on every label it holds.
-    #[serde(rename = "location", default)]
-    _location: Option<Value>,
-    // llmlint: ignore-end[changed_behavior_has_e2e]
-    // llmlint: ignore-end[invalid_states_unrepresentable]
-}
-
-#[derive(Deserialize)]
-struct DestinationTask {
-    id: QualifiedId,
-    item: DestinationTaskItem,
-}
-
-#[derive(Deserialize)]
-struct DestinationTaskItem {
-    /// Not modelled by a plan at all, so they are preserved rather than dropped.
-    labels: Vec<DestinationLabel>,
-    /// Read for `onepipeline.id`, which is how a destination task names its plan node.
-    metadata: BTreeMap<String, Value>,
-    /// Read for its category, which is what says whether a copy reopened the item. Lenient:
-    /// an answer without one —
-    /// `store::a_settlement_reaches_a_store_whose_answer_dropped_a_field_this_build_never_read`
-    /// takes it away — reads as an item whose category nobody knows, which no copy is counted
-    /// as reopening.
-    #[serde(default)]
-    status: Option<DestinationStatus>,
-    // llmlint: ignore-block[invalid_states_unrepresentable] `location` is onetaskgraph's
-    // own answer about where it keeps an item, and this projection neither mints one nor
-    // reads one. It is named anyway so this boundary *states* the newest field the store
-    // reports rather than leaving it to be inferred from an absence, and it is typed as
-    // the raw document precisely so that it cannot narrow: the shapes are the producer's
-    // to change, and it has already shipped `{"path": …}`, `{"url": …}` and
-    // `{"kind": …, "url": …}` across patch releases. Giving it a type of its own is what
-    // would make a fourth shape a projection failure, which is the defect this field was
-    // added under rather than a stricter form of the fix.
-    // llmlint: ignore-block[changed_behavior_has_e2e] naming it changes no behaviour that
-    // could be driven on its own: the types here no longer deny unknown fields, so a page
-    // carrying `location` was already accepted and naming it accepts exactly the same
-    // pages. What there is to drive is that acceptance, and
-    // `store::a_settlement_reaches_a_store_whose_answer_grew_a_field_this_build_does_not_know`
-    // drives it against the real binary at a release this build was not written against —
-    // on the response, on each item, on that item's body and on every label it holds.
-    #[serde(rename = "location", default)]
-    _location: Option<Value>,
-    // llmlint: ignore-end[changed_behavior_has_e2e]
-    // llmlint: ignore-end[invalid_states_unrepresentable]
-}
-
-/// The half of a destination item's status this worker reads: its normalised category.
-#[derive(Deserialize)]
-struct DestinationStatus {
-    category: DestinationCategory,
-}
-
-/// onetaskgraph's normalised status categories, as its `--json` answers name them.
-///
-/// Closed under `Unknown`, the store's own word for a status its vocabulary cannot place,
-/// so a category a later release adds reads as that rather than refusing the page — and is
-/// neither `done` nor `cancelled`, so nothing is counted reopened off it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum DestinationCategory {
-    Draft,
-    Backlog,
-    Todo,
-    Queued,
-    InProgress,
-    Done,
-    Cancelled,
-    #[serde(other)]
-    Unknown,
-}
-
-/// One label a destination item carries, read back and written unchanged.
-///
-/// Serialized as well as deserialized: a preserved label is written into the shadow
-/// document whole, so the destination's own label id and colour survive the round trip
-/// rather than being reduced to a name the store would have to re-resolve.
-// llmlint: ignore-block[invalid_states_unrepresentable] These three are onetaskgraph's own
-// strings, and this projection neither mints nor interprets one — it reads a label off the
-// destination and writes the same label back. Narrowing them here would turn a label the
-// store legitimately holds into a projection failure, which is the defect this type exists
-// to fix rather than a stricter form of the fix.
-#[derive(Clone, Deserialize, Serialize)]
-struct DestinationLabel {
-    id: String,
-    name: String,
-    color: Option<String>,
-}
-// llmlint: ignore-end[invalid_states_unrepresentable]
-
 /// Build the shadow project a `project copy` then projects onto the destination.
 ///
 /// Every field written here is decided by the module's ownership rule: a plan-declared
@@ -2028,7 +1765,7 @@ struct DestinationLabel {
 fn write_shadow(
     snapshot: &Snapshot,
     origins: &BTreeMap<String, Origin>,
-    destination_project: &DestinationProjectItem,
+    destination_project: &Project,
 ) -> Result<(), String> {
     let projects = snapshot.dir.join("projects");
     let tasks = snapshot
@@ -2121,8 +1858,7 @@ fn task_document(
     let repo = wire
         .remove("repo")
         .and_then(|v| v.as_str().map(str::to_owned));
-    // The store's own field, never a reserved key: taken out of the wire whether or not the
-    // store offers it, so an older store is handed no `onepipeline.delivers` either.
+    // The store's own field, never a reserved key.
     let delivers = wire
         .remove(DELIVERS_FIELD)
         .and_then(|v| v.as_array().cloned())
@@ -2135,7 +1871,7 @@ fn task_document(
         metadata.insert(SUPERSEDES_KEY.into(), json!(superseded));
     }
     if let Some(origin) = origin {
-        metadata.insert("onetaskgraph.origin".into(), json!(origin.id.as_str()));
+        metadata.insert(GlobalId::ORIGIN_KEY.into(), json!(origin.id.to_string()));
     }
     for (key, value) in wire {
         metadata.insert(format!("onepipeline.{key}"), value);
@@ -2216,7 +1952,7 @@ fn task_document(
     // nothing writes none, which is the plan saying so. Every entry is already qualified —
     // `graph::check_node` refused any that was not — so the store carries each one through
     // as the ticket it names rather than as an id of the shadow source.
-    if snapshot.vocabulary == Vocabulary::WithDelivers && !delivers.is_empty() {
+    if !delivers.is_empty() {
         front.insert(DELIVERS_FIELD.into(), json!(delivers));
     }
     // A node the plan has just added has no destination item yet, so there is nothing
@@ -2238,7 +1974,7 @@ fn task_document(
 }
 
 /// Atomic because the shadow store is a directory a reader *lists* while this writes it:
-/// the `project copy` below reads it as a `local-md` source, and a document replaced in
+/// the copy reads it as a `local-md` source, and a document replaced in
 /// place is truncated first, so a listing arriving in that window parses an empty file and
 /// reports the run's own board as malformed.
 fn document(path: &Path, front: &Value, body: &str) -> Result<(), String> {
@@ -2369,12 +2105,21 @@ fn encoded(value: &str) -> String {
         .collect()
 }
 
-/// The shadow store's own qualified id for one node's task, which is what `--member` names.
-fn member_id(snapshot: &Snapshot, id: &str) -> String {
-    format!(
-        "{SHADOW_SOURCE}:{}/{}",
+/// The shadow store's own qualified id for one node's task, which is what a member copy
+/// names.
+fn member_id(snapshot: &Snapshot, id: &str) -> GlobalId {
+    shadow_id(&format!(
+        "{}/{}",
         project_file(&snapshot.project),
         task_file(id)
+    ))
+}
+
+/// One item of the shadow store, by its native id there.
+fn shadow_id(native: &str) -> GlobalId {
+    GlobalId::new(
+        SourceName::new(SHADOW_SOURCE).expect("the shadow source's name is a source name"),
+        NativeId::from(native),
     )
 }
 
@@ -2390,9 +2135,9 @@ enum Carry {
 impl Carry {
     /// Whole where it has to be, and otherwise exactly the lineages that changed.
     ///
-    /// Whole when the store offers no member copy, when the attempt before this one failed —
-    /// what the destination holds is then not known to be the last success — and when nothing
-    /// has landed in this worker yet, in that order of precedence. A lineage changed when its
+    /// Whole when the attempt before this one failed — what the destination holds is then not
+    /// known to be the last success — and when nothing has landed in this worker yet, in that
+    /// order of precedence. A lineage changed when its
     /// shadow task, rendered from the snapshot alone, differs from the one the last success
     /// rendered under the same root, or when that success rendered none. Project-level
     /// metadata is not a node: the project item every copy includes carries it. A node never
@@ -2402,15 +2147,7 @@ impl Carry {
     /// change under the root's member, which
     /// `live_edit::retry_cancel_requeue_and_drop_are_projected_after_their_rulings` drives to
     /// the board.
-    fn decide(
-        members: bool,
-        after_failure: bool,
-        last: Option<&Snapshot>,
-        snapshot: &Snapshot,
-    ) -> Self {
-        if !members {
-            return Self::Whole(WholeBecause::StoreLacksMembers);
-        }
+    fn decide(after_failure: bool, last: Option<&Snapshot>, snapshot: &Snapshot) -> Self {
         if after_failure {
             return Self::Whole(WholeBecause::AfterFailure);
         }
@@ -2458,9 +2195,7 @@ struct Carried {
 /// have changed them since. A named node the destination holds no item for is created by the
 /// copy, so there is nothing to read.
 fn member_origins(
-    binary: &Path,
-    launch_dir: &Path,
-    run_dir: &Path,
+    attempt: &Attempt,
     named: &BTreeSet<String>,
     known: &BTreeMap<String, Origin>,
 ) -> Result<BTreeMap<String, Origin>, Failed> {
@@ -2469,187 +2204,109 @@ fn member_origins(
         let Some(origin) = origins.get_mut(node) else {
             continue;
         };
-        let args = ["task", "show", origin.id.as_str(), "--json"];
-        let output = bounded_output(
-            binary,
-            launch_dir,
-            run_dir,
-            TASK_SHOW,
-            &args,
-            Deadline::Floor,
-        )?;
-        if !output.status.success() {
-            let reason = format!(
-                "task show exited {}: {}",
-                exit(&output.status),
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-            return Err(Failed::answered(&output, reason));
-        }
-        // llmlint: ignore-block[changed_behavior_has_e2e] These refusals defend the compiled
-        // sibling's machine contract, exactly as `destination_project`'s do. Producing
-        // malformed JSON, partial results, no task or a different task here requires
-        // replacing the real onetaskgraph executable with a scripted mock; the member journey
-        // drives the successful read and the carried-through labels end to end.
-        let response: TaskPage = answered(&output.stdout)?;
-        if !response.errors.is_empty() {
-            return Err("task show returned partial results".to_owned().into());
-        }
-        let mut items = response.items.into_iter();
-        let task = items
-            .next()
-            .ok_or_else(|| format!("task '{}' was not found", origin.id))?;
-        if items.next().is_some() || task.id != origin.id {
-            return Err(format!("task show returned the wrong task for '{}'", origin.id).into());
-        }
-        // llmlint: ignore-end[changed_behavior_has_e2e]
-        origin.labels = task.item.labels;
-        origin.category = task.item.status.map(|status| status.category);
+        let answer = attempt
+            .call(TASK_SHOW, Deadline::Floor, attempt.engine.task(&origin.id))?
+            .map_err(|error| Failed::engine(TASK_SHOW, &error))?;
+        *origin = Origin::of(shown(TASK_SHOW, &origin.id, answer)?);
     }
     Ok(origins)
 }
 
-/// The store's answer to a `project copy` that landed: what it did to each item it carried,
-/// and what it spent.
+/// How many items a copy report says the copy did each thing to, the project item included —
+/// and, derived here rather than reported by the store, how many it reopened.
 ///
-/// Read leniently, like every answer the store composes, and never required: a report this
-/// build cannot read leaves the record's `actions` and `spent` unsaid rather than failing a
-/// copy the store says landed.
-#[derive(Deserialize)]
-struct CopyReport {
-    items: Vec<CopiedItem>,
-    /// Verbatim: the store's own account, absent where no source in the command meters.
-    #[serde(default)]
-    spent: Option<Map<String, Value>>,
-    /// Verbatim: what the store did to each ticket a carried task delivers, absent from a store
-    /// that has no `delivers`.
-    // llmlint: ignore[boundary_inputs_validated] kept as the store wrote it because the
-    // projection record is required to carry each attempt's `delivered` entries verbatim, exactly
-    // as it carries `spent`: a reader of the record is owed what the store said, including an
-    // entry this build could not read. Nothing interprets this copy — every decision and every
-    // sentence about a ticket reads the same answer through `DeliveredAnswer`, whose typed entry
-    // validates both ids, the outcome and the failure at the boundary.
-    #[serde(default)]
-    delivered: Vec<Map<String, Value>>,
-}
-
-#[derive(Deserialize)]
-struct CopiedItem {
-    source: QualifiedId,
-    action: CopiedAction,
-    #[serde(default)]
-    destination: Option<QualifiedId>,
-}
-
-/// What a copy did to one item. An action this build has never heard of leaves the report
-/// unread, so its counts are never missing one.
-#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum CopiedAction {
-    Created,
-    Updated,
-    Unchanged,
-    Orphaned,
-}
-
-impl CopyReport {
-    /// How many items the copy did each thing to, the project item included — and, derived
-    /// here rather than reported by the store, how many it reopened.
-    ///
-    /// An item was reopened when the store says it `updated` it, the attempt's own pre-copy
-    /// read (`before`, off `task list` for a whole copy and `task show` for a member copy)
-    /// reported its category `done` or `cancelled`, and the word this snapshot projects its
-    /// lineage under is neither. The store's copy-report vocabulary is not extended for it:
-    /// an action word an older build has not heard of makes it drop the whole report and then
-    /// re-create items.
-    ///
-    /// A destination the copy `updated` is never also counted `orphaned`. An item an older
-    /// build wrote can still carry that build's origin after an adoption reuses it for a
-    /// lineage, so the store reports it once as the lineage it rewrote and again as a
-    /// counterpart the source no longer holds — one item, and the second report is not true
-    /// of it: it was rewritten, not left as it was.
-    fn actions(&self, snapshot: &Snapshot, before: &BTreeMap<String, Origin>) -> ProjectionActions {
-        let lineages = snapshot.lineages();
-        let members = shadow_members(snapshot, &lineages);
-        let rewritten: BTreeSet<&str> = self
-            .items
-            .iter()
-            .filter(|item| item.action == CopiedAction::Updated)
-            .filter_map(|item| item.destination.as_ref().map(QualifiedId::as_str))
-            .collect();
-        let mut actions = ProjectionActions::default();
-        for item in &self.items {
-            let count = match item.action {
-                CopiedAction::Orphaned
-                    if item
-                        .destination
-                        .as_ref()
-                        .is_some_and(|destination| rewritten.contains(destination.as_str())) =>
-                {
-                    continue;
-                }
-                CopiedAction::Created => &mut actions.created,
-                CopiedAction::Updated => &mut actions.updated,
-                CopiedAction::Unchanged => &mut actions.unchanged,
-                CopiedAction::Orphaned => &mut actions.orphaned,
-            };
-            *count = count.saturating_add(1);
-            if item.action != CopiedAction::Updated {
-                continue;
-            }
-            let reopened = members.get(item.source.as_str()).is_some_and(|root| {
-                before.get(*root).is_some_and(Origin::closed)
-                    && lineages
-                        .chain(root)
-                        .and_then(<[String]>::last)
-                        .is_some_and(|head| {
-                            !matches!(
-                                snapshot.word_of(head),
-                                ProjectedStatus::Done | ProjectedStatus::Cancelled
-                            )
-                        })
-            });
-            if reopened {
-                actions.reopened = actions.reopened.saturating_add(1);
-            }
+/// An item was reopened when the store says it `updated` it, the attempt's own pre-copy read
+/// (`before`, off the page of tasks for a whole copy and each member's own read for a member
+/// copy) reported its category `done` or `cancelled`, and the word this snapshot projects its
+/// lineage under is neither. The store's copy-report vocabulary is not extended for it: the
+/// store's report says what it wrote, and a reopen is a fact about the run.
+///
+/// A destination the copy `updated` is never also counted `orphaned`. An item an older build
+/// wrote can still carry that build's origin after an adoption reuses it for a lineage, so the
+/// store reports it once as the lineage it rewrote and again as a counterpart the source no
+/// longer holds — one item, and the second report is not true of it: it was rewritten, not
+/// left as it was.
+fn actions(
+    report: &CopyReport,
+    snapshot: &Snapshot,
+    before: &BTreeMap<String, Origin>,
+) -> ProjectionActions {
+    let lineages = snapshot.lineages();
+    let members = shadow_members(snapshot, &lineages);
+    let rewritten: std::collections::HashSet<&GlobalId> = report
+        .items
+        .iter()
+        .filter_map(|item| match &item.action {
+            CopyAction::Updated { destination } => Some(destination),
+            CopyAction::Created { .. }
+            | CopyAction::Unchanged { .. }
+            | CopyAction::Orphaned { .. } => None,
+        })
+        .collect();
+    let mut actions = ProjectionActions::default();
+    for item in &report.items {
+        let count = match &item.action {
+            CopyAction::Orphaned { destination } if rewritten.contains(destination) => continue,
+            CopyAction::Created { .. } => &mut actions.created,
+            CopyAction::Updated { .. } => &mut actions.updated,
+            CopyAction::Unchanged { .. } => &mut actions.unchanged,
+            CopyAction::Orphaned { .. } => &mut actions.orphaned,
+        };
+        *count = count.saturating_add(1);
+        if !matches!(item.action, CopyAction::Updated { .. }) {
+            continue;
         }
-        actions
+        let reopened = members.get(&item.source).is_some_and(|root| {
+            before.get(*root).is_some_and(Origin::closed)
+                && lineages
+                    .chain(root)
+                    .and_then(<[String]>::last)
+                    .is_some_and(|head| {
+                        !matches!(
+                            snapshot.word_of(head),
+                            ProjectedStatus::Done | ProjectedStatus::Cancelled
+                        )
+                    })
+        });
+        if reopened {
+            actions.reopened = actions.reopened.saturating_add(1);
+        }
     }
+    actions
+}
 
-    /// Fold where the copy says each carried lineage landed into what the run knows.
-    ///
-    /// A lineage the copy created has a destination item nobody has read yet, and without this
-    /// the next member copy naming it would carry no origin and create it a second time. An
-    /// item that is not one of this snapshot's shadow tasks says nothing about a lineage.
-    fn learn(&self, origins: &mut BTreeMap<String, Origin>, snapshot: &Snapshot) {
-        let lineages = snapshot.lineages();
-        let members = shadow_members(snapshot, &lineages);
-        for item in &self.items {
-            let (Some(node), Some(destination)) =
-                (members.get(item.source.as_str()), item.destination.as_ref())
-            else {
-                continue;
-            };
-            if item.action == CopiedAction::Orphaned {
-                continue;
+/// Fold where the copy says each carried lineage landed into what the run knows.
+///
+/// A lineage the copy created has a destination item nobody has read yet, and without this
+/// the next member copy naming it would carry no origin and create it a second time. An item
+/// that is not one of this snapshot's shadow tasks says nothing about a lineage.
+fn learn(report: &CopyReport, origins: &mut BTreeMap<String, Origin>, snapshot: &Snapshot) {
+    let lineages = snapshot.lineages();
+    let members = shadow_members(snapshot, &lineages);
+    for item in &report.items {
+        let destination = match &item.action {
+            CopyAction::Orphaned { .. } => continue,
+            action => action.destination(),
+        };
+        let (Some(node), Some(destination)) = (members.get(&item.source), destination) else {
+            continue;
+        };
+        match origins.get_mut(*node) {
+            Some(origin) if origin.id == *destination => {}
+            Some(origin) => {
+                origin.id = destination.clone();
+                origin.labels = Vec::new();
+                origin.category = None;
             }
-            match origins.get_mut(*node) {
-                Some(origin) if origin.id == *destination => {}
-                Some(origin) => {
-                    origin.id = destination.clone();
-                    origin.labels = Vec::new();
-                    origin.category = None;
-                }
-                None => {
-                    origins.insert(
-                        (*node).clone(),
-                        Origin {
-                            id: destination.clone(),
-                            labels: Vec::new(),
-                            category: None,
-                        },
-                    );
-                }
+            None => {
+                origins.insert(
+                    (*node).clone(),
+                    Origin {
+                        id: destination.clone(),
+                        labels: Vec::new(),
+                        category: None,
+                    },
+                );
             }
         }
     }
@@ -2657,108 +2314,14 @@ impl CopyReport {
 
 /// Each lineage's shadow member id, mapped back to its root: what a copy report's `source`
 /// names.
-fn shadow_members<'a>(snapshot: &Snapshot, lineages: &'a Lineages) -> BTreeMap<String, &'a String> {
+fn shadow_members<'a>(
+    snapshot: &Snapshot,
+    lineages: &'a Lineages,
+) -> std::collections::HashMap<GlobalId, &'a String> {
     lineages
         .roots()
         .map(|root| (member_id(snapshot, root), root))
         .collect()
-}
-
-/// Whether this run's store offers a member copy, decided once for the run.
-///
-/// Read off [`WRITEBACK_STORE_FILE`] where an earlier driver of the run decided it, and
-/// otherwise decided from the version the launch check's `--version` already read and written
-/// there before the first projection. Never found out by attempting a copy: against a store
-/// without `--member` that is a failed attempt, and the attempt after a failure is whole — the
-/// cost a member copy exists to remove. A record that does not read is decided again and
-/// replaced.
-fn decide_member_copy_once(run_dir: &Path, reported: &str) -> bool {
-    let path = run_dir.join(WRITEBACK_STORE_FILE);
-    if let Some(recorded) = std::fs::read(&path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<StoreRecord>(&bytes).ok())
-    {
-        return recorded.members();
-    }
-    let recorded = StoreRecord {
-        version: reported.to_owned(),
-    };
-    let members = recorded.members();
-    // llmlint: ignore-block[changed_behavior_has_e2e] writing a small file into the run's own
-    // directory fails only on a host whose run directory has been made unwritable, which no
-    // CLI journey arranges; the answer is still used for this driver, and a later driver that
-    // finds no record decides it again the same way.
-    let written = serde_json::to_vec(&recorded)
-        .map_err(|error| error.to_string())
-        .and_then(|bytes| std::fs::write(&path, bytes).map_err(|error| error.to_string()));
-    if let Err(error) = written {
-        eprintln!(
-            "onetaskgraph write-back could not record whether the store offers a member copy \
-             at {}: {error}",
-            path.display()
-        );
-    }
-    // llmlint: ignore-end[changed_behavior_has_e2e]
-    members
-}
-
-/// What [`WRITEBACK_STORE_FILE`] holds: the version the run's answer was decided from.
-///
-/// Written with the decision beside it, for a reader, and read back only where the two agree.
-/// The decision is derived from the version rather than kept beside it, so a record whose
-/// `members` says something its `version` does not is no record of this run's answer, and the
-/// answer is decided again.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(try_from = "StoreWire", into = "StoreWire")]
-struct StoreRecord {
-    // llmlint: ignore[invalid_states_unrepresentable] the token the store printed, recorded
-    // verbatim for a reader and read by `taskgraph::at_least` for the one decision made of it;
-    // a token that does not read as a version is a store offering no member copy, which is an
-    // answer rather than an invalid record.
-    version: String,
-}
-
-impl StoreRecord {
-    /// Whether the store this was decided from offers a member copy.
-    fn members(&self) -> bool {
-        crate::taskgraph::at_least(&self.version, WRITEBACK_MEMBERS_FROM)
-    }
-}
-
-/// The two keys [`StoreRecord`] is written as.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoreWire {
-    version: String,
-    members: bool,
-}
-
-impl TryFrom<StoreWire> for StoreRecord {
-    type Error = String;
-
-    fn try_from(wire: StoreWire) -> Result<Self, String> {
-        let record = Self {
-            version: wire.version,
-        };
-        if record.members() == wire.members {
-            Ok(record)
-        } else {
-            Err(format!(
-                "the store record says `members: {}` of version {:?}, which says otherwise",
-                wire.members, record.version
-            ))
-        }
-    }
-}
-
-impl From<StoreRecord> for StoreWire {
-    fn from(record: StoreRecord) -> Self {
-        let members = record.members();
-        Self {
-            version: record.version,
-            members,
-        }
-    }
 }
 
 /// Append one attempt to the run's [`WRITEBACK_PROJECTIONS_FILE`].
@@ -2846,8 +2409,11 @@ pub enum WholeBecause {
     First,
     /// The attempt before this one failed.
     AfterFailure,
-    /// The store reported a version older than
-    /// [`WRITEBACK_MEMBERS_FROM`](crate::cli::WRITEBACK_MEMBERS_FROM).
+    /// The store reported a version older than the first release offering a member copy.
+    ///
+    /// **Read, never written.** An engine that drove the store's binary decided this off the
+    /// version the binary reported, so lines it wrote carry the reason and still read. The
+    /// linked store always offers a member copy, so this build never gives it.
     StoreLacksMembers,
 }
 
@@ -2857,7 +2423,8 @@ pub enum ProjectionEnded {
     /// The copy landed.
     Projected {
         /// How many items the copy report says it did each thing to, or `None` where no
-        /// report was read.
+        /// report was read — which a line an older engine wrote may say, and this one never
+        /// does: the linked store always answers a copy with its report.
         actions: Option<ProjectionActions>,
         /// The copy report's `spent`, verbatim, or `None` where the report carried none.
         spent: Option<Map<String, Value>>,
@@ -2923,7 +2490,7 @@ impl ProjectionRecord {
             duration_ms: u64::try_from(took.as_millis()).unwrap_or(u64::MAX),
             ended: match attempt {
                 Ok(landed) => ProjectionEnded::Projected {
-                    actions: landed.actions,
+                    actions: Some(landed.actions),
                     spent: landed.spent.clone(),
                 },
                 Err(failed) => ProjectionEnded::Failed {
@@ -3185,17 +2752,18 @@ impl From<ProjectionRecord> for ProjectionWire {
 #[cfg(test)]
 mod tests {
     use super::{
-        classified, per_item_budget, projected, write_shadow, Claim, Classified, Deadline,
-        DestinationCategory, DestinationLabel, DestinationProjectItem, FailureClass, Landing,
-        Origin, Pending, ProjectedStatus, Snapshot, WorkerState, Writeback, CHANGE_URL_KEY,
-        COMMAND_FLOOR, DELIVERS_FIELD, ID_KEY, LANDING_COMMIT_KEY, LANDING_EVIDENCE_KEY,
-        LANDING_KEY, NODE_KEY, SUPERSEDES_KEY,
+        per_item_budget, projected, write_shadow, Claim, Classified, Deadline, FailureClass,
+        Landing, Origin, Pending, ProjectedStatus, Snapshot, WorkerState, Writeback,
+        CHANGE_URL_KEY, COMMAND_FLOOR, DELIVERS_FIELD, ID_KEY, LANDING_COMMIT_KEY,
+        LANDING_EVIDENCE_KEY, LANDING_KEY, NODE_KEY, SUPERSEDES_KEY,
     };
     use crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS;
     use crate::graph::NodeStatus;
     use crate::ledger::{LaunchRecord, RunPaths};
     use crate::plan::Node;
     use crate::projection::RunState;
+    use onetaskgraph_core::{EngineError, GlobalId};
+    use onetaskgraph_plugin_api::{Label, Project, SourceError, StatusCategory};
     use serde_json::{json, Map, Value};
     use std::collections::BTreeMap;
     use std::num::NonZeroU64;
@@ -3429,13 +2997,15 @@ mod tests {
         assert!(pending.latest.as_ref() == Some(&changed));
     }
 
-    /// Entry 72's rule is the one the worker classifies by: the member and value it names
-    /// make a failure document refused, the commands it names are the three an attempt runs,
-    /// and a partial answer is refused only where every entry is.
+    /// Entry 72's rule is the one the worker classifies by: the class it names stops the
+    /// timer, the calls it names are the three an attempt makes, a source error is classed by
+    /// the store's own classifier — the kinds it names transient and every other refused —
+    /// and a partial answer, like a copy's delivered tickets, is refused only where every
+    /// failure is.
     ///
-    /// `tests/contract.rs` holds the same block against the published constants; the
-    /// classifier and the type it reads through are private, so this is where the block
-    /// meets what actually decides whether a retry is scheduled.
+    /// Each failure is built as the store's own typed value and read through the functions
+    /// the worker reads it through; no message is read to decide, which the pair of refusals
+    /// below with the same words and different classes holds.
     #[test]
     fn the_divergence_records_refusal_rule_is_the_one_the_worker_classifies_by() {
         let block = divergence_block("72.");
@@ -3443,51 +3013,105 @@ mod tests {
         assert_eq!(
             rule["commands"],
             json!([super::PROJECT_SHOW, super::TASK_LIST, super::PROJECT_COPY]),
-            "entry 72 names other commands than the three an attempt runs"
+            "entry 72 names other calls than the three an attempt makes"
         );
+        assert_eq!(
+            rule["stops_the_timer"].as_str(),
+            Some(FailureClass::Refused.as_str())
+        );
+        let transient: Vec<&str> = rule["transient"]
+            .as_array()
+            .expect("entry 72 names the kinds a wait can change")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        let words = "the store's own words".to_owned();
+        let every_source_error = [
+            SourceError::Config {
+                message: words.clone(),
+            },
+            SourceError::Auth {
+                message: words.clone(),
+            },
+            SourceError::Refused {
+                message: words.clone(),
+            },
+            SourceError::RateLimited {
+                retry_after_seconds: Some(30),
+                message: Some(words.clone()),
+            },
+            SourceError::Unavailable {
+                message: words.clone(),
+            },
+            SourceError::Malformed {
+                message: words.clone(),
+            },
+        ];
+        for error in &every_source_error {
+            let classified = Classified::of_source(error);
+            // The kind is the store's own wire tag for the error.
+            assert_eq!(
+                json!(classified.kind),
+                serde_json::to_value(error).expect("a source error serializes")["kind"],
+                "{error:?}"
+            );
+            let expected = if transient.contains(&classified.kind.as_str()) {
+                FailureClass::Transient
+            } else {
+                FailureClass::Refused
+            };
+            assert_eq!(classified.class, expected, "{error:?}");
+        }
 
-        let stops = rule["stops_the_timer"]
-            .as_str()
-            .expect("entry 72 names the class that stops the timer");
-        let (object, member) = rule["member"]
-            .as_str()
-            .and_then(|path| path.split_once('.'))
-            .expect("entry 72 names the member as a path");
-        let document = |class: &str| {
-            let mut failure = Map::new();
-            failure.insert(member.to_owned(), json!(class));
-            failure.insert("kind".to_owned(), json!("stale-origin"));
-            failure.insert("source".to_owned(), Value::Null);
-            failure.insert("message".to_owned(), json!("the store's own words"));
-            failure.insert("retry_after_seconds".to_owned(), Value::Null);
-            let mut document = Map::new();
-            document.insert(object.to_owned(), Value::Object(failure));
-            Value::Object(document).to_string()
+        // An engine failure wrapping a source's is that source's; one the engine decided on
+        // its own no retry changes.
+        let rate_limited = SourceError::RateLimited {
+            retry_after_seconds: None,
+            message: None,
         };
-        let exit = rule["failure_document_exit"]
-            .as_i64()
-            .and_then(|code| i32::try_from(code).ok())
-            .expect("entry 72 names the exit a failure document is written under");
-        let refused = Some(Classified {
-            class: FailureClass::Refused,
-            kind: "stale-origin".to_owned(),
-        });
+        let failed = EngineError::SourceFailed {
+            name: "plans".to_owned(),
+            error: rate_limited,
+        };
         assert_eq!(
-            classified(Some(exit), document(stops).as_bytes()),
-            refused,
-            "the document entry 72 describes is not one the worker reads as refused"
+            Classified::of_engine(&failed),
+            Classified {
+                class: FailureClass::Transient,
+                kind: "rate-limited".to_owned()
+            }
         );
+        let refused = EngineError::SourceRefused {
+            name: "plans".to_owned(),
+            error: SourceError::Refused {
+                message: words.clone(),
+            },
+        };
+        assert_eq!(Classified::of_engine(&refused).class, FailureClass::Refused);
+        let undone = EngineError::CopyNotUndone {
+            error: Box::new(failed.clone()),
+            left_behind: onetaskgraph_core::LeftBehind::new(
+                "plans:board/1".parse::<GlobalId>().expect("an id"),
+            ),
+            refusal: SourceError::Refused {
+                message: words.clone(),
+            },
+        };
         assert_eq!(
-            classified(Some(exit), document("transient").as_bytes()).map(|c| c.class),
-            Some(FailureClass::Transient)
+            Classified::of_engine(&undone).class,
+            FailureClass::Transient,
+            "a copy that could not be undone is classed by the failure it wraps"
         );
-        // Unclassified, so on the schedule: the same document under an exit that does not
-        // carry one, a class nobody has named, words that are not a document at all, and a
-        // command that ended on a signal.
-        assert_eq!(classified(Some(2), document(stops).as_bytes()), None);
-        assert_eq!(classified(Some(exit), document("maybe").as_bytes()), None);
-        assert_eq!(classified(Some(exit), b"no project with that id"), None);
-        assert_eq!(classified(None, document(stops).as_bytes()), None);
+        let stale = EngineError::StaleOrigin {
+            item: "a".to_owned(),
+            origin: "b".to_owned(),
+        };
+        assert_eq!(
+            Classified::of_engine(&stale),
+            Classified {
+                class: FailureClass::Refused,
+                kind: "stale-origin".to_owned()
+            }
+        );
 
         let partial = &rule["partial_answer"];
         assert_eq!(
@@ -3495,66 +3119,126 @@ mod tests {
             Some("every"),
             "entry 72 states a partial-answer rule other than the one the worker applies"
         );
-        let partial_exit = partial["exit"]
-            .as_i64()
-            .and_then(|code| i32::try_from(code).ok())
-            .expect("entry 72 names the exit a partial answer is written under");
-        let (list, member) = partial["member"]
-            .as_str()
-            .and_then(|path| path.split_once("[]."))
-            .expect("entry 72 names the partial member as a path");
-        let answer = |classes: &[Option<&str>]| {
-            let entries: Vec<Value> = classes
-                .iter()
-                .enumerate()
-                .map(|(n, class)| {
-                    let mut entry = Map::new();
-                    entry.insert("source".to_owned(), json!(format!("source{n}")));
-                    entry.insert(
-                        "error".to_owned(),
-                        json!({"kind": if n == 0 { "config" } else { "unavailable" },
-                               "message": "the store's own words"}),
-                    );
-                    if let Some(class) = class {
-                        entry.insert(member.to_owned(), json!(class));
-                    }
-                    Value::Object(entry)
-                })
-                .collect();
-            let mut answer = Map::new();
-            answer.insert("items".to_owned(), json!([]));
-            answer.insert("next".to_owned(), Value::Null);
-            answer.insert(list.to_owned(), Value::Array(entries));
-            Value::Object(answer).to_string()
-        };
+        let of =
+            |errors: &[SourceError]| Classified::of_all(errors.iter().map(Classified::of_source));
         assert_eq!(
-            classified(Some(partial_exit), answer(&[Some(stops)]).as_bytes()),
+            of(&[SourceError::Config {
+                message: words.clone()
+            }]),
             Some(Classified {
                 class: FailureClass::Refused,
-                kind: "config".to_owned(),
+                kind: "config".to_owned()
             })
         );
         assert_eq!(
-            classified(
-                Some(partial_exit),
-                answer(&[Some(stops), Some("transient")]).as_bytes()
-            ),
+            of(&[
+                SourceError::Config {
+                    message: words.clone()
+                },
+                SourceError::Unavailable {
+                    message: words.clone()
+                },
+            ]),
             Some(Classified {
                 class: FailureClass::Transient,
                 kind: "config, unavailable".to_owned(),
             }),
             "a partial answer with one entry a wait could change was read as refused"
         );
+        assert_eq!(of(&[]), None, "an answer naming no failure was classified");
         assert_eq!(
-            classified(Some(partial_exit), answer(&[]).as_bytes()),
-            None,
-            "a partial answer naming no failure was classified"
+            block["failure"]["delivered"]["refused_when"].as_str(),
+            Some("every")
         );
-        assert_eq!(
-            classified(Some(partial_exit), answer(&[Some(stops), None]).as_bytes()),
-            None,
-            "an entry from a store that writes no class was read as a refusal"
-        );
+    }
+
+    /// Every failure the engine can answer with is named, and its kind is the one the store's
+    /// own failure document gives it: the worker's exhaustive match and the store's own
+    /// rendering cannot drift apart without this failing.
+    #[test]
+    fn every_engine_failure_is_named_as_the_store_names_it() {
+        let words = || "the store's own words".to_owned();
+        let source = SourceError::Unavailable { message: words() };
+        let id = || "plans:board/1".parse::<GlobalId>().expect("an id");
+        let failures = [
+            EngineError::UnknownSource {
+                name: "x".into(),
+                configured: "plans".into(),
+            },
+            EngineError::Token { message: words() },
+            EngineError::NoSources,
+            EngineError::NotWritable {
+                name: "plans".into(),
+                kind: "in-memory".into(),
+            },
+            EngineError::NoDocuments {
+                name: "plans".into(),
+                kind: "in-memory".into(),
+            },
+            EngineError::NoComments {
+                name: "plans".into(),
+                kind: "in-memory".into(),
+            },
+            EngineError::CommentsNotWritable {
+                name: "plans".into(),
+                kind: "in-memory".into(),
+            },
+            EngineError::StatusNotWritable {
+                name: "plans".into(),
+                kind: "in-memory".into(),
+            },
+            EngineError::NoSuchProject {
+                id: "plans:a".into(),
+            },
+            EngineError::NoSuchDocument {
+                id: "plans:a".into(),
+            },
+            EngineError::NoSuchTask {
+                id: "plans:a".into(),
+            },
+            EngineError::NoSuchComment {
+                task: "plans:a".into(),
+                comment: "c".into(),
+            },
+            EngineError::SourceUnavailable {
+                name: "plans".into(),
+                error: source.clone(),
+            },
+            EngineError::SourceFailed {
+                name: "plans".into(),
+                error: source.clone(),
+            },
+            EngineError::DestinationUnavailable {
+                name: "plans".into(),
+                error: source.clone(),
+            },
+            EngineError::NoSuchItem {
+                id: "plans:a".into(),
+            },
+            EngineError::StaleOrigin {
+                item: "a".into(),
+                origin: "b".into(),
+            },
+            EngineError::NotAMember {
+                id: id(),
+                projects: vec![id()],
+            },
+            EngineError::SourceRefused {
+                name: "plans".into(),
+                error: source.clone(),
+            },
+        ];
+        for failure in &failures {
+            let classified = Classified::of_engine(failure);
+            let document = serde_json::to_value(onetaskgraph_core::Failure::from(failure))
+                .expect("the store's failure serializes");
+            assert_eq!(json!(classified.kind), document["kind"], "{failure:?}");
+            assert_eq!(
+                json!(classified.class),
+                document["class"],
+                "{failure:?} is classed otherwise than the store classes it"
+            );
+        }
     }
 
     #[test]
@@ -3588,9 +3272,7 @@ mod tests {
     fn the_close_out_phase_is_lifted_when_the_run_is_driven_again() {
         let writeback = Writeback {
             pending: Arc::new((Mutex::new(Pending::default()), Condvar::new())),
-            vocabulary: super::Vocabulary::WithDelivers,
             per_item: DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
-            told_why_not_delivered: std::sync::atomic::AtomicBool::new(false),
         };
         writeback.wait_briefly();
         assert!(
@@ -3618,24 +3300,27 @@ mod tests {
     ///
     /// What it watches is real: the thread [`Writeback::start`] spawns, the schedule that
     /// thread keeps, and its own reference to the state it shares — which it lets go of
-    /// when, and only when, `worker` returns. The destination refuses at the same
-    /// subprocess boundary a rate-limited one does, because the binary the run names is not
-    /// installed, which is a refusal this test can arrange without a store at all.
+    /// when, and only when, `worker` returns. The destination fails the way an unreachable
+    /// one does: the run's own `onetaskgraph.yaml` names a source whose plugin program is
+    /// not installed, which the linked store answers `unavailable` — a failure a wait can
+    /// change, so the worker keeps retrying it on the schedule.
     #[test]
     fn a_stop_reaches_a_worker_that_is_waiting_out_a_retry_interval() {
         let dir = scratch("stop-mid-wait");
+        std::fs::write(
+            dir.join("onetaskgraph.yaml"),
+            format!(
+                "sources:\n  plans:\n    plugin: subprocess\n    config:\n      command: {:?}\n",
+                dir.join("onetaskgraph-plugin-nobody-installed")
+            ),
+        )
+        .expect("the run's store configuration is written");
         let paths = RunPaths {
             run: "stopmidwait".to_owned(),
             dir: dir.to_path_buf(),
         };
         let launch = a_launch(&paths);
-        let writeback = Writeback::start(
-            dir.join("onetaskgraph-nobody-installed"),
-            "",
-            &paths,
-            &launch,
-        )
-        .expect("a write-back worker");
+        let writeback = Writeback::start(&paths, &launch).expect("a write-back worker");
         writeback.publish(&paths, &launch, &RunState::default(), &BTreeMap::new());
 
         // Four attempts in, the interval the worker is now waiting out is longer than every
@@ -3646,6 +3331,14 @@ mod tests {
         assert!(
             outstanding >= Duration::from_secs(2),
             "the streak is not deep enough for a stop to have anything to wait out: {waited:?}"
+        );
+        let recorded = attempts_recorded(&paths);
+        assert!(
+            std::fs::read_to_string(paths.dir.join(crate::cli::WRITEBACK_PROJECTIONS_FILE))
+                .expect("the record")
+                .lines()
+                .all(|line| line.contains("\"class\":\"transient\"")),
+            "an unreachable store was not classed transient"
         );
 
         let shared = Arc::clone(&writeback.pending);
@@ -3660,23 +3353,27 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(
-            !attempt_capture(&paths).exists(),
+        assert_eq!(
+            attempts_recorded(&paths),
+            recorded,
             "the worker asked the destination again on its way out"
         );
     }
 
-    /// The wall-clock intervals between the worker's next `count` attempts.
-    ///
-    /// An attempt is counted where the destination's side of the boundary is: the capture
-    /// file the worker creates for the store command it is about to run. This takes each
-    /// one away again, so the next one appearing is the next attempt rather than the same
-    /// file read twice — which a modification time this filesystem may round would not tell
-    /// apart.
+    /// How many attempts the worker has recorded: one line of the projection record each,
+    /// appended as the attempt ends.
+    fn attempts_recorded(paths: &RunPaths) -> usize {
+        std::fs::read_to_string(paths.dir.join(crate::cli::WRITEBACK_PROJECTIONS_FILE))
+            .map(|record| record.lines().count())
+            .unwrap_or(0)
+    }
+
+    /// The wall-clock intervals between the worker's next `count` attempts, each read off
+    /// the line the attempt appended to the run's projection record.
     fn intervals_between_attempts(paths: &RunPaths, count: usize) -> Vec<Duration> {
-        let capture = attempt_capture(paths);
         let deadline = Instant::now() + Duration::from_secs(60);
         let mut at: Vec<Instant> = Vec::new();
+        let mut seen = attempts_recorded(paths);
         while at.len() < count {
             assert!(
                 Instant::now() < deadline,
@@ -3684,18 +3381,15 @@ mod tests {
                  off",
                 at.len()
             );
-            if capture.exists() {
+            let now = attempts_recorded(paths);
+            if now > seen {
                 at.push(Instant::now());
-                std::fs::remove_file(&capture).expect("the capture file is taken away");
+                seen = now;
             } else {
                 std::thread::sleep(Duration::from_millis(5));
             }
         }
         at.windows(2).map(|pair| pair[1] - pair[0]).collect()
-    }
-
-    fn attempt_capture(paths: &RunPaths) -> PathBuf {
-        paths.dir.join("writeback-project-show.stderr")
     }
 
     /// A launch record naming a project to project into, and nothing else this worker reads.
@@ -3742,32 +3436,14 @@ mod tests {
         );
     }
 
-    /// The gate over `WRITEBACK_DELIVERS_FROM`, on both sides of the boundary: the release it
-    /// names and every later one offer `queued` and `delivers`, and the release before it, a
-    /// pre-release of it, and a version that does not read offer neither. What each side writes
-    /// follows from it: a driven unstarted node is `queued` and its shadow task carries `delivers`
-    /// on one side, and `todo` with no `delivers` on the other — and no reserved key carries the
-    /// tickets on either.
+    /// A driven unstarted node is written `queued` and its shadow task carries the tickets it
+    /// delivers in the store's own `delivers` field; a closeout writes it `todo`. No reserved
+    /// key carries the tickets on either side: the linked store always offers both.
     #[test]
-    fn the_store_vocabulary_gate_holds_on_both_sides_of_the_first_release_carrying_delivers() {
-        use super::Vocabulary;
-        let from = crate::cli::WRITEBACK_DELIVERS_FROM;
-        assert_eq!(Vocabulary::of(from), Vocabulary::WithDelivers);
-        assert_eq!(Vocabulary::of("0.3.0"), Vocabulary::WithDelivers);
-        for older in ["0.2.31", "0.2.32-rc.1", "0.1.0", ""] {
-            assert_eq!(Vocabulary::of(older), Vocabulary::BeforeDelivers, "{older}");
-        }
-        for (vocabulary, word, carried) in [
-            (
-                Vocabulary::WithDelivers,
-                "queued",
-                Some(json!(["tickets:t-1"])),
-            ),
-            (Vocabulary::BeforeDelivers, "todo", None),
-        ] {
-            let snapshot = Fixture::new("vocabulary").snapshot_with(|snapshot| {
-                snapshot.claim = vocabulary.driving_claim();
-                snapshot.vocabulary = vocabulary;
+    fn an_unstarted_node_is_queued_while_driven_and_carries_what_it_delivers() {
+        for (claim, word) in [(Claim::Held, "queued"), (Claim::Released, "todo")] {
+            let snapshot = Fixture::new("delivers").snapshot_with(|snapshot| {
+                snapshot.claim = claim;
                 snapshot
                     .statuses
                     .insert("design".to_owned(), NodeStatus::Ready);
@@ -3779,8 +3455,8 @@ mod tests {
             });
             let (front, _) = super::task_document(&snapshot, &snapshot.lineages(), "design", None)
                 .expect("the shadow task renders");
-            assert_eq!(front["status"], word, "{vocabulary:?}");
-            assert_eq!(front.get("delivers").cloned(), carried, "{vocabulary:?}");
+            assert_eq!(front["status"], word, "{claim:?}");
+            assert_eq!(front.get("delivers").cloned(), Some(json!(["tickets:t-1"])));
             assert!(
                 front["metadata"].get("onepipeline.delivers").is_none(),
                 "a reserved key carries the tickets: {front}"
@@ -3788,52 +3464,63 @@ mod tests {
         }
     }
 
-    /// A copy report's failed tickets are described only where every failed entry reads: a
-    /// well-formed one is named with its deliverer and the store's words on one line, a report
-    /// failing no ticket describes none, and an entry that does not validate — an unqualified
-    /// ticket, an unknown outcome, a failure with nothing in it — describes nothing at all.
+    /// A copy report's failed tickets are named with their deliverer and the store's words on
+    /// one line, a report failing no ticket describes none, and the class of each is the
+    /// store's own: refused only where every failed ticket's is.
     #[test]
-    fn a_delivered_report_is_described_only_where_every_failed_entry_reads() {
+    fn a_delivered_report_names_each_failed_ticket_and_is_classed_by_every_one() {
         use super::failed_deliveries;
-        let failure = json!({"class": "transient", "kind": "unavailable", "source": "tickets",
-                             "message": "cannot write\nnext: fix it", "retry_after_seconds": null});
-        let entry = |ticket: &str, outcome: &str, failure: Value| {
-            json!({"ticket": ticket, "deliverer": "plans:p/a", "outcome": outcome,
+        let failure = |class: &str, kind: &str| {
+            json!({"class": class, "kind": kind, "source": "tickets",
+                   "message": "cannot write\nnext: fix it", "retry_after_seconds": null})
+        };
+        let entry = |ticket: &str, failure: Value| {
+            json!({"ticket": ticket, "deliverer": "plans:p/a", "outcome": "failed",
                    "from": "queued", "failure": failure})
         };
-        let report = |entries: Vec<Value>| {
-            json!({"items": [], "delivered": entries})
-                .to_string()
-                .into_bytes()
+        let report = |entries: Vec<Value>| -> Vec<onetaskgraph_core::Delivered> {
+            serde_json::from_value(json!(entries)).expect("the store's own entries")
         };
+        let refused = report(vec![entry("tickets:t/one", failure("refused", "refused"))]);
         assert_eq!(
-            failed_deliveries(&report(vec![entry(
-                "tickets:t/one",
-                "failed",
-                failure.clone()
-            )]))
-            .as_deref(),
+            failed_deliveries(&refused).as_deref(),
             Some("ticket tickets:t/one (delivered by plans:p/a): cannot write next: fix it")
         );
+        let classed = |entries: &[onetaskgraph_core::Delivered]| {
+            Classified::of_all(entries.iter().filter_map(|entry| match &entry.outcome {
+                onetaskgraph_core::DeliveryOutcome::Failed { failure, .. } => {
+                    Classified::of_delivery(failure)
+                }
+                _ => None,
+            }))
+        };
         assert_eq!(
-            failed_deliveries(&report(vec![json!({
-                "ticket": "tickets:t/two", "deliverer": "plans:p/a", "outcome": "written",
-                "from": "todo", "to": "queued"
-            })])),
+            classed(&refused),
+            Some(Classified {
+                class: FailureClass::Refused,
+                kind: "refused".to_owned()
+            })
+        );
+        let mixed = report(vec![
+            entry("tickets:t/one", failure("refused", "refused")),
+            entry("tickets:t/two", failure("transient", "rate-limited")),
+        ]);
+        assert_eq!(
+            classed(&mixed),
+            Some(Classified {
+                class: FailureClass::Transient,
+                kind: "refused, rate-limited".to_owned(),
+            })
+        );
+        let written = report(vec![json!({
+            "ticket": "tickets:t/two", "deliverer": "plans:p/a", "outcome": "written",
+            "from": "todo", "to": "queued"
+        })]);
+        assert_eq!(
+            failed_deliveries(&written),
             None,
             "a report failing no ticket described one"
         );
-        for unreadable in [
-            entry("not qualified", "failed", failure.clone()),
-            entry("tickets:t/one", "exploded", failure.clone()),
-            entry("tickets:t/one", "failed", Value::Null),
-        ] {
-            assert_eq!(
-                failed_deliveries(&report(vec![unreadable.clone()])),
-                None,
-                "an entry that does not validate was described: {unreadable}"
-            );
-        }
     }
 
     /// Every word this projection writes, in the one arrangement that states them:
@@ -4073,7 +3760,7 @@ mod tests {
 
     /// The same complement, read off the destination the projection was written
     /// against.
-    fn preserved_of(destination: &DestinationProjectItem) -> Value {
+    fn preserved_of(destination: &Project) -> Value {
         let metadata: Map<String, Value> = destination
             .metadata
             .iter()
@@ -4113,7 +3800,7 @@ mod tests {
         dir: Scratch,
         snapshot: Snapshot,
         origins: BTreeMap<String, Origin>,
-        destination: DestinationProjectItem,
+        destination: Project,
     }
 
     impl Fixture {
@@ -4157,7 +3844,6 @@ mod tests {
                         json!(4),
                     )]),
                     claim: Claim::Held,
-                    vocabulary: super::Vocabulary::WithDelivers,
                 },
                 // Only `build`. A node the plan has just added has no destination
                 // task at all, and holding both kinds in one fixture is what makes
@@ -4167,7 +3853,7 @@ mod tests {
                     Origin {
                         id: "plans:board/002-build".parse().expect("a qualified task"),
                         labels: labels(&[("needs-review", Some("d73a4a"))]),
-                        category: Some(DestinationCategory::Done),
+                        category: Some(StatusCategory::Done),
                     },
                 )]),
                 destination: destination("A person's own board", &["planning", "q3"]),
@@ -4224,7 +3910,7 @@ mod tests {
     /// produced the same bytes.
     fn undiscriminating(
         fixture: &str,
-        destination: &DestinationProjectItem,
+        destination: &Project,
         snapshot: &Snapshot,
         origins: &BTreeMap<String, Origin>,
     ) -> Option<String> {
@@ -4312,10 +3998,8 @@ mod tests {
 
     /// The destination project a projection is written against.
     ///
-    /// Built out of the sibling's own machine response rather than by naming
-    /// fields, so the shape this projection reads is the shape `project show
-    /// --json` answers in.
-    fn destination(title: &str, labels: &[&str]) -> DestinationProjectItem {
+    /// Built as the store's own `Project` value, which is what the projection reads.
+    fn destination(title: &str, labels: &[&str]) -> Project {
         serde_json::from_value(json!({
             "id": "board",
             "title": title,
@@ -4331,15 +4015,15 @@ mod tests {
             "metadata": {"authored.note": "keep this value", "authored.owner": "a person"},
             "repositories": [],
         }))
-        .expect("the sibling's own project response")
+        .expect("the store's own project")
     }
 
-    fn labels(named: &[(&str, Option<&str>)]) -> Vec<DestinationLabel> {
+    fn labels(named: &[(&str, Option<&str>)]) -> Vec<Label> {
         serde_json::from_value(json!(named
             .iter()
             .map(|(name, color)| json!({"id": name, "name": name, "color": color}))
             .collect::<Vec<_>>()))
-        .expect("the sibling's own labels")
+        .expect("the store's own labels")
     }
 
     /// The rule's first consequence: everything a plan declares is replaced,
@@ -4678,10 +4362,27 @@ mod tests {
         assert_eq!(build["metadata"]["onepipeline.landing"], "unlanded");
     }
 
-    use super::{
-        decide_member_copy_once, member_id, Carry, CopyReport, ProjectionActions, WholeBecause,
-    };
-    use crate::cli::{WRITEBACK_MEMBERS_FROM, WRITEBACK_STORE_FILE};
+    use super::{member_id, Carry, ProjectionActions, WholeBecause};
+
+    /// What a copy report counts against what the attempt read before it, as the worker
+    /// counts it.
+    trait ActionsAgainst {
+        fn actions_against(
+            &self,
+            snapshot: &Snapshot,
+            before: &BTreeMap<String, Origin>,
+        ) -> ProjectionActions;
+    }
+
+    impl ActionsAgainst for onetaskgraph_core::CopyReport {
+        fn actions_against(
+            &self,
+            snapshot: &Snapshot,
+            before: &BTreeMap<String, Origin>,
+        ) -> ProjectionActions {
+            super::actions(self, snapshot, before)
+        }
+    }
 
     /// The node ids a decision carries as members, refusing a whole one.
     fn named(carry: &Carry) -> Vec<String> {
@@ -4700,23 +4401,20 @@ mod tests {
         let last = fixture.snapshot.clone();
 
         assert_eq!(
-            named(&Carry::decide(true, false, Some(&last), &last)),
+            named(&Carry::decide(false, Some(&last), &last)),
             Vec::<String>::new(),
             "a snapshot the last success already projected carried a node"
         );
 
         let mut one = last.clone();
         one.statuses.insert("build".to_owned(), NodeStatus::Running);
-        assert_eq!(
-            named(&Carry::decide(true, false, Some(&last), &one)),
-            ["build"]
-        );
+        assert_eq!(named(&Carry::decide(false, Some(&last), &one)), ["build"]);
 
         let mut both = one.clone();
         both.settlements
             .insert("design".to_owned(), json!({"status": "done"}));
         assert_eq!(
-            named(&Carry::decide(true, false, Some(&last), &both)),
+            named(&Carry::decide(false, Some(&last), &both)),
             ["build", "design"]
         );
 
@@ -4731,7 +4429,7 @@ mod tests {
             .statuses
             .insert("design".to_owned(), NodeStatus::Ready);
         assert_eq!(
-            named(&Carry::decide(true, false, Some(&pending), &ready)),
+            named(&Carry::decide(false, Some(&pending), &ready)),
             Vec::<String>::new()
         );
 
@@ -4740,7 +4438,7 @@ mod tests {
         verify.id = "verify".to_owned();
         added.nodes.insert("verify".to_owned(), verify);
         assert_eq!(
-            named(&Carry::decide(true, false, Some(&last), &added)),
+            named(&Carry::decide(false, Some(&last), &added)),
             ["verify"]
         );
 
@@ -4749,7 +4447,7 @@ mod tests {
             .project_metadata
             .insert("onepipeline.goal".to_owned(), json!("a goal restated"));
         assert_eq!(
-            named(&Carry::decide(true, false, Some(&last), &project_level)),
+            named(&Carry::decide(false, Some(&last), &project_level)),
             Vec::<String>::new(),
             "a change only the project item carries named a task"
         );
@@ -4779,44 +4477,43 @@ mod tests {
             "entry 73 ranks other reasons than it names"
         );
         let snapshot = Fixture::new("whole").snapshot.clone();
-        for members in [true, false] {
-            for after_failure in [true, false] {
-                for landed in [true, false] {
-                    let applies = |reason: &str| match reason {
-                        "store-lacks-members" => !members,
-                        "after-failure" => after_failure,
-                        "first" => !landed,
-                        other => {
-                            panic!("entry 73 names a reason the worker never decides: {other}")
-                        }
-                    };
-                    let expected = precedence.iter().find(|reason| applies(reason));
-                    let decided = Carry::decide(
-                        members,
-                        after_failure,
-                        landed.then_some(&snapshot),
-                        &snapshot,
-                    );
-                    match (expected, decided) {
-                        (Some(reason), Carry::Whole(because)) => assert_eq!(
-                            serde_json::to_value(because).expect("a reason serializes"),
-                            json!(reason),
-                            "members {members}, after a failure {after_failure}, landed {landed}"
-                        ),
-                        (None, Carry::Members(_)) => {}
-                        (expected, Carry::Whole(because)) => panic!(
-                            "decided whole ({because:?}) where entry 73 expects {expected:?}"
-                        ),
-                        (expected, Carry::Members(_)) => {
-                            panic!("decided members where entry 73 expects {expected:?}")
-                        }
+        for after_failure in [true, false] {
+            for landed in [true, false] {
+                let applies = |reason: &str| match reason {
+                    "after-failure" => after_failure,
+                    "first" => !landed,
+                    other => panic!("entry 73 names a reason the worker never decides: {other}"),
+                };
+                let expected = precedence.iter().find(|reason| applies(reason));
+                let decided = Carry::decide(after_failure, landed.then_some(&snapshot), &snapshot);
+                match (expected, decided) {
+                    (Some(reason), Carry::Whole(because)) => assert_eq!(
+                        serde_json::to_value(because).expect("a reason serializes"),
+                        json!(reason),
+                        "after a failure {after_failure}, landed {landed}"
+                    ),
+                    (None, Carry::Members(_)) => {}
+                    (expected, Carry::Whole(because)) => {
+                        panic!("decided whole ({because:?}) where entry 73 expects {expected:?}")
+                    }
+                    (expected, Carry::Members(_)) => {
+                        panic!("decided members where entry 73 expects {expected:?}")
                     }
                 }
             }
         }
+        // The reason an engine that drove the store's binary gave for a store older than
+        // the member copy is one this build reads and never gives.
+        let read_only = block["projection"]["whole_because_read_only"]
+            .as_object()
+            .expect("entry 73 names the reason it reads and never writes");
         assert_eq!(
-            serde_json::to_value(WholeBecause::StoreLacksMembers).expect("serializes"),
-            json!("store-lacks-members")
+            read_only.keys().collect::<Vec<_>>(),
+            vec![&serde_json::to_value(WholeBecause::StoreLacksMembers)
+                .expect("serializes")
+                .as_str()
+                .expect("a word")
+                .to_owned()]
         );
     }
 
@@ -4828,7 +4525,7 @@ mod tests {
     fn a_copy_report_is_counted_and_teaches_the_run_where_a_created_node_landed() {
         let fixture = Fixture::new("report");
         let snapshot = &fixture.snapshot;
-        let report: CopyReport = serde_json::from_value(json!({
+        let report: onetaskgraph_core::CopyReport = serde_json::from_value(json!({
             "items": [
                 {"source": format!("onepipeline-writeback:{}", super::project_file(&snapshot.project)),
                  "action": "unchanged", "destination": "plans:board"},
@@ -4843,7 +4540,7 @@ mod tests {
         }))
         .expect("the store's own report reads");
         assert_eq!(
-            report.actions(snapshot, &fixture.origins),
+            super::actions(&report, snapshot, &fixture.origins),
             ProjectionActions {
                 created: 1,
                 updated: 1,
@@ -4855,49 +4552,43 @@ mod tests {
             }
         );
         assert_eq!(
-            report.spent,
+            report.spent.as_ref().map(super::verbatim),
             Some(
                 json!({"requests": 3, "budgets": []})
                     .as_object()
                     .cloned()
                     .expect("an object")
-            )
+            ),
+            "the record's `spent` is not the store's own, verbatim"
         );
 
         let mut origins = fixture.origins.clone();
-        report.learn(&mut origins, snapshot);
+        super::learn(&report, &mut origins, snapshot);
         assert_eq!(
             origins.len(),
             2,
             "an item that is no node's shadow task taught a node"
         );
-        assert_eq!(origins["design"].id.as_str(), "plans:board/003-design");
+        assert_eq!(origins["design"].id.to_string(), "plans:board/003-design");
         assert!(origins["design"].labels.is_empty());
-        assert_eq!(origins["build"].id.as_str(), "plans:board/002-build");
+        assert_eq!(origins["build"].id.to_string(), "plans:board/002-build");
         assert_eq!(
             origins["build"].labels.len(),
             1,
             "an updated node the run already knew lost the labels it was read with"
-        );
-
-        assert!(
-            serde_json::from_value::<CopyReport>(json!({
-                "items": [{"source": "plans:board/a", "action": "moved", "destination": "plans:board/b"}]
-            }))
-            .is_err(),
-            "a report naming an action this build does not know was read"
         );
     }
 
     /// A destination the store reports both `updated` and `orphaned` in one copy — an item an
     /// older build wrote, reused for a lineage while it still carried that build's origin — is
     /// counted under `updated` alone. An orphan at a destination the copy did not rewrite still
-    /// counts, and so does one the store names no destination for.
+    /// counts. (The store's own `CopyAction` gives every orphan a destination, so an orphan
+    /// naming none is no longer a report this build can be handed.)
     #[test]
     fn a_destination_the_copy_updated_is_not_also_counted_orphaned() {
         let fixture = Fixture::new("reused");
         let snapshot = &fixture.snapshot;
-        let report: CopyReport = serde_json::from_value(json!({
+        let report: onetaskgraph_core::CopyReport = serde_json::from_value(json!({
             "items": [
                 {"source": member_id(snapshot, "build"), "action": "updated",
                  "destination": "plans:board/002-build"},
@@ -4905,91 +4596,18 @@ mod tests {
                  "destination": "plans:board/002-build"},
                 {"source": "elsewhere:board/gone", "action": "orphaned",
                  "destination": "plans:board/009-gone"},
-                {"source": "elsewhere:board/unplaced", "action": "orphaned"},
             ],
         }))
         .expect("the store's own report reads");
         assert_eq!(
-            report.actions(snapshot, &fixture.origins),
+            super::actions(&report, snapshot, &fixture.origins),
             ProjectionActions {
                 created: 0,
                 updated: 1,
                 unchanged: 0,
-                orphaned: 2,
+                orphaned: 1,
                 reopened: 0,
             }
-        );
-    }
-
-    /// Whether the store offers a member copy is decided from the version once, recorded in the
-    /// run's directory in the shape entry 73 states, and read back from there by every later
-    /// decision — so a driver reading a newer version keeps the run's answer.
-    #[test]
-    fn whether_the_store_offers_a_member_copy_is_decided_once_and_read_back_after() {
-        let block = divergence_block("73.");
-        let detection = &block["detection"];
-        assert_eq!(
-            detection["members_from"].as_str(),
-            Some(WRITEBACK_MEMBERS_FROM)
-        );
-        assert!(crate::taskgraph::at_least(
-            WRITEBACK_MEMBERS_FROM,
-            WRITEBACK_MEMBERS_FROM
-        ));
-        assert!(crate::taskgraph::at_least("0.3.0", WRITEBACK_MEMBERS_FROM));
-        assert!(!crate::taskgraph::at_least(
-            "0.2.29",
-            WRITEBACK_MEMBERS_FROM
-        ));
-        assert!(!crate::taskgraph::at_least(
-            "0.2.30-rc.1",
-            WRITEBACK_MEMBERS_FROM
-        ));
-        assert!(!crate::taskgraph::at_least("", WRITEBACK_MEMBERS_FROM));
-
-        let dir = scratch("members-record");
-        assert!(!decide_member_copy_once(&dir, "0.2.29"));
-        let path = dir.join(WRITEBACK_STORE_FILE);
-        let recorded: Value =
-            serde_json::from_slice(&std::fs::read(&path).expect("the answer is recorded"))
-                .expect("the record is JSON");
-        assert_eq!(recorded, json!({"version": "0.2.29", "members": false}));
-        assert_eq!(
-            recorded
-                .as_object()
-                .map(|record| record.keys().collect::<Vec<_>>()),
-            detection["record_example"]
-                .as_object()
-                .map(|record| record.keys().collect::<Vec<_>>()),
-            "the record is not the shape entry 73 states"
-        );
-        assert!(
-            !decide_member_copy_once(&dir, "0.2.30"),
-            "a later decision asked the version again rather than reading the run's answer"
-        );
-
-        std::fs::write(&path, "not a record").expect("the record is spoiled");
-        assert!(
-            decide_member_copy_once(&dir, "0.2.30"),
-            "a record that does not read was kept"
-        );
-        assert_eq!(
-            serde_json::from_slice::<Value>(&std::fs::read(&path).expect("a record"))
-                .expect("JSON"),
-            detection["record_example"],
-        );
-
-        // A record whose decision disagrees with its version is no record of the answer.
-        std::fs::write(&path, r#"{"version": "0.2.29", "members": true}"#)
-            .expect("a contradictory record is written");
-        assert!(
-            decide_member_copy_once(&dir, "0.2.30"),
-            "a record whose `members` its version contradicts was trusted"
-        );
-        assert_eq!(
-            serde_json::from_slice::<Value>(&std::fs::read(&path).expect("a record"))
-                .expect("JSON"),
-            json!({"version": "0.2.30", "members": true}),
         );
     }
 
@@ -5167,7 +4785,7 @@ mod tests {
         retried(&mut fixture, false);
         let once = fixture.snapshot.clone();
         assert_eq!(
-            named(&Carry::decide(true, false, Some(&last), &once)),
+            named(&Carry::decide(false, Some(&last), &once)),
             ["build", "ship"],
             "a retry named the replacement as a member of its own, or missed the root"
         );
@@ -5176,12 +4794,12 @@ mod tests {
         retried(&mut fixture, true);
         let twice = fixture.snapshot.clone();
         assert_eq!(
-            named(&Carry::decide(true, false, Some(&once), &twice)),
+            named(&Carry::decide(false, Some(&once), &twice)),
             ["build"],
             "a second retry of one lineage named something other than its root"
         );
         assert_eq!(
-            named(&Carry::decide(true, false, Some(&twice), &twice)),
+            named(&Carry::decide(false, Some(&twice), &twice)),
             Vec::<String>::new()
         );
     }
@@ -5205,14 +4823,18 @@ mod tests {
             if let Some(node) = node {
                 metadata[NODE_KEY] = json!(node);
             }
-            serde_json::from_value::<super::DestinationTask>(json!({
-                "id": format!("plans:board/{file}"),
-                "item": {"labels": [], "metadata": metadata,
-                         "status": {"category": category, "name": category}},
-            }))
-            .expect("the sibling's own task response")
+            serde_json::from_value::<onetaskgraph_core::Qualified<onetaskgraph_plugin_api::Task>>(
+                json!({
+                    "id": format!("plans:board/{file}"),
+                    "item": {"id": format!("board/{file}"), "title": file, "content": null,
+                             "labels": [], "project": "board", "url": null,
+                             "created_at": null, "updated_at": null, "metadata": metadata,
+                             "status": {"category": category, "name": category}},
+                }),
+            )
+            .expect("the store's own task")
         };
-        let place = |items: Vec<super::DestinationTask>| {
+        let place = |items: Vec<onetaskgraph_core::Qualified<onetaskgraph_plugin_api::Task>>| {
             super::furthest_along(
                 items
                     .into_iter()
@@ -5237,11 +4859,11 @@ mod tests {
             "the fold keyed something other than lineage roots and strays"
         );
         assert_eq!(
-            origins["build"].id.as_str(),
+            origins["build"].id.to_string(),
             "plans:board/004-build-2",
             "the lineage was not resolved to its furthest-along item"
         );
-        assert_eq!(origins["design"].id.as_str(), "plans:board/002-design");
+        assert_eq!(origins["design"].id.to_string(), "plans:board/002-design");
         assert!(
             !origins.contains_key("ship"),
             "a lineage the board holds nothing for was given an origin"
@@ -5249,7 +4871,7 @@ mod tests {
         let mut reversed = older();
         reversed.reverse();
         assert_eq!(
-            place(reversed).expect("resolves")["build"].id.as_str(),
+            place(reversed).expect("resolves")["build"].id.to_string(),
             "plans:board/004-build-2",
             "the order the page answered in decided the fold"
         );
@@ -5262,7 +4884,7 @@ mod tests {
         ];
         let origins = place(rewritten).expect("a board this build wrote over resolves again");
         assert_eq!(
-            origins["build"].id.as_str(),
+            origins["build"].id.to_string(),
             "plans:board/004-build-2",
             "the rewritten head lost to the older item at the root"
         );
@@ -5303,7 +4925,7 @@ mod tests {
             item("004-build-2", "build-2", None, "cancelled"),
         ])
         .expect("resolves");
-        assert_eq!(stray["build"].id.as_str(), "plans:board/004-build-2");
+        assert_eq!(stray["build"].id.to_string(), "plans:board/004-build-2");
 
         // A reserved key present as other than a non-empty string is the destination's
         // answer being wrong, refused by the task and key rather than read as absent.
@@ -5397,7 +5019,7 @@ mod tests {
                 Origin {
                     id: "plans:board/002-build".parse().expect("a qualified task"),
                     labels: Vec::new(),
-                    category: Some(DestinationCategory::Cancelled),
+                    category: Some(StatusCategory::Cancelled),
                 },
             ),
             (
@@ -5405,7 +5027,7 @@ mod tests {
                 Origin {
                     id: "plans:board/003-design".parse().expect("a qualified task"),
                     labels: Vec::new(),
-                    category: Some(DestinationCategory::Done),
+                    category: Some(StatusCategory::Done),
                 },
             ),
         ]);
@@ -5413,7 +5035,7 @@ mod tests {
             json!({"source": member_id(snapshot, root), "action": action,
                    "destination": format!("plans:board/00x-{root}")})
         };
-        let report = |items: Vec<Value>| -> CopyReport {
+        let report = |items: Vec<Value>| -> onetaskgraph_core::CopyReport {
             serde_json::from_value(json!({"items": items})).expect("the store's report reads")
         };
         let counted = report(vec![
@@ -5423,7 +5045,7 @@ mod tests {
             json!({"source": "elsewhere:board/gone", "action": "updated",
                    "destination": "plans:board/009-gone"}),
         ])
-        .actions(snapshot, &before);
+        .actions_against(snapshot, &before);
         assert_eq!(
             counted,
             ProjectionActions {
@@ -5443,7 +5065,7 @@ mod tests {
             .category = None;
         assert_eq!(
             report(vec![item("build", "updated")])
-                .actions(snapshot, &unknown)
+                .actions_against(snapshot, &unknown)
                 .reopened,
             0,
             "an item whose category nobody read was counted reopened"
@@ -5455,17 +5077,17 @@ mod tests {
             .insert("build-2".to_owned(), NodeStatus::Cancelled);
         assert_eq!(
             report(vec![item("build", "updated")])
-                .actions(&dropped, &before)
+                .actions_against(&dropped, &before)
                 .reopened,
             0,
             "a cancelled item rewritten cancelled was counted reopened"
         );
-        // A store older than `queued` writes `todo`, which is open too.
+        // A closeout's `todo`, the word a released claim is written under, is open too.
         let mut released = fixture.snapshot.clone();
         released.claim = Claim::Released;
         assert_eq!(
             report(vec![item("build", "updated")])
-                .actions(&released, &before)
+                .actions_against(&released, &before)
                 .reopened,
             1
         );

@@ -240,7 +240,7 @@ fn check_node_sets(plan: &crate::plan::Plan) -> std::result::Result<(), Refusal>
 /// not a read at all. `Err` is the project not being readable, which is a
 /// different answer from a plan the schema refuses: see [`Load`].
 fn load_and_check(args: &PlanCheckArgs) -> Result<Answered> {
-    let store = Store::resolve()?;
+    let store = Store::discovered()?;
     let project: QualifiedId = args.project.parse()?;
 
     // A check is handed the *loaded* plan, so a loader refusal leaves nothing to
