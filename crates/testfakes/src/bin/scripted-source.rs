@@ -258,7 +258,7 @@ fn main() -> ExitCode {
 struct Scripted {
     script: PathBuf,
     key: Key,
-    /// What the writes served so far have spent, where the scenario meters them.
+    /// What the requests served so far have spent, where the scenario meters them.
     spent: Metering,
     /// The methods this source has been handed at least once, answered or not.
     handed: std::collections::BTreeSet<String>,

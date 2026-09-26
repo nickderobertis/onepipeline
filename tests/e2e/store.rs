@@ -256,39 +256,72 @@ fn the_store_is_discovered_from_the_launch_directory_by_the_read_and_by_every_wr
     // The launch directory's configuration stops loading: the next projection is refused by
     // the store's own reading of it — a document it cannot parse, which no retry changes —
     // and reported once. Put right, the next change to the graph projects again.
+    // Each way the store will not run on it: a document it cannot read, one it cannot parse,
+    // and a setting it refuses — each its own kind, and none of them retried on a timer.
     let document = launch.join("onetaskgraph.yaml");
     let configured = std::fs::read_to_string(&document).expect("the configuration reads");
-    std::fs::write(&document, "sources: [this is not a mapping\n")
-        .expect("the configuration is broken");
-    noted(
-        &world,
-        name,
-        "later",
-        "projected through a broken configuration",
-    );
-    world.until("the broken configuration to be reported", |world| {
-        streaks_reported(world, name) >= 1
-    });
-    let said = the_line_reported(&world, name);
-    assert!(
-        said.contains("the store's configuration cannot be read")
-            && said.contains("class: refused, kind: config-syntax")
-            && said.contains("attempted again when the run's graph next changes"),
-        "the line does not report the configuration the store refused: {said}"
-    );
-    std::fs::write(&document, configured).expect("the configuration is put right");
-    noted(&world, name, "later", "projected once it was put right");
-    world.until("the projection to recover", |world| {
-        std::fs::read_to_string(world.run_file(name, "driver.log"))
-            .is_ok_and(|log| log.contains("onetaskgraph write-back recovered"))
-    });
-    world.until_store("the change after the repair to reach the board", |world| {
-        world.store_tasks(&project).iter().any(|task| {
-            task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"]
-                    == "projected once it was put right"
-        })
-    });
+    let log = |world: &World| {
+        std::fs::read_to_string(world.run_file(name, "driver.log")).unwrap_or_default()
+    };
+    for (kind, broken) in [
+        ("config-read", None),
+        ("config-syntax", Some("sources: [this is not a mapping\n")),
+        ("config-setting", Some("page_size: never\n")),
+    ] {
+        match broken {
+            Some(text) => std::fs::write(&document, text).expect("the configuration is broken"),
+            // A directory where the document is: there, and not a document the store can read.
+            None => {
+                std::fs::remove_file(&document).expect("the configuration is taken away");
+                std::fs::create_dir(&document).expect("a directory stands in its place");
+            }
+        }
+        let reported = log(&world)
+            .matches("onetaskgraph write-back failed")
+            .count();
+        noted(
+            &world,
+            name,
+            "later",
+            &format!("projected through a {kind} failure"),
+        );
+        world.until(&format!("the {kind} failure to be reported"), |world| {
+            log(world).matches("onetaskgraph write-back failed").count() > reported
+        });
+        let said = log(&world)
+            .lines()
+            .filter(|line| line.contains("onetaskgraph write-back failed"))
+            .last()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            said.contains("the store's configuration cannot be read")
+                && said.contains(&format!("class: refused, kind: {kind}"))
+                && said.contains("attempted again when the run's graph next changes"),
+            "the line does not report the configuration the store refused: {said}"
+        );
+        if broken.is_none() {
+            std::fs::remove_dir(&document).expect("the directory is taken away");
+        }
+        std::fs::write(&document, &configured).expect("the configuration is put right");
+        let recovered = log(&world)
+            .matches("onetaskgraph write-back recovered")
+            .count();
+        let repaired = format!("projected once the {kind} failure was put right");
+        noted(&world, name, "later", &repaired);
+        world.until("the projection to recover", |world| {
+            log(world)
+                .matches("onetaskgraph write-back recovered")
+                .count()
+                > recovered
+        });
+        world.until_store("the change after the repair to reach the board", |world| {
+            world.store_tasks(&project).iter().any(|task| {
+                task["item"]["metadata"]["onepipeline.id"] == "later"
+                    && task["item"]["metadata"]["onepipeline.context"] == repaired.as_str()
+            })
+        });
+    }
     world.release("work.go");
     world.until("the run to settle", |world| {
         world.run_file(name, "result.json").is_file()
@@ -1326,10 +1359,11 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
 }
 
 /// A member attempt is refused whichever of the calls it makes the store refuses: the read of
-/// a member the copy names, the copy, or the project read answered as a partial response
-/// every source of which refused. Each is reported once under the store's own kind, and none is asked again
-/// on a timer. The graph change each scenario makes is a member projection, which reads a named
-/// member rather than a page of the project's tasks; a whole projection's page of tasks refused
+/// a member the copy names — refused, or answered with nothing because the item is gone — the
+/// copy, or the project read answered as a partial response every source of which refused.
+/// Each is reported once under the store's own kind, and none is asked again on a timer. The
+/// graph change each scenario makes is a member projection, which reads a named member rather
+/// than a page of the project's tasks; a whole projection's page of tasks refused
 /// is `writeback_projections::a_projection_after_a_failed_attempt_is_whole`'s.
 #[test]
 fn a_refusal_of_the_member_read_the_copy_or_the_project_read_stops_the_retry_timer() {
@@ -1337,19 +1371,27 @@ fn a_refusal_of_the_member_read_the_copy_or_the_project_read_stops_the_retry_tim
         (
             "task-show",
             "get_task",
-            source_refused(),
+            Some(source_refused()),
             "class: refused, kind: refused",
+        ),
+        // The member's own item is not there any more: the read answers nothing, with no
+        // failure beside it, which is the store's own reading of an item that is gone.
+        (
+            "member-gone",
+            "get_task",
+            None,
+            "class: refused, kind: no-such-item",
         ),
         (
             "project-copy",
             "write_task",
-            source_refused(),
+            Some(source_refused()),
             "class: refused, kind: refused",
         ),
         (
             "partial",
             "get_project",
-            source_misconfigured(),
+            Some(source_misconfigured()),
             "class: refused, kind: config",
         ),
     ] {
@@ -1358,7 +1400,10 @@ fn a_refusal_of_the_member_read_the_copy_or_the_project_read_stops_the_retry_tim
             &format!("store-writeback-refused-{scenario}"),
             &run,
         );
-        world.store_refuses(method, &error);
+        match &error {
+            Some(error) => world.store_refuses(method, error),
+            None => world.script(&format!("store.{method}.absent"), ""),
+        }
         noted(&world, &run, "later", &format!("refuse this at {scenario}"));
         world.until(&format!("the {scenario} refusal to be reported"), |world| {
             streaks_reported(world, &run) >= 1
