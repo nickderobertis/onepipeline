@@ -2464,6 +2464,195 @@ fn the_pool_maintenance_schedule_is_what_the_divergence_record_names() {
     }
 }
 
+/// The branch-name template this build takes is exactly what the amended contract
+/// names.
+///
+/// The block is the source: the flag is asked of the parser, the key of the launch
+/// config at the version the block states and at none before it, the default and the
+/// variable namespace of the public renderer — the default rendered over the block's
+/// own variables, with a key and without one — the task record of the public node
+/// type, and the field a name is handed to `onevcs` in of the sibling's own request.
+/// `tests/e2e/branch_template.rs` drives each through the real binary and the real
+/// sibling.
+#[test]
+fn the_branch_name_template_is_what_the_contract_names() {
+    use onepipeline::branchname::{
+        render, CONFIG_SCHEMA_VERSION, DEFAULT_TEMPLATE, ENVIRONMENT, FLAG, KEY,
+    };
+    let block: Value = serde_json::from_str(&fenced_block_naming("json", "\"branch_template\": {"))
+        .expect("the branch-name block is JSON");
+    let block = &block["branch_template"];
+    assert_eq!(block["flag"].as_str(), Some(FLAG));
+    assert_eq!(block["environment"].as_str(), Some(ENVIRONMENT));
+    assert_eq!(block["config_key"].as_str(), Some(KEY));
+    assert_eq!(block["launch_record_key"].as_str(), Some(KEY));
+
+    // The flag, and `adopt` not taking it.
+    let Command::Start(started) =
+        Cli::try_parse_from(["onepipeline", "start", "plans:demo", FLAG, "{{ node.id }}"])
+            .expect("the flag the block names is one `start` takes")
+            .command
+    else {
+        panic!("that is not a start")
+    };
+    assert_eq!(started.branch_template.as_deref(), Some("{{ node.id }}"));
+    let refused = Cli::try_parse_from(["onepipeline", "adopt", "demo", FLAG, "x"])
+        .expect_err("adopt takes no template");
+    assert!(refused.to_string().contains(FLAG), "{refused}");
+
+    // The key, at the version the block states and refused by name before it.
+    let at = u32::try_from(
+        block["config_schema_version"]
+            .as_u64()
+            .expect("the block states the version the key arrived at"),
+    )
+    .expect("a version fits");
+    assert_eq!(at, CONFIG_SCHEMA_VERSION);
+    assert_eq!(at, LAUNCH_CONFIG_SCHEMA_VERSION);
+    let example: LaunchConfig =
+        serde_norway::from_str(&fenced_block_naming("yaml", "branch_template:"))
+            .expect("the contract's launch example parses");
+    assert_eq!(example.schema_version, at);
+    assert_eq!(
+        example.branch_template.as_deref(),
+        Some("{{ task.key }}/{{ node.id }}")
+    );
+    let dir = std::env::temp_dir().join(format!(
+        "onepipeline-contract-branch-template-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    for version in LAUNCH_CONFIG_SCHEMA_VERSIONS_READ
+        .into_iter()
+        .filter(|version| *version < at)
+    {
+        let path = dir.join(format!("{version}.yaml"));
+        std::fs::write(&path, format!("schema_version: {version}\n{KEY}: x\n"))
+            .expect("the config is written");
+        let refused = LaunchConfig::load(&path)
+            .expect_err("a version that never had the key refuses it")
+            .to_string();
+        assert!(
+            refused.contains(&format!("`{KEY}` is a schema {at} key")),
+            "schema {version} did not refuse `{KEY}` by its name: {refused}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // The default, rendered over exactly the namespace the block names.
+    assert_eq!(block["default"].as_str(), Some(DEFAULT_TEMPLATE));
+    let variables = block["variables"].clone();
+    let names = |value: &Value| -> BTreeSet<String> {
+        value
+            .as_object()
+            .expect("a namespace is a mapping")
+            .keys()
+            .cloned()
+            .collect()
+    };
+    assert_eq!(
+        names(&variables),
+        BTreeSet::from(["task", "plan", "node", "run"].map(String::from))
+    );
+    assert_eq!(
+        names(&variables["task"]),
+        BTreeSet::from(["key", "id", "title", "delivers"].map(String::from))
+    );
+    assert_eq!(
+        names(&variables["plan"]),
+        BTreeSet::from(["name", "id"].map(String::from))
+    );
+    assert_eq!(names(&variables["node"]), BTreeSet::from(["id".to_owned()]));
+    assert_eq!(
+        render(DEFAULT_TEMPLATE, &variables).as_deref(),
+        Ok(block["rendered"]
+            .as_str()
+            .expect("the block names what it renders"))
+    );
+    let mut keyless = variables.clone();
+    keyless["task"]
+        .as_object_mut()
+        .expect("a task")
+        .remove("key");
+    assert_eq!(
+        render(DEFAULT_TEMPLATE, &keyless).as_deref(),
+        Ok(block["rendered_without_key"]
+            .as_str()
+            .expect("the block names what a keyless task renders"))
+    );
+    // Each variable reaches the renderer under the name the block gives it.
+    for (path, value) in [
+        ("task.key", "ENG-123"),
+        ("task.id", "demo-board/000-build"),
+        ("task.title", "feat: build it"),
+        ("task.delivers[0]", "tickets:board/ENG-123"),
+        ("plan.name", "demo"),
+        ("plan.id", "plans:demo-board"),
+        ("node.id", "build"),
+        ("run", "demo"),
+    ] {
+        assert_eq!(
+            render(&format!("{{{{ {path} }}}}"), &variables).as_deref(),
+            Ok(value),
+            "{path}"
+        );
+    }
+    // Printing a key a task does not have is a failure, not an empty segment.
+    assert!(render("{{ task.key }}", &keyless).is_err());
+
+    // The task record the node carries, and the field a name to cut travels in.
+    let record: TaskRecord =
+        serde_json::from_value(block["task_record"].clone()).expect("the task record parses");
+    assert_eq!(
+        serde_json::to_value(&record).expect("serializes"),
+        block["task_record"]
+    );
+    assert_eq!(record.key.as_deref(), variables["task"]["key"].as_str());
+    assert_eq!(record.id, variables["task"]["id"].as_str().expect("an id"));
+    let request = serde_json::to_value(SessionRequest {
+        repo: "owner/repo".into(),
+        branch: None,
+        branch_name: Some("ENG-123/build".into()),
+        branch_prefix: None,
+        base: None,
+        execution_checkout: None,
+        pool: None,
+        overflow: None,
+        labels: Default::default(),
+    })
+    .expect("a request serializes");
+    let field = block["session_request_field"]
+        .as_str()
+        .expect("the block names the field");
+    assert_eq!(request[field], "ENG-123/build");
+
+    // The outcome word is the engine's own and private, so it is held to the
+    // contract's own closed list rather than imported.
+    let outcome = block["refusal_outcome"].as_str().expect("an outcome word");
+    assert_eq!(outcome, "infrastructure-failure");
+    let tokens = backticked();
+    assert!(tokens.contains(outcome));
+    for token in [KEY, ENVIRONMENT, "schema_version: 11", "task_record"] {
+        assert!(
+            tokens.contains(token),
+            "the contract no longer names `{token}`"
+        );
+    }
+    assert!(tokens.contains(&format!("{FLAG} TEMPLATE")));
+    for names in [
+        "**The template applies only when a branch is cut.**",
+        "set only where the request sets no `branch`",
+        "no sanitization, no prefix, no suffix, no existence check",
+        "and no run is minted",
+        "with no session opened and no branch cut",
+    ] {
+        assert!(
+            CONTRACT.contains(names),
+            "the contract no longer states {names}"
+        );
+    }
+}
+
 /// Every field a summary document carries, taken off a value built through the
 /// type with every absence filled in.
 ///
@@ -6257,6 +6446,10 @@ const RULINGS: &[(&str, &str)] = &[
     ("82.", "held under `workspace`"),
     ("83.", "pool-maintenance"),
     ("89.", "some slot ran, is `unavailable` or is `broken`"),
+    (
+        "90.",
+        "`branch_template` is a key of launch-config `schema_version: 11`",
+    ),
 ];
 
 #[test]

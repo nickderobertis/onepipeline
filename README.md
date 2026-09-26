@@ -547,6 +547,22 @@ slot's command — or met another run inside an identity, or failed — journals
 `pool-maintenance` record; `status` names a sweep in progress and `results` the last
 record. Naming no schedule runs no maintenance at all.
 
+The branch a lifecycle node's session **cuts** is named from a **branch-name
+template**: minijinja, rendered over the node's own task — `task.key` (absent where
+the source has none), `task.id`, `task.title`, `task.delivers` — and `plan.name`,
+`plan.id`, `node.id` and `run`. `--branch-template TEMPLATE` beats
+`ONEPIPELINE_BRANCH_TEMPLATE`, which beats a launch config's `branch_template`
+(`schema_version: 11`), which beats the shipped default,
+`{% if task.key %}{{ task.key }}{% else %}{{ plan.name }}{% endif %}/{{ node.id }}` —
+so a Linear-backed node cuts `ENG-123/build` and a `local-md` one `<plan>/build`. The
+name goes to `onevcs` as a name to cut, which sanitizes it, puts the host's branch
+prefix in front and takes the first free `-2`, `-3`, … suffix; a node continuing a
+branch it was pinned to renders nothing. The template is retained in the launch
+record, so `adopt` names branches as the launch did. One that does not parse is
+refused before any run exists; one that does not render at a node settles that node
+`infrastructure-failure` and cuts no branch. A blank template names none, and the
+branch is the one `onevcs` derives.
+
 Read-only views — `runs`, `status`, `host`, `monitor`, `results`, `goals`,
 `transcript`, `agents`, `telemetry` — report unread surfaces, driver liveness,
 and provider health without touching a run. `status` says what each in-flight
