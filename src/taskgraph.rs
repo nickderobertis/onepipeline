@@ -117,6 +117,10 @@ const FILLED_FROM_THE_TASK: &[(&str, &str)] = &[
     ("title", "the task's own `title`"),
     ("task", "the task's own `content`"),
     ("delivers", "the task's own `delivers`"),
+    (
+        "task_record",
+        "the task itself — its native id, its `key` and its `title`",
+    ),
 ];
 
 /// The reserved key a repository identity the store cannot hold is carried
@@ -415,6 +419,19 @@ impl Store {
                 .collect();
             node.insert("delivers".to_owned(), Value::Array(qualified));
         }
+        // The task's human-facing record, which is what a branch this node's session
+        // cuts is named from. A blank key is the store's way of carrying none, as a
+        // blank title is.
+        let mut record = Map::new();
+        record.insert(
+            "id".to_owned(),
+            Value::String(task.id.native().to_owned()),
+        );
+        if let Some(key) = task.item.key.as_ref().filter(|key| !key.trim().is_empty()) {
+            record.insert("key".to_owned(), Value::String(key.clone()));
+        }
+        record.insert("title".to_owned(), Value::String(task.item.title.clone()));
+        node.insert("task_record".to_owned(), Value::Object(record));
         match (task.item.repositories.first(), node.get("repo")) {
             (Some(_), Some(_)) => {
                 return Err(refused(
@@ -1058,6 +1075,10 @@ struct ProjectItem {
 
 #[derive(Debug, Deserialize)]
 struct TaskItem {
+    /// The short handle the task's source shows people, from `onetaskgraph` 0.2.44 on;
+    /// absent, or null, where the source has none.
+    #[serde(default)]
+    key: Option<String>,
     title: String,
     /// The project this task belongs to, as the store says it does.
     ///
@@ -1446,6 +1467,7 @@ mod tests {
     #[test]
     fn a_task_carrying_no_node_id_is_refused_by_the_key_it_is_missing() {
         let bare = TaskItem {
+            key: None,
             title: "Build it".into(),
             project: None,
             content: None,

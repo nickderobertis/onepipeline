@@ -48,7 +48,7 @@ use onepipeline::filter::{
 use onepipeline::note::{Addressee, Delivered, Note, Party, Reached};
 use onepipeline::plan::{
     adoption_instructions, arrival_note, CrossRepoReference, Node, NodeKind, Plan, RepoType,
-    Resume, Step, Workflow, ADOPTION_INSTRUCTION_VARIABLES, AMENDMENT_HEADING,
+    Resume, Step, TaskRecord, Workflow, ADOPTION_INSTRUCTION_VARIABLES, AMENDMENT_HEADING,
     AMENDMENT_PRECEDENCE, CROSS_REPO_REFERENCES_HEADING, DEFAULT_ADOPTION_INSTRUCTION,
     OBSERVED_STATE, PLANNER_CONTEXT_HEADING, PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
 };
@@ -279,6 +279,8 @@ fn the_dispatch_request_carries_every_field_the_contract_declares() {
         workspace: WorkspaceSpec::VcsSession(SessionRequest {
             repo: "nickderobertis/some-service".into(),
             branch: None,
+            branch_name: None,
+            branch_prefix: None,
             base: None,
             execution_checkout: None,
             pool: None,
@@ -1609,6 +1611,11 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         amendment: Some("changed requirements".into()),
         consumes: std::collections::BTreeMap::new(),
         delivers: vec!["tickets:t-1".into()],
+        task_record: Some(TaskRecord {
+            id: "t-1".into(),
+            key: Some("ENG-1".into()),
+            title: "feat: x".into(),
+        }),
     })
     .expect("a node serialises");
     let fields: BTreeSet<String> = plan

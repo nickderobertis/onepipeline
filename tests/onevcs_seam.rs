@@ -78,6 +78,8 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
         .open_session(SessionRequest {
             repo: "owner/repo".to_owned(),
             branch: Some("feature".to_owned()),
+            branch_name: None,
+            branch_prefix: None,
             base: Some("main".to_owned()),
             execution_checkout: None,
             pool: None,
@@ -201,6 +203,8 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
         .open_session(SessionRequest {
             repo: "owner/repo".to_owned(),
             branch: Some("adopts-early".to_owned()),
+            branch_name: None,
+            branch_prefix: None,
             base: Some("main".to_owned()),
             execution_checkout: None,
             pool: None,
@@ -270,6 +274,45 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
     assert!(
         host.state().made_ready.contains(&drafted_id),
         "the host was never asked to take the change out of its draft state"
+    );
+
+    // 6. `src/vcs.rs::opening_for`: a branch a session **cuts** is proposed as
+    //    `branch_name`, a name to cut, and never as `branch`, a name to continue.
+    //    The seam takes the proposal as the branch it opens on, and refuses a
+    //    request naming both — the two answers to one question this crate never
+    //    gives at once. What makes a proposal a ref — the sanitizer, the host's
+    //    prefix and the collision suffix — is the real library's, and
+    //    `tests/e2e/branch_template.rs` drives it over real git.
+    let cut = vcs
+        .open_session(SessionRequest {
+            repo: "owner/repo".to_owned(),
+            branch: None,
+            branch_name: Some("ENG-123/build".to_owned()),
+            branch_prefix: None,
+            base: Some("main".to_owned()),
+            execution_checkout: None,
+            pool: None,
+            overflow: None,
+            labels: Default::default(),
+        })
+        .expect("the seam cuts a session at a proposed name");
+    assert_eq!(cut.branch, "ENG-123/build");
+    let refused = vcs
+        .open_session(SessionRequest {
+            repo: "owner/repo".to_owned(),
+            branch: Some("feature".to_owned()),
+            branch_name: Some("ENG-123/build".to_owned()),
+            branch_prefix: None,
+            base: Some("main".to_owned()),
+            execution_checkout: None,
+            pool: None,
+            overflow: None,
+            labels: Default::default(),
+        })
+        .expect_err("a request naming a branch to continue and a name to cut is refused");
+    assert!(
+        refused.to_string().contains("two answers to one question"),
+        "{refused}"
     );
 
     let _ = std::fs::remove_dir_all(&root);

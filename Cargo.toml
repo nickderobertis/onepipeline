@@ -571,7 +571,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.2"
-onevcs = "0.32.2"
+onevcs = "0.33.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -736,7 +736,7 @@ oneharness-core = "0.18.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.8.2"
+onevcs-testing = "0.8.3"
 # **Test-support only**, and linked by `crates/testfakes` alone: the crate under test
 # still reads every plan by *driving* the `onetaskgraph` binary. These host the real
 # `local-md` plugin inside `label-strict-source`; that fake says why.
@@ -748,8 +748,8 @@ onevcs-testing = "0.8.2"
 # here can pin, so
 # `taskgraph::tests::every_onetaskgraph_crate_in_the_lock_is_the_release_the_checks_install`
 # holds the lock's whole family to `justfile`'s `onetaskgraph-version`.
-onetaskgraph-core = "=0.2.32"
-onetaskgraph-local-md = "=0.2.32"
+onetaskgraph-core = "=0.2.44"
+onetaskgraph-local-md = "=0.2.44"
 
 [package]
 name = "onepipeline"

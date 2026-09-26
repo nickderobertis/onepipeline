@@ -136,6 +136,8 @@ fn cut_a_slot(world: &World, checkout: &Path) {
             .open_session(onevcs::SessionRequest {
                 repo: checkout.to_string_lossy().into_owned(),
                 branch: None,
+                branch_name: None,
+                branch_prefix: None,
                 base: None,
                 execution_checkout: None,
                 pool: None,
@@ -1308,6 +1310,8 @@ fn a_sweep_answered_in_use_no_slots_and_no_command_journals_nothing() {
             .open_session(onevcs::SessionRequest {
                 repo: service.checkout.to_string_lossy().into_owned(),
                 branch: None,
+                branch_name: None,
+                branch_prefix: None,
                 base: None,
                 execution_checkout: None,
                 pool: None,

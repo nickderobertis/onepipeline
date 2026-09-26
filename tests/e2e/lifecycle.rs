@@ -7101,6 +7101,8 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
             .open_session(onevcs::SessionRequest {
                 repo: unread.checkout.to_string_lossy().into_owned(),
                 branch: None,
+                branch_name: None,
+                branch_prefix: None,
                 base: None,
                 execution_checkout: None,
                 pool: None,
