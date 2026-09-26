@@ -507,9 +507,9 @@ fn a_failed_first_projection_does_not_hold_back_the_first_dispatch() {
 }
 
 /// A launch whose first projection the store never answers waits for it only as long as the
-/// store command deadline allows, and then dispatches: nothing is dispatched while the held copy
+/// store call deadline allows, and then dispatches: nothing is dispatched while the held copy
 /// is inside its deadline, the ready node is dispatched once it has passed, and the planner hears
-/// the copy was killed. The deadline is the store's sixty-second floor, so this journey takes a
+/// the copy was cancelled. The deadline is the store's sixty-second floor, so this journey takes a
 /// minute by construction.
 #[test]
 fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch() {

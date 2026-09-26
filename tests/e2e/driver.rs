@@ -5253,12 +5253,6 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
 /// the store before it settles, held open by a capture path the store cannot
 /// write. What proves the driver rather than the reply applied the edit is the
 /// run's own answer on the command queue, which only the lock-holder writes.
-///
-/// `#[cfg(not(windows))]` for the reason `store.rs`'s own capture-outage journey
-/// carries it: the fault injection depends on POSIX `File::create` refusing a
-/// path a directory occupies, and Windows can open that path successfully — so
-/// there would be no failing projection, no held close-out, and no window.
-#[cfg(not(windows))]
 #[test]
 fn an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go() {
     let world = World::new("driver-drain-on-exit");
@@ -5273,18 +5267,13 @@ fn an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go
         !world.events_of(run, "node-dispatched").is_empty()
     });
 
-    // llmlint: ignore-block[tests_mirror_real_usage] a write-back capture path that cannot
-    // be written is a state a host produces on its own — a full disk, a permission change
-    // — and `store.rs`'s `an_unwritable_writeback_capture_is_reported_retried_and_recovered`
-    // states the same fixture the same way. It is here because the close-out has to stay
-    // open long enough for a planner to type a reply into it, and how long a store takes to
-    // refuse is not something the CLI exposes an input for.
-    let capture = world.run_file(run, "writeback-project-show.stdout");
-    world.until("the first projection to leave its capture behind", |_| {
-        capture.is_file()
-    });
-    std::fs::remove_file(&capture).expect("the completed capture is removed");
-    std::fs::create_dir(&capture).expect("a directory makes the capture path unwritable");
+    // llmlint: ignore-block[tests_mirror_real_usage] a write-back shadow store that cannot
+    // be written is a state a host produces on its own — a full disk, a permission change —
+    // and `store.rs`'s `an_unwritable_shadow_store_is_reported_retried_and_recovered` states
+    // the same fixture the same way. It is here because the close-out has to stay open long
+    // enough for a planner to type a reply into it, and how long a store takes to refuse is
+    // not something the CLI exposes an input for.
+    unwritable_shadow_store(&world, run);
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     // The run's only node settles, so the loop has nothing left to do and starts
@@ -5364,18 +5353,13 @@ fn a_driver_that_owns_a_run_and_claims_nothing(world: &World, name: &str) -> (St
         !world.events_of(&run, "node-dispatched").is_empty()
     });
 
-    // llmlint: ignore-block[tests_mirror_real_usage] a write-back capture path that cannot
+    // llmlint: ignore-block[tests_mirror_real_usage] a write-back shadow store that cannot
     // be written is a state a host produces on its own — a full disk, a permission change —
-    // and `store.rs`'s `an_unwritable_writeback_capture_is_reported_retried_and_recovered`
-    // states the same fixture the same way. It is here because the driver has to hold the
-    // run without claiming its queue for long enough for a planner to type a reply into
-    // that window, and how long a store takes to refuse is not an input the CLI exposes.
-    let capture = world.run_file(&run, "writeback-project-show.stdout");
-    world.until("the first projection to leave its capture behind", |_| {
-        capture.is_file()
-    });
-    std::fs::remove_file(&capture).expect("the completed capture is removed");
-    std::fs::create_dir(&capture).expect("a directory makes the capture path unwritable");
+    // and `store.rs`'s `an_unwritable_shadow_store_is_reported_retried_and_recovered` states
+    // the same fixture the same way. It is here because the driver has to hold the run
+    // without claiming its queue for long enough for a planner to type a reply into that
+    // window, and how long a store takes to refuse is not an input the CLI exposes.
+    unwritable_shadow_store(world, &run);
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     world.release("work.go");
@@ -5383,6 +5367,18 @@ fn a_driver_that_owns_a_run_and_claims_nothing(world: &World, name: &str) -> (St
         !world.events_of(&run, "node-settled").is_empty()
     });
     (run, driver)
+}
+
+/// Make the run's write-back shadow store unwritable once its first projection has written
+/// it: a file where its projects folder belongs, which every later attempt fails on and
+/// retries — the failing projection that holds a close-out open.
+fn unwritable_shadow_store(world: &World, run: &str) {
+    let shadow = world.run_file(run, "writeback").join("projects");
+    world.until("the first projection to write its shadow store", |_| {
+        shadow.is_dir()
+    });
+    std::fs::remove_dir_all(&shadow).expect("the shadow projects folder is taken away");
+    std::fs::write(&shadow, "not a folder").expect("a file makes the shadow store unwritable");
 }
 
 /// Type one reply into that window and wait until the run's queue holds it.

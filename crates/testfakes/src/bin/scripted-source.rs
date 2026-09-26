@@ -43,14 +43,16 @@
 //!   each plan read, each write-back attempt — so this holds one call per attempt: the first
 //!   task a copy writes, say, which is how a journey holds a copy without holding each of its
 //!   writes in turn.
-//! * `<key>.metering` — a `Metering` in the store's own shape that every write this source
+//! * `<key>.metering` — a `Metering` in the store's own shape that every request this source
 //!   serves adds to its running total, which is what it answers `metering` with: a source
 //!   that meters its own requests, as a hosted one does, so a copy's `spent` is the store's
 //!   own figure rather than one a journey wrote into a report. Read when the source starts,
 //!   because a source says in its handshake whether it meters.
 //!
 //! Every call is recorded into the directory's `invocations.jsonl` as
-//! `{"tool": <key>, "args": [<method>, <the id it names, where it names one>]}`.
+//! `{"tool": <key>, "args": [<method>, <the id it names, where it names one>]}`, the
+//! handshake included as `initialize`, naming the credentials the engine handed over — their
+//! names, never their values.
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -83,6 +85,9 @@ struct HandshakeParams {
     engine: Value,
     source_name: String,
     config: Settings,
+    /// The credentials the engine resolved for this source, by the variable each is named by.
+    #[serde(default)]
+    secrets: std::collections::BTreeMap<String, String>,
 }
 
 /// This source's own `config:` block.
@@ -108,18 +113,6 @@ struct Request {
 
 // llmlint: ignore-end[boundary_inputs_validated]
 
-/// The methods that write, and so spend what a metering source reports.
-const WRITES: &[&str] = &[
-    "write_task",
-    "write_project",
-    "set_task_status",
-    "set_delivered_by",
-    "set_task_metadata",
-    "set_project_metadata",
-    "delete_task",
-    "delete_project",
-];
-
 fn stop(why: &str) -> ExitCode {
     eprintln!("scripted-source: {why}");
     ExitCode::FAILURE
@@ -144,6 +137,17 @@ fn main() -> ExitCode {
         ));
     }
     let settings = handshake.params.config;
+    let handed: Vec<&str> = handshake
+        .params
+        .secrets
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fake::record(
+        &settings.script,
+        &settings.key,
+        &["initialize".to_owned(), handed.join(",")],
+    );
     let mut host = match Host::start() {
         Ok(host) => host,
         Err(why) => return stop(&why),
@@ -279,7 +283,7 @@ impl Scripted {
             "id": request.id, "method": request.method, "params": request.params,
         });
         let answered = host.ask(&relayed)?;
-        if WRITES.contains(&method) && answered.contains_key("result") {
+        if answered.contains_key("result") {
             if let Some(each) = metering(&metered)? {
                 self.spend(&each);
             }
@@ -287,7 +291,7 @@ impl Scripted {
         Ok(Value::Object(answered))
     }
 
-    /// Add one write's cost to what this source has spent.
+    /// Add one request's cost to what this source has spent.
     fn spend(&mut self, each: &Metering) {
         self.spent.requests += each.requests;
         for budget in &each.budgets {
@@ -332,7 +336,7 @@ fn refusal(path: &Path) -> Result<Option<SourceError>, String> {
     }
 }
 
-/// What each write spends, where the scenario meters them.
+/// What each request spends, where the scenario meters them.
 fn metering(path: &Path) -> Result<Option<Metering>, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).map(Some).map_err(|error| {

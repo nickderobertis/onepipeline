@@ -172,7 +172,7 @@ fn a_copy_held_past_the_floor_still_lands_when_the_item_count_lifts_its_deadline
     std::thread::sleep(past_the_floor.saturating_sub(started.elapsed()));
     assert!(
         !a_projection_failed(&world, run),
-        "the copy was killed inside {} seconds under a budget of {items} × {per_item}:\n{}",
+        "the copy was cancelled inside {} seconds under a budget of {items} × {per_item}:\n{}",
         floor + 5,
         std::fs::read_to_string(world.run_file(run, "driver.log")).unwrap_or_default()
     );
@@ -218,8 +218,8 @@ fn a_copy_held_past_the_floor_still_lands_when_the_item_count_lifts_its_deadline
 /// A copy held past what a deliberately tiny budget allows is cancelled, and the
 /// refusal names what the deadline was computed from — including that the
 /// floor governed, since one item at one second is less than a minute — and the
-/// driver that is killed by it is one an **adopt** started, under the budget
-/// the launch chose rather than the one the adopting shell's environment names.
+/// driver whose copy it cancels is one an **adopt** started, under the budget the
+/// launch chose rather than the one the adopting shell's environment names.
 ///
 /// The line is read where it lands: on the driver's stderr, and on the planner
 /// surface built from it, which are all anybody gets about a projection that
@@ -227,9 +227,9 @@ fn a_copy_held_past_the_floor_still_lands_when_the_item_count_lifts_its_deadline
 /// from a plan that has outgrown its budget. The adoption is what makes the
 /// retained budget more than a field: a fresh driver from a shell naming a
 /// thousand seconds per item would, re-reading its environment, allow this copy
-/// a thousand seconds and never kill it inside the wait below.
+/// a thousand seconds and never cancel it inside the wait below.
 #[test]
-fn a_copy_held_past_a_tiny_budget_is_killed_and_the_refusal_names_the_arithmetic() {
+fn a_copy_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithmetic() {
     let floor = number("floor_seconds");
     let items = 1;
     let run = "budgetfloor";
@@ -337,12 +337,12 @@ fn a_copy_held_past_a_tiny_budget_is_killed_and_the_refusal_names_the_arithmetic
 
 /// A run whose launch record an older build wrote — no budget field on it — is
 /// adopted, and the driver the adoption starts bounds its copy by the shipped
-/// default: the refusal it is killed with names that figure, not one the
+/// default: the refusal its copy is cancelled with names that figure, not one the
 /// adopting shell's environment offered and not a zero read off the record.
 ///
 /// The record is the one file a run *is* to an adoption, and a build before this
 /// field left it without one. Reading the missing field as no budget at all would
-/// kill every copy; reading it as the environment's would let the shell that
+/// cancel every copy; reading it as the environment's would let the shell that
 /// adopted decide what the launch had. What the worker does with it is only
 /// observable on a copy it actually bounds, so this holds one past the floor.
 #[test]

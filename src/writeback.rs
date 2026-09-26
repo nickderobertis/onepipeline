@@ -568,29 +568,20 @@ impl Classified {
 
     /// The store's failure for one delivered ticket it could not keep in step.
     ///
-    /// **Temporary, and the one place this happens.** This is the one failure that arrives
-    /// as a [`Failure`] with no [`EngineError`] behind it, and `onetaskgraph-core` 0.2.44 keeps
-    /// that type's class and kind private — so they are read off the failure's own serialised
-    /// form into the store's own [`onetaskgraph_core::FailureClass`]: a value of the store's
-    /// type written by the store's serialiser, never a document parsed off a process.
-    /// onetaskgraph is adding public `Failure::class()` and `Failure::kind()` accessors, and
-    /// the onepipeline change that adopts that release replaces this read with them. A
-    /// failure that does not carry a class this build reads leaves the entry unclassified,
-    /// and so on the retry schedule.
+    /// The one failure that arrives as a [`Failure`] with no [`EngineError`] behind it, and
+    /// at the `onetaskgraph-core` release this build links that type publishes no accessor for
+    /// its class or kind — so, here and nowhere else, both are read off the failure's own
+    /// serialised form, the class into the store's own
+    /// [`onetaskgraph_core::FailureClass`]: a value of the store's type written by the store's
+    /// serialiser, never a document parsed off a process. A failure that does not carry a
+    /// class this build reads leaves the entry unclassified, and so on the retry schedule.
     fn of_delivery_until_failure_publishes_its_class(failure: &Failure) -> Option<Self> {
-        #[derive(Deserialize)]
-        struct Classed {
-            class: onetaskgraph_core::FailureClass,
-            // llmlint: ignore[invalid_states_unrepresentable] open by the store's own
-            // contract, for the reason `Classified::kind` records; only ever named.
-            kind: String,
-        }
-        let classed: Classed = serde_json::to_value(failure)
-            .ok()
-            .and_then(|value| serde_json::from_value(value).ok())?;
+        let written = serde_json::to_value(failure).ok()?;
+        let class: onetaskgraph_core::FailureClass =
+            serde_json::from_value(written.get("class")?.clone()).ok()?;
         Some(Self {
-            class: classed.class.into(),
-            kind: classed.kind,
+            class: class.into(),
+            kind: written.get("kind")?.as_str()?.to_owned(),
         })
     }
 }

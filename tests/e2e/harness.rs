@@ -4125,8 +4125,6 @@ fn reserved(field: &str) -> String {
     }
 }
 
-/// Where an executable of this name sits on **this process's** `PATH`.
-///
 /// A qualified id, as the store's own type — refused loudly when a journey wrote one the
 /// store could not name, since a read of it would prove nothing.
 pub fn global(id: &str) -> onetaskgraph_core::GlobalId {

@@ -339,6 +339,17 @@ fn a_runs_first_projection_is_whole_and_a_later_transition_carries_that_node_alo
 
     let later = records(&world, run)[recorded_before..].to_vec();
     assert!(!later.is_empty(), "the transition was never projected");
+    // Each attempt opened a store of its own — the source started afresh, handshake and all —
+    // so none of them answered from a read an earlier one made.
+    let opened = store_calls(&world)[asked_before..]
+        .iter()
+        .filter(|call| is_call(call, "initialize"))
+        .count();
+    assert!(
+        opened >= later.len(),
+        "{} attempts were made over {opened} stores, so one answered from another's reads",
+        later.len()
+    );
     for record in &later {
         assert_eq!(record["scope"], "members", "{record}");
         assert_eq!(record["whole_because"], Value::Null, "{record}");
@@ -375,7 +386,8 @@ fn a_runs_first_projection_is_whole_and_a_later_transition_carries_that_node_alo
     for call in member_calls {
         let named = call.get(1).map(String::as_str).unwrap_or_default();
         match call[0].as_str() {
-            "get_project"
+            "initialize"
+            | "get_project"
             | "write_project"
             | "task_dependencies"
             | "metering"
@@ -488,6 +500,8 @@ fn a_projection_after_a_failed_attempt_is_whole() {
         "query_tasks",
         &source_refused("source plans refused the request"),
     );
+    let asked_before = store_calls(&world).len();
+    let board_before = world.store_tasks(&project);
     noted(&world, run, "later", "refused at the page of tasks");
     let whole = recorded(2)[mark + 1].clone();
     assert_eq!(whole["scope"], "whole", "{whole}");
@@ -496,6 +510,20 @@ fn a_projection_after_a_failed_attempt_is_whole() {
     assert_eq!(whole["outcome"], "failed", "{whole}");
     assert_eq!(whole["class"], "refused", "{whole}");
     assert_eq!(whole["kind"], "refused", "{whole}");
+    // A destination read that answered in part ends the projection there: nothing was
+    // written, and the board holds what it held before.
+    let asked = store_calls(&world)[asked_before..].to_vec();
+    assert!(
+        asked
+            .iter()
+            .all(|call| !call[0].starts_with("write_") && !call[0].starts_with("set_")),
+        "a projection whose page of tasks answered in part wrote to the board: {asked:?}"
+    );
+    assert_eq!(
+        world.store_tasks(&project),
+        board_before,
+        "a projection whose page of tasks answered in part changed the board"
+    );
     world.store_stops_refusing("query_tasks");
 
     noted(&world, run, "later", "projected whole");
@@ -555,10 +583,10 @@ fn a_projection_after_a_failed_attempt_is_whole() {
 
 /// The record carries exactly what the copy said it did and spent: its `spent` object as the
 /// store reported it, and its per-item actions counted. The destination here meters its own
-/// writes, as a hosted source meters its requests — each write it serves spends one request and
-/// three points — so the store reports a `spent` for the copy, and a worker recording it as
-/// anything but what the store said fails here, as does one miscounting what the copy did. The
-/// copy after the meter is taken away reports what a source that meters nothing reports.
+/// requests, as a hosted source does — each request it serves spends one request and three
+/// points — so the store reports a `spent` for the copy, and a worker recording it as anything
+/// but what the store said fails here, as does one miscounting what the copy did. The copy
+/// after the meter is taken away reports what a source that meters nothing reports.
 #[test]
 fn the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent() {
     let run = "projections-report";
@@ -594,16 +622,29 @@ fn the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent() {
     let counted = records(&world, run)[mark].clone();
     assert_eq!(counted["outcome"], "projected", "{counted}");
     assert_eq!(counted["scope"], "members", "{counted}");
-    // What the metered source served for that copy, read off its own record of calls.
-    let writes = store_calls(&world)[asked_before..]
+    // What the metered source served for that copy: every request between the two readings
+    // the store takes of its meter, one before the copy and one after, read off the source's
+    // own record of calls.
+    let calls = store_calls(&world)[asked_before..].to_vec();
+    let readings: Vec<usize> = calls
         .iter()
-        .filter(|call| call[0].starts_with("write_") || call[0].starts_with("set_"))
-        .count() as u64;
-    assert!(writes > 0, "the metered copy wrote nothing");
+        .enumerate()
+        .filter(|(_, call)| is_call(call, "metering"))
+        .map(|(at, _)| at)
+        .collect();
+    assert!(
+        readings.len() >= 2,
+        "the store read its meter fewer than twice: {calls:?}"
+    );
+    let served = (readings[1] - readings[0] - 1) as u64;
+    assert!(
+        served > 0,
+        "the metered copy asked the source nothing: {calls:?}"
+    );
     assert_eq!(
         counted["spent"],
-        json!({"requests": writes, "budgets": [
-            {"budget": "graphql", "unit": "points", "amount": 3 * writes, "lower_bound": false}
+        json!({"requests": served, "budgets": [
+            {"budget": "graphql", "unit": "points", "amount": 3 * served, "lower_bound": false}
         ]}),
         "{counted}"
     );
@@ -672,12 +713,19 @@ fn a_run_directory_holding_an_older_engines_store_record_adopts_and_projects_by_
 
     let before = records(&world, run).len();
     noted(&world, run, "later", "a change for the adopted driver");
+    // The attempt that carries the note: the adopted driver may project its own node's
+    // progress around it, each as the members that changed.
+    let carrying = |world: &World| {
+        records(world, run)[before..]
+            .iter()
+            .find(|record| record["items"] == json!(["later"]))
+            .cloned()
+    };
     world.until("the adopted driver's change to be projected", |world| {
-        records(world, run).len() > before
+        carrying(world).is_some()
     });
-    let change = records(&world, run)[before].clone();
+    let change = carrying(&world).expect("the change was projected");
     assert_eq!(change["scope"], "members", "{change}");
-    assert_eq!(change["items"], json!(["later"]), "{change}");
     assert_eq!(change["outcome"], "projected", "{change}");
     assert!(
         records(&world, run)

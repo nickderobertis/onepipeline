@@ -167,6 +167,235 @@ fn a_launch_with_no_onetaskgraph_executable_reads_runs_and_projects_through_the_
     );
 }
 
+/// A command whose store is configured by an `onetaskgraph.yaml` alone, run from `dir`: every
+/// setting this world's commands carry for their plans source is taken away, so what the
+/// command reads its store through is the document it discovers.
+fn configured_by_document(
+    world: &World,
+    dir: &std::path::Path,
+    args: &[&str],
+) -> std::process::Command {
+    let mut command = world.cmd(args);
+    command
+        .current_dir(dir)
+        .env_remove("ONETASKGRAPH_DEFAULT_SOURCES")
+        .env_remove(format!(
+            "ONETASKGRAPH_SOURCES__{}__PLUGIN",
+            crate::harness::STORE_SOURCE.to_uppercase()
+        ))
+        .env_remove(crate::harness::store_root_env());
+    command
+}
+
+/// The store is configured where an operator configures it: the plan is read through the
+/// `onetaskgraph.yaml` discovered from the directory a launch runs in, and every write-back
+/// after it — the release a `stop` makes, and the claim an adopted driver projects — through
+/// the one discovered from the directory the launch record names, whichever directory the
+/// verb that makes it was run from. That configuration is read afresh for every attempt, so
+/// one that stops loading refuses the projection it was read for, and one put right is what
+/// the next attempt reads.
+///
+/// The directory `stop` and `adopt` run from holds no configuration at all, and no command
+/// here carries a store setting in its environment, so a write-back that looked anywhere but
+/// the launch record's directory would find no source to write to.
+#[test]
+fn the_store_is_discovered_from_the_launch_directory_by_the_read_and_by_every_write_back() {
+    let world = World::new("store-discovered");
+    world.script("work.wait", "hold");
+    let name = "discovered";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![agent("work", &[]), agent("later", &["work"])]),
+    );
+    let launch = world.root.join("launch-directory");
+    std::fs::create_dir_all(&launch).expect("a launch directory");
+    std::fs::write(
+        launch.join("onetaskgraph.yaml"),
+        format!(
+            "sources:\n  {}:\n    plugin: local-md\n    config:\n      root: {:?}\n",
+            crate::harness::STORE_SOURCE,
+            world.store()
+        ),
+    )
+    .expect("the launch directory's store configuration");
+    let elsewhere = world.root.join("somewhere-else");
+    std::fs::create_dir_all(&elsewhere).expect("a directory with no configuration");
+
+    let start = configured_by_document(&world, &launch, &["start", &project, "--detach"]);
+    world.run_on(start, "start --detach").exited(0);
+    world.until_store(
+        "the claim and the running node to reach the board",
+        |world| {
+            let words = projected_words(world, &project);
+            words.get("work").is_some_and(|word| word == "in progress")
+                && words.get("later").is_some_and(|word| word == "queued")
+        },
+    );
+
+    let stop = configured_by_document(&world, &elsewhere, &["stop", name]);
+    world
+        .run_on(stop, "stop")
+        .exited(0)
+        .out_has("\"stopped\":true");
+    assert_eq!(
+        projected_words(&world, &project)
+            .get("later")
+            .map(String::as_str),
+        Some("todo"),
+        "the stop's release did not reach the store the launch directory configures"
+    );
+
+    let adopt = configured_by_document(&world, &elsewhere, &["adopt", name, "--detach"]);
+    world.run_on(adopt, "adopt --detach").exited(0);
+    world.until_store("the adopted driver's claim to reach the board", |world| {
+        projected_words(world, &project)
+            .get("later")
+            .is_some_and(|word| word == "queued")
+    });
+
+    // The launch directory's configuration stops loading: the next projection is refused by
+    // the store's own reading of it — a document it cannot parse, which no retry changes —
+    // and reported once. Put right, the next change to the graph projects again.
+    let document = launch.join("onetaskgraph.yaml");
+    let configured = std::fs::read_to_string(&document).expect("the configuration reads");
+    std::fs::write(&document, "sources: [this is not a mapping\n")
+        .expect("the configuration is broken");
+    noted(
+        &world,
+        name,
+        "later",
+        "projected through a broken configuration",
+    );
+    world.until("the broken configuration to be reported", |world| {
+        streaks_reported(world, name) >= 1
+    });
+    let said = the_line_reported(&world, name);
+    assert!(
+        said.contains("the store's configuration cannot be read")
+            && said.contains("class: refused, kind: config-syntax")
+            && said.contains("attempted again when the run's graph next changes"),
+        "the line does not report the configuration the store refused: {said}"
+    );
+    std::fs::write(&document, configured).expect("the configuration is put right");
+    noted(&world, name, "later", "projected once it was put right");
+    world.until("the projection to recover", |world| {
+        std::fs::read_to_string(world.run_file(name, "driver.log"))
+            .is_ok_and(|log| log.contains("onetaskgraph write-back recovered"))
+    });
+    world.until_store("the change after the repair to reach the board", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "later"
+                && task["item"]["metadata"]["onepipeline.context"]
+                    == "projected once it was put right"
+        })
+    });
+    world.release("work.go");
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    world.until_store("the settlement to reach the board", |world| {
+        let words = projected_words(world, &project);
+        words.get("work").is_some_and(|word| word == "done")
+            && words.get("later").is_some_and(|word| word == "done")
+    });
+}
+
+/// A source's credential is read from the variable its own configuration names — out of the
+/// engine's own environment, or out of the `secrets.env` that environment names — and handed
+/// to the source, exactly as the store's own CLI read it. A launch where nothing defines it
+/// is refused as a store that cannot be read, before any run exists.
+///
+/// The plans source here is reached through `scripted-source` as a `subprocess` source whose
+/// configuration names a credential; the variable is named in the `onetaskgraph.yaml` the
+/// launch directory holds, beside the settings this world's environment carries, and what
+/// the source was handed is read off its own record of the handshake — the name, never the
+/// value.
+#[test]
+fn a_sources_credential_is_read_from_the_engines_environment_or_its_secrets_file() {
+    const TOKEN: &str = "ONEPIPELINE_PLAN_STORE_TOKEN";
+    let world = World::new("store-credential").through_scripted_source();
+    let launch = world.root.join("launch-directory");
+    std::fs::create_dir_all(&launch).expect("a launch directory");
+    std::fs::write(
+        launch.join("onetaskgraph.yaml"),
+        format!(
+            "sources:\n  {}:\n    config:\n      secrets: [{TOKEN}]\n",
+            crate::harness::STORE_SOURCE
+        ),
+    )
+    .expect("the configuration naming the credential");
+    let handed = |world: &World| {
+        world
+            .store_calls()
+            .iter()
+            .filter(|call| call[0] == "initialize")
+            .filter(|call| {
+                call.get(1)
+                    .is_some_and(|names| names.split(',').any(|name| name == TOKEN))
+            })
+            .count()
+    };
+
+    // Nothing defines it: the store cannot be built, and the launch says which variable.
+    let project = world.plan("unset", &plan_of("unset", vec![agent("work", &[])]));
+    let mut start = world.cmd(&["start", &project, "--detach"]);
+    start.current_dir(&launch).env_remove(TOKEN);
+    world
+        .run_on(start, "start --detach")
+        .exited(REFUSED)
+        .err_has(TOKEN);
+    assert!(
+        !world.runs.join("unset").exists(),
+        "a launch whose store could not be read left a run behind"
+    );
+
+    // Defined in the `secrets.env` the engine's environment names.
+    let secrets = world.root.join("secrets.env");
+    std::fs::write(&secrets, format!("{TOKEN}=from-the-file\n")).expect("a secrets file");
+    let project = world.plan("filed", &plan_of("filed", vec![agent("work", &[])]));
+    let mut start = world.cmd(&["start", &project, "--detach"]);
+    start
+        .current_dir(&launch)
+        .env_remove(TOKEN)
+        .env("ONETASKGRAPH_SECRETS_FILE", &secrets);
+    world.run_on(start, "start --detach").exited(0);
+    world.until("the run whose token is filed to settle", |world| {
+        world.run_file("filed", "result.json").is_file()
+    });
+    world.until_store("its settlement to reach the board", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .all(|task| task["item"]["metadata"]["onepipeline.settlement"].is_object())
+    });
+    let after_filed = handed(&world);
+    assert!(
+        after_filed > 0,
+        "the source was never handed the filed credential"
+    );
+
+    // Exported in the engine's own environment.
+    let project = world.plan("exported", &plan_of("exported", vec![agent("work", &[])]));
+    let mut start = world.cmd(&["start", &project, "--detach"]);
+    start
+        .current_dir(&launch)
+        .env(TOKEN, "from-the-environment");
+    world.run_on(start, "start --detach").exited(0);
+    world.until("the run whose token is exported to settle", |world| {
+        world.run_file("exported", "result.json").is_file()
+    });
+    world.until_store("its settlement to reach the board", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .all(|task| task["item"]["metadata"]["onepipeline.settlement"].is_object())
+    });
+    assert!(
+        handed(&world) > after_filed,
+        "the source was never handed the exported credential"
+    );
+}
+
 /// Write-back owns exactly what the plan document declares, and preserves everything the
 /// plan does not model. Drive that rule through the installed CLI and a real local-md
 /// store: a settlement must arrive without renaming the project, without changing a

@@ -1385,4 +1385,129 @@ mod tests {
             "the store discovered from the directory does not hold its source"
         );
     }
+
+    /// A scratch directory of this test's own, holding `onetaskgraph.yaml` as given.
+    fn configured(name: &str, document: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("onepipeline-store-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        std::fs::write(dir.join("onetaskgraph.yaml"), document).expect("a store configuration");
+        dir
+    }
+
+    /// Whether the store the configuration describes built its `board` source, or why not.
+    fn board(store: &Store) -> std::result::Result<(), String> {
+        let built = store
+            .engine(&Layer::default())
+            .unwrap_or_else(|error| panic!("the configuration loads: {error}"));
+        let listed = built
+            .engine
+            .listing()
+            .into_iter()
+            .find(|listing| listing.source.as_str() == "board")
+            .expect("the configuration's board source is listed");
+        match listed.state {
+            onetaskgraph_core::SourceState::Available { .. } => Ok(()),
+            onetaskgraph_core::SourceState::Unavailable { error } => Err(error.to_string()),
+        }
+    }
+
+    /// A source's token is read from the variable its own configuration names — out of the
+    /// engine's own environment, or out of the `secrets.env` that environment names — and an
+    /// `ONETASKGRAPH_*` setting in that environment is layered over the discovered document,
+    /// exactly as the store's own CLI read each of them.
+    #[test]
+    fn a_sources_token_and_settings_come_from_the_engines_own_environment() {
+        const TOKEN: &str = "ONEPIPELINE_TASKGRAPH_TEST_BOARD_TOKEN";
+        let dir = configured(
+            "credentials",
+            &format!(
+                "sources:\n  board:\n    plugin: github-projects\n    config:\n      owner: acme\n      \
+                 project_number: 1\n      token_env: {TOKEN}\n      endpoint: http://127.0.0.1:9/graphql\n"
+            ),
+        );
+        let bare = Store {
+            dir: dir.clone(),
+            environment: Environment::default(),
+        };
+        let refused = board(&bare).expect_err("a source with no token is not built");
+        assert!(
+            refused.contains(TOKEN),
+            "the refusal does not name the variable: {refused}"
+        );
+
+        // The engine's own environment, read through the constructor the write-back uses.
+        std::env::set_var(TOKEN, "a-token");
+        let exported = Store::at(&dir);
+        std::env::remove_var(TOKEN);
+        assert_eq!(board(&exported), Ok(()), "the exported token was not read");
+
+        // The `secrets.env` the environment names.
+        let secrets = dir.join("secrets.env");
+        std::fs::write(&secrets, format!("{TOKEN}=a-token\n")).expect("a secrets file");
+        let filed = Store {
+            dir: dir.clone(),
+            environment: Environment::from_pairs([(
+                "ONETASKGRAPH_SECRETS_FILE",
+                secrets.to_string_lossy().into_owned(),
+            )]),
+        };
+        assert_eq!(
+            board(&filed),
+            Ok(()),
+            "the token in secrets.env was not read"
+        );
+
+        // And a setting in the environment, layered over the document it discovered.
+        let layered = Store {
+            dir: dir.clone(),
+            environment: Environment::from_pairs([(
+                "ONETASKGRAPH_SOURCES__PLANS__PLUGIN",
+                "in-memory",
+            )]),
+        };
+        let built = layered
+            .engine(&Layer::default())
+            .expect("the layered configuration loads");
+        assert!(
+            built
+                .engine
+                .has(&SourceName::new("plans").expect("a source name")),
+            "a source declared in the environment was not layered over the document"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Each plan read builds its engine from the configuration as it stands, so a store
+    /// reconfigured between two reads is read as it now is rather than as the first read
+    /// found it.
+    #[test]
+    fn each_read_builds_its_store_from_the_configuration_afresh() {
+        let dir = configured("afresh", "sources:\n  plans:\n    plugin: in-memory\n");
+        let store = Store {
+            dir: dir.clone(),
+            environment: Environment::default(),
+        };
+        let first = store.engine(&Layer::default()).expect("a configuration");
+        assert!(first
+            .engine
+            .has(&SourceName::new("plans").expect("a source name")));
+        std::fs::write(
+            dir.join("onetaskgraph.yaml"),
+            "sources:\n  work:\n    plugin: in-memory\n",
+        )
+        .expect("the configuration changes");
+        let second = store.engine(&Layer::default()).expect("a configuration");
+        assert!(
+            second
+                .engine
+                .has(&SourceName::new("work").expect("a source name"))
+                && !second
+                    .engine
+                    .has(&SourceName::new("plans").expect("a source name")),
+            "a later read answered from the store an earlier read built"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
