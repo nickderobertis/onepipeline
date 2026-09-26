@@ -311,6 +311,19 @@ impl Store {
                 .as_array()
                 .expect("the nodes just written"),
         ) {
+            if let Some(version) = document["schema_version"]
+                .as_u64()
+                .filter(|v| *v < u64::from(crate::plan::PLAN_SCHEMA_VERSION))
+            {
+                if node.get("sets").is_some() {
+                    return Err(refused(
+                        task.id.as_str(),
+                        crate::plan::node_field_is_newer("sets", version as u32),
+                    )
+                    .field("sets")
+                    .into());
+                }
+            }
             read::<Node>(node.clone()).map_err(|error| {
                 refused(
                     task.id.as_str(),

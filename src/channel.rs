@@ -215,6 +215,8 @@ pub(crate) fn allowed_by(
 /// The wire word for one command's op.
 pub fn op_of(command: &Command) -> &'static str {
     match command {
+        Command::SetNodeSets { .. } => "set-node-sets",
+        Command::SetRunNodeSets { .. } => "set-run-node-sets",
         Command::Add { .. } => "add",
         Command::Drop { .. } => "drop",
         Command::Reparent { .. } => "reparent",
@@ -233,6 +235,8 @@ pub fn op_of(command: &Command) -> &'static str {
 /// The node one command is about, when it names one.
 pub fn target_of(command: &Command) -> Option<String> {
     match command {
+        Command::SetNodeSets { id, .. } => Some(id.clone()),
+        Command::SetRunNodeSets { .. } => None,
         Command::Add { node } => Some(node.id.clone()),
         Command::Drop { id, .. }
         | Command::Reparent { id, .. }
@@ -333,6 +337,20 @@ pub enum Dependents {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Command {
+    /// Replace one node's ordered graph overrides for its next dispatch.
+    #[serde(rename = "set-node-sets")]
+    SetNodeSets {
+        /// The node whose future dispatches change.
+        id: String,
+        /// The replacement list, including an empty list to clear it.
+        sets: Vec<String>,
+    },
+    /// Replace the run-wide node overrides for future dispatches.
+    #[serde(rename = "set-run-node-sets")]
+    SetRunNodeSets {
+        /// The replacement run-wide list.
+        sets: Vec<String>,
+    },
     /// Add a new node. Its `deps`, if any, must name graph nodes or valid
     /// cross-DAG references.
     Add {

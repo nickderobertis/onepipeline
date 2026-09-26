@@ -2877,6 +2877,11 @@ fn validate_command(
         // start of the pass — never out of this process's environment, which is
         // a driver an `adopt` started somewhere else with a different one.
         node_validator: launch.node_validator().map(str::to_owned),
+        graph_validation: Some(crate::edits::GraphValidation {
+            default_graph: oneagentgraph::config::ConfigRef(launch.node_graph.clone()),
+            launch_node_sets: launch.node_sets.clone(),
+            launch_dir: launch.dir.clone(),
+        }),
         ..state.frontier()
     };
     let mut candidate = state.graph.clone();
@@ -8296,6 +8301,13 @@ mod tests {
             },
             edits::Operation::CompletionRequested {
                 reason: "publication verified".into(),
+            },
+            edits::Operation::NodeSetsReplaced {
+                node: node(),
+                sets: vec!["members.worker.agent.model=selected".into()],
+            },
+            edits::Operation::RunNodeSetsReplaced {
+                sets: vec!["members.worker.agent.model=run".into()],
             },
             edits::Operation::NodeAdded {
                 node: Box::new(crate::plan::Node {

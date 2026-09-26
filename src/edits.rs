@@ -29,6 +29,13 @@ use crate::plan::Node;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Operation {
+    NodeSetsReplaced {
+        node: String,
+        sets: Vec<String>,
+    },
+    RunNodeSetsReplaced {
+        sets: Vec<String>,
+    },
     /// A node joined the graph.
     NodeAdded {
         /// The node's full definition.
@@ -332,6 +339,8 @@ impl Operation {
         match self {
             Self::FindingRaised { .. } | Self::CompletionRequested { .. } => false,
             Self::NodeAdded { .. }
+            | Self::NodeSetsReplaced { .. }
+            | Self::RunNodeSetsReplaced { .. }
             | Self::EdgeAdded { .. }
             | Self::EdgeRemoved { .. }
             | Self::NodeDropped { .. }
@@ -377,6 +386,8 @@ pub(crate) fn every_operation_kind() -> Vec<String> {
     [
         "finding-raised",
         "completion-requested",
+        "node-sets-replaced",
+        "run-node-sets-replaced",
         "node-added",
         "edge-added",
         "edge-removed",
@@ -460,12 +471,30 @@ pub struct Frontier {
     /// by a live edit reached a dispatch having been checked by nothing.
     pub node_validator: Option<String>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// The effective run-wide node overrides, where a journal edit replaced them.
+    pub run_node_sets: Option<Vec<String>>,
+    /// Graph validation inputs supplied together by the driver.
+    pub graph_validation: Option<GraphValidation>,
     /// Where an operator has already stated each node's work landed.
     ///
     /// Carried because a `settle` at the outcome a node already holds is a
     /// duplicate only if it also states nothing new about where the work landed.
     // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` every neighbouring map of this struct keys by — `landings`, `branches`, `change_urls` — and it was validated where the graph took the node; a node-id newtype on this one field would disagree with each of them and convert at every read, which `src/AGENTS.md` names as drift. The value is the typed half: `StatedLanding` holds only a spelling its own parser accepted.
     pub stated_landings: BTreeMap<String, StatedLanding>,
+}
+
+/// What an edit's overrides are checked against, read off the launch record
+/// rather than this process, because an `adopt`ing driver may have been started
+/// somewhere else with a different default graph and environment.
+#[derive(Debug, Clone)]
+pub struct GraphValidation {
+    /// Resolved default node-scope graph.
+    pub default_graph: oneagentgraph::config::ConfigRef,
+    /// The run-wide list a node edit composes onto until a `set-run-node-sets`
+    /// edit replaces it.
+    pub launch_node_sets: Vec<String>,
+    /// Directory relative graph references resolve against.
+    pub launch_dir: std::path::PathBuf,
 }
 
 /// What one park recorded about itself, as a later edit reads it.
@@ -595,10 +624,35 @@ pub fn compile(
     author: Author,
     command: &Command,
 ) -> Result<Vec<Operation>> {
+    if graph_setting_requires_validation(command) && frontier.graph_validation.is_none() {
+        return Err(refuse(
+            "graph overrides require the run's resolved graph validation context",
+        ));
+    }
     // Validate against a copy, so a refusal partway through a multi-edge
     // mutation cannot leave the caller's graph in a state nothing submitted.
     let mut candidate = graph.clone();
-    let operations = compile_into(&mut candidate, frontier, author, command)?;
+    let mut resolved = command.clone();
+    if let Some(base) = frontier
+        .graph_validation
+        .as_ref()
+        .map(|c| c.launch_dir.as_path())
+    {
+        match &mut resolved {
+            Command::Add { node } | Command::Retry { node, .. } => {
+                crate::driver::resolve_node_graphs(node, base)
+                    .map_err(|why| refuse(format!("node '{}': {why}", node.id)))?;
+            }
+            Command::Requeue {
+                id,
+                amend: Some(amend),
+            } => {
+                resolve_amended_graphs(id, amend, base)?;
+            }
+            _ => {}
+        }
+    }
+    let operations = compile_into(&mut candidate, frontier, author, &resolved)?;
     if !matches!(
         command,
         Command::Complete { .. }
@@ -616,6 +670,46 @@ pub fn compile(
         });
         graph::validate_edited(&plan).map_err(|e| Error::Refused(e.to_string()))?;
     }
+    if let Some(context) = &frontier.graph_validation {
+        let run_sets = match command {
+            Command::SetRunNodeSets { sets } => sets.as_slice(),
+            _ => frontier
+                .run_node_sets
+                .as_deref()
+                .unwrap_or(&context.launch_node_sets),
+        };
+        /// Which nodes' future dispatches one command can change the overrides of.
+        enum Affected<'a> {
+            One(&'a str),
+            EveryUnsettled,
+            Nothing,
+        }
+        let affected = match command {
+            Command::SetNodeSets { id, .. } | Command::Requeue { id, .. } => {
+                Affected::One(id.as_str())
+            }
+            Command::Add { node } | Command::Retry { node, .. } => Affected::One(node.id.as_str()),
+            Command::SetRunNodeSets { .. } => Affected::EveryUnsettled,
+            _ => Affected::Nothing,
+        };
+        for node in candidate.iter() {
+            match affected {
+                Affected::Nothing => break,
+                Affected::One(id) if id != node.id => continue,
+                Affected::One(_) | Affected::EveryUnsettled => {}
+            }
+            if frontier.recorded.get(&node.id).is_some_and(|status| {
+                matches!(
+                    status,
+                    NodeStatus::Done | NodeStatus::Failed | NodeStatus::Skipped
+                )
+            }) {
+                continue;
+            }
+            graph::validate_dispatch_sets(node, &context.default_graph.0, run_sets)
+                .map_err(|why| Error::Refused(why.to_string()))?;
+        }
+    }
     // Last, and over the node the edit actually produced: the host's own rules
     // are the expensive check and the specific one, so a node this crate's own
     // schema would refuse never reaches them.
@@ -624,6 +718,53 @@ pub fn compile(
     }
     *graph = candidate;
     Ok(operations)
+}
+
+fn graph_setting_requires_validation(command: &Command) -> bool {
+    match command {
+        Command::SetNodeSets { .. } | Command::SetRunNodeSets { .. } => true,
+        Command::Add { node } | Command::Retry { node, .. } => {
+            !node.sets.is_empty()
+                || node.agent_graph.is_some()
+                || node
+                    .steps
+                    .as_ref()
+                    .is_some_and(|steps| steps.iter().any(|step| step.agent_graph.is_some()))
+        }
+        Command::Requeue {
+            amend: Some(amend), ..
+        } => ["sets", "agent_graph", "steps"]
+            .iter()
+            .any(|key| amend.contains_key(*key)),
+        _ => false,
+    }
+}
+
+fn resolve_amended_graphs(
+    id: &str,
+    amend: &mut Map<String, Value>,
+    base: &std::path::Path,
+) -> Result<()> {
+    let resolve = |reference: &mut Value| -> Result<()> {
+        if let Some(written) = reference.as_str() {
+            *reference = Value::String(
+                crate::driver::resolve_graph(written, base)
+                    .map_err(|why| refuse(format!("requeue: node '{id}': {why}")))?,
+            );
+        }
+        Ok(())
+    };
+    if let Some(reference) = amend.get_mut("agent_graph") {
+        resolve(reference)?;
+    }
+    if let Some(steps) = amend.get_mut("steps").and_then(Value::as_array_mut) {
+        for step in steps {
+            if let Some(reference) = step.get_mut("agent_graph") {
+                resolve(reference)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Carry one command's compiled operations onto the frontier the **next**
@@ -644,6 +785,9 @@ pub fn compile(
 pub fn advance(frontier: &mut Frontier, operations: &[Operation]) {
     for operation in operations {
         match operation {
+            Operation::RunNodeSetsReplaced { sets } => {
+                frontier.run_node_sets = Some(sets.clone());
+            }
             Operation::NodeParked { node, by, reason } => {
                 frontier
                     .parks
@@ -1186,6 +1330,32 @@ fn compile_into(
     command: &Command,
 ) -> Result<Vec<Operation>> {
     match command {
+        Command::SetNodeSets { id, sets } => {
+            let Some(node) = graph.get_mut(id) else {
+                return Err(refuse(format!("set-node-sets: no node '{id}'")));
+            };
+            if frontier.recorded.get(id).is_some_and(|status| {
+                matches!(
+                    status,
+                    NodeStatus::Done | NodeStatus::Failed | NodeStatus::Skipped
+                )
+            }) {
+                return Err(refuse(format!("set-node-sets: node '{id}' is settled")));
+            }
+            node.sets.clone_from(sets);
+            Ok(vec![Operation::NodeSetsReplaced {
+                node: id.clone(),
+                sets: sets.clone(),
+            }])
+        }
+        Command::SetRunNodeSets { sets } => {
+            for entry in sets {
+                oneagentgraph::run::parse_set(entry).map_err(|why| {
+                    refuse(format!("set-run-node-sets: invalid entry {entry:?}: {why}"))
+                })?;
+            }
+            Ok(vec![Operation::RunNodeSetsReplaced { sets: sets.clone() }])
+        }
         Command::Add { node } => compile_add(graph, node),
         Command::Drop { id, dependents } => compile_drop(graph, frontier, id, *dependents),
         Command::Reparent { id, deps } => compile_reparent(graph, frontier, id, deps),
@@ -2140,6 +2310,12 @@ fn compile_amend(
 /// it. A rejected edit was never recorded, so nothing here can refuse.
 pub fn apply(graph: &mut Graph, operation: &Operation) {
     match operation {
+        Operation::NodeSetsReplaced { node, sets } => {
+            if let Some(existing) = graph.get_mut(node) {
+                existing.sets.clone_from(sets);
+            }
+        }
+        Operation::RunNodeSetsReplaced { .. } => {}
         Operation::NodeAdded { node, .. } => graph.insert((**node).clone()),
         Operation::NodeDropped { node, .. } => {
             graph.remove(node);

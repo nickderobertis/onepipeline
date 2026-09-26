@@ -33,7 +33,7 @@ use oneagentgraph::config::ConfigRef;
 use onevcs::SessionRequest;
 
 use crate::agentgraph::{Ending, Environment, GraphOutput, GraphRun, Launch};
-use crate::controls::{NodeControls, WORKER_MEMBER};
+use crate::controls::NodeControls;
 use crate::error::{Error, Result};
 use crate::event::{Envelope, Labels};
 
@@ -664,14 +664,36 @@ fn node_sets(
     if labels.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
         return Ok(Vec::new());
     }
-    let mut sets = launched.map_or_else(Vec::new, |record| record.node_sets.clone());
-    if let Some(persona) = &labels.persona {
-        sets.push(format!("members.{WORKER_MEMBER}.persona={persona}"));
-    }
-    // A control this build cannot apply refuses the launch here as well as at
-    // validation, so no path composes a launch that drops one on the floor.
-    sets.extend(controls.overrides().map_err(Error::Invalid)?);
-    Ok(sets)
+    let (run_sets, own_sets) = if let (Some(record), Some(run), Some(node)) =
+        (launched, labels.run_id.as_deref(), labels.node.as_deref())
+    {
+        let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
+        let state = crate::checkpoint::Projected::open(&paths);
+        (
+            state
+                .run_node_sets
+                .clone()
+                .unwrap_or_else(|| record.node_sets.clone()),
+            // A node this run's projection does not hold has no sets anyone
+            // can vouch for: dispatching it with none would drop what the plan
+            // or an edit declared for it without a word.
+            state
+                .graph
+                .get(node)
+                .map(|n| n.sets.clone())
+                .ok_or_else(|| {
+                    Error::Invalid(format!(
+                        "run '{run}' holds no node '{node}' to read its graph overrides from"
+                    ))
+                })?,
+        )
+    } else {
+        (
+            launched.map_or_else(Vec::new, |record| record.node_sets.clone()),
+            Vec::new(),
+        )
+    };
+    crate::graph::dispatch_sets(&run_sets, labels.persona.as_deref(), *controls, &own_sets)
 }
 
 /// The launch record of the run this dispatch belongs to, when it belongs to one.
@@ -1050,6 +1072,40 @@ mod tests {
         );
         std::env::remove_var(crate::ledger::RUNS_DIR_ENV);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A node the run's projection does not hold is refused rather than
+    /// dispatched without the overrides the plan or an edit declared for it.
+    #[test]
+    fn a_node_the_run_does_not_hold_is_refused_rather_than_given_no_sets() {
+        let _runs_dir = runs_dir_lock();
+        let root = scratch_root("absent-node");
+        let paths = crate::ledger::RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let record = r#"{"run_id":"demo","plan":"p.json","node_graph":"./node.yaml",
+            "pr_author_graph":"./author.yaml","launcher":"l","session":"s","pid":1,
+            "host":"h","started_at":"now","heartbeat_interval":1}"#;
+        std::fs::write(paths.launch(), record).expect("the launch record is written");
+        std::env::set_var(crate::ledger::RUNS_DIR_ENV, &root);
+
+        let labels = Labels {
+            run_id: Some("demo".into()),
+            node: Some("absent".into()),
+            persona: Some("engineer".into()),
+            ..Labels::default()
+        };
+        let launched = launched_with(&labels).expect("the launch record is readable");
+        let refused = node_sets(launched.as_ref(), &labels, &NodeControls::default());
+
+        std::env::remove_var(crate::ledger::RUNS_DIR_ENV);
+        let _ = std::fs::remove_dir_all(&root);
+        match refused {
+            Err(Error::Invalid(why)) => assert!(
+                why.contains("'demo'") && why.contains("'absent'"),
+                "the refusal does not name the run and node: {why}"
+            ),
+            other => panic!("an unknown node was dispatched with guessed sets: {other:?}"),
+        }
     }
 
     /// Every dispatch is given a directory of its own, and no two are given one.

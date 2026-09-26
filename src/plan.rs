@@ -81,11 +81,9 @@ pub(crate) fn draft_is_newer(declared: u32) -> String {
     )
 }
 
-/// What a plan below [`PLAN_SCHEMA_VERSION`] naming `pool` or `overflow` is
-/// told, for [`draft_is_newer`]'s reason: a planner who sized a node's placement
-/// and had the ask ignored would find that out from a session refused, or from
-/// one cut fresh where a warm slot was asked for.
-pub(crate) fn placement_is_newer(field: &str, declared: u32) -> String {
+/// Name a node field that this plan schema introduced, so an older document's
+/// request cannot be accepted and silently ignored.
+pub(crate) fn node_field_is_newer(field: &str, declared: u32) -> String {
     format!(
         "`{field}` is a schema {PLAN_SCHEMA_VERSION} field and this plan declares \
          schema_version {declared} — set `schema_version: {PLAN_SCHEMA_VERSION}`"
@@ -905,6 +903,9 @@ pub struct Node {
     /// The dispatch's turn budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
+    /// Ordered graph overrides applied to every agent dispatch of this node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sets: Vec<String>,
     /// The node is expected to leave the repository unchanged, so an empty diff
     /// is a completed node rather than a failed one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

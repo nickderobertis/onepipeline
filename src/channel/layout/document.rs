@@ -46,7 +46,7 @@ pub const DOCUMENT_PATH: &str = "schemas/planner-channel.json";
 /// The version the published document declares — what a link's pin is held
 /// against. Raised with any change to what the document says: its major where
 /// a channel directory one version writes is one the other cannot read.
-pub const DOCUMENT_VERSION: &str = "1.0.0";
+pub const DOCUMENT_VERSION: &str = "1.1.0";
 
 /// The reply envelope family, whose every version this build reads the bundle
 /// carries.

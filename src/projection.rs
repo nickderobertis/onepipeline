@@ -58,6 +58,9 @@ pub struct RunState {
     /// The desired graph the loop is converging toward, with every committed
     /// edit applied.
     pub graph: Graph,
+    /// Latest journalled replacement for the launch's run-wide node overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_node_sets: Option<Vec<String>>,
     /// The plan the run was launched with, for the fields a graph does not
     /// carry — the goal and the name.
     pub plan: Option<Plan>,
@@ -726,6 +729,8 @@ impl RunState {
             in_flight: BTreeMap::new(),
             // The launch's, and only a caller holding the launch record has it.
             node_validator: None,
+            run_node_sets: self.run_node_sets.clone(),
+            graph_validation: None,
             stated_landings: self.stated_landings.clone(),
         }
     }
@@ -1531,6 +1536,9 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
     for operation in operations {
         edits::apply(&mut state.graph, operation);
         match operation {
+            Operation::RunNodeSetsReplaced { sets } => {
+                state.run_node_sets = Some(sets.clone());
+            }
             Operation::HumanAttested { node } => {
                 state.attestations.insert(node.clone());
                 state

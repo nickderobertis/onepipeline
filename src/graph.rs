@@ -16,6 +16,7 @@ use onevcs::provenance::SUBJECT_LIMIT;
 use serde::{Deserialize, Serialize};
 
 use crate::controls::NodeControls;
+use crate::controls::WORKER_MEMBER;
 use crate::error::{Error, Result};
 use crate::plan::{Node, NodeKind, Plan, Step};
 use crate::refusal::Refusal;
@@ -504,16 +505,17 @@ fn check_declared_version(plan: &Plan) -> std::result::Result<(), Refusal> {
         if node.draft && plan.schema_version < crate::plan::PLAN_SCHEMA_VERSION {
             return Err(named(crate::plan::draft_is_newer(plan.schema_version)).field("draft"));
         }
-        // The two placement overrides, on `body`'s terms: the version is the
-        // whole of what each is checked for here, and what either means is the
-        // sibling's, which reads them off the session request.
+        // These node fields arrived with schema 3. Older plans that named one
+        // must be refused rather than silently losing the request.
         for (field, named_it) in [
             ("pool", node.pool.is_some()),
             ("overflow", node.overflow.is_some()),
+            ("sets", !node.sets.is_empty()),
         ] {
             if named_it && plan.schema_version < crate::plan::PLAN_SCHEMA_VERSION {
                 return Err(
-                    named(crate::plan::placement_is_newer(field, plan.schema_version)).field(field),
+                    named(crate::plan::node_field_is_newer(field, plan.schema_version))
+                        .field(field),
                 );
             }
         }
@@ -535,6 +537,130 @@ fn check_declared_version(plan: &Plan) -> std::result::Result<(), Refusal> {
 /// make the planner unable to abandon a graph it started.
 pub fn validate_edited(plan: &Plan) -> Result<()> {
     check_edited(plan).map_err(Error::from)
+}
+
+/// Compose the overrides for one agent dispatch in precedence order.
+pub(crate) fn dispatch_sets(
+    run_sets: &[String],
+    persona: Option<&str>,
+    controls: NodeControls,
+    node_sets: &[String],
+) -> Result<Vec<String>> {
+    let mut sets = run_sets.to_vec();
+    if let Some(persona) = persona {
+        sets.push(format!("members.{WORKER_MEMBER}.persona={persona}"));
+    }
+    sets.extend(controls.overrides().map_err(Error::Invalid)?);
+    sets.extend_from_slice(node_sets);
+    Ok(sets)
+}
+
+/// Apply a complete ordered list through oneagentgraph's loader and schema.
+pub(crate) fn validate_graph_sets(reference: &str, sets: &[String], context: &str) -> Result<()> {
+    let mut resolver = oneagentgraph::resolve::Resolver::new();
+    let content = resolver
+        .resolve(
+            &oneagentgraph::config::ConfigRef(reference.to_owned()),
+            None,
+        )
+        .map_err(|why| Error::Invalid(format!("{context} graph '{reference}': {why}")))?
+        .content
+        .clone();
+    let mut document: serde_json::Value = serde_norway::from_str(&content)
+        .map_err(|why| Error::Invalid(format!("{context} graph '{reference}': {why}")))?;
+    for entry in sets {
+        let override_ = oneagentgraph::run::parse_set(entry).map_err(|why| {
+            Error::Invalid(format!(
+                "{context} graph '{reference}' set {entry:?}: {why}"
+            ))
+        })?;
+        oneagentgraph::run::apply_overrides(&mut document, &[override_]).map_err(|why| {
+            Error::Invalid(format!(
+                "{context} graph '{reference}' set {entry:?}: {why}"
+            ))
+        })?;
+    }
+    let graph: oneagentgraph::config::GraphConfig = serde_norway::from_value(
+        serde_norway::to_value(&document)
+            .map_err(|why| Error::Invalid(format!("{context} graph '{reference}': {why}")))?,
+    )
+    .map_err(|why| {
+        Error::Invalid(format!(
+            "{context} graph '{reference}' sets {sets:?}: {why}"
+        ))
+    })?;
+    oneagentgraph::config::validate(&graph).map_err(|why| {
+        Error::Invalid(format!(
+            "{context} graph '{reference}' sets {sets:?}: {why}"
+        ))
+    })?;
+    oneagentgraph::run::ready_order(&graph).map_err(|why| {
+        Error::Invalid(format!(
+            "{context} graph '{reference}' sets {sets:?}: {why}"
+        ))
+    })?;
+    Ok(())
+}
+
+/// Check each affected dispatch with the graph loader and schema oneagentgraph runs.
+pub(crate) fn validate_dispatch_sets(
+    node: &Node,
+    default_graph: &str,
+    run_sets: &[String],
+) -> Result<()> {
+    // A dispatch no override list touches is the graph's as shipped, and what is
+    // wrong with that is oneagentgraph's to say, in its own words, when it runs.
+    if node.kind == NodeKind::Human
+        || node.expects_no_diff
+        || (run_sets.is_empty() && node.sets.is_empty())
+    {
+        return Ok(());
+    }
+    let check = |step: Option<&Step>| -> Result<()> {
+        let (step_name, graph, persona, controls) = match step {
+            Some(step) => (
+                Some(step.id.as_str()),
+                step.agent_graph
+                    .as_ref()
+                    .or(node.agent_graph.as_ref())
+                    .map_or(default_graph, |r| r.0.as_str()),
+                step.persona.as_deref(),
+                NodeControls::of_step(step).map_err(Error::Invalid)?,
+            ),
+            None => (
+                None,
+                node.agent_graph
+                    .as_ref()
+                    .map_or(default_graph, |r| r.0.as_str()),
+                node.persona.as_deref(),
+                NodeControls::of_node(node).map_err(Error::Invalid)?,
+            ),
+        };
+        let sets = dispatch_sets(run_sets, persona, controls, &node.sets)?;
+        let context = match step_name {
+            Some(step) => format!("node '{}' step '{step}'", node.id),
+            None => format!("node '{}'", node.id),
+        };
+        validate_graph_sets(graph, &sets, &context)
+    };
+    if let Some(steps) = &node.steps {
+        let agents: Vec<_> = steps
+            .iter()
+            .filter(|s| s.kind == NodeKind::Agent && !s.expects_no_diff)
+            .collect();
+        if agents.is_empty() && !node.sets.is_empty() {
+            return Err(Error::Invalid(format!(
+                "node '{}' has sets but no agent step to dispatch",
+                node.id
+            )));
+        }
+        for step in agents {
+            check(Some(step))?;
+        }
+    } else {
+        check(None)?;
+    }
+    Ok(())
 }
 
 /// [`validate_edited`], answering with what each refusal is about.
@@ -665,6 +791,14 @@ pub fn validate_node(node: &Node) -> Result<()> {
 /// [`validate_node`], answering with what the refusal is about.
 pub(crate) fn check_node(node: &Node) -> std::result::Result<(), Refusal> {
     let named = |what: &str| Refusal::node(&node.id, what);
+    for entry in &node.sets {
+        oneagentgraph::run::parse_set(entry).map_err(|why| {
+            named(&format!("invalid `sets` entry {entry:?}: {why}")).field("sets")
+        })?;
+    }
+    if !node.sets.is_empty() && (node.kind == NodeKind::Human || node.expects_no_diff) {
+        return Err(named("`sets` needs an agent dispatch; this node has none").field("sets"));
+    }
     if node.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
         return Err(named(RESERVED_PERSONA).field("persona"));
     }

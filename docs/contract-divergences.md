@@ -706,6 +706,9 @@ the run-wide `--node-set`s because a control written against one node is the mor
 specific of the two. `OnejudgeMember::max_turns` is the sibling's existing
 mechanism, so nothing new was needed there.
 
+The planner accepted per-node and mid-run graph overrides as an extension of
+this entry's surface.
+
 `done_when` is **gone from `Node` and `Step`** rather than forwarded. onejudge
 hands that field to the judge verbatim as its criterion, and the judge is given
 the transcript whose first message is the task with its acceptance criteria — so

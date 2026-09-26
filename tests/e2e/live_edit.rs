@@ -37,6 +37,15 @@ fn live(world: &World, name: &str, nodes: Vec<Value>, hold: &[&str]) -> String {
     name.to_string()
 }
 
+fn relative_graph(world: &World, name: &str) -> String {
+    std::fs::copy(
+        crate::harness::repo_file("graphs/node-scope.yaml"),
+        world.root.join(name),
+    )
+    .expect("the relative graph is written in the launch directory");
+    format!("./{name}")
+}
+
 fn envelope(commands: Value) -> String {
     json!({"version": 2, "commands": commands}).to_string()
 }
@@ -53,6 +62,707 @@ fn committed(world: &World, run: &str) -> Vec<String> {
         })
         .collect()
 }
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys live
+// beside the other live-edit journeys in this file, for the reason the settle journey
+// below states: what they exercise is the crate's own edit vocabulary, reconciler and node
+// dispatch, which any change under `src/` can move, so no project edged narrower than the
+// crate could honestly run them.
+#[test]
+fn commands_only_set_replacements_replay_into_the_next_node_dispatch() {
+    let world = World::new("edit-node-sets");
+    let run = live(
+        &world,
+        "sets-edited",
+        vec![
+            agent("held", &[]),
+            agent("specific", &["held"]),
+            agent("general", &["held"]),
+        ],
+        &["held"],
+    );
+    let edited = json!({"version":3,"commands":[
+        {"op":"set-run-node-sets","sets":["members.worker.agent.model=run,wide"]},
+        {"op":"set-node-sets","id":"specific","sets":["members.worker.agent.model=node=value"]}
+    ]});
+    world
+        .run_with_stdin(&["reply", &run], &edited.to_string())
+        .exited(0);
+    world.until("both list edits to commit", |world| {
+        committed(world, &run)
+            .iter()
+            .filter(|op| op.starts_with("set-"))
+            .count()
+            == 2
+    });
+    let refused = json!({"version":3,"commands":[
+        {"op":"set-node-sets","id":"specific","sets":["members.absent.model=wrong"]}
+    ]});
+    world
+        .run_with_stdin(&["reply", &run], &refused.to_string())
+        .exited(REFUSED)
+        .err_has("members.absent.model=wrong");
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version":3,"commands":[{"op":"set-run-node-sets","sets":["members.absent.agent.model=wrong"]}]}).to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("members.absent.agent.model=wrong");
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version":3,"commands":[{"op":"set-run-node-sets","sets":["missing-equals"]}]})
+                .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("missing-equals")
+        .err_has("PATH=VALUE");
+    world.release("held.go");
+    world.until("both dependent nodes to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let sets_of = |id: &str| -> Vec<String> {
+        let call = world
+            .invocations()
+            .into_iter()
+            .find(|call| {
+                call["tool"] == "oneagentgraph"
+                    && call["args"].as_array().is_some_and(|args| {
+                        args.iter()
+                            .any(|value| value == &format!("onepipeline.node={id}"))
+                    })
+            })
+            .unwrap_or_else(|| panic!("no graph launch for {id}: {}", world.dump()));
+        let args = call["args"].as_array().expect("argv");
+        args.windows(2)
+            .filter(|pair| pair[0] == "--set")
+            .filter_map(|pair| pair[1].as_str().map(str::to_string))
+            .collect()
+    };
+    let specific = sets_of("specific");
+    let general = sets_of("general");
+    let held = sets_of("held");
+    assert!(
+        !held.iter().any(|set| set.contains("model=run,wide")),
+        "the running conversation changed its launch: {held:?}"
+    );
+    assert_eq!(
+        specific.last().map(String::as_str),
+        Some("members.worker.agent.model=node=value")
+    );
+    assert_eq!(
+        general.first().map(String::as_str),
+        Some("members.worker.agent.model=run,wide")
+    );
+    assert!(!specific.iter().any(|set| set.contains("absent")));
+    assert!(operations(&world, &run)
+        .iter()
+        .any(|op| op["kind"] == "run-node-sets-replaced"));
+    assert!(operations(&world, &run)
+        .iter()
+        .any(|op| op["kind"] == "node-sets-replaced"));
+}
+
+#[test]
+fn run_wide_edit_refuses_a_future_steps_effective_graph() {
+    let world = World::new("edit-run-set-step-refusal");
+    world.repository("local-direct", &[]);
+    world.script("service.work", "the worker wrote this");
+    let other = world.root.join("step-oneharness.yaml");
+    std::fs::write(
+        &other,
+        "version: 1\nname: other\nmembers:\n  worker:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+    )
+    .expect("step graph written");
+    let lifecycle = json!({
+        "id":"service", "repo":"service", "title":"feat: service",
+        "deps":["held"],
+        "steps":[
+            {"id":"build", "persona":"engineer", "task":"## What\nbuild"},
+            {"id":"review", "persona":"reviewer", "task":"## What\nreview",
+             "deps":["build"], "agent_graph":other.to_string_lossy()}
+        ]
+    });
+    let run = live(
+        &world,
+        "step-edit-refused",
+        vec![agent("held", &[]), lifecycle],
+        &["held"],
+    );
+    let entry = "members.worker.agent.model=invalid-for-review";
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version":3,"commands":[{"op":"set-run-node-sets","sets":[entry]}]})
+                .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("service")
+        .err_has("review")
+        .err_has("step-oneharness.yaml")
+        .err_has(entry);
+    assert!(!committed(&world, &run).contains(&"set-run-node-sets".to_string()));
+    world.release("held.go");
+    world.until("the unchanged lifecycle to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    assert!(world.invocations().iter().all(|call| {
+        !call["args"]
+            .as_array()
+            .is_some_and(|args| args.iter().any(|arg| arg == entry))
+    }));
+}
+
+/// Both lists are edited while a lifecycle node's first step is in flight: that step keeps the
+/// overrides it launched with, and the node's next step dispatches with the replacements.
+#[test]
+fn set_edits_during_a_running_step_reach_the_lifecycle_nodes_next_step() {
+    let world = World::new("edit-sets-between-steps");
+    world.repository("local-direct", &[]);
+    world.script("service.work", "the worker wrote this");
+    world.script("service.build.wait", "hold");
+    let service = json!({
+        "id":"service", "repo":"service", "title":"feat: service",
+        "sets":["members.worker.agent.model=planned"],
+        "steps":[
+            {"id":"build", "persona":"engineer", "task":"## What\nbuild"},
+            {"id":"review", "persona":"reviewer", "task":"## What\nreview", "deps":["build"]}
+        ]
+    });
+    let run = "sets-between-steps";
+    let path = world.plan(run, &plan_of(run, vec![service]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    let step_sets = |world: &World, step: &str| -> Option<Vec<String>> {
+        let call = world.invocations().into_iter().find(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"].as_array().is_some_and(|args| {
+                    args.iter().any(|arg| arg == "onepipeline.node=service")
+                        && args
+                            .iter()
+                            .any(|arg| arg == &format!("onepipeline.step={step}"))
+                })
+        })?;
+        Some(
+            call["args"]
+                .as_array()
+                .expect("argv")
+                .windows(2)
+                .filter(|pair| pair[0] == "--set")
+                .filter_map(|pair| pair[1].as_str().map(str::to_string))
+                .collect(),
+        )
+    };
+    world.until("the first step to dispatch", |world| {
+        step_sets(world, "build").is_some()
+    });
+    let edited = json!({"version":3,"commands":[
+        {"op":"set-run-node-sets","sets":["members.worker.agent.model=run=wide"]},
+        {"op":"set-node-sets","id":"service","sets":["members.worker.agent.model=edited,node"]}
+    ]});
+    world
+        .run_with_stdin(&["reply", run], &edited.to_string())
+        .exited(0);
+    world.until("both list edits to commit", |world| {
+        committed(world, run)
+            .iter()
+            .filter(|op| op.starts_with("set-"))
+            .count()
+            == 2
+    });
+    world.release("service.build.go");
+    world.until("the lifecycle node to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+
+    let build = step_sets(&world, "build").expect("the first step dispatched");
+    assert_eq!(
+        build.last().map(String::as_str),
+        Some("members.worker.agent.model=planned"),
+        "the running step did not launch with the plan's list: {build:?}"
+    );
+    assert!(
+        !build
+            .iter()
+            .any(|set| set.ends_with("run=wide") || set.ends_with("edited,node")),
+        "the running step changed its launch: {build:?}"
+    );
+    let review = step_sets(&world, "review")
+        .unwrap_or_else(|| panic!("the next step never dispatched: {}", world.dump()));
+    let run_wide = review
+        .iter()
+        .position(|set| set == "members.worker.agent.model=run=wide")
+        .unwrap_or_else(|| panic!("the next step lost the run-wide edit: {review:?}"));
+    assert_eq!(
+        review.last().map(String::as_str),
+        Some("members.worker.agent.model=edited,node"),
+        "the next step did not end with the node's replacement: {review:?}"
+    );
+    assert!(run_wide < review.len() - 1, "{review:?}");
+    assert!(
+        !review.iter().any(|set| set.ends_with("=planned")),
+        "the replaced node list still reached the next step: {review:?}"
+    );
+}
+
+#[test]
+fn a_run_wide_set_edit_is_replayed_when_a_driver_adopts() {
+    let world = World::new("edit-sets-adopt");
+    world.script("held.wait", "hold");
+    let path = world.plan(
+        "sets-adopted",
+        &plan_of(
+            "sets-adopted",
+            vec![
+                human("approve", &[]),
+                agent("held", &[]),
+                agent("build", &["approve", "held"]),
+            ],
+        ),
+    );
+    world
+        .run(&[
+            "start",
+            &path,
+            "--detach",
+            "--dag-graph",
+            &world.shipped_dag_graph(),
+            "--set",
+            "members.monitor.agent.model=observer",
+        ])
+        .exited(0);
+    world.until("the held node to start", |world| {
+        world
+            .events_of("sets-adopted", "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "held")
+    });
+    let edited = json!({"version":3,"commands":[
+        {"op":"set-run-node-sets","sets":["members.worker.agent.model=adopted=value"]}
+    ]});
+    world
+        .run_with_stdin(&["reply", "sets-adopted"], &edited.to_string())
+        .exited(0);
+    world.until("the live driver to commit the edit", |world| {
+        committed(world, "sets-adopted").contains(&"set-run-node-sets".to_string())
+    });
+    world.release("held.go");
+    world.until("the blocked driver to exit", |world| {
+        world
+            .run(&["status", "sets-adopted"])
+            .stdout
+            .contains("DRIVER DEAD")
+    });
+    world.run(&["status", "sets-adopted"]).exited(0);
+    let checkpoint = world.run_json("sets-adopted", "checkpoint.json");
+    assert_eq!(
+        checkpoint["state"]["run_node_sets"],
+        json!(["members.worker.agent.model=adopted=value"]),
+        "the usable checkpoint did not fold the edit: {checkpoint}"
+    );
+    assert!(
+        checkpoint["coverage"]["records"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "the checkpoint covers no journal records: {checkpoint}"
+    );
+    world.run(&["attest", "sets-adopted", "approve"]).exited(0);
+    world.run(&["adopt", "sets-adopted"]).exited(0);
+    let launch = world.run_json("sets-adopted", "launch.json");
+    assert!(
+        launch["node_sets"].is_null(),
+        "launch remains the baseline: {launch}"
+    );
+    assert_eq!(
+        launch["dag_sets"],
+        json!(["members.monitor.agent.model=observer"])
+    );
+    let dags: Vec<_> = world
+        .invocations()
+        .into_iter()
+        .filter(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"].as_array().is_some_and(|args| {
+                    args.iter()
+                        .any(|arg| arg.as_str().is_some_and(|s| s.ends_with("dag-scope.yaml")))
+                })
+        })
+        .collect();
+    assert!(
+        dags.len() >= 2,
+        "start and adopt launched the dag observer: {dags:?}"
+    );
+    for dag in dags {
+        assert!(
+            dag["args"]
+                .as_array()
+                .expect("argv")
+                .windows(2)
+                .any(|pair| {
+                    pair[0] == "--set" && pair[1] == "members.monitor.agent.model=observer"
+                }),
+            "a dag observer lost its original overrides: {dag}"
+        );
+    }
+    let call = world
+        .invocations()
+        .into_iter()
+        .find(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"]
+                    .as_array()
+                    .is_some_and(|args| args.iter().any(|arg| arg == "onepipeline.node=build"))
+        })
+        .expect("adoption dispatched build");
+    assert!(
+        call["args"]
+            .as_array()
+            .expect("argv")
+            .windows(2)
+            .any(|pair| {
+                pair[0] == "--set" && pair[1] == "members.worker.agent.model=adopted=value"
+            }),
+        "the adopted dispatch lost the edit: {call}"
+    );
+}
+
+#[test]
+fn empty_set_replacements_clear_both_scopes_and_settled_targets_refuse() {
+    let world = World::new("edit-sets-clear");
+    let run = live(
+        &world,
+        "sets-cleared",
+        vec![
+            agent("done", &[]),
+            agent("held", &[]),
+            agent("next", &["held"]),
+        ],
+        &["held"],
+    );
+    world.until("the independent node to settle", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "done")
+    });
+    for (id, expected) in [("missing", "no node"), ("done", "settled")] {
+        world
+            .run_with_stdin(
+                &["reply", &run],
+                &json!({"version":3,"commands":[{"op":"set-node-sets","id":id,"sets":["members.worker.agent.model=wrong"]}]}).to_string(),
+            )
+            .exited(REFUSED)
+            .err_has(expected);
+    }
+    for commands in [
+        json!([{"op":"set-run-node-sets","sets":["members.worker.agent.model=run"]},
+               {"op":"set-node-sets","id":"next","sets":["members.worker.agent.model=node"]}]),
+        json!([{"op":"set-node-sets","id":"next","sets":[]},
+               {"op":"set-run-node-sets","sets":[]}]),
+    ] {
+        world
+            .run_with_stdin(
+                &["reply", &run],
+                &json!({"version":3,"commands":commands}).to_string(),
+            )
+            .exited(0);
+    }
+    world.release("held.go");
+    world.until("the cleared node to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let call = world
+        .invocations()
+        .into_iter()
+        .find(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"]
+                    .as_array()
+                    .is_some_and(|args| args.iter().any(|arg| arg == "onepipeline.node=next"))
+        })
+        .expect("next was dispatched");
+    assert!(
+        !call["args"].as_array().expect("argv").iter().any(|arg| {
+            arg.as_str()
+                .is_some_and(|set| set.starts_with("members.worker.agent.model="))
+        }),
+        "cleared overrides reached the next dispatch: {call}"
+    );
+    assert_eq!(
+        world.run_json(&run, "launch.json")["node_sets"],
+        Value::Null
+    );
+}
+
+#[test]
+fn node_set_edits_refuse_nodes_without_dispatch_and_preserve_the_graph() {
+    let world = World::new("edit-sets-no-dispatch");
+    let mut target = agent("target", &["held"]);
+    target["sets"] = json!(["members.worker.agent.model=original"]);
+    let mut no_diff = agent("no-diff", &["held"]);
+    no_diff["expects_no_diff"] = json!(true);
+    no_diff.as_object_mut().expect("node").remove("persona");
+    let run = live(
+        &world,
+        "sets-no-dispatch",
+        vec![
+            agent("held", &[]),
+            target,
+            human("approve", &["held"]),
+            no_diff,
+        ],
+        &["held"],
+    );
+    for id in ["approve", "no-diff"] {
+        world
+            .run_with_stdin(
+                &["reply", &run],
+                &json!({"version":3,"commands":[{"op":"set-node-sets","id":id,"sets":["members.worker.agent.model=wrong"]}]}).to_string(),
+            )
+            .exited(REFUSED)
+            .err_has(id)
+            .err_has("needs an agent dispatch");
+    }
+    world.release("held.go");
+    world.until("the target to dispatch", |world| {
+        world.invocations().iter().any(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"]
+                    .as_array()
+                    .is_some_and(|args| args.iter().any(|arg| arg == "onepipeline.node=target"))
+        })
+    });
+    let target = world
+        .invocations()
+        .into_iter()
+        .find(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"]
+                    .as_array()
+                    .is_some_and(|args| args.iter().any(|arg| arg == "onepipeline.node=target"))
+        })
+        .expect("the target dispatched");
+    assert!(
+        target["args"]
+            .as_array()
+            .expect("argv")
+            .windows(2)
+            .any(|pair| { pair[0] == "--set" && pair[1] == "members.worker.agent.model=original" }),
+        "a rejected edit changed the target: {target}"
+    );
+}
+
+#[test]
+fn add_and_retry_resolve_relative_graphs_before_dispatch() {
+    let world = World::new("edit-relative-add-retry");
+    let relative = relative_graph(&world, "relative-node.yaml");
+    world.script("slow.wait", "hold");
+    world.script("retried.wait", "hold");
+    let path = world.plan(
+        "relative-add-retry",
+        &plan_of(
+            "relative-add-retry",
+            vec![agent("slow", &[]), agent("retried", &[])],
+        ),
+    );
+    let mut start = world.cmd(&["start", &path, "--detach"]);
+    start.current_dir(&world.root);
+    world
+        .run_on(start, "start from the graph directory")
+        .exited(0);
+    world.until("both original nodes to start", |world| {
+        ["slow", "retried"].iter().all(|id| {
+            world
+                .events_of("relative-add-retry", "node-dispatched")
+                .iter()
+                .any(|event| event["labels"]["node"] == *id)
+        })
+    });
+    world
+        .run_with_stdin(
+            &["reply", "relative-add-retry"],
+            &json!({"version":3,"commands":[{"op":"add","node":{
+                "id":"missing", "persona":"engineer", "task":"## What\nmissing",
+                "agent_graph":"./missing-node.yaml", "sets":["members.worker.agent.model=wrong"]
+            }}]})
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("missing")
+        .err_has("missing-node.yaml");
+    for command in [
+        json!({"op":"add","node":{
+            "id":"extra", "persona":"engineer", "task":"## What\nextra",
+            "deps":["slow"], "agent_graph":relative,
+            "sets":["members.worker.agent.model=added"]
+        }}),
+        json!({"op":"retry","id":"retried","node":{
+            "id":"replacement", "persona":"engineer", "task":"## What\nretry",
+            "agent_graph":relative,
+            "sets":["members.worker.agent.model=retried"]
+        }}),
+    ] {
+        world
+            .run_with_stdin(
+                &["reply", "relative-add-retry"],
+                &json!({"version":3,"commands":[command]}).to_string(),
+            )
+            .exited(0);
+    }
+    world.release("slow.go");
+    world.release("retried.go");
+    let expected = world
+        .root
+        .join("relative-node.yaml")
+        .canonicalize()
+        .expect("graph resolves");
+    world.until("both edited nodes to dispatch", |world| {
+        ["extra", "replacement"].iter().all(|id| {
+            world.invocations().iter().any(|call| {
+                call["tool"] == "oneagentgraph"
+                    && call["args"].as_array().is_some_and(|args| {
+                        args.iter()
+                            .any(|arg| arg == &format!("onepipeline.node={id}"))
+                    })
+            })
+        })
+    });
+    for id in ["extra", "replacement"] {
+        let call = world
+            .invocations()
+            .into_iter()
+            .find(|call| {
+                call["tool"] == "oneagentgraph"
+                    && call["args"].as_array().is_some_and(|args| {
+                        args.iter()
+                            .any(|arg| arg == &format!("onepipeline.node={id}"))
+                    })
+            })
+            .expect("edited node launched");
+        let launched = std::path::Path::new(call["args"][1].as_str().expect("graph path"))
+            .canonicalize()
+            .expect("launched graph resolves");
+        assert_eq!(launched, expected, "{id}: {call}");
+    }
+}
+
+#[test]
+fn requeue_resolves_relative_node_and_step_graph_amendments() {
+    let world = World::new("edit-relative-requeue");
+    let relative_node = relative_graph(&world, "relative-node.yaml");
+    let relative_step = relative_graph(&world, "relative-step.yaml");
+    world.repository("local-direct", &[]);
+    world.script("slow.wait", "hold");
+    world.script("service.work", "the worker wrote this");
+    let node = json!({
+        "id":"service", "repo":"service", "title":"feat: ship service", "deps":["slow"],
+        "steps":[{"id":"build", "persona":"engineer", "task":"## What\nbuild"}]
+    });
+    let path = world.plan(
+        "relative-requeue",
+        &plan_of("relative-requeue", vec![agent("slow", &[]), node]),
+    );
+    let mut start = world.cmd(&["start", &path, "--detach"]);
+    start.current_dir(&world.root);
+    world
+        .run_on(start, "start from the graph directory")
+        .exited(0);
+    world.until("the slow node to start", |world| {
+        world
+            .events_of("relative-requeue", "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "slow")
+    });
+    world
+        .run_with_stdin(
+            &["reply", "relative-requeue"],
+            &json!({"version":3,"commands":[{"op":"cancel","id":"service"}]}).to_string(),
+        )
+        .exited(0);
+    world.until("the service to be parked", |world| {
+        committed(world, "relative-requeue").contains(&"cancel".to_string())
+    });
+    world
+        .run_with_stdin(
+            &["reply", "relative-requeue"],
+            &json!({"version":3,"commands":[{"op":"requeue","id":"service","amend":{
+                "agent_graph":relative_node,
+                "steps":[
+                    {"id":"build", "persona":"engineer", "task":"## What\nbuild"},
+                    {"id":"review", "persona":"reviewer", "task":"## What\nreview",
+                     "deps":["build"], "agent_graph":relative_step}
+                ],
+                "sets":["members.worker.agent.model=chosen"]
+            }}]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the requeue to commit", |world| {
+        committed(world, "relative-requeue").contains(&"requeue".to_string())
+    });
+    let operation = operations(&world, "relative-requeue")
+        .into_iter()
+        .find(|op| op["kind"] == "node-requeued")
+        .expect("the requeue was journalled");
+    for (actual, file) in [
+        (&operation["amend"]["agent_graph"], "relative-node.yaml"),
+        (
+            &operation["amend"]["steps"][1]["agent_graph"],
+            "relative-step.yaml",
+        ),
+    ] {
+        let actual = std::path::Path::new(actual.as_str().expect("graph reference"))
+            .canonicalize()
+            .expect("the journalled graph resolves");
+        let expected = world
+            .root
+            .join(file)
+            .canonicalize()
+            .expect("the graph exists");
+        assert_eq!(actual, expected, "{operation}");
+    }
+    world.release("slow.go");
+    world.until("both requeued steps to dispatch", |world| {
+        ["build", "review"].iter().all(|step| {
+            world.invocations().iter().any(|call| {
+                call["tool"] == "oneagentgraph"
+                    && call["args"].as_array().is_some_and(|args| {
+                        args.iter().any(|arg| arg == "onepipeline.node=service")
+                            && args
+                                .iter()
+                                .any(|arg| arg == &format!("onepipeline.step={step}"))
+                    })
+            })
+        })
+    });
+    for (step, file) in [
+        ("build", "relative-node.yaml"),
+        ("review", "relative-step.yaml"),
+    ] {
+        let call = world
+            .invocations()
+            .into_iter()
+            .find(|call| {
+                call["tool"] == "oneagentgraph"
+                    && call["args"].as_array().is_some_and(|args| {
+                        args.iter().any(|arg| arg == "onepipeline.node=service")
+                            && args
+                                .iter()
+                                .any(|arg| arg == &format!("onepipeline.step={step}"))
+                    })
+            })
+            .expect("the requeued step dispatched");
+        let actual = std::path::Path::new(call["args"][1].as_str().expect("graph path"))
+            .canonicalize()
+            .expect("the launched graph resolves");
+        let expected = world
+            .root
+            .join(file)
+            .canonicalize()
+            .expect("the graph exists");
+        assert_eq!(actual, expected, "{step}: {call}");
+    }
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The `edge-added` operations a run recorded, as `(from, to, target)`.
 ///
@@ -130,6 +840,11 @@ fn consumes_on_the_board(world: &World, run: &str, node: &str) -> Option<Value> 
     board_metadata(world, run, node).map(|metadata| metadata["onepipeline.consumes"].clone())
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys live
+// beside the other live-edit journeys in this file, for the reason the settle journey
+// below states: what they exercise is the crate's own edit vocabulary, reconciler and node
+// dispatch, which any change under `src/` can move, so no project edged narrower than the
+// crate could honestly run them.
 #[test]
 fn add_reparent_and_note_are_applied_and_reported_applied() {
     let world = World::new("edit-apply");
@@ -139,7 +854,7 @@ fn add_reparent_and_note_are_applied_and_reported_applied() {
         .run_with_stdin(
             &["reply", &run],
             &envelope(json!([
-                {"op": "add", "node": {"id": "extra", "persona": "engineer", "task": "## What\nextra", "max_turns": 2, "branch": "topic/extra"}},
+                {"op": "add", "node": {"id": "extra", "persona": "engineer", "task": "## What\nextra", "max_turns": 2, "branch": "topic/extra", "sets": ["members.worker.agent.model=added"]}},
                 {"op": "reparent", "id": "extra", "deps": ["slow"]},
                 {"op": "note", "id": "extra", "addressee": "worker",
                  "text": "the fixture moved", "deliver": "next"},
@@ -168,6 +883,7 @@ fn add_reparent_and_note_are_applied_and_reported_applied() {
             task["item"]["metadata"]["onepipeline.id"] == "extra"
                 && task["item"]["metadata"]["onepipeline.context"] == "the fixture moved"
                 && task["item"]["metadata"]["onepipeline.max_turns"] == 2
+                && task["item"]["metadata"]["onepipeline.sets"] == json!(["members.worker.agent.model=added"])
                 && task["item"]["metadata"]["onepipeline.branch"] == "topic/extra"
                 // Added while the run is driven, so claimed and not yet started.
                 && task["item"]["status"]["category"] == "queued"
@@ -189,6 +905,24 @@ fn add_reparent_and_note_are_applied_and_reported_applied() {
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
     });
+    let launched = world
+        .invocations()
+        .into_iter()
+        .find(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"]
+                    .as_array()
+                    .is_some_and(|args| args.iter().any(|arg| arg == "onepipeline.node=extra"))
+        })
+        .expect("the added node dispatched");
+    assert!(
+        launched["args"]
+            .as_array()
+            .expect("argv")
+            .windows(2)
+            .any(|pair| { pair[0] == "--set" && pair[1] == "members.worker.agent.model=added" }),
+        "the added node lost its overrides: {launched}"
+    );
 
     // The note reached the dispatch it was aimed at, as its own section.
     let relayed = world
@@ -258,7 +992,7 @@ fn retry_cancel_requeue_and_drop_are_projected_after_their_rulings() {
         json!({"op": "drop", "id": "dropped", "dependents": "detach"}),
         json!({"op": "retry", "id": "retried", "node": {
             "id": "replacement", "persona": "engineer", "task": "## What\nRetry it.",
-            "branch": "topic/replacement"
+            "branch": "topic/replacement", "sets": ["members.worker.agent.model=retried"]
         }}),
     ] {
         world
@@ -317,13 +1051,43 @@ fn retry_cancel_requeue_and_drop_are_projected_after_their_rulings() {
         lineage["item"]["metadata"]["onepipeline.branch"],
         "topic/replacement"
     );
+    assert_eq!(
+        lineage["item"]["metadata"]["onepipeline.sets"],
+        json!(["members.worker.agent.model=retried"])
+    );
     assert!(
         item_of(&tasks, "replacement").is_empty(),
         "the retry minted an item of its own for the replacement: {tasks:?}"
     );
     world.release("retried.go");
     world.release("root.go");
-}
+    world.until("the replacement to dispatch", |world| {
+        world.invocations().iter().any(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"].as_array().is_some_and(|args| {
+                    args.iter().any(|arg| arg == "onepipeline.node=replacement")
+                })
+        })
+    });
+    let launched = world
+        .invocations()
+        .into_iter()
+        .find(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"].as_array().is_some_and(|args| {
+                    args.iter().any(|arg| arg == "onepipeline.node=replacement")
+                })
+        })
+        .expect("the replacement dispatched");
+    assert!(
+        launched["args"]
+            .as_array()
+            .expect("argv")
+            .windows(2)
+            .any(|pair| { pair[0] == "--set" && pair[1] == "members.worker.agent.model=retried" }),
+        "the retried node lost its overrides: {launched}"
+    );
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A node a `retry` superseded reads as **superseded**, everywhere the run is
 /// read — and a node that failed and was never retried still reads as the
@@ -454,6 +1218,11 @@ fn a_node_a_retry_superseded_reads_as_superseded_and_one_that_was_not_still_read
         .exited(0);
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys live
+// beside the other live-edit journeys in this file, for the reason the settle journey
+// below states: what they exercise is the crate's own edit vocabulary, reconciler and node
+// dispatch, which any change under `src/` can move, so no project edged narrower than the
+// crate could honestly run them.
 #[test]
 fn cancel_parks_a_node_and_requeue_returns_it_to_the_frontier() {
     let world = World::new("edit-park");
@@ -495,7 +1264,16 @@ fn cancel_parks_a_node_and_requeue_returns_it_to_the_frontier() {
     world
         .run_with_stdin(
             &["reply", &run],
-            &envelope(json!([{"op": "requeue", "id": "sweep", "amend": {"max_turns": 32}}])),
+            &envelope(json!([{"op": "requeue", "id": "sweep", "amend": {"sets": ["members.absent.agent.model=wrong"]}}])),
+        )
+        .exited(REFUSED)
+        .err_has("sweep")
+        .err_has("members.absent.agent.model=wrong");
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "requeue", "id": "sweep", "amend": {"max_turns": 32, "sets": ["members.worker.agent.model=requeued"]}}])),
         )
         .exited(0);
     world.until("the requeue to commit", |world| {
@@ -517,7 +1295,25 @@ fn cancel_parks_a_node_and_requeue_returns_it_to_the_frontier() {
         sweep["status"], "done",
         "a requeued node was not dispatched"
     );
-}
+    let call = world
+        .invocations()
+        .into_iter()
+        .find(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"]
+                    .as_array()
+                    .is_some_and(|args| args.iter().any(|arg| arg == "onepipeline.node=sweep"))
+        })
+        .expect("sweep graph launched");
+    assert!(
+        call["args"]
+            .as_array()
+            .expect("argv")
+            .windows(2)
+            .any(|pair| { pair[0] == "--set" && pair[1] == "members.worker.agent.model=requeued" }),
+        "the requeued list did not reach its dispatch: {call}"
+    );
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A parked node stays parked for as long as the run lasts, and `requeue` is
 /// the only way back.
@@ -1748,7 +2544,9 @@ fn from_entry_57(field: &str) -> Value {
     block[field].clone()
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what this journey exercises is the crate's own edit vocabulary, reconciler and projection, which any change under `src/` can move, so a narrower project could not honestly run it.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what this journey
+// exercises is the crate's own edit vocabulary, reconciler and projection, which any
+// change under `src/` can move, so a narrower project could not honestly run it.
 /// A run holding nodes a live edit created **projects**, and each of them reaches
 /// the board under its own id.
 ///

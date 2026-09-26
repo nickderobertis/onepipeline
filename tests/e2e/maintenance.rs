@@ -689,6 +689,10 @@ fn a_rules_every_beats_the_default_for_the_identity_it_matches() {
     release(&world, "unruled");
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey proves
+// the crate's own launch-config versioning in `src/filter.rs` and the driver's maintenance
+// wiring, which any change under `src/` can move, so no project edged narrower than the
+// crate could honestly run it.
 /// The flag and the key: the flag beats the config even when blank, a blank key
 /// names none, the parsed document is retained and replayed by `adopt` — which
 /// takes no flag — and a document this build does not accept is refused before
@@ -836,11 +840,12 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
             .err_has("maintenance_config")
             .err_has(names);
     }
-    // And the key under every earlier schema version this build still reads,
+    // And the key under every schema version before the one it arrived at,
     // refused by name and pointed at the version that admits it.
+    let arrived = 9;
     for earlier in onepipeline::filter::LAUNCH_CONFIG_SCHEMA_VERSIONS_READ
         .iter()
-        .filter(|version| **version < at)
+        .filter(|version| **version < arrived)
     {
         let early = world.root.join(format!("early-{earlier}.yaml"));
         std::fs::write(
@@ -855,7 +860,7 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
             )
             .exited(REFUSED)
             .err_has(&format!(
-                "`maintenance_config` is a schema {at} key and this config declares \
+                "`maintenance_config` is a schema {arrived} key and this config declares \
                  schema_version {earlier}"
             ));
     }
@@ -902,7 +907,7 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
         world.run_json("adopted", "launch.json")["maintenance_config"]["default"]["every"],
         "1h"
     );
-}
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// What a sweep records when it could not do its work — each one record, each
 /// named by `results`: a maintain command that failed, one that timed out under

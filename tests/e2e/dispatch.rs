@@ -173,6 +173,9 @@ fn relative_default_graphs_dispatch_from_the_launch_directory() {
 /// Plan-owned graph references have the same launch-directory semantics as
 /// the defaults. Both levels actually dispatch through the real sibling: the
 /// node graph runs the first lifecycle step and the step graph runs the second.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey
+// verifies the root crate's resolution and dispatch of node and step graphs
+// through the real sibling; the root source edge must own that behavior.
 #[test]
 fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
     let world = World::new("real-relative-plan-overrides");
@@ -193,6 +196,12 @@ fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
         world.root.join(worker_config),
     )
     .expect("the relative graphs' harness config is written");
+    let selected = world.harness_config("selected");
+    std::fs::copy(
+        world.graphs().join(selected.trim_start_matches("./")),
+        world.root.join(selected.trim_start_matches("./")),
+    )
+    .expect("the selected harness config is beside both copied graphs");
     // The real sibling's worker is the harness double, and it writes, so the
     // workstream publishes rather than failing on a branch its steps left level
     // with the base.
@@ -202,6 +211,7 @@ fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
         "repo": "service",
         "title": "feat: land the workstream",
         "agent_graph": "node-override.yaml",
+        "sets": [format!("members.worker.oneharness_config={selected}")],
         "steps": [
             {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
             {
@@ -250,7 +260,18 @@ fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
             world.dump()
         );
     }
+    let turns = world.turns();
+    assert_eq!(
+        turns.len(),
+        2,
+        "both steps used the real sibling: {turns:?}"
+    );
+    assert!(
+        turns.iter().all(|turn| turn.member == "selected"),
+        "a step lost the node override: {turns:?}"
+    );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Both graphs a lifecycle node dispatches under are the ones its **launch**
 /// resolved, and a fresh driver replays them.
@@ -260,6 +281,9 @@ fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
 /// directory the operator launched from, and recorded. `adopt` runs from
 /// somewhere else, under an environment naming a *different* node graph — what
 /// the dispatches run under is the launch record either way.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey
+// verifies the root crate's launch record and adoption dispatch through the
+// real sibling, so it follows root source changes rather than note journeys.
 #[test]
 fn a_lifecycle_nodes_two_graphs_are_the_ones_its_launch_resolved() {
     let world = World::new("lifecycle-recorded-default-graph");
@@ -272,6 +296,7 @@ fn a_lifecycle_nodes_two_graphs_are_the_ones_its_launch_resolved() {
     let drafting = world.pr_author_graph();
     let mut service = crate::harness::lifecycle("service", &["approve"]);
     service["deps"] = json!(["approve"]);
+    service["sets"] = json!(["members.worker.agent.model=service"]);
     let path = world.plan(
         "recorded-lifecycle-graph",
         &plan_of(
@@ -279,7 +304,15 @@ fn a_lifecycle_nodes_two_graphs_are_the_ones_its_launch_resolved() {
             vec![human("approve", &[]), service],
         ),
     );
-    let mut start = world.cmd(&["start", &path, "--attach", "--pr-author-graph", &drafting]);
+    let mut start = world.cmd(&[
+        "start",
+        &path,
+        "--attach",
+        "--pr-author-graph",
+        &drafting,
+        "--node-set",
+        "members.worker.agent.model=run",
+    ]);
     start.env("ONEPIPELINE_NODE_GRAPH", &launch_graph);
     world
         .run_on(start, "start recorded lifecycle graph")
@@ -335,6 +368,16 @@ fn a_lifecycle_nodes_two_graphs_are_the_ones_its_launch_resolved() {
         drafts[0]["args"][1], drafting,
         "the drafting dispatch ran a graph the launch did not record: {drafts:?}"
     );
+    assert!(
+        !drafts[0]["args"]
+            .as_array()
+            .expect("argv")
+            .iter()
+            .any(|arg| arg
+                .as_str()
+                .is_some_and(|s| s.starts_with("members.worker.agent.model="))),
+        "the drafting dispatch inherited node overrides: {drafts:?}"
+    );
     let worked = under("onepipeline.persona=engineer");
     assert!(
         !worked.is_empty(),
@@ -346,7 +389,19 @@ fn a_lifecycle_nodes_two_graphs_are_the_ones_its_launch_resolved() {
             .all(|call| call["args"][1] == launch_graph.to_string_lossy().as_ref()),
         "a lifecycle dispatch re-read the live graph instead of launch state: {worked:?}"
     );
+    assert!(
+        worked.iter().all(|call| {
+            call["args"]
+                .as_array()
+                .expect("argv")
+                .windows(2)
+                .rfind(|pair| pair[0] == "--set")
+                .is_some_and(|pair| pair[1] == "members.worker.agent.model=service")
+        }),
+        "the node override did not win on its dispatch: {worked:?}"
+    );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 #[test]
 fn an_unreadable_relative_graph_names_its_launch_base() {
@@ -3999,6 +4054,46 @@ fn a_nodes_turn_budget_reaches_its_dispatch_and_outranks_the_run_wide_one() {
     );
 }
 
+/// Two nodes share one real graph; the named node's list wins after the run-wide
+/// list and the following node keeps the run-wide choice.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey
+// exercises onepipeline's node dispatch and override precedence through the real
+// oneagentgraph binary, so it belongs to the root crate's source edge. A separate
+// note-journey project cannot own it without missing changes to this dispatch code;
+// the root project's dependency on that project is shared configuration beyond
+// this test's site.
+#[test]
+fn a_node_set_selects_only_its_own_harness_configuration() {
+    let world = World::new("real-node-sets");
+    world.write_graphs();
+    let selected = world.harness_config("selected");
+    let runwide = world.harness_config("runwide");
+    let mut first = agent("first", &[]);
+    first["sets"] = json!([format!("members.worker.oneharness_config={selected}"),]);
+    let second = agent("second", &["first"]);
+    let path = world.plan("node-sets", &plan_of("node-sets", vec![first, second]));
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &path,
+            "--attach",
+            "--node-set",
+            &format!("members.worker.oneharness_config={runwide}"),
+        ])
+        .settled();
+    let turns = world.turns();
+    assert_eq!(turns.len(), 2, "both nodes dispatched: {turns:#?}");
+    assert_eq!(turns[0].member, "selected", "the node's config won");
+    assert_eq!(
+        turns[1].member, "runwide",
+        "the next node kept the run list"
+    );
+    let loaded = world.run_json("node-sets", "plan.json");
+    assert_eq!(loaded["tasks"][0]["sets"].as_array().map(Vec::len), Some(1));
+    assert!(loaded["tasks"][1].get("sets").is_none());
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
 /// The directory a two-party member was started in, read off the run's own
 /// merged stream.
 ///
@@ -4130,6 +4225,36 @@ fn a_steps_turn_budget_reaches_that_steps_own_dispatch() {
          own default is 12"
     );
 }
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this real
+// sibling journey proves the root crate's node dispatch precedence over step
+// controls, and therefore belongs to the root source edge.
+#[test]
+fn a_node_set_takes_precedence_over_a_steps_turn_budget() {
+    let world = World::new("real-node-set-turn-budget");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    write_persona(&world, "implementer");
+    world.repository("local-direct", &[]);
+    let node = json!({
+        "id": "service", "repo": "service", "title": "feat: ship service",
+        "sets": ["members.worker.max_turns=7"],
+        "steps": [{"id": "implement", "persona": "./implementer.yaml",
+                   "task": "## What\nimplement", "max_turns": 45}]
+    });
+    let path = world.plan(
+        "node-set-turn-budget",
+        &plan_of("node-set-turn-budget", vec![node]),
+    );
+    world
+        .run_on_agentgraph(&["start", &path, "--attach"])
+        .settled();
+    assert_eq!(
+        turns_dispatched(&world, "node-set-turn-budget", "service", Some("implement")),
+        7
+    );
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// `filters.agentgraph` reaches every `oneagentgraph` launch the run starts.
 ///

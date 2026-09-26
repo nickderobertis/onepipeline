@@ -488,6 +488,10 @@ impl Message for CommandOutcome {
 /// ops, as the allowlist names them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Op {
+    /// Replace one node's graph overrides.
+    SetNodeSets,
+    /// Replace run-wide node graph overrides.
+    SetRunNodeSets,
     /// Add a node.
     Add,
     /// Remove a node.
@@ -516,7 +520,9 @@ pub enum Op {
 
 impl Op {
     /// Every op, in the order the contract lists them.
-    pub const ALL: [Op; 12] = [
+    pub const ALL: [Op; 14] = [
+        Op::SetNodeSets,
+        Op::SetRunNodeSets,
         Op::Add,
         Op::Drop,
         Op::Reparent,
@@ -535,6 +541,8 @@ impl Op {
     #[must_use]
     pub const fn word(self) -> &'static str {
         match self {
+            Op::SetNodeSets => "set-node-sets",
+            Op::SetRunNodeSets => "set-run-node-sets",
             Op::Add => "add",
             Op::Drop => "drop",
             Op::Reparent => "reparent",

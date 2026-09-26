@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "The planner-channel layout onepipeline publishes for a host's onemessagebus to link.",
   "schemas": [
     {
@@ -613,6 +613,8 @@
         }
       ],
       "operations": [
+        "set-node-sets",
+        "set-run-node-sets",
         "add",
         "drop",
         "reparent",
