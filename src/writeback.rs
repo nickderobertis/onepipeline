@@ -1078,7 +1078,7 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     // `delivers::a_stop_whose_release_the_store_refuses_still_stops_and_says_so`, which asserts
     // the stop's answer, its stderr and the failed record line. The one timeout-specific branch
     // is the deadline's cancellation, driven by
-    // `writeback_budget::a_copy_held_past_a_tiny_budget_is_killed_and_the_refusal_names_the_arithmetic`
+    // `writeback_budget::a_copy_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithmetic`
     // and `delivers::a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch`.
     // A journey holding a `stop` past the sixty-second floor would spend that minute on no line
     // those three do not already reach.
