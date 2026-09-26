@@ -749,3 +749,59 @@ fn a_config_naming_the_key_at_a_version_that_never_had_it_is_refused_by_that_nam
         Value::from(number("default_seconds"))
     );
 }
+
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this journey waits past the sixty-second floor by construction — a store that has not opened within a minute cannot be observed in less than one — and the edge it needs is the crate under test, the compiled `onepipeline` binary against its own write-back worker, as the journeys above record.
+/// A store slow to start — a source whose handshake has not been answered — is held to the
+/// floor every read is held to: an attempt whose store has not opened inside it is refused by
+/// the name the floor gives the opening, retried on the schedule, and lands once the store
+/// answers. The launch's own plan read is let through; every attempt's handshake after it is
+/// held until the journey lets the store answer.
+#[test]
+fn a_store_that_does_not_open_within_the_floor_is_refused_retried_and_recovers() {
+    let floor = number("floor_seconds");
+    let world = World::new("writeback-budget-slow-open");
+    world.script("work.wait", "hold");
+    let run = "slowopen";
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    let opening = world.rendezvous(&format!("{SCRIPTED_KEY}.initialize"));
+    let world = world
+        .through_scripted_source()
+        .with_env(RENDEZVOUS_SECONDS_ENV, "600");
+
+    let mut start = world
+        .cmd(&["start", &project, "--detach"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the launch starts");
+    opening.arrived().release();
+    let launched = start.wait().expect("the launch ends");
+    assert!(launched.success(), "the launch exited {launched}");
+
+    // The first attempt's store is held, and never let go: the floor is what ends the wait.
+    let held = opening.arrived();
+    let expected = format!("store-open exceeded {floor} seconds");
+    world.until_run_file_holds(run, "driver.log", &expected);
+    let log = std::fs::read_to_string(world.run_file(run, "driver.log")).expect("the log");
+    assert!(
+        log.contains(&format!("write-back failed for '{project}': {expected}"))
+            && log.contains("retrying"),
+        "a store that did not open was not reported as a failure to retry:\n{log}"
+    );
+
+    // The store answers: nothing is held from here, and the retry lands.
+    world.unscript(&format!("{SCRIPTED_KEY}.initialize.rendezvous"));
+    held.release();
+    drop(opening);
+    world.until("the projection to recover", |world| {
+        std::fs::read_to_string(world.run_file(run, "driver.log"))
+            .is_ok_and(|log| log.contains("onetaskgraph write-back recovered"))
+    });
+    world.until_store("the running node to reach the board", |world| {
+        board_status(world, &project, "work").is_some_and(|word| word == "in-progress")
+    });
+    world.release("work.go");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+}

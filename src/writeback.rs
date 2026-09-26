@@ -165,6 +165,8 @@ const TASK_LIST: &str = WRITEBACK_CLASSIFIED_COMMANDS[1];
 const PROJECT_COPY: &str = WRITEBACK_CLASSIFIED_COMMANDS[2];
 // What a member projection reads each named member with, in place of the page of tasks.
 const TASK_SHOW: &str = WRITEBACK_MEMBER_READ;
+// What building an attempt's store is called where it outlasts the floor.
+const STORE_OPEN: &str = "store-open";
 
 /// How long one store call may run, and the account a refusal gives of the figure.
 ///
@@ -1383,7 +1385,7 @@ impl Attempt {
         // reads it as a folder that is not there.
         std::fs::create_dir_all(&snapshot.dir)
             .map_err(|error| format!("cannot create the shadow store: {error}"))?;
-        let built = store.engine(&flags).map_err(|error| {
+        let built = opened_within(store, flags, Deadline::Floor)?.map_err(|error| {
             Failed::classed(
                 format!("the store's configuration cannot be read: {error}"),
                 Classified::of_config(&error),
@@ -1410,6 +1412,32 @@ impl Attempt {
             .block_on(async { tokio::time::timeout(deadline.within(), future).await })
             .map_err(|_| Failed::from(deadline.refusal(name)))
     }
+}
+
+/// Build the attempt's store — its configuration read, each source constructed and a
+/// hosted source's handshake answered — within `deadline`, as every call after it is.
+///
+/// Building runs no future the deadline could cancel, so it runs on a thread of its own and
+/// is waited on for as long as the deadline allows. A build that outlasts it is left to
+/// finish on that thread and then dropped with whatever it built: constructing a source
+/// writes nothing, so nothing it does after the attempt is recorded reaches the board.
+fn opened_within(
+    store: &Store,
+    flags: Layer,
+    deadline: Deadline,
+) -> Result<Result<crate::taskgraph::Built, ConfigError>, Failed> {
+    let (built, arrived) = std::sync::mpsc::channel();
+    let store = store.clone();
+    std::thread::Builder::new()
+        .name("writeback-store".to_owned())
+        .spawn(move || {
+            // The receiver is gone once the deadline has passed, and the build goes with it.
+            let _ = built.send(store.engine(&flags));
+        })
+        .map_err(|error| format!("the store cannot be opened: {error}"))?;
+    arrived
+        .recv_timeout(deadline.within())
+        .map_err(|_| Failed::from(deadline.refusal(STORE_OPEN)))
 }
 
 fn project(

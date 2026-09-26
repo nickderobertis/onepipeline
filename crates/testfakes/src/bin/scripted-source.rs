@@ -38,6 +38,8 @@
 //! * `<key>.<method>.rendezvous` — the address this source meets the test at before it
 //!   answers that method, held until the test lets go; written by `World::rendezvous`, read by
 //!   `fake::meet`. The one way to make a store call **slow** rather than wrong.
+//! * `<key>.initialize.rendezvous` — the handshake of every connection, held before it is
+//!   answered: a source slow to start.
 //! * `<key>.<method>.first.rendezvous` — the same, for the **first** call of that method this
 //!   source is handed and no later one. The engine starts a source for each command it runs —
 //!   each plan read, each write-back attempt — so this holds one call per attempt: the first
@@ -203,6 +205,11 @@ fn main() -> ExitCode {
         &settings.key.0,
         &["initialize".to_owned(), handed.join(",")],
     );
+    // A handshake held open is a source slow to start: every connection meets it here, before
+    // anything is answered.
+    if let Err(why) = held(&settings.script, &format!("{}.initialize", settings.key.0)) {
+        return stop(&why);
+    }
     let mut host = match Host::start() {
         Ok(host) => host,
         Err(why) => return stop(&why),
@@ -288,23 +295,7 @@ impl Scripted {
             holds.push(format!("{}.{method}.first", self.key.0));
         }
         for hold in holds {
-            let script = fake::rendezvous_script(&self.script, &hold);
-            match std::fs::read_to_string(&script) {
-                Ok(address) => fake::meet(address.trim()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                // A hold that is there and cannot be read is never read as no hold: a journey
-                // timing a store that has not answered would be handed one that answered at
-                // once. So this source stops, which the engine reports as its own failure.
-                Err(error) => {
-                    return Err(format!(
-                        "`{}` could not be read: {error}",
-                        script
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_default()
-                    ))
-                }
-            }
+            held(&self.script, &hold)?;
         }
         let once = self.scenario(&format!("{method}.refuse.once"));
         if let Some(error) = refusal(&once)? {
@@ -374,6 +365,28 @@ fn named(params: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned()
+}
+
+/// Meet the test at the rendezvous `hold` names, where one is scripted.
+///
+/// A hold that is there and cannot be read is never read as no hold: a journey timing a store
+/// that has not answered would be handed one that answered at once. So this source stops,
+/// which the engine reports as its own failure.
+fn held(script: &Path, hold: &str) -> Result<(), String> {
+    let path = fake::rendezvous_script(script, hold);
+    match std::fs::read_to_string(&path) {
+        Ok(address) => {
+            fake::meet(address.trim());
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "`{}` could not be read: {error}",
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        )),
+    }
 }
 
 /// Whether a scenario file that says only by being there is there. One that cannot be read
