@@ -75,6 +75,31 @@ fn memory(world: &World, session: &str) -> PathBuf {
         .join(hex(&Sha256::digest(session.as_bytes())))
 }
 
+/// Where the guard remembers what `command`, declared as a source, last
+/// blocked `session` on: beside the verb's own memory, under the file name the
+/// page spells for it.
+#[cfg(unix)]
+fn source_memory(world: &World, session: &str, command: &str) -> PathBuf {
+    let name = page()
+        .split("## Declared sources")
+        .nth(1)
+        .and_then(|section| {
+            section
+                .split('`')
+                .find(|span| span.starts_with("<sha256(session)>."))
+        })
+        .expect("the page spells a source memory's file name")
+        .replace(
+            "<sha256(session)>",
+            &hex(&Sha256::digest(session.as_bytes())),
+        )
+        .replace(
+            "<sha256(command)>",
+            &hex(&Sha256::digest(command.as_bytes())),
+        );
+    memory(world, session).with_file_name(name)
+}
+
 /// Every `--flag` a synopsis or a `--help` names, `--help` itself aside.
 pub(crate) fn flags_of(text: &str) -> std::collections::BTreeSet<String> {
     text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
@@ -203,6 +228,47 @@ fn the_documented_synopsis_is_the_verbs_own() {
             proposed.contains(format),
             "entry 85 does not propose `--format {format}`"
         );
+    }
+    // The source timeout's default is the one the page states, and a timeout
+    // no clock could hold, or none at all, is refused at the flag.
+    let default = page
+        .split("(default `")
+        .nth(1)
+        .and_then(|rest| rest.split('`').next())
+        .expect("the page states the source timeout's default");
+    let offered = help
+        .stdout
+        .split("--source-timeout <SECONDS>")
+        .nth(1)
+        .and_then(|rest| rest.split("[default: ").nth(1))
+        .and_then(|rest| rest.split(']').next())
+        .expect("`--help` states the source timeout's default");
+    assert_eq!(
+        default, offered,
+        "the page and `--help` differ on the default"
+    );
+    let most: u64 = page
+        .split("at most `")
+        .nth(1)
+        .and_then(|rest| rest.split('`').next())
+        .and_then(|most| most.parse().ok())
+        .expect("the page states the longest source timeout");
+    for accepted in ["1".to_owned(), most.to_string()] {
+        world
+            .run(&[
+                "stop-guard",
+                "--session",
+                "s",
+                "--source-timeout",
+                &accepted,
+            ])
+            .exited(0);
+    }
+    for refused in ["0".to_owned(), (most + 1).to_string()] {
+        world
+            .run(&["stop-guard", "--session", "s", "--source-timeout", &refused])
+            .exited(2)
+            .err_has("--source-timeout");
     }
     for format in ["neutral", "claude-code", "codex"] {
         assert!(
@@ -790,4 +856,814 @@ fn the_documented_claude_code_wiring_reads_real_stop_payloads_and_answers_its_de
         "{told}"
     );
     owner.release("build.go");
+}
+
+/// A declared source as a host writes one: a script that records the bytes it
+/// was handed and the session its environment names, and answers whatever the
+/// journey last put in its answer file.
+///
+/// A POSIX shell script, because `--source` is run by the platform shell and
+/// `cmd` would not run one — which is why the journeys that use it are Unix's.
+#[cfg(unix)]
+struct Source {
+    command: String,
+    answer: PathBuf,
+    asked: PathBuf,
+    environment: PathBuf,
+}
+
+#[cfg(unix)]
+impl Source {
+    fn new(world: &World, name: &str) -> Self {
+        let dir = world.root.join("sources");
+        std::fs::create_dir_all(&dir).expect("the sources directory");
+        let path = dir.join(name);
+        let answer = dir.join(format!("{name}.answer"));
+        let asked = dir.join(format!("{name}.asked"));
+        let environment = dir.join(format!("{name}.environment"));
+        onepipeline_testfakes::executable(
+            &path,
+            format!(
+                "#!/bin/sh\ncat >> '{}'\nprintf '%s\\n' \"$ONEPIPELINE_LAUNCHER_SESSION\" >> '{}'\ncat '{}'\n",
+                asked.display(),
+                environment.display(),
+                answer.display()
+            ),
+        );
+        let source = Self {
+            command: path.display().to_string(),
+            answer,
+            asked,
+            environment,
+        };
+        source.answers(&json!({"verdict": "none"}));
+        source
+    }
+
+    fn answers(&self, verdict: &Value) {
+        std::fs::write(&self.answer, format!("{verdict}\n")).expect("the answer is written");
+    }
+
+    /// Each input it was handed, byte for byte, its closing newline kept.
+    fn inputs(&self) -> Vec<String> {
+        std::fs::read_to_string(&self.asked)
+            .unwrap_or_default()
+            .split_inclusive('\n')
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn environments(&self) -> Vec<String> {
+        std::fs::read_to_string(&self.environment)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+// Every call site of this helper sits inside a `#[cfg(unix)]` item, so on a target
+// without those items it is dead code and the crate's own `-D warnings` refuses it.
+#[cfg(unix)]
+fn declaring<'a>(sources: &'a [&'a str], rest: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec!["stop-guard"];
+    for source in sources {
+        args.extend(["--source", source]);
+    }
+    args.extend(rest);
+    args
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] Measured at 4.4s on a
+// host at load 32 over 20 cores, beside the journeys in this module that hold a real run
+// for 19-24s each on the same run. It holds a run because what it proves is a source's
+// verdict combined with the verb's own `unwatched` block, which only a real unwatched run
+// makes; the code it guards is `src/stopguard.rs`, under the crate's own edge, so a
+// narrower project would drop it out of `nx affected` for the changes it exists to catch.
+/// Declared sources are asked about this stop's session with the verb's own
+/// input bytes, and every answer is combined into one verdict with the verb's
+/// own: the strongest wins and no reason is dropped. The continuation rule
+/// holds per source — an unchanged continuation ends the turn, and one where a
+/// single source moved refuses on that source alone.
+#[cfg(unix)]
+#[test]
+fn declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source() {
+    let owner = World::new("stop-guard-sources");
+    let world = guarded(&owner);
+    owner.script("build.wait", "hold");
+    let run = held(&owner, "guardsources");
+    let session = owner.session.clone();
+    let report = owner
+        .run(&["unwatched", "--session", &session])
+        .exited(RUNS_UNWATCHED)
+        .stdout
+        .clone();
+    let refusing = Source::new(&world, "unpublished");
+    let second = Source::new(&world, "unpushed");
+    let warning = Source::new(&world, "advisory");
+    let quiet = Source::new(&world, "quiet");
+    refusing
+        .answers(&json!({"verdict": "block", "reason": "branch b-1 preserved, never published"}));
+    second
+        .answers(&json!({"verdict": "block", "reason": "branch b-2 preserved, never published\n"}));
+    warning.answers(&json!({"verdict": "warn", "message": "the registry is stale"}));
+    let sources = [
+        refusing.command.as_str(),
+        second.command.as_str(),
+        warning.command.as_str(),
+        quiet.command.as_str(),
+        refusing.command.as_str(),
+    ];
+
+    let first = ask_with(&world, &sources, &json!({"session": session}));
+    first.exited(0);
+    let told = verdict(&first.stdout).expect("a verdict");
+    documented(&told);
+    let reason = told["reason"].as_str().expect("a block carries a reason");
+    assert!(
+        reason.starts_with(&report),
+        "the verb's own report leads: {reason}"
+    );
+    for said in [
+        "branch b-1 preserved, never published",
+        "branch b-2 preserved, never published",
+        "the registry is stale",
+        &refusing.command,
+        &second.command,
+        &warning.command,
+    ] {
+        assert!(reason.contains(said), "{said:?} is missing from {reason}");
+    }
+    assert!(!reason.contains(&quiet.command), "{reason}");
+    let at = |said: &str| reason.find(said).expect("said");
+    assert!(
+        at(&report) < at("branch b-1")
+            && at("branch b-1") < at("branch b-2")
+            && at("branch b-2") < at("the registry is stale"),
+        "not in the order declared: {reason}"
+    );
+    assert_eq!(
+        reason.matches("branch b-1").count(),
+        1,
+        "a source declared twice was asked twice: {reason}"
+    );
+    assert!(reason.contains(&run), "{reason}");
+    assert!(first.stderr.is_empty(), "{}", first.stderr);
+
+    // Each source was handed the verb's own neutral input — the very shape the
+    // page documents — naming the input's session, never the environment's.
+    let template = page()
+        .split("## Declared sources")
+        .nth(1)
+        .and_then(|section| {
+            section
+                .split('`')
+                .find(|span| span.starts_with("{\"session\""))
+        })
+        .expect("the page spells the input a source is handed")
+        .to_owned();
+    assert!(
+        page().contains(&format!("`{template}`\n  and a newline")),
+        "the page no longer says the input closes with a newline"
+    );
+    let bytes = template
+        .replace("<ID>", &session)
+        .replace("<bool>", "false")
+        + "\n";
+    for source in [&refusing, &second, &warning, &quiet] {
+        assert_eq!(source.inputs(), vec![bytes.clone()]);
+        let handed: Value = serde_json::from_str(&bytes).expect("the input is JSON");
+        let mut documented = documented_input(&session);
+        documented["continuation"] = json!(false);
+        assert_eq!(handed, documented);
+        assert_eq!(source.environments(), vec![session.clone()]);
+    }
+    // And by hand, those same bytes drive the same answer out of the source.
+    let by_hand = std::process::Command::new(&refusing.command)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .expect("stdin is piped")
+                .write_all(refusing.inputs()[0].as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("the source runs by hand");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&by_hand.stdout).expect("its answer"),
+        json!({"verdict": "block", "reason": "branch b-1 preserved, never published"})
+    );
+
+    // The continuation over every unchanged report ends the turn, the warning
+    // included in nothing because a warning was never a refusal to continue.
+    warning.answers(&json!({"verdict": "none"}));
+    let ended = ask_with(
+        &world,
+        &sources,
+        &json!({"session": session, "continuation": true}),
+    );
+    ended.exited(0);
+    assert_eq!(verdict(&ended.stdout), Some(json!({"verdict": "none"})));
+    let inputs = refusing.inputs();
+    assert_eq!(
+        inputs.len(),
+        3,
+        "the stop, the run by hand, the continuation"
+    );
+    assert!(inputs[2].contains("\"continuation\":true"), "{inputs:?}");
+
+    // One source's condition moves: the continuation refuses on it alone, and
+    // neither the verb's unchanged report nor the other source's is repeated.
+    refusing
+        .answers(&json!({"verdict": "block", "reason": "branch b-3 preserved, never published"}));
+    let moved = ask_with(
+        &world,
+        &sources,
+        &json!({"session": session, "continuation": true}),
+    );
+    moved.exited(0);
+    let reason = verdict(&moved.stdout).expect("a verdict")["reason"]
+        .as_str()
+        .expect("a reason")
+        .to_owned();
+    assert!(reason.contains("b-3"), "{reason}");
+    assert!(
+        !reason.contains("b-2") && !reason.contains(&run),
+        "{reason}"
+    );
+
+    // Its condition clears: nothing to refuse on, and what it last blocked
+    // on is forgotten — so should that same condition return, even a
+    // continuation refuses on it again.
+    let idle = json!({"session": "a-session-owning-nothing"});
+    let alone = [refusing.command.as_str()];
+    ask_with(&world, &alone, &idle).exited(0);
+    let remembered = source_memory(&world, "a-session-owning-nothing", &refusing.command);
+    assert!(remembered.is_file(), "the block was not remembered");
+    refusing.answers(&json!({"verdict": "none"}));
+    let cleared = ask_with(&world, &alone, &idle);
+    cleared.exited(0);
+    assert_eq!(verdict(&cleared.stdout), Some(json!({"verdict": "none"})));
+    assert!(!remembered.exists(), "a cleared source kept its memory");
+    refusing
+        .answers(&json!({"verdict": "block", "reason": "branch b-3 preserved, never published"}));
+    let returned = ask_with(
+        &world,
+        &alone,
+        &json!({"session": "a-session-owning-nothing", "continuation": true}),
+    );
+    returned.exited(0);
+    assert_eq!(
+        verdict(&returned.stdout).expect("a verdict")["verdict"],
+        json!("block"),
+        "{}",
+        returned.stdout
+    );
+    // A warning in its place clears it just the same.
+    assert!(
+        remembered.is_file(),
+        "the returned block was not remembered"
+    );
+    refusing.answers(&json!({"verdict": "warn", "message": "the origin is slow"}));
+    ask_with(&world, &alone, &idle).exited(0);
+    assert!(!remembered.exists(), "a source now warning kept its block");
+
+    // Warnings alone are one warning carrying each, under the neutral rendering and a hook's.
+    refusing.answers(&json!({"verdict": "none"}));
+    second.answers(&json!({"verdict": "warn", "message": "the origin is unreachable"}));
+    warning.answers(&json!({"verdict": "warn", "message": "the registry is stale"}));
+    let only = [warning.command.as_str(), second.command.as_str()];
+    let warned = ask_with(&world, &only, &idle);
+    warned.exited(0);
+    let told = verdict(&warned.stdout).expect("a verdict");
+    documented(&told);
+    assert!(
+        told["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("the registry is stale")
+                && message.contains("the origin is unreachable")),
+        "{told}"
+    );
+    let hooked = world.run_with_stdin(
+        &declaring(&only, &["--format", "claude-code"]),
+        &json!({"session_id": "a-session-owning-nothing", "stop_hook_active": false}).to_string(),
+    );
+    hooked.exited(0);
+    let told = verdict(&hooked.stdout).expect("a verdict");
+    assert!(told.get("decision").is_none(), "{told}");
+    assert!(told["systemMessage"]
+        .as_str()
+        .is_some_and(|message| message.contains("the registry is stale")));
+    owner.release("build.go");
+}
+
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+#[cfg(unix)]
+fn ask_with(world: &World, sources: &[&str], input: &Value) -> crate::harness::Run {
+    world.run_with_stdin(&declaring(sources, &[]), &input.to_string())
+}
+
+/// Under both hook renderings a declared source is asked about the payload's
+/// session — never the one the hook's environment names — and its block is the
+/// harness's refusal, after which the continuation the harness marks ends the
+/// turn.
+#[cfg(unix)]
+#[test]
+fn a_hook_rendering_asks_a_source_about_the_payloads_session_and_its_continuation_ends_the_turn() {
+    let owner = World::new("stop-guard-source-hook");
+    let world = guarded(&owner);
+    let source = Source::new(&world, "unfinished");
+    source.answers(&json!({"verdict": "block", "reason": "branch b-1 preserved, never published"}));
+    let session = "the-workers-own-session";
+    let payload = |active: bool| {
+        json!({
+            "session_id": session,
+            "transcript_path": "/home/someone/.claude/projects/x/abc.jsonl",
+            "cwd": world.root.display().to_string(),
+            "hook_event_name": "Stop",
+            "stop_hook_active": active,
+        })
+        .to_string()
+    };
+    // A second refusing source, so each rendering's refusal is a combined one
+    // and carries every block rather than the first.
+    let other = Source::new(&world, "unpushed");
+    other.answers(&json!({"verdict": "block", "reason": "stash s-1 never pushed"}));
+    let sources = [source.command.as_str(), other.command.as_str()];
+    for (format, turn) in [("claude-code", 0), ("codex", 1)] {
+        // Each rendering's first stop blocks; a fresh reason per rendering
+        // keeps the one before it from being this one's continuation.
+        source.answers(&json!({
+            "verdict": "block",
+            "reason": format!("branch b-{turn} preserved, never published"),
+        }));
+        let blocked =
+            world.run_with_stdin(&declaring(&sources, &["--format", format]), &payload(false));
+        blocked.exited(0);
+        let told = verdict(&blocked.stdout).expect("a verdict");
+        assert_eq!(told["decision"], json!("block"), "{format}: {told}");
+        assert!(
+            told["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains(&format!("b-{turn}"))
+                    && reason.contains(&source.command)
+                    && reason.contains("stash s-1 never pushed")
+                    && reason.contains(&other.command)),
+            "{format}: {told}"
+        );
+        let ended =
+            world.run_with_stdin(&declaring(&sources, &["--format", format]), &payload(true));
+        ended.exited(0);
+        assert_eq!(
+            ended.stdout, "",
+            "{format}: the continuation did not end the turn"
+        );
+    }
+    for input in source.inputs() {
+        let handed: Value = serde_json::from_str(&input).expect("the input is JSON");
+        assert_eq!(handed["session"], json!(session), "{handed}");
+        assert!(!input.contains(INHERITED), "{input}");
+    }
+    assert_eq!(source.inputs().len(), 4);
+    assert_eq!(other.inputs(), source.inputs());
+    assert!(source.environments().iter().all(|named| named == session));
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] Measured at 14.9s on a
+// host at load 32 over 20 cores, beside the journeys in this module that hold a real run
+// for 19-24s each on the same run; its cost is two one-second deadlines and short-lived
+// scripts. What it guards is `src/stopguard.rs` and the clap surface in `src/cli.rs`, both
+// under the crate's own edge, so a narrower project would drop it out of `nx affected` for
+// the changes it exists to catch — the ground `tests/e2e/session_reuse.rs` carries too.
+/// A source that cannot be consulted is reported in the verdict — naming the
+/// source and what went wrong — and refuses the stop rather than letting it
+/// pass; the continuation after that refusal ends the turn, so a broken source
+/// cannot hold one in a loop — unless the failure moved, which refuses again.
+#[cfg(unix)]
+#[test]
+fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_passes() {
+    let owner = World::new("stop-guard-source-broken");
+    let world = guarded(&owner);
+    let session = "a-session-owning-nothing";
+    let answering = |name: &str, body: &str| {
+        let path = world.root.join("sources").join(name);
+        std::fs::create_dir_all(path.parent().expect("a directory")).expect("the directory");
+        onepipeline_testfakes::executable(&path, format!("#!/bin/sh\ncat > /dev/null\n{body}\n"));
+        path.display().to_string()
+    };
+    let left_behind = world.root.join("left-behind.pid");
+    let missing = world
+        .root
+        .join("sources/nothing-here")
+        .display()
+        .to_string();
+    let cases: Vec<(String, &str)> = vec![
+        (missing, "could not find"),
+        (
+            answering(
+                "fails",
+                "echo '{\"verdict\":\"none\"}'; echo 'what went wrong' >&2; exit 3",
+            ),
+            "exited with status 3",
+        ),
+        (answering("silent", "true"), "wrote nothing"),
+        // A command line rather than a script, so the shell running it is
+        // what the signal ends.
+        ("kill -9 $$".to_owned(), "ended by a signal"),
+        (
+            answering("slow", "exec sleep 30"),
+            "did not answer within 1 second(s)",
+        ),
+        (answering("prose", "echo 'all good'"), "not one JSON object"),
+        (
+            answering("unknown-word", "echo '{\"verdict\":\"maybe\"}'"),
+            "unknown variant `maybe`",
+        ),
+        (
+            answering("reasonless", "echo '{\"verdict\":\"block\"}'"),
+            "missing field `reason`",
+        ),
+        (
+            answering(
+                "blank-reason",
+                "echo '{\"verdict\":\"block\",\"reason\":\"  \"}'",
+            ),
+            "`reason` is blank",
+        ),
+        (
+            answering(
+                "blank-message",
+                "echo '{\"verdict\":\"warn\",\"message\":\"\"}'",
+            ),
+            "`message` is blank",
+        ),
+        (
+            answering("crossed", "echo '{\"verdict\":\"warn\",\"reason\":\"x\"}'"),
+            "unknown field `reason`",
+        ),
+        (
+            answering("extra", "echo '{\"verdict\":\"none\",\"why\":\"x\"}'"),
+            "unknown field `why`",
+        ),
+        (
+            answering(
+                "twice",
+                "echo '{\"verdict\":\"none\"}'; echo '{\"verdict\":\"none\"}'",
+            ),
+            "not one JSON object",
+        ),
+        (
+            answering("array", "echo '[{\"verdict\":\"none\"}]'"),
+            "not one JSON object",
+        ),
+        (
+            answering(
+                "repeated-key",
+                "echo '{\"verdict\":\"none\",\"verdict\":\"block\",\"reason\":\"x\"}'",
+            ),
+            "duplicate field `verdict`",
+        ),
+        (
+            answering("binary", "printf '\\377\\n'"),
+            "bytes that are not text",
+        ),
+        (
+            answering(
+                "flood",
+                "head -c 1100000 /dev/zero | tr '\\0' ' '; echo '{\"verdict\":\"none\"}'",
+            ),
+            "more than 1048576 bytes",
+        ),
+        // It exits at once, and what it left behind holds its standard output
+        // past the deadline.
+        (
+            answering(
+                "left-behind",
+                &format!(
+                    "sleep 300 &\necho $! > '{}'\necho '{{\"verdict\":\"none\"}}'",
+                    left_behind.display()
+                ),
+            ),
+            "did not answer within 1 second(s)",
+        ),
+    ];
+    for (command, what) in &cases {
+        let sources = [command.as_str()];
+        let started = std::time::Instant::now();
+        let refused = world.run_with_stdin(
+            &declaring(&sources, &["--source-timeout", "1"]),
+            &json!({"session": session}).to_string(),
+        );
+        refused.exited(0);
+        // The slow source sleeps for 30 seconds, so a stop answered sooner is
+        // one that ended it rather than waited it out.
+        assert!(
+            !command.ends_with("/slow") || started.elapsed() < std::time::Duration::from_secs(30),
+            "{command}: the stop was held {:?}",
+            started.elapsed()
+        );
+        let told = verdict(&refused.stdout).expect("a verdict");
+        assert_eq!(told["verdict"], json!("block"), "{command}: {told}");
+        documented(&told);
+        let reason = told["reason"].as_str().expect("a reason");
+        assert!(
+            reason.contains(command.as_str())
+                && reason.contains("could not be consulted")
+                && reason.contains(what),
+            "{command}: the refusal does not name the source and {what:?}: {reason}"
+        );
+        assert!(
+            reason.contains(&json!({"session": session, "continuation": false}).to_string()),
+            "{command}: the refusal does not say what to hand it by hand: {reason}"
+        );
+        assert!(refused.stderr.is_empty(), "{command}: {}", refused.stderr);
+        if command.ends_with("/left-behind") {
+            let pid = std::fs::read_to_string(&left_behind).expect("the pid it left behind");
+            owner.until("what the source left behind to be ended", |_| {
+                !std::process::Command::new("kill")
+                    .args(["-0", pid.trim()])
+                    .status()
+                    .expect("kill runs")
+                    .success()
+            });
+        }
+
+        // Were the refusal's report to move between a stop and its
+        // continuation, this would refuse again, and a broken source would
+        // hold the turn until the harness gave up on it.
+        let ended = world.run_with_stdin(
+            &declaring(&sources, &["--source-timeout", "1"]),
+            &json!({"session": session, "continuation": true}).to_string(),
+        );
+        ended.exited(0);
+        assert_eq!(
+            verdict(&ended.stdout),
+            Some(json!({"verdict": "none"})),
+            "{command}: {}",
+            ended.stdout
+        );
+    }
+
+    // A failure that *moves* is a new condition: a continuation over a
+    // different failure refuses again on it, and only an unchanged one ends
+    // the turn.
+    let failing = world.root.join("sources/failing.how");
+    let moving = answering("moving", &format!(". '{}'", failing.display()));
+    let stop = |how: &str, continuation: bool| {
+        std::fs::write(&failing, format!("{how}\n")).expect("how it fails is written");
+        let run = world.run_with_stdin(
+            &declaring(&[moving.as_str()], &[]),
+            &json!({"session": session, "continuation": continuation}).to_string(),
+        );
+        run.exited(0);
+        verdict(&run.stdout).expect("a verdict")
+    };
+    let refused_on = |told: &Value, what: &str| {
+        assert_eq!(told["verdict"], json!("block"), "{what}: {told}");
+        assert!(
+            told["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("could not be consulted")
+                    && reason.contains(what)
+                    && reason.contains(&moving)),
+            "{what}: {told}"
+        );
+    };
+    refused_on(&stop("exit 3", false), "exited with status 3");
+    assert_eq!(stop("exit 3", true), json!({"verdict": "none"}));
+    refused_on(&stop("exit 4", true), "exited with status 4");
+    refused_on(&stop("echo 'all good'", true), "not one JSON object");
+    assert_eq!(stop("echo 'all good'", true), json!({"verdict": "none"}));
+
+    let unstartable = answering("unstartable", "echo '{\"verdict\":\"none\"}'");
+    let mut shell_less = world.cmd(&declaring(&[unstartable.as_str()], &[]));
+    shell_less.env("PATH", world.empty_path());
+    let shell_less = world.run_with_stdin_on(shell_less, &json!({"session": session}).to_string());
+    shell_less.exited(0);
+    let told = verdict(&shell_less.stdout).expect("a verdict");
+    assert_eq!(told["verdict"], json!("block"), "{told}");
+    assert!(
+        told["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("could not be consulted")
+                && reason.contains("it could not be started")
+                && reason.contains(&unstartable)),
+        "{told}"
+    );
+
+    // And a source whose memory cannot be kept stands aside in a warning that
+    // still names what it would refuse on, exactly as the verb's own does.
+    let refusing = answering(
+        "refusing",
+        "echo '{\"verdict\":\"block\",\"reason\":\"branch b-1 preserved\"}'",
+    );
+    let path = source_memory(&world, session, &refusing);
+    // llmlint: ignore-block[tests_mirror_real_usage] nothing writes a directory at a
+    // memory's path; the same stand-in the verb's own memory journey above uses for a
+    // record this process cannot write.
+    std::fs::create_dir_all(path.join("held")).expect("something in the way");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let unread = world.run_with_stdin(
+        &declaring(&[refusing.as_str()], &[]),
+        &json!({"session": session, "continuation": true}).to_string(),
+    );
+    unread.exited(0);
+    let told = verdict(&unread.stdout).expect("a verdict");
+    assert_eq!(told["verdict"], json!("warn"), "{told}");
+    assert!(
+        told["message"].as_str().is_some_and(|message| message
+            .contains("could not read what it last blocked on")
+            && message.contains("branch b-1 preserved")
+            && message.contains(&refusing)),
+        "{told}"
+    );
+    let aside = world.run_with_stdin(
+        &declaring(&[refusing.as_str()], &[]),
+        &json!({"session": session}).to_string(),
+    );
+    aside.exited(0);
+    let told = verdict(&aside.stdout).expect("a verdict");
+    assert_eq!(told["verdict"], json!("warn"), "{told}");
+    assert!(
+        told["message"].as_str().is_some_and(|message| message
+            .contains("could not record what it would block on")
+            && message.contains("branch b-1 preserved")),
+        "{told}"
+    );
+    // One that answers nothing to refuse over that same unremovable memory
+    // says so rather than letting a later continuation through in silence.
+    let quiet = answering("quiet-refusing", "echo '{\"verdict\":\"none\"}'");
+    let stuck = source_memory(&world, session, &quiet);
+    // llmlint: ignore-block[tests_mirror_real_usage] the same directory-in-the-way.
+    std::fs::create_dir_all(stuck.join("held")).expect("something in the way");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let unremoved = world.run_with_stdin(
+        &declaring(&[quiet.as_str()], &[]),
+        &json!({"session": session}).to_string(),
+    );
+    unremoved.exited(0);
+    let told = verdict(&unremoved.stdout).expect("a verdict");
+    assert_eq!(told["verdict"], json!("warn"), "{told}");
+    assert!(
+        told["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("could not remove what it last blocked on")),
+        "{told}"
+    );
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// Declared sources are consulted together, so the stop is bounded by the
+/// slowest of them rather than by their sum: each of these two answers only
+/// once it has seen the other start, which consulting them one after the other
+/// could never satisfy.
+#[cfg(unix)]
+#[test]
+fn declared_sources_are_consulted_together() {
+    let owner = World::new("stop-guard-source-together");
+    let world = guarded(&owner);
+    let dir = world.root.join("sources");
+    std::fs::create_dir_all(&dir).expect("the sources directory");
+    let meeting = |mine: &str, theirs: &str| {
+        let path = dir.join(mine);
+        onepipeline_testfakes::executable(
+            &path,
+            format!(
+                "#!/bin/sh\ncat > /dev/null\ntouch '{}'\nuntil [ -f '{}' ]; do sleep 0.1; done\necho '{{\"verdict\":\"none\"}}'\n",
+                dir.join(format!("{mine}.started")).display(),
+                dir.join(format!("{theirs}.started")).display()
+            ),
+        );
+        path.display().to_string()
+    };
+    let first = meeting("first", "second");
+    let second = meeting("second", "first");
+    let met = world.run_with_stdin(
+        &declaring(
+            &[first.as_str(), second.as_str()],
+            &["--source-timeout", "20"],
+        ),
+        &json!({"session": "a-session-owning-nothing"}).to_string(),
+    );
+    met.exited(0);
+    assert_eq!(
+        verdict(&met.stdout),
+        Some(json!({"verdict": "none"})),
+        "{}",
+        met.stdout
+    );
+}
+
+/// A source that closes its standard input before its input was delivered in
+/// full answered without knowing whose stop this is, so its `none` is not
+/// taken: the stop is refused naming the failed delivery, and the continuation
+/// after that refusal ends the turn.
+///
+/// The session is longer than a pipe buffer (64 KiB on Linux), so the input
+/// cannot sit whole in the pipe ahead of the source's closing it: the write is
+/// refused every time rather than racing the source's start. It stays under
+/// the 128 KiB one environment string may hold, because the source's
+/// environment names the session too.
+#[cfg(unix)]
+#[test]
+fn a_source_not_delivered_its_whole_input_refuses_the_stop_and_its_continuation_ends_the_turn() {
+    let owner = World::new("stop-guard-source-undelivered");
+    let world = guarded(&owner);
+    let path = world.root.join("sources/closes-its-input");
+    std::fs::create_dir_all(path.parent().expect("a directory")).expect("the directory");
+    onepipeline_testfakes::executable(
+        &path,
+        "#!/bin/sh\nexec 0<&-\necho '{\"verdict\":\"none\"}'\n",
+    );
+    let source = path.display().to_string();
+    let session = format!("s-{}", "x".repeat(100_000));
+    let sources = [source.as_str()];
+
+    // Input the pipe took is delivered whether or not it was read: this one
+    // reads a single byte — which a write this size lands whole behind — and
+    // leaves the rest, and its answer is taken.
+    let partly = world.root.join("sources/reads-one-byte");
+    onepipeline_testfakes::executable(
+        &partly,
+        "#!/bin/sh\nhead -c 1 > /dev/null\necho '{\"verdict\":\"block\",\"reason\":\"host-wide freeze\"}'\n",
+    );
+    let partly = partly.display().to_string();
+    let taken = world.run_with_stdin(
+        &declaring(&[partly.as_str()], &[]),
+        &json!({"session": "a-short-session"}).to_string(),
+    );
+    taken.exited(0);
+    let told = verdict(&taken.stdout).expect("a verdict");
+    assert_eq!(told["verdict"], json!("block"), "{told}");
+    assert!(
+        told["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("host-wide freeze")
+                && !reason.contains("could not be consulted")),
+        "{told}"
+    );
+
+    let refused = world.run_with_stdin(
+        &declaring(&sources, &[]),
+        &json!({"session": session}).to_string(),
+    );
+    refused.exited(0);
+    let told = verdict(&refused.stdout).expect("a verdict");
+    assert_eq!(told["verdict"], json!("block"), "the `none` was taken");
+    documented(&told);
+    let reason = told["reason"].as_str().expect("a reason");
+    let head: String = reason.chars().take(400).collect();
+    assert!(
+        reason.contains(&source)
+            && reason.contains("could not be consulted")
+            && reason.contains("its input could not be delivered to it in full"),
+        "the refusal does not name the source and the failed delivery: {head}"
+    );
+    assert!(refused.stderr.is_empty(), "{}", refused.stderr);
+
+    let ended = world.run_with_stdin(
+        &declaring(&sources, &[]),
+        &json!({"session": session, "continuation": true}).to_string(),
+    );
+    ended.exited(0);
+    assert_eq!(
+        verdict(&ended.stdout),
+        Some(json!({"verdict": "none"})),
+        "the continuation did not end the turn"
+    );
+
+    // One that stays alive and never reads an input larger than the pipe holds
+    // cannot hold the stop on that full pipe: it is ended at the deadline.
+    let stalled = world.root.join("sources/never-reads");
+    onepipeline_testfakes::executable(
+        &stalled,
+        "#!/bin/sh
+exec sleep 30
+",
+    );
+    let stalled = stalled.display().to_string();
+    let started = std::time::Instant::now();
+    let late = world.run_with_stdin(
+        &declaring(&[stalled.as_str()], &["--source-timeout", "1"]),
+        &json!({"session": session}).to_string(),
+    );
+    late.exited(0);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "the stop was held {:?}",
+        started.elapsed()
+    );
+    let told = verdict(&late.stdout).expect("a verdict");
+    assert_eq!(told["verdict"], json!("block"), "the stall was taken");
+    let reason = told["reason"].as_str().expect("a reason");
+    assert!(
+        reason.contains(&stalled) && reason.contains("did not answer within 1 second(s)"),
+        "the refusal does not name the source and its deadline: {}",
+        reason.chars().take(400).collect::<String>()
+    );
 }
