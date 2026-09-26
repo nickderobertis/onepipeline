@@ -50,10 +50,8 @@ oneharness-core = { workspace = true }
 # provider the graph *declares* rather than one it remembered: a graph that named
 # a different provider would otherwise still be supervised by this copy.
 serde_norway = "0.9"
-# The reference plugin host and the plugin it hosts, so `label-strict-source` and
-# `scripted-source` serve a real store without a second executable, and the plugin
-# API whose own types — a `SourceError`, a `Metering` — `scripted-source` reads its
-# scenario through. `src/hosted.rs` says why it hosts rather than spawns.
+# The store's reference plugin host, the plugin it hosts, and the plugin API whose
+# types `scripted-source` reads its scenario through; see `src/hosted.rs`.
 onetaskgraph-core = { workspace = true }
 onetaskgraph-local-md = { workspace = true }
 onetaskgraph-plugin-api = { workspace = true }

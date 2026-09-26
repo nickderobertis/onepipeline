@@ -738,15 +738,9 @@ oneharness-core = "0.18.0"
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
 onevcs-testing = "0.8.2"
-# The store every plan is read out of and every settlement is projected into, **linked**
-# rather than driven: the engine calls `onetaskgraph-core`'s `Engine` in process, so a
-# store answer reaches it as that library's own types and a change in the store's shape
-# is a compile error here rather than a misread at run time. `src/taskgraph.rs` is where
-# it is called from and says what the engine owns that the store's CLI used to decide.
-# `-plugin-api` is named because the values the engine answers with — a `Task`, a
-# `Project`, a `SourceError` — are that crate's, and `-local-md` because
-# `crates/testfakes` hosts the real plugin in process inside `label-strict-source` and
-# `scripted-source`; those fakes say why.
+# The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
+# named for the values the store answers with, and `-local-md` for the plugin
+# `crates/testfakes` hosts in process.
 #
 # **Exact, and one release for all three**, because the family is lock-step: each
 # sibling requires the others at exactly its own version, so a caret would admit a split

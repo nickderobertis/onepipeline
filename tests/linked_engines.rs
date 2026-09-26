@@ -847,7 +847,7 @@ fn a_held_back_release_below_the_newest_admitted_one_is_not_reported() {
 /// learn it is not a sibling's.
 #[test]
 fn an_entry_naming_a_crate_outside_the_siblings_is_skipped_whatever_its_shape() {
-    let fixture = tree("foreign-dep-shape", &CARET_SHAPES);
+    let fixture = tree("foreign-dep-shape", &REQUIREMENT_SHAPES);
     let entry = repo_root()
         .join(&fixture.index)
         .join(index_path("oneagentgraph"));
@@ -885,7 +885,7 @@ fn an_entry_naming_a_crate_outside_the_siblings_is_skipped_whatever_its_shape() 
 /// with a fix that splits the graph.
 #[test]
 fn a_renamed_sibling_requirement_is_read_by_the_crate_it_names() {
-    let fixture = tree("renamed-dep", &CARET_SHAPES);
+    let fixture = tree("renamed-dep", &REQUIREMENT_SHAPES);
     let entry = repo_root()
         .join(&fixture.index)
         .join(index_path("oneagentgraph"));
@@ -923,7 +923,7 @@ fn a_renamed_sibling_requirement_is_read_by_the_crate_it_names() {
 /// skip a sibling's requirement as foreign.
 #[test]
 fn a_sibling_requirement_whose_package_is_null_is_read_by_its_name() {
-    let fixture = tree("null-package", &CARET_SHAPES);
+    let fixture = tree("null-package", &REQUIREMENT_SHAPES);
     let entry = repo_root()
         .join(&fixture.index)
         .join(index_path("oneagentgraph"));
@@ -1602,16 +1602,16 @@ fn tree(case: &str, engines: &[Engine]) -> Tree {
     }
 }
 
-/// A sound tree, whose six engines between them take every caret shape cargo
-/// defines that this repository's own pins do not, and the exact `=` pin its
-/// store's lock-step family takes.
+/// A sound tree, whose six engines between them take every requirement shape this
+/// check models that this repository's own caret pins do not: the other caret shapes
+/// cargo defines, and the exact `=` pin the store's lock-step family takes.
 ///
 /// Each one is served a release *just* outside its window — 3.0.0 against
 /// `^2.1`, 1.0.0 against `^0`, 0.0.4 against `^0.0.3`, 0.1.0 against `^0.0`,
 /// 2.0.0 against `^1`, 0.2.45 against `=0.2.44` — so a window computed by any
 /// other rule reports the engine as behind, or stops finding the locked copy at
 /// all.
-const CARET_SHAPES: [Engine; 6] = [
+const REQUIREMENT_SHAPES: [Engine; 6] = [
     Engine {
         name: "oneagentgraph",
         requirement: "2.1",
@@ -1656,10 +1656,10 @@ const CARET_SHAPES: [Engine; 6] = [
     },
 ];
 
-/// `CARET_SHAPES` with one engine replaced, so a refusal test states only the
+/// `REQUIREMENT_SHAPES` with one engine replaced, so a refusal test states only the
 /// one thing it is about.
 fn but(replacement: Engine) -> [Engine; 6] {
-    CARET_SHAPES.map(|engine| {
+    REQUIREMENT_SHAPES.map(|engine| {
         if engine.name == replacement.name {
             Engine { ..replacement }
         } else {
@@ -1676,7 +1676,7 @@ fn but(replacement: Engine) -> [Engine; 6] {
 /// reports a currency it never established.
 #[test]
 fn the_windows_this_check_computes_are_cargos_own_caret_rules() {
-    let tree = tree("caret-shapes", &CARET_SHAPES);
+    let tree = tree("caret-shapes", &REQUIREMENT_SHAPES);
     let run = linked_engines(&tree.args());
     assert!(
         run.status.success(),
@@ -1685,7 +1685,7 @@ fn the_windows_this_check_computes_are_cargos_own_caret_rules() {
         said(&run)
     );
     let report = String::from_utf8_lossy(&run.stdout);
-    for engine in &CARET_SHAPES {
+    for engine in &REQUIREMENT_SHAPES {
         assert!(
             report.contains(&format!("{} {}", engine.name, engine.locked[0])),
             "the check passed without reporting `{}`, whose requirement is `{}`:\n{}",
@@ -2006,7 +2006,7 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
              requirement shape this check does not model",
         ),
     ] {
-        let fixture = tree(case, &CARET_SHAPES);
+        let fixture = tree(case, &REQUIREMENT_SHAPES);
         let entry = repo_root()
             .join(&fixture.index)
             .join(index_path("oneagentgraph"));
@@ -2196,7 +2196,7 @@ fn registry(index: &str, refusals: usize) -> String {
 /// of those red would train its reader to ignore it.
 #[test]
 fn a_registry_that_hiccups_is_retried_and_one_that_never_answers_is_not_a_finding() {
-    let tree = tree("over-http", &CARET_SHAPES);
+    let tree = tree("over-http", &REQUIREMENT_SHAPES);
 
     let recovered = linked_engines(&[
         "--manifest",

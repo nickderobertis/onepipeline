@@ -407,7 +407,7 @@ fn a_stopped_run_releases_its_unstarted_tickets_and_an_adoption_claims_them_agai
 /// A ticket the store cannot write is a projection that did not land: the planner hears of it,
 /// naming the ticket and what the store said, and the run settles exactly as it would have.
 #[test]
-fn a_refused_ticket_write_raises_the_planner_surface_and_settles_the_run_unchanged() {
+fn a_ticket_the_store_cannot_write_raises_the_planner_surface_and_settles_the_run_unchanged() {
     let world = a_world_with_scripted_tickets("delivers-refused-ticket");
     let delivered = ticket(&world, "work", "todo");
     // The tickets source cannot write this ticket's status, the way a hosted source that could

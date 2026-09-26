@@ -890,9 +890,9 @@ impl QualifiedId {
 
     /// The same id as the store's own type, which is what every call into it names.
     ///
-    /// Infallible, because the two agree on what a qualified id is: a source name in
-    /// the language [`valid_source_name`] checks, which is the one the store publishes,
-    /// and a native id that is not empty.
+    /// Infallible, because the two agree on what a qualified id is: a source name the
+    /// store's own [`SourceName`] parser accepted where this id was parsed, and a native id
+    /// that is not empty.
     pub(crate) fn global(&self) -> GlobalId {
         GlobalId::new(
             SourceName::new(self.source())
@@ -905,34 +905,24 @@ impl QualifiedId {
 impl TryFrom<String> for QualifiedId {
     type Error = String;
 
+    /// The source half is held to the store's own [`SourceName`] parser, whose words say
+    /// what a source name is when one is not; the native half is the upstream system's
+    /// opaque value, and only has to be there.
     fn try_from(whole: String) -> std::result::Result<Self, String> {
-        match whole.find(':') {
-            Some(colon) if valid_source_name(&whole[..colon]) && colon + 1 < whole.len() => {
-                Ok(Self { whole, colon })
-            }
-            _ => Err(format!(
-                "'{whole}' is not a qualified onetaskgraph id; write it as <source>:<native>, \
-                 for example plan-store:ship-the-widget; source names use lower-case letters, \
-                 digits and hyphens, starting with a letter or digit"
-            )),
+        let refused = |why: &str| {
+            format!(
+                "'{whole}' is not a qualified onetaskgraph id{why}; write it as \
+                 <source>:<native>, for example plan-store:ship-the-widget"
+            )
+        };
+        let Some(colon) = whole.find(':').filter(|colon| colon + 1 < whole.len()) else {
+            return Err(refused(""));
+        };
+        match SourceName::new(&whole[..colon]) {
+            Ok(_) => Ok(Self { whole, colon }),
+            Err(error) => Err(refused(&format!(": {error}"))),
         }
     }
-}
-
-/// The source-name language onetaskgraph publishes for qualified ids.
-///
-/// Native ids stay opaque (and may contain colons or whitespace) because they
-/// belong to the upstream system; the configured source name is the component
-/// onetaskgraph itself validates.
-fn valid_source_name(source: &str) -> bool {
-    let mut chars = source.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first.is_ascii_lowercase() || first.is_ascii_digit())
-        && chars.all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-        })
 }
 
 impl std::str::FromStr for QualifiedId {

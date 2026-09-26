@@ -96,11 +96,32 @@ struct Settings {
     root: PathBuf,
     script: PathBuf,
     #[serde(default = "default_key")]
-    key: String,
+    key: Key,
 }
 
-fn default_key() -> String {
-    "store".to_owned()
+fn default_key() -> Key {
+    Key("store".to_owned())
+}
+
+/// What a source's scenario files and recorded calls are named by: lower-case letters,
+/// digits and hyphens, so a key can name no file outside the scenario directory and no
+/// scenario of another source.
+#[derive(Deserialize)]
+#[serde(try_from = "String")]
+struct Key(String);
+
+impl TryFrom<String> for Key {
+    type Error = String;
+
+    fn try_from(key: String) -> Result<Self, Self::Error> {
+        let named = !key.is_empty()
+            && key
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        named
+            .then_some(Self(key.clone()))
+            .ok_or_else(|| format!("`key` {key:?} is not lower-case letters, digits and hyphens"))
+    }
 }
 
 /// One request off the engine's wire, its parameters kept as they arrived.
@@ -137,6 +158,12 @@ fn main() -> ExitCode {
         ));
     }
     let settings = handshake.params.config;
+    if !settings.script.is_dir() {
+        return stop(&format!(
+            "`script` {} is not a directory to read a scenario from",
+            settings.script.display()
+        ));
+    }
     let handed: Vec<&str> = handshake
         .params
         .secrets
@@ -145,17 +172,17 @@ fn main() -> ExitCode {
         .collect();
     fake::record(
         &settings.script,
-        &settings.key,
+        &settings.key.0,
         &["initialize".to_owned(), handed.join(",")],
     );
     let mut host = match Host::start() {
         Ok(host) => host,
         Err(why) => return stop(&why),
     };
-    let meters = settings
-        .script
-        .join(format!("{}.metering", settings.key))
-        .is_file();
+    let meters = match metering(&settings.script.join(format!("{}.metering", settings.key.0))) {
+        Ok(metered) => metered.is_some(),
+        Err(why) => return stop(&why),
+    };
     match host.initialize(
         handshake.id,
         handshake.params.protocol_version,
@@ -176,7 +203,7 @@ fn main() -> ExitCode {
     }
     let mut source = Scripted {
         script: settings.script,
-        key: settings.key,
+        key: settings.key.0,
         spent: Metering::default(),
         answered: std::collections::BTreeSet::new(),
     };
@@ -267,7 +294,7 @@ impl Scripted {
         if let Some(error) = refusal(&self.scenario(&format!("{method}.refuse")))? {
             return Ok(json!({"id": request.id, "error": error}));
         }
-        if self.scenario(&format!("{method}.absent")).is_file() {
+        if present(&self.scenario(&format!("{method}.absent")))? {
             let held = match method {
                 "get_project" => "project",
                 "get_task" => "task",
@@ -276,7 +303,7 @@ impl Scripted {
             return Ok(json!({"id": request.id, "result": {held: null}}));
         }
         let metered = self.scenario("metering");
-        if method == "metering" && metered.is_file() {
+        if method == "metering" && metering(&metered)?.is_some() {
             return Ok(json!({"id": request.id, "result": {"metering": self.spent}}));
         }
         let relayed = json!({
@@ -319,6 +346,18 @@ fn named(params: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned()
+}
+
+/// Whether a scenario file that says only by being there is there. One that cannot be read
+/// as a file is refused rather than read as absent: a fixture that scripted nothing would
+/// hand a journey the real store's answer while it asserts the scripted one.
+fn present(path: &Path) -> Result<bool, String> {
+    match std::fs::metadata(path) {
+        Ok(found) if found.is_file() => Ok(true),
+        Ok(_) => Err(format!("{} is not a scenario file", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("cannot read {}: {error}", path.display())),
+    }
 }
 
 /// The source error a scenario file scripts, read through the store's own type, or `None`
