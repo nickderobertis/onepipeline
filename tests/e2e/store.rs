@@ -2251,12 +2251,17 @@ fn an_unwritable_shadow_store_is_reported_retried_and_recovered() {
         })
     });
 
+    // llmlint: ignore-block[tests_mirror_real_usage] a shadow store the worker cannot write is
+    // a state a host produces on its own — a full disk, a permission change — and not one any
+    // verb of this CLI can be asked to make; the journey's subject is what the run does when
+    // its own local writes fail, and every claim afterwards is read off the CLI and the board.
     // The folder every attempt, whole or members, writes the shadow project into.
     let shadow = world
         .run_file("writeback-capture-retry", "writeback")
         .join("projects");
     std::fs::remove_dir_all(&shadow).expect("the shadow projects folder is taken away");
     std::fs::write(&shadow, "not a folder").expect("a file makes the shadow store unwritable");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world
         .run_with_stdin(
             &["reply", "writeback-capture-retry"],

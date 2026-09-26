@@ -85,7 +85,6 @@ struct Handshake {
     params: HandshakeParams,
 }
 
-/// The one method a handshake is.
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Initialize {
@@ -104,7 +103,6 @@ struct HandshakeParams {
     secrets: std::collections::BTreeMap<String, String>,
 }
 
-/// This source's own `config:` block.
 #[derive(Deserialize)]
 struct Settings {
     root: PathBuf,

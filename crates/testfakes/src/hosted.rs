@@ -35,7 +35,6 @@ impl Write for Writing {
         Ok(bytes.len())
     }
 
-    /// Nothing is buffered on this side: every write is already with the reader.
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }

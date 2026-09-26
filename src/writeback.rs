@@ -2103,7 +2103,6 @@ fn member_id(snapshot: &Snapshot, id: &str) -> GlobalId {
     ))
 }
 
-/// One item of the shadow store, by its native id there.
 fn shadow_id(native: &str) -> GlobalId {
     GlobalId::new(
         SourceName::new(SHADOW_SOURCE).expect("the shadow source's name is a source name"),
