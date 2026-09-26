@@ -1921,7 +1921,7 @@ fn a_node_and_a_step_default_to_the_shapes_the_contract_states() {
 ///
 /// The documents themselves rather than the graph they read as: what they read
 /// as is `tests/e2e/shipped.rs`'s, which drives them through the real
-/// `onetaskgraph` binary and executes one. What is held here is that the store
+/// `onetaskgraph` store the binary links and executes one. What is held here is that the store
 /// the contract names is on disk, in the shape the mapping needs — a project per
 /// plan, a task per node, and the reserved key that carries the schema version.
 #[test]

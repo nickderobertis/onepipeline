@@ -12,7 +12,7 @@
 // journeys point `ONEPIPELINE_ONEVCS_BIN` at an absent or ill-answering program, which is
 // the state under test rather than a stand-in: a real `onevcs` cannot be asked to be one
 // that is not installed or answers a shape this build cannot read, the same reason
-// `fake-onetaskgraph` exists beside it.
+// `scripted-source` exists beside it.
 
 use serde_json::{json, Value};
 

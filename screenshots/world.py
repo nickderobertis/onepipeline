@@ -230,24 +230,9 @@ class World:
         # first (see `clear_inherited_engine_and_git_settings`), so nothing an
         # operator exported can print into a shot or point the journey elsewhere.
         path = os.pathsep.join([str(self.bin), os.environ.get("PATH", "")])
-        stated = os.environ.get("SHOTS_ONETASKGRAPH_BIN")
-        if stated:
-            # An override that does not name a runnable program would otherwise
-            # fail several steps later, as a plan the launcher could not read.
-            if not (Path(stated).is_file() and os.access(stated, os.X_OK)):
-                raise SystemExit(
-                    f"screenshots: SHOTS_ONETASKGRAPH_BIN names {stated!r}, which is "
-                    "not an executable file. Point it at one, or unset it to take "
-                    "`onetaskgraph` from PATH: `unset SHOTS_ONETASKGRAPH_BIN`."
-                )
-        onetaskgraph = stated or shutil.which("onetaskgraph")
-        if not onetaskgraph:
-            raise SystemExit(
-                "screenshots: no `onetaskgraph` on PATH. The capture reads every plan "
-                "through the real binary, exactly as the e2e suite does. Install it "
-                "with `just bootstrap`, or point SHOTS_ONETASKGRAPH_BIN at an "
-                "executable one, then re-run `just screenshots`."
-            )
+        # The store every plan is read out of is linked into the engine, so the
+        # capture needs no `onetaskgraph` of its own: the settings below are all
+        # it reads.
         env = {n: v for n, v in os.environ.items() if not n.startswith("GIT_")}
         env.update(
             {
@@ -274,7 +259,6 @@ class World:
                 "ONEVCS_CHECKS_TIMEOUT_SECONDS": "2",
                 "ONEVCS_CHECKS_POLL_SECONDS": "0.05",
                 "ONEPIPELINE_RUNS_DIR": str(self.runs),
-                "ONETASKGRAPH_BIN": onetaskgraph,
                 "XDG_CONFIG_HOME": str(self.root / "xdg"),
                 "XDG_STATE_HOME": str(self.root / "xdg-state"),
                 "ONETASKGRAPH_DEFAULT_SOURCES": "plans",

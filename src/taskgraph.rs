@@ -825,8 +825,9 @@ pub(crate) struct Read {
 /// Why a project did not become a plan.
 ///
 /// The two are different answers and are kept apart: the schema **refused** what
-/// the project says, or the project could not be **read** at all — an absent
-/// binary, a store that answered badly, a project that names nothing. A caller
+/// the project says, or the project could not be **read** at all — a
+/// configuration that does not load, a source that could not answer, a project
+/// that names nothing. A caller
 /// that collapsed them would report a store outage as a plan its author has to
 /// fix.
 pub(crate) enum Load {

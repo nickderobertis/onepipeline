@@ -69,12 +69,13 @@ fn repo_root() -> PathBuf {
 /// every other test here asserts that what it expects is present, which on its
 /// own would say nothing about an engine added to the script and to nothing
 /// else.
-const SIBLINGS: [&str; 5] = [
+const SIBLINGS: [&str; 6] = [
     "oneagentgraph",
     "onevcs",
     "onevcs-testing",
     "onejudge",
     "oneharness-core",
+    "onetaskgraph-core",
 ];
 
 /// The path of the script both recipes run.
@@ -1601,14 +1602,16 @@ fn tree(case: &str, engines: &[Engine]) -> Tree {
     }
 }
 
-/// A sound tree, whose five engines between them take every caret shape cargo
-/// defines that this repository's own pins do not.
+/// A sound tree, whose six engines between them take every caret shape cargo
+/// defines that this repository's own pins do not, and the exact `=` pin its
+/// store's lock-step family takes.
 ///
 /// Each one is served a release *just* outside its window — 3.0.0 against
 /// `^2.1`, 1.0.0 against `^0`, 0.0.4 against `^0.0.3`, 0.1.0 against `^0.0`,
-/// 2.0.0 against `^1` — so a window computed by any other rule reports the
-/// engine as behind, or stops finding the locked copy at all.
-const CARET_SHAPES: [Engine; 5] = [
+/// 2.0.0 against `^1`, 0.2.45 against `=0.2.44` — so a window computed by any
+/// other rule reports the engine as behind, or stops finding the locked copy at
+/// all.
+const CARET_SHAPES: [Engine; 6] = [
     Engine {
         name: "oneagentgraph",
         requirement: "2.1",
@@ -1644,11 +1647,18 @@ const CARET_SHAPES: [Engine; 5] = [
         served: &["1.2.3", "2.0.0"],
         requires: &[],
     },
+    Engine {
+        name: "onetaskgraph-core",
+        requirement: "=0.2.44",
+        locked: &["0.2.44"],
+        served: &["0.2.44", "0.2.45"],
+        requires: &[],
+    },
 ];
 
 /// `CARET_SHAPES` with one engine replaced, so a refusal test states only the
 /// one thing it is about.
-fn but(replacement: Engine) -> [Engine; 5] {
+fn but(replacement: Engine) -> [Engine; 6] {
     CARET_SHAPES.map(|engine| {
         if engine.name == replacement.name {
             Engine { ..replacement }
@@ -2440,4 +2450,167 @@ fn a_release_carrying_build_metadata_is_one_the_lock_can_be_behind() {
         "the refusal does not name the release with metadata on it as the one permitted:\n{}",
         said(&run)
     );
+}
+
+/// Every `onetaskgraph` package a lock carries, as the name and version each one
+/// resolved at.
+///
+/// A list of pairs rather than a map from name to version, because a lock may
+/// carry one crate twice and that is the state worth catching: keyed by name
+/// alone, the second copy would overwrite the first and the split would read as
+/// a single clean resolution.
+fn onetaskgraph_packages(lock: &str) -> Vec<(String, String)> {
+    let lock: toml::Value = toml::from_str(lock).expect("a lock is TOML");
+    lock["package"]
+        .as_array()
+        .expect("a lock is a list of packages")
+        .iter()
+        .filter_map(|package| {
+            let name = package.get("name")?.as_str()?;
+            let version = package.get("version")?.as_str()?;
+            (name == "onetaskgraph" || name.starts_with("onetaskgraph-"))
+                .then(|| (name.to_owned(), version.to_owned()))
+        })
+        .collect()
+}
+
+/// The releases of the `onetaskgraph` family `packages` resolves, each once.
+fn releases(packages: &[(String, String)]) -> std::collections::BTreeSet<&str> {
+    packages
+        .iter()
+        .map(|(_, version)| version.as_str())
+        .collect()
+}
+
+/// Every `onetaskgraph` binary this repository's own automation installs, as the
+/// release each names: a `cargo install onetaskgraph`, or an install of the
+/// `onetaskgraph-cli` wheel or package, anywhere a recipe, a workflow or a script
+/// runs one. `None` for an install that names no release at all.
+fn installed_onetaskgraph(text: &str) -> Vec<Option<String>> {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .filter(|line| {
+            line.contains("cargo install onetaskgraph")
+                || (line.contains("onetaskgraph-cli")
+                    && (line.contains("install") || line.contains("uv tool")))
+        })
+        .map(|line| {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            words
+                .windows(2)
+                .find(|pair| pair[0] == "--version")
+                .map(|pair| pair[1].trim_matches('"').to_owned())
+                .or_else(|| {
+                    words.iter().find_map(|word| {
+                        word.trim_matches(|c| c == '"' || c == '\'')
+                            .split_once("onetaskgraph-cli==")
+                            .or_else(|| word.split_once("onetaskgraph-cli@"))
+                            .map(|(_, version)| version.to_owned())
+                    })
+                })
+        })
+        .collect()
+}
+
+/// A lock that resolved the family at two releases is reported as two, and an
+/// install naming a release — or naming none — is read as the release it names.
+#[test]
+fn a_split_family_and_an_install_are_each_read_as_the_releases_they_name() {
+    let split = "[[package]]\nname = \"onetaskgraph-core\"\nversion = \"0.2.43\"\n\n\
+                 [[package]]\nname = \"onetaskgraph-plugin-api\"\nversion = \"0.2.44\"\n\n\
+                 [[package]]\nname = \"serde\"\nversion = \"1.0.0\"\n";
+    let packages = onetaskgraph_packages(split);
+    assert_eq!(
+        packages.len(),
+        2,
+        "a crate of another family was taken: {packages:?}"
+    );
+    assert_eq!(
+        releases(&packages).len(),
+        2,
+        "a family split across two releases read as one"
+    );
+    assert_eq!(
+        installed_onetaskgraph(
+            "    cargo install onetaskgraph --locked --version 0.2.32\n\
+             # cargo install onetaskgraph --version 9.9.9\n\
+             uv tool install onetaskgraph-cli==0.2.30\n\
+             cargo install onetaskgraph --locked\n"
+        ),
+        vec![Some("0.2.32".to_owned()), Some("0.2.30".to_owned()), None]
+    );
+}
+
+/// Every `onetaskgraph` crate this build links is **one** release, the one
+/// `[workspace.dependencies]` names, and anything this repository installs as an
+/// `onetaskgraph` binary names that release too.
+///
+/// The lock rather than the manifest, because most of the family is transitive:
+/// the manifest binds three crates, and the family is lock-step — each sibling
+/// requires the others at exactly its own version — so a lock that split it would
+/// not build and one that moved it whole would link a release the manifest does
+/// not name. The three direct crates are asserted present as well as pinned: a
+/// link quietly dropped would leave this passing over an empty set, which is the
+/// one answer it must not give.
+///
+/// Nothing installs the binary today — the store is linked — so the install half
+/// holds that every recipe, workflow and script this repository runs names no
+/// other release, and fails the day one is added at another.
+#[test]
+fn every_onetaskgraph_crate_in_the_lock_is_the_one_release_the_manifest_names() {
+    let direct = [
+        "onetaskgraph-core",
+        "onetaskgraph-plugin-api",
+        "onetaskgraph-local-md",
+    ];
+    let pinned: std::collections::BTreeSet<String> =
+        direct.iter().map(|name| required(name)).collect();
+    assert_eq!(
+        pinned.len(),
+        1,
+        "the manifest pins the onetaskgraph family at more than one release: {pinned:?}"
+    );
+    let named = pinned.iter().next().expect("one pin");
+    let release = named
+        .strip_prefix('=')
+        .unwrap_or_else(|| panic!("the family is pinned exactly, and `{named}` is not"));
+
+    let lock = fs::read_to_string(repo_root().join("Cargo.lock")).expect("this build's lock");
+    let packages = onetaskgraph_packages(&lock);
+    for name in direct {
+        assert!(
+            packages.iter().any(|(linked, _)| linked == name),
+            "the lock no longer carries {name}"
+        );
+    }
+    assert_eq!(
+        releases(&packages),
+        std::collections::BTreeSet::from([release]),
+        "the lock resolves the onetaskgraph family at other than the one release \
+         [workspace.dependencies] names: {packages:?}"
+    );
+
+    let mut automation: Vec<PathBuf> = vec![repo_root().join("justfile")];
+    for dir in [".github/workflows", "scripts", "screenshots"] {
+        for entry in fs::read_dir(repo_root().join(dir)).expect("an automation directory") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_file() {
+                automation.push(path);
+            }
+        }
+    }
+    for path in automation {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for install in installed_onetaskgraph(&text) {
+            assert_eq!(
+                install.as_deref(),
+                Some(release),
+                "{} installs an onetaskgraph binary at other than the release the engine \
+                 links",
+                path.display()
+            );
+        }
+    }
 }

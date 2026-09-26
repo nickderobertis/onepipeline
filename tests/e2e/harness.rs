@@ -39,317 +39,7 @@ use std::process::{Command, Output, Stdio};
 use onepipeline_testfakes::{
     rendezvous_script, segment, CLI_BIN_ENV, EVALUATOR_OPENING, MEMBER_ENV, SCRIPT_DIR_ENV,
 };
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoreResponse<T> {
-    items: Vec<T>,
-    next: Option<String>,
-    plan: serde::de::IgnoredAny,
-    errors: Vec<StoreFailure>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoreFailure {
-    source: String,
-    error: StoreSourceError,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-enum StoreSourceError {
-    Config { message: String },
-    Auth { message: String },
-    Refused { message: String },
-    RateLimited { retry_after_seconds: Option<u64> },
-    Unavailable { message: String },
-    Malformed { message: String },
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct StoreQualified<T> {
-    id: String,
-    item: T,
-}
-
-/// Where the store says an entity is, on the two terms a reader can act on.
-///
-/// Externally tagged with exactly two variants, so the JSON is `{"url": "https://…"}`
-/// or `{"path": "/home/…"}` and which key is present is what tells them apart. An
-/// unknown key is an unknown *variant*, which is refused here exactly as an unknown
-/// field is refused on the structs around it — so this widens what the boundary accepts
-/// by the one shape `onetaskgraph` documents and by nothing else. It is read *forward*:
-/// an install that predates the field reads as one carrying none, and this is what lets
-/// the suite read a store served by one that has it.
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum StoreLocation {
-    /// The entity lives at an external website, and this is a link a reader can open.
-    Url(String),
-    /// The entity is a file on the machine the source runs on, and this is its absolute
-    /// path.
-    Path(String),
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct StoreTask {
-    id: String,
-    title: String,
-    content: Option<String>,
-    status: StoreStatus,
-    labels: Vec<StoreLabel>,
-    project: Option<String>,
-    url: Option<String>,
-    /// Absent where the source does not say, which means *it did not say* rather than
-    /// *this is nowhere*. Skipped on the way out so a task the source placed nowhere
-    /// renders exactly as it did before this field existed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    location: Option<StoreLocation>,
-    created_at: Option<String>,
-    updated_at: Option<String>,
-    #[serde(default)]
-    repositories: Vec<String>,
-    #[serde(default)]
-    metadata: BTreeMap<String, Value>,
-    /// The tasks this one delivers, every entry qualified, as onetaskgraph 0.2.32 answers them.
-    /// Skipped on the way out when empty, so a task delivering nothing renders exactly as it did
-    /// before the store carried the field.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    delivers: Vec<String>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct StoreProject {
-    id: String,
-    title: String,
-    content: Option<String>,
-    status: StoreStatus,
-    labels: Vec<StoreLabel>,
-    url: Option<String>,
-    /// On exactly the terms of [`StoreTask::location`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    location: Option<StoreLocation>,
-    created_at: Option<String>,
-    updated_at: Option<String>,
-    #[serde(default)]
-    repositories: Vec<String>,
-    #[serde(default)]
-    metadata: BTreeMap<String, Value>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct StoreStatus {
-    category: StoreStatusCategory,
-    name: String,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum StoreStatusCategory {
-    Backlog,
-    Todo,
-    Queued,
-    InProgress,
-    Done,
-    Cancelled,
-    Unknown,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct StoreLabel {
-    id: String,
-    name: String,
-    color: Option<String>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct StoreEdge {
-    from: StoreEndpoint,
-    to: StoreEndpoint,
-    kind: StoreEdgeKind,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct StoreEndpoint {
-    id: String,
-    kind: StoreItemKind,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum StoreItemKind {
-    Task,
-    Project,
-}
-
-/// A task page is read whether the source said where the task is or not, and both
-/// forms of saying are understood.
-///
-/// The **absent** form is what an install older than the field produces, and the
-/// **present** forms are what one that has it reports on every task its `local-md`
-/// plugin serves. No single install produces both, so the two spellings are pinned
-/// here, beside the silence, against the boundary that actually validates them.
-// llmlint: ignore-block[tests_mirror_real_usage] the subject is the suite's own
-// validated boundary rather than a journey: what is asserted is which store pages this
-// harness will accept, which is the thing every journey built on it takes for granted
-// and none of them can assert about itself.
-#[test]
-fn a_task_page_is_read_whether_the_source_placed_the_task_or_not() {
-    let page = |task: &str| {
-        format!(
-            r#"{{"items":[{{"id":"local:t","item":{task}}}],"next":null,
-               "plan":{{}},"errors":[]}}"#
-        )
-    };
-    let task = |extra: &str| {
-        format!(
-            r#"{{"id":"t","title":"probe","content":null,
-               "status":{{"category":"todo","name":"todo"}},"labels":[],
-               "project":null,"url":null{extra},"created_at":null,
-               "updated_at":null,"metadata":{{}},"repositories":[]}}"#
-        )
-    };
-    for (form, extra) in [
-        ("said nothing", String::new()),
-        (
-            "a path on this machine",
-            r#","location":{"path":"/home/who/tasks/t.md"}"#.to_owned(),
-        ),
-        (
-            "a link to open",
-            r#","location":{"url":"https://example.invalid/t"}"#.to_owned(),
-        ),
-    ] {
-        let read: Result<StoreResponse<StoreQualified<StoreTask>>, _> =
-            serde_json::from_str(&page(&task(&extra)));
-        let read = read.unwrap_or_else(|error| {
-            panic!("a store page whose source {form} is not read by this harness: {error}")
-        });
-        assert_eq!(read.items.len(), 1, "the page held one task where {form}");
-    }
-} // llmlint: ignore-end[tests_mirror_real_usage]
-
-/// This boundary reads every `location` the real `onetaskgraph` declares — and an
-/// install that predates the field declares none, which is why the field is optional
-/// here.
-///
-/// This suite carries a hand-written copy of a two-variant enum, and a copy of an
-/// external schema is exactly the thing that rots silently. So what is asked of the
-/// authoritative source is the one thing that holds for every install: whatever
-/// `onetaskgraph schema` declares, this boundary reads — no `location` at all from an
-/// install older than the field, and the two spellings from one that has it, where a
-/// third would fail here.
-///
-/// **The copy is this suite's alone.** `src/writeback.rs` names `location` too, but no
-/// longer as a second copy of this shape: those types stopped denying unknown fields, and
-/// the field is held there as the raw document, so no spelling of one can be refused and
-/// there is nothing there for this enum to agree with. That is what
-/// `store::a_settlement_reaches_a_store_whose_answer_grew_a_field_this_build_does_not_know`
-/// drives, at a `{"kind": …, "url": …}` neither spelling below would have accepted. So one
-/// copy is left to rot rather than two, and it is this one, because this suite's own reader
-/// is still the one that refuses what it does not recognise — which is what the test below
-/// it pins.
-// llmlint: ignore-block[tests_mirror_real_usage] the subject is this suite's own boundary
-// against the real sibling's declared schema, which is not a journey: it asks the same
-// compiled `onetaskgraph` every journey reads its store through, and no journey can assert
-// about the validation standing between it and that store.
-#[test]
-fn this_boundary_reads_every_location_onetaskgraph_declares() {
-    let world = World::new("harness-location-schema");
-    let output = world
-        .store_cmd(&["schema"])
-        .output()
-        .expect("the real onetaskgraph prints its schema");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let schema: Value =
-        serde_json::from_slice(&output.stdout).expect("the schema is machine-readable");
-    let task = &schema["roots"]["Task"];
-    let mut declared: Vec<String> = match task["$defs"]["Location"]["oneOf"].as_array() {
-        Some(variants) => variants
-            .iter()
-            .flat_map(|variant| {
-                variant["properties"]
-                    .as_object()
-                    .expect("each variant is an object with one key")
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<String>>()
-            })
-            .collect(),
-        // An install older than the field declares none, which leaves nothing to reconcile
-        // against but is not nothing to assert: a task it declares carries no `location`
-        // either, so the two halves of its schema agree and the absent form this
-        // boundary reads is the only form this `onetaskgraph` can produce.
-        None => {
-            assert!(
-                task["properties"].get("location").is_none(),
-                "onetaskgraph reports a location it declares no shape for: {}",
-                task["properties"]
-            );
-            Vec::new()
-        }
-    };
-    declared.sort();
-    for spelling in &declared {
-        let read: Result<StoreLocation, _> =
-            serde_json::from_value(serde_json::json!({ spelling.as_str(): "somewhere" }));
-        assert!(
-            read.is_ok(),
-            "onetaskgraph declares a `{spelling}` location this boundary refuses"
-        );
-    }
-}
-// llmlint: ignore-end[tests_mirror_real_usage]
-
-/// Widening the boundary by one documented field did not stop it refusing the rest.
-///
-/// The reason this boundary denies unknown fields is that a store page carrying
-/// something the suite has never heard of is the suite reading a `onetaskgraph` it was
-/// not written against — which is exactly how the `location` field announced itself. So
-/// accepting that one field must not become accepting anything, and the refusal is
-/// pinned rather than assumed.
-// llmlint: ignore-block[tests_mirror_real_usage] as above: the subject is what the
-// harness refuses, and a journey cannot assert about the validation standing between it
-// and the store it reads.
-#[test]
-fn a_field_this_boundary_has_never_heard_of_is_still_refused() {
-    let task = r#"{"id":"t","title":"probe","content":null,
-        "status":{"category":"todo","name":"todo"},"labels":[],"project":null,
-        "url":null,"whereabouts":{"path":"/tmp/t.md"},"created_at":null,
-        "updated_at":null,"metadata":{},"repositories":[]}"#;
-    let read: Result<StoreTask, _> = serde_json::from_str(task);
-    let error = read
-        .err()
-        .expect("a task carrying a field this suite has never heard of is refused")
-        .to_string();
-    assert!(
-        error.contains("whereabouts"),
-        "the refusal does not name the field that caused it: {error}"
-    );
-
-    // And an unknown *variant* of the field that was widened, for the same reason.
-    let placed_oddly = task.replace(
-        r#""whereabouts":{"path":"/tmp/t.md"}"#,
-        r#""location":{"shelf":"third from the left"}"#,
-    );
-    serde_json::from_str::<StoreTask>(&placed_oddly)
-        .err()
-        .expect("a location spelled a way onetaskgraph does not document is refused");
-} // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// The harness double answers `oneharness run --format` the way the real CLI's grammar
 /// reads it — and only for the one report it renders.
@@ -584,13 +274,6 @@ fn the_harness_double_selects_the_chain_an_extends_parent_declares() {
     let _ = std::fs::remove_dir_all(&fakes);
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum StoreEdgeKind {
-    Blocks,
-    Related,
-}
-
 // The exit codes are the crate's own, not a second copy of them. A suite that
 // restated the numbers would keep passing against a build that had changed one,
 // which is exactly the drift these journeys exist to catch.
@@ -813,6 +496,10 @@ pub struct World {
     /// read. Applied after the defaults, so a journey overrides rather than
     /// races them, and empty for every world that names none.
     pub environment: Vec<(String, String)>,
+    /// Whether the binary under test reaches this world's plans source through
+    /// `scripted-source` rather than straight through `local-md`. See
+    /// [`World::through_scripted_source`].
+    pub scripted: bool,
 }
 
 impl World {
@@ -847,6 +534,7 @@ impl World {
             root,
             session: format!("session-{name}"),
             environment: Vec::new(),
+            scripted: false,
         };
         for dir in [&world.runs, &world.fakes, &world.project] {
             std::fs::create_dir_all(dir).expect("a scratch directory");
@@ -864,6 +552,7 @@ impl World {
             project: self.project.clone(),
             session: session.to_string(),
             environment: self.environment.clone(),
+            scripted: self.scripted,
         }
     }
 
@@ -877,6 +566,54 @@ impl World {
     pub fn with_env(mut self, key: &str, value: &str) -> Self {
         self.environment.push((key.to_owned(), value.to_owned()));
         self
+    }
+
+    /// The same world, with the binary under test reaching its plans source through
+    /// `crates/testfakes`' `scripted-source`: the real `local-md` plugin over the same
+    /// folder, served over the store's own plugin protocol, which answers the one call a
+    /// journey scripts with the source error a hosted destination answers with, or holds it
+    /// open. Every call it is handed is recorded as `store` in [`World::invocations`].
+    ///
+    /// Only the run reaches it: [`World::store_call`] and every read built on it go straight
+    /// to `local-md`, so what a journey reads back is never refused by what it scripted, and
+    /// never counted among the calls the run made.
+    #[must_use]
+    pub fn through_scripted_source(mut self) -> Self {
+        self.scripted = true;
+        self
+    }
+
+    /// The settings that declare this world's plans source to the binary under test.
+    fn plans_source(&self) -> Vec<(String, String)> {
+        let prefix = format!("ONETASKGRAPH_SOURCES__{}", STORE_SOURCE.to_uppercase());
+        if !self.scripted {
+            return vec![
+                (format!("{prefix}__PLUGIN"), "local-md".to_owned()),
+                (store_root_env(), path_text(&self.store())),
+            ];
+        }
+        vec![
+            (format!("{prefix}__PLUGIN"), "subprocess".to_owned()),
+            (
+                format!("{prefix}__CONFIG__COMMAND"),
+                path_text(&double("scripted-source")),
+            ),
+            (
+                format!("{prefix}__CONFIG__SETTINGS__ROOT"),
+                path_text(&self.store()),
+            ),
+            (
+                format!("{prefix}__CONFIG__SETTINGS__SCRIPT"),
+                path_text(&self.fakes),
+            ),
+            // A held call outlasts whatever a journey measures around it — a copy past the
+            // sixty-second floor included — so the protocol's own per-request deadline is
+            // not what ends one.
+            (
+                format!("{prefix}__CONFIG__DEADLINE_MS"),
+                "900000".to_owned(),
+            ),
+        ]
     }
 
     /// The `onepipeline` binary, wired to this world.
@@ -906,8 +643,8 @@ impl World {
             // `onetaskgraph`'s own environment layer so no configuration file is
             // discovered from wherever the test process happens to be running.
             // `XDG_CONFIG_HOME` is redirected for the same reason — the
-            // operator's own sources are not this world's.
-            .env(STORE_BINARY_ENV, onetaskgraph_binary())
+            // operator's own sources are not this world's. The store is linked into
+            // the binary under test, so this environment is all it reads.
             .env("XDG_CONFIG_HOME", self.root.join("xdg"))
             // And the state directory, for the same reason one layer down:
             // every dispatch the engine starts runs with oneharness history on,
@@ -927,14 +664,7 @@ impl World {
             .env_remove(onepipeline::agents::POINTER_FILE_ENV)
             .env_remove(onepipeline::agents::LABELS_ENV)
             .env("ONETASKGRAPH_DEFAULT_SOURCES", STORE_SOURCE)
-            .env(
-                format!(
-                    "ONETASKGRAPH_SOURCES__{}__PLUGIN",
-                    STORE_SOURCE.to_uppercase()
-                ),
-                "local-md",
-            )
-            .env(store_root_env(), self.store())
+            .envs(self.plans_source())
             .env(
                 "ONEPIPELINE_ONEAGENTGRAPH_BIN",
                 double("fake-oneagentgraph"),
@@ -1055,59 +785,144 @@ impl World {
         )
     }
 
-    /// Read this world's project tasks back through the real onetaskgraph binary.
+    /// Read this world's project tasks back through the store the engine links.
     pub fn store_tasks(&self, project: &str) -> Vec<Value> {
-        self.store_pages::<StoreQualified<StoreTask>>(&["task", "list", "--project", project])
+        let id = global(project);
+        self.store_call(|engine| async move {
+            let mut items = Vec::new();
+            let mut token = None;
+            loop {
+                let request = onetaskgraph_core::TaskRequest {
+                    sources: Vec::new(),
+                    filters: onetaskgraph_core::Filters::default(),
+                    project: onetaskgraph_core::ProjectSelector::Qualified(id.clone()),
+                    paging: onetaskgraph_core::Paging {
+                        limit: std::num::NonZeroU32::new(500).expect("not zero"),
+                        token,
+                    },
+                };
+                let page = engine
+                    .tasks(&request)
+                    .await
+                    .unwrap_or_else(|error| panic!("the store reads the tasks of {id}: {error}"));
+                assert!(
+                    page.errors.is_empty(),
+                    "the store read the tasks of {id} in part: {:?}",
+                    page.errors
+                );
+                items.extend(
+                    page.items
+                        .iter()
+                        .map(|task| serde_json::to_value(task).expect("a store task renders")),
+                );
+                match page.next {
+                    Some(next) => token = Some(next),
+                    None => return items,
+                }
+            }
+        })
     }
 
-    /// The real onetaskgraph binary, wired to the sources this world configures.
+    /// The store the binary under test links, configured exactly as [`World::cmd`]
+    /// configures it for that binary — plus whatever [`World::with_env`] added, so a journey
+    /// that configured a second source reads and writes through it here as the run does —
+    /// and one call driven against it.
     ///
-    /// The same declaration [`World::cmd`] hands the binary under test, plus whatever
-    /// [`World::with_env`] added — so a journey that configured a second source reads and
-    /// writes through it here exactly as the run does.
-    pub fn store_cmd(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(onetaskgraph_binary());
-        command
-            .args(args)
-            .env_remove(STORE_BINARY_ENV)
-            .env("XDG_CONFIG_HOME", self.root.join("xdg"))
-            .env("ONETASKGRAPH_DEFAULT_SOURCES", STORE_SOURCE)
-            .env(
+    /// The engine is built afresh for the call, as the engine under test builds one per
+    /// logical command, so a read here never answers from an earlier one's snapshot.
+    pub fn store_call<T, Fut>(&self, call: impl FnOnce(onetaskgraph_core::Engine) -> Fut) -> T
+    where
+        Fut: std::future::Future<Output = T>,
+    {
+        self.store_call_with(&[], call)
+    }
+
+    /// The same, with `settings` — `ONETASKGRAPH_*` variables — layered over this world's
+    /// own, for a journey that states a source of its own for one call.
+    pub fn store_call_with<T, Fut>(
+        &self,
+        settings: &[(&str, &str)],
+        call: impl FnOnce(onetaskgraph_core::Engine) -> Fut,
+    ) -> T
+    where
+        Fut: std::future::Future<Output = T>,
+    {
+        let mut environment: Vec<(String, String)> = vec![
+            (
+                "XDG_CONFIG_HOME".to_owned(),
+                path_text(&self.root.join("xdg")),
+            ),
+            ("HOME".to_owned(), path_text(&self.root)),
+            (
+                "ONETASKGRAPH_DEFAULT_SOURCES".to_owned(),
+                STORE_SOURCE.to_owned(),
+            ),
+            (
                 format!(
                     "ONETASKGRAPH_SOURCES__{}__PLUGIN",
                     STORE_SOURCE.to_uppercase()
                 ),
-                "local-md",
-            )
-            .env(store_root_env(), self.store())
-            // Only what onetaskgraph's own settings layer reads, and last, so a journey
-            // that declared a second source reads through it here. `ONETASKGRAPH_BIN` is
-            // deliberately not forwarded: it is *onepipeline*'s key for naming this
-            // executable, which is already resolved above, and onetaskgraph would refuse
-            // it by name as a setting it has never heard of.
-            .envs(
-                self.environment
-                    .iter()
-                    .filter(|(key, _)| key.starts_with("ONETASKGRAPH_") && key != STORE_BINARY_ENV)
-                    .map(|(k, v)| (k, v)),
-            );
-        command
+                "local-md".to_owned(),
+            ),
+            (store_root_env(), path_text(&self.store())),
+        ];
+        environment.extend(
+            self.environment
+                .iter()
+                .filter(|(key, _)| key.starts_with("ONETASKGRAPH_"))
+                .cloned(),
+        );
+        environment.extend(
+            settings
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+        );
+        let loaded = onetaskgraph_core::config::load(
+            &self.root,
+            &onetaskgraph_core::Environment::from_pairs(environment),
+            &onetaskgraph_core::config::Layer::default(),
+        )
+        .unwrap_or_else(|error| panic!("this world's store configuration loads: {error}"));
+        let engine = onetaskgraph_core::Engine::build(&loaded.config, &loaded.secrets);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime for one store call")
+            .block_on(call(engine))
     }
 
-    /// Read this world's project back through the real onetaskgraph binary.
+    /// Read this world's project back through the store the engine links, as the page a
+    /// `show` of it answers.
     pub fn store_project(&self, project: &str) -> Value {
-        let output = self
-            .store_cmd(&["project", "show", project, "--json"])
-            .output()
-            .expect("the real onetaskgraph reads the project");
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let response: StoreResponse<StoreQualified<StoreProject>> =
-            serde_json::from_slice(&output.stdout).expect("project show returns schema-valid JSON");
-        json!({"items": response.items, "next": response.next})
+        let answer = self
+            .store_answers_project(project)
+            .unwrap_or_else(|why| panic!("the store reads {project}: {why}"));
+        json!({"items": answer.items, "next": answer.next})
+    }
+
+    /// The store's own answer to a read of one project, or why it gave none: a failure the
+    /// engine refused the call with, or the sources that could not answer.
+    pub fn store_answers_project(
+        &self,
+        project: &str,
+    ) -> Result<
+        onetaskgraph_core::QueryResponse<
+            onetaskgraph_core::Qualified<onetaskgraph_plugin_api::Project>,
+        >,
+        String,
+    > {
+        let id = global(project);
+        self.store_call(|engine| async move {
+            let answer = engine
+                .project(&id)
+                .await
+                .map_err(|error| error.to_string())?;
+            if answer.errors.is_empty() {
+                Ok(answer)
+            } else {
+                Err(format!("{:?}", answer.errors))
+            }
+        })
     }
 
     /// The labels this world's project holds on each of its tasks, by node id.
@@ -1131,48 +946,37 @@ impl World {
             .collect()
     }
 
-    /// Read one projected task's dependency edges through onetaskgraph.
+    /// Read one projected task's dependency edges through the store the engine links.
     pub fn store_deps(&self, task: &str) -> Vec<Value> {
-        self.store_pages::<StoreEdge>(&["task", "deps", task, "--direction", "depends-on"])
-    }
-
-    fn store_pages<T>(&self, base: &[&str]) -> Vec<Value>
-    where
-        T: DeserializeOwned + Serialize,
-    {
-        let mut items = Vec::new();
-        let mut page: Option<String> = None;
-        let mut seen = std::collections::BTreeSet::new();
-        loop {
-            let mut args: Vec<String> = base.iter().map(|arg| (*arg).to_owned()).collect();
-            args.push("--json".to_owned());
-            if let Some(token) = &page {
-                args.extend(["--page".to_owned(), token.clone()]);
+        let id = global(task);
+        self.store_call(|engine| async move {
+            let mut edges = Vec::new();
+            let mut token = None;
+            loop {
+                let request = onetaskgraph_core::DependencyRequest {
+                    id: id.clone(),
+                    direction: onetaskgraph_plugin_api::Direction::DependsOn,
+                    paging: onetaskgraph_core::Paging {
+                        limit: std::num::NonZeroU32::new(500).expect("not zero"),
+                        token,
+                    },
+                };
+                let page = engine
+                    .task_dependencies(&request)
+                    .await
+                    .unwrap_or_else(|error| panic!("the store reads the edges of {id}: {error}"));
+                assert!(page.errors.is_empty(), "{:?}", page.errors);
+                edges.extend(
+                    page.items
+                        .iter()
+                        .map(|edge| serde_json::to_value(edge).expect("an edge renders")),
+                );
+                match page.next {
+                    Some(next) => token = Some(next),
+                    None => return edges,
+                }
             }
-            let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-            let output = self
-                .store_cmd(&borrowed)
-                .output()
-                .expect("the real onetaskgraph reads a store page");
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let response: StoreResponse<T> = serde_json::from_slice(&output.stdout)
-                .expect("the store page is schema-valid JSON");
-            items.extend(response.items.into_iter().map(|item| {
-                serde_json::to_value(item).expect("a validated store item renders as JSON")
-            }));
-            page = response.next;
-            if page.is_none() {
-                return items;
-            }
-            assert!(
-                seen.insert(page.clone()),
-                "the store repeated a page cursor"
-            );
-        }
+        })
     }
 
     /// The `onepipeline` binary with the **real** `oneagentgraph` behind that one
@@ -2329,9 +2133,17 @@ impl World {
     /// out of that root and projects its board back into it. A detached run's driver
     /// inherits it, which is what makes the projection land there too.
     pub fn run_in(&self, store: &Path, args: &[&str]) -> Run {
+        let root = if self.scripted {
+            format!(
+                "ONETASKGRAPH_SOURCES__{}__CONFIG__SETTINGS__ROOT",
+                STORE_SOURCE.to_uppercase()
+            )
+        } else {
+            store_root_env()
+        };
         Run::of(
             self.cmd(args)
-                .env(store_root_env(), store)
+                .env(root, store)
                 .output()
                 .expect("the binary runs"),
             args,
@@ -2613,6 +2425,66 @@ impl World {
 
     pub fn unscript(&self, name: &str) {
         std::fs::remove_file(self.fakes.join(name)).expect("the script is removed");
+    }
+
+    /// Have the scripted store answer every call of `method` — the plugin protocol's own
+    /// name for it, `get_project`, `query_tasks`, `write_project` — with `error`, the source
+    /// error in the store's own shape, until [`World::store_stops_refusing`]. Only a world
+    /// [`through_scripted_source`](World::through_scripted_source) reaches it.
+    pub fn store_refuses(&self, method: &str, error: &Value) {
+        self.script(
+            &format!("{SCRIPTED_KEY}.{method}.refuse"),
+            &error.to_string(),
+        );
+    }
+
+    /// The same, for the next call of `method` alone.
+    pub fn store_refuses_once(&self, method: &str, error: &Value) {
+        self.script(
+            &format!("{SCRIPTED_KEY}.{method}.refuse.once"),
+            &error.to_string(),
+        );
+    }
+
+    /// The scripted store answers `method` from the real store again.
+    pub fn store_stops_refusing(&self, method: &str) {
+        self.unscript(&format!("{SCRIPTED_KEY}.{method}.refuse"));
+    }
+
+    /// Hold the first call of `method` each command the binary under test runs against the
+    /// scripted store — each write-back attempt, each plan read — until the journey lets it go:
+    /// the one way to make a store call slow rather than wrong. Holding the first
+    /// `write_task` holds a copy at its first write, once per attempt.
+    pub fn store_holds(&self, method: &str) -> Rendezvous {
+        self.rendezvous(&format!("{SCRIPTED_KEY}.{method}.first"))
+    }
+
+    /// Stop holding `method`: calls from now on are answered at once.
+    pub fn store_stops_holding(&self, method: &str) {
+        std::fs::remove_file(rendezvous_script(
+            &self.fakes,
+            &format!("{SCRIPTED_KEY}.{method}.first"),
+        ))
+        .expect("the hold is withdrawn");
+    }
+
+    /// Every call the scripted store was handed, as `[method, the id it names]`, in order.
+    pub fn store_calls(&self) -> Vec<Vec<String>> {
+        self.invocations()
+            .into_iter()
+            .filter(|call| call["tool"] == SCRIPTED_KEY)
+            .map(|call| {
+                serde_json::from_value(call["args"].clone()).expect("a recorded call's arguments")
+            })
+            .collect()
+    }
+
+    /// How many calls of `method` the scripted store was handed.
+    pub fn store_asked(&self, method: &str) -> usize {
+        self.store_calls()
+            .iter()
+            .filter(|call| call.first().is_some_and(|called| called == method))
+            .count()
     }
 
     /// Release a rendezvous the doubles are holding.
@@ -3394,8 +3266,8 @@ pub fn restored(aside: &Path, store: &Path, what: &str) {
 /// The writer does what a `project copy` the move lands inside does: it resolved the
 /// store's path before the move and goes on writing a document beneath it, creating the
 /// folders that document names. A move alone lets it put the store back, which is how this
-/// fails against [`renamed`]; what reads the store on either side is the real
-/// `onetaskgraph`, which is what a journey's run reads it through.
+/// fails against [`renamed`]; what reads the store on either side is the store the engine
+/// links, which is what a journey's run reads it through.
 // llmlint: ignore-block[tests_mirror_real_usage] the subject is the harness's own outage,
 // which the journeys built on it cannot assert about themselves; the writer stands in for
 // a sibling process caught mid-copy, an interval no real command can be held inside.
@@ -3432,14 +3304,9 @@ fn a_store_taken_away_stays_away_from_a_writer_already_writing_to_it() {
         !store.is_dir(),
         "a writer that was already writing put the store back under its old name"
     );
-    let refused = world
-        .store_cmd(&["project", "show", &project, "--json"])
-        .output()
-        .expect("the real onetaskgraph runs");
     assert!(
-        !refused.status.success(),
-        "the real onetaskgraph still read a store that was taken away: {}",
-        String::from_utf8_lossy(&refused.stdout)
+        world.store_answers_project(&project).is_err(),
+        "the store still read a store that was taken away"
     );
 
     restored(&aside, &store, "the store returns");
@@ -4260,32 +4127,23 @@ fn reserved(field: &str) -> String {
 
 /// Where an executable of this name sits on **this process's** `PATH`.
 ///
-/// The resolution the operating system would do, done once and kept, so a child
-/// this suite hands a different `PATH` still reaches the same program.
-fn on_path(name: &str) -> Option<PathBuf> {
-    let executable = |dir: PathBuf| {
-        [name.to_owned(), format!("{name}.exe")]
-            .into_iter()
-            .map(|file| dir.join(file))
-            .find(|candidate| candidate.is_file())
-    };
-    std::env::split_paths(&std::env::var_os("PATH")?).find_map(executable)
+/// A qualified id, as the store's own type — refused loudly when a journey wrote one the
+/// store could not name, since a read of it would prove nothing.
+pub fn global(id: &str) -> onetaskgraph_core::GlobalId {
+    id.parse()
+        .unwrap_or_else(|error| panic!("{id:?} is not a qualified store id: {error}"))
 }
 
-/// The environment variable naming the `onetaskgraph` executable.
-///
-/// Restated here rather than imported: the crate under test declares it in a
-/// module `src/lib.rs` keeps private, so there is no item to name.
-///
-/// What reconciles the two spellings is
-/// `store::an_absent_onetaskgraph_refuses_the_launch_and_starts_nothing`, which
-/// points this key at a path that does not exist and requires the launch to
-/// **refuse, naming that path**. A spelling that drifted would leave the binary
-/// under test ignoring the key, resolving whatever the host installed, and
-/// launching successfully — so that journey fails rather than passing against a
-/// key nothing reads. Every use of the key in this suite goes through this
-/// constant, which is what makes the one journey cover them all.
-pub const STORE_BINARY_ENV: &str = "ONETASKGRAPH_BIN";
+/// A path as the text a store setting carries.
+fn path_text(path: &Path) -> String {
+    path.to_str()
+        .unwrap_or_else(|| panic!("{} is not a path a store setting can name", path.display()))
+        .to_owned()
+}
+
+/// What `scripted-source` names its scenario files and its recorded calls by, when a world
+/// reaches its plans source through it: the double's own default.
+pub const SCRIPTED_KEY: &str = "store";
 
 /// The name of the one source every world configures.
 ///
@@ -4304,47 +4162,6 @@ pub fn store_root_env() -> String {
         "ONETASKGRAPH_SOURCES__{}__CONFIG__ROOT",
         STORE_SOURCE.to_uppercase()
     )
-}
-
-/// The **real** `onetaskgraph` executable every journey reads its plan through.
-///
-/// Not a double, and deliberately: a plan is one project of that store, so a
-/// journey that launched from a stand-in would prove the fixture rather than the
-/// mapping. It is not a Cargo dependency either — this crate *drives* the binary
-/// rather than linking it — so cargo cannot build it and the suite resolves what
-/// the host installed: `ONETASKGRAPH_BIN` when that names one, and the name on
-/// the `PATH` otherwise.
-///
-/// A host without one **fails**, naming what to run. A skip would be a pass
-/// nobody earned, and this is not the credentialled tier: the binary reads a
-/// folder of Markdown with no network and no account.
-pub fn onetaskgraph_binary() -> PathBuf {
-    static FOUND: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    FOUND
-        .get_or_init(|| {
-            // Absolute, and resolved here rather than left to the child: a
-            // journey may hand the binary under test a `PATH` of its own — one
-            // that leads with a sibling's directory, or one that is empty — and
-            // the store it reads its plan through is not what those journeys are
-            // about.
-            let named = std::env::var("ONETASKGRAPH_BIN")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .map(PathBuf::from)
-                .or_else(|| on_path("onetaskgraph"))
-                .unwrap_or_else(|| PathBuf::from("onetaskgraph"));
-            let reported = Command::new(&named).arg("--version").output();
-            match reported {
-                Ok(output) if output.status.success() => named,
-                other => panic!(
-                    "the e2e suite reads every plan through the real onetaskgraph and {} \
-                     could not be run ({other:?}) — run `just bootstrap`, or set \
-                     ONETASKGRAPH_BIN to an executable one",
-                    named.display()
-                ),
-            }
-        })
-        .clone()
 }
 
 /// The released `onevcs` executable whose holders verb the launcher consumes.

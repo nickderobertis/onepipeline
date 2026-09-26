@@ -50,11 +50,13 @@ oneharness-core = { workspace = true }
 # provider the graph *declares* rather than one it remembered: a graph that named
 # a different provider would otherwise still be supervised by this copy.
 serde_norway = "0.9"
-# The reference plugin host and the plugin it hosts, so `label-strict-source`
-# serves a real store without a second executable. That fake's own module doc says
-# why it hosts rather than spawns.
+# The reference plugin host and the plugin it hosts, so `label-strict-source` and
+# `scripted-source` serve a real store without a second executable, and the plugin
+# API whose own types — a `SourceError`, a `Metering` — `scripted-source` reads its
+# scenario through. `src/hosted.rs` says why it hosts rather than spawns.
 onetaskgraph-core = { workspace = true }
 onetaskgraph-local-md = { workspace = true }
+onetaskgraph-plugin-api = { workspace = true }
 # The plugin API is async, so hosting one needs a runtime to block on. Nothing
 # under `local-md` is a socket or a timer, so the current-thread runtime is all of
 # it — and onetaskgraph's own network plugins already put tokio in the lock.
@@ -102,13 +104,15 @@ path = "src/bin/fake-codex.rs"
 name = "fake-oneharness"
 path = "src/bin/fake-oneharness.rs"
 
-# The one thing a real `onetaskgraph` cannot be asked to be: an install of the
-# wrong version, and one that cannot answer at all. Every *plan* in the suite is
-# read out of the real binary against a real folder of Markdown — this answers
-# `--version` and refuses everything else, so it can never stand in for a read.
+# Not a double either: a **real** `onetaskgraph` source that can be told to fail the
+# way a hosted one does. It serves every read and write out of the real `local-md`
+# plugin, hosted in process, and answers the one call a journey scripts with the
+# store's own source error — a refusal, a rate limit, an unreachable source — or
+# holds it open, which is the only way an offline store can be made slow or refused
+# at the boundary the linked engine really reaches it through.
 [[bin]]
-name = "fake-onetaskgraph"
-path = "src/bin/fake-onetaskgraph.rs"
+name = "scripted-source"
+path = "src/bin/scripted-source.rs"
 
 # Not a double at all either: a **real** `onetaskgraph` source. It speaks that
 # product's own stdio plugin protocol and serves every read and write out of the

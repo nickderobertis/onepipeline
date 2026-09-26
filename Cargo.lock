@@ -1397,6 +1397,7 @@ dependencies = [
  "onemessagebus",
  "onetaskgraph-core",
  "onetaskgraph-local-md",
+ "onetaskgraph-plugin-api",
  "onevcs",
  "serde",
  "serde_json",

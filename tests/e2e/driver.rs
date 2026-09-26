@@ -4086,37 +4086,30 @@ fn leading(dir: &Path, path: &std::ffi::OsStr) -> std::ffi::OsString {
 /// The launcher appends the run's first record before it writes the launch
 /// record, and its driver claims the run before it appends anything of its own
 /// — so between the two the run's journal holds the launcher's record alone.
-/// The driver is held there, at its store's version check, which is the state a
-/// slow host leaves a reader in.
-// llmlint: ignore-block[tests_mirror_real_usage] an `onetaskgraph` that holds a driver's
-// version check stands in for a host slow to start one, the only way to keep a driver where a
-// Windows runner left it; everything else is the real binary and the real store behind it.
+/// The driver is held there, at the claim it projects onto its store before its
+/// first pass does anything, which is the state a slow host leaves a reader in.
+// llmlint: ignore-block[tests_mirror_real_usage] a store whose first write a journey holds
+// stands in for a host slow to start a driver, the only way to keep a driver where a Windows
+// runner left it; everything else is the real binary and the real store behind the source.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_run_listed_while_its_driver_is_on_its_way_up_is_the_launching_sessions() {
-    let world = World::new("driver-ownership-rising");
-    let plan = world.plan("rising", &plan_of("rising", vec![human("approve", &[])]));
-    let mut command = world.cmd(&["start", &plan, "--detach"]);
-    let real = env_of(&command, "ONETASKGRAPH_BIN");
-    let store = world.root.join("store-holds-the-driver");
-    std::fs::create_dir_all(&store).expect("a directory for the store stand-in");
-    let (held, go) = (world.root.join("driver-held"), world.root.join("driver-go"));
-    onepipeline_testfakes::executable(
-        &store.join("onetaskgraph"),
-        format!(
-            "#!/bin/sh\nif [ \"$1\" = --version ] && tr '\\0' ' ' < /proc/$PPID/cmdline | grep -q ' drive-run '; then\n  : > '{}'\n  while [ ! -f '{}' ]; do sleep 0.05; done\nfi\nexec '{}' \"$@\"\n",
-            held.display(),
-            go.display(),
-            Path::new(&real).display()
-        ),
+    let world = World::new("driver-ownership-rising").through_scripted_source();
+    // A node waiting on another run's DAG, which nothing will release: the driver's first
+    // pass has nothing to announce about it, so the claim it projects onto its board is the
+    // first thing it does, before it records anything of its own.
+    let plan = world.plan(
+        "rising",
+        &plan_of("rising", vec![agent("work", &["run:elsewhere#nothing"])]),
     );
-    command.env("ONETASKGRAPH_BIN", store.join("onetaskgraph"));
-    world.run_on(command, "start --detach").exited(0);
-    world.until("the driver to be held on its way up", |_| held.is_file());
+    let claim = world.store_holds("write_task");
+    world.run(&["start", &plan, "--detach"]).exited(0);
+    let held = claim.arrived();
     assert_eq!(
         world.journal("rising").len(),
         1,
-        "the driver appended before it was held, so this journey proves nothing"
+        "the driver appended before it was held, so this journey proves nothing: {:?}",
+        world.journal("rising")
     );
 
     world
@@ -4125,10 +4118,12 @@ fn a_run_listed_while_its_driver_is_on_its_way_up_is_the_launching_sessions() {
         .out_has("[mine]")
         .out_lacks("[unknown]");
 
-    std::fs::write(&go, "").expect("the driver is let go");
+    world.store_stops_holding("write_task");
+    held.release();
     world.until("the driver to append", |world| {
         world.journal("rising").len() > 1
     });
+    world.run(&["stop", "rising"]).exited(0);
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

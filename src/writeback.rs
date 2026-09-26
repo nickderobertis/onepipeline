@@ -155,7 +155,7 @@ const COMMAND_FLOOR: Duration = Duration::from_secs(WRITEBACK_COMMAND_FLOOR_SECO
 const FIRST_RETRY_AFTER: Duration = Duration::from_millis(250);
 const RETRY_GROWTH: u32 = 4;
 const RETRY_CEILING: Duration = Duration::from_secs(60);
-// Closeout never inherits the duration of a store command. A slow store may keep working in
+// Closeout never inherits the duration of a store call. A slow store may keep working in
 // the worker, but it still cannot turn a completed graph into run settlement.
 const CLOSEOUT_WAIT: Duration = Duration::from_millis(2_250);
 // The three store calls one attempt makes, by the name each one's refusals carry. Each
@@ -568,13 +568,16 @@ impl Classified {
 
     /// The store's failure for one delivered ticket it could not keep in step.
     ///
-    /// The one failure that arrives as a [`Failure`] with no [`EngineError`] behind it, and
-    /// whose class that type keeps private, so it is read off the failure's own serialised
-    /// form into the store's own [`onetaskgraph_core::FailureClass`] — a value of the store's
-    /// type written by the store's serialiser, never a document parsed off a process. A
+    /// **Temporary, and the one place this happens.** This is the one failure that arrives
+    /// as a [`Failure`] with no [`EngineError`] behind it, and `onetaskgraph-core` 0.2.44 keeps
+    /// that type's class and kind private — so they are read off the failure's own serialised
+    /// form into the store's own [`onetaskgraph_core::FailureClass`]: a value of the store's
+    /// type written by the store's serialiser, never a document parsed off a process.
+    /// onetaskgraph is adding public `Failure::class()` and `Failure::kind()` accessors, and
+    /// the onepipeline change that adopts that release replaces this read with them. A
     /// failure that does not carry a class this build reads leaves the entry unclassified,
     /// and so on the retry schedule.
-    fn of_delivery(failure: &Failure) -> Option<Self> {
+    fn of_delivery_until_failure_publishes_its_class(failure: &Failure) -> Option<Self> {
         #[derive(Deserialize)]
         struct Classed {
             class: onetaskgraph_core::FailureClass,
@@ -857,7 +860,7 @@ impl Writeback {
         }
     }
 
-    /// Wait for this worker to end one attempt, bounded by the store command deadline for a
+    /// Wait for this worker to end one attempt, bounded by the store call deadline for a
     /// whole copy of what is queued.
     ///
     /// What a driver asks before its first dispatch, so the run's claim — and the store's
@@ -965,8 +968,8 @@ impl Writeback {
     /// Give the active worker a bounded closeout window for the terminal snapshot.
     pub fn wait_briefly(&self) {
         // Let one already-running real copy reach its own deadline before the process
-        // exits. This keeps a completed run from racing a person's next store command,
-        // while the hard command limit preserves write-back's latency boundary.
+        // exits. This keeps a completed run from racing a person's next store call,
+        // while the hard call limit preserves write-back's latency boundary.
         let deadline = Instant::now() + CLOSEOUT_WAIT;
         let (lock, ready) = &*self.pending;
         let Ok(mut pending) = lock.lock() else { return };
@@ -1435,12 +1438,9 @@ fn project(
         Carry::Whole(_) => destination_origins(&attempt, snapshot)?,
         Carry::Members(named) => member_origins(&attempt, named, known)?,
     };
-    // llmlint: ignore-block[changed_behavior_has_e2e] The real outage journey drives
-    // destination write failure through onetaskgraph. Making this private, run-owned
-    // shadow directory unwritable would instead require sabotaging the host filesystem,
-    // outside the public run interface and unrelated to store availability.
+    // A shadow store this worker cannot write is its own failure, classed by nobody and so
+    // retried: `store::an_unwritable_shadow_store_is_reported_retried_and_recovered`.
     write_shadow(snapshot, &origins, &destination_project)?;
-    // llmlint: ignore-end[changed_behavior_has_e2e]
     let shadow_project = shadow_id(&project_file(&snapshot.project));
     // A member copy names exactly the nodes that changed. Naming none is not a copy of
     // everything: the project item alone carries what changed at the project's level.
@@ -1493,12 +1493,13 @@ fn project(
                     .delivered
                     .iter()
                     .filter_map(|entry| match &entry.outcome {
-                        DeliveryOutcome::Failed { failure, .. } => {
-                            Some(Classified::of_delivery(failure).unwrap_or(Classified {
-                                class: FailureClass::Transient,
-                                kind: "unclassified".to_owned(),
-                            }))
-                        }
+                        DeliveryOutcome::Failed { failure, .. } => Some(
+                            Classified::of_delivery_until_failure_publishes_its_class(failure)
+                                .unwrap_or(Classified {
+                                    class: FailureClass::Transient,
+                                    kind: "unclassified".to_owned(),
+                                }),
+                        ),
                         DeliveryOutcome::Written { .. }
                         | DeliveryOutcome::Unchanged { .. }
                         | DeliveryOutcome::Left { .. } => None,
@@ -3489,7 +3490,7 @@ mod tests {
         let classed = |entries: &[onetaskgraph_core::Delivered]| {
             Classified::of_all(entries.iter().filter_map(|entry| match &entry.outcome {
                 onetaskgraph_core::DeliveryOutcome::Failed { failure, .. } => {
-                    Classified::of_delivery(failure)
+                    Classified::of_delivery_until_failure_publishes_its_class(failure)
                 }
                 _ => None,
             }))

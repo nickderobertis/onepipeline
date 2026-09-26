@@ -2,25 +2,26 @@
 //!
 //! Every journey in this suite launches from a store, so what is held here is
 //! the seam itself — the mapping from a project to the graph a run executes, and
-//! the binary that mapping is read through. Both are driven for real: the store
-//! is a folder of Markdown on this host with no remote system in it, and the
-//! binary is the one an operator installed, resolved the way the contract says
-//! it is resolved.
+//! the store that mapping is read through. Both are driven for real: the store
+//! is a folder of Markdown on this host with no remote system in it, read by the
+//! `onetaskgraph` library the binary under test links, configured the way an
+//! operator configures it.
 //!
-//! The one double is for the version check, and only for the version check: an
-//! install of the wrong version is the one thing a real binary cannot be asked
-//! to be. It answers `--version` and refuses every other invocation, so it can
-//! never stand in for reading a plan.
+//! What an offline store cannot be made to do — refuse, rate-limit, be
+//! unreachable, or answer slowly — is arranged at the store's own plugin
+//! boundary, by `scripted-source`: a real source serving the same folder through
+//! the real `local-md` plugin, answering the one call a journey scripts with the
+//! source error a hosted destination answers with.
 
-// llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
-// subprocess boundary and nothing inside the crate under test, which is driven as a real
-// compiled binary. `onetaskgraph` is not among them: every plan below is read out of the
-// real store binary against a real folder of Markdown. `harness.rs` carries the same
-// suppression and the full rationale.
+// llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its subprocess
+// boundary and nothing inside the crate under test, which is driven as a real compiled binary.
+// `onetaskgraph` is not substituted: every plan below is read out of the real store library
+// the binary links, against a real folder of Markdown, and `scripted-source` is a real source
+// of that store serving the same folder. `harness.rs` carries the same suppression and the
+// full rationale.
 
 use crate::harness::{
-    agent, double, lifecycle, onetaskgraph_binary, plan_of, project_id, renamed, World, REFUSED,
-    RENDEZVOUS_SECONDS_ENV, STORE_BINARY_ENV,
+    agent, double, lifecycle, plan_of, project_id, renamed, World, REFUSED, RENDEZVOUS_SECONDS_ENV,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -93,6 +94,77 @@ fn a_run_launches_from_a_local_markdown_project_and_executes_the_graph_it_holds(
         .run(&["goals", "localmd"])
         .exited(0)
         .out_has("Deliver it from a folder of Markdown");
+}
+
+/// A launch on a host with **no** `onetaskgraph` executable reads its plan, runs it, and
+/// projects every settlement onto its board: the store is linked, so nothing is looked up.
+///
+/// Nothing on the `PATH` answers to `onetaskgraph` — every directory holding one is taken
+/// off it — and `ONETASKGRAPH_BIN` names a program that records that it was run and then
+/// fails, which is the one way a launch that still spawned a store executable could not go
+/// unnoticed: an engine that ran it would fail or leave the record behind, and one that
+/// looked it up on the `PATH` would find nothing there to run.
+#[cfg(unix)]
+#[test]
+fn a_launch_with_no_onetaskgraph_executable_reads_runs_and_projects_through_the_linked_store() {
+    let world = World::new("store-no-executable");
+    let ran = world.root.join("onetaskgraph-was-run");
+    let refusing = world.root.join("bin-that-fails").join("onetaskgraph");
+    std::fs::create_dir_all(refusing.parent().expect("a directory")).expect("a bin directory");
+    onepipeline_testfakes::executable(
+        &refusing,
+        format!("#!/bin/sh\n: > '{}'\nexit 1\n", ran.display()),
+    );
+    let name = "no-executable";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![agent("design", &[]), agent("build", &["design"])],
+        ),
+    );
+
+    let mut start = world.cmd(&["start", &project, "--detach"]);
+    let path: Vec<std::path::PathBuf> = std::env::split_paths(
+        start
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .and_then(|(_, value)| value)
+            .expect("the world states a PATH"),
+    )
+    .filter(|dir| !dir.join("onetaskgraph").exists() && !dir.join("onetaskgraph.exe").exists())
+    .collect();
+    start
+        .env("PATH", std::env::join_paths(path).expect("a PATH"))
+        .env("ONETASKGRAPH_BIN", &refusing);
+    world.run_on(start, "start --detach").exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+
+    let result = world.run_json(name, "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+    world.until_store("both settlements to reach the board", |world| {
+        let tasks = world.store_tasks(&project);
+        tasks.len() == 2
+            && tasks.iter().all(|task| {
+                task["item"]["status"]["category"] == "done"
+                    && task["item"]["metadata"]["onepipeline.settlement"].is_object()
+            })
+    });
+    let records =
+        std::fs::read_to_string(world.run_file(name, onepipeline::cli::WRITEBACK_PROJECTIONS_FILE))
+            .expect("the projection record");
+    assert!(
+        records
+            .lines()
+            .all(|line| line.contains("\"outcome\":\"projected\"")),
+        "a projection did not land:\n{records}"
+    );
+    assert!(
+        !ran.exists(),
+        "the launch ran the program ONETASKGRAPH_BIN names"
+    );
 }
 
 /// Write-back owns exactly what the plan document declares, and preserves everything the
@@ -252,519 +324,6 @@ fn settlement_preserves_everything_the_plan_does_not_declare() {
     }
 }
 
-/// The field a journey about a **grown** answer injects into the store's own.
-///
-/// One name rather than one per assertion, because what it has to be is a property of the
-/// installed store rather than of any one line: a field that release does not answer with.
-/// `location` was this until `onetaskgraph` 0.2.14 added it and later releases answered it,
-/// at which point the journey below was asserting growth against a field the store itself
-/// supplied. Any name the installed release does not answer serves; the journey's own guard
-/// is what says the one chosen still does.
-const GROWN_FIELD: &str = "provenance";
-
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge these three
-// need is the crate under test — each drives the compiled binary against its own write-back
-// worker — so a project of their own would declare the same dependency and skip nothing.
-// Same grounds as the block at
-// `a_projection_that_keeps_failing_is_retried_at_a_ceiling_rather_than_abandoned`.
-/// A settlement reaches a store at a release this build was **not** written against.
-///
-/// `onetaskgraph` grows its own machine answers in patch releases — `location` arrived on
-/// the project item at 0.2.14 — and this projection reads those answers through types of
-/// its own.
-///
-/// The field this journey injects is [`GROWN_FIELD`], and which name that is has to move
-/// as the store grows: it was `location` until an installed release began answering one of
-/// its own, at which point the growth this journey states was no growth at all. The guard
-/// below is what says so, and it is the reason the name is a constant rather than four
-/// literals. While those types denied unknown fields, the first field the store added
-/// turned every projection into a parse failure; and because write-back is best-effort the
-/// run still settled `complete`, so the only evidence was one line on a driver log that a
-/// detached run writes where nobody opens it. A consuming host could not adopt any release
-/// from 0.2.14 onward without silently losing every settlement projection, which is the
-/// worst shape this failure could have taken.
-///
-/// So the store here is the real one, over the real folder of Markdown, served at a
-/// release carrying a field this build has never heard of — on the response, on each item
-/// of it, on that item's own body, and on every label it holds. The settlement has to
-/// arrive anyway, and everything the plan does not declare has to still be there after it.
-#[test]
-fn a_settlement_reaches_a_store_whose_answer_grew_a_field_this_build_does_not_know() {
-    let world = World::new("store-writeback-grown");
-    let grown_field = GROWN_FIELD;
-    let name = "writeback-grown";
-    let project = world.plan(name, &plan_of(name, vec![agent("work", &[])]));
-    let identifier = crate::harness::project_id(name);
-
-    // A board a person has made their own: labels and metadata of their own on the
-    // project, a label on the plan's task, and a description. None of it is declared by a
-    // plan, so all of it is what the projection has to carry through.
-    let document = world
-        .store()
-        .join("projects")
-        .join(format!("{identifier}.md"));
-    amend(&document, |front| {
-        front.insert("labels".to_owned(), json!(["planning", "q3"]));
-        front
-            .entry("metadata")
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-            .expect("a project's metadata is a mapping")
-            .insert("authored.note".to_owned(), json!("keep this value"));
-    });
-    let authored = std::fs::read_to_string(&document).expect("the authored project document");
-    std::fs::write(
-        &document,
-        format!("{authored}A person's own description.\n"),
-    )
-    .expect("the project's description is authored");
-    label(
-        &world
-            .store()
-            .join("tasks")
-            .join(&identifier)
-            .join("000-work.md"),
-        &["needs-review"],
-    );
-
-    // The release the store is served at. Every read and write below is the real binary's,
-    // against that same folder of Markdown — what this adds is the one thing an install on
-    // this host cannot be asked to be, an answer from a release later than the one this
-    // build was written against.
-    world.script(
-        "onetaskgraph.delegate",
-        &onetaskgraph_binary().to_string_lossy(),
-    );
-    let grown = json!({grown_field: {"kind": "board", "url": "https://example.invalid/boards/1"}});
-    world.script("onetaskgraph.project-show.grow", &grown.to_string());
-    world.script("onetaskgraph.task-list.grow", &grown.to_string());
-    let world = world.with_env(
-        STORE_BINARY_ENV,
-        &double("fake-onetaskgraph").to_string_lossy(),
-    );
-
-    // Read through the real binary, which is where the assertions of this journey live:
-    // the growth is the run's variable and never the fixture's own state.
-    let before = world.store_project(&project)["items"][0]["item"].clone();
-    let labels_before = world.store_task_labels(&project);
-    let tasks_before = preserved_tasks(&world, &project);
-    assert!(
-        before[grown_field].is_null(),
-        "the store's own answer already carries `{grown_field}`, the field this journey \
-         adds, so nothing here is about a field this build does not know — name a field \
-         the installed release does not answer with: {before}"
-    );
-    assert_eq!(
-        before["labels"],
-        json!([
-            {"id": "planning", "name": "planning", "color": null},
-            {"id": "q3", "name": "q3", "color": null},
-        ]),
-        "the fixture authored no project labels, so a label read through a grown shape \
-         proves nothing"
-    );
-    assert_eq!(
-        labels_before,
-        std::collections::BTreeMap::from([(
-            "work".to_owned(),
-            json!([{"id": "needs-review", "name": "needs-review", "color": null}])
-        )]),
-        "the fixture authored no task labels"
-    );
-
-    // Detached, so a projection failure would be on the driver's log this journey reads —
-    // which is exactly where it went unread.
-    world.run(&["start", &project, "--detach"]).exited(0);
-    world.until("the run to settle", |world| {
-        world.run_file(name, "result.json").is_file()
-    });
-    world.until_store("the settlement to reach the project", |world| {
-        world
-            .store_tasks(&project)
-            .iter()
-            .any(|task| task["item"]["metadata"]["onepipeline.settlement"].is_object())
-    });
-
-    // And this journey could have failed: the bytes the projection actually parsed are the
-    // ones the worker kept, and they carry the field. Against a write-back that denies
-    // unknown fields, no settlement above ever arrives.
-    let answered = world.run_json(name, "writeback-project-show.stdout");
-    assert!(
-        answered["items"][0]["item"][grown_field].is_object(),
-        "the answer this projection read carried no field this build does not know, so it \
-         could not have told a tolerant write-back from a strict one: {answered}"
-    );
-    let log = std::fs::read_to_string(world.run_file(name, "driver.log"))
-        .expect("the driver log is readable");
-    assert!(
-        !log.contains("onetaskgraph write-back failed"),
-        "a projection failed against a store that had only grown a field: {log}"
-    );
-
-    // The field changed nothing about what was written: everything the plan does not
-    // declare is still there, and the field itself was not carried onto the destination.
-    let after = world.store_project(&project)["items"][0]["item"].clone();
-    assert_eq!(
-        preserved(&after),
-        preserved(&before),
-        "settlement changed something the plan does not declare"
-    );
-    assert_eq!(
-        preserved_tasks(&world, &project),
-        tasks_before,
-        "settlement changed something a task's plan does not declare"
-    );
-    assert_eq!(
-        world.store_task_labels(&project),
-        labels_before,
-        "settlement changed a task's labels"
-    );
-    assert_ne!(
-        preserved(&after),
-        preserved(&without(&before, "authored.note")),
-        "the complement assertion cannot fail on a deleted field, so it proves nothing"
-    );
-    assert!(
-        after[grown_field].is_null(),
-        "a field this build does not know was read off one release and written onto \
-         another: {after}"
-    );
-}
-
-/// A settlement reaches a store whose answer **stopped** carrying a field this build
-/// never read.
-///
-/// The other half of the same change, and the behaviour it altered that growth does not
-/// cover. A project's `status` and `repositories`, a task's `status`, and the page's own
-/// `plan` were enumerated here only because a mirror of a deny-unknown response has to
-/// enumerate the whole of one — the projection reads none of them, and a plan is not what
-/// states any of them. Dropping them from the mirror also stopped *requiring* them, so an
-/// answer that no longer carries one is now read where it used to be refused. That is the
-/// release this journey serves the real store at, and the settlement still has to arrive
-/// with everything the plan does not declare still on the destination after it.
-#[test]
-fn a_settlement_reaches_a_store_whose_answer_dropped_a_field_this_build_never_read() {
-    let world = World::new("store-writeback-dropped");
-    let name = "writeback-dropped";
-    let project = world.plan(name, &plan_of(name, vec![agent("work", &[])]));
-    let identifier = crate::harness::project_id(name);
-    amend(
-        &world
-            .store()
-            .join("projects")
-            .join(format!("{identifier}.md")),
-        |front| {
-            front.insert("labels".to_owned(), json!(["planning"]));
-            front
-                .entry("metadata")
-                .or_insert_with(|| json!({}))
-                .as_object_mut()
-                .expect("a project's metadata is a mapping")
-                .insert("authored.note".to_owned(), json!("keep this value"));
-        },
-    );
-
-    // What the release this build *was* written against answers, read raw off the real
-    // binary rather than through the harness's own typed read: a journey that took away a
-    // field the store had already stopped carrying would move nothing and prove nothing.
-    let served = world
-        .store_cmd(&["project", "show", &project, "--json"])
-        .output()
-        .expect("the real onetaskgraph reads the project");
-    let served: Value =
-        serde_json::from_slice(&served.stdout).expect("project show answers in JSON");
-    for present in [&served["plan"], &served["items"][0]["item"]["status"]] {
-        assert!(
-            !present.is_null(),
-            "the store already answers without a field this journey takes away, so it \
-             cannot tell a build that requires one from a build that does not: {served}"
-        );
-    }
-
-    world.script(
-        "onetaskgraph.delegate",
-        &onetaskgraph_binary().to_string_lossy(),
-    );
-    // Fields of the page and of the item, and none the projection or the plan reader
-    // requires: the projection reads a task's `status` for its category where the answer
-    // carries one, and counts no reopen where it does not. The double refuses a name this
-    // answer does not carry, so a fixture that moved nothing here fails rather than passing
-    // as a plain delegated answer.
-    world.script(
-        "onetaskgraph.project-show.shrink",
-        "plan status repositories\n",
-    );
-    world.script("onetaskgraph.task-list.shrink", "plan status\n");
-    let world = world.with_env(
-        STORE_BINARY_ENV,
-        &double("fake-onetaskgraph").to_string_lossy(),
-    );
-
-    let before = world.store_project(&project)["items"][0]["item"].clone();
-    let labels_before = world.store_task_labels(&project);
-    let tasks_before = preserved_tasks(&world, &project);
-
-    world.run(&["start", &project, "--detach"]).exited(0);
-    world.until("the run to settle", |world| {
-        world.run_file(name, "result.json").is_file()
-    });
-    world.until_store("the settlement to reach the project", |world| {
-        world
-            .store_tasks(&project)
-            .iter()
-            .any(|task| task["item"]["metadata"]["onepipeline.settlement"].is_object())
-    });
-
-    // And this journey could have failed: the bytes the projection actually parsed are the
-    // ones the worker kept, and they are missing what a build that required them refuses.
-    let shown = world.run_json(name, "writeback-project-show.stdout");
-    let listed = world.run_json(name, "writeback-task-list.stdout");
-    for absent in [
-        &shown["plan"],
-        &shown["items"][0]["item"]["status"],
-        &shown["items"][0]["item"]["repositories"],
-        &listed["plan"],
-        &listed["items"][0]["item"]["status"],
-    ] {
-        assert!(
-            absent.is_null(),
-            "the answers this projection read still carry the fields this journey took \
-             away, so they could not have told a lenient read from a required one: \
-             {shown} {listed}"
-        );
-    }
-    let log = std::fs::read_to_string(world.run_file(name, "driver.log"))
-        .expect("the driver log is readable");
-    assert!(
-        !log.contains("onetaskgraph write-back failed"),
-        "a projection failed against a store that had only dropped a field it never \
-         read: {log}"
-    );
-
-    // And the absence changed nothing about what was written.
-    let after = world.store_project(&project)["items"][0]["item"].clone();
-    assert_eq!(
-        preserved(&after),
-        preserved(&before),
-        "settlement changed something the plan does not declare"
-    );
-    assert_eq!(
-        preserved_tasks(&world, &project),
-        tasks_before,
-        "settlement changed something a task's plan does not declare"
-    );
-    assert_eq!(
-        world.store_task_labels(&project),
-        labels_before,
-        "settlement changed a task's labels"
-    );
-    assert_ne!(
-        preserved(&after),
-        preserved(&without(&before, "authored.note")),
-        "the complement assertion cannot fail on a deleted field, so it proves nothing"
-    );
-}
-
-/// Tolerating a field this build does not know is not tolerating anything: an answer
-/// **missing** a field the projection reads is still refused, and the refusal names it.
-///
-/// The store is the same real one, served at a release whose project item stopped carrying
-/// `labels` — a field the projection reads off the destination and writes back, and one
-/// the plan reader never looks at, so what this journey moves is the write-back's own read
-/// and nothing else. A projection that read it as absent would write a project with no
-/// labels, which is the deletion the strict-destination journey exists to stop.
-#[test]
-fn a_store_answer_missing_a_field_the_projection_reads_is_still_refused_by_name() {
-    let world = World::new("store-writeback-shrunk");
-    let name = "writeback-shrunk";
-    let project = world.plan(name, &plan_of(name, vec![agent("work", &[])]));
-    world.script(
-        "onetaskgraph.delegate",
-        &onetaskgraph_binary().to_string_lossy(),
-    );
-    world.script("onetaskgraph.project-show.shrink", "labels\n");
-    let world = world.with_env(
-        STORE_BINARY_ENV,
-        &double("fake-onetaskgraph").to_string_lossy(),
-    );
-
-    world.run(&["start", &project, "--detach"]).exited(0);
-    world.until("the run to settle", |world| {
-        world.run_file(name, "result.json").is_file()
-    });
-    world.until("the projection failure to be reported", |world| {
-        std::fs::read_to_string(world.run_file(name, "driver.log"))
-            .is_ok_and(|log| log.contains("onetaskgraph write-back failed"))
-    });
-    let log = std::fs::read_to_string(world.run_file(name, "driver.log"))
-        .expect("the driver log is readable");
-    assert!(
-        log.contains("missing field `labels`"),
-        "the refusal does not name the field the store's answer stopped carrying: {log}"
-    );
-
-    // And the planner heard what was wrong, rather than only the log a detached run writes
-    // where nobody opens it.
-    let raised: Vec<Value> = world
-        .events_of(name, "planner-surface-queued")
-        .into_iter()
-        .filter(|event| {
-            event["payload"]["message"]
-                .as_str()
-                .is_some_and(|said| said.contains("did not take this run's projection"))
-        })
-        .collect();
-    assert!(
-        raised.iter().any(|event| {
-            event["payload"]["message"]
-                .as_str()
-                .is_some_and(|said| said.contains("missing field `labels`"))
-        }),
-        "the planner was told a projection failed without being told what was wrong: \
-         {raised:?}"
-    );
-
-    // Nothing was projected out of what survived: a read this build cannot act on is a
-    // refusal, not a projection assembled from the fields that were still there.
-    assert!(
-        world
-            .store_tasks(&project)
-            .iter()
-            .all(|task| task["item"]["metadata"]["onepipeline.settlement"].is_null()),
-        "a settlement was projected out of an answer the projection had refused"
-    );
-
-    // The run itself is untouched, because write-back is best-effort and settles nothing.
-    let result = world.run_json(name, "result.json");
-    assert_eq!(result["state"], "complete", "{result}");
-}
-
-/// The same again, for a field the answer carries at the **wrong JSON type**.
-///
-/// Growth is tolerated because the store owns its own shape; a field this projection reads
-/// is not tolerated at whatever type happens to arrive. `labels` is where that matters
-/// most: the projection reads the destination's labels and writes them back whole, so a
-/// read that took a string for a list would write a project carrying none — and the
-/// destination that refuses a label-dropping write is the one this run's every later
-/// settlement then stops reaching.
-#[test]
-fn a_store_answer_carrying_a_field_at_the_wrong_type_is_still_refused_by_name() {
-    let world = World::new("store-writeback-retyped");
-    let name = "writeback-retyped";
-    let project = world.plan(name, &plan_of(name, vec![agent("work", &[])]));
-    label(
-        &world
-            .store()
-            .join("projects")
-            .join(format!("{}.md", crate::harness::project_id(name))),
-        &["planning", "q3"],
-    );
-    world.script(
-        "onetaskgraph.delegate",
-        &onetaskgraph_binary().to_string_lossy(),
-    );
-    // The same field the journey above takes away, at a type it is not: read by the
-    // projection, never looked at by the plan reader, so what this moves is the
-    // write-back's own read and the launch still reaches a running graph.
-    world.script(
-        "onetaskgraph.project-show.retype",
-        &json!({"labels": "planning, q3"}).to_string(),
-    );
-    let world = world.with_env(
-        STORE_BINARY_ENV,
-        &double("fake-onetaskgraph").to_string_lossy(),
-    );
-
-    world.run(&["start", &project, "--detach"]).exited(0);
-    world.until("the run to settle", |world| {
-        world.run_file(name, "result.json").is_file()
-    });
-    world.until("the projection failure to be reported", |world| {
-        std::fs::read_to_string(world.run_file(name, "driver.log"))
-            .is_ok_and(|log| log.contains("onetaskgraph write-back failed"))
-    });
-
-    // The fixture can fail: the bytes the projection actually parsed are the ones the
-    // worker kept, and they carry a list answered as a string.
-    //
-    // Waited for rather than read once, because this projection never succeeds and so is
-    // retried: every attempt truncates that capture before the store it starts writes into
-    // it, and a single read landing inside that window sees an empty file rather than the
-    // answer — which is what the `cross (windows-latest)` leg saw and neither developed-on
-    // platform did.
-    world.until(
-        "the answer this projection read to carry `labels` as the string it was retyped to",
-        |world| {
-            std::fs::read_to_string(world.run_file(name, "writeback-project-show.stdout"))
-                .ok()
-                .and_then(|kept| serde_json::from_str::<Value>(&kept).ok())
-                .is_some_and(|answered| answered["items"][0]["item"]["labels"].is_string())
-        },
-    );
-
-    let log = std::fs::read_to_string(world.run_file(name, "driver.log"))
-        .expect("the driver log is readable");
-    // Both halves: which field, and what was wrong with it. `serde_json` on its own says
-    // the type it wanted and not where it wanted it, which is one sentence for every field
-    // of the answer and tells an operator nothing about which to look at.
-    for said in [
-        "items[0].item.labels",
-        "invalid type: string",
-        "expected a sequence",
-    ] {
-        assert!(
-            log.contains(said),
-            "the refusal does not say {said:?}: {log}"
-        );
-    }
-
-    // And the planner heard the same two halves, rather than only the log a detached run
-    // writes where nobody opens it.
-    let raised: Vec<Value> = world
-        .events_of(name, "planner-surface-queued")
-        .into_iter()
-        .filter(|event| {
-            event["payload"]["message"]
-                .as_str()
-                .is_some_and(|said| said.contains("did not take this run's projection"))
-        })
-        .collect();
-    assert!(
-        raised.iter().any(|event| {
-            event["payload"]["message"].as_str().is_some_and(|said| {
-                said.contains("items[0].item.labels")
-                    && said.contains("invalid type: string")
-                    && said.contains("expected a sequence")
-            })
-        }),
-        "the planner was told a projection failed without being told which field was \
-         answered as what: {raised:?}"
-    );
-
-    // Nothing was projected out of what could still be read: a field at a type this build
-    // does not read it as is a refusal, not a projection that dropped it.
-    assert!(
-        world
-            .store_tasks(&project)
-            .iter()
-            .all(|task| task["item"]["metadata"]["onepipeline.settlement"].is_null()),
-        "a settlement was projected out of an answer the projection had refused"
-    );
-    assert_eq!(
-        world.store_project(&project)["items"][0]["item"]["labels"],
-        json!([
-            {"id": "planning", "name": "planning", "color": null},
-            {"id": "q3", "name": "q3", "color": null},
-        ]),
-        "the refused projection reached the destination and dropped its labels"
-    );
-
-    // The run itself is untouched, because write-back is best-effort and settles nothing.
-    let result = world.run_json(name, "result.json");
-    assert_eq!(result["state"], "complete", "{result}");
-}
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
-
 /// A destination that **refuses** a write whose labels differ from the ones it holds still
 /// accepts this projection, run after run.
 ///
@@ -890,26 +449,39 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
         format!("---\ntitle: {name}\nmetadata:\n  onetaskgraph.origin: {project}\n---\n"),
     )
     .expect("the projection is authored");
-    let refused = world
-        .store_cmd(&[
-            "project",
-            "copy",
-            "a-projection:board",
-            "--to",
-            "strict",
-            "--no-tasks",
-            "--set",
-            "sources.a-projection.plugin=local-md",
-            "--set",
-            &format!("sources.a-projection.config.root={}", dropped.display()),
-        ])
-        .output()
-        .expect("the real onetaskgraph runs the copy");
-    let said = String::from_utf8_lossy(&refused.stderr);
+    let root = dropped.to_string_lossy().into_owned();
+    let refused = world.store_call_with(
+        &[
+            ("ONETASKGRAPH_SOURCES__A_PROJECTION__PLUGIN", "local-md"),
+            ("ONETASKGRAPH_SOURCES__A_PROJECTION__CONFIG__ROOT", &root),
+        ],
+        |engine| async move {
+            engine
+                .copy(&onetaskgraph_core::CopyRequest {
+                    items: onetaskgraph_core::CopyItems::new(vec![crate::harness::global(
+                        "a-projection:board",
+                    )])
+                    .expect("one item"),
+                    scope: onetaskgraph_core::CopyScope::Projects { tasks: false },
+                    destination: onetaskgraph_plugin_api::SourceName::new("strict")
+                        .expect("a source name"),
+                    match_by: None,
+                    recreate: false,
+                    dry_run: false,
+                })
+                .await
+        },
+    );
+    let said = match refused {
+        Ok(report) => panic!(
+            "the destination accepted a projection that dropped its labels, so this journey \
+             could not have told a right answer from a wrong one: {report:?}"
+        ),
+        Err(error) => error.to_string(),
+    };
     assert!(
-        !refused.status.success() && said.contains("labels differ from the labels being written"),
-        "the destination accepted a projection that dropped its labels, so this journey \
-         could not have told a right answer from a wrong one: {said}"
+        said.contains("labels differ from the labels being written"),
+        "the destination refused the projection for another reason: {said}"
     );
 }
 
@@ -1265,9 +837,10 @@ fn an_unreachable_store_is_reported_and_attempted_again_on_the_next_change_while
     );
 }
 
-/// A copy refusal happens after the destination task list was read successfully. The
-/// write-back worker reports that child failure, retries through the same subprocess
-/// boundary, and publishes the snapshot when the real sibling accepts the next copy.
+/// A copy the destination could not take happens after the destination's task list was read
+/// successfully. The write-back worker reports that failure — a source that could not be
+/// reached, which a wait can change — retries it, and publishes the snapshot when the store
+/// accepts the next copy.
 #[test]
 fn a_project_copy_refusal_is_reported_retried_and_recovers() {
     let world = World::new("store-writeback-copy-retry");
@@ -1279,18 +852,11 @@ fn a_project_copy_refusal_is_reported_retried_and_recovers() {
             vec![crate::harness::agent("work", &[])],
         ),
     );
-    world.script(
-        "onetaskgraph.delegate",
-        &onetaskgraph_binary().to_string_lossy(),
+    world.store_refuses_once(
+        "write_task",
+        &json!({"kind": "unavailable", "message": "the destination refused this copy once"}),
     );
-    world.script(
-        "onetaskgraph.project-copy.refuse.1",
-        "the destination refused this copy once\n",
-    );
-    let world = world.with_env(
-        STORE_BINARY_ENV,
-        &double("fake-onetaskgraph").to_string_lossy(),
-    );
+    let world = world.through_scripted_source();
 
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("the copy refusal and recovery to be reported", |world| {
@@ -1316,51 +882,35 @@ fn a_project_copy_refusal_is_reported_retried_and_recovers() {
     });
 }
 
-// The failure documents the store writes on a failed verb, in the shape `onetaskgraph` writes
-// them from 0.2.29 — `failure.class`, `kind`, `source`, `message` and `retry_after_seconds`,
-// every member always present — and the partial answers its exit-4 verbs write, each `errors`
-// entry carrying its `class`. The pinned release writes them for the failures an offline store
-// can be made to have, and the journey against it reads the real one; these stand in for the
-// failures it cannot be made to have, for the one command a journey scripts the double to
-// refuse, and every other call is the real store's own.
+// The failures a hosted destination answers with and an offline store cannot be made to have,
+// each in the store's own `SourceError` shape: what `scripted-source` answers the one call a
+// journey scripts it to fail, while every other call is the real `local-md` store's own.
 
-/// What `project show` writes for a project the store does not hold.
-const NO_SUCH_ITEM: &str = r#"{"failure":{"class":"refused","kind":"no-such-item","source":null,"message":"no project with that id\nnext: check the id, or list what is there — `onetaskgraph project list` reports every project the configured sources hold.","retry_after_seconds":null}}"#;
-const NO_SUCH_ITEM_SAID: &str = "onetaskgraph: no project with that id\nnext: check the id, or list \
-     what is there — `onetaskgraph project list` reports every project the configured sources hold.";
-
-/// What a verb writes when its source declined the request.
-const SOURCE_REFUSED: &str = r#"{"failure":{"class":"refused","kind":"refused","source":"plans","message":"source plans could not do it: the source refused the request: status unknown is disabled for source plans\nnext: fix what the source named above, then copy again.","retry_after_seconds":null}}"#;
-const SOURCE_REFUSED_SAID: &str = "onetaskgraph: source plans could not do it: the source refused \
-     the request: status unknown is disabled for source plans";
-
-/// What `project copy` writes when an item's recorded origin names nothing the destination
-/// still holds.
-const STALE_ORIGIN: &str = r#"{"failure":{"class":"refused","kind":"stale-origin","source":null,"message":"onepipeline-writeback:board/work was copied from plans:board/000-work, which that destination no longer holds\nnext: re-run with --recreate to create a new item there instead, or restore plans:board/000-work.","retry_after_seconds":null}}"#;
-const STALE_ORIGIN_SAID: &str = "onetaskgraph: onepipeline-writeback:board/work was copied from \
-     plans:board/000-work, which that destination no longer holds";
-
-/// What a verb writes when its source rate-limited the request.
-const RATE_LIMITED_DOCUMENT: &str = r#"{"failure":{"class":"transient","kind":"rate-limited","source":"plans","message":"source plans could not do it: the source rate-limited the request: You have exceeded a secondary rate limit","retry_after_seconds":60}}"#;
-
-/// A partial answer whose one failed source refused, which is what a `local-md` source whose
-/// root has gone answers with.
-const PARTIAL_REFUSED: &str = r#"{"items":[],"next":null,"plan":{"per_source":[]},"errors":[{"source":"plans","error":{"kind":"config","message":"source plans: cannot canonicalize root plan-store: No such file or directory (os error 2)"},"class":"refused"}]}"#;
-const PARTIAL_REFUSED_SAID: &str =
-    "onetaskgraph: source plans could not answer: configuration for \
-     this source is invalid: source plans: cannot canonicalize root plan-store";
-
-/// The same, beside a second source that could not be reached, which a wait could change.
-const PARTIAL_MIXED: &str = r#"{"items":[],"next":null,"plan":{"per_source":[]},"errors":[{"source":"plans","error":{"kind":"config","message":"source plans: cannot canonicalize root plan-store: No such file or directory (os error 2)"},"class":"refused"},{"source":"board","error":{"kind":"unavailable","message":"connection reset"},"class":"transient"}]}"#;
-
-/// Script the store double to refuse through `script` the way a release that writes a failure
-/// document does: its words on stderr, `document` on stdout, under `exit`. The document and
-/// the status are written first, so the refusal is never acted out without them.
-fn refusing(world: &World, script: &str, said: &str, document: &str, exit: u8) {
-    world.script(&format!("{script}.stdout"), document);
-    world.script(&format!("{script}.exit"), &exit.to_string());
-    world.script(script, said);
+/// A source that declined the request: what `github-projects` answers for a status it has
+/// disabled.
+fn source_refused() -> Value {
+    json!({"kind": "refused", "message": "status unknown is disabled for source plans"})
 }
+
+/// A source whose configuration it will not run on: what `local-md` answers for a root that
+/// has gone.
+fn source_misconfigured() -> Value {
+    json!({"kind": "config", "message": "source plans: cannot canonicalize root plan-store: \
+           No such file or directory (os error 2)"})
+}
+
+/// A source that rate-limited the request, in GitHub's own words.
+fn rate_limited() -> Value {
+    json!({"kind": "rate-limited", "retry_after_seconds": 60, "message": RATE_LIMITED})
+}
+
+/// A source that could not be reached at all.
+fn source_unreachable() -> Value {
+    json!({"kind": "unavailable", "message": UNREACHABLE})
+}
+
+/// What an unreachable source says, carried through to the line an operator reads.
+const UNREACHABLE: &str = "connection reset by the destination";
 
 /// Give a run something new to project: a note for one node, which changes the graph the
 /// write-back worker is handed.
@@ -1453,13 +1003,7 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
     let (world, project) =
         a_run_whose_destination_can_start_refusing("store-writeback-refused", run);
 
-    refusing(
-        &world,
-        "onetaskgraph.refuse-reads",
-        NO_SUCH_ITEM_SAID,
-        NO_SUCH_ITEM,
-        1,
-    );
+    world.script("store.get_project.absent", "");
     noted(
         &world,
         run,
@@ -1473,7 +1017,7 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
     let said = the_line_reported(&world, run);
     for expected in [
         project.as_str(),
-        "no project with that id",
+        "it is not in the configured sources",
         "class: refused, kind: no-such-item",
         "attempted again when the run's graph next changes",
     ] {
@@ -1549,37 +1093,31 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
     );
 }
 
-/// An attempt is refused whichever of its commands the store refuses: the read of a member the
-/// copy names, the copy, or the project read answered as a partial response every entry of
-/// which is refused. Each is reported once under the store's own kind, and none is asked again
+/// An attempt is refused whichever of its calls the store refuses: the read of a member the
+/// copy names, the copy, or the project read answered as a partial response every source of
+/// which refused. Each is reported once under the store's own kind, and none is asked again
 /// on a timer. The graph change each scenario makes is a member projection, which reads a named
 /// member rather than a page of the project's tasks; a whole projection's page of tasks refused
 /// is `writeback_projections::a_projection_after_a_failed_attempt_is_whole`'s.
 #[test]
 fn a_refusal_from_any_command_of_an_attempt_stops_the_retry_timer() {
-    for (scenario, script, said, document, exit, kind) in [
+    for (scenario, method, error, kind) in [
         (
             "task-show",
-            "onetaskgraph.task-show.refuse",
-            SOURCE_REFUSED_SAID,
-            SOURCE_REFUSED,
-            1,
+            "get_task",
+            source_refused(),
             "class: refused, kind: refused",
         ),
         (
             "project-copy",
-            "onetaskgraph.project-copy.refuse",
-            STALE_ORIGIN_SAID,
-            STALE_ORIGIN,
-            1,
-            "class: refused, kind: stale-origin",
+            "write_task",
+            source_refused(),
+            "class: refused, kind: refused",
         ),
         (
             "partial",
-            "onetaskgraph.refuse-reads",
-            PARTIAL_REFUSED_SAID,
-            PARTIAL_REFUSED,
-            4,
+            "get_project",
+            source_misconfigured(),
             "class: refused, kind: config",
         ),
     ] {
@@ -1588,7 +1126,7 @@ fn a_refusal_from_any_command_of_an_attempt_stops_the_retry_timer() {
             &format!("store-writeback-refused-{scenario}"),
             &run,
         );
-        refusing(&world, script, said, document, exit);
+        world.store_refuses(method, &error);
         noted(&world, &run, "later", &format!("refuse this at {scenario}"));
         world.until(&format!("the {scenario} refusal to be reported"), |world| {
             streaks_reported(world, &run) >= 1
@@ -1614,43 +1152,33 @@ fn a_refusal_from_any_command_of_an_attempt_stops_the_retry_timer() {
     }
 }
 
-/// A failure the store does not refuse keeps today's schedule exactly: a document classed
-/// `transient`, a partial answer with any entry a wait could change even beside one that
-/// refused, and a document carrying a class this build has never heard of, which it does not
-/// read as a refusal. The first retry stays prompt, the interval grows, and the one line and
-/// one surface say it is being retried.
+/// A failure the store does not refuse keeps today's schedule exactly: a rate limit, and a
+/// source that could not be reached — each a failure the store classes `transient`, arrived
+/// as its own typed error at the source's own boundary. The first retry stays prompt, the
+/// interval grows, and the one line and one surface say it is being retried.
 #[test]
 fn a_failure_the_store_does_not_refuse_is_retried_on_the_schedule() {
-    let unknown_class =
-        RATE_LIMITED_DOCUMENT.replace(r#""class":"transient""#, r#""class":"deferred""#);
-    assert_ne!(
-        unknown_class, RATE_LIMITED_DOCUMENT,
-        "the unknown-class document names the class it was built from"
-    );
-    for (scenario, document, exit, kind) in [
+    for (scenario, error, words, kind) in [
         (
-            "transient",
-            RATE_LIMITED_DOCUMENT,
-            1,
-            Some("class: transient, kind: rate-limited"),
+            "rate-limited",
+            rate_limited(),
+            RATE_LIMITED,
+            "class: transient, kind: rate-limited",
         ),
         (
-            "mixed-partial",
-            PARTIAL_MIXED,
-            4,
-            Some("class: transient, kind: config, unavailable"),
+            "unreachable",
+            source_unreachable(),
+            UNREACHABLE,
+            "class: transient, kind: unavailable",
         ),
-        ("unknown-class", unknown_class.as_str(), 1, None),
     ] {
         let run = format!("writeback-{scenario}");
         let (world, _project) = a_run_whose_destination_can_start_refusing(
             &format!("store-writeback-{scenario}"),
             &run,
         );
-        world.script("onetaskgraph.refuse-reads.stdout", document);
-        world.script("onetaskgraph.refuse-reads.exit", &exit.to_string());
 
-        let outage = starts_refusing(&world, &run, &format!("retry this {scenario}"));
+        let outage = starts_refusing_with(&world, &run, &format!("retry this {scenario}"), &error);
         let waited = retry_intervals(&world, &run, &outage, 3, Duration::from_secs(60));
         outage.replied();
 
@@ -1667,19 +1195,13 @@ fn a_failure_the_store_does_not_refuse_is_retried_on_the_schedule() {
         }
         let line = the_line_reported(&world, &run);
         assert!(
-            line.contains("retrying") && line.contains(RATE_LIMITED),
+            line.contains("retrying") && line.contains(words),
             "{scenario}: the line does not report a retried failure: {line}"
         );
-        match kind {
-            Some(kind) => assert!(
-                line.contains(kind),
-                "{scenario}: the line does not carry the store's `{kind}`: {line}"
-            ),
-            None => assert!(
-                !line.contains("class:"),
-                "{scenario}: a class this build does not know was reported as one: {line}"
-            ),
-        }
+        assert!(
+            line.contains(kind),
+            "{scenario}: the line does not carry the store's `{kind}`: {line}"
+        );
         assert_eq!(
             surfaces_raised(&world, &run).len(),
             1,
@@ -1696,13 +1218,7 @@ fn closeout_attempts_what_changed_after_a_refusal_and_never_a_refused_snapshot_a
     let run = "writeback-refused-then-put-right";
     let (world, project) =
         a_run_whose_destination_can_start_refusing("store-writeback-refused-then-put-right", run);
-    refusing(
-        &world,
-        "onetaskgraph.refuse-reads",
-        NO_SUCH_ITEM_SAID,
-        NO_SUCH_ITEM,
-        1,
-    );
+    world.script("store.get_project.absent", "");
     noted(&world, run, "later", "refused before the run ends");
     world.until("the refusal to be reported", |world| {
         streaks_reported(world, run) >= 1
@@ -1728,13 +1244,7 @@ fn closeout_attempts_what_changed_after_a_refusal_and_never_a_refused_snapshot_a
     let (world, _project) =
         a_run_whose_destination_can_start_refusing("store-writeback-refused-to-the-end", run);
     let asked_before = projections_asked_for(&world);
-    refusing(
-        &world,
-        "onetaskgraph.refuse-reads",
-        NO_SUCH_ITEM_SAID,
-        NO_SUCH_ITEM,
-        1,
-    );
+    world.script("store.get_project.absent", "");
     noted(&world, run, "later", "refused until the run ends");
     world.until("the refusal to be reported", |world| {
         streaks_reported(world, run) >= 1
@@ -1768,9 +1278,10 @@ fn closeout_attempts_what_changed_after_a_refusal_and_never_a_refused_snapshot_a
     );
 }
 
-/// The same refusal, answered by the real store with no double in front of it: the project the
-/// run projects onto is taken out of the store, so the `project show` every attempt opens with
-/// is answered with the store's own failure document, classed `refused` under `no-such-item`.
+/// The same refusal, answered by the real store with nothing in front of it: the project the
+/// run projects onto is taken out of the store, so the project read every attempt opens with
+/// answers nothing — which the store's own reading of an empty `show`, and so this engine's,
+/// classes `refused` under `no-such-item`.
 #[test]
 fn a_projection_the_real_store_refuses_is_not_asked_again_until_the_graph_changes() {
     let run = "writeback-refused-real";
@@ -1901,19 +1412,19 @@ fn a_projection_the_real_store_refuses_is_not_asked_again_until_the_graph_change
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// What a hosted destination says when it is refusing for a rate limit, and what this
-/// suite's store double is made to say. The words are GitHub's own: that limiter is the
+/// suite's scripted source is made to say. The words are GitHub's own: that limiter is the
 /// one the retry schedule below exists for, and the driver's line has to carry the
 /// destination's reason through unchanged for an operator to know which refusal it is.
 const RATE_LIMITED: &str = "You have exceeded a secondary rate limit";
 
-/// A detached run whose projections go through the store double, in front of the real
-/// store.
+/// A detached run whose store is reached through `scripted-source`, in front of the real
+/// `local-md` store.
 ///
-/// The double delegates every call to the real `onetaskgraph` until [`starts_refusing`]
-/// makes it refuse, which is how a destination that begins rate-limiting part-way through
-/// a run is arranged — and, because every attempt is a real process this double records,
-/// how the intervals the worker actually waits become observable at the destination rather
-/// than in the shape of the code.
+/// The source answers every call from the real store until [`starts_refusing`] makes it
+/// refuse, which is how a destination that begins rate-limiting part-way through a run is
+/// arranged — and, because every call the run makes is one this source records, how the
+/// intervals the worker actually waits become observable at the destination rather than in
+/// the shape of the code.
 fn a_run_whose_destination_can_start_refusing(world: &str, run: &str) -> (World, String) {
     let world = World::new(world);
     world.script("work.wait", "hold");
@@ -1921,15 +1432,8 @@ fn a_run_whose_destination_can_start_refusing(world: &str, run: &str) -> (World,
         run,
         &plan_of(run, vec![agent("work", &[]), agent("later", &["work"])]),
     );
-    world.script(
-        "onetaskgraph.delegate",
-        &onetaskgraph_binary().to_string_lossy(),
-    );
     let world = world
-        .with_env(
-            STORE_BINARY_ENV,
-            &double("fake-onetaskgraph").to_string_lossy(),
-        )
+        .through_scripted_source()
         // A hold has to outlast the thing the journey is measuring, and what these measure
         // is a schedule in minutes: the default is written to outlast `World::until`'s
         // two-minute deadline, which is shorter than the interval a refusing destination is
@@ -1946,16 +1450,9 @@ fn a_run_whose_destination_can_start_refusing(world: &str, run: &str) -> (World,
     (world, project)
 }
 
+/// How many attempts have asked the store: the project read every attempt opens with.
 fn projections_asked_for(world: &World) -> usize {
-    world
-        .invocations()
-        .iter()
-        .filter(|call| {
-            call["tool"] == "onetaskgraph"
-                && call["args"][0] == "project"
-                && call["args"][1] == "show"
-        })
-        .count()
+    world.store_asked("get_project")
 }
 
 /// Which of the plan's nodes have run, in the order they first were dispatched.
@@ -2009,8 +1506,13 @@ impl Outage {
 /// measured from — so a caller that waited here would start observing somewhere after the
 /// thing it means to time.
 fn starts_refusing(world: &World, run: &str, note: &str) -> Outage {
+    starts_refusing_with(world, run, note, &rate_limited())
+}
+
+/// The same, refusing with `error`.
+fn starts_refusing_with(world: &World, run: &str, note: &str, error: &Value) -> Outage {
     let streaks_before = streaks_reported(world, run);
-    world.script("onetaskgraph.refuse-reads", RATE_LIMITED);
+    world.store_refuses("get_project", error);
     let mut reply = world
         .cmd(&["reply", run])
         .stdin(std::process::Stdio::piped())
@@ -2033,9 +1535,17 @@ fn starts_refusing(world: &World, run: &str, note: &str) -> Outage {
     }
 }
 
+/// The destination answers again: whatever [`starts_refusing`] or an absent board scripted
+/// on the project read every attempt opens with is taken away.
 fn stops_refusing(world: &World) {
-    std::fs::remove_file(world.fakes.join("onetaskgraph.refuse-reads"))
-        .expect("the destination stops refusing");
+    let mut stopped = false;
+    for script in ["store.get_project.refuse", "store.get_project.absent"] {
+        if world.fakes.join(script).is_file() {
+            world.unscript(script);
+            stopped = true;
+        }
+    }
+    assert!(stopped, "the destination was not refusing");
 }
 
 /// How many outages reached the planner, in the words the driver raises them in.
@@ -2479,18 +1989,16 @@ fn a_stop_during_a_long_retry_interval_is_not_made_to_wait_it_out() {
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
-/// Losing the worker's own command-capture path is handled by the same best-effort
-/// boundary as losing the destination: the committed graph keeps running, and the
-/// projection catches up after the filesystem recovers.
+/// Losing the worker's own shadow store is handled by the same best-effort boundary as
+/// losing the destination: the committed graph keeps running, and the projection catches up
+/// after the filesystem recovers.
 ///
-/// This fault injection depends on POSIX `File::create` refusing a path occupied by a
-/// directory. Windows can open that path as a directory-associated handle instead: the
-/// sibling then completes successfully, so there is deliberately no capture failure for
-/// this journey to await. The portable sibling-refusal path is covered separately by
-/// `a_project_copy_refusal_is_reported_retried_and_recovers`.
-#[cfg(not(windows))]
+/// The shadow store is the folder under the run the worker writes a snapshot into before the
+/// store copies it onto the board; a file standing where its projects folder belongs is a
+/// path no platform will write a document beneath, and a failure no store classed, so it is
+/// retried on the schedule.
 #[test]
-fn an_unwritable_writeback_capture_is_reported_retried_and_recovered() {
+fn an_unwritable_shadow_store_is_reported_retried_and_recovered() {
     let world = World::new("store-writeback-capture-retry");
     world.script("work.wait", "hold");
     let project = world.plan(
@@ -2511,11 +2019,12 @@ fn an_unwritable_writeback_capture_is_reported_retried_and_recovered() {
         })
     });
 
-    // The read every attempt opens with, whole or members: a member projection runs no page of
-    // tasks at all, so that read's capture would never be asked for again.
-    let capture = world.run_file("writeback-capture-retry", "writeback-project-show.stdout");
-    std::fs::remove_file(&capture).expect("the completed capture is removed");
-    std::fs::create_dir(&capture).expect("a directory makes the capture path unwritable");
+    // The folder every attempt, whole or members, writes the shadow project into.
+    let shadow = world
+        .run_file("writeback-capture-retry", "writeback")
+        .join("projects");
+    std::fs::remove_dir_all(&shadow).expect("the shadow projects folder is taken away");
+    std::fs::write(&shadow, "not a folder").expect("a file makes the shadow store unwritable");
     world
         .run_with_stdin(
             &["reply", "writeback-capture-retry"],
@@ -2527,17 +2036,13 @@ fn an_unwritable_writeback_capture_is_reported_retried_and_recovered() {
             .to_string(),
         )
         .exited(0);
-    world.until("the capture failure to be reported", |world| {
+    world.until("the shadow store failure to be reported", |world| {
         std::fs::read_to_string(world.run_file("writeback-capture-retry", "driver.log")).is_ok_and(
-            |log| {
-                log.contains("onetaskgraph write-back failed")
-                    && log.contains("retrying")
-                    && log.contains("Is a directory")
-            },
+            |log| log.contains("onetaskgraph write-back failed") && log.contains("retrying"),
         )
     });
 
-    std::fs::remove_dir(&capture).expect("the capture path becomes writable again");
+    std::fs::remove_file(&shadow).expect("the shadow store becomes writable again");
     world.until("capture recovery to be reported", |world| {
         std::fs::read_to_string(world.run_file("writeback-capture-retry", "driver.log"))
             .is_ok_and(|log| log.contains("onetaskgraph write-back recovered"))
@@ -3104,7 +2609,7 @@ fn a_project_reads_as_the_plan_document_of_the_same_content() {
 /// A store pages, and a plan is the whole graph or it is not a plan: a launch
 /// that read the first page alone would execute a prefix of the project and
 /// never say which nodes it left out. The world's own `page_size` is turned down
-/// so the real binary really does hand back continuation tokens — three pages of
+/// so the linked store really does hand back continuation tokens — three pages of
 /// tasks, and a page of edges behind each of them — rather than fitting the
 /// project into one response by accident.
 #[test]
@@ -3222,231 +2727,6 @@ fn the_launch_record_names_the_project_and_the_run_still_projects_from_its_journ
     world.run(&["status", "record"]).exited(0).out_has("record");
 }
 
-/// A store that answers something this build will not act on refuses the launch.
-///
-/// Five endings, and none of them is reachable through a correct install: the
-/// double below is scripted to answer badly on purpose, which is the only way to
-/// reach the far side of "the store said something unusable". Every one of them
-/// is a **refusal** — the double never stands in for a plan that reads — and
-/// every one of them names the command it came from, because a launch that
-/// stopped without saying which query answered badly would leave an operator
-/// with a store to search by hand.
-#[test]
-fn a_store_that_answers_badly_refuses_the_launch_and_names_the_query() {
-    type Script<'a> = &'a [(&'a str, &'a str)];
-    type BadAnswer<'a> = (&'a str, Script<'a>, &'a str);
-    let cases: &[BadAnswer<'_>] = &[
-        // A query that ran and failed, after the version check passed.
-        (
-            "exits",
-            &[(
-                "onetaskgraph.refuse-reads",
-                "this store cannot be reached\n",
-            )],
-            "this store cannot be reached",
-        ),
-        // An answer that is not the JSON this build reads.
-        (
-            "malformed",
-            &[("onetaskgraph.project-show", "not json at all\n")],
-            "answered with something this build cannot read",
-        ),
-        // A `show` answering with nothing, and with several. A `show` addresses
-        // one item, so both are a store this build cannot read a plan out of
-        // rather than a set to take the first of.
-        (
-            "nothing",
-            &[("onetaskgraph.project-show", r#"{"items":[],"next":null}"#)],
-            "names nothing in the configured sources",
-        ),
-        (
-            "several",
-            &[(
-                "onetaskgraph.project-show",
-                r#"{"items":[{"id":"plans:mine","item":{"title":"T","metadata":{}}},
-                   {"id":"plans:mine","item":{"title":"T","metadata":{}}}],"next":null}"#,
-            )],
-            "answered with more than one item",
-        ),
-        (
-            "show-next-page",
-            &[(
-                "onetaskgraph.project-show",
-                r#"{"items":[{"id":"plans:mine","item":{"title":"T","metadata":{}}}],
-                   "next":"another"}"#,
-            )],
-            "answer claims another page",
-        ),
-        // A `show` answering with an item nobody asked for.
-        (
-            "elsewhere",
-            &[(
-                "onetaskgraph.project-show",
-                r#"{"items":[{"id":"plans:other","item":{"title":"T","metadata":{}}}],"next":null}"#,
-            )],
-            "answered with 'plans:other'",
-        ),
-        // A task list carrying an item of another source, which `--project`
-        // said it would not.
-        (
-            "foreign",
-            &[
-                (
-                    "onetaskgraph.project-show",
-                    r#"{"items":[{"id":"plans:mine","item":{"title":"T","metadata":
-                       {"onepipeline.schema_version":3}}}],"next":null}"#,
-                ),
-                (
-                    "onetaskgraph.task-list",
-                    r#"{"items":[{"id":"elsewhere:build","item":{"title":"B","content":"t",
-                       "project":"mine","metadata":{"onepipeline.id":"build"}}}],"next":null}"#,
-                ),
-            ],
-            "which is an item of another source",
-        ),
-        // The store's wire type promises normalized origins. Validate that
-        // third-party output at this boundary rather than letting an arbitrary
-        // string become the repository a lifecycle node acts on.
-        (
-            "repository",
-            &[
-                (
-                    "onetaskgraph.project-show",
-                    r#"{"items":[{"id":"plans:mine","item":{"title":"T","metadata":
-                       {"onepipeline.schema_version":3}}}],"next":null}"#,
-                ),
-                (
-                    "onetaskgraph.task-list",
-                    r#"{"items":[{"id":"plans:build","item":{"title":"B","content":"t",
-                       "project":"mine","repositories":["https://github.com/acme/widget"],
-                       "metadata":{"onepipeline.id":"build"}}}],"next":null}"#,
-                ),
-            ],
-            "is not a normalized repository origin",
-        ),
-        // A dependency edge whose far end is a project. The store draws edges at
-        // both levels and across them; a plan node is a task, so a far end that
-        // is not one is refused rather than read as a node.
-        (
-            "project-end",
-            &[
-                (
-                    "onetaskgraph.project-show",
-                    r#"{"items":[{"id":"plans:mine","item":{"title":"T","metadata":
-                       {"onepipeline.schema_version":3}}}],"next":null}"#,
-                ),
-                (
-                    "onetaskgraph.task-list",
-                    r#"{"items":[{"id":"plans:build","item":{"title":"B","content":"t",
-                       "project":"mine","metadata":{"onepipeline.id":"build"}}}],"next":null}"#,
-                ),
-                (
-                    "onetaskgraph.task-deps",
-                    r#"{"items":[{"from":{"id":"plans:build","kind":"task"},
-                       "to":{"id":"plans:other","kind":"project"},"kind":"blocks"}],"next":null}"#,
-                ),
-            ],
-            "which is a project and not a node of a plan",
-        ),
-        // The command asks for a task's dependencies, so an edge claiming its
-        // matching id is a project is still a malformed answer.
-        (
-            "project-near-end",
-            &[
-                (
-                    "onetaskgraph.project-show",
-                    r#"{"items":[{"id":"plans:mine","item":{"title":"T","metadata":
-                       {"onepipeline.schema_version":3}}}],"next":null}"#,
-                ),
-                (
-                    "onetaskgraph.task-list",
-                    r#"{"items":[{"id":"plans:build","item":{"title":"B","content":"t",
-                       "project":"mine","metadata":{"onepipeline.id":"build"}}}],"next":null}"#,
-                ),
-                (
-                    "onetaskgraph.task-deps",
-                    r#"{"items":[{"from":{"id":"plans:build","kind":"project"},
-                       "to":{"id":"plans:other","kind":"task"},"kind":"blocks"}],"next":null}"#,
-                ),
-            ],
-            "answered with an edge from a project",
-        ),
-        (
-            "unknown-edge-kind",
-            &[
-                (
-                    "onetaskgraph.project-show",
-                    r#"{"items":[{"id":"plans:mine","item":{"title":"T","metadata":
-                       {"onepipeline.schema_version":3}}}],"next":null}"#,
-                ),
-                (
-                    "onetaskgraph.task-list",
-                    r#"{"items":[{"id":"plans:build","item":{"title":"B","content":"t",
-                       "project":"mine","metadata":{"onepipeline.id":"build"}}}],"next":null}"#,
-                ),
-                (
-                    "onetaskgraph.task-deps",
-                    r#"{"items":[{"from":{"id":"plans:build","kind":"task"},
-                       "to":{"id":"plans:other","kind":"task"},"kind":"orders"}],"next":null}"#,
-                ),
-            ],
-            "unknown variant `orders`",
-        ),
-        // A walk handed a token that is no token: it names no next page and ends
-        // nothing, so the walk would ask for the same page for ever.
-        (
-            "emptytoken",
-            &[
-                (
-                    "onetaskgraph.project-show",
-                    r#"{"items":[{"id":"plans:mine","item":{"title":"T","metadata":
-                       {"onepipeline.schema_version":3}}}],"next":null}"#,
-                ),
-                ("onetaskgraph.task-list", r#"{"items":[],"next":""}"#),
-            ],
-            "does not advance the walk",
-        ),
-        // A walk that cycles: two tokens handed back for ever. Read naively this
-        // is a launch that never returns and never says why.
-        (
-            "cycle",
-            &[
-                (
-                    "onetaskgraph.project-show",
-                    r#"{"items":[{"id":"plans:mine","item":{"title":"T","metadata":
-                       {"onepipeline.schema_version":3}}}],"next":null}"#,
-                ),
-                ("onetaskgraph.task-list", r#"{"items":[],"next":"first"}"#),
-                (
-                    "onetaskgraph.task-list.2",
-                    r#"{"items":[],"next":"second"}"#,
-                ),
-                ("onetaskgraph.task-list.3", r#"{"items":[],"next":"first"}"#),
-            ],
-            "does not advance the walk",
-        ),
-    ];
-
-    for (name, scripted, expected) in cases {
-        let world = World::new(&format!("store-bad-{name}")).with_env(
-            STORE_BINARY_ENV,
-            &double("fake-onetaskgraph").to_string_lossy(),
-        );
-        world.script("onetaskgraph.version", "onetaskgraph 0.2.0\n");
-        for (file, body) in *scripted {
-            world.script(file, body);
-        }
-        world
-            .run(&["start", "plans:mine", "--detach"])
-            .exited(REFUSED)
-            .err_has(expected);
-        assert!(
-            world.runs.read_dir().expect("a runs root").next().is_none(),
-            "a launch refused for its store left a run directory behind"
-        );
-    }
-}
-
 /// Related links are visible in the store but are not plan ordering edges.
 #[test]
 fn a_related_task_link_does_not_become_a_plan_dependency() {
@@ -3500,220 +2780,6 @@ fn a_project_without_a_usable_name_mints_the_run_id_from_its_native_id() {
     assert!(
         world.runs.join("native-run-board").is_dir(),
         "the project's native id did not name the run"
-    );
-}
-
-/// When the override is empty, launch resolves `onetaskgraph` on `PATH`.
-#[test]
-fn onetaskgraph_resolves_by_executable_name_when_the_override_is_empty() {
-    let binary = crate::harness::onetaskgraph_binary();
-    let path = std::env::join_paths(
-        std::iter::once(
-            binary
-                .parent()
-                .expect("the binary has a directory")
-                .to_path_buf(),
-        )
-        .chain(std::env::split_paths(
-            &std::env::var_os("PATH").unwrap_or_default(),
-        )),
-    )
-    .expect("a PATH");
-    let world = World::new("store-path-binary")
-        .with_env(STORE_BINARY_ENV, "")
-        .with_env("PATH", &path.to_string_lossy());
-    let project = world.plan(
-        "path-binary",
-        &plan_of("path-binary", vec![crate::harness::agent("build", &[])]),
-    );
-    world.run(&["start", &project, "--detach"]).exited(0);
-    assert!(world.runs.join("path-binary").is_dir());
-}
-
-/// The override selects the store executable without becoming store configuration.
-#[test]
-fn a_store_command_does_not_inherit_the_parent_binary_override() {
-    let binary = onetaskgraph_binary();
-    let original = std::env::var_os(STORE_BINARY_ENV);
-    std::env::set_var(STORE_BINARY_ENV, &binary);
-
-    let world = World::new("store-parent-binary-override");
-    let project = world.plan(
-        "parent-binary-override",
-        &plan_of(
-            "parent-binary-override",
-            vec![crate::harness::agent("build", &[])],
-        ),
-    );
-    let output = world
-        .store_cmd(&["project", "show", &project, "--json"])
-        .output()
-        .expect("the selected store runs");
-
-    match original {
-        Some(value) => std::env::set_var(STORE_BINARY_ENV, value),
-        None => std::env::remove_var(STORE_BINARY_ENV),
-    }
-    assert!(
-        output.status.success(),
-        "the selected store refused the inherited override: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let shown: Value =
-        serde_json::from_slice(&output.stdout).expect("project show answers in JSON");
-    assert_eq!(shown["items"][0]["item"]["title"], "parent-binary-override");
-}
-
-/// An executable path is an OS path, not necessarily Unicode.
-#[cfg(unix)]
-#[test]
-fn onetaskgraph_resolves_a_non_unicode_executable_path_from_the_override() {
-    use std::os::unix::ffi::OsStringExt;
-
-    let world = World::new("store-non-unicode-binary");
-    let project = world.plan(
-        "non-unicode-binary",
-        &plan_of(
-            "non-unicode-binary",
-            vec![crate::harness::agent("build", &[])],
-        ),
-    );
-    let alias = world
-        .root
-        .join(std::ffi::OsString::from_vec(b"onetaskgraph-\xff".to_vec()));
-    if let Err(error) = std::os::unix::fs::symlink(crate::harness::onetaskgraph_binary(), &alias) {
-        #[cfg(target_os = "macos")]
-        if error.raw_os_error() == Some(libc::EILSEQ) {
-            eprintln!(
-                "macOS refused the non-Unicode executable alias with EILSEQ; override resolution \
-                 for a non-Unicode executable path is unproven on this platform"
-            );
-            return;
-        }
-        panic!("a non-Unicode executable alias: {error}");
-    }
-
-    let output = world
-        .cmd(&["start", &project, "--detach"])
-        .env(STORE_BINARY_ENV, &alias)
-        .output()
-        .expect("onepipeline runs");
-    assert!(
-        output.status.success(),
-        "non-Unicode executable path was refused: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(world.runs.join("non-unicode-binary").is_dir());
-}
-
-/// An absent `onetaskgraph` refuses the launch, and nothing is started for it.
-///
-/// The path resolved, the minimum this build needs, and how to install one — all
-/// three, because "not found" alone leaves the one actionable thing unsaid.
-#[test]
-fn an_absent_onetaskgraph_refuses_the_launch_and_starts_nothing() {
-    let world = World::new("store-absent");
-    let missing = world.root.join("no-such-onetaskgraph");
-    let world = world.with_env(STORE_BINARY_ENV, &missing.to_string_lossy());
-    let project = world.plan(
-        "absent",
-        &plan_of("absent", vec![crate::harness::agent("build", &[])]),
-    );
-
-    world
-        .run(&["start", &project, "--detach"])
-        .exited(REFUSED)
-        .err_has("no-such-onetaskgraph")
-        .err_has("0.2.0 or newer")
-        .err_has("cargo install onetaskgraph");
-    assert!(
-        !world.runs.join("absent").exists(),
-        "a launch refused for its store left a run directory behind"
-    );
-    assert!(
-        world.events_of("absent", "node-dispatched").is_empty(),
-        "a launch refused for its store dispatched a node"
-    );
-}
-
-/// An `onetaskgraph` below the minimum refuses the launch, naming the version it
-/// found and the one it needs.
-///
-/// The two numbers together, because either alone leaves an operator guessing:
-/// what is installed, and what has to be.
-#[test]
-fn an_onetaskgraph_below_the_minimum_refuses_the_launch_naming_both_versions() {
-    let world = World::new("store-stale").with_env(
-        STORE_BINARY_ENV,
-        &double("fake-onetaskgraph").to_string_lossy(),
-    );
-    let project = world.plan(
-        "stale",
-        &plan_of("stale", vec![crate::harness::agent("build", &[])]),
-    );
-    world.script("onetaskgraph.version", "onetaskgraph 0.1.0\n");
-
-    world
-        .run(&["start", &project, "--detach"])
-        .exited(REFUSED)
-        .err_has("is version 0.1.0")
-        .err_has("0.2.0 or newer")
-        .err_has("cargo install onetaskgraph");
-    assert!(
-        !world.runs.join("stale").exists(),
-        "a launch refused for a stale store left a run directory behind"
-    );
-}
-
-/// An `onetaskgraph` that cannot say what it is refuses the launch too.
-///
-/// Two endings, and both are an install this build cannot read a plan through: a
-/// binary that refuses `--version`, and one that answers with something that is
-/// not a version at all. Neither is allowed to become a run that fails on its
-/// first node.
-#[test]
-fn an_onetaskgraph_that_cannot_report_a_version_refuses_the_launch() {
-    let world = World::new("store-unusable").with_env(
-        STORE_BINARY_ENV,
-        &double("fake-onetaskgraph").to_string_lossy(),
-    );
-    let project = world.plan(
-        "unusable",
-        &plan_of("unusable", vec![crate::harness::agent("build", &[])]),
-    );
-
-    world.script("onetaskgraph.refuse", "this install is broken\n");
-    world
-        .run(&["start", &project, "--detach"])
-        .exited(REFUSED)
-        .err_has("refused `--version`")
-        .err_has("this install is broken")
-        .err_has("0.2.0 or newer");
-
-    std::fs::remove_file(world.fakes.join("onetaskgraph.refuse")).expect("the refusal is cleared");
-    world.script("onetaskgraph.version", "something that is not a version\n");
-    world
-        .run(&["start", &project, "--detach"])
-        .exited(REFUSED)
-        .err_has("reported no version this build can read")
-        .err_has("0.2.0 or newer");
-
-    world.script("onetaskgraph.version", "onetaskgraph 0.1.1-01\n");
-    world
-        .run(&["start", &project, "--detach"])
-        .exited(REFUSED)
-        .err_has("reported no version this build can read")
-        .err_has("0.1.1-01");
-
-    world.script("onetaskgraph.version-invalid-utf8", "invalid");
-    world
-        .run(&["start", &project, "--detach"])
-        .exited(REFUSED)
-        .err_has("reported a version that is not UTF-8");
-
-    assert!(
-        !world.runs.join("unusable").exists(),
-        "a launch refused for an unusable store left a run directory behind"
     );
 }
 
@@ -4090,11 +3156,11 @@ fn a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchange
             "the surface does not name the item {item}: {message}"
         );
     }
-    // The reason, on **one** line. What the sibling refused with is several lines of its
-    // own and the last of them is the `next:` it ends with, which read as this surface's
-    // own advice — so the whole message is five lines: one is the reason, and the next is
-    // the class and kind the store gave it. A source whose root has gone is the store's
-    // `config` failure, which it classes `refused`.
+    // The reason, on **one** line, carrying what the store said of the source that could not
+    // answer: the whole message is five lines, one of them the reason, and the next the class
+    // and kind the store gave it. A store's failure can run to several lines of its own, and
+    // they are closed up onto that one rather than read as this surface's own advice. A source
+    // whose root has gone is the store's `config` failure, which it classes `refused`.
     let reason = message
         .lines()
         .find_map(|line| line.strip_prefix("reason: "))
@@ -4105,7 +3171,7 @@ fn a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchange
         "a multi-line refusal was carried onto the surface as it was spelled: {message}"
     );
     assert!(
-        reason.contains("next:"),
+        reason.contains("could not answer") && reason.contains("cannot canonicalize root"),
         "the surface dropped what the store said rather than carrying it on one line: {reason}"
     );
     assert!(

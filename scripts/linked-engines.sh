@@ -35,10 +35,13 @@
 set -euo pipefail
 
 # The engines whose currency this repository claims: the two it composes, the
-# verdict vocabulary it relays, and the two test-support pins whose drift would
-# leave a double proving a fixture. Every one is pinned in
-# `[workspace.dependencies]`, which is what makes the claim checkable at all.
-SIBLINGS=(oneagentgraph onevcs onevcs-testing onejudge oneharness-core)
+# verdict vocabulary it relays, the two test-support pins whose drift would
+# leave a double proving a fixture, and the store every plan is read out of and
+# every settlement projected into, which the engine links. Every one is pinned in
+# `[workspace.dependencies]`, which is what makes the claim checkable at all. The
+# store's family is lock-step, so it is pinned exactly and its core stands for the
+# whole release: the notes name the store release the engine links.
+SIBLINGS=(oneagentgraph onevcs onevcs-testing onejudge oneharness-core onetaskgraph-core)
 
 format=check
 manifest=Cargo.toml
@@ -178,11 +181,22 @@ ver_lt() { [ "$(ver_cmp "$1" "$2")" -lt 0 ]; }
 # permits every 0.3.z, so a lock at 0.3.6 with 0.3.9 published is behind without
 # the requirement having said anything.
 #
-# Refuses a shape it does not model rather than guessing: a `~`, `=`, `>=`, `*`
-# or comma-separated range read as a caret could report a currency this
-# repository never claimed.
+# An exact `=MAJOR.MINOR.PATCH` is modelled too, as the one release it names: the
+# store's family is lock-step, each sibling requiring the others at exactly its
+# own version, so it is pinned exactly and permits nothing past itself.
+#
+# Refuses a shape it does not model rather than guessing: a `~`, `>=`, `*`, a
+# partial `=` or a comma-separated range read as a caret could report a currency
+# this repository never claimed.
 req_window() {
   local core major minor patch upper dots
+  if [ "${1#=}" != "$1" ]; then
+    core="${1#=}"
+    orderable "$core" || return 1
+    IFS=. read -r major minor patch <<<"$core"
+    printf '%s %s\n' "$core" "$major.$minor.$((patch + 1))"
+    return 0
+  fi
   core="${1#^}"
   case "$core" in
     ""|*[!0-9.]*|*..*|.*|*.) return 1 ;;

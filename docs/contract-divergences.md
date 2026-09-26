@@ -6332,7 +6332,7 @@ What this crate does now is the block below, and the block is the source.
 **Lineage.** A lineage is a node and every retry replacement of it, in order, read off the
 run's `superseded` record and nothing else — never a title, never an id's suffix. Its **root**
 is the id the plan authored or an `add` stated; its **head** is the one node in it nothing
-superseded. **One shadow task per lineage**, whose file and `--member` id are the root's, so a
+superseded. **One shadow task per lineage**, whose file and member id are the root's, so a
 retry changes that member's rendering rather than adding a member. Its front matter and body
 are the head's own: title (the root id where the head carries none), the head's projected
 status word, the head's `task` as the body, the head's `deps` — each mapped to the shadow task
@@ -6392,7 +6392,8 @@ word. `tests/contract.rs` holds the record's `reopened`, its version and entry 7
 `writeback_projections::a_retry_or_requeue_of_a_cancelled_node_reopens_its_one_item`,
 `writeback_projections::an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item`
 and `delivers::a_retried_deliverer_keeps_its_ticket_claimed_across_the_retry` drive the compiled
-binary against the real `onetaskgraph` and this suite's store double;
+binary against the real `onetaskgraph` store it links, served through this suite's
+`scripted-source`;
 `store::a_retried_project_launches_again_reading_the_lineage_head_under_the_roots_id` relaunches
 a project the retry was written onto.
 

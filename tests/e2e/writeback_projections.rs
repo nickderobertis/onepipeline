@@ -1,36 +1,32 @@
 //! What a settlement write-back projection carries, and the record every attempt leaves.
 //!
 //! A projection used to copy every node of the plan to change one, and nothing on the run
-//! said what that cost. What runs here is the real projection against the real
-//! `onetaskgraph`, at the release this repository's checks install, over a local Markdown
-//! destination: every command the worker spawns goes through the store double, which
-//! records it and hands it to that real store. What lands on the board is the store's own
-//! work; what the double adds is a log of every command it was handed, and — for the one
-//! journey about the figures a report carries — a report rewritten to carry figures an
-//! offline store never reports. `crates/testfakes/src/bin/fake-onetaskgraph.rs` says how
-//! each is scripted.
+//! said what that cost. What runs here is the real projection through the `onetaskgraph`
+//! library the binary under test links, over a local Markdown destination reached through
+//! `scripted-source`: a real source of that store serving the same folder through the real
+//! `local-md` plugin, which records every call it is handed. What lands on the board is the
+//! store's own work; what the source adds is a log of every call, and — for the one journey
+//! about the figures a copy reports — a meter on its own writes, the way a hosted source
+//! meters its requests. `crates/testfakes/src/bin/scripted-source.rs` says how each is
+//! scripted.
 //!
 //! Entry 73 of `docs/contract-divergences.md` is the source for the record these journeys
 //! read, and where the record lives is read out of it rather than restated.
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its subprocess
 // boundary and nothing inside the crate under test, which is driven as a real compiled binary.
-// The store double here delegates every command to the real `onetaskgraph` and records it, so
-// what lands on the board is the real store's own; the scripted refusals and the one rewritten
-// report stand in only for what an offline store cannot be made to answer. `harness.rs` carries
-// the same suppression and the full rationale.
+// The scripted source here serves every call out of the real `local-md` plugin and records it,
+// so what lands on the board is the real store's own; the scripted refusals and the meter stand
+// in only for what an offline store cannot be made to answer. `harness.rs` carries the same
+// suppression and the full rationale.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::harness::{
-    agent, double, onetaskgraph_binary, plan_of, project_id, World, CANCEL_GRACE_ENV,
-    RENDEZVOUS_SECONDS_ENV, STORE_BINARY_ENV,
-};
+use crate::harness::{agent, plan_of, project_id, World, CANCEL_GRACE_ENV, RENDEZVOUS_SECONDS_ENV};
 
-/// Entry 73's block, which is where the record's path and the store's answer's path are
-/// written down.
+/// Entry 73's block, which is where the record's path is written down.
 fn proposed() -> Value {
     let record = std::fs::read_to_string(crate::harness::repo_file("docs/contract-divergences.md"))
         .expect("the divergence record ships");
@@ -69,38 +65,30 @@ fn records(world: &World, run: &str) -> Vec<Value> {
         .collect()
 }
 
-/// Every command line the store double was handed, in order.
+/// Every call the scripted source was handed, in order, as `[method, the id it names]`.
 fn store_calls(world: &World) -> Vec<Vec<String>> {
-    world
-        .invocations()
-        .into_iter()
-        .filter(|call| call["tool"] == "onetaskgraph")
-        .map(|call| {
-            call["args"]
-                .as_array()
-                .expect("a recorded call names its arguments")
-                .iter()
-                .map(|arg| arg.as_str().expect("an argument is a string").to_owned())
-                .collect()
-        })
-        .collect()
+    world.store_calls()
 }
 
-fn is_verb(call: &[String], verb: [&str; 2]) -> bool {
-    call.len() >= 2 && call[0] == verb[0] && call[1] == verb[1]
+fn is_call(call: &[String], method: &str) -> bool {
+    call.first().is_some_and(|called| called == method)
 }
 
-/// Whether every copy the worker has run has been recorded, and every record landed — so no
-/// attempt is in flight and none failed. Only the worker copies, so the count of copies the
-/// double was handed is the count of attempts that reached one.
+/// The native half of a qualified id: what the store's plugin protocol names an item by.
+fn native(id: &str) -> &str {
+    id.split_once(':').map_or(id, |(_, native)| native)
+}
+
+/// Whether every attempt the worker has made has been recorded, every record landed, and the
+/// store is quiet — so no attempt is in flight and none failed. Quiet is read off the store's
+/// own record of calls: nothing new across a pause longer than one attempt against a local
+/// folder takes to make its next call.
 fn every_attempt_landed(world: &World, run: &str) -> bool {
+    let before = (records(world, run).len(), store_calls(world).len());
+    std::thread::sleep(std::time::Duration::from_millis(400));
     let records = records(world, run);
-    let copies = store_calls(world)
-        .iter()
-        .filter(|call| is_verb(call, ["project", "copy"]))
-        .count();
-    !records.is_empty()
-        && records.len() == copies
+    before == (records.len(), store_calls(world).len())
+        && !records.is_empty()
         && records
             .iter()
             .all(|record| record["outcome"] == "projected")
@@ -125,33 +113,21 @@ fn board_task<'a>(tasks: &'a [Value], node: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("the board holds no item for {node}"))
 }
 
-/// A detached run whose every store command goes through the recording double in front of the
-/// real store. `held` nodes stay running until the journey releases them, and `version` is
-/// what the store says it is where a journey needs an older one.
+/// A detached run whose every store call goes through the recording source in front of the
+/// real store. `held` nodes stay running until the journey releases them.
 fn a_run_projecting_through_a_recording_store(
     world: &str,
     run: &str,
     nodes: Vec<Value>,
     held: &[&str],
-    version: Option<&str>,
 ) -> (World, String) {
     let world = World::new(world);
     for node in held {
         world.script(&format!("{node}.wait"), "hold");
     }
     let project = world.plan(run, &plan_of(run, nodes));
-    world.script(
-        "onetaskgraph.delegate",
-        &onetaskgraph_binary().to_string_lossy(),
-    );
-    if let Some(version) = version {
-        world.script("onetaskgraph.version", version);
-    }
     let world = world
-        .with_env(
-            STORE_BINARY_ENV,
-            &double("fake-onetaskgraph").to_string_lossy(),
-        )
+        .through_scripted_source()
         // A held node has to outlast everything the journey does to the board around it, an
         // adoption included; the store journeys hold theirs under the same setting.
         .with_env(RENDEZVOUS_SECONDS_ENV, "600");
@@ -267,30 +243,10 @@ fn adopted(world: &World, run: &str) {
     world.run_on(adopt, "adopt --detach").exited(0);
 }
 
-/// Script the double to refuse `script` the way the store does, failure document and all.
-fn refusing(world: &World, script: &str, said: &str, document: &str) {
-    world.script(&format!("{script}.stdout"), document);
-    world.script(&format!("{script}.exit"), "1");
-    world.script(script, said);
+/// What a destination says when it declines a write or a read, in the store's own shape.
+fn source_refused(message: &str) -> Value {
+    json!({"kind": "refused", "message": message})
 }
-
-fn stops_refusing(world: &World, script: &str) {
-    for file in [
-        script.to_owned(),
-        format!("{script}.stdout"),
-        format!("{script}.exit"),
-    ] {
-        std::fs::remove_file(world.fakes.join(&file))
-            .unwrap_or_else(|error| panic!("{file} is taken away: {error}"));
-    }
-}
-
-const STALE_ORIGIN_SAID: &str =
-    "onetaskgraph: onepipeline-writeback:board/later was copied from a destination item that \
-     destination no longer holds";
-const STALE_ORIGIN: &str = r#"{"failure":{"class":"refused","kind":"stale-origin","source":null,"message":"a destination item that destination no longer holds","retry_after_seconds":null}}"#;
-const SOURCE_REFUSED_SAID: &str = "onetaskgraph: source plans refused the request";
-const SOURCE_REFUSED: &str = r#"{"failure":{"class":"refused","kind":"refused","source":"plans","message":"source plans refused the request","retry_after_seconds":null}}"#;
 
 /// A run's first projection carries the whole project and is recorded `whole` / `first`; a
 /// later transition of one node carries that node alone. The named node reaches the board as
@@ -307,7 +263,6 @@ fn a_runs_first_projection_is_whole_and_a_later_transition_carries_that_node_alo
         run,
         vec![agent("work", &[]), agent("aside", &[])],
         &["work", "aside"],
-        None,
     );
     projected_until(
         &world,
@@ -409,75 +364,34 @@ fn a_runs_first_projection_is_whole_and_a_later_transition_carries_that_node_alo
         "the named node's label did not survive its projection"
     );
 
-    // The shadow task the copy names for `work`, read off the whole copy's own command line
-    // and the shadow store it pointed the copy at.
+    // What the member projection asked the store for: the project item, the named member's own
+    // item, and the writes of the copy — never a page of tasks, and never the unnamed member.
     let calls = store_calls(&world);
-    let whole_copy = calls[..asked_before]
-        .iter()
-        .find(|call| is_verb(call, ["project", "copy"]))
-        .expect("the first projection ran a copy");
-    let shadow_project = &whole_copy[2];
-    let shadow_root = whole_copy
-        .iter()
-        .find_map(|arg| {
-            arg.strip_prefix(&format!(
-                "sources.{}.config.root=",
-                shadow_project.split(':').next().unwrap_or_default()
-            ))
-        })
-        .expect("the copy names its shadow store's root");
-    let shadow_file = shadow_project
-        .split_once(':')
-        .map(|(_, file)| file)
-        .expect("a qualified shadow project");
-    let work_member = std::fs::read_dir(Path::new(shadow_root).join("tasks").join(shadow_file))
-        .expect("the shadow store holds the project's tasks")
-        .filter_map(Result::ok)
-        .find(|entry| {
-            std::fs::read_to_string(entry.path())
-                .is_ok_and(|document| document.contains("onepipeline.id: work"))
-        })
-        .and_then(|entry| {
-            entry
-                .path()
-                .file_stem()
-                .map(|stem| format!("{shadow_project}/{}", stem.to_string_lossy()))
-        })
-        .expect("the shadow store holds work's task");
-
     let member_calls = &calls[asked_before..];
     assert!(
-        member_calls
-            .iter()
-            .any(|call| is_verb(call, ["project", "copy"])),
-        "no copy was run for the transition"
+        member_calls.iter().any(|call| is_call(call, "write_task")),
+        "no copy wrote the transition: {member_calls:?}"
     );
     for call in member_calls {
-        if is_verb(call, ["project", "show"]) {
-            assert_eq!(call, &["project", "show", project.as_str(), "--json"]);
-        } else if is_verb(call, ["task", "show"]) {
-            assert_eq!(
-                call,
-                &["task", "show", work_origin.as_str(), "--json"],
-                "a member projection read an item other than the member it names"
-            );
-        } else if is_verb(call, ["project", "copy"]) {
-            let named: Vec<&String> = call
-                .windows(2)
-                .filter(|pair| pair[0] == "--member")
-                .map(|pair| &pair[1])
-                .collect();
-            assert_eq!(
+        let named = call.get(1).map(String::as_str).unwrap_or_default();
+        match call[0].as_str() {
+            "get_project"
+            | "write_project"
+            | "task_dependencies"
+            | "metering"
+            | "project_dependencies"
+            | "health" => {}
+            "get_task" | "write_task" => assert_eq!(
                 named,
-                [&work_member],
-                "the copy named other members: {call:?}"
-            );
-            assert!(!call.iter().any(|arg| arg == "--no-tasks"), "{call:?}");
-        } else {
-            panic!("a member projection asked the store for something else: {call:?}");
+                native(&work_origin),
+                "a member projection read or wrote an item other than the member it names: \
+                 {call:?}"
+            ),
+            _ => panic!("a member projection asked the store for something else: {call:?}"),
         }
-        assert!(
-            !call.iter().any(|arg| arg == &aside_origin),
+        assert_ne!(
+            named,
+            native(&aside_origin),
             "a member projection read the member it does not name: {call:?}"
         );
     }
@@ -506,7 +420,6 @@ fn a_projection_after_a_failed_attempt_is_whole() {
         run,
         vec![agent("work", &[]), agent("later", &["work"])],
         &["work"],
-        None,
     );
     projected_until(
         &world,
@@ -523,11 +436,9 @@ fn a_projection_after_a_failed_attempt_is_whole() {
         records(&world, run)
     };
 
-    refusing(
-        &world,
-        "onetaskgraph.project-copy.refuse",
-        STALE_ORIGIN_SAID,
-        STALE_ORIGIN,
+    world.store_refuses(
+        "write_task",
+        &source_refused("the item that copy would update is one the destination no longer holds"),
     );
     noted(&world, run, "later", "refused at the copy");
     let member = recorded(1)[mark].clone();
@@ -535,7 +446,7 @@ fn a_projection_after_a_failed_attempt_is_whole() {
     assert_eq!(member["items"], json!(["later"]), "{member}");
     assert_eq!(member["outcome"], "failed", "{member}");
     assert_eq!(member["class"], "refused", "{member}");
-    assert_eq!(member["kind"], "stale-origin", "{member}");
+    assert_eq!(member["kind"], "refused", "{member}");
     assert!(
         member["reason"]
             .as_str()
@@ -571,13 +482,11 @@ fn a_projection_after_a_failed_attempt_is_whole() {
         Some("later"),
         "the surface names other items than the copy carried: {surface}"
     );
-    stops_refusing(&world, "onetaskgraph.project-copy.refuse");
+    world.store_stops_refusing("write_task");
 
-    refusing(
-        &world,
-        "onetaskgraph.task-list.refuse",
-        SOURCE_REFUSED_SAID,
-        SOURCE_REFUSED,
+    world.store_refuses(
+        "query_tasks",
+        &source_refused("source plans refused the request"),
     );
     noted(&world, run, "later", "refused at the page of tasks");
     let whole = recorded(2)[mark + 1].clone();
@@ -587,7 +496,7 @@ fn a_projection_after_a_failed_attempt_is_whole() {
     assert_eq!(whole["outcome"], "failed", "{whole}");
     assert_eq!(whole["class"], "refused", "{whole}");
     assert_eq!(whole["kind"], "refused", "{whole}");
-    stops_refusing(&world, "onetaskgraph.task-list.refuse");
+    world.store_stops_refusing("query_tasks");
 
     noted(&world, run, "later", "projected whole");
     let landed = recorded(3)[mark + 2].clone();
@@ -607,12 +516,12 @@ fn a_projection_after_a_failed_attempt_is_whole() {
     assert_eq!(again["items"], json!(["later"]), "{again}");
     assert_eq!(again["outcome"], "projected", "{again}");
 
-    // A failure the store writes no class for is retried on the schedule, and the retry is
-    // whole: the read of the named member failing is recorded failed and unclassified, and the
-    // attempt the schedule makes next reads the page of tasks rather than that member, and lands.
-    world.script(
-        "onetaskgraph.task-show.refuse",
-        "onetaskgraph: the connection was reset",
+    // A failure a wait can change is retried on the schedule, and the retry is whole: the read
+    // of the named member failing is recorded failed and `transient`, and the attempt the
+    // schedule makes next reads the page of tasks rather than that member, and lands.
+    world.store_refuses_once(
+        "get_task",
+        &json!({"kind": "unavailable", "message": "the connection was reset"}),
     );
     noted(&world, run, "later", "retried whole");
     let retried = recorded(6);
@@ -620,13 +529,12 @@ fn a_projection_after_a_failed_attempt_is_whole() {
     assert_eq!(unread["scope"], "members", "{unread}");
     assert_eq!(unread["items"], json!(["later"]), "{unread}");
     assert_eq!(unread["outcome"], "failed", "{unread}");
-    assert_eq!(unread["class"], Value::Null, "{unread}");
-    assert_eq!(unread["kind"], Value::Null, "{unread}");
+    assert_eq!(unread["class"], "transient", "{unread}");
+    assert_eq!(unread["kind"], "unavailable", "{unread}");
     assert!(
-        unread["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("task show exited")
-                && reason.contains("connection was reset")),
+        unread["reason"].as_str().is_some_and(
+            |reason| reason.contains("task-show") && reason.contains("connection was reset")
+        ),
         "{unread}"
     );
     let recovered = &retried[mark + 5];
@@ -639,95 +547,18 @@ fn a_projection_after_a_failed_attempt_is_whole() {
                 && task["item"]["metadata"]["onepipeline.context"] == "retried whole"
         })
     });
-    std::fs::remove_file(world.fakes.join("onetaskgraph.task-show.refuse"))
-        .expect("the member read stops failing");
-}
-
-/// Against a store that reports a version older than the first offering a member copy, every
-/// projection is whole and recorded `store-lacks-members`, and no copy naming a member is ever
-/// attempted. The store is asked nothing to find out: the answer is decided once, before the
-/// first projection, and kept in the run's directory — so no projection asks the version again,
-/// and a driver an adoption starts keeps the run's answer even from a store that now reports a
-/// release that offers one.
-#[test]
-fn a_store_older_than_the_member_copy_is_projected_whole_and_decided_once_per_run() {
-    let run = "projections-older-store";
-    let (world, project) = a_run_projecting_through_a_recording_store(
-        "writeback-projections-older-store",
-        run,
-        vec![agent("work", &[]), agent("later", &["work"])],
-        &["work"],
-        Some("onetaskgraph 0.2.29\n"),
-    );
-    projected_until(
-        &world,
-        run,
-        &project,
-        "the running node to reach the board",
-        |tasks| board_word(tasks, "work").as_deref() == Some("in-progress"),
-    );
-    let answer_file = in_run_dir(&proposed()["detection"]["record"]);
-    let answer = world.run_json(run, &answer_file);
-    assert_eq!(answer, json!({"version": "0.2.29", "members": false}));
-    let versions_asked = |world: &World| {
-        store_calls(world)
-            .iter()
-            .filter(|call| call == &&["--version"])
-            .count()
-    };
-    let asked_once = versions_asked(&world);
-
-    for note in ["one change", "another change"] {
-        let before = records(&world, run).len();
-        noted(&world, run, "later", note);
-        world.until(&format!("`{note}` to be projected"), |world| {
-            records(world, run).len() > before && every_attempt_landed(world, run)
-        });
-    }
-    assert_eq!(
-        versions_asked(&world),
-        asked_once,
-        "a projection asked the store its version again"
-    );
-
-    let recorded_before = records(&world, run).len();
-    world.script("onetaskgraph.version", "onetaskgraph 0.2.30\n");
-    adopted(&world, run);
-    world.until("the adopted driver's first projection", |world| {
-        records(world, run).len() > recorded_before
-    });
-    let before = records(&world, run).len();
-    noted(&world, run, "later", "a change for the adopted driver");
-    world.until("the adopted driver's change to be projected", |world| {
-        records(world, run).len() > before
-    });
-
-    let all = records(&world, run);
-    assert!(all.len() >= 5, "{all:?}");
-    for record in &all {
-        assert_eq!(record["scope"], "whole", "{record}");
-        assert_eq!(record["whole_because"], "store-lacks-members", "{record}");
-        assert_eq!(record["items"], json!(["later", "work"]), "{record}");
-    }
     assert!(
-        !store_calls(&world)
-            .iter()
-            .flatten()
-            .any(|arg| arg == "--member"),
-        "a copy naming a member was attempted against a store that offers none"
-    );
-    assert_eq!(
-        world.run_json(run, &answer_file),
-        answer,
-        "the adopted driver decided the run's answer again"
+        !world.fakes.join("store.get_task.refuse.once").exists(),
+        "the member read was never asked, so nothing failed it"
     );
 }
 
-/// The record carries exactly what the copy report said: its `spent` object verbatim and its
-/// per-item actions counted. The store double hands the worker the real store's report for one
-/// copy rewritten to carry known figures — the copy itself is still the real store's work — so
-/// a worker recording `spent` or `actions` as anything but what the report said fails here. The
-/// copy after it reports what the real store did.
+/// The record carries exactly what the copy said it did and spent: its `spent` object as the
+/// store reported it, and its per-item actions counted. The destination here meters its own
+/// writes, as a hosted source meters its requests — each write it serves spends one request and
+/// three points — so the store reports a `spent` for the copy, and a worker recording it as
+/// anything but what the store said fails here, as does one miscounting what the copy did. The
+/// copy after the meter is taken away reports what a source that meters nothing reports.
 #[test]
 fn the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent() {
     let run = "projections-report";
@@ -736,7 +567,6 @@ fn the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent() {
         run,
         vec![agent("work", &[]), agent("later", &["work"])],
         &["work"],
-        None,
     );
     projected_until(
         &world,
@@ -746,56 +576,51 @@ fn the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent() {
         |tasks| board_word(tasks, "work").as_deref() == Some("in-progress"),
     );
 
-    let spent = json!({
-        "requests": 7,
-        "budgets": [
-            {"budget": "graphql", "unit": "points", "amount": 12, "lower_bound": false},
-            {"budget": "rest", "unit": "requests", "amount": 2, "lower_bound": true},
-        ],
-    });
-    let mut items = Vec::new();
-    for (action, count) in [
-        ("created", 2),
-        ("updated", 3),
-        ("unchanged", 5),
-        ("orphaned", 1),
-    ] {
-        for n in 0..count {
-            items.push(json!({
-                "source": format!("elsewhere:board/{action}-{n}"),
-                "action": action,
-                "destination": format!("plans:elsewhere/{action}-{n}"),
-            }));
-        }
-    }
-    let rewrite = "onetaskgraph.project-copy.rewrite";
+    let meter = "store.metering";
     world.script(
-        rewrite,
-        &json!({"items": items, "spent": spent}).to_string(),
+        meter,
+        &json!({"requests": 1, "budgets": [
+            {"budget": "graphql", "unit": "points", "measured": 3, "modelled": 0}
+        ]})
+        .to_string(),
     );
     let mark = records(&world, run).len();
+    let asked_before = store_calls(&world).len();
     noted(&world, run, "later", "counted");
-    world.until("the rewritten report to be recorded", |world| {
-        !world.fakes.join(rewrite).exists() && records(world, run).len() > mark
+    world.until("the metered copy to be recorded", |world| {
+        records(world, run).len() > mark
     });
 
     let counted = records(&world, run)[mark].clone();
     assert_eq!(counted["outcome"], "projected", "{counted}");
     assert_eq!(counted["scope"], "members", "{counted}");
-    assert_eq!(counted["spent"], spent, "{counted}");
-    // The rewritten items are no shadow task of the run, so none of them is a reopen.
+    // What the metered source served for that copy, read off its own record of calls.
+    let writes = store_calls(&world)[asked_before..]
+        .iter()
+        .filter(|call| call[0].starts_with("write_") || call[0].starts_with("set_"))
+        .count() as u64;
+    assert!(writes > 0, "the metered copy wrote nothing");
     assert_eq!(
-        counted["actions"],
-        json!({"created": 2, "updated": 3, "unchanged": 5, "orphaned": 1, "reopened": 0}),
+        counted["spent"],
+        json!({"requests": writes, "budgets": [
+            {"budget": "graphql", "unit": "points", "amount": 3 * writes, "lower_bound": false}
+        ]}),
         "{counted}"
     );
-    world.until_store("the copy the report was rewritten for to land", |world| {
+    // The project item already read as the source did; the named member was rewritten.
+    assert_eq!(
+        counted["actions"],
+        json!({"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0, "reopened": 0}),
+        "{counted}"
+    );
+    world.until_store("the metered copy to land", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
                 && task["item"]["metadata"]["onepipeline.context"] == "counted"
         })
     });
 
+    world.unscript(meter);
     noted(&world, run, "later", "reported as it was");
     world.until("the next projection to be recorded", |world| {
         records(world, run).len() > mark + 1
@@ -807,6 +632,71 @@ fn the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent() {
         json!({"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0, "reopened": 0}),
         "{real}"
     );
+}
+
+/// A run directory an engine that drove the store's binary left behind holds that engine's
+/// record of whether its store offered a member copy, `writeback-store.json`, answering that it
+/// did not. This build neither reads nor writes that record: the run adopts, the adopted
+/// driver's first projection is whole and `first` as every driver's is, and the change after it
+/// is carried as members — never whole for `store-lacks-members`, which this build reads on an
+/// older line and never gives.
+#[test]
+fn a_run_directory_holding_an_older_engines_store_record_adopts_and_projects_by_member() {
+    let run = "projections-older-record";
+    let (world, project) = a_run_projecting_through_a_recording_store(
+        "writeback-projections-older-record",
+        run,
+        vec![agent("work", &[]), agent("later", &["work"])],
+        &["work"],
+    );
+    projected_until(
+        &world,
+        run,
+        &project,
+        "the running node to reach the board",
+        |tasks| board_word(tasks, "work").as_deref() == Some("in-progress"),
+    );
+    let older = in_run_dir(&proposed()["retired"]["record"]);
+    let answer = json!({"version": "0.2.29", "members": false});
+    std::fs::write(world.run_file(run, &older), answer.to_string())
+        .expect("the older engine's record is left in the run directory");
+
+    let recorded_before = records(&world, run).len();
+    adopted(&world, run);
+    world.until("the adopted driver's first projection", |world| {
+        records(world, run).len() > recorded_before
+    });
+    let first = records(&world, run)[recorded_before].clone();
+    assert_eq!(first["scope"], "whole", "{first}");
+    assert_eq!(first["whole_because"], "first", "{first}");
+
+    let before = records(&world, run).len();
+    noted(&world, run, "later", "a change for the adopted driver");
+    world.until("the adopted driver's change to be projected", |world| {
+        records(world, run).len() > before
+    });
+    let change = records(&world, run)[before].clone();
+    assert_eq!(change["scope"], "members", "{change}");
+    assert_eq!(change["items"], json!(["later"]), "{change}");
+    assert_eq!(change["outcome"], "projected", "{change}");
+    assert!(
+        records(&world, run)
+            .iter()
+            .all(|record| record["whole_because"] != "store-lacks-members"),
+        "this build gave a reason only an engine driving the binary gives"
+    );
+    assert_eq!(
+        world.run_json(run, &older),
+        answer,
+        "this build rewrote the older engine's record"
+    );
+    world.until_store("the adopted driver's change to reach the board", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "later"
+                && task["item"]["metadata"]["onepipeline.context"]
+                    == "a change for the adopted driver"
+        })
+    });
 }
 
 /// A running node that is cancelled settles `cancelled` and reads `parked` on the board — the
@@ -844,15 +734,8 @@ fn a_retry_or_requeue_of_a_cancelled_node_reopens_its_one_item() {
     );
     plan["concurrency"] = json!(2);
     let project = world.plan(run, &plan);
-    world.script(
-        "onetaskgraph.delegate",
-        &onetaskgraph_binary().to_string_lossy(),
-    );
     let world = world
-        .with_env(
-            STORE_BINARY_ENV,
-            &double("fake-onetaskgraph").to_string_lossy(),
-        )
+        .through_scripted_source()
         .with_env(RENDEZVOUS_SECONDS_ENV, "600")
         .with_env(CANCEL_GRACE_ENV, "1");
     world.run(&["start", &project, "--detach"]).exited(0);
@@ -1048,7 +931,6 @@ fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item(
         run,
         vec![agent("flaky", &[]), agent("hold", &[])],
         &["flaky", "hold"],
-        None,
     );
     world.script("flaky-2.wait", "hold");
     projected_until(
@@ -1386,16 +1268,10 @@ fn shadow_documents(dir: &Path) -> Vec<PathBuf> {
 // coverage when the projection code changes.
 #[test]
 fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
-    let world = World::new("writeback-concurrent-shadow");
-    world.script(
-        "onetaskgraph.delegate",
-        &onetaskgraph_binary().to_string_lossy(),
-    );
-    let world = world.with_env(
-        STORE_BINARY_ENV,
-        &double("fake-onetaskgraph").to_string_lossy(),
-    );
-    let copies = world.rendezvous("onetaskgraph.project-copy");
+    let world = World::new("writeback-concurrent-shadow").through_scripted_source();
+    // Each run's first copy, held at its first write: the store is started once per attempt, so
+    // this holds the two runs' first attempts and no later one.
+    let copies = world.store_holds("write_task");
     let runs = ["left", "right"];
     let shadows: Vec<PathBuf> = runs
         .iter()
@@ -1421,7 +1297,7 @@ fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
     let left_copy = copies.arrived();
     let right_copy = copies.arrived();
     assert_ne!(left_copy.pid, right_copy.pid, "the same copy arrived twice");
-    world.unscript("onetaskgraph.project-copy.rendezvous");
+    world.store_stops_holding("write_task");
     left_copy.release();
     right_copy.release();
 
