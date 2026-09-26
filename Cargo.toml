@@ -558,6 +558,17 @@ resolver = "2"
 # fails with `cannot lock ref`, on Windows every time, in
 # `tests/e2e/lifecycle.rs`'s pooled-identity journey.
 #
+# `onevcs` 0.34.0 is the floor because it carries **branch retirement**:
+# `record_supersession`/`Supersession`, which `src/supersession.rs` calls when a
+# retry on a fresh branch lands, and `retire_finished`/`RetirePass`/`BranchRef`/
+# `RetirementPassReport`, which `src/maintenance.rs`'s idle sweep calls after
+# `pool_maintain`. It also adds the `branch-superseded` and `branch-retired` stream
+# kinds, which `src/vcs.rs`'s `kind_of` relays as that library spells them, and
+# `LandingEvidence::Retired`, which nothing here matches arm by arm. A
+# **requirement**, because `^0.33` admits no 0.34.x; `onevcs-testing` 0.8.4
+# requires exactly it, so the two move together. `tests/e2e/retirement.rs` drives
+# both calls against the linked release over real git and a bare origin.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -578,7 +589,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.2"
-onevcs = "0.33.0"
+onevcs = "0.34.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -743,7 +754,7 @@ oneharness-core = "0.18.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.8.3"
+onevcs-testing = "0.8.4"
 # **Test-support only**, and linked by `crates/testfakes` alone: the crate under test
 # still reads every plan by *driving* the `onetaskgraph` binary. These host the real
 # `local-md` plugin inside `label-strict-source`; that fake says why.
