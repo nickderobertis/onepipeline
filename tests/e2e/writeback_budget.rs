@@ -810,3 +810,72 @@ fn a_store_that_does_not_open_within_the_floor_is_refused_retried_and_recovers()
     });
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey waits past
+// the sixty-second floor twice by construction — a read held past a minute cannot be observed
+// in less than one — and the edge it needs is the crate under test: it drives the compiled
+// `onepipeline` binary against its own write-back worker, as the journeys above do and for the
+// reason they record.
+/// The two reads an attempt makes before it copies — the destination project, and the item of
+/// each member a member copy names — are each held to the floor: a read held past it is
+/// cancelled and reported by the name and the seconds of the deadline it outlasted, retried on
+/// the schedule, and the projection recovers once the store answers.
+#[test]
+fn a_destination_read_held_past_the_floor_is_cancelled_retried_and_recovers() {
+    let floor = number("floor_seconds");
+    let world = World::new("writeback-budget-held-read")
+        .through_scripted_source()
+        .with_env(RENDEZVOUS_SECONDS_ENV, "600");
+    world.script("work.wait", "hold");
+    let run = "heldread";
+    let project = world.plan(
+        run,
+        &plan_of(run, vec![agent("work", &[]), agent("later", &["work"])]),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until_store("the running node to reach the board", |world| {
+        board_status(world, &project, "work").is_some_and(|word| word == "in-progress")
+    });
+    let log = |world: &World| {
+        std::fs::read_to_string(world.run_file(run, "driver.log")).unwrap_or_default()
+    };
+
+    for (method, read) in [("get_project", "project-show"), ("get_task", "task-show")] {
+        // Held from the next attempt on: its first call of the read, which is the read itself.
+        let holding = world.store_holds(method);
+        let recovered = log(&world).matches("write-back recovered").count();
+        noted(&world, run, "later", &format!("held at {read}"));
+        let held = holding.arrived();
+        let expected = format!("{read} exceeded {floor} seconds");
+        world.until_run_file_holds(run, "driver.log", &expected);
+        assert!(
+            log(&world).lines().any(|line| {
+                line.contains(&format!("write-back failed for '{project}': {expected}"))
+                    && line.contains("retrying")
+            }),
+            "a read held past its deadline was not reported as a failure to retry:\n{}",
+            log(&world)
+        );
+
+        // The store answers again, and the retry lands.
+        world.store_stops_holding(method);
+        held.release();
+        drop(holding);
+        world.until(
+            &format!("the projection to recover after {read}"),
+            |world| log(world).matches("write-back recovered").count() > recovered,
+        );
+        let context = format!("held at {read}");
+        world.until_store("the held change to reach the board", |world| {
+            world.store_tasks(&project).iter().any(|task| {
+                task["item"]["metadata"]["onepipeline.id"] == "later"
+                    && task["item"]["metadata"]["onepipeline.context"] == context.as_str()
+            })
+        });
+    }
+    world.release("work.go");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

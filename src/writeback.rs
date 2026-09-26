@@ -1681,8 +1681,10 @@ fn destination_origins(
             },
         };
         // llmlint: ignore-block[changed_behavior_has_e2e] The real unavailable-store
-        // journey proves this asynchronous read cannot affect or delay reconciliation; the
-        // deadline that bounds it is the one `writeback_budget` drives against a held copy.
+        // journey proves this asynchronous read cannot affect or delay reconciliation, and the
+        // floor that bounds it is the one
+        // `writeback_budget::a_destination_read_held_past_the_floor_is_cancelled_retried_and_recovers`
+        // drives against the project read and the member read an attempt makes beside it.
         let answer = attempt
             .call(TASK_LIST, Deadline::Floor, attempt.engine.tasks(&request))?
             .map_err(|error| Failed::engine(TASK_LIST, &error))?;
