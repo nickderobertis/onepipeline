@@ -1371,15 +1371,20 @@ impl Attempt {
                 },
             })
         };
+        // A setting is text, so a shadow root that is not is refused by name rather than
+        // handed over lossily — which would point the store at a folder nobody wrote.
+        let root = snapshot.dir.to_str().ok_or_else(|| {
+            format!(
+                "the shadow store {} is not a UTF-8 path, so no store setting can name it",
+                snapshot.dir.display()
+            )
+        })?;
         let flags = Layer::new(vec![
             setting(
                 &format!("sources.{SHADOW_SOURCE}.plugin"),
                 json!(onetaskgraph_core::PluginKind::LocalMd.as_str()),
             )?,
-            setting(
-                &format!("sources.{SHADOW_SOURCE}.config.root"),
-                json!(snapshot.dir.to_string_lossy()),
-            )?,
+            setting(&format!("sources.{SHADOW_SOURCE}.config.root"), json!(root))?,
         ]);
         // The shadow root exists before the source over it is built, so the store never
         // reads it as a folder that is not there.
@@ -5131,6 +5136,39 @@ mod tests {
                 .actions_against(&released, &before)
                 .reopened,
             1
+        );
+    }
+
+    /// A shadow store whose path is not UTF-8 is refused by name before the store is opened,
+    /// rather than named to the store lossily — which would point it at a folder nobody wrote.
+    #[cfg(unix)]
+    #[test]
+    fn a_shadow_store_path_that_is_not_utf8_is_refused_rather_than_named_lossily() {
+        use std::os::unix::ffi::OsStrExt;
+        let fixture = Fixture::new("not-utf8");
+        let mut snapshot = fixture.snapshot.clone();
+        snapshot.dir = fixture
+            .dir
+            .join(std::ffi::OsStr::from_bytes(b"shadow-\xff"));
+        let store = crate::taskgraph::Store::at(fixture.dir.to_path_buf());
+        let failed = match super::project(
+            &store,
+            DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
+            &snapshot,
+            &super::Carry::Whole(super::WholeBecause::First),
+            &BTreeMap::new(),
+        ) {
+            Ok(_) => panic!("a shadow store no setting can name was projected through"),
+            Err(failed) => failed,
+        };
+        assert!(
+            failed.reason.contains("is not a UTF-8 path"),
+            "{}",
+            failed.reason
+        );
+        assert!(
+            !snapshot.dir.exists(),
+            "the store was opened over a path it was never handed"
         );
     }
 }
