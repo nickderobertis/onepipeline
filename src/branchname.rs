@@ -38,7 +38,7 @@ pub const ENVIRONMENT: &str = "ONEPIPELINE_BRANCH_TEMPLATE";
 pub const KEY: &str = "branch_template";
 
 /// The launch-config schema version [`KEY`] arrived at.
-pub const CONFIG_SCHEMA_VERSION: u32 = 10;
+pub const CONFIG_SCHEMA_VERSION: u32 = 11;
 
 /// The template a launch that names none at any layer renders with:
 /// `<task key>/<node id>`, falling back to `<plan name>/<node id>` where the
@@ -74,6 +74,54 @@ pub(crate) fn parses(template: &str, whence: &str) -> Result<()> {
                 "{whence}: the branch-name template does not parse: {error}"
             ))
         })
+}
+
+/// The template a launch renders its branches with, off the first layer that
+/// is there: the flag, then [`ENVIRONMENT`], then the launch config's [`KEY`],
+/// then [`DEFAULT_TEMPLATE`].
+///
+/// A layer that is there and blank is this launch naming none — `None` — and
+/// stops the search rather than falling through to the layer under it, exactly
+/// as every other launch-config field reads. Whatever wins is parsed here, before
+/// a run is minted, and refused naming the layer it came from: the flag, the
+/// variable, or the key and the file that carried it.
+///
+/// # Errors
+///
+/// [`Error::Invalid`] for a template that does not parse, and for a variable
+/// this build cannot read as text.
+pub(crate) fn resolve(
+    flag: Option<&str>,
+    configured: Option<&str>,
+    config: Option<&std::path::Path>,
+) -> Result<Option<String>> {
+    let (template, whence) = match flag {
+        Some(flag) => (flag.to_owned(), FLAG.to_owned()),
+        None => match std::env::var(ENVIRONMENT) {
+            Ok(variable) => (variable, ENVIRONMENT.to_owned()),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(Error::Invalid(format!(
+                    "{ENVIRONMENT} holds something this build cannot read as text — set it \
+                     to a template, or unset it"
+                )))
+            }
+            Err(std::env::VarError::NotPresent) => match configured {
+                Some(configured) => (
+                    configured.to_owned(),
+                    match config {
+                        Some(path) => format!("`{KEY}` in {}", path.display()),
+                        None => format!("`{KEY}`"),
+                    },
+                ),
+                None => (DEFAULT_TEMPLATE.to_owned(), "the shipped default".to_owned()),
+            },
+        },
+    };
+    if template.trim().is_empty() {
+        return Ok(None);
+    }
+    parses(&template, &whence)?;
+    Ok(Some(template))
 }
 
 /// Render a template over the variables a node's branch is named from.
@@ -112,6 +160,35 @@ pub(crate) struct Naming {
 }
 
 impl Naming {
+    /// What `launch`'s run names its branches with, or `None` for a run whose
+    /// launch named no template — including every run launched before there was
+    /// one — which proposes no name, so `onevcs` derives each as it always has.
+    ///
+    /// `plan.name` is read off the plan the launch recorded, which the store's
+    /// mapping has already given the project's own title where
+    /// `onepipeline.name` states none; a record this build cannot read falls back
+    /// to the project's native id rather than to no name at all.
+    pub fn of_run(paths: &crate::ledger::RunPaths, launch: &crate::ledger::LaunchRecord) -> Option<Self> {
+        let template = launch.branch_template()?.to_owned();
+        let plan_name = crate::ledger::read_json::<crate::plan::Plan>(&paths.plan())
+            .ok()
+            .and_then(|plan| plan.name)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| {
+                launch
+                    .project
+                    .split_once(':')
+                    .map_or(launch.project.as_str(), |(_, native)| native)
+                    .to_owned()
+            });
+        Some(Self {
+            template,
+            plan_name,
+            plan_id: launch.project.clone(),
+            run: paths.run.clone(),
+        })
+    }
+
     /// The namespace a node's branch is rendered over.
     ///
     /// `task.key` is left out rather than written null where the node's task has

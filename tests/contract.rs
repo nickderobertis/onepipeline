@@ -464,7 +464,9 @@ fn the_contracts_graph_override_shapes_match_the_public_types() {
         serde_json::to_value(&launch).expect("launch serializes"),
         overrides["launch_config"]
     );
-    assert_eq!(launch.schema_version, LAUNCH_CONFIG_SCHEMA_VERSION);
+    // The version the override lists arrived at, which a later version still reads.
+    assert_eq!(launch.schema_version, 10);
+    assert!(LAUNCH_CONFIG_SCHEMA_VERSIONS_READ.contains(&launch.schema_version));
     assert_eq!(node.sets.len(), 2);
     let mut empty = node;
     empty.sets.clear();

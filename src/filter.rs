@@ -52,8 +52,9 @@ pub const DETAILED_PROFILE: &str = "detailed";
 /// envelope reviewer judges against — `bus_config` and `envelope_reviewer_bar` —
 /// and **6** the commands a run fires when it ends — `success_hook`,
 /// `failure_hook` and `hook_timeout`. **10** adds the ordered node and dag
-/// graph override lists.
-pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 10;
+/// graph override lists, and **11** the template a lifecycle node's branch is
+/// named from, `branch_template`.
+pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 11;
 
 /// Every launch-config version this build **reads**, newest first.
 ///
@@ -65,12 +66,14 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 10;
 /// reviewing an envelope, a version-4 one says nothing about the write-back's
 /// budget, a version-5 one says nothing about a run-end hook, a version-6 one
 /// says nothing about the bus or a reviewer's bar, a version-7 one says nothing
-/// about a dispatch-env hook, and a version-8 one says nothing about a
-/// maintenance schedule, which is what a launch naming none of them means — and
+/// about a dispatch-env hook, a version-8 one says nothing about a maintenance
+/// schedule, a version-9 one says nothing about graph overrides, and a
+/// version-10 one says nothing about a branch-name template, which is what a
+/// launch naming none of them means — and
 /// naming a later key there is refused by that field's name**, exactly as a key
 /// no version ever had is.
-pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 10] =
-    [LAUNCH_CONFIG_SCHEMA_VERSION, 9, 8, 7, 6, 5, 4, 3, 2, 1];
+pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 11] =
+    [LAUNCH_CONFIG_SCHEMA_VERSION, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
 
 const OVERRIDE_LIST_SCHEMA_VERSION: u32 = 10;
 
@@ -116,6 +119,11 @@ const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
     (crate::maintenance::KEY, 9, BlankValue::Kept),
     ("node_sets", OVERRIDE_LIST_SCHEMA_VERSION, BlankValue::Kept),
     ("dag_sets", OVERRIDE_LIST_SCHEMA_VERSION, BlankValue::Kept),
+    (
+        crate::branchname::KEY,
+        crate::branchname::CONFIG_SCHEMA_VERSION,
+        BlankValue::Kept,
+    ),
 ];
 
 /// The launch-config key naming the write-back's per-item budget, spelled once
@@ -494,6 +502,23 @@ pub struct LaunchConfig {
     // llmlint: ignore[invalid_states_unrepresentable] a path spelled as the launch config document wrote it, exactly as `bus_config` beside it is: resolved against the document's own directory at the launch and read there, where a document this build does not accept is refused naming its key. It is a public field of the type `docs/contract.md`'s launch config names, and a path newtype would be a public item that contract never promised.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance_config: Option<String>,
+    /// The minijinja template the branch a lifecycle node's session cuts is
+    /// named from, if the launch says.
+    ///
+    /// The ninth launch-level decision, written down beside a plan for the
+    /// reason the others are: what a team's branches say is a property of how it
+    /// works rather than of one launch. `--branch-template` spells the same thing
+    /// inline and overrides this, as does `ONEPIPELINE_BRANCH_TEMPLATE` between
+    /// them; naming none at any of the three takes the shipped default.
+    ///
+    /// A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may
+    /// not carry one. Blank is kept as written and read at the launch as naming
+    /// none, as the hooks are: a run naming none proposes no branch name, and its
+    /// branches are the ones `onevcs` derives. Parsed at the launch, where one
+    /// that does not parse is refused naming this key. Omitted when absent.
+    // llmlint: ignore[invalid_states_unrepresentable] a template spelled as the launch config document wrote it, exactly as the command keys beside it are: it is parsed where the launch reads it, and refused there naming this key, and a template newtype would be a public item `docs/contract.md`'s launch config never promised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_template: Option<String>,
 }
 
 impl Default for LaunchConfig {
@@ -515,6 +540,7 @@ impl Default for LaunchConfig {
             dispatch_env_hook: None,
             dispatch_env_hook_timeout: None,
             maintenance_config: None,
+            branch_template: None,
         }
     }
 }
@@ -573,7 +599,7 @@ impl LaunchConfig {
         // request nobody drafted a body for, one who wrote a validator would
         // find it out from a node nothing checked, and one who wrote a budget
         // would find it out from a settlement that never reached the board.
-        let carried: [(&str, Carried); 12] = [
+        let carried: [(&str, Carried); 13] = [
             (
                 "pr_author_graph",
                 Carried::text(config.pr_author_graph.as_deref()),
@@ -629,6 +655,10 @@ impl LaunchConfig {
             (
                 crate::maintenance::KEY,
                 Carried::text(config.maintenance_config.as_deref()),
+            ),
+            (
+                crate::branchname::KEY,
+                Carried::text(config.branch_template.as_deref()),
             ),
         ];
         for (key, value) in carried {
@@ -811,11 +841,12 @@ mod tests {
     /// without anyone deciding to move it. The earlier ones stay checked in for
     /// the half a single golden cannot pin — that a config written before the
     /// current version is still a document this build reads.
-    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v10.json");
+    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v11.json");
 
     /// The same document as each earlier version wrote it: the block it had, and
     /// no key that version never had, newest first.
-    const GOLDEN_EARLIER: [(u32, &str); 9] = [
+    const GOLDEN_EARLIER: [(u32, &str); 10] = [
+        (10, include_str!("../tests/golden/launch-config-v10.json")),
         (9, include_str!("../tests/golden/launch-config-v9.json")),
         (8, include_str!("../tests/golden/launch-config-v8.json")),
         (7, include_str!("../tests/golden/launch-config-v7.json")),
@@ -912,6 +943,7 @@ mod tests {
             dispatch_env_hook: Some("./scripts/dispatch-env.sh".to_string()),
             dispatch_env_hook_timeout: NonZeroU64::new(60),
             maintenance_config: Some("./maintenance.yml".to_string()),
+            branch_template: Some("{{ task.key }}/{{ node.id }}".to_string()),
         }
     }
 
@@ -950,8 +982,13 @@ mod tests {
                 earlier,
                 LaunchConfig {
                     schema_version: version,
-                    node_sets: Vec::new(),
-                    dag_sets: Vec::new(),
+                    // Version 10 declared the graph override lists.
+                    node_sets: (version >= 10)
+                        .then(|| vec!["members.worker.agent.model=node".to_string()])
+                        .unwrap_or_default(),
+                    dag_sets: (version >= 10)
+                        .then(|| vec!["members.observer.agent.model=dag".to_string()])
+                        .unwrap_or_default(),
                     filters: pinned_filters(),
                     // Version 2 is the one that declared the drafting graph, and
                     // it names one; version 1 never had the key at all. Version 3
@@ -976,6 +1013,7 @@ mod tests {
                         .then(|| "./scripts/dispatch-env.sh".to_string()),
                     dispatch_env_hook_timeout: NonZeroU64::new(60).filter(|_| version >= 8),
                     maintenance_config: (version >= 9).then(|| "./maintenance.yml".to_string()),
+                    branch_template: None,
                 }
             );
             assert!(

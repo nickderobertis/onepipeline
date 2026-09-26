@@ -51,6 +51,9 @@ pub struct Launch {
     pub pr_author_graph: Option<String>,
     /// What every followed `onevcs` session's stream is read through.
     pub vcs_filter: Option<EventFilter>,
+    /// What a branch a session cuts is named from, when the launch named a
+    /// template. `None` proposes no name, and `onevcs` derives one.
+    pub branch_naming: Option<crate::branchname::Naming>,
 }
 
 /// Run one lifecycle node to settlement, re-dispatching it while its
@@ -331,11 +334,28 @@ fn attempt_once(
 ) -> Attempt {
     let run = paths.run.as_str();
     let vcs_filter = launch.vcs_filter.as_ref();
-    let Some(request) = crate::vcs::request_for(node) else {
-        return Attempt::settled(Settlement {
-            detail: Some("a lifecycle node needs a repo".into()),
-            ..Settlement::plain(&node.id, NodeStatus::Failed, Some(engine::INVALID_NODE))
-        });
+    let request = match crate::vcs::opening_for(node, launch.branch_naming.as_ref()) {
+        Some(Ok(request)) => request,
+        // The template could not name the branch this node would cut. Settled
+        // before any session opens — the executor refusing before any work began,
+        // which carries no work to lose — and never answered by cutting the branch
+        // under some other name.
+        Some(Err(why)) => {
+            return Attempt::settled(Settlement {
+                detail: Some(why),
+                ..Settlement::plain(
+                    &node.id,
+                    NodeStatus::Failed,
+                    Some(engine::INFRASTRUCTURE_FAILURE),
+                )
+            })
+        }
+        None => {
+            return Attempt::settled(Settlement {
+                detail: Some("a lifecycle node needs a repo".into()),
+                ..Settlement::plain(&node.id, NodeStatus::Failed, Some(engine::INVALID_NODE))
+            })
+        }
     };
 
     // A node that declared no steps has one dispatch and no step, so nothing

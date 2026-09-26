@@ -1,0 +1,51 @@
+{
+  "schema_version": 11,
+  "node_sets": [
+    "members.worker.agent.model=node"
+  ],
+  "dag_sets": [
+    "members.observer.agent.model=dag"
+  ],
+  "filters": {
+    "agentgraph": {
+      "exclude": [
+        {
+          "kind": "turn-activity"
+        }
+      ]
+    },
+    "vcs": {
+      "include": [
+        {
+          "kind": "gate-*"
+        },
+        {
+          "kind": "session-closed"
+        }
+      ]
+    },
+    "profiles": {
+      "monitor": {},
+      "planner": {
+        "include": [
+          {
+            "source": "pipeline"
+          }
+        ]
+      }
+    }
+  },
+  "pr_author_graph": "./graphs/pr-author.yaml",
+  "node_validator": "./scripts/check-node.sh",
+  "envelope_reviewer": "./scripts/review-envelope.sh",
+  "envelope_reviewer_bar": "./scripts/reviewer-bar.sh",
+  "writeback_item_budget": 10,
+  "success_hook": "./scripts/follow-up.sh",
+  "failure_hook": "./scripts/report-failure.sh",
+  "hook_timeout": 600,
+  "bus_config": "./onemessagebus.yaml",
+  "dispatch_env_hook": "./scripts/dispatch-env.sh",
+  "dispatch_env_hook_timeout": 60,
+  "maintenance_config": "./maintenance.yml",
+  "branch_template": "{{ task.key }}/{{ node.id }}"
+}
