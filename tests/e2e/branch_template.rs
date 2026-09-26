@@ -248,6 +248,15 @@ fn the_flag_beats_the_environment_which_beats_the_launch_config_which_beats_the_
     );
     assert_eq!(opened_branches(&world, &run), ["config/service"]);
 
+    // And under all three, with none of them there: the shipped default, which for a
+    // task with no key is the plan's name and the node's.
+    let run = settle(&world, "defaulted", vec![lifecycle("service", &[])], &[]);
+    assert_eq!(opened_branches(&world, &run), ["defaulted/service"]);
+    assert_eq!(
+        world.run_json(&run, "launch.json")[KEY],
+        json!(DEFAULT_TEMPLATE)
+    );
+
     // A blank layer is this launch naming none, over every layer beneath it — the
     // flag over the config, the variable over the config, and a blank key over the
     // default: the branch is the one `onevcs` derives, and the record names none.
@@ -524,6 +533,33 @@ fn a_retry_that_cuts_a_branch_names_it_for_the_task_its_node_was_read_out_of() {
     );
     assert_eq!(settlement(&world, &run, "service")["status"], "failed");
     assert!(opened_branches(&world, &run).is_empty());
+
+    // A node an edit submits carrying a task record of its own is refused, on `add`
+    // and on `retry` alike: the record is the store's to fill, and one a reply stated
+    // would name a branch for a task nobody read.
+    let replacement = |id: &str| {
+        json!({"id": id, "repo": "service", "persona": "engineer",
+               "title": "feat: ship service",
+               "task": "## What\nShip it.\n\n## Why\nIt failed.\n\n## Acceptance criteria\n- shipped."})
+    };
+    let invented = json!({"id": "invented", "key": "ENG-999", "title": "not this task"});
+    for (op, mut command) in [
+        ("add", json!({"op": "add", "node": replacement("sneaked")})),
+        (
+            "retry",
+            json!({"op": "retry", "id": "service", "node": replacement("service-2")}),
+        ),
+    ] {
+        command["node"]["task_record"] = invented.clone();
+        world
+            .run_with_stdin(
+                &["reply", &run],
+                &json!({"version": 2, "commands": [command]}).to_string(),
+            )
+            .exited(REFUSED)
+            .err_has(&format!("{op}: node '"))
+            .err_has("states `task_record`");
+    }
 
     // A planner writes the replacement, so it states no task record — and names the
     // branch it cuts for the task it replaces, whose key it inherits.

@@ -41,7 +41,12 @@ mod amend;
 mod ask;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod boundary;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the
+// head of `tests/e2e/branch_template.rs` and is not restated here; this declaration is the
+// other site the rule reads, and what it adds is only that the module belongs to this
+// binary for the same reason `mod listing` and `mod shutdown` below do.
 mod branch_template;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod bus_config;
 mod cancellation;
 mod channel;
