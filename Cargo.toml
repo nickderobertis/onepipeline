@@ -767,7 +767,7 @@ onetaskgraph-plugin-api = "=0.2.44"
 
 [package]
 name = "onepipeline"
-version = "0.47.0"
+version = "0.48.0"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
