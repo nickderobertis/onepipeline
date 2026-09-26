@@ -19,6 +19,15 @@
 // real store through `fake-onetaskgraph`, which adds the one field a local source cannot
 // carry. `harness.rs` carries the same suppression and the full rationale.
 
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
+// assumed: the twelve journeys here take about 45 seconds on the wall under the suite's
+// parallelism, each cutting a real branch through the linked `onevcs` over real git. What
+// they exercise is `branchname`, `vcs::opening_for`, the lifecycle's session open, the
+// launch in `driver`, the store mapping in `taskgraph` and the write-back together, which
+// any change under `src/` can move, so a project edged narrower than the crate would drop
+// them out of `nx affected` for the very changes they exist to catch — the ground
+// `shutdown.rs` and `listing.rs` carry for their own.
+
 use serde_json::{json, Value};
 
 use crate::harness::{
@@ -195,7 +204,6 @@ fn the_flag_beats_the_environment_which_beats_the_launch_config_which_beats_the_
     .expect("the launch config is written");
     let config = config.to_string_lossy().into_owned();
 
-    // Every layer named: the flag.
     let path = world.plan(
         "flagged",
         &plan_of("flagged", vec![lifecycle("service", &[])]),
@@ -213,7 +221,6 @@ fn the_flag_beats_the_environment_which_beats_the_launch_config_which_beats_the_
     world.run_on(command, "start flagged").settled();
     assert_eq!(cut_branches(&world, "flagged"), ["flag/service"]);
 
-    // The environment and the config: the environment.
     let path = world.plan(
         "envied",
         &plan_of("envied", vec![lifecycle("service", &[])]),
@@ -223,7 +230,6 @@ fn the_flag_beats_the_environment_which_beats_the_launch_config_which_beats_the_
     world.run_on(command, "start envied").settled();
     assert_eq!(cut_branches(&world, "envied"), ["env/service"]);
 
-    // The config alone.
     let run = settle(
         &world,
         "configured",
@@ -280,12 +286,10 @@ fn a_template_that_does_not_parse_or_a_key_its_version_never_had_is_refused_befo
         &plan_of("refused", vec![lifecycle("service", &[])]),
     );
 
-    // From the flag, naming the flag.
     world
         .run(&["start", &path, FLAG, "{{ node.id"])
         .exited(REFUSED)
         .err_has(&format!("{FLAG}: the branch-name template does not parse"));
-    // From the environment, naming the variable.
     let mut command = world.cmd(&["start", &path]);
     command.env(ENVIRONMENT, "{% if %}");
     world
@@ -294,7 +298,18 @@ fn a_template_that_does_not_parse_or_a_key_its_version_never_had_is_refused_befo
         .err_has(&format!(
             "{ENVIRONMENT}: the branch-name template does not parse"
         ));
-    // From the launch config, naming the key and the file.
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let mut command = world.cmd(&["start", &path]);
+        command.env(ENVIRONMENT, std::ffi::OsStr::from_bytes(b"x/\xff"));
+        world
+            .run_on(command, "start refused")
+            .exited(REFUSED)
+            .err_has(&format!(
+                "{ENVIRONMENT} holds something this build cannot read as text"
+            ));
+    }
     let config = world.root.join("broken.yaml");
     std::fs::write(&config, format!("schema_version: 11\n{KEY}: \"{{{{ x\"\n"))
         .expect("the config is written");
@@ -321,7 +336,6 @@ fn a_template_that_does_not_parse_or_a_key_its_version_never_had_is_refused_befo
                 "`{KEY}` is a schema 11 key and this config declares schema_version {earlier}"
             ));
     }
-    // A task stating the record it is read out of, as metadata: refused by the key.
     let mut stating = lifecycle("service", &[]);
     stating["task_record"] = json!({"id": "elsewhere", "title": "not this task"});
     let stated = world.plan("stated", &plan_of("stated", vec![stating]));
@@ -329,11 +343,9 @@ fn a_template_that_does_not_parse_or_a_key_its_version_never_had_is_refused_befo
         .run(&["start", &stated])
         .exited(REFUSED)
         .err_has("`onepipeline.task_record` is not a node field");
-    // No run was minted by any of them.
     assert!(!world.run_file("refused", "launch.json").is_file());
     assert!(!world.run_file("stated", "launch.json").is_file());
 
-    // `adopt` takes no template of its own.
     world
         .run(&["adopt", "refused", FLAG, "x"])
         .exited(USAGE_ERROR)
@@ -495,6 +507,62 @@ fn a_retry_that_cuts_a_branch_names_it_for_the_task_its_node_was_read_out_of() {
     );
     assert_eq!(settlement(&world, &run, "service-2")["status"], "done");
 }
+
+// llmlint: ignore-block[tests_mirror_real_usage] the one state set by hand is a run's own
+// record going bad between the launch that wrote it and the driver that adopts it — a
+// template edited into one that no longer parses, a recorded plan removed. No verb writes
+// either: the launch parses the template it records and writes the plan beside it, so a
+// record this build cannot read is reached only by something outside it, which is the
+// condition the adopting driver has to refuse on. Everything else is the real binary
+// against a real run, and the assertion is on how the node settled and what was cut.
+#[test]
+fn a_run_whose_records_went_bad_before_adoption_settles_the_node_and_cuts_no_branch() {
+    let world = publishing("branch-bad-records");
+    for (run, spoil, says) in [
+        (
+            "retemplated",
+            (|world: &World, run: &str| {
+                let path = world.run_file(run, "launch.json");
+                let mut record: Value = serde_json::from_str(
+                    &std::fs::read_to_string(&path).expect("the launch record"),
+                )
+                .expect("the launch record is JSON");
+                record[KEY] = json!("{{ node.id");
+                std::fs::write(&path, record.to_string()).expect("the record is rewritten");
+            }) as fn(&World, &str),
+            "the launch record's `branch_template`",
+        ),
+        (
+            "unplanned",
+            (|world: &World, run: &str| {
+                std::fs::remove_file(world.run_file(run, "plan.json"))
+                    .expect("the recorded plan is removed");
+            }) as fn(&World, &str),
+            "the run's recorded plan",
+        ),
+    ] {
+        let run = settle(
+            &world,
+            run,
+            vec![human("approve", &[]), lifecycle("service", &["approve"])],
+            &[],
+        );
+        spoil(&world, &run);
+        world.run(&["attest", &run, "approve"]).exited(0);
+        world.run(&["adopt", &run]).settled();
+
+        let settled = settlement(&world, &run, "service");
+        assert_eq!(settled["status"], "failed", "{settled}");
+        assert_eq!(settled["outcome"], "infrastructure-failure", "{settled}");
+        let detail = settled["detail"].as_str().expect("a detail");
+        assert!(
+            detail.contains("node 'service'") && detail.contains(says),
+            "{detail}"
+        );
+        assert!(cut_branches(&world, &run).is_empty(), "{}", world.dump());
+    }
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 #[test]
 fn a_rendered_name_another_branch_carries_takes_the_suffix_and_leaves_that_branch_alone() {
