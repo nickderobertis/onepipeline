@@ -1458,7 +1458,6 @@ fn named_lossless(world: &World, repo: &Repository, named: &str) -> String {
     named.to_owned()
 }
 
-/// What `onepipeline results live` says `node` is.
 fn state_of(world: &World, node: &str) -> String {
     let results = world.run(&["results", "live"]).exited(0).stdout.clone();
     results
@@ -1470,7 +1469,6 @@ fn state_of(world: &World, node: &str) -> String {
         .unwrap_or_else(|| panic!("results names no {node}:\n{results}"))
 }
 
-/// How many `node-dispatched` and `node-settled` records `live` holds.
 fn moves(world: &World) -> (usize, usize) {
     (
         world.events_of("live", "node-dispatched").len(),
@@ -1549,7 +1547,6 @@ fn kept_by_the_pass(
     });
 }
 
-/// Wait until `live`'s node `id` has been dispatched.
 fn until_dispatched(world: &World, id: &str) {
     world.until(&format!("{id} to be dispatched"), |world| {
         world
@@ -1805,7 +1802,6 @@ fn an_idle_pass_keeps_the_branch_a_running_node_resumes() {
 /// Where each session case re-pins its node, so its `branch` names another one.
 const ELSEWHERE: &str = "x/elsewhere";
 
-/// The reply command that requeues `x` pinned to [`ELSEWHERE`].
 fn requeue_elsewhere() -> Value {
     json!({"op": "requeue", "id": "x", "amend": {
         "branch": ELSEWHERE,
