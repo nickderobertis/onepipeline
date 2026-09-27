@@ -432,13 +432,16 @@ fn an_attempt_that_never_settled_is_recorded_on_the_branch_its_session_opened() 
         !world.events_of(run, "session-opened").is_empty()
     });
     crate::harness::end_process(driver);
-    // What the attempt committed before its driver died.
+    // llmlint: ignore-block[tests_mirror_real_usage] the worker double commits only when its
+    // hold is released, and this journey's point is a driver that died before that, so the
+    // commit the attempt would have made is made here, in the session's own worktree.
     let opened = &world.events_of(run, "session-opened")[0]["payload"];
     assert_eq!(opened["branch"], FIRST, "{opened}");
     let worktree = PathBuf::from(opened["worktree"].as_str().expect("a worktree"));
     std::fs::write(worktree.join("svc.md"), FIRST_WORK).expect("the work is written");
     git(&world, &worktree, &["add", "-A"]);
     git(&world, &worktree, &["commit", "-m", "feat: ship svc"]);
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     world.script("svc-2.work", "the second attempt wrote this\n");
     retry(&world, run, Some(SECOND));

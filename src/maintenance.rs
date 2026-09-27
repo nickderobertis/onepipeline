@@ -42,15 +42,9 @@
 //! the schedule and the pool working, they are the common case on a schedule
 //! measured in days, and a record of them would be a record of nothing.
 //!
-//! **The same sweep retires finished branches.** After `pool_maintain`, each
-//! identity is handed to `onevcs::retire_finished` with every branch a live node
-//! of this run names excluded — its `branch`, its `resume.branch`, and its current
-//! dispatch session's branch — and nothing else of this crate's: which branches
-//! provably hold no work beyond their base is that library's to decide, and it
-//! retires only those, which is why the pass may act host-wide on branches other
-//! runs left behind. What it retired, and any identity whose pass failed, is
-//! written as one `branches-retired` record; a sweep that retired nothing and
-//! failed nowhere writes none, and a failure never fails the run.
+//! **The same sweep retires finished branches** through `onevcs::retire_finished`,
+//! excluding what this run's live nodes name; divergence entry 91 states the pass
+//! and its `branches-retired` record.
 
 use std::path::Path;
 use std::sync::mpsc::Sender;

@@ -1,24 +1,9 @@
 //! What a landed retry superseded, told to `onevcs` when it lands.
 //!
-//! `onevcs` chains the sessions cut onto one branch itself, so an earlier attempt
-//! on the **same** branch as the retry that landed needs nothing from here. An
-//! attempt on a branch of its own is different: to that library it is unpublished
-//! work of unknown value, and only this run's journal knows that a retry of it
-//! landed. So every landed lineage's earlier attempts on other branches are handed
-//! to [`onevcs::record_supersession`] — which is what lets that library retire one
-//! that adds nothing and surface one that still differs — and the answer is
-//! journalled as `branches-superseded`.
-//!
-//! A lineage is walked through the journal's retry edges, root first, exactly as
-//! `writeback`'s lineages are: [`RunState::superseded`] maps each retried node to
-//! its replacement. What landed and where is the fold's: a publication closeout
-//! that settled `merged`, a `settle` stating a `landing`, and a relayed
-//! `merge-completed` are the three ways a node's landing reaches it.
-//!
-//! **Nothing here changes a settlement.** The record is idempotent in `onevcs`, a
-//! refusal is journalled in the record's `failed` list and the run moves on, and
-//! the backfill verb — `onepipeline supersessions` — records what a run that
-//! settled before this existed never did, through the same function.
+//! Each landed lineage's earlier attempts on other branches go to
+//! [`onevcs::record_supersession`] and are journalled as `branches-superseded`;
+//! nothing here changes a settlement. `onepipeline supersessions` backfills the
+//! same record from a run's journal. Divergence entry 91 states the proposal.
 
 use std::collections::{BTreeMap, BTreeSet};
 
