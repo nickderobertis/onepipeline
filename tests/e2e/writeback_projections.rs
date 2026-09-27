@@ -870,7 +870,7 @@ fn a_retry_or_requeue_of_a_cancelled_node_reopens_its_one_item() {
         &world,
         run,
         json!({"op": "retry", "id": "retried", "node": {
-            "id": "retried-2", "persona": "engineer", "task": "## What\nRetry it.",
+            "id": "retried-2", "persona": "engineer", "task": "## What\nRetry it.\n\n## Acceptance criteria\n- It is done.",
             "deps": ["hog"]
         }}),
     );
@@ -898,7 +898,10 @@ fn a_retry_or_requeue_of_a_cancelled_node_reopens_its_one_item() {
         .collect();
     assert_eq!(lineage.len(), 1, "{tasks:?}");
     assert_eq!(lineage[0]["id"], held_before("retried"), "{}", lineage[0]);
-    assert_eq!(lineage[0]["item"]["content"], "## What\nRetry it.");
+    assert_eq!(
+        lineage[0]["item"]["content"],
+        "## What\nRetry it.\n\n## Acceptance criteria\n- It is done."
+    );
     assert_eq!(
         lineage[0]["item"]["metadata"]["onepipeline.supersedes"],
         json!(["retried"])
@@ -1005,7 +1008,7 @@ fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item(
         &world,
         run,
         json!({"op": "retry", "id": "flaky", "node": {
-            "id": "flaky-2", "persona": "engineer", "task": "## What\nAgain."
+            "id": "flaky-2", "persona": "engineer", "task": "## What\nAgain.\n\n## Acceptance criteria\n- It is done."
         }}),
     );
     projected_until(

@@ -1959,7 +1959,7 @@ mod tests {
         Node {
             id: id.into(),
             persona: Some("engineer".into()),
-            task: Some("## What\ndo it".into()),
+            task: Some("## What\ndo it\n\n## Acceptance criteria\n- it is done.".into()),
             deps: deps.iter().map(|d| (*d).to_string()).collect(),
             ..Node::default()
         }

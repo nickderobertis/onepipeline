@@ -306,7 +306,7 @@ fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
             &["reply", &run],
             &json!({"version": 2, "commands": [
                 {"op": "add", "node": {"id": "extra", "persona": "engineer",
-                                       "task": "## What\nsweep"}}
+                                       "task": "## What\nsweep\n\n## Acceptance criteria\n- It is done."}}
             ]})
             .to_string(),
         )

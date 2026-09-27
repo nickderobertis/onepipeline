@@ -60,6 +60,11 @@ mod checkpoint;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod concurrency;
 mod criteria;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] C6b is checked in `plan`,
+// `graph`, `edits` and `driver` at once, so the crate is the narrowest edge these journeys can
+// honestly sit behind; same grounds as `mod delivers` below.
+mod criteria_rule;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod crossdag;
 // llmlint: ignore[expensive_tests_stay_behind_their_own_edge] these journeys drive the compiled
 // binary over the real store and exercise `writeback`, `engine`, `graph`, `taskgraph` and

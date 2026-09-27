@@ -248,7 +248,7 @@ fn every_op_that_introduces_or_changes_a_task_is_offered_and_nothing_else_is() {
         json!({"op": "amend", "id": "spare", "text": "the ruling"}),
         json!({"op": "cancel", "id": "spare"}),
         // Offered: this requeue's amendment rewrites the task.
-        json!({"op": "requeue", "id": "spare", "amend": {"task": "## What\nsomething else"}}),
+        json!({"op": "requeue", "id": "spare", "amend": {"task": "## What\nsomething else\n\n## Acceptance criteria\n- It is done."}}),
         json!({"op": "cancel", "id": "spare"}),
         // Not offered: this one raises a turn budget, which changes nothing a
         // dispatch is asked to do — and neither does a cancel or a note.
@@ -334,7 +334,8 @@ fn the_node_validator_judges_the_node_an_edit_produces_and_nothing_else() {
     world.script("validator.silent", "");
     let before = committed(&world);
     let mut replacement = agent("build-2", &[]);
-    replacement["task"] = json!("## What\nbuild it again, differently");
+    replacement["task"] =
+        json!("## What\nbuild it again, differently\n\n## Acceptance criteria\n- It is built.");
     world
         .run_with_stdin(
             &["reply", run],

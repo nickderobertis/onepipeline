@@ -2066,6 +2066,17 @@ fn validate_and_displace_for_adoption(paths: &RunPaths) -> Result<(LaunchRecord,
             paths.run, paths.run
         )));
     }
+    // C6b over the graph this adoption would drive, before anything is written.
+    // A node settled `done` is never dispatched again, so refusing the run over
+    // one would strand finished work and protect nothing; every other node — a
+    // failed or cancelled one included, which a retry or requeue re-dispatches
+    // with its stored task — could still be dispatched, and is held to it.
+    let statuses = view.state.statuses();
+    for node in view.state.graph.iter() {
+        if statuses.get(&node.id) != Some(&graph::NodeStatus::Done) {
+            graph::check_criteria(node)?;
+        }
+    }
     // A driver this host has proved is *not working* still holds the run's
     // ownership lock, and the loop this adoption is about to start is the run's
     // single writer — so taking the run over means ending the process that had

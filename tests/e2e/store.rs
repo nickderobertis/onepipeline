@@ -46,9 +46,9 @@ fn a_run_launches_from_a_local_markdown_project_and_executes_the_graph_it_holds(
             "goal": {"text": "Deliver it from a folder of Markdown"},
             "tasks": [
                 {"id": "design", "persona": "engineer", "title": "feat: design it",
-                 "task": "## What\nDesign it."},
+                 "task": "## What\nDesign it.\n\n## Acceptance criteria\n- It is done."},
                 {"id": "build", "persona": "engineer", "title": "feat: build it",
-                 "task": "## What\nBuild it.", "deps": ["design"]},
+                 "task": "## What\nBuild it.\n\n## Acceptance criteria\n- It is done.", "deps": ["design"]},
             ],
         }),
     );
@@ -2639,7 +2639,7 @@ fn a_retried_project_launches_again_reading_the_lineage_head_under_the_roots_id(
         .run_with_stdin(
             &["reply", run],
             &json!({"version": 2, "commands": [{"op": "retry", "id": "work", "node": {
-                "id": "work-2", "persona": "engineer", "task": "## What\nRedo it."
+                "id": "work-2", "persona": "engineer", "task": "## What\nRedo it.\n\n## Acceptance criteria\n- It is done."
             }}]})
             .to_string(),
         )
@@ -2700,7 +2700,7 @@ fn a_retried_project_launches_again_reading_the_lineage_head_under_the_roots_id(
     assert_eq!(
         launched,
         json!([
-            {"id": "work", "title": "work", "task": "## What\nRedo it.", "persona": "engineer",
+            {"id": "work", "title": "work", "task": "## What\nRedo it.\n\n## Acceptance criteria\n- It is done.", "persona": "engineer",
              "task_record": {"id": "writeback-retried-board/000-work", "title": "work"}},
             {"id": "ship", "title": "ship", "task": "## What\nDo ship.\n\n## Why\nSo the run can settle.\n\n## Acceptance criteria\n- ship is done.", "persona": "engineer", "deps": ["work"],
              "task_record": {"id": "writeback-retried-board/001-ship", "title": "ship"}},
@@ -2732,14 +2732,14 @@ fn derived_waiting_failed_and_parked_states_reach_the_board_under_their_own_word
             "concurrency": 2,
             "goal": {"text": "Keep the board current"},
             "tasks": [
-                {"id": "fails", "persona": "engineer", "task": "## What\nFail."},
-                {"id": "skipped", "persona": "engineer", "task": "## What\nWait.", "deps": ["fails"]},
-                {"id": "parked", "persona": "engineer", "task": "## What\nWait.", "parked": true},
+                {"id": "fails", "persona": "engineer", "task": "## What\nFail.\n\n## Acceptance criteria\n- It is done."},
+                {"id": "skipped", "persona": "engineer", "task": "## What\nWait.\n\n## Acceptance criteria\n- It is done.", "deps": ["fails"]},
+                {"id": "parked", "persona": "engineer", "task": "## What\nWait.\n\n## Acceptance criteria\n- It is done.", "parked": true},
                 {"id": "approve", "kind": "human", "task": "Approve it."},
-                {"id": "blocked", "persona": "engineer", "task": "## What\nWait.", "deps": ["approve"]},
-                {"id": "cross", "persona": "engineer", "task": "## What\nWait.", "parked": true, "deps": ["run:missing#up"]},
-                {"id": "hosted", "persona": "engineer", "task": "## What\nWait.\n\nKeep this body.", "parked": true, "repo": "github.com/owner/service", "title": "test: hosted", "max_turns": 7, "context": "carry this note"},
-                {"id": "local", "persona": "engineer", "task": "## What\nWait.", "parked": true, "repo": local, "title": "test: local"}
+                {"id": "blocked", "persona": "engineer", "task": "## What\nWait.\n\n## Acceptance criteria\n- It is done.", "deps": ["approve"]},
+                {"id": "cross", "persona": "engineer", "task": "## What\nWait.\n\n## Acceptance criteria\n- It is done.", "parked": true, "deps": ["run:missing#up"]},
+                {"id": "hosted", "persona": "engineer", "task": "## What\nWait.\n\nKeep this body.\n\n## Acceptance criteria\n- It is done.", "parked": true, "repo": "github.com/owner/service", "title": "test: hosted", "max_turns": 7, "context": "carry this note"},
+                {"id": "local", "persona": "engineer", "task": "## What\nWait.\n\n## Acceptance criteria\n- It is done.", "parked": true, "repo": local, "title": "test: local"}
             ]
         }),
     );
@@ -2837,7 +2837,7 @@ fn a_project_reads_as_the_plan_document_of_the_same_content() {
                 "body": "## What\nIt publishes.",
                 "draft": true,
                 "persona": "engineer",
-                "task": "## What\nPublish it.\n\n## Why\nUsers need it.",
+                "task": "## What\nPublish it.\n\n## Why\nUsers need it.\n\n## Acceptance criteria\n- It is done.",
                 "max_turns": 12,
                 "context": "the fixture moved",
                 "executor": "local",
@@ -2846,7 +2846,7 @@ fn a_project_reads_as_the_plan_document_of_the_same_content() {
             {
                 "id": "audit",
                 "kind": "human",
-                "task": "Approve the publication.",
+                "task": "Approve the publication.\n\n## Acceptance criteria\n- It is done.",
                 "deps": ["publish"],
                 "parked": true,
             },
@@ -2937,7 +2937,7 @@ fn a_project_larger_than_one_page_is_read_to_its_end() {
                 "id": id,
                 "persona": "engineer",
                 "title": format!("feat: ship {id}"),
-                "task": format!("## What\nShip {id}."),
+                "task": format!("## What\nShip {id}.\n\n## Acceptance criteria\n- {id} ships."),
                 "deps": deps,
             })
         })
@@ -3134,14 +3134,14 @@ fn every_settlement_reaches_the_board_under_its_own_word() {
             "concurrency": 4,
             "goal": {"text": "Deliver settlement-words"},
             "tasks": [
-                {"id": "finished", "persona": "engineer", "task": "## What\nFinish."},
-                {"id": "broke", "persona": "engineer", "task": "## What\nFail."},
-                {"id": "abandoned", "persona": "engineer", "task": "## What\nLose the provider."},
-                {"id": "superseded", "persona": "engineer", "task": "## What\nBe retried."},
-                {"id": "dropped", "persona": "engineer", "task": "## What\nBe dropped."},
+                {"id": "finished", "persona": "engineer", "task": "## What\nFinish.\n\n## Acceptance criteria\n- It is done."},
+                {"id": "broke", "persona": "engineer", "task": "## What\nFail.\n\n## Acceptance criteria\n- It is done."},
+                {"id": "abandoned", "persona": "engineer", "task": "## What\nLose the provider.\n\n## Acceptance criteria\n- It is done."},
+                {"id": "superseded", "persona": "engineer", "task": "## What\nBe retried.\n\n## Acceptance criteria\n- It is done."},
+                {"id": "dropped", "persona": "engineer", "task": "## What\nBe dropped.\n\n## Acceptance criteria\n- It is done."},
                 // The planner's own idle, declared rather than raced for: a node nothing
                 // dispatches, which is not the same fact as a node something stopped.
-                {"id": "idled", "persona": "engineer", "task": "## What\nWait.", "parked": true},
+                {"id": "idled", "persona": "engineer", "task": "## What\nWait.\n\n## Acceptance criteria\n- It is done.", "parked": true},
             ],
         }),
     );
@@ -3168,7 +3168,7 @@ fn every_settlement_reaches_the_board_under_its_own_word() {
                 "commands": [
                     {"op": "drop", "id": "dropped", "dependents": "detach"},
                     {"op": "retry", "id": "superseded", "node": {
-                        "id": "replacement", "persona": "engineer", "task": "## What\nRetry it."
+                        "id": "replacement", "persona": "engineer", "task": "## What\nRetry it.\n\n## Acceptance criteria\n- It is done."
                     }},
                 ],
             })
