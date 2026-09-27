@@ -33,7 +33,6 @@ use crate::harness::{plan_of, repo_file, World, RENDEZVOUS_SECONDS_ENV};
 
 const RUN: &str = "comparable-plan";
 
-/// The record the figures are held to.
 const RECORD: &str = "tests/golden/writeback-comparable-plan.json";
 
 /// What every request the scripted source answers charges: one request, and one point of a
@@ -62,7 +61,6 @@ fn reply(world: &World, command: Value) {
         .exited(0);
 }
 
-/// Every projection attempt the run has recorded.
 fn records(world: &World) -> Vec<Value> {
     std::fs::read_to_string(world.run_file(RUN, "writeback-projections.jsonl"))
         .map(|text| {

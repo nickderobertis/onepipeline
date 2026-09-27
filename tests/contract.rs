@@ -56,9 +56,9 @@ use onepipeline::report::{
 use onepipeline::rules::{ExecutorKind, ExecutorRules, Predicate};
 use onepipeline::verbs;
 use onepipeline::views::{
-    FailureClass, Listing, NodeLanding, ProjectGroup, ProjectionActions, ProjectionEnded,
-    ProjectionFailure, ProjectionRecord, ProjectionScope, Projects, RunPaths, RunSummary,
-    RunTelemetry, StoreCall, UpdatedField, WholeBecause, GROUP_HEADER, NO_PROJECT,
+    FailureClass, Listing, NodeLanding, ProjectGroup, ProjectionActions, ProjectionCalls,
+    ProjectionEnded, ProjectionFailure, ProjectionRecord, ProjectionScope, Projects, RunPaths,
+    RunSummary, RunTelemetry, StoreCall, UpdatedField, WholeBecause, GROUP_HEADER, NO_PROJECT,
     SUMMARY_SCHEMA_VERSION,
 };
 use onevcs::{Adoption, MergePolicy, SessionRequest};
@@ -4377,14 +4377,19 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
         // A line counting targeted updates, which this build never makes and a later one
         // writes: `updated_fields` beside a `task-update` call.
         ProjectionRecord {
-            calls: Some(std::collections::BTreeMap::from([
-                (StoreCall::TaskUpdate, 2),
-                (StoreCall::ProjectCopy, 1),
-            ])),
-            updated_fields: Some(std::collections::BTreeMap::from([
-                (UpdatedField::Status, 2),
-                (UpdatedField::Metadata, 1),
-            ])),
+            calls: Some(
+                ProjectionCalls::new(
+                    std::collections::BTreeMap::from([
+                        (StoreCall::TaskUpdate, 2),
+                        (StoreCall::ProjectCopy, 1),
+                    ]),
+                    Some(std::collections::BTreeMap::from([
+                        (UpdatedField::Status, 2),
+                        (UpdatedField::Metadata, 1),
+                    ])),
+                )
+                .expect("fields beside the task-update calls that wrote them"),
+            ),
             ..record.clone()
         },
     ];
@@ -4613,6 +4618,18 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
             .map(|field| serde_json::to_value(field).expect("a field serializes"))
             .collect()
         )
+    );
+    // Fields no update wrote cannot be built, as they cannot be read.
+    assert!(
+        ProjectionCalls::new(
+            std::collections::BTreeMap::from([(StoreCall::ProjectCopy, 1)]),
+            Some(std::collections::BTreeMap::from([(
+                UpdatedField::Status,
+                1
+            )])),
+        )
+        .is_err(),
+        "a record could say fields were written by no task-update call"
     );
     // Every golden line is `members` and counts its calls, and none reads a page of tasks.
     for golden in [example, &projection["example_delivered"]] {

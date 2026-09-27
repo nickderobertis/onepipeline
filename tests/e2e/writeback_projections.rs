@@ -493,7 +493,6 @@ fn landed(world: &World, run: &str) -> Value {
     serde_json::from_str(&text).expect("the landed baseline is JSON")
 }
 
-/// The keys of one JSON object, as a set.
 fn keys(value: &Value) -> std::collections::BTreeSet<String> {
     value
         .as_object()
@@ -736,6 +735,74 @@ fn a_landed_baseline_the_driver_cannot_read_is_said_and_each_item_read_by_its_id
     );
     no_record_is_whole_or_reads_a_page_of_tasks(&world, run);
     world.release("work.go");
+}
+
+/// A run an older build started whose board already says everything the adopting driver would
+/// write — one node done, one parked, nothing left to start — is adopted with each lineage read
+/// once by its own id and nothing more: no project read, no copy, and a line naming no items.
+/// What the reads found is recorded as landed.
+#[test]
+fn an_adoption_whose_every_read_matches_reads_each_item_once_and_copies_nothing() {
+    let run = "projections-cold-match";
+    let world = World::new("writeback-projections-cold-match");
+    for node in ["done", "parked"] {
+        world.script(&format!("{node}.wait"), "hold");
+    }
+    // A worker that takes the cancel's ask, so the cancel settles it rather than waiting it out.
+    world.script("parked.stops-when-interrupted", "");
+    let project = world.plan(
+        run,
+        &plan_of(run, vec![agent("done", &[]), agent("parked", &[])]),
+    );
+    let world = world
+        .through_scripted_source()
+        .with_env(RENDEZVOUS_SECONDS_ENV, "600")
+        .with_env(CANCEL_GRACE_ENV, "1");
+    world.run(&["start", &project, "--detach"]).exited(0);
+    projected_until(&world, run, &project, "both nodes running", |tasks| {
+        board_word(tasks, "done").as_deref() == Some("in-progress")
+            && board_word(tasks, "parked").as_deref() == Some("in-progress")
+    });
+    world.release("done.go");
+    cancelled(&world, run, "parked");
+    projected_until(&world, run, &project, "the board to say it all", |tasks| {
+        board_word(tasks, "done").as_deref() == Some("done")
+            && board_task(tasks, "parked")["item"]["status"]["name"] == "parked"
+    });
+    world.run(&["stop", run]).exited(0);
+    let path = world.run_file(run, &in_run_dir(&landed_block()["file"]));
+    // llmlint: ignore-block[tests_mirror_real_usage] a run directory an older build left holds
+    // no landed baseline, and every launch of this build seeds one; removing it is exactly that
+    // directory.
+    std::fs::remove_file(&path).expect("this build seeded a landed baseline");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let mark = records(&world, run).len();
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    world.until("the adopted driver's first projection", |world| {
+        records(world, run).len() > mark
+    });
+    let first = records(&world, run)[mark].clone();
+    assert_eq!(first["outcome"], "projected", "{first}");
+    assert_eq!(first["items"], json!([]), "{first}");
+    assert_eq!(
+        first["calls"],
+        json!({"task-show": 2}),
+        "the adopted driver did more than read each item once: {first}"
+    );
+    assert_eq!(first["actions"], Value::Null, "{first}");
+    let recorded = landed(&world, run);
+    assert_eq!(
+        keys(&recorded["items"]),
+        ["done", "parked"].map(String::from).into(),
+        "{recorded}"
+    );
+    assert_eq!(recorded["items"]["done"]["status"], "done", "{recorded}");
+    assert_eq!(
+        recorded["items"]["parked"]["status"], "parked",
+        "{recorded}"
+    );
+    no_record_is_whole_or_reads_a_page_of_tasks(&world, run);
 }
 
 /// The attempt after a failed one carries exactly the lineages whose change had not landed —

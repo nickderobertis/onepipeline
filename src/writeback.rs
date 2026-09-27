@@ -1622,7 +1622,6 @@ fn carry_the_difference(
     // read for the lineages the copy carries, below; an unnamed one is neither read nor written.
     let mut origins = baseline.origins();
     let mut carried = decided.carried;
-    let destination_project = destination_project(attempt, snapshot)?;
     let mut read: BTreeSet<String> = BTreeSet::new();
     let mut seeded = false;
     for (root, id) in &decided.unread {
@@ -1651,6 +1650,16 @@ fn carry_the_difference(
         baseline.save();
     }
     *items = carried.iter().cloned().collect();
+    // Every lineage the run did not know already says what the run would write, and no project
+    // key moved: the reads were the whole attempt, and there is nothing to copy.
+    if carried.is_empty() && !baseline.project_differs(snapshot) {
+        return Ok(Landed {
+            actions: None,
+            spent: None,
+            delivered: Vec::new(),
+        });
+    }
+    let destination_project = destination_project(attempt, snapshot)?;
     for root in &carried {
         if read.contains(root) {
             continue;
@@ -1673,12 +1682,12 @@ fn carry_the_difference(
             .collect(),
     ) {
         Some(members) => CopyScope::Members(members),
-        // llmlint: ignore-block[changed_behavior_has_e2e] a projection naming no lineage is
-        // reached only by a snapshot that moves no lineage's projection — a status moving
-        // inside one board word, pending to ready — because no edit a CLI accepts changes only
-        // the project's metadata, and the run passes through such a move inside a pass no
-        // input holds open. `writeback::tests` holds the decision that names none; a project
-        // copy without its tasks is the store's own scope for copying the project item alone.
+        // llmlint: ignore-block[changed_behavior_has_e2e] a copy naming no lineage is reached
+        // only when a project key the destination holds changed and no lineage did — every
+        // other attempt carrying nothing asks the store nothing — and no edit a CLI accepts
+        // changes only the project's metadata. `writeback::tests` holds the decision that names
+        // none; a project copy without its tasks is the store's own scope for copying the
+        // project item alone.
         None => CopyScope::Projects { tasks: false },
         // llmlint: ignore-end[changed_behavior_has_e2e]
     };
@@ -1913,16 +1922,49 @@ fn known_id(snapshot: &Snapshot, lineages: &Lineages, root: &str) -> Option<Glob
     })
 }
 
-/// The destination item a shadow document names as its origin, or `None` where there is no
-/// such document or it names none.
+/// The destination item a shadow document names as its origin: `None` where there is no such
+/// document or it names none, and — said on standard error, naming the document and why —
+/// where it cannot be read as one, so the id the run falls back to is never chosen silently.
 fn shadow_origin(path: &Path) -> Option<GlobalId> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let (front, _) = text.strip_prefix("---\n")?.split_once("\n---\n")?;
-    let front: Value = serde_norway::from_str(front).ok()?;
-    front["metadata"][GlobalId::ORIGIN_KEY]
-        .as_str()?
-        .parse::<GlobalId>()
-        .ok()
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        // llmlint: ignore-block[changed_behavior_has_e2e] a shadow document that is there and
+        // cannot be read is a run directory whose permissions were taken away underneath the
+        // run, which no CLI journey arranges; it is said and passed over exactly as a malformed
+        // one is below.
+        Err(error) => {
+            eprintln!(
+                "onetaskgraph write-back cannot read {}: {error}; the item it names is not \
+                 taken as the lineage's",
+                path.display()
+            );
+            return None;
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
+    };
+    let origin = text
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---\n"))
+        .ok_or_else(|| "it opens and closes no front matter".to_owned())
+        .and_then(|(front, _)| {
+            serde_norway::from_str::<Value>(front).map_err(|error| error.to_string())
+        })
+        .and_then(|front| match &front["metadata"][GlobalId::ORIGIN_KEY] {
+            Value::Null => Ok(None),
+            Value::String(origin) => origin
+                .parse::<GlobalId>()
+                .map(Some)
+                .map_err(|why| format!("its origin '{origin}' {why}")),
+            other => Err(format!("its origin is {other}, not an id")),
+        });
+    origin.unwrap_or_else(|why| {
+        eprintln!(
+            "onetaskgraph write-back cannot read {} as a shadow document: {why}; the item it \
+             names is not taken as the lineage's",
+            path.display()
+        );
+        None
+    })
 }
 
 /// One lineage as the snapshot alone renders it: the half of its shadow task the landed
@@ -2281,6 +2323,9 @@ impl LandedItem {
             destination: task.id.to_string(),
             title: task.item.title.clone(),
             content_sha256: sha256(task.item.content.as_deref().unwrap_or_default().trim()),
+            // A word this engine never writes — a person's own, or a board's mapped option — is
+            // no word it landed, so it reads as not known, which differs from every word a
+            // rendering has and so is carried rather than trusted.
             status: serde_json::from_value(json!(task.item.status.name)).ok(),
             metadata: owned(&task.item.metadata.clone().into_iter().collect()),
             delivers: task
@@ -2976,14 +3021,63 @@ pub struct ProjectionRecord {
     /// carried task delivers, whether the attempt landed or not. Empty where the report carried
     /// none, and then left off the line.
     pub delivered: Vec<Map<String, Value>>,
-    /// How many times the attempt called each store operation, the one that failed included.
-    /// `None` only on a line an earlier build wrote, which named none; version 4 added it, and
-    /// every line this build writes names it — `{}` for an attempt that called nothing.
-    pub calls: Option<BTreeMap<StoreCall, u64>>,
-    /// How many items each field was written on, by the attempt's targeted updates. Written only
-    /// by an attempt that made one; this build makes none, so it never writes it. Version 4
-    /// defined it.
-    pub updated_fields: Option<BTreeMap<UpdatedField, u64>>,
+    /// Which store operations the attempt called, and how many items its targeted updates
+    /// wrote each field on. `None` only on a line an earlier build wrote, which named none;
+    /// version 4 added it, and every line this build writes names it.
+    pub calls: Option<ProjectionCalls>,
+}
+
+/// How many times one projection attempt called each store operation — the one that failed
+/// included, an operation not called left off — and, for an attempt that made targeted
+/// updates, how many items each field was written on.
+///
+/// One value, so a record cannot name field updates without the `task-update` calls that wrote
+/// them: [`ProjectionCalls::new`] refuses that, and is the only way to build one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectionCalls {
+    counts: BTreeMap<StoreCall, u64>,
+    updated_fields: Option<BTreeMap<UpdatedField, u64>>,
+}
+
+impl ProjectionCalls {
+    /// The calls one attempt made, and what its targeted updates wrote where it made any.
+    ///
+    /// # Errors
+    ///
+    /// Refuses `updated_fields` beside no `task-update` call: fields no update wrote.
+    pub fn new(
+        counts: BTreeMap<StoreCall, u64>,
+        updated_fields: Option<BTreeMap<UpdatedField, u64>>,
+    ) -> Result<Self, String> {
+        if updated_fields.is_some()
+            && counts
+                .get(&StoreCall::TaskUpdate)
+                .copied()
+                .unwrap_or_default()
+                == 0
+        {
+            return Err(
+                "`updated_fields` is named without a `task-update` call to have written them"
+                    .to_owned(),
+            );
+        }
+        Ok(Self {
+            counts,
+            updated_fields,
+        })
+    }
+
+    /// How many times each store operation was called.
+    #[must_use]
+    pub fn counts(&self) -> &BTreeMap<StoreCall, u64> {
+        &self.counts
+    }
+
+    /// How many items each field was written on, where the attempt made a targeted update.
+    #[must_use]
+    pub fn updated_fields(&self) -> Option<&BTreeMap<UpdatedField, u64>> {
+        self.updated_fields.as_ref()
+    }
 }
 
 /// One store operation a projection attempt can call, by the name the record and its
@@ -3154,8 +3248,10 @@ impl ProjectionRecord {
                 Ok(landed) => landed.delivered.clone(),
                 Err(failed) => failed.delivered.clone(),
             },
-            calls: Some(attempted.calls.clone()),
-            updated_fields: None,
+            calls: Some(ProjectionCalls {
+                counts: attempted.calls.clone(),
+                updated_fields: None,
+            }),
         }
     }
 }
@@ -3308,18 +3404,7 @@ impl TryFrom<ProjectionWire> for ProjectionRecord {
                 if matches!(wire.updated_fields, Some(None)) {
                     return Err("a line names `updated_fields` as null".to_owned());
                 }
-                if wire.updated_fields.is_some()
-                    && calls
-                        .get(&StoreCall::TaskUpdate)
-                        .copied()
-                        .unwrap_or_default()
-                        == 0
-                {
-                    return Err(
-                        "a line names `updated_fields` without having called `task-update`"
-                            .to_owned(),
-                    );
-                }
+                ProjectionCalls::new(calls.clone(), wire.updated_fields.clone().flatten())?;
             }
             1 | PROJECTION_LINE_WITH_DELIVERED | PROJECTION_LINE_WITH_REOPENED if names_calls => {
                 return Err(format!(
@@ -3414,8 +3499,10 @@ impl TryFrom<ProjectionWire> for ProjectionRecord {
             duration_ms: wire.duration_ms,
             ended,
             delivered: wire.delivered.unwrap_or_default(),
-            calls: wire.calls.flatten(),
-            updated_fields: wire.updated_fields.flatten(),
+            calls: match wire.calls.flatten() {
+                Some(counts) => Some(ProjectionCalls::new(counts, wire.updated_fields.flatten())?),
+                None => None,
+            },
         })
     }
 }
@@ -3464,8 +3551,14 @@ impl From<ProjectionRecord> for ProjectionWire {
             actions,
             spent,
             delivered: (!record.delivered.is_empty()).then_some(record.delivered),
-            calls: record.calls.map(Some),
-            updated_fields: record.updated_fields.map(Some),
+            calls: record
+                .calls
+                .as_ref()
+                .map(|calls| Some(calls.counts.clone())),
+            updated_fields: record
+                .calls
+                .and_then(|calls| calls.updated_fields)
+                .map(Some),
         }
     }
 }
@@ -3710,6 +3803,36 @@ mod tests {
             Some(Duration::from_secs(9))
         );
         assert_eq!(Failed::from("cancelled".to_owned()).wait, None);
+    }
+
+    /// The name a refusal gives each store call is the word the record serializes it as, and
+    /// the three an attempt makes are the calls `cli` publishes, so the record and a refusal
+    /// cannot name one call two ways.
+    #[test]
+    fn every_store_call_is_named_as_the_record_writes_it() {
+        use super::StoreCall;
+        for call in [
+            StoreCall::ProjectShow,
+            StoreCall::TaskList,
+            StoreCall::TaskShow,
+            StoreCall::ProjectCopy,
+            StoreCall::TaskUpdate,
+            StoreCall::ProjectMetadataSet,
+        ] {
+            assert_eq!(
+                json!(call.as_str()),
+                serde_json::to_value(call).expect("a call serializes"),
+                "{call:?}"
+            );
+        }
+        assert_eq!(
+            crate::cli::WRITEBACK_CLASSIFIED_COMMANDS,
+            [
+                StoreCall::ProjectShow.as_str(),
+                StoreCall::TaskShow.as_str(),
+                StoreCall::ProjectCopy.as_str()
+            ]
+        );
     }
 
     /// The budget the worker runs under is the one the launch record retained, and a
