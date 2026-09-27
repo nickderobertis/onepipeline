@@ -203,6 +203,7 @@ pub struct ListedTemplate {
     pub layer: Option<Layer>,
     /// The file it resolves to now, or null for the built-in and for a name no layer
     /// supplies.
+    // llmlint: ignore[invalid_states_unrepresentable] `layer` and `path` side by side, `path` null for the built-in, is the wire shape C8 fixes for every consumer of `template list --json` and `template resolve --json` (`docs/contract.md`'s `listed_keys` and `resolved_keys`, reconciled by `tests/contract.rs`); the one producer of these values is `templates::locate`, which pairs a file with every layer but the built-in and none with it, and a nested enum would change the JSON the UI and ai-orchestrator nodes read.
     pub path: Option<PathBuf>,
 }
 
@@ -250,6 +251,7 @@ pub struct ResolvedTemplate {
     /// The layer it resolved at.
     pub layer: Layer,
     /// The file it resolved to, absolute, or null for the built-in.
+    // llmlint: ignore[invalid_states_unrepresentable] `layer` and `path` side by side, `path` null for the built-in, is the wire shape C8 fixes for every consumer of `template list --json` and `template resolve --json` (`docs/contract.md`'s `listed_keys` and `resolved_keys`, reconciled by `tests/contract.rs`); the one producer of these values is `templates::locate`, which pairs a file with every layer but the built-in and none with it, and a nested enum would change the JSON the UI and ai-orchestrator nodes read.
     pub path: Option<PathBuf>,
 }
 
@@ -266,6 +268,19 @@ pub enum TemplateCheck {
     Item(String),
 }
 
+/// What `template check` checked beside the template itself: one of the three, as the
+/// flags that ask for the other two exclude each other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Checked {
+    /// The template alone.
+    Template,
+    /// A rendering too.
+    Rendering,
+    /// The stored item with this qualified id too.
+    Item(String),
+}
+
 /// What `template check` accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TemplateChecked {
@@ -276,13 +291,12 @@ pub struct TemplateChecked {
     /// The layer it resolved at.
     pub layer: Layer,
     /// The file it resolved to, or null for the built-in.
+    // llmlint: ignore[invalid_states_unrepresentable] `layer` and `path` side by side, `path` null for the built-in, is the wire shape C8 fixes for every consumer of `template list --json` and `template resolve --json` (`docs/contract.md`'s `listed_keys` and `resolved_keys`, reconciled by `tests/contract.rs`); the one producer of these values is `templates::locate`, which pairs a file with every layer but the built-in and none with it, and a nested enum would change the JSON the UI and ai-orchestrator nodes read.
     pub path: Option<PathBuf>,
     /// The chain's digest.
     pub digest: String,
-    /// Whether a rendering was checked too.
-    pub rendering: bool,
-    /// The stored item checked too, where one was.
-    pub item: Option<String>,
+    /// What was checked beside the template.
+    pub checked: Checked,
 }
 
 /// One name as `templates.yaml` declares it.
@@ -631,7 +645,7 @@ pub(crate) fn validate(resolution: &Resolution) -> std::result::Result<(), &'sta
     match criteria {
         Some(variable)
             if variable.kind() == VariableType::List
-                && variable.items().unwrap_or(ItemType::String) == ItemType::String =>
+                && variable.items() == Some(ItemType::String) =>
         {
             Ok(())
         }
@@ -643,16 +657,47 @@ pub(crate) fn validate(resolution: &Resolution) -> std::result::Result<(), &'sta
 ///
 /// An `extends` naming its parent by an expression is not one this can follow, and a
 /// template that relies on one is refused as not extending the base: the check is on the
-/// file as written, never on a render.
+/// file as written, never on a render. A tag inside a `{# comment #}` or a
+/// `{% raw %}` block is text, not a tag, and is passed over.
 fn extends_literal(source: &str) -> Option<String> {
     let mut rest = source;
-    while let Some(open) = rest.find("{%") {
+    loop {
+        let tag_at = rest.find("{%");
+        let comment_at = rest.find("{#");
+        let open = match (tag_at, comment_at) {
+            (Some(tag), Some(comment)) if comment < tag => {
+                let after = &rest[comment + 2..];
+                rest = &after[after.find("#}")? + 2..];
+                continue;
+            }
+            (Some(tag), _) => tag,
+            (None, _) => return None,
+        };
         let after = &rest[open + 2..];
         let close = after.find("%}")?;
         let tag = after[..close]
             .trim_start_matches(['-', '+'])
             .trim_end_matches(['-', '+'])
             .trim();
+        if tag == "raw" {
+            let body = &after[close + 2..];
+            let mut end = body;
+            loop {
+                let at = end.find("{%")?;
+                let inner = &end[at + 2..];
+                let shut = inner.find("%}")?;
+                let named = inner[..shut]
+                    .trim_start_matches(['-', '+'])
+                    .trim_end_matches(['-', '+'])
+                    .trim();
+                end = &inner[shut + 2..];
+                if named == "endraw" {
+                    break;
+                }
+            }
+            rest = end;
+            continue;
+        }
         if let Some(named) = tag.strip_prefix("extends") {
             let named = named.trim();
             let quote = named.chars().next()?;
@@ -664,7 +709,6 @@ fn extends_literal(source: &str) -> Option<String> {
         }
         rest = &after[close + 2..];
     }
-    None
 }
 
 /// Whether the file at `path` reaches [`BASE`] by `extends`, following each parent it
@@ -1037,6 +1081,22 @@ mod tests {
         assert_eq!(extends_literal("{% extends parent %}"), None);
         assert_eq!(extends_literal("no tags at all {{ x }}"), None);
         assert_eq!(extends_literal("{% unclosed"), None);
+        // A tag inside a comment or a raw block is text, and the real one after it is read.
+        assert_eq!(
+            extends_literal("{# {% extends \"commented.md.j2\" %} #}{% extends \"real.md.j2\" %}"),
+            Some("real.md.j2".to_owned())
+        );
+        assert_eq!(
+            extends_literal("{# {% extends \"onepipeline/plan-task.md.j2\" %} #}\nno tag"),
+            None
+        );
+        assert_eq!(
+            extends_literal(
+                "{% raw %}{% extends \"raw.md.j2\" %}{% endraw %}{%- extends 'after.md.j2' %}"
+            ),
+            Some("after.md.j2".to_owned())
+        );
+        assert_eq!(extends_literal("{# unclosed comment"), None);
     }
 
     #[test]

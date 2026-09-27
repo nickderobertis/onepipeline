@@ -1488,15 +1488,15 @@ pub fn template_check(
         Error::Refused(format!("template {name} ({}): {rule}", resolution.whence()))
     })?;
     let role = resolution.stated.role;
-    let mut item = None;
-    match check {
-        TemplateCheck::Template => {}
+    let checked = match check {
+        TemplateCheck::Template => templates::Checked::Template,
         TemplateCheck::Rendering(text) => {
             if role == templates::Role::Task {
                 templates::check_rendering(text).map_err(|rule| {
                     Error::Refused(format!("template {name}: the rendering: {rule}"))
                 })?;
             }
+            templates::Checked::Rendering
         }
         TemplateCheck::Item(id) => {
             let qualified: crate::taskgraph::QualifiedId = id.parse()?;
@@ -1523,17 +1523,16 @@ pub fn template_check(
                 },
             )
             .map_err(|why| refused(&why))?;
-            item = Some(qualified.as_str().to_owned());
+            templates::Checked::Item(qualified.as_str().to_owned())
         }
-    }
+    };
     Ok(TemplateChecked {
         name: resolution.stated.name,
         role,
         layer: resolution.stated.layer,
         path: resolution.stated.path,
         digest: resolution.stated.digest,
-        rendering: matches!(check, TemplateCheck::Rendering(_)),
-        item,
+        checked,
     })
 }
 
@@ -1544,11 +1543,10 @@ pub fn render_template_checked(checked: &TemplateChecked) -> String {
         None => format!("{} layer", checked.layer),
     };
     let mut line = format!("template {} [{}]: ok ({at})", checked.name, checked.role);
-    if checked.rendering {
-        line.push_str("; rendering: ok");
-    }
-    if let Some(item) = &checked.item {
-        line.push_str(&format!("; item {item}: ok"));
+    match &checked.checked {
+        templates::Checked::Template => {}
+        templates::Checked::Rendering => line.push_str("; rendering: ok"),
+        templates::Checked::Item(item) => line.push_str(&format!("; item {item}: ok")),
     }
     line
 }

@@ -782,23 +782,35 @@ fn c6a_holds_a_task_template_to_the_base_and_its_criteria_and_a_rendering_to_lis
         overridden.display()
     ));
 
-    // Extending the base and redeclaring its criteria as one string.
+    // Extending the base and redeclaring its criteria as one string, or as a list of
+    // objects: each is not a list of strings.
+    for declared in ["type: string", "type: list\n    items: object"] {
+        write(
+            &hosted,
+            &format!(
+                "---\nonetaskgraph_template: 1\nvariables:\n  acceptance_criteria:\n    \
+                 description: Criteria.\n    {declared}\n---\n{{% extends \"{BASE}\" %}}\n"
+            ),
+        );
+        verb(&world, &dir, &root, &["check", "follow-up"])
+            .exited(REFUSED)
+            .err_has(&format!(
+                "(host layer, {}): {RULE_CRITERIA_TYPE}",
+                hosted.display()
+            ));
+    }
+    // An `extends` inside a comment is text: the template extends nothing.
     write(
         &hosted,
-        &format!(
-            "---\nonetaskgraph_template: 1\nvariables:\n  acceptance_criteria:\n    \
-             description: One line.\n    type: string\n---\n{{% extends \"{BASE}\" %}}\n"
-        ),
+        &format!("{{# {{% extends \"{BASE}\" %}} #}}\n## Acceptance criteria\n\n- fixed\n"),
     );
     verb(&world, &dir, &root, &["check", "follow-up"])
         .exited(REFUSED)
-        .err_has(&format!(
-            "(host layer, {}): {RULE_CRITERIA_TYPE}",
-            hosted.display()
-        ));
+        .err_has(RULE_NOT_EXTENDED);
 
     // A document extending nothing passes; so do task templates using their variables any
-    // way minijinja allows — nothing is rendered to check them.
+    // way minijinja allows — nothing is rendered to check them. Both below redeclare the
+    // criteria as a `list` naming no `items`, which is a list of strings, the default.
     write(
         &root.join("design-doc.md.j2"),
         &document_template("{{ anything }}"),

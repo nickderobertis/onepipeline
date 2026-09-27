@@ -165,7 +165,7 @@ The template surface, as the verbs and the launch name it:
     "resolved_keys": ["reference", "entry", "search_path", "templates", "digest", "name", "role", "layer", "path"],
     "listed_keys": ["name", "role", "description", "layer", "path"],
     "list_keys": ["registration", "templates"],
-    "checked_keys": ["name", "role", "layer", "path", "digest", "rendering", "item"],
+    "checked_keys": ["name", "role", "layer", "path", "digest", "checked"],
     "verbs": ["list", "resolve", "check"]
   }
 }
