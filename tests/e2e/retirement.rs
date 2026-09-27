@@ -881,37 +881,77 @@ fn the_backfill_verb_records_what_a_settled_run_never_did_once() {
         .exited(crate::harness::REFUSED);
 }
 
-/// A run whose journal reads but whose launch record does not is a store this
-/// verb cannot answer for: `supersessions` refuses it with `2`, naming the
-/// record, and appends nothing to the journal even with `--record`.
+/// The backfill verb reads the run's journal alone: over a settled run whose
+/// launch record is missing, and then unreadable, and whose result is gone too, it
+/// still previews the pair, records it with `--record`, and records nothing new
+/// the second time.
 #[cfg(unix)]
 #[test]
-fn the_backfill_verb_refuses_a_run_whose_launch_record_does_not_read() {
-    let world = World::new("retirement-backfill-unreadable");
-    world.repository("local-direct", &[]);
-    let run = "unreadable";
+fn the_backfill_verb_answers_and_records_from_the_journal_alone() {
+    let world = World::new("retirement-backfill-journal-alone");
+    let repo = world.repository("local-direct", &[]);
+    let run = "journal-alone";
     first_attempt(&world, run);
-    let journal = world.run_file(run, "events.jsonl");
-    let before = std::fs::read_to_string(&journal).expect("the journal reads");
-    // llmlint: ignore-block[tests_mirror_real_usage] no verb writes an unreadable launch
-    // record — a truncated or corrupted file on disk is the only way a run reaches this
-    // state, so the journey writes one; the verb under test is still the real binary's.
-    std::fs::write(world.run_file(run, "launch.json"), "{ not json")
-        .expect("the record is written");
-    // llmlint: ignore-end[tests_mirror_real_usage]
-    for args in [
-        &["supersessions", run][..],
-        &["supersessions", run, "--record"][..],
-    ] {
-        world
-            .run(args)
-            .exited(crate::harness::REFUSED)
-            .err_has("launch.json");
-    }
-    assert_eq!(
-        std::fs::read_to_string(&journal).expect("the journal reads"),
-        before
+    world.script("svc-2.work", "the second attempt wrote this\n");
+    world.script("svc-2.fail", "1");
+    retry(&world, run, Some(SECOND));
+    adopted(&world, run);
+    let landing = landed_by_hand(&world, &repo);
+    // Settled while `onevcs` can record nothing, and then stripped of the record,
+    // so the sibling holds no supersession: where an older build left the run.
+    registry_readable(&world, false);
+    settle_at(&world, run, &landing);
+    registry_readable(&world, true);
+    as_an_older_build_left_it(&world, run);
+    assert_ne!(
+        classified(&world, FIRST)["class"],
+        "superseded-with-changes"
     );
+
+    let launch = world.run_file(run, "launch.json");
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb removes or corrupts a run's
+    // launch record or result — a lost or truncated file on disk is the only way a run
+    // reaches this state, so the journey makes one; the verb under test is the real binary's.
+    std::fs::remove_file(&launch).expect("the launch record is removed");
+    std::fs::remove_file(world.run_file(run, "result.json")).expect("the result is removed");
+    world
+        .run(&["supersessions", run])
+        .exited(0)
+        .out_has(&format!("svc-2 landed {SECOND} at {landing}"))
+        .out_has(&format!(
+            "superseded svc on {FIRST}: to record: run again with --record"
+        ));
+    std::fs::write(&launch, "{ not json").expect("an unreadable launch record is written");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let previewed = world
+        .run(&["supersessions", run, "--json"])
+        .exited(0)
+        .json();
+    assert_eq!(
+        previewed["lineages"][0]["to_record"],
+        json!([{"node": "svc", "branch": FIRST}]),
+        "{previewed}"
+    );
+    assert!(superseded(&world, run).is_empty());
+
+    world
+        .run(&["supersessions", run, "--record"])
+        .exited(0)
+        .out_has(&format!("superseded svc on {FIRST}: recorded"));
+    let records = superseded(&world, run);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(
+        records[0]["payload"]["superseded"],
+        json!([{"node": "svc", "branch": FIRST}])
+    );
+    assert_eq!(records[0]["payload"]["landing"], landing);
+
+    world
+        .run(&["supersessions", run, "--record"])
+        .exited(0)
+        .out_has(&format!("superseded svc on {FIRST}: already recorded"));
+    assert_eq!(superseded(&world, run).len(), 1);
+    first_is_superseded_then_retirable(&world, &repo);
 }
 
 /// The identity the world's `service` checkout registers as.

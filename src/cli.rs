@@ -228,7 +228,7 @@ pub enum Command {
     // rather than a new command or client: it reads the run store the engine owns and records
     // through the `onevcs` library it already links, as the verbs in the block above do.
     /// Which earlier attempts of a run's landed retries are superseded, read off
-    /// the run's own store, and — with `--record` — record them with onevcs.
+    /// its journal alone, and — with `--record` — record them with onevcs.
     Supersessions(SupersessionsArgs),
     /// What each run is for, and how far it has got.
     Goals(OptionalRunArgs),
@@ -1025,7 +1025,7 @@ pub struct RunArgs {
 /// naming the branches it refused.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct SupersessionsArgs {
-    /// The run id. Only the run's own store is read: no driver need be alive.
+    /// The run id. Its journal is all that is read: no driver need be alive.
     pub run: String,
     /// Record each pair with onevcs and journal `branches-superseded`, rather
     /// than only printing what would be recorded.

@@ -455,8 +455,9 @@ impl Supersessions {
 
 /// `onepipeline supersessions RUN [--record]`.
 ///
-/// Reads the run's own store — its journal, and the launch record every run view
-/// opens — and nothing else, so it answers for a settled run with no driver.
+/// Reads the run's journal and nothing else — no launch record, checkpoint or
+/// result — so it answers for a settled run with no driver, whatever else of its
+/// store survives.
 /// With `record`, each pair the journal does not already record is handed to
 /// `onevcs::record_supersession` — the function a driver calls when the retry
 /// lands — and one `branches-superseded` per lineage that had any is appended to
@@ -464,13 +465,26 @@ impl Supersessions {
 ///
 /// # Errors
 ///
-/// A run whose store cannot be read, or whose journal cannot be written.
+/// A run with no directory under the runs root, or whose journal cannot be
+/// written.
 pub(crate) fn supersessions(paths: &RunPaths, mode: Mode) -> Result<Supersessions> {
-    let view = crate::views::RunView::open(paths)?;
-    let already = recorded_in(&view.events);
+    if !paths.exists() {
+        return Err(crate::Error::NoSuchRun {
+            run: paths.run.clone(),
+            root: paths
+                .dir
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf(),
+        });
+    }
+    let mut events = journal::read(&paths.journal());
+    journal::merge_order(&mut events);
+    let state = crate::projection::fold(&events);
+    let already = recorded_in(&events);
     let mut journal = (mode == Mode::Record).then(|| Journal::open(paths));
     let mut lineages = Vec::new();
-    for lineage in self::lineages(&view.state) {
+    for lineage in self::lineages(&state) {
         let to_record = unrecorded(&lineage, &already);
         let (recorded, failed) = match &mut journal {
             Some(journal) if !to_record.is_empty() => {
