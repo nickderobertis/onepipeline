@@ -332,13 +332,14 @@ impl Watch {
         state: &RunState,
     ) -> Result<()> {
         for lineage in lineages(state) {
-            // llmlint: ignore[changed_behavior_has_e2e] once per lineage per driver by design,
-            // so a landing that later gains a commit is not asked again: `onevcs` credits the
-            // change-request record by the base commit naming that change, so a second record
-            // at the commit changes no class, and `supersessions --record` keys by landing.
+            // llmlint: ignore-block[changed_behavior_has_e2e] once per lineage per driver by
+            // design, so a landing that later gains a commit is not asked again: `onevcs`
+            // credits the change-request record by the base commit naming that change, so a
+            // second record at the commit changes no class, and `supersessions --record` keys
+            // by landing.
             if !self.answered.insert(lineage.node.clone()) {
                 continue;
-            }
+            } // llmlint: ignore-end[changed_behavior_has_e2e]
             let pending = unrecorded(&lineage, &self.recorded);
             if pending.is_empty() {
                 continue;
@@ -497,10 +498,14 @@ pub(crate) fn supersessions(paths: &RunPaths, mode: Mode) -> Result<Supersession
     })
 }
 
-/// Every record of a run's journal, refusing a journal that cannot be opened or
-/// holds none this build reads: every run's journal opens with its launch, so an
-/// empty read is a store this verb cannot answer for rather than a run with
-/// nothing to record.
+/// Every record of a run's journal, refusing a journal that cannot be opened,
+/// holds none this build reads, or holds a line it cannot read among the ones it
+/// can. Every run's journal opens with its launch, so an empty read is a store
+/// this verb cannot answer for rather than a run with nothing to record; and a
+/// line it cannot read may be the retry edge, the landing or the record a lineage
+/// turns on, so an answer from the rest could say *nothing to record* of a run
+/// that has something — the same reason strict replay reports such a line rather
+/// than folding past it.
 fn journal_of(paths: &RunPaths) -> Result<Vec<Envelope>> {
     let path = paths.journal();
     std::fs::File::open(&path).map_err(|source| crate::Error::Ledger {
@@ -512,6 +517,14 @@ fn journal_of(paths: &RunPaths) -> Result<Vec<Envelope>> {
         return Err(crate::Error::Invalid(format!(
             "{}: the journal holds no record this build can read, so there is no run to \
              answer for",
+            path.display()
+        )));
+    }
+    if journal::has_unreadable_lines(&path) {
+        return Err(crate::Error::Invalid(format!(
+            "{}: the journal holds a line this build cannot read, so an answer from the \
+             rest could miss a retry, a landing or a record it states; read it with the \
+             build that wrote it, or repair the line",
             path.display()
         )));
     }

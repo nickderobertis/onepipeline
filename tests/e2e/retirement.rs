@@ -966,6 +966,23 @@ fn the_backfill_verb_answers_and_records_from_the_journal_alone() {
     let journal = world.run_file(run, "events.jsonl");
     // llmlint: ignore-block[tests_mirror_real_usage] no verb removes or corrupts a run's
     // journal — a lost or truncated file on disk is the only way a run reaches this state.
+    let whole = std::fs::read_to_string(&journal).expect("the journal reads");
+    std::fs::write(&journal, format!("{whole}{{ not json\n")).expect("a line is damaged");
+    for args in [
+        &["supersessions", run][..],
+        &["supersessions", run, "--record"][..],
+    ] {
+        world
+            .run(args)
+            .exited(crate::harness::REFUSED)
+            .out_lacks("superseded svc")
+            .err_has("the journal holds a line this build cannot read");
+    }
+    assert_eq!(
+        std::fs::read_to_string(&journal).expect("the journal reads"),
+        format!("{whole}{{ not json\n"),
+        "a refused --record wrote to the journal"
+    );
     std::fs::write(&journal, "{ not json\n").expect("an unreadable journal is written");
     for args in [
         &["supersessions", run][..],
