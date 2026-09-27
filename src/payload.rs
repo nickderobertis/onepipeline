@@ -1102,13 +1102,28 @@ pub(crate) struct RetiredBranch {
     pub(crate) identity: String,
     /// The branch.
     pub(crate) branch: String,
-    /// Its class, as `onevcs::RetirementClass::as_str` spells it.
-    pub(crate) class: String,
+    /// Its class, as `onevcs` serializes it. That type derives no `JsonSchema`,
+    /// so the document says a string and the type is what is read and written.
+    #[schemars(with = "String")]
+    pub(crate) class: onevcs::RetirementClass,
     /// What proved it held nothing beyond its base.
     // llmlint: ignore[invalid_states_unrepresentable] `onevcs::RetirementProof` is the type, and it is what the writer serializes; it derives no `JsonSchema`, so this *document* — a generated schema — carries it as the JSON the sibling declares rather than as a shape restated here, which would be a second copy of that library's vocabulary to drift.
     pub(crate) proof: Value,
-    /// What retired it: `pass`, the automatic pass `retire_finished` is.
-    pub(crate) trigger: String,
+    /// What retired it.
+    pub(crate) trigger: RetirementTrigger,
+}
+
+/// What retired a branch of a `branches-retired` record.
+///
+/// One word, because this crate reaches retirement through `retire_finished`
+/// alone. `onevcs` keeps its trigger vocabulary private, so the spelling is held
+/// to the one it records by `tests/e2e/retirement.rs`, which reads that
+/// library's own record of the branch back through `onevcs status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum RetirementTrigger {
+    /// The automatic pass `onevcs::retire_finished` makes.
+    Pass,
 }
 
 /// One identity, or one branch of it, an idle pass did not finish retiring.

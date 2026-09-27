@@ -138,7 +138,14 @@ mod plan_check;
 mod real_vcs;
 mod recorded_channel;
 mod recorded_support;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
+// exercise is `supersession`, `maintenance`'s idle sweep, `engine`'s landing paths and the
+// `supersessions` verb in `driver` together, against the linked `onevcs` over real git and a
+// bare origin — so the narrowest edge they can honestly sit behind is the crate itself,
+// which is this target's; a project edged narrower would drop them out of `nx affected` for
+// the very changes they exist to catch. Same grounds as `mod maintenance` above.
 mod retirement;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod run_end_hooks;
 mod scratch;
 mod session;

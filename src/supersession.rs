@@ -179,6 +179,10 @@ fn landing_of(state: &RunState, node: &str) -> Option<String> {
 }
 
 /// Every `(node, branch)` a `branches-superseded` record says `onevcs` recorded.
+///
+/// A record that does not read as one is said so on stderr and counts for
+/// nothing, so its pairs are asked of `onevcs` again — which records a
+/// supersession once however often it is told.
 pub(crate) fn recorded_in(events: &[Envelope]) -> BTreeSet<Attempt> {
     events
         .iter()
@@ -190,6 +194,12 @@ pub(crate) fn recorded_in(events: &[Envelope]) -> BTreeSet<Attempt> {
             serde_json::from_value::<BranchesSuperseded>(serde_json::Value::Object(
                 event.payload.clone(),
             ))
+            .map_err(|error| {
+                eprintln!(
+                    "onepipeline: a branches-superseded record in this run's journal could not \
+                     be read ({error}); what it names is asked of onevcs again"
+                );
+            })
             .ok()
         })
         .flat_map(|record| record.superseded)
@@ -338,6 +348,16 @@ pub(crate) fn record_landed(paths: &RunPaths, journal: &mut Journal) -> Result<(
     .pass(paths, journal, &state)
 }
 
+/// What `onepipeline supersessions` is asked to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Mode {
+    /// Say what would be recorded, and record nothing.
+    Answer,
+    /// Record each pair the journal does not, with `--record`.
+    Record,
+}
+
 /// `onepipeline supersessions RUN [--record]`: which earlier attempts of the run's
 /// landed retries were on a branch other than the one that landed, and what
 /// became of recording them with `onevcs`.
@@ -345,8 +365,8 @@ pub(crate) fn record_landed(paths: &RunPaths, journal: &mut Journal) -> Result<(
 pub(crate) struct Supersessions {
     /// The run.
     pub(crate) run: String,
-    /// Whether this call recorded, rather than only answered.
-    pub(crate) record: bool,
+    /// What this call was asked to do.
+    pub(crate) mode: Mode,
     /// Every landed lineage with earlier attempts, in head order.
     pub(crate) lineages: Vec<SupersededLineage>,
 }
@@ -394,10 +414,10 @@ impl Supersessions {
 /// # Errors
 ///
 /// A run whose store cannot be read, or whose journal cannot be written.
-pub(crate) fn backfill(paths: &RunPaths, record: bool) -> Result<Supersessions> {
+pub(crate) fn backfill(paths: &RunPaths, mode: Mode) -> Result<Supersessions> {
     let view = crate::views::RunView::open(paths)?;
     let already = recorded_in(&view.events);
-    let mut journal = record.then(|| Journal::open(paths));
+    let mut journal = (mode == Mode::Record).then(|| Journal::open(paths));
     let mut lineages = Vec::new();
     for lineage in self::lineages(&view.state) {
         let to_record: Vec<Attempt> = lineage
@@ -423,12 +443,13 @@ pub(crate) fn backfill(paths: &RunPaths, record: bool) -> Result<Supersessions> 
     }
     Ok(Supersessions {
         run: paths.run.clone(),
-        record,
+        mode,
         lineages,
     })
 }
 
-/// The lines `onepipeline supersessions RUN` prints.
+/// The lines `onepipeline supersessions RUN` prints on stdout. What `onevcs`
+/// answered for a record it refused is [`render_refusals`]'s, for stderr.
 pub(crate) fn render(answered: &Supersessions) -> String {
     if answered.lineages.is_empty() {
         return format!(
@@ -451,18 +472,18 @@ pub(crate) fn render(answered: &Supersessions) -> String {
             );
         }
         for attempt in &head.superseded {
-            let state = if let Some(failed) = lineage
+            let state = if lineage
                 .failed
                 .iter()
-                .find(|failed| &failed.attempt == attempt)
+                .any(|failed| &failed.attempt == attempt)
             {
-                format!("not recorded: {}", failed.error)
+                "not recorded"
             } else if lineage.recorded.contains(attempt) {
-                "recorded".to_owned()
+                "recorded"
             } else if lineage.to_record.contains(attempt) {
-                "to record: run again with --record".to_owned()
+                "to record: run again with --record"
             } else {
-                "already recorded".to_owned()
+                "already recorded"
             };
             out.push_str(&format!(
                 "  superseded {} on {}: {state}\n",
@@ -470,26 +491,73 @@ pub(crate) fn render(answered: &Supersessions) -> String {
             ));
         }
     }
-    let failed: Vec<String> = answered
+    out
+}
+
+/// What `onepipeline supersessions RUN --record` prints on stderr when `onevcs`
+/// refused a record: each refused branch with its answer, and what to run once
+/// that is fixed. Nothing when every record was taken.
+pub(crate) fn render_refusals(answered: &Supersessions) -> String {
+    let failed: Vec<&Unrecorded> = answered
         .lineages
         .iter()
         .flat_map(|lineage| &lineage.failed)
-        .map(|failed| failed.attempt.branch.clone())
         .collect();
-    if !failed.is_empty() {
+    if failed.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for refused in &failed {
         out.push_str(&format!(
-            "onevcs refused to record {}; run `onepipeline supersessions {} --record` again \
-             once that is fixed\n",
-            failed.join(", "),
-            answered.run
+            "onepipeline: onevcs refused to record {} ({}) as superseded: {}\n",
+            refused.attempt.branch, refused.attempt.node, refused.error
         ));
     }
+    out.push_str(&format!(
+        "onepipeline: run `onepipeline supersessions {} --record` again once that is fixed\n",
+        answered.run
+    ));
     out
 }
 
 /// The one JSON object `onepipeline supersessions RUN --json` prints.
 pub(crate) fn render_json(answered: &Supersessions) -> String {
     serde_json::to_string(answered).expect("the answer serializes")
+}
+
+/// Entry 91's block in `docs/contract-divergences.md`: the proposal this module
+/// and `maintenance`'s retirement pass are held to.
+#[cfg(test)]
+pub(crate) fn proposal() -> serde_json::Value {
+    let record = include_str!("../docs/contract-divergences.md");
+    let entry = record
+        .split("\n## ")
+        .find(|entry| entry.starts_with("91."))
+        .expect("the divergence record carries entry 91");
+    let block = entry
+        .split("```json")
+        .nth(1)
+        .and_then(|rest| rest.split("```").next())
+        .expect("entry 91 carries its json block");
+    serde_json::from_str(block).expect("entry 91's block is JSON")
+}
+
+/// The words a list of `proposal()` names.
+#[cfg(test)]
+pub(crate) fn proposed(key: &str) -> BTreeSet<String> {
+    serde_json::from_value(proposal()[key].clone())
+        .unwrap_or_else(|error| panic!("entry 91's {key} is a list of words: {error}"))
+}
+
+/// The top-level properties the payload document generated from `T` declares.
+#[cfg(test)]
+pub(crate) fn declared<T: schemars::JsonSchema>() -> BTreeSet<String> {
+    schemars::schema_for!(T).as_value()["properties"]
+        .as_object()
+        .expect("a payload document declares its properties")
+        .keys()
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -563,5 +631,46 @@ mod tests {
         state.landings.insert("b".to_owned(), Landing::Landed);
         state.landing_commits.insert("b".to_owned(), "e".repeat(40));
         assert!(lineages(&state).is_empty(), "b's own branch is unrecorded");
+    }
+
+    /// Entry 91 tells a planner the fields `branches-superseded` carries and the
+    /// shape `--json` prints; these are the types that write both.
+    #[test]
+    fn entry_91_names_the_fields_this_build_writes() {
+        assert_eq!(
+            proposed("branches_superseded_fields"),
+            declared::<BranchesSuperseded>()
+        );
+        let answered = Supersessions {
+            run: "r".to_owned(),
+            mode: Mode::Record,
+            lineages: vec![SupersededLineage {
+                lineage: Lineage {
+                    node: "b".to_owned(),
+                    branch: "y".to_owned(),
+                    repo: "service".to_owned(),
+                    landing: "f".repeat(40),
+                    superseded: Vec::new(),
+                },
+                to_record: Vec::new(),
+                recorded: Vec::new(),
+                failed: Vec::new(),
+            }],
+        };
+        let printed = serde_json::to_value(&answered).expect("the answer serializes");
+        let keys = |value: &serde_json::Value| -> BTreeSet<String> {
+            value
+                .as_object()
+                .expect("an object")
+                .keys()
+                .cloned()
+                .collect()
+        };
+        assert_eq!(proposed("verb_json_fields"), keys(&printed));
+        assert_eq!(
+            proposed("verb_json_lineage_fields"),
+            keys(&printed["lineages"][0])
+        );
+        assert_eq!(printed["mode"], "record");
     }
 }

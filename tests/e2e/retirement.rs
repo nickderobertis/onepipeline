@@ -27,11 +27,8 @@ use serde_json::{json, Value};
 
 use crate::harness::{git, lifecycle, onevcs_binary, plan_of, Repository, World};
 
-/// The branch every lineage's first attempt works on.
 const FIRST: &str = "try/first";
-/// The branch a replacement on a branch of its own works on.
 const SECOND: &str = "try/second";
-/// What the first attempt's worker writes, into `svc.md`.
 const FIRST_WORK: &str = "the first attempt wrote this\n";
 
 /// The first attempt of the lineage every journey here retries: a lifecycle node
@@ -462,6 +459,13 @@ fn a_retry_on_the_branch_its_first_attempt_left_records_nothing() {
 /// The run's journal as a build before `branches-superseded` existed left it:
 /// this build's, less the records of that one kind — and less the fold
 /// checkpoint, which is a reader's shortcut over bytes that are no longer there.
+// llmlint: ignore-block[tests_mirror_real_usage] the state the backfill verb exists for is
+// one only a build *older* than this one writes — a run that settled with a landed retry
+// and no `branches-superseded` — and this build writes that record at every landing,
+// refused or not, so no entry point of it reaches the state. What an older build left is
+// exactly this build's journal less the records of the one kind it did not know, which is
+// what is written here; everything else in the run, the lineage and the landing included,
+// is the real binary's own.
 fn as_an_older_build_left_it(world: &World, run: &str) {
     let journal = world.run_file(run, "events.jsonl");
     let kept: String = std::fs::read_to_string(&journal)
@@ -477,11 +481,13 @@ fn as_an_older_build_left_it(world: &World, run: &str) {
     let _ = std::fs::remove_file(world.run_file(run, "checkpoint.json"));
     assert!(superseded(world, run).is_empty());
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// `onepipeline supersessions` over a settled run whose journal holds a landed
 /// retry but no `branches-superseded`: it prints the pair, records it with
-/// `--record`, answers `1` naming the branch when `onevcs` refuses, and records
-/// nothing new the second time. An unknown run is refused.
+/// `--record`, answers `1` naming the branch on stderr when `onevcs` refuses, and
+/// records nothing new the second time — in lines and in `--json` alike. A run
+/// with no landed retry has nothing to record, and an unknown run is refused.
 #[cfg(unix)]
 #[test]
 fn the_backfill_verb_records_what_a_settled_run_never_did_once() {
@@ -489,6 +495,20 @@ fn the_backfill_verb_records_what_a_settled_run_never_did_once() {
     let repo = world.repository("local-direct", &[]);
     let run = "backfill";
     first_attempt(&world, run);
+    // Nothing retried yet, so nothing landed that superseded anything.
+    world
+        .run(&["supersessions", run])
+        .exited(0)
+        .out_has(&format!(
+            "run {run}: no retry that landed has an earlier attempt, so there is nothing to \
+             record"
+        ));
+    let nothing = world
+        .run(&["supersessions", run, "--record", "--json"])
+        .exited(0)
+        .json();
+    assert_eq!(nothing["lineages"], json!([]), "{nothing}");
+
     world.script("svc-2.work", "the second attempt wrote this\n");
     world.script("svc-2.fail", "1");
     retry(&world, run, Some(SECOND));
@@ -515,7 +535,7 @@ fn the_backfill_verb_records_what_a_settled_run_never_did_once() {
         .run(&["supersessions", run, "--json"])
         .exited(0)
         .json();
-    assert_eq!(answered["record"], false, "{answered}");
+    assert_eq!(answered["mode"], "answer", "{answered}");
     assert_eq!(
         answered["lineages"][0]["to_record"],
         json!([{"node": "svc", "branch": FIRST}]),
@@ -527,13 +547,34 @@ fn the_backfill_verb_records_what_a_settled_run_never_did_once() {
         "superseded-with-changes"
     );
 
-    // Refused by `onevcs`: exit 1, naming the branch.
+    // Refused by `onevcs`: exit 1, naming the branch and what it answered on
+    // stderr, whichever form stdout is in.
     registry_readable(&world, false);
     world
         .run(&["supersessions", run, "--record"])
         .exited(1)
-        .out_has(&format!("superseded svc on {FIRST}: not recorded: "))
-        .out_has(&format!("onevcs refused to record {FIRST}"));
+        .out_has(&format!("superseded svc on {FIRST}: not recorded\n"))
+        .err_has(&format!(
+            "onevcs refused to record {FIRST} (svc) as superseded: "
+        ))
+        .err_has(&format!(
+            "run `onepipeline supersessions {run} --record` again"
+        ));
+    let refused = world.run(&["supersessions", run, "--record", "--json"]);
+    refused.exited(1).err_has(&format!(
+        "onevcs refused to record {FIRST} (svc) as superseded: "
+    ));
+    let refused = refused.json();
+    assert_eq!(refused["mode"], "record", "{refused}");
+    assert_eq!(refused["lineages"][0]["recorded"], json!([]), "{refused}");
+    assert_eq!(
+        refused["lineages"][0]["failed"][0]["node"], "svc",
+        "{refused}"
+    );
+    assert_eq!(
+        refused["lineages"][0]["failed"][0]["branch"], FIRST,
+        "{refused}"
+    );
     registry_readable(&world, true);
 
     // Recorded: the same function a driver calls, and the same record.
@@ -559,7 +600,15 @@ fn the_backfill_verb_records_what_a_settled_run_never_did_once() {
     world
         .run(&["supersessions", run, "--record"])
         .exited(0)
-        .out_has(&format!("superseded svc on {FIRST}: already recorded"));
+        .out_has(&format!("superseded svc on {FIRST}: already recorded"))
+        .err_lacks("refused");
+    let again = world
+        .run(&["supersessions", run, "--record", "--json"])
+        .exited(0)
+        .json();
+    for list in ["to_record", "recorded", "failed"] {
+        assert_eq!(again["lineages"][0][list], json!([]), "{list}: {again}");
+    }
     assert_eq!(superseded(&world, run).len(), before);
     first_is_superseded_then_retirable(&world, &repo);
 
@@ -635,6 +684,24 @@ fn pool_status(world: &World) -> Value {
         .output()
         .expect("onevcs runs");
     serde_json::from_slice(&status.stdout).expect("the status is JSON")
+}
+
+/// The trigger `onevcs` recorded retiring `branch` with, as its own `status`
+/// reads back the retirement of a branch nothing holds any more.
+fn recorded_trigger(world: &World, repo: &Repository, branch: &str) -> Value {
+    let output = world
+        .cmd_on(&onevcs_binary(), &["status", branch, "--json"])
+        .current_dir(&repo.checkout)
+        .output()
+        .expect("onevcs runs");
+    let status: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "`onevcs status {branch} --json` printed no report ({error}): {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    status["retired"]["trigger"].clone()
 }
 
 /// Wait until a run has journalled the retirement of every branch given.
@@ -817,6 +884,14 @@ fn an_idle_pass_retires_what_other_runs_left_and_keeps_the_slot_that_held_one() 
         assert_eq!(entry["class"], "retirable", "{entry}");
         assert_eq!(entry["trigger"], "pass", "{entry}");
         assert_eq!(entry["proof"]["kind"], "merged-change-request", "{entry}");
+        // The trigger journalled is the one `onevcs` recorded, which keeps its
+        // vocabulary to itself: this is where the two spellings meet.
+        let branch = entry["branch"].as_str().expect("a branch");
+        assert_eq!(
+            recorded_trigger(&world, &repo, branch),
+            entry["trigger"],
+            "{entry}"
+        );
     }
     for (branch, holder) in &places {
         let location = holder["location"].as_str().expect("a location");
@@ -1131,4 +1206,108 @@ fn a_node_pinned_to_a_retired_branch_is_cut_fresh_from_the_base() {
         repo.base_file("again.md").as_deref().map(str::trim),
         Some("the pinned node wrote this")
     );
+}
+
+/// A branch whose origin refuses its deletion is retired in part: the pass journals
+/// a failure naming the identity, the branch and what the origin answered, the
+/// copy the origin kept stays, and the run settles as it would have.
+#[cfg(unix)]
+#[test]
+fn a_deletion_the_origin_refuses_is_journalled_against_its_branch() {
+    let world = sweeping_world("retirement-incomplete");
+    let repo = world.repository("local-direct", &[]);
+    // Published, and named by a record of the host's — a supersession — which is
+    // what makes a branch whose commits an origin ref holds one a pass examines.
+    lossless(&world, &repo, "done/published", "published.md");
+    git(
+        &world,
+        &repo.checkout,
+        &["push", "origin", "done/published"],
+    );
+    let base = git(&world, &repo.origin, &["rev-parse", "main"])
+        .trim()
+        .to_owned();
+    let supersede = world
+        .cmd_on(
+            &onevcs_binary(),
+            &[
+                "supersede",
+                "done/published",
+                "--repo",
+                "service",
+                "--by",
+                "main",
+                "--landing",
+                &base,
+            ],
+        )
+        .output()
+        .expect("onevcs runs");
+    assert!(
+        supersede.status.success(),
+        "{}",
+        String::from_utf8_lossy(&supersede.stderr)
+    );
+    let hook = repo.origin.join("hooks").join("pre-receive");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\nwhile read old new ref; do\n  case \"$new\" in\n    *[!0]*) ;;\n    \
+         *) echo \"deleting $ref is not allowed here\" >&2; exit 1 ;;\n  esac\ndone\n",
+    )
+    .expect("the hook is written");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("the hook is executable");
+    }
+    let class = classified(&world, "done/published");
+    assert_eq!(class["class"], "retirable", "{class}");
+    assert!(
+        class["holders"]
+            .as_array()
+            .is_some_and(|holders| holders.iter().any(|holder| holder["kind"] == "origin")),
+        "{class}"
+    );
+
+    sweeping(
+        &world,
+        "sweeper",
+        crate::harness::agent("hold", &[]),
+        Vec::new(),
+    );
+    let refused = |world: &World| {
+        world
+            .events_of("sweeper", "branches-retired")
+            .into_iter()
+            .flat_map(|event| {
+                event["payload"]["failed"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .find(|failed| failed["branch"] == "done/published")
+    };
+    world.until("the refused deletion to be journalled", |world| {
+        refused(world).is_some()
+    });
+    let failed = refused(&world).expect("a failure");
+    assert_eq!(failed["identity"], SERVICE_IDENTITY, "{failed}");
+    let error = failed["error"].as_str().expect("an error");
+    assert!(error.contains("origin"), "{failed}");
+    assert!(error.contains("pre-receive hook declined"), "{failed}");
+    assert!(
+        retired(&world, "sweeper")
+            .iter()
+            .all(|entry| entry["branch"] != "done/published"),
+        "a branch the origin kept was journalled as retired"
+    );
+    assert!(!holds(&world, &repo.checkout, "done/published"));
+    assert!(holds(&world, &repo.origin, "done/published"));
+
+    world.release("hold.go");
+    world.until("the sweeper to settle", |world| {
+        world.run_file("sweeper", "result.json").is_file()
+    });
+    let result = world.run_json("sweeper", "result.json");
+    assert_eq!(result["nodes"][0]["status"], "done", "{result}");
 }

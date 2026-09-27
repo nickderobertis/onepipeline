@@ -671,6 +671,11 @@ fn a_run_stopped_mid_publication(world: &World) -> (crate::harness::Repository, 
     (repo, clone, stranded)
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey lives
+// beside the other session journeys in this file, on the same grounds as the block above:
+// it exercises `src/executor.rs`'s session seam and the `onevcs` calls behind `src/vcs.rs`
+// through a retry, each of which any change under `src/` can move, so a project edged
+// narrower than the crate would drop it out of `nx affected` for the changes it catches.
 #[cfg(unix)]
 #[test]
 fn a_retry_lands_the_work_a_stopped_run_left_on_the_branch_it_pinned() {
@@ -735,6 +740,7 @@ fn a_retry_lands_the_work_a_stopped_run_left_on_the_branch_it_pinned() {
         "the base did not advance by exactly the retry's publication"
     );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A retry that takes up a stopped run's session and writes nothing is not
 /// credited with the commit that run left in the worktree.
