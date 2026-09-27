@@ -210,6 +210,9 @@ could not be run — which is reported separately from a refusal and never read 
 an accept. A loader refusal short-circuits: there is no loaded plan to hand a
 check, so each is reported as not run.
 
+`--template-root` names the host's template root and `--require-rendered` turns
+on the rendered-only check, each read exactly as `start` reads it.
+
 The run's own record does not move: the journal, the ledger, and the graph a run
 is executing are still this crate's, projected from that journal under the run's
 ownership lock. Node status, settlement metadata, and accepted live graph edits
@@ -217,6 +220,20 @@ are projected back onto the onetaskgraph project in the background. A failed
 write is reported and retried — unless the store refused it, which is reported
 once and attempted again when the run's graph next changes; it never changes
 execution or an edit ruling.
+
+A task's shape is a template its host owns. `<root>/templates.yaml` registers
+named templates beside the one this crate ships, `plan-task`. Each name resolves
+at the first layer that supplies it: `--template FILE`, then the repository's
+`.onepipeline/templates/<name>.md.j2`, then `<root>/<name>.md.j2`, then the
+built-in. `onepipeline template list`, `template resolve <NAME> --json` and
+`template check <NAME> [--rendering FILE|- | --item <ID>]` report, state and
+validate them. None of them writes anything; the rendering is `onetaskgraph`'s:
+
+```bash
+onepipeline template resolve plan-task --json \
+  | onetaskgraph task create plans --project board --title "feat: build it" \
+      --template-loader - --answers answers.yaml
+```
 
 ## What it does
 

@@ -6,7 +6,7 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89 and 91** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91 and 93** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
@@ -7586,3 +7586,46 @@ exclusion is built from.
   "excluded_by": ["branch", "resume.branch", "session"]
 }
 ```
+
+## 93. Task templates are registered, layered and checked here, and three rulings moved what C4 and C7 stated — RESOLVED
+
+**Ruling: C4, C6a, C7 and C8 are part of the contract, on the user's ruling relayed by the
+manager of run `task-templates`, and `docs/contract.md` states them beside C6b.** A task's
+shape is a template its host owns. This crate registers and layers the names, states the
+resolved template as onetaskgraph's C3b loader document, and checks. It never renders into a
+store, and onetaskgraph never calls it. The one template it embeds is `plan-task`'s base,
+`src/templates/onepipeline/plan-task.md.j2`.
+
+**Three manager rulings made while it was built**, each relayed over the run's channel:
+
+- **The two launch-config keys are at schema 12, not 11.** C4 and C7 placed `template_root`
+  and `require_rendered` at launch-config `schema_version: 11`, written when this build wrote
+  10. Entry 90's `branch_template` had since shipped at 11, so adding keys there would have made
+  two documents declaring 11: one a released build reads, and one it refuses. The ruling is
+  the version one above the highest any release shipped. `LAUNCH_CONFIG_SCHEMA_VERSION` is 12,
+  `tests/golden/launch-config-v12.json` pins it, and versions 1 to 11 load as they did.
+- **A node on a board that keeps no answers is placed there as its bytes, not by `onetaskgraph
+  project copy`.** The criterion named a `github-projects` loopback fixture. This repository has
+  none; the only one is inside onetaskgraph's own test suite. The ruling substitutes
+  `crates/testfakes`' `scripted-source`, a real onetaskgraph source over the subprocess plugin
+  protocol that keeps no answers beside an item. A second ruling then followed: onetaskgraph
+  0.2.47's `project copy` writes a copied item's content trimmed, which drops the final line
+  break every `plan-task` rendering ends with. So the journey writes the item onto that board
+  byte for byte and shows it accepted, then one interior line changed and refused. The trim is
+  onetaskgraph's defect, and an onetaskgraph node is fixing it. It was not loosened here.
+- **C7 stays exact.** The body check digests the stored content through onetaskgraph's own
+  published `body_digest`, so the digest has one definition.
+
+**Where C8 is narrower than it reads.** `--template FILE` names the explicit layer for the one
+name a verb acts on. `template list` reports every name, so it takes no `--template`. With
+several `--repository` origins and no `--repo`, the working directory is the checkout, which is
+what *the single* origin's rule leaves. A lifecycle node's repository layer, at plan load, is
+the publication checkout `onevcs resolve` reports. Where that cannot be resolved under
+`require_rendered`, the node is refused rather than loaded unchecked.
+
+**What this build does.** `onepipeline::templates` holds the names, the rules and the answer
+types. `onepipeline::verbs` holds `template_list`, `template_resolve` and `template_check`, and
+their renderers. `start` and `plan check` read the root and the check. `tests/contract.rs`'s
+`the_task_templates_are_what_the_contract_names` reconciles the block. `tests/e2e/templates.rs`
+drives every verb, and the seam through the released `onetaskgraph` the justfile installs at the
+release the lock links, over a real `local-md` store.

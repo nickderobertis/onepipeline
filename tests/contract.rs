@@ -2670,7 +2670,7 @@ fn the_branch_name_template_is_what_the_contract_names() {
     )
     .expect("a version fits");
     assert_eq!(at, CONFIG_SCHEMA_VERSION);
-    assert_eq!(at, LAUNCH_CONFIG_SCHEMA_VERSION);
+    assert!(at <= LAUNCH_CONFIG_SCHEMA_VERSION);
     let example: LaunchConfig =
         serde_norway::from_str(&fenced_block_naming("yaml", "branch_template:"))
             .expect("the contract's launch example parses");
@@ -6669,6 +6669,10 @@ const RULINGS: &[(&str, &str)] = &[
         "91.",
         "onepipeline::plan::check_criteria(task: &str) -> Result<(), CriteriaRule>",
     ),
+    (
+        "93.",
+        "`template_root` and `require_rendered` are keys of launch-config `schema_version: 12`",
+    ),
 ];
 
 #[test]
@@ -7999,6 +8003,18 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
     let _: fn(&RunPaths, Adopt) -> Result<Adopted> = verbs::adopt;
     let _: fn(&Adopted) -> String = verbs::render_adopted;
     let _: fn(&RunPaths, Retained) -> Result<i32> = verbs::drive_run;
+    {
+        use onepipeline::templates::{
+            ResolvedTemplate, TemplateCheck, TemplateChecked, TemplateList, TemplateOptions,
+        };
+        let _: fn(&TemplateOptions) -> Result<TemplateList> = verbs::template_list;
+        let _: fn(&TemplateList, bool) -> Result<String> = verbs::render_template_list;
+        let _: fn(&str, &TemplateOptions) -> Result<ResolvedTemplate> = verbs::template_resolve;
+        let _: fn(&ResolvedTemplate, bool) -> Result<String> = verbs::render_template_resolved;
+        let _: fn(&str, &TemplateOptions, &TemplateCheck) -> Result<TemplateChecked> =
+            verbs::template_check;
+        let _: fn(&TemplateChecked) -> String = verbs::render_template_checked;
+    }
     let _: fn(&RunSummary) -> DriverLiveness = onepipeline::views::liveness_of;
     let _: fn(&RunPaths) -> Result<Plan> = onepipeline::views::plan_of;
 
@@ -8350,4 +8366,227 @@ fn an_older_records_bus_config_is_read_best_effort_as_the_contract_states() {
     assert!(named.contains(&refusal(emptied.clone())));
     emptied["select"] = json!("op");
     assert!(named.contains(&refusal(emptied)));
+}
+
+/// C4, C6a, C7 and C8: the task-template block, reconciled against the public constants,
+/// the verbs' answers, the command line and the launch config — and the loader document
+/// `template resolve --json` states, read back through `onetaskgraph`'s own reader.
+///
+/// `tests/e2e/templates.rs` drives every one of these through the real binary and the
+/// released `onetaskgraph`.
+#[test]
+fn the_task_templates_are_what_the_contract_names() {
+    use onepipeline::templates::{
+        Layer, Role, TemplateCheck, TemplateOptions, BASE, BASE_SOURCE, BUILT_IN,
+        CONFIG_SCHEMA_VERSION, CRITERIA_VARIABLE, EXTENSION, REFERENCE_PREFIX, REGISTRATION_FILE,
+        REGISTRATION_KEY, REGISTRATION_VERSION, REPOSITORY_DIR, REQUIRE_RENDERED_ENVIRONMENT,
+        REQUIRE_RENDERED_FLAG, REQUIRE_RENDERED_KEY, ROOT_ENVIRONMENT, ROOT_FLAG, ROOT_KEY,
+        RULE_BODY_CHANGED, RULE_CRITERIA_TYPE, RULE_FOREIGN, RULE_NOT_EXTENDED, RULE_NO_PROVENANCE,
+        RULE_TEMPLATE_CHANGED,
+    };
+    let block: Value = serde_json::from_str(&fenced_block_naming("json", "\"task_templates\": {"))
+        .expect("the task-template block is JSON");
+    let block = &block["task_templates"];
+    assert_eq!(block["built_in"].as_str(), Some(BUILT_IN));
+    assert_eq!(block["base"].as_str(), Some(BASE));
+    assert_eq!(block["repository_dir"].as_str(), Some(REPOSITORY_DIR));
+    assert_eq!(block["extension"].as_str(), Some(EXTENSION));
+    assert_eq!(block["reference_prefix"].as_str(), Some(REFERENCE_PREFIX));
+    let registration = &block["registration"];
+    assert_eq!(registration["file"].as_str(), Some(REGISTRATION_FILE));
+    assert_eq!(registration["version_key"].as_str(), Some(REGISTRATION_KEY));
+    assert_eq!(registration["version"], json!(REGISTRATION_VERSION));
+    assert_eq!(
+        registration["roles"],
+        json!([Role::Task, Role::Document]),
+        "the roles the block names are the type's"
+    );
+    for (rung, flag, environment, key) in [
+        ("host_root", ROOT_FLAG, ROOT_ENVIRONMENT, ROOT_KEY),
+        (
+            "require_rendered",
+            REQUIRE_RENDERED_FLAG,
+            REQUIRE_RENDERED_ENVIRONMENT,
+            REQUIRE_RENDERED_KEY,
+        ),
+    ] {
+        let rung = &block[rung];
+        assert_eq!(rung["flag"].as_str(), Some(flag));
+        assert_eq!(rung["environment"].as_str(), Some(environment));
+        assert_eq!(rung["config_key"].as_str(), Some(key));
+        assert_eq!(rung["launch_record_key"].as_str(), Some(key));
+        assert_eq!(rung["config_schema_version"], json!(CONFIG_SCHEMA_VERSION));
+    }
+    assert_eq!(CONFIG_SCHEMA_VERSION, LAUNCH_CONFIG_SCHEMA_VERSION);
+    assert_eq!(
+        block["layers"],
+        json!([
+            Layer::Explicit,
+            Layer::Repository,
+            Layer::Host,
+            Layer::BuiltIn
+        ])
+    );
+    let rules = &block["rules"];
+    for (name, rule) in [
+        ("not_extended", RULE_NOT_EXTENDED),
+        ("criteria_type", RULE_CRITERIA_TYPE),
+        ("no_provenance", RULE_NO_PROVENANCE),
+        ("foreign", RULE_FOREIGN),
+        ("template_changed", RULE_TEMPLATE_CHANGED),
+        ("body_changed", RULE_BODY_CHANGED),
+    ] {
+        assert_eq!(rules[name].as_str(), Some(rule), "{name}");
+        assert!(
+            backticked().iter().any(|spelled| spelled.starts_with(rule)),
+            "the contract's prose no longer spells `{rule}`"
+        );
+    }
+    assert!(backticked().contains(block["remedy"].as_str().expect("the remedy")));
+
+    // The base declares exactly what the block says, read by onetaskgraph's own loader.
+    let base = onetaskgraph_core::LoaderDocument::new("onepipeline:plan-task", BASE)
+        .and_then(|document| document.with_template(BASE, BASE_SOURCE))
+        .and_then(|document| document.load())
+        .expect("the base loads");
+    let [declared] = base.variables() else {
+        panic!("the base declares exactly one variable")
+    };
+    let stated = &block["criteria_variable"];
+    assert_eq!(stated["name"].as_str(), Some(CRITERIA_VARIABLE));
+    assert_eq!(declared.name(), CRITERIA_VARIABLE);
+    assert_eq!(stated["type"].as_str(), Some(declared.kind().as_str()));
+    assert_eq!(
+        stated["items"].as_str(),
+        declared.items().map(onetaskgraph_core::ItemType::as_str)
+    );
+    assert_eq!(stated["required"], json!(declared.required()));
+    assert_eq!(stated["description"].as_str(), Some(declared.description()));
+
+    // The registration example, registered by a root of its own, and each answer's keys.
+    let root = std::env::temp_dir().join(format!(
+        "onepipeline-contract-templates-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a scratch root");
+    std::fs::write(
+        root.join(REGISTRATION_FILE),
+        fenced_block_naming("yaml", "onepipeline_templates:"),
+    )
+    .expect("the registration is written");
+    let options = TemplateOptions {
+        template_root: Some(root.clone()),
+        working_dir: root.clone(),
+        ..TemplateOptions::default()
+    };
+    let listed = onepipeline::verbs::template_list(&options).expect("the example registers");
+    let named: Vec<(&str, Role)> = listed
+        .templates
+        .iter()
+        .map(|listed| (listed.name.as_str(), listed.role))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            (BUILT_IN, Role::Task),
+            ("design-doc", Role::Document),
+            ("follow-up", Role::Task)
+        ]
+    );
+    let keys = |value: Value| -> Value {
+        json!(value
+            .as_object()
+            .expect("an object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>())
+    };
+    let listed = serde_json::to_value(&listed).expect("the list serialises");
+    assert_eq!(keys(listed.clone()), block["list_keys"]);
+    assert_eq!(keys(listed["templates"][0].clone()), block["listed_keys"]);
+
+    let resolved = onepipeline::verbs::template_resolve(BUILT_IN, &options)
+        .expect("plan-task resolves to the built-in");
+    assert_eq!(resolved.layer, Layer::BuiltIn);
+    let stated = serde_json::to_value(&resolved).expect("the document serialises");
+    assert_eq!(keys(stated.clone()), block["resolved_keys"]);
+    assert_eq!(
+        block["loader_document_keys"],
+        json!(onetaskgraph_core::LoaderDocument::KEYS),
+        "the loader document is onetaskgraph's own"
+    );
+    assert_eq!(
+        stated["reference"].as_str(),
+        Some(format!("{REFERENCE_PREFIX}{BUILT_IN}").as_str())
+    );
+    let read = onetaskgraph_core::LoaderDocument::from_json(&stated.to_string())
+        .expect("onetaskgraph reads what resolve --json prints");
+    assert_eq!(
+        read.load().expect("its digest is the one stated").digest(),
+        resolved.digest
+    );
+
+    let checked = onepipeline::verbs::template_check(BUILT_IN, &options, &TemplateCheck::Template)
+        .expect("the built-in passes C6a");
+    assert_eq!(
+        keys(serde_json::to_value(&checked).expect("it serialises")),
+        block["checked_keys"]
+    );
+
+    // The command line the block names.
+    let verbs: Vec<String> = Cli::command()
+        .find_subcommand("template")
+        .expect("the binary has a template group")
+        .get_subcommands()
+        .map(|verb| verb.get_name().to_owned())
+        .collect();
+    assert_eq!(json!(verbs), block["verbs"]);
+    let Command::Start(started) = Cli::try_parse_from([
+        "onepipeline",
+        "start",
+        "plans:demo",
+        ROOT_FLAG,
+        "templates",
+        REQUIRE_RENDERED_FLAG,
+        "true",
+    ])
+    .expect("start takes both flags")
+    .command
+    else {
+        panic!("that is not a start")
+    };
+    assert_eq!(
+        started.template_root.as_deref(),
+        Some(Path::new("templates"))
+    );
+    assert_eq!(started.require_rendered, Some(true));
+    Cli::try_parse_from([
+        "onepipeline",
+        "plan",
+        "check",
+        "plans:demo",
+        ROOT_FLAG,
+        "templates",
+        REQUIRE_RENDERED_FLAG,
+        "false",
+    ])
+    .expect("plan check takes both flags");
+    Cli::try_parse_from(["onepipeline", "adopt", "demo", ROOT_FLAG, "x"])
+        .expect_err("adopt replays the launch record's root and takes none");
+
+    // And the launch config's two keys, at the version the block names.
+    let path = root.join("launch.yaml");
+    std::fs::write(
+        &path,
+        format!(
+            "schema_version: {CONFIG_SCHEMA_VERSION}\n{ROOT_KEY}: ./templates\n\
+             {REQUIRE_RENDERED_KEY}: true\n"
+        ),
+    )
+    .expect("the config is written");
+    let config = LaunchConfig::load(&path).expect("schema 12 carries both keys");
+    assert_eq!(config.template_root.as_deref(), Some("./templates"));
+    assert_eq!(config.require_rendered, Some(true));
+    let _ = std::fs::remove_dir_all(&root);
 }

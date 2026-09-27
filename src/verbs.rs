@@ -1504,7 +1504,7 @@ pub fn template_check(
                 .item(&qualified, role == templates::Role::Document)?;
             let refused = |why: &str| Error::Refused(format!("item {id}: {why}"));
             if role == templates::Role::Task {
-                templates::check_rendering(&stored.content).map_err(|rule| refused(rule))?;
+                templates::check_rendering(&stored.content).map_err(&refused)?;
             }
             templates::check_rendered(
                 &registry,
