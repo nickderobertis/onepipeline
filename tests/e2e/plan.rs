@@ -1,6 +1,6 @@
 //! What a plan may say, what it may not, and the order the engine starts what it
 //! says. A plan is one project of a real `onetaskgraph` store, read through that
-//! product's own binary, and it is external input — so every refusal here
+//! product's own library, which the binary links, and it is external input — so every refusal here
 //! happens at the point the project is read, before any provider time is spent
 //! and before a run root exists.
 //!

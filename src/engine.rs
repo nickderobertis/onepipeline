@@ -1007,17 +1007,13 @@ fn converge(
     state: &mut Projected,
     launch: &LaunchRecord,
 ) -> Result<GraphState> {
-    // Resolving write-back is deliberately best effort. A run launched by an older build
-    // may name no project, and a sibling unavailable after launch cannot become a run
+    // Starting write-back is deliberately best effort. A run launched by an older build
+    // may name no project, and a store unavailable after launch cannot become a run
     // failure. The worker never feeds anything it reads back into this loop.
-    // llmlint: ignore-block[changed_behavior_has_e2e] The real-store outage journey covers
-    // every failure after this optional worker exists. Making resolution itself fail only
-    // after `start` already resolved the same executable requires replacing or deleting the
-    // real sibling between two adjacent calls; that is a host sabotage fixture, not a user
-    // journey, and the compatibility behavior here is intentionally the absence of a writer.
-    let writeback = crate::taskgraph::Store::resolve().ok().and_then(|store| {
-        crate::writeback::Writeback::start(store.binary(), store.reported_version(), paths, launch)
-    });
+    // llmlint: ignore-block[changed_behavior_has_e2e] `start` fails only where the host
+    // refuses this process a thread, which is resource exhaustion no real CLI journey can
+    // arrange; the compatibility behaviour there is intentionally the absence of a writer.
+    let writeback = crate::writeback::Writeback::start(paths, launch);
     // llmlint: ignore-end[changed_behavior_has_e2e]
     let channel = ChannelState::of_run(paths, launch);
     let rules = executor_rules()?;

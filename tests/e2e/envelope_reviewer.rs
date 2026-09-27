@@ -878,6 +878,14 @@ fn a_blank_rung_names_no_reviewer_and_an_unreadable_variable_is_refused() {
             "a launch naming {which} ran a reviewer"
         );
         world.release("slow.go");
+        // The next launch reads the store this run projects onto, and a local-md
+        // copy writes in place: it waits until nothing of this run can be mid-write.
+        world.until("the run to settle", |world| {
+            world.run_file(&name, "result.json").is_file()
+        });
+        world.until("the driver to release the run", |world| {
+            !world.run_file(&name, "owner.lock").exists()
+        });
     }
 
     // And a variable that is there and holds something this build cannot read

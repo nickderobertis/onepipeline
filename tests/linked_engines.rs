@@ -69,12 +69,13 @@ fn repo_root() -> PathBuf {
 /// every other test here asserts that what it expects is present, which on its
 /// own would say nothing about an engine added to the script and to nothing
 /// else.
-const SIBLINGS: [&str; 5] = [
+const SIBLINGS: [&str; 6] = [
     "oneagentgraph",
     "onevcs",
     "onevcs-testing",
     "onejudge",
     "oneharness-core",
+    "onetaskgraph-core",
 ];
 
 /// The path of the script both recipes run.
@@ -846,7 +847,7 @@ fn a_held_back_release_below_the_newest_admitted_one_is_not_reported() {
 /// learn it is not a sibling's.
 #[test]
 fn an_entry_naming_a_crate_outside_the_siblings_is_skipped_whatever_its_shape() {
-    let fixture = tree("foreign-dep-shape", &CARET_SHAPES);
+    let fixture = tree("foreign-dep-shape", &REQUIREMENT_SHAPES);
     let entry = repo_root()
         .join(&fixture.index)
         .join(index_path("oneagentgraph"));
@@ -884,7 +885,7 @@ fn an_entry_naming_a_crate_outside_the_siblings_is_skipped_whatever_its_shape() 
 /// with a fix that splits the graph.
 #[test]
 fn a_renamed_sibling_requirement_is_read_by_the_crate_it_names() {
-    let fixture = tree("renamed-dep", &CARET_SHAPES);
+    let fixture = tree("renamed-dep", &REQUIREMENT_SHAPES);
     let entry = repo_root()
         .join(&fixture.index)
         .join(index_path("oneagentgraph"));
@@ -922,7 +923,7 @@ fn a_renamed_sibling_requirement_is_read_by_the_crate_it_names() {
 /// skip a sibling's requirement as foreign.
 #[test]
 fn a_sibling_requirement_whose_package_is_null_is_read_by_its_name() {
-    let fixture = tree("null-package", &CARET_SHAPES);
+    let fixture = tree("null-package", &REQUIREMENT_SHAPES);
     let entry = repo_root()
         .join(&fixture.index)
         .join(index_path("oneagentgraph"));
@@ -1601,14 +1602,16 @@ fn tree(case: &str, engines: &[Engine]) -> Tree {
     }
 }
 
-/// A sound tree, whose five engines between them take every caret shape cargo
-/// defines that this repository's own pins do not.
+/// A sound tree, whose six engines between them take every requirement shape this
+/// check models that this repository's own caret pins do not: the other caret shapes
+/// cargo defines, and the exact `=` pin the store's lock-step family takes.
 ///
 /// Each one is served a release *just* outside its window — 3.0.0 against
 /// `^2.1`, 1.0.0 against `^0`, 0.0.4 against `^0.0.3`, 0.1.0 against `^0.0`,
-/// 2.0.0 against `^1` — so a window computed by any other rule reports the
-/// engine as behind, or stops finding the locked copy at all.
-const CARET_SHAPES: [Engine; 5] = [
+/// 2.0.0 against `^1`, 0.2.45 against `=0.2.44` — so a window computed by any
+/// other rule reports the engine as behind, or stops finding the locked copy at
+/// all.
+const REQUIREMENT_SHAPES: [Engine; 6] = [
     Engine {
         name: "oneagentgraph",
         requirement: "2.1",
@@ -1644,12 +1647,19 @@ const CARET_SHAPES: [Engine; 5] = [
         served: &["1.2.3", "2.0.0"],
         requires: &[],
     },
+    Engine {
+        name: "onetaskgraph-core",
+        requirement: "=0.2.44",
+        locked: &["0.2.44"],
+        served: &["0.2.44", "0.2.45"],
+        requires: &[],
+    },
 ];
 
-/// `CARET_SHAPES` with one engine replaced, so a refusal test states only the
+/// `REQUIREMENT_SHAPES` with one engine replaced, so a refusal test states only the
 /// one thing it is about.
-fn but(replacement: Engine) -> [Engine; 5] {
-    CARET_SHAPES.map(|engine| {
+fn but(replacement: Engine) -> [Engine; 6] {
+    REQUIREMENT_SHAPES.map(|engine| {
         if engine.name == replacement.name {
             Engine { ..replacement }
         } else {
@@ -1666,7 +1676,7 @@ fn but(replacement: Engine) -> [Engine; 5] {
 /// reports a currency it never established.
 #[test]
 fn the_windows_this_check_computes_are_cargos_own_caret_rules() {
-    let tree = tree("caret-shapes", &CARET_SHAPES);
+    let tree = tree("caret-shapes", &REQUIREMENT_SHAPES);
     let run = linked_engines(&tree.args());
     assert!(
         run.status.success(),
@@ -1675,7 +1685,7 @@ fn the_windows_this_check_computes_are_cargos_own_caret_rules() {
         said(&run)
     );
     let report = String::from_utf8_lossy(&run.stdout);
-    for engine in &CARET_SHAPES {
+    for engine in &REQUIREMENT_SHAPES {
         assert!(
             report.contains(&format!("{} {}", engine.name, engine.locked[0])),
             "the check passed without reporting `{}`, whose requirement is `{}`:\n{}",
@@ -1996,7 +2006,7 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
              requirement shape this check does not model",
         ),
     ] {
-        let fixture = tree(case, &CARET_SHAPES);
+        let fixture = tree(case, &REQUIREMENT_SHAPES);
         let entry = repo_root()
             .join(&fixture.index)
             .join(index_path("oneagentgraph"));
@@ -2186,7 +2196,7 @@ fn registry(index: &str, refusals: usize) -> String {
 /// of those red would train its reader to ignore it.
 #[test]
 fn a_registry_that_hiccups_is_retried_and_one_that_never_answers_is_not_a_finding() {
-    let tree = tree("over-http", &CARET_SHAPES);
+    let tree = tree("over-http", &REQUIREMENT_SHAPES);
 
     let recovered = linked_engines(&[
         "--manifest",
@@ -2440,4 +2450,186 @@ fn a_release_carrying_build_metadata_is_one_the_lock_can_be_behind() {
         "the refusal does not name the release with metadata on it as the one permitted:\n{}",
         said(&run)
     );
+}
+
+/// Every `onetaskgraph` package a lock carries, as the name and version each one
+/// resolved at.
+///
+/// A list of pairs rather than a map from name to version, because a lock may
+/// carry one crate twice and that is the state worth catching: keyed by name
+/// alone, the second copy would overwrite the first and the split would read as
+/// a single clean resolution.
+fn onetaskgraph_packages(lock: &str) -> Vec<(String, String)> {
+    let lock: toml::Value = toml::from_str(lock).expect("a lock is TOML");
+    lock["package"]
+        .as_array()
+        .expect("a lock is a list of packages")
+        .iter()
+        .filter_map(|package| {
+            let name = package.get("name")?.as_str()?;
+            let version = package.get("version")?.as_str()?;
+            (name == "onetaskgraph" || name.starts_with("onetaskgraph-"))
+                .then(|| (name.to_owned(), version.to_owned()))
+        })
+        .collect()
+}
+
+fn releases(packages: &[(String, String)]) -> std::collections::BTreeSet<&str> {
+    packages
+        .iter()
+        .map(|(_, version)| version.as_str())
+        .collect()
+}
+
+/// Every line of `text` that installs an `onetaskgraph` binary, as the release it names —
+/// `None` for one that names none.
+///
+/// Read by the words on the line rather than by one spelling of a command: a line is an
+/// install where one word is `install` and another names the package — `onetaskgraph`
+/// itself, as `cargo` spells it, or the `onetaskgraph-cli` wheel and package, as `uv`, `pip`
+/// and `npm` spell it — whatever order the words come in. The release is the word after a
+/// `--version`, or what follows `==` or `@` on the package's own word.
+fn onetaskgraph_installs(text: &str) -> Vec<Option<String>> {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .filter_map(|line| {
+            let words: Vec<&str> = line
+                .split_whitespace()
+                .map(|word| word.trim_matches(|c| c == '"' || c == '\'' || c == ';'))
+                .collect();
+            let package = words.iter().find_map(|word| {
+                ["onetaskgraph-cli", "onetaskgraph"]
+                    .iter()
+                    .find_map(|name| word.strip_prefix(name))
+                    .filter(|rest| {
+                        rest.is_empty() || rest.starts_with("==") || rest.starts_with('@')
+                    })
+            })?;
+            words.contains(&"install").then(|| {
+                words
+                    .windows(2)
+                    .find(|pair| pair[0] == "--version")
+                    .map(|pair| pair[1].to_owned())
+                    .or_else(|| {
+                        package
+                            .strip_prefix("==")
+                            .or_else(|| package.strip_prefix('@'))
+                            .map(str::to_owned)
+                    })
+            })
+        })
+        .collect()
+}
+
+/// A lock that resolved the family at two releases is reported as two, and an
+/// install naming a release — or naming none — is read as the release it names.
+#[test]
+fn a_split_family_and_an_install_are_each_read_as_the_releases_they_name() {
+    let split = "[[package]]\nname = \"onetaskgraph-core\"\nversion = \"0.2.43\"\n\n\
+                 [[package]]\nname = \"onetaskgraph-plugin-api\"\nversion = \"0.2.44\"\n\n\
+                 [[package]]\nname = \"serde\"\nversion = \"1.0.0\"\n";
+    let packages = onetaskgraph_packages(split);
+    assert_eq!(
+        packages.len(),
+        2,
+        "a crate of another family was taken: {packages:?}"
+    );
+    assert_eq!(
+        releases(&packages).len(),
+        2,
+        "a family split across two releases read as one"
+    );
+    assert_eq!(
+        onetaskgraph_installs(
+            "    cargo install onetaskgraph --locked --version 0.2.32\n\
+             # cargo install onetaskgraph --version 9.9.9\n\
+             cargo install --version 0.2.31 onetaskgraph\n\
+             uv tool install onetaskgraph-cli==0.2.30\n\
+             npm install -g onetaskgraph-cli@0.2.29\n\
+             cargo install onetaskgraph --locked\n\
+             cargo install onetaskgraph-core-helper --version 1.0.0\n\
+             cargo build --package onetaskgraph\n"
+        ),
+        vec![
+            Some("0.2.32".to_owned()),
+            Some("0.2.31".to_owned()),
+            Some("0.2.30".to_owned()),
+            Some("0.2.29".to_owned()),
+            None
+        ]
+    );
+}
+
+/// Every `onetaskgraph` crate this build links is **one** release, the one
+/// `[workspace.dependencies]` names, and anything this repository installs as an
+/// `onetaskgraph` binary names that release too.
+///
+/// The lock rather than the manifest, because most of the family is transitive:
+/// the manifest binds three crates, and the family is lock-step — each sibling
+/// requires the others at exactly its own version — so a lock that split it would
+/// not build and one that moved it whole would link a release the manifest does
+/// not name. The three direct crates are asserted present as well as pinned: a
+/// link quietly dropped would leave this passing over an empty set, which is the
+/// one answer it must not give.
+///
+/// Nothing installs the binary today — the store is linked — so the install half
+/// holds that every recipe, workflow and script this repository runs names no
+/// other release, and fails the day one is added at another.
+#[test]
+fn every_onetaskgraph_crate_in_the_lock_is_the_one_release_the_manifest_names() {
+    let direct = [
+        "onetaskgraph-core",
+        "onetaskgraph-plugin-api",
+        "onetaskgraph-local-md",
+    ];
+    let pinned: std::collections::BTreeSet<String> =
+        direct.iter().map(|name| required(name)).collect();
+    assert_eq!(
+        pinned.len(),
+        1,
+        "the manifest pins the onetaskgraph family at more than one release: {pinned:?}"
+    );
+    let named = pinned.iter().next().expect("one pin");
+    let release = named
+        .strip_prefix('=')
+        .unwrap_or_else(|| panic!("the family is pinned exactly, and `{named}` is not"));
+
+    let lock = fs::read_to_string(repo_root().join("Cargo.lock")).expect("this build's lock");
+    let packages = onetaskgraph_packages(&lock);
+    for name in direct {
+        assert!(
+            packages.iter().any(|(linked, _)| linked == name),
+            "the lock no longer carries {name}"
+        );
+    }
+    assert_eq!(
+        releases(&packages),
+        std::collections::BTreeSet::from([release]),
+        "the lock resolves the onetaskgraph family at other than the one release \
+         [workspace.dependencies] names: {packages:?}"
+    );
+
+    let mut automation: Vec<PathBuf> = vec![repo_root().join("justfile")];
+    for dir in [".github/workflows", "scripts", "screenshots"] {
+        for entry in fs::read_dir(repo_root().join(dir)).expect("an automation directory") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_file() {
+                automation.push(path);
+            }
+        }
+    }
+    for path in automation {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for install in onetaskgraph_installs(&text) {
+            assert_eq!(
+                install.as_deref(),
+                Some(release),
+                "{} installs an onetaskgraph binary at other than the release the engine \
+                 links",
+                path.display()
+            );
+        }
+    }
 }

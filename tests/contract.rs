@@ -23,10 +23,8 @@ use onepipeline::cli::{
     Cli, Command, DAG_GRAPH_OFF, DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS,
     DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_HOOK_TIMEOUT_SECONDS,
     DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_CLASSIFIED_COMMANDS,
-    WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_FAILURE_CLASS_MEMBER, WRITEBACK_FAILURE_EXIT,
-    WRITEBACK_ITEM_BUDGET_ENV, WRITEBACK_MEMBERS_FROM, WRITEBACK_MEMBER_READ,
-    WRITEBACK_PARTIAL_CLASS_MEMBER, WRITEBACK_PARTIAL_EXIT, WRITEBACK_PROJECTIONS_FILE,
-    WRITEBACK_REFUSED_CLASS, WRITEBACK_STORE_FILE,
+    WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_ITEM_BUDGET_ENV, WRITEBACK_MEMBER_READ,
+    WRITEBACK_PROJECTIONS_FILE, WRITEBACK_REFUSED_CLASS,
 };
 use onepipeline::controls::NodeControls;
 use onepipeline::error::{
@@ -1932,7 +1930,7 @@ fn a_node_and_a_step_default_to_the_shapes_the_contract_states() {
 ///
 /// The documents themselves rather than the graph they read as: what they read
 /// as is `tests/e2e/shipped.rs`'s, which drives them through the real
-/// `onetaskgraph` binary and executes one. What is held here is that the store
+/// `onetaskgraph` store the binary links and executes one. What is held here is that the store
 /// the contract names is on disk, in the shape the mapping needs — a project per
 /// plan, a task per node, and the reserved key that carries the schema version.
 #[test]
@@ -4214,52 +4212,42 @@ fn the_dispatch_env_hook_surface_is_what_the_contract_names() {
 /// The contract says write-back is "retried off the reconcile loop" and nothing
 /// narrower, so entry 72 is the only place the narrowing is written down — and a
 /// divergence nothing gates quietly stops being true. The entry's own block is the
-/// source: the member the worker branches on, the value that stops its timer, the
-/// commands whose failures it reads and the partial-answer rule are each the
-/// constant the code carries. The contract's own sentence is held too, because it
-/// is approved as written and this entry is a proposal against it rather than an
-/// edit of it.
+/// source: the class that stops the timer and the calls whose failures it classifies
+/// are each the constant the code carries, and the classifier it names is the store's
+/// own, which `writeback::tests` holds the worker to. The contract's own sentence is
+/// held too, because it is approved as written and this entry is a proposal against it
+/// rather than an edit of it.
 #[test]
 fn the_writeback_refusal_rule_is_what_the_divergence_record_names() {
     let block = divergence_block("72.");
     let rule = &block["failure"];
-    assert_eq!(
-        rule["member"].as_str(),
-        Some(WRITEBACK_FAILURE_CLASS_MEMBER),
-        "entry 72 names a different member than the worker branches on"
-    );
     assert_eq!(
         rule["stops_the_timer"].as_str(),
         Some(WRITEBACK_REFUSED_CLASS),
         "entry 72 names a different class than the one that stops the retry timer"
     );
     assert_eq!(
-        rule["failure_document_exit"].as_i64(),
-        Some(i64::from(WRITEBACK_FAILURE_EXIT)),
-        "entry 72 reads the failure document under a different exit than the worker does"
-    );
-    assert_eq!(
         rule["commands"],
         json!(WRITEBACK_CLASSIFIED_COMMANDS),
-        "entry 72 names different commands than the worker reads a class off"
-    );
-
-    let partial = &rule["partial_answer"];
-    assert_eq!(
-        partial["exit"].as_i64(),
-        Some(i64::from(WRITEBACK_PARTIAL_EXIT)),
-        "entry 72 reads a partial answer under a different exit than the worker does"
+        "entry 72 names different calls than the worker classifies"
     );
     assert_eq!(
-        partial["member"].as_str(),
-        Some(WRITEBACK_PARTIAL_CLASS_MEMBER),
-        "entry 72 names a different partial-answer member than the worker reads"
+        rule["classified_by"].as_str(),
+        Some("onetaskgraph_core::classify"),
+        "entry 72 names a classifier other than the store's own"
     );
     assert_eq!(
-        partial["refused_when"].as_str(),
-        Some("every"),
-        "entry 72 states a partial answer is refused on something other than every entry"
+        rule["empty_show"]["class"].as_str(),
+        Some(WRITEBACK_REFUSED_CLASS),
+        "entry 72 classes an empty show otherwise than the worker does"
     );
+    for answer in ["partial_answer", "delivered"] {
+        assert_eq!(
+            rule[answer]["refused_when"].as_str(),
+            Some("every"),
+            "entry 72 states a {answer} is refused on something other than every entry"
+        );
+    }
 
     let contract =
         std::fs::read_to_string(repo_root().join("docs/contract.md")).expect("the contract reads");
@@ -4296,7 +4284,6 @@ fn json_type(value: &Value) -> &'static str {
 fn the_writeback_projection_record_is_what_the_divergence_record_names() {
     let block = divergence_block("73.");
     let projection = &block["projection"];
-    let detection = &block["detection"];
     let member = &block["member_projection"];
 
     assert_eq!(
@@ -4304,20 +4291,9 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
         Some(format!("<run dir>/{WRITEBACK_PROJECTIONS_FILE}").as_str()),
         "entry 73 names a different record than the worker appends to"
     );
-    assert_eq!(
-        detection["record"].as_str(),
-        Some(format!("<run dir>/{WRITEBACK_STORE_FILE}").as_str()),
-        "entry 73 keeps the store's answer somewhere other than the worker does"
-    );
-    assert_eq!(
-        detection["members_from"].as_str(),
-        Some(WRITEBACK_MEMBERS_FROM),
-        "entry 73 names a different first release offering a member copy"
-    );
-    assert_eq!(
-        detection["command"].as_str(),
-        Some("onetaskgraph --version")
-    );
+    // The store record an engine that drove the binary kept is neither read nor written.
+    assert_eq!(block["retired"]["read"], json!(false));
+    assert_eq!(block["retired"]["written"], json!(false));
     assert_eq!(
         member["reads"],
         json!([WRITEBACK_CLASSIFIED_COMMANDS[0], WRITEBACK_MEMBER_READ]),
@@ -6623,7 +6599,8 @@ const RULINGS: &[(&str, &str)] = &[
     ("31.", "shaped event view beside the surface"),
     ("32.", "any run of characters including none"),
     ("34.", "body-not-drafted"),
-    ("44.", "the minimum this build requires"),
+    ("43.", "`ONETASKGRAPH_BIN` names nothing"),
+    ("44.", "links the store, it does not drive a binary"),
     ("63.", "--correlation C"),
     ("74.", "holds any node that is not `done`"),
     (

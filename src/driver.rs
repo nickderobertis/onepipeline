@@ -668,11 +668,11 @@ fn resolved_sets(flags: &[String], variable: &str, configured: &[String]) -> Res
 
 /// `onepipeline start`.
 fn start(args: &StartArgs) -> Result<i32> {
-    // The binary first, and its version with it: a plan that cannot be read is
-    // a launch that never starts, and a store this build cannot read a project
-    // out of is named here rather than by a node that fails on its first
-    // dispatch. Nothing is dispatched and no run root is created before this.
-    let store = crate::taskgraph::Store::resolve()?;
+    // The store first: a plan that cannot be read is a launch that never starts,
+    // and a store this build cannot read a project out of is named here rather
+    // than by a node that fails on its first dispatch. Nothing is dispatched and
+    // no run root is created before this.
+    let store = crate::taskgraph::Store::discovered()?;
     // Parsed once, here: a bare id names nothing a store can answer for, and
     // this is where a person typed it.
     let project: crate::taskgraph::QualifiedId = args.project.parse()?;

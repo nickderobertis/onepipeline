@@ -2825,6 +2825,31 @@ fn started_at_of(pid: u32) -> String {
         .to_string()
 }
 
+/// When this host says a process started, spelled the way a run's records spell
+/// it, so it can be compared with a stamp one of them carries.
+///
+/// Linux records field 22 of `/proc/<pid>/stat`, the start in clock ticks since
+/// boot, as `linux-proc-stat:<ticks>`: read here from procfs directly rather than
+/// through the crate, which is the reader under test. Compared against the
+/// `lstart` rendering instead, no stamp could ever match and a stand-in started
+/// in the dispatch's own tick would pass for a stranger. Elsewhere a record
+/// carries `lstart`, so that is what is compared.
+#[cfg(target_os = "linux")]
+fn recorded_start_of(pid: u32) -> String {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .expect("this host describes a process it just started");
+    let ticks = stat
+        .rsplit_once(')')
+        .and_then(|(_, fields)| fields.split_whitespace().nth(19))
+        .expect("`/proc/<pid>/stat` carries a start time");
+    format!("linux-proc-stat:{ticks}")
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn recorded_start_of(pid: u32) -> String {
+    started_at_of(pid)
+}
+
 /// The Windows stand-in for the stranger below.
 ///
 /// No oracle is needed here: the crate reads a process's start on Windows as its
@@ -2846,15 +2871,16 @@ pub(crate) fn stranger_started_after(_stamps: &[String]) -> std::process::Child 
 /// a reissued pid to — and one this host describes differently from **every**
 /// `stamp` a record it is about to be planted into carries.
 ///
-/// `lstart` is reported to the **second**, so a process started inside the same
-/// second as a recorded one carries that record's own stamp and would be a pid
-/// the record still proves rather than a stranger. Every stamp is passed rather
-/// than the launch record's alone, because a dispatch runs in a process of its
-/// own: its registry entry carries that child's start, the child was started
-/// moments before the stand-in, and a host whose resolution is a second describes
-/// the two identically. Retried until the host's clock has left every one of
-/// those seconds behind, so the stand-in is a stranger by construction rather
-/// than by luck.
+/// A start is recorded at the host's resolution — a kernel clock tick on Linux,
+/// a second of `lstart` elsewhere — so a process started inside the same tick as
+/// a recorded one carries that record's own stamp and would be a pid the record
+/// still proves rather than a stranger. Every stamp is passed rather than the
+/// launch record's alone, because a dispatch runs in a process of its own: its
+/// registry entry carries that child's start, the child was started moments
+/// before the stand-in, and the two can share a tick. Each candidate is read in
+/// the spelling the stamps are written in ([`recorded_start_of`]) and retried
+/// until the host's clock has left every one of them behind, so the stand-in is a
+/// stranger by construction rather than by luck.
 #[cfg(unix)]
 pub(crate) fn stranger_started_after(stamps: &[String]) -> std::process::Child {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -2863,7 +2889,7 @@ pub(crate) fn stranger_started_after(stamps: &[String]) -> std::process::Child {
             .arg("300")
             .spawn()
             .expect("this host starts a process of its own");
-        let started = started_at_of(child.id());
+        let started = recorded_start_of(child.id());
         if !stamps.contains(&started) {
             return child;
         }
@@ -3579,6 +3605,14 @@ fn a_stop_that_declines_every_live_identity_does_not_report_success() {
                 .to_string()
         })
         .collect();
+    // The stand-in is told apart from these stamps by reading its own start in
+    // their spelling, so that spelling is held here against the one process every
+    // stamp's author is known to be: a reading that could never match a stamp
+    // would let a stand-in started in the dispatch's own tick pass for a stranger.
+    assert!(
+        stamps.contains(&recorded_start_of(driver)),
+        "the driver's start, read as a record spells it, matches none of {stamps:?}"
+    );
     let mut stranger = stranger_started_after(&stamps);
     let stranger_pid = stranger.id();
     for (path, claim) in &mut claims {
@@ -4086,37 +4120,30 @@ fn leading(dir: &Path, path: &std::ffi::OsStr) -> std::ffi::OsString {
 /// The launcher appends the run's first record before it writes the launch
 /// record, and its driver claims the run before it appends anything of its own
 /// — so between the two the run's journal holds the launcher's record alone.
-/// The driver is held there, at its store's version check, which is the state a
-/// slow host leaves a reader in.
-// llmlint: ignore-block[tests_mirror_real_usage] an `onetaskgraph` that holds a driver's
-// version check stands in for a host slow to start one, the only way to keep a driver where a
-// Windows runner left it; everything else is the real binary and the real store behind it.
+/// The driver is held there, at the claim it projects onto its store before its
+/// first pass does anything, which is the state a slow host leaves a reader in.
+// llmlint: ignore-block[tests_mirror_real_usage] a store whose first write a journey holds
+// stands in for a host slow to start a driver, the only way to keep a driver where a Windows
+// runner left it; everything else is the real binary and the real store behind the source.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_run_listed_while_its_driver_is_on_its_way_up_is_the_launching_sessions() {
-    let world = World::new("driver-ownership-rising");
-    let plan = world.plan("rising", &plan_of("rising", vec![human("approve", &[])]));
-    let mut command = world.cmd(&["start", &plan, "--detach"]);
-    let real = env_of(&command, "ONETASKGRAPH_BIN");
-    let store = world.root.join("store-holds-the-driver");
-    std::fs::create_dir_all(&store).expect("a directory for the store stand-in");
-    let (held, go) = (world.root.join("driver-held"), world.root.join("driver-go"));
-    onepipeline_testfakes::executable(
-        &store.join("onetaskgraph"),
-        format!(
-            "#!/bin/sh\nif [ \"$1\" = --version ] && tr '\\0' ' ' < /proc/$PPID/cmdline | grep -q ' drive-run '; then\n  : > '{}'\n  while [ ! -f '{}' ]; do sleep 0.05; done\nfi\nexec '{}' \"$@\"\n",
-            held.display(),
-            go.display(),
-            Path::new(&real).display()
-        ),
+    let world = World::new("driver-ownership-rising").through_scripted_source();
+    // A node waiting on another run's DAG, which nothing will release: the driver's first
+    // pass has nothing to announce about it, so the claim it projects onto its board is the
+    // first thing it does, before it records anything of its own.
+    let plan = world.plan(
+        "rising",
+        &plan_of("rising", vec![agent("work", &["run:elsewhere#nothing"])]),
     );
-    command.env("ONETASKGRAPH_BIN", store.join("onetaskgraph"));
-    world.run_on(command, "start --detach").exited(0);
-    world.until("the driver to be held on its way up", |_| held.is_file());
+    let claim = world.store_holds("write_task");
+    world.run(&["start", &plan, "--detach"]).exited(0);
+    let held = claim.arrived();
     assert_eq!(
         world.journal("rising").len(),
         1,
-        "the driver appended before it was held, so this journey proves nothing"
+        "the driver appended before it was held, so this journey proves nothing: {:?}",
+        world.journal("rising")
     );
 
     world
@@ -4125,10 +4152,12 @@ fn a_run_listed_while_its_driver_is_on_its_way_up_is_the_launching_sessions() {
         .out_has("[mine]")
         .out_lacks("[unknown]");
 
-    std::fs::write(&go, "").expect("the driver is let go");
+    world.store_stops_holding("write_task");
+    held.release();
     world.until("the driver to append", |world| {
         world.journal("rising").len() > 1
     });
+    world.run(&["stop", "rising"]).exited(0);
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
@@ -5258,12 +5287,6 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
 /// the store before it settles, held open by a capture path the store cannot
 /// write. What proves the driver rather than the reply applied the edit is the
 /// run's own answer on the command queue, which only the lock-holder writes.
-///
-/// `#[cfg(not(windows))]` for the reason `store.rs`'s own capture-outage journey
-/// carries it: the fault injection depends on POSIX `File::create` refusing a
-/// path a directory occupies, and Windows can open that path successfully — so
-/// there would be no failing projection, no held close-out, and no window.
-#[cfg(not(windows))]
 #[test]
 fn an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go() {
     let world = World::new("driver-drain-on-exit");
@@ -5278,18 +5301,13 @@ fn an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go
         !world.events_of(run, "node-dispatched").is_empty()
     });
 
-    // llmlint: ignore-block[tests_mirror_real_usage] a write-back capture path that cannot
-    // be written is a state a host produces on its own — a full disk, a permission change
-    // — and `store.rs`'s `an_unwritable_writeback_capture_is_reported_retried_and_recovered`
-    // states the same fixture the same way. It is here because the close-out has to stay
-    // open long enough for a planner to type a reply into it, and how long a store takes to
-    // refuse is not something the CLI exposes an input for.
-    let capture = world.run_file(run, "writeback-project-show.stdout");
-    world.until("the first projection to leave its capture behind", |_| {
-        capture.is_file()
-    });
-    std::fs::remove_file(&capture).expect("the completed capture is removed");
-    std::fs::create_dir(&capture).expect("a directory makes the capture path unwritable");
+    // llmlint: ignore-block[tests_mirror_real_usage] a write-back shadow store that cannot
+    // be written is a state a host produces on its own — a full disk, a permission change —
+    // and `store.rs`'s `an_unwritable_shadow_store_is_reported_retried_and_recovered` states
+    // the same fixture the same way. It is here because the close-out has to stay open long
+    // enough for a planner to type a reply into it, and how long a store takes to refuse is
+    // not something the CLI exposes an input for.
+    unwritable_shadow_store(&world, run);
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     // The run's only node settles, so the loop has nothing left to do and starts
@@ -5369,18 +5387,13 @@ fn a_driver_that_owns_a_run_and_claims_nothing(world: &World, name: &str) -> (St
         !world.events_of(&run, "node-dispatched").is_empty()
     });
 
-    // llmlint: ignore-block[tests_mirror_real_usage] a write-back capture path that cannot
+    // llmlint: ignore-block[tests_mirror_real_usage] a write-back shadow store that cannot
     // be written is a state a host produces on its own — a full disk, a permission change —
-    // and `store.rs`'s `an_unwritable_writeback_capture_is_reported_retried_and_recovered`
-    // states the same fixture the same way. It is here because the driver has to hold the
-    // run without claiming its queue for long enough for a planner to type a reply into
-    // that window, and how long a store takes to refuse is not an input the CLI exposes.
-    let capture = world.run_file(&run, "writeback-project-show.stdout");
-    world.until("the first projection to leave its capture behind", |_| {
-        capture.is_file()
-    });
-    std::fs::remove_file(&capture).expect("the completed capture is removed");
-    std::fs::create_dir(&capture).expect("a directory makes the capture path unwritable");
+    // and `store.rs`'s `an_unwritable_shadow_store_is_reported_retried_and_recovered` states
+    // the same fixture the same way. It is here because the driver has to hold the run
+    // without claiming its queue for long enough for a planner to type a reply into that
+    // window, and how long a store takes to refuse is not an input the CLI exposes.
+    unwritable_shadow_store(world, &run);
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     world.release("work.go");
@@ -5388,6 +5401,23 @@ fn a_driver_that_owns_a_run_and_claims_nothing(world: &World, name: &str) -> (St
         !world.events_of(&run, "node-settled").is_empty()
     });
     (run, driver)
+}
+
+/// Make the run's write-back shadow store unwritable once its first projection has written
+/// it: a file where its projects folder belongs, which every later attempt fails on and
+/// retries — the failing projection that holds a close-out open.
+fn unwritable_shadow_store(world: &World, run: &str) {
+    let shadow = world.run_file(run, "writeback").join("projects");
+    world.until("the first projection to write its shadow store", |_| {
+        shadow.is_dir()
+    });
+    // llmlint: ignore-block[tests_mirror_real_usage] a shadow store the worker cannot write is
+    // a state a host produces on its own — a full disk, a permission change — and not one any
+    // verb of this CLI can be asked to make; `store.rs`'s
+    // `an_unwritable_shadow_store_is_reported_retried_and_recovered` states it the same way.
+    std::fs::remove_dir_all(&shadow).expect("the shadow projects folder is taken away");
+    std::fs::write(&shadow, "not a folder").expect("a file makes the shadow store unwritable");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
 /// Type one reply into that window and wait until the run's queue holds it.

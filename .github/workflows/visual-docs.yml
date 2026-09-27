@@ -60,13 +60,12 @@ jobs:
       # one source for it — rust-toolchain.toml, read below — so nothing here
       # restates a version.
       container: rust:1-bookworm
-      # Three derivations and no restatements. The toolchain comes from
-      # rust-toolchain.toml's own `channel`; `freeze` comes from the justfile's
-      # `freeze-version` line, read by the script, because the renderer's
-      # version decides the bytes of every shot; and `onetaskgraph` comes from
-      # the justfile's `onetaskgraph-version`, which `src/taskgraph.rs` holds to
-      # being named exactly once. The capture reads its plan through that real
-      # binary, exactly as the e2e suite does.
+      # Two derivations and no restatements. The toolchain comes from
+      # rust-toolchain.toml's own `channel`, and `freeze` comes from the justfile's
+      # `freeze-version` line, read by the script, because the renderer's version
+      # decides the bytes of every shot. The capture reads its plan through the
+      # `onetaskgraph` store the engine links, exactly as the e2e suite does, so
+      # there is no store binary to install.
       #
       # The reusable workflow exports $SHOTS_OUT as shots/current/<arch>;
       # screenshots/capture.sh writes captures.json and the SVGs there.
@@ -78,7 +77,7 @@ jobs:
       # the next one. The two scripts below are bash only because each is handed
       # to `bash` by name; nothing else on these lines may assume it.
       capture-command: |
-        # The shape both derivations below are held to: exactly one line naming
+        # The shape the derivation below is held to: exactly one line naming
         # an exact release. The *whole* value is matched rather than any line of
         # it — `grep -q` answers "some line matched", so a file that pinned the
         # channel twice would pass and export both — and `case` is what matches a
@@ -105,14 +104,5 @@ jobs:
         export RUSTUP_TOOLCHAIN
         # llmlint: ignore[work_goes_through_command_surface] this container is a bare `rust:1-bookworm` with no `just`; this is the body of `just screenshots-tools`, which additionally needs Go, and it reads the same `freeze-version` line that recipe does
         bash screenshots/install-freeze.sh
-        release="$(sed -n 's/^onetaskgraph-version *:= *"\([^"]*\)".*/\1/p' justfile)"
-        # The same shape again: a justfile naming the release twice must refuse
-        # here rather than install one of the two.
-        exact_release "$release" || {
-          echo "the justfile does not name exactly one onetaskgraph release: '$release'" >&2
-          exit 1
-        }
-        # llmlint: ignore[work_goes_through_command_surface, diagnostics_error_or_absent] this is the body of `_ensure-onetaskgraph`, reading the same `onetaskgraph-version` line that recipe reads; `just bootstrap` owns it and additionally installs rustup components, cargo-nextest, cargo-llvm-cov and strace — none of which a capture uses — through Nx, which this container has no Node for. And the diagnostics are a published sibling's own: `-D warnings` over another crate's source fails this capture on a warning nobody here can fix, and that crate's own gate is where they are answered
-        cargo install onetaskgraph --locked --version "$release"
         # llmlint: ignore[work_goes_through_command_surface] no `just` in this container; `just screenshots` wraps exactly this line
         bash screenshots/capture.sh

@@ -62,9 +62,9 @@ use crate::refusal::Refusal;
 /// The environment variable naming the `onevcs` executable.
 ///
 /// In this crate's namespace rather than `onevcs`'s own, for the reason
-/// [`crate::taskgraph::BINARY_ENV`] records about the other sibling: a product
-/// that reads its configuration from its own prefix would take `ONEVCS_BIN` for a
-/// setting called `bin`.
+/// [`crate::taskgraph::RETIRED_BINARY_ENV`] records about the other sibling: a
+/// product that reads its configuration from its own prefix would take `ONEVCS_BIN`
+/// for a setting called `bin`.
 pub const BINARY_ENV: &str = "ONEPIPELINE_ONEVCS_BIN";
 
 pub const DEFAULT_BINARY: &str = "onevcs";
