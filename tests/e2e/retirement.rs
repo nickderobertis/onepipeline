@@ -1650,6 +1650,65 @@ fn an_idle_pass_leaves_what_holds_work() {
     });
 }
 
+/// A branch a node comes to name while a sweep is already running — added to the
+/// run while the sweep's maintenance is held — is left alone by that sweep's
+/// retirement pass, which retires the control another run left beside it: the
+/// pass reads what the run names as it reaches an identity, not what it named
+/// when the sweep began.
+#[cfg(unix)]
+#[test]
+fn a_branch_a_node_comes_to_name_mid_sweep_is_left_by_that_sweeps_pass() {
+    let world = sweeping_world("retirement-mid-sweep");
+    let repo = world.repository("local-direct", &[]);
+    let maintaining = world.root.join("maintain.go");
+    crate::maintenance::pooled_with_maintenance(&world, Some(&maintaining));
+    crate::maintenance::cut_a_slot(&world, &repo.checkout);
+    left_by_another_run(&world);
+    lossless(&world, &repo, "keep/late", "late.md");
+    assert_eq!(classified(&world, "keep/late")["class"], "retirable");
+    control_made_lossless(&world, &repo);
+
+    sweeping(
+        &world,
+        "live",
+        crate::harness::agent("hold", &[]),
+        Vec::new(),
+    );
+    world.until("the sibling to report the slot maintaining", |world| {
+        pool_status(world)["slots"][0]["state"]["state"] == "maintaining"
+    });
+    let mut late = lifecycle("late", &["hold"]);
+    late["branch"] = json!("keep/late");
+    world
+        .run_with_stdin(
+            &["reply", "live"],
+            &json!({"version": 2, "commands": [{"op": "add", "node": late}]}).to_string(),
+        )
+        .exited(0);
+    world.until("the driver to take the late node up", |world| {
+        world
+            .journal("live")
+            .iter()
+            .any(|event| event["labels"]["node"] == "late")
+    });
+    assert!(retired(&world, "live").is_empty(), "{}", world.dump());
+
+    std::fs::write(&maintaining, "go").expect("the maintenance is released");
+    until_retired(&world, "live", &[LEFT]);
+    assert!(
+        holds(&world, &repo.checkout, "keep/late"),
+        "keep/late was retired by a sweep that began before a node named it"
+    );
+    assert!(
+        retired(&world, "live")
+            .iter()
+            .all(|entry| entry["branch"] == LEFT),
+        "{:?}",
+        retired(&world, "live")
+    );
+    world.run(&["stop", "live", "--force"]).exited(0);
+}
+
 /// A pass whose `retire_finished` fails is journalled with the error, and the run
 /// goes on scheduling: its nodes settle exactly as the same plan's do on a run
 /// that runs no pass at all.
