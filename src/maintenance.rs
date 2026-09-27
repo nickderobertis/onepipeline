@@ -41,6 +41,10 @@
 //! `NoMaintainCommand`, `NoSlots`, `NotDue` or `InUse` writes nothing: those are
 //! the schedule and the pool working, they are the common case on a schedule
 //! measured in days, and a record of them would be a record of nothing.
+//!
+//! **The same sweep retires finished branches** through `onevcs::retire_finished`,
+//! excluding what this run's live nodes name; divergence entry 92 states the pass
+//! and its `branches-retired` record.
 
 use std::path::Path;
 use std::sync::mpsc::Sender;
@@ -54,7 +58,10 @@ use serde_json::{json, Map, Value};
 
 use crate::engine::Message;
 use crate::error::{Error, Result};
+use crate::graph::NodeStatus;
 use crate::ledger::RunPaths;
+use crate::payload::{BranchesRetired, RetiredBranch, RetirementTrigger, UnretiredIdentity};
+use crate::projection::RunState;
 
 /// The flag a launch names the schedule with.
 pub const FLAG: &str = "--maintenance-config";
@@ -317,23 +324,215 @@ impl Maintained {
     }
 }
 
-/// What one sweep did: every identity it visited, and how the enumeration went.
+/// One branch a live node of this run names, which the sweep's retirement pass is
+/// told to leave alone.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Named {
+    /// The repository the node names, as it names it; `None` for a node naming a
+    /// branch and no repository, which is left alone in every identity.
+    pub(crate) repo: Option<String>,
+    /// The branch name as the node, its `resume` or its session carries it, which
+    /// `onevcs` compares an exclusion by exactly.
+    pub(crate) branch: String,
+}
+
+/// Every branch a node of this run in a live state names: its `branch`, its
+/// `resume.branch`, and its current dispatch session's branch.
+///
+/// Live is every status a node can still move out of — pending, ready and running,
+/// and the held ones: waiting, blocked, parked and complete-but-draft. A settled
+/// node's branch is `onevcs`'s to judge like any other.
+pub(crate) fn live_branches(
+    state: &RunState,
+    statuses: &std::collections::BTreeMap<String, NodeStatus>,
+) -> Vec<Named> {
+    let mut named = std::collections::BTreeSet::new();
+    for (id, status) in statuses {
+        if matches!(
+            status,
+            NodeStatus::Done | NodeStatus::Failed | NodeStatus::Skipped | NodeStatus::Cancelled
+        ) {
+            continue;
+        }
+        let Some(node) = state.graph.get(id) else {
+            continue;
+        };
+        let session = state
+            .sessions
+            .get(id)
+            .map(|s| s.branch().as_str().to_owned());
+        let resumed = node.resume.as_ref().map(|resume| resume.branch.clone());
+        for branch in [node.branch.clone(), resumed, session]
+            .into_iter()
+            .flatten()
+        {
+            if !branch.is_empty() {
+                named.insert(Named {
+                    repo: node.repo.clone(),
+                    branch,
+                });
+            }
+        }
+    }
+    named.into_iter().collect()
+}
+
+/// What one sweep's retirement pass did across every identity.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Retirements {
+    pub(crate) retired: Vec<RetiredBranch>,
+    /// Every identity whose pass failed, and every branch whose deletion did not
+    /// finish.
+    pub(crate) failed: Vec<UnretiredIdentity>,
+}
+
+impl Retirements {
+    /// Fold one identity's `retire_finished` answer in: a call that failed is one
+    /// failure against the identity, a retired branch an entry, and a branch some
+    /// copy of which a deletion did not reach a failure naming it and each such
+    /// copy. A branch kept, or already retired, is nothing to record.
+    fn take(&mut self, identity: &str, pass: onevcs::Result<onevcs::RetirementPassReport>) {
+        let report = match pass {
+            Ok(report) => report,
+            Err(error) => {
+                self.failed.push(UnretiredIdentity {
+                    identity: identity.to_owned(),
+                    branch: None,
+                    error: crate::engine::bounded(&error.to_string()),
+                });
+                return;
+            }
+        };
+        for examined in report.examined {
+            let retirement = &examined.retirement;
+            match examined.outcome {
+                onevcs::RetireOutcome::Retired => self.retired.push(RetiredBranch {
+                    identity: retirement.identity.clone(),
+                    branch: retirement.branch.clone(),
+                    class: retirement.class,
+                    proof: serde_json::to_value(&retirement.proof).unwrap_or(Value::Null),
+                    trigger: RetirementTrigger::Pass,
+                }),
+                onevcs::RetireOutcome::Incomplete => self.failed.push(UnretiredIdentity {
+                    identity: retirement.identity.clone(),
+                    branch: Some(retirement.branch.clone()),
+                    error: crate::engine::bounded(
+                        &examined
+                            .failed
+                            .iter()
+                            .map(|holder| {
+                                format!(
+                                    "{} {}: {}",
+                                    holder.kind.as_str(),
+                                    holder.location,
+                                    holder.error
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    ),
+                }),
+                onevcs::RetireOutcome::WouldRetire
+                | onevcs::RetireOutcome::AlreadyRetired
+                | onevcs::RetireOutcome::Kept => {}
+            }
+        }
+    }
+
+    /// A sweep that retired nothing and failed nowhere is the common case on an
+    /// idle host, and writes no record.
+    fn is_recorded(&self) -> bool {
+        !self.retired.is_empty() || !self.failed.is_empty()
+    }
+
+    /// The `branches-retired` record's payload.
+    fn payload(&self) -> Map<String, Value> {
+        match serde_json::to_value(BranchesRetired {
+            retired: self.retired.clone(),
+            failed: self.failed.clone(),
+        }) {
+            Ok(Value::Object(payload)) => payload,
+            // llmlint: ignore[changed_behavior_has_e2e] unreachable by construction: a
+            // struct of strings and serialized values serializes to an object.
+            _ => Map::new(),
+        }
+    }
+}
+
+/// The exclusions one identity's pass is told, out of what the run names:
+/// every branch named against a repository resolving to that identity, and every
+/// branch [`resolved`] left alone in every identity.
+fn excluded_in(identity: &str, named: &[(Option<String>, String)]) -> Vec<onevcs::BranchRef> {
+    named
+        .iter()
+        .filter(|(key, _)| key.as_deref().is_none_or(|key| key == identity))
+        .map(|(_, branch)| onevcs::BranchRef {
+            identity: identity.to_owned(),
+            branch: branch.clone(),
+        })
+        .collect()
+}
+
+/// Resolve each named branch's repository to the identity key `onevcs` compares
+/// an exclusion by, through `resolve`: `None` where it is to be left alone in
+/// every identity.
+///
+/// A repository that does not resolve is one of those, and is said on stderr. Which
+/// identity it meant is exactly what is unknown, so leaving its branch alone
+/// everywhere is the one answer that cannot retire a branch a live node needs.
+// llmlint: ignore-block[changed_behavior_has_e2e] the refusal arm is unreachable from the
+// binary: `start` and every verb that adds a node refuse a repository `onevcs` does not
+// resolve, and `onevcs` has no verb that unregisters one under a live run.
+// `tests::a_repository_that_does_not_resolve_is_left_alone_in_every_identity` holds it.
+fn resolved(
+    named: &[Named],
+    resolve: impl Fn(&str) -> std::result::Result<String, String>,
+) -> Vec<(Option<String>, String)> {
+    let mut keys: std::collections::BTreeMap<String, Option<String>> =
+        std::collections::BTreeMap::new();
+    named
+        .iter()
+        .map(|one| {
+            let key = one.repo.as_ref().and_then(|repo| {
+                keys.entry(repo.clone())
+                    .or_insert_with(|| match resolve(repo) {
+                        Ok(key) => Some(key),
+                        Err(error) => {
+                            eprintln!(
+                                "onepipeline: the retirement pass could not resolve repository \
+                                 {repo} ({error}), so the branches this run's live nodes name \
+                                 against it are left alone in every identity"
+                            );
+                            None
+                        }
+                    })
+                    .clone()
+            });
+            (key, one.branch.clone())
+        })
+        .collect()
+}
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// What one sweep's maintenance did: every identity it visited, and how the
+/// enumeration went. The sweep's retirement pass reports apart, as [`Retirements`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Swept {
+pub(crate) struct PoolsMaintained {
     /// When the sweep started, RFC3339, stamped by `sys::now_rfc3339` and carried
     /// to the record as the record's own document spells it.
     // llmlint: ignore[invalid_states_unrepresentable] the instant is a `String` on every record this crate writes — `LaunchRecord::started_at`, the envelope's `ts` — and on the sibling's `SlotStatus::last_maintained` beside it; the one writer is `sys::now_rfc3339`, and `payload::PoolMaintenance` declares the same shape.
     pub(crate) started_at: String,
-    /// Every identity, in sorted order.
-    pub(crate) identities: Vec<Maintained>,
-    /// Why the identities could not be enumerated at all, where they could not.
-    pub(crate) failure: Option<String>,
+    /// Every identity, in sorted order; or why the identities could not be
+    /// enumerated at all, where they could not.
+    pub(crate) identities: std::result::Result<Vec<Maintained>, String>,
 }
 
-impl Swept {
+impl PoolsMaintained {
     /// Whether this sweep is written into the record at all.
     fn is_recorded(&self) -> bool {
-        self.failure.is_some() || self.identities.iter().any(Maintained::is_recorded)
+        self.identities.as_ref().map_or(true, |identities| {
+            identities.iter().any(Maintained::is_recorded)
+        })
     }
 
     /// The `pool-maintenance` record's payload.
@@ -345,13 +544,14 @@ impl Swept {
                 Value::Array(
                     self.identities
                         .iter()
+                        .flatten()
                         .filter(|identity| identity.is_recorded())
                         .map(Maintained::payload)
                         .collect(),
                 ),
             ),
         ]);
-        if let Some(failure) = &self.failure {
+        if let Err(failure) = &self.identities {
             payload.insert("error".to_owned(), json!(crate::engine::bounded(failure)));
         }
         payload
@@ -363,62 +563,107 @@ fn identities() -> std::result::Result<Vec<String>, String> {
         .map_err(|error| format!("the host's registered identities could not be read: {error}"))
 }
 
-/// Maintain every registered identity once, on the schedule.
-fn sweep(config: &MaintenanceConfig) -> Swept {
+/// Maintain every registered identity once, on the schedule; and the keys it
+/// visited, which the retirement pass then walks.
+fn maintain_pools(config: &MaintenanceConfig) -> (PoolsMaintained, Vec<String>) {
     let started_at = crate::sys::now_rfc3339();
     let keys = match identities() {
         Ok(keys) => keys,
         Err(failure) => {
-            return Swept {
-                started_at,
-                identities: Vec::new(),
-                failure: Some(failure),
-            }
+            return (
+                PoolsMaintained {
+                    started_at,
+                    identities: Err(failure),
+                },
+                Vec::new(),
+            )
         }
     };
     let identities = keys
-        .into_iter()
-        .map(|identity| {
-            let every = match config.every_for(&identity) {
-                Ok(every) => every,
-                Err(why) => {
-                    return Maintained {
-                        identity,
-                        every: config.default.every,
-                        outcome: Err(why),
-                    }
-                }
-            };
-            let outcome = onevcs::pool_maintain(Scope::Repo(identity.clone()), Some(every))
-                .map_err(|failure| failure.to_string())
-                .and_then(|report| {
-                    report
-                        .identities
-                        .into_iter()
-                        .next()
-                        .map(|maintained| maintained.outcome)
-                        .ok_or_else(|| "the sibling answered for no identity".to_owned())
-                });
-            Maintained {
-                identity,
-                every,
-                outcome,
-            }
-        })
+        .iter()
+        .map(|identity| maintain(config, identity.clone()))
         .collect();
-    Swept {
-        started_at,
-        identities,
-        failure: None,
+    (
+        PoolsMaintained {
+            started_at,
+            identities: Ok(identities),
+        },
+        keys,
+    )
+}
+
+/// Retire each identity's finished branches, leaving alone every branch in
+/// `named`.
+///
+/// A pass of its own once every identity is maintained, rather than one
+/// interleaved with them, so the maintenance is recorded when it is done: a
+/// retirement pass costs several times what a pool maintenance does, and a
+/// record held back behind it reaches a reader only after the next sweep may
+/// already have maintained the same slots again.
+fn retire(keys: &[String], named: &[Named]) -> Retirements {
+    let mut retirements = Retirements::default();
+    if keys.is_empty() {
+        return retirements;
+    }
+    let providers = onevcs::Providers::real();
+    let named = resolved(named, |repo| {
+        providers
+            .vcs
+            .resolve_identity(repo)
+            .map(|identity| identity.origin)
+            .map_err(|error| error.to_string())
+    });
+    for identity in keys {
+        retirements.take(
+            identity,
+            onevcs::retire_finished(
+                &providers,
+                &onevcs::RetirePass {
+                    scope: Scope::Repo(identity.clone()),
+                    exclude: excluded_in(identity, &named),
+                    dry_run: false,
+                },
+            ),
+        );
+    }
+    retirements
+}
+
+/// Maintain one identity's pool on the schedule.
+fn maintain(config: &MaintenanceConfig, identity: String) -> Maintained {
+    let every = match config.every_for(&identity) {
+        Ok(every) => every,
+        Err(why) => {
+            return Maintained {
+                identity,
+                every: config.default.every,
+                outcome: Err(why),
+            }
+        }
+    };
+    let outcome = onevcs::pool_maintain(Scope::Repo(identity.clone()), Some(every))
+        .map_err(|failure| failure.to_string())
+        .and_then(|report| {
+            report
+                .identities
+                .into_iter()
+                .next()
+                .map(|maintained| maintained.outcome)
+                .ok_or_else(|| "the sibling answered for no identity".to_owned())
+        });
+    Maintained {
+        identity,
+        every,
+        outcome,
     }
 }
 
 /// The one maintenance thread a driver runs at a time.
 ///
-/// Started on an idle pass, it hands its [`Swept`] back over the loop's own
-/// channel and is joined where the loop takes it up — or, where the loop ends
-/// first, when this is dropped, which is what makes a driver closing out wait
-/// for it. The join is bounded by construction: every command the sweep runs is
+/// Started on an idle pass, it hands its [`PoolsMaintained`] and then its
+/// [`Retirements`] back over the loop's own channel, and is joined where the
+/// loop takes up the second — or, where the loop ends first, when this is
+/// dropped, which is what makes a driver closing out wait for it. The join is bounded by construction: every command the sweep runs is
 /// under its identity's own `timeout`.
 ///
 /// While it is live the run root carries a marker, which is what lets `status`
@@ -432,7 +677,12 @@ impl Sweep {
     /// Start one sweep. `None` where this host will not start a thread, which
     /// is reported and costs nothing else: the schedule is asked again at the
     /// next pace.
-    fn start(config: MaintenanceConfig, paths: &RunPaths, tx: Sender<Message>) -> Option<Self> {
+    fn start(
+        config: MaintenanceConfig,
+        named: Vec<Named>,
+        paths: &RunPaths,
+        tx: Sender<Message>,
+    ) -> Option<Self> {
         let started_at = crate::sys::now_rfc3339();
         // The marker before the thread, so no reader meets a live sweep with
         // nothing on disk saying so. A marker that could not be written costs
@@ -451,10 +701,11 @@ impl Sweep {
         let handle = std::thread::Builder::new()
             .name("pool-maintenance".to_owned())
             .spawn(move || {
-                let swept = sweep(&config);
+                let (swept, keys) = maintain_pools(&config);
                 // A loop that has gone has nobody to record it; the slots keep
                 // their own stamps regardless.
                 let _ = tx.send(Message::Maintained(Box::new(swept)));
+                let _ = tx.send(Message::Retired(Box::new(retire(&keys, &named))));
             });
         match handle {
             Ok(handle) => {
@@ -698,7 +949,16 @@ impl Maintenance {
     /// room — and what this adds is the pacing: no sweep of this driver's is
     /// running, and the pace has elapsed since it last started one. A launch
     /// naming no schedule starts nothing, ever.
-    pub(crate) fn consider(&mut self, idle: bool, paths: &RunPaths, tx: &Sender<Message>) {
+    ///
+    /// `named` is asked only when a sweep starts: every branch a live node of
+    /// this run names, which the sweep's retirement pass leaves alone.
+    pub(crate) fn consider(
+        &mut self,
+        idle: bool,
+        paths: &RunPaths,
+        tx: &Sender<Message>,
+        named: impl FnOnce() -> Vec<Named>,
+    ) {
         let Some(config) = &self.config else {
             return;
         };
@@ -706,7 +966,7 @@ impl Maintenance {
             return;
         }
         self.last_started = Some(Instant::now());
-        self.sweep = Sweep::start(config.clone(), paths, tx.clone());
+        self.sweep = Sweep::start(config.clone(), named(), paths, tx.clone());
     }
 
     /// How long until this driver could next start a sweep, for the loop's wait.
@@ -730,8 +990,9 @@ impl Maintenance {
         }
     }
 
-    /// Take up a finished sweep: join its thread, take the marker back, and
-    /// write the one record it earned, if it earned one.
+    /// Take up a sweep's maintenance, and write the one record it earned, if
+    /// it earned one. The sweep goes on to its retirement pass, and is over
+    /// only at [`Self::retired`].
     ///
     /// # Errors
     ///
@@ -740,32 +1001,55 @@ impl Maintenance {
         &mut self,
         paths: &RunPaths,
         journal: &mut crate::journal::Journal,
-        swept: &Swept,
+        swept: &PoolsMaintained,
+    ) -> Result<()> {
+        if let Err(failure) = &swept.identities {
+            eprintln!("onepipeline: the pool-maintenance sweep could not enumerate this host's identities: {failure}");
+        }
+        if swept.is_recorded() {
+            journal.emit(
+                crate::journal::PipelineKind::PoolMaintenance,
+                crate::journal::labels(&paths.run, None),
+                swept.payload(),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Take up a finished sweep's retirement pass: join its thread, take the
+    /// marker back, and write the record the pass earned, if it earned one.
+    ///
+    /// # Errors
+    ///
+    /// The reason the run's journal could not be written.
+    pub(crate) fn retired(
+        &mut self,
+        paths: &RunPaths,
+        journal: &mut crate::journal::Journal,
+        retirements: &Retirements,
     ) -> Result<()> {
         if let Some(mut sweep) = self.sweep.take() {
             sweep.join();
         }
-        if let Some(failure) = &swept.failure {
-            eprintln!("onepipeline: the pool-maintenance sweep could not enumerate this host's identities: {failure}");
+        if retirements.is_recorded() {
+            journal.emit(
+                crate::journal::PipelineKind::BranchesRetired,
+                crate::journal::labels(&paths.run, None),
+                retirements.payload(),
+            )?;
         }
-        if !swept.is_recorded() {
-            return Ok(());
-        }
-        journal.emit(
-            crate::journal::PipelineKind::PoolMaintenance,
-            crate::journal::labels(&paths.run, None),
-            swept.payload(),
-        )
+        Ok(())
     }
 
     /// Wait for a sweep still running as the driver closes out, and record what
     /// it did.
     ///
-    /// The thread hands its report over the loop's channel, which the loop has
-    /// stopped reading; so it is joined here and the channel drained for its
-    /// report. Nothing else can be queued there by then — the loop closes out
-    /// with nothing in flight, and every dispatch thread has settled — so the
-    /// drain takes the sweep's report and nothing of consequence with it.
+    /// The thread hands its reports over the loop's channel, which the loop has
+    /// stopped reading; so it is joined here and the channel drained for
+    /// whichever of its two reports the loop had not taken up. Nothing else can
+    /// be queued there by then — the loop closes out with nothing in flight,
+    /// and every dispatch thread has settled — so the drain takes the sweep's
+    /// reports and nothing of consequence with it.
     ///
     /// # Errors
     ///
@@ -781,18 +1065,14 @@ impl Maintenance {
         };
         sweep.join();
         drop(sweep);
-        let swept = rx.try_iter().find_map(|message| match message {
-            Message::Maintained(swept) => Some(swept),
-            _ => None,
-        });
-        match swept {
-            Some(swept) => self.record(paths, journal, &swept),
-            // llmlint: ignore[changed_behavior_has_e2e] unreachable by construction:
-            // the thread sends its report before it ends, and it was joined above, so
-            // the report is on the channel — nothing else drains it once the loop's own
-            // reads have ended.
-            None => Ok(()),
+        for message in rx.try_iter() {
+            match message {
+                Message::Maintained(swept) => self.record(paths, journal, &swept)?,
+                Message::Retired(retirements) => self.retired(paths, journal, &retirements)?,
+                _ => {}
+            }
         }
+        Ok(())
     }
 
     /// Whether a sweep of this driver's is running now.
@@ -806,6 +1086,7 @@ impl Maintenance {
 mod tests {
     use super::*;
     use onevcs::{IdentityMaintenance, MaintenanceOutcome, SlotMaintenance};
+    use std::collections::BTreeMap;
 
     fn written(text: &str) -> Result<MaintenanceConfig> {
         static NTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -950,15 +1231,207 @@ mod tests {
         }
     }
 
+    /// A run whose graph holds one node per status given, each naming the branch
+    /// `<id>/branch` pinned, `<id>/resume.branch` resumed and `<id>/session` as its
+    /// current dispatch session's — one per word of entry 92's `excluded_by` —
+    /// against `service`, and one direct node naming a branch and no repository.
+    fn named_by(statuses: &[(&str, NodeStatus)]) -> (RunState, BTreeMap<String, NodeStatus>) {
+        let mut state = crate::projection::fold(&[]);
+        let mut derived = BTreeMap::new();
+        for (id, status) in statuses {
+            let node: crate::plan::Node = serde_json::from_value(json!({
+                "id": id, "repo": "service", "task": "## What\nShip.",
+                "branch": format!("{id}/branch"),
+                "resume": {"branch": format!("{id}/resume.branch")},
+            }))
+            .expect("a node parses");
+            state.graph.insert(node);
+            state.sessions.insert(
+                (*id).to_owned(),
+                serde_json::from_value(
+                    json!({"token": format!("s-{id}"), "branch": format!("{id}/session")}),
+                )
+                .expect("a session reads"),
+            );
+            derived.insert((*id).to_owned(), *status);
+        }
+        let direct: crate::plan::Node = serde_json::from_value(json!({
+            "id": "direct", "task": "## What\nShip.", "branch": "direct/branch",
+        }))
+        .expect("a node parses");
+        state.graph.insert(direct);
+        derived.insert("direct".to_owned(), NodeStatus::Running);
+        (state, derived)
+    }
+
+    /// Every live status names all three of a node's branches — its pin, its
+    /// resume and its current dispatch session's — and a settled one names none.
+    /// The session means is held here as well as end to end, because a running
+    /// node's session is open under a live owner and `onevcs` keeps its branch on
+    /// that alone, so a journey cannot tell this exclusion from that hold.
+    #[test]
+    fn a_live_node_names_its_pin_its_resume_and_its_session_and_a_settled_one_names_nothing() {
+        let live = [
+            ("pending", NodeStatus::Pending),
+            ("ready", NodeStatus::Ready),
+            ("running", NodeStatus::Running),
+            ("parked", NodeStatus::Parked),
+            ("waiting", NodeStatus::Waiting),
+            ("blocked", NodeStatus::Blocked),
+            ("draft", NodeStatus::CompleteDraft),
+        ];
+        let settled = [
+            ("done", NodeStatus::Done),
+            ("failed", NodeStatus::Failed),
+            ("skipped", NodeStatus::Skipped),
+            ("cancelled", NodeStatus::Cancelled),
+        ];
+        let (state, statuses) = named_by(&[&live[..], &settled[..]].concat());
+        let named = live_branches(&state, &statuses);
+        // Every means entry 92 names, and no other: each live node names exactly
+        // one branch per word.
+        let means = crate::supersession::proposed("excluded_by");
+        for (id, _) in live {
+            assert_eq!(
+                named
+                    .iter()
+                    .filter(|one| one.branch.starts_with(&format!("{id}/")))
+                    .count(),
+                means.len(),
+                "{id} names other than entry 92's means: {named:?}"
+            );
+            for means in &means {
+                assert!(
+                    named.contains(&Named {
+                        repo: Some("service".to_owned()),
+                        branch: format!("{id}/{means}"),
+                    }),
+                    "{id}'s {means} is not excluded: {named:?}"
+                );
+            }
+        }
+        for (id, _) in settled {
+            assert!(
+                !named
+                    .iter()
+                    .any(|one| one.branch.starts_with(&format!("{id}/"))),
+                "settled {id} is excluded: {named:?}"
+            );
+        }
+        assert!(named.contains(&Named {
+            repo: None,
+            branch: "direct/branch".to_owned(),
+        }));
+    }
+
+    /// An identity's pass is told the branches named against it and the ones
+    /// named against no repository, and none named against another identity.
+    #[test]
+    fn an_identity_is_told_its_own_exclusions_and_the_unscoped_ones() {
+        let named = vec![
+            (Some("github.com/owner/service".to_owned()), "a".to_owned()),
+            (Some("github.com/owner/other".to_owned()), "b".to_owned()),
+            (None, "c".to_owned()),
+        ];
+        let told: Vec<String> = excluded_in("github.com/owner/service", &named)
+            .into_iter()
+            .map(|excluded| {
+                assert_eq!(excluded.identity, "github.com/owner/service");
+                excluded.branch
+            })
+            .collect();
+        assert_eq!(told, ["a", "c"]);
+    }
+
+    /// Entry 92 tells a planner the fields `branches-retired` and each of its
+    /// retired entries carry; these are the types that write them.
+    #[test]
+    fn entry_92_names_the_fields_a_retirement_record_carries() {
+        use crate::supersession::{declared, proposed};
+        assert_eq!(
+            proposed("branches_retired_fields"),
+            declared::<BranchesRetired>()
+        );
+        assert_eq!(
+            proposed("retired_entry_fields"),
+            declared::<RetiredBranch>()
+        );
+    }
+
+    /// A branch named against a repository that does not resolve is left alone in
+    /// every identity, as one named against no repository is; one that resolves is
+    /// left alone in its own identity alone.
+    #[test]
+    fn a_repository_that_does_not_resolve_is_left_alone_in_every_identity() {
+        let named = [
+            Named {
+                repo: Some("service".to_owned()),
+                branch: "a".to_owned(),
+            },
+            Named {
+                repo: Some("gone".to_owned()),
+                branch: "b".to_owned(),
+            },
+        ];
+        let keyed = resolved(&named, |repo| match repo {
+            "service" => Ok("github.com/owner/service".to_owned()),
+            other => Err(format!("{other} is not a registered repository")),
+        });
+        assert_eq!(
+            keyed,
+            [
+                (Some("github.com/owner/service".to_owned()), "a".to_owned()),
+                (None, "b".to_owned()),
+            ]
+        );
+        let told = |identity: &str| -> Vec<String> {
+            excluded_in(identity, &keyed)
+                .into_iter()
+                .map(|excluded| excluded.branch)
+                .collect()
+        };
+        assert_eq!(told("github.com/owner/service"), ["a", "b"]);
+        assert_eq!(told("github.com/owner/other"), ["b"]);
+    }
+
+    /// A failed pass is recorded against its identity, and a pass that retired
+    /// nothing writes nothing.
+    #[test]
+    fn a_failed_pass_is_recorded_and_an_empty_one_is_not() {
+        let mut retirements = Retirements::default();
+        retirements.take(
+            "github.com/owner/service",
+            Ok(onevcs::RetirementPassReport {
+                dry_run: false,
+                examined: Vec::new(),
+            }),
+        );
+        assert!(!retirements.is_recorded());
+        retirements.take(
+            "github.com/owner/service",
+            Err(onevcs::Error::Invalid {
+                reason: "the registry could not be read".to_owned(),
+            }),
+        );
+        assert!(retirements.is_recorded());
+        let payload = retirements.payload();
+        assert_eq!(payload["retired"], json!([]));
+        assert_eq!(payload["failed"][0]["identity"], "github.com/owner/service");
+        assert!(payload["failed"][0].get("branch").is_none(), "{payload:?}");
+        assert!(payload["failed"][0]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("the registry could not be read")));
+    }
+
     /// A sweep on which nothing was due and nothing was wrong writes nothing; one
     /// on which a slot ran, a due slot could not be maintained, an identity was
     /// claimed or one failed writes one record carrying exactly those identities,
     /// each with the sibling's own outcome shape.
     #[test]
     fn a_sweep_is_recorded_where_something_ran_or_a_due_slot_could_not_and_never_otherwise() {
-        let nothing = Swept {
+        let nothing = PoolsMaintained {
             started_at: "2026-09-20T00:00:00.000Z".into(),
-            identities: vec![
+            identities: Ok(vec![
                 quiet("a", IdentityOutcome::NoMaintainCommand),
                 quiet("b", IdentityOutcome::NoSlots),
                 quiet(
@@ -978,8 +1451,7 @@ mod tests {
                         },
                     ]),
                 ),
-            ],
-            failure: None,
+            ]),
         };
         assert!(!nothing.is_recorded());
 
@@ -994,23 +1466,22 @@ mod tests {
                 reason: "its worktree is not a repository".into(),
             },
         ] {
-            let held = Swept {
+            let held = PoolsMaintained {
                 started_at: "2026-09-20T00:00:00.000Z".into(),
-                identities: vec![quiet(
+                identities: Ok(vec![quiet(
                     "a",
                     IdentityOutcome::Slots(vec![SlotMaintenance {
                         number: 1,
                         outcome: kept.clone(),
                     }]),
-                )],
-                failure: None,
+                )]),
             };
             assert!(held.is_recorded(), "{kept:?} was not recorded");
         }
 
-        let something = Swept {
+        let something = PoolsMaintained {
             started_at: "2026-09-20T00:00:00.000Z".into(),
-            identities: vec![
+            identities: Ok(vec![
                 quiet("a", IdentityOutcome::NoMaintainCommand),
                 ran("b"),
                 quiet("c", IdentityOutcome::Claimed { by_pid: 42 }),
@@ -1019,8 +1490,7 @@ mod tests {
                     every: "1d".parse().expect("a span"),
                     outcome: Err("the registry could not be read".into()),
                 },
-            ],
-            failure: None,
+            ]),
         };
         assert!(something.is_recorded());
         let payload = Value::Object(something.payload());
@@ -1056,10 +1526,9 @@ mod tests {
             outcome: read,
         };
 
-        let failed = Swept {
+        let failed = PoolsMaintained {
             started_at: "2026-09-20T00:00:00.000Z".into(),
-            identities: Vec::new(),
-            failure: Some("the host's registered identities could not be read".into()),
+            identities: Err("the host's registered identities could not be read".into()),
         };
         assert!(failed.is_recorded());
         let payload = Value::Object(failed.payload());
@@ -1252,13 +1721,13 @@ mod tests {
         // Due now, and the pass was not idle: nothing starts, and the wait is
         // the recheck rather than zero.
         assert_eq!(scheduled.next_due(), RECHECK);
-        scheduled.consider(false, &paths, &tx);
+        scheduled.consider(false, &paths, &tx, Vec::new);
         assert!(!scheduled.is_sweeping());
         assert_eq!(scheduled.next_due(), RECHECK);
         // Started once: the wait is then the pace, and a second idle pass
         // inside it starts nothing more.
         scheduled.last_started = Some(Instant::now());
-        scheduled.consider(true, &paths, &tx);
+        scheduled.consider(true, &paths, &tx, Vec::new);
         assert!(!scheduled.is_sweeping());
         let until = scheduled.next_due();
         assert!(

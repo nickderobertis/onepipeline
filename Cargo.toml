@@ -3,7 +3,7 @@
 # the programs this stack spawns: `oneagentgraph`, and the `gh` behind `onevcs`.
 # Members are listed explicitly so a new one joins the graph deliberately rather
 # than by changing what `--workspace` means.
-# llmlint: ignore[new_command_or_client_gets_its_own_project] no new command or client binary joins this workspace: `onepipeline shutdown` is one more verb of the existing `onepipeline` CLI, which `docs/contract.md` states as one command surface over `onepipeline::verbs`, and this repository is one Rust build unit (the directive further down says the same for the whole crate).
+# llmlint: ignore[new_command_or_client_gets_its_own_project] `shutdown` and `supersessions` are verbs of the existing `onepipeline` CLI, not new binaries.
 members = [".", "crates/testfakes"]
 resolver = "2"
 
@@ -558,6 +558,11 @@ resolver = "2"
 # fails with `cannot lock ref`, on Windows every time, in
 # `tests/e2e/lifecycle.rs`'s pooled-identity journey.
 #
+# `onevcs` 0.34.1 is the floor because it is the published release carrying
+# branch retirement — `record_supersession` and `retire_finished`, which
+# `src/supersession.rs` and `src/maintenance.rs` call — and `^0.33` admits none of
+# it. `onevcs-testing` 0.8.5 requires exactly `^0.34.1`, so the two pins move as one.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -579,7 +584,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.2"
-onevcs = "0.33.0"
+onevcs = "0.34.1"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -744,7 +749,7 @@ oneharness-core = "0.18.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.8.3"
+onevcs-testing = "0.8.5"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.

@@ -1046,6 +1046,93 @@ pub(crate) enum MaintainedAnswer {
         error: String,
     },
 }
+
+/// `branches-superseded`: what one landed lineage told `onevcs` about the earlier
+/// attempts it superseded on branches of their own.
+// llmlint: ignore[boundary_inputs_validated] the rule stated at this module's head: no payload document denies unknown fields, so a newer build's record still reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct BranchesSuperseded {
+    /// The node whose landing superseded them: the head of the lineage.
+    pub(crate) node: String,
+    /// Where it landed, as `onevcs` was told: a commit, or a change request's URL.
+    pub(crate) landing: String,
+    /// Every earlier attempt recorded as superseded.
+    pub(crate) superseded: Vec<SupersededAttempt>,
+    /// Every earlier attempt whose record `onevcs` refused, and why.
+    pub(crate) failed: Vec<UnrecordedAttempt>,
+}
+
+/// One earlier attempt of a `branches-superseded` record.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct SupersededAttempt {
+    pub(crate) node: String,
+    pub(crate) branch: String,
+}
+
+/// One earlier attempt whose supersession `onevcs` did not record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct UnrecordedAttempt {
+    pub(crate) node: String,
+    pub(crate) branch: String,
+    /// What `onevcs` answered, bounded as every payload text is.
+    pub(crate) error: String,
+}
+
+/// `branches-retired`: what one idle pass's `onevcs::retire_finished` retired, or
+/// why a pass over an identity could not be made.
+// llmlint: ignore[boundary_inputs_validated] the rule stated at this module's head: no payload document denies unknown fields, so a newer build's record still reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct BranchesRetired {
+    /// Every branch the pass deleted.
+    pub(crate) retired: Vec<RetiredBranch>,
+    /// Every identity whose pass failed, and every branch a deletion did not
+    /// finish.
+    pub(crate) failed: Vec<UnretiredIdentity>,
+}
+
+/// One branch of a `branches-retired` record, in the words `onevcs`'s report
+/// carries it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct RetiredBranch {
+    /// The identity key the pass was scoped to, as `onevcs` reports it.
+    pub(crate) identity: String,
+    /// The branch name every copy of which the pass deleted.
+    pub(crate) branch: String,
+    /// Its class, as `onevcs` serializes it. That type derives no `JsonSchema`,
+    /// so the document says a string and the type is what is read and written.
+    #[schemars(with = "String")]
+    pub(crate) class: onevcs::RetirementClass,
+    /// What proved it held nothing beyond its base.
+    // llmlint: ignore[invalid_states_unrepresentable] `onevcs::RetirementProof` is the type, and it is what the writer serializes; it derives no `JsonSchema`, so this *document* — a generated schema — carries it as the JSON the sibling declares rather than as a shape restated here, which would be a second copy of that library's vocabulary to drift.
+    pub(crate) proof: Value,
+    /// What retired it.
+    pub(crate) trigger: RetirementTrigger,
+}
+
+/// What retired a branch of a `branches-retired` record.
+///
+/// One word, because this crate reaches retirement through `retire_finished`
+/// alone. `onevcs` keeps its trigger vocabulary private, so the spelling is held
+/// to the one it records by `tests/e2e/retirement.rs`, which reads that
+/// library's own record of the branch back through `onevcs status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum RetirementTrigger {
+    /// The automatic pass `onevcs::retire_finished` makes.
+    Pass,
+}
+
+/// One identity, or one branch of it, an idle pass did not finish retiring.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct UnretiredIdentity {
+    /// The identity key.
+    pub(crate) identity: String,
+    /// The branch, where the failure was one branch's rather than the pass's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) branch: Option<String>,
+    /// What stopped it, bounded as every payload text is.
+    pub(crate) error: String,
+}
 // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// Declares each payload as the bus [`Message`] its kind carries, the total map
@@ -1131,6 +1218,8 @@ payload_messages! {
     PoolMaintenance => "pool-maintenance";
     DispatchStopped => "dispatch-stopped";
     HostShutdown => "host-shutdown";
+    BranchesSuperseded => "branches-superseded";
+    BranchesRetired => "branches-retired";
 }
 
 #[cfg(test)]

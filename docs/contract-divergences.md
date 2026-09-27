@@ -11,14 +11,14 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80 and 84–88 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88 and 92 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80 and 84 to 88 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80, 84 to 88 and 92 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -7468,3 +7468,121 @@ are not held hostage to a task it was launched with. `tests/contract.rs`'s
 C6b is fixed once the plan runs: `op-task-templates`, the onepipeline-ui node and the
 ai-orchestrator nodes restate it, so a change to it is a proposal to the manager, never an edit
 here.
+
+## 92. A landed retry's earlier attempts are told to `onevcs`, and an idle driver retires what holds no work — OPEN
+
+**Proposal: two pipeline kinds, `branches-superseded` and `branches-retired`; one
+post-launch verb, `onepipeline supersessions <RUN> [--record] [--json]`, with its SDK
+function; and a retirement pass inside the idle pool-maintenance sweep.** For the planner
+who owns the contract. It would change three places in `docs/contract.md`: the merged
+stream's closed list of this library's own kinds, which gains the two below; the
+pool-maintenance paragraph, which gains the pass; and the post-launch verbs paragraph,
+which gains the verb and its function. `docs/contract.md` is unchanged until that ruling.
+
+`onevcs` 0.34.1 carries branch retirement: `record_supersession(&Supersession)` and
+`retire_finished(&Providers, &RetirePass) -> RetirementPassReport`, with `BranchRef` naming
+what a pass leaves alone. That library chains the sessions cut onto one branch itself, so
+an earlier attempt on the **same** branch as the retry that landed needs nothing more. An
+attempt on a branch of its own is different: to `onevcs` it is unpublished work of unknown
+value, and only the run's journal knows a retry of it landed. The shapes are that crate's,
+and this build restates none of them.
+
+**Recording at the landing.** When a node lands — a publication closeout settling
+`merged`, a planner `settle` carrying a `landing`, or a relayed `merge-completed` — the
+engine walks its lineage root first through the journal's retry edges and, for every
+earlier attempt whose recorded branch (its settlement's, else its `session-opened`'s) is
+non-empty and differs from the landed node's, calls `onevcs::record_supersession` with
+`repo` the landed node's repository, `branch` the attempt's, `superseded_by` the landed
+branch, `landing` the landing commit — or the change request's URL where no commit is
+recorded — and the labels `run`, `node` (the attempt) and `superseded_by_node`. It is
+asked once per lineage per driver, seeded from the journal, and from a `reply` that
+applied a `settle` with nothing driving the run. The call is idempotent in `onevcs`, and a
+refusal never changes the settlement: it is journalled and the run moves on.
+
+**`branches-superseded`**, labelled with the run alone, written when a lineage had any
+attempt to record: `{"node": <the landed node>, "landing": <what onevcs was told>,
+"superseded": [{"node", "branch"}], "failed": [{"node", "branch", "error"}]}`.
+
+**The backfill verb.** `onepipeline supersessions <RUN> [--record] [--json]` reads the
+run's journal and nothing else — no launch record, checkpoint or result — so it needs no
+live driver and answers for a settled run whatever else of its store survives.
+Without `--record` it prints each landed lineage with earlier attempts, its landing, and
+each superseded `(node, branch)` pair with whether the journal already records it. With
+`--record` it records each pair the journal does not, through the same function a driver
+calls, and appends the same `branches-superseded` per lineage that had one; so a second
+`--record` records nothing new. It exits `0` when it answered or recorded, nothing to
+record included; `2` for a refused invocation, such as an unknown run or one whose
+journal is missing or holds no record this build reads; and `1` when
+`onevcs` refused a record, naming the refused branches — on stderr, with what `onevcs`
+answered for each, whichever form stdout is in. `--json` prints one object on stdout:
+`verb_json_fields` below, `mode` being `answer` or `record`, and each of its `lineages`
+carrying `verb_json_lineage_fields`. Until the ruling the verb is the binary's alone —
+its body is crate-private, as `ask`'s and `publish-branch`'s are, because the post-launch
+verbs paragraph names every function `onepipeline::verbs` publishes and this one is not
+named there yet. The proposal is that the SDK then carry `supersessions(&RunPaths, Mode)
+-> Result<Supersessions>`, rendered by `render_supersessions` and
+`render_supersessions_json`, with an `exit_code` on the answer, and that
+`tests/parity.rs` hold the binary to it.
+
+**The retirement pass.** The idle pool-maintenance sweep, after `pool_maintain` for each
+registered identity, calls `onevcs::retire_finished(&providers, &RetirePass { scope:
+Scope::Repo(identity), exclude, dry_run: false })`. `exclude` is every `BranchRef` a node
+of this run in a live state names — pending, ready, running, and the held states
+(waiting, blocked, parked, complete-but-draft) — by each of `excluded_by` below: its
+`branch`, its `resume.branch`, or its current dispatch session's branch. A node naming a
+repository is excluded in the identity that repository resolves to. A node naming a branch
+and no repository is excluded in every identity, and so is one whose repository does not
+resolve, with the resolution's failure said on the driver's stderr. The pass keeps the sweep's cadence, its idle and room checks
+and its schedule, and adds no configuration key. It acts **host-wide**, on branches other
+runs left behind, which is intended only because `onevcs` retires nothing but a branch
+whose every copy is proved to hold no work beyond its base; the engine adds no retirement
+logic of its own.
+
+**`branches-retired`**, labelled with the run alone, written once per sweep and only
+where a branch was retired or a pass failed: `{"retired": [{"identity", "branch",
+"class", "proof", "trigger"}], "failed": [{"identity", "branch"?, "error"}]}` — each
+retired entry is the report's own, `class` and `proof` as `onevcs` serializes
+`RetirementClass` and `RetirementProof`, and `trigger` the `pass` that library stamps
+`retire_finished` with; a failed entry names the
+branch where one branch's deletion did not finish and omits it where the whole identity's
+pass failed. A failed pass never fails the run.
+
+**A node pinned to a branch a pass retired still dispatches**: `onevcs` cuts the named
+branch fresh from the base.
+
+Driven end to end by `tests/e2e/retirement.rs` against the linked `onevcs` over real git
+and a bare origin: the recording on each of the three landing paths, with the first
+attempt's branch then classified `superseded-with-changes` by that library while it still
+differs from the base and `retirable` once the base carries it; a lineage retried twice
+recording both earlier attempts root first; a `settle` applied by a `reply` with nothing
+driving the run, and one a dead driver's queue held applied by the `reply` that takes the
+run over, each recording there; a refused recording
+journalled with the settlement unchanged; a same-branch retry recording nothing; the
+backfill verb's three exits, both output forms and its idempotence; the pass retiring what
+other runs left while keeping the slot, with the `trigger` it journals the one `onevcs`
+recorded; leaving every branch a live node names and every branch holding work; a deletion
+the origin refuses journalled against its branch; failing without failing the run; and a
+retired pinned branch cut fresh. A repository that stops resolving under a live run is held
+by `src/maintenance.rs`'s unit tests alone, because `start` refuses one that does not
+resolve and `onevcs` has no verb that unregisters one.
+`tests/contract.rs` holds the kinds below to `PipelineKind` and the verb to the binary's
+parser; `src/supersession.rs`'s and `src/maintenance.rs`'s unit tests hold the field lists
+to the payload and answer types that write them, `supersession_labels` to the label keys
+`onevcs` is given, and `excluded_by` to the means the
+exclusion is built from.
+
+```json
+{
+  "event_kinds": ["branches-superseded", "branches-retired"],
+  "branches_superseded_fields": ["node", "landing", "superseded", "failed"],
+  "branches_retired_fields": ["retired", "failed"],
+  "supersession_labels": ["run", "node", "superseded_by_node"],
+  "retired_entry_fields": ["identity", "branch", "class", "proof", "trigger"],
+  "verb": "supersessions",
+  "verb_flags": ["--record", "--json"],
+  "verb_exits": {"answered_or_recorded": 0, "onevcs_refused": 1, "refused_invocation": 2},
+  "verb_json_fields": ["run", "mode", "lineages"],
+  "verb_json_lineage_fields": ["node", "branch", "repo", "landing", "superseded", "to_record", "recorded", "failed"],
+  "excluded_by": ["branch", "resume.branch", "session"]
+}
+```

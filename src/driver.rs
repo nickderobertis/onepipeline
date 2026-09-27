@@ -337,6 +337,23 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             );
             Ok(EXIT_SUCCESS)
         }
+        Verb::Supersessions(args) => {
+            // The binary's alone until the contract names it: see
+            // `docs/contract-divergences.md` entry 92.
+            let mode = if args.record {
+                crate::supersession::Mode::Record
+            } else {
+                crate::supersession::Mode::Answer
+            };
+            let answered = crate::supersession::supersessions(&resolve(&args.run)?, mode)?;
+            if args.json {
+                println!("{}", crate::supersession::render_json(&answered));
+            } else {
+                print!("{}", crate::supersession::render(&answered));
+            }
+            eprint!("{}", crate::supersession::render_refusals(&answered));
+            Ok(answered.exit_code())
+        }
         Verb::Goals(args) => {
             print!(
                 "{}",
@@ -3146,6 +3163,9 @@ pub(crate) fn submit_envelope(
                     }
                 }
             }
+            // A `settle` stating a landing is a landing with nothing driving the
+            // run to see it, so what it superseded is told to `onevcs` here.
+            crate::supersession::record_landed(paths, &mut journal)?;
             // This process was the run's writer, so it lets go of it the way a
             // driver does: under the handover, and not while the queue holds
             // something another supervisor's edit put there while this one was

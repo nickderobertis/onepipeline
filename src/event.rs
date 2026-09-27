@@ -270,6 +270,26 @@ pub enum PipelineKind {
     /// grace, the dispatch tallies, the teardown `run-stopped` would have
     /// carried, and one entry per branch the shutdown offered to `onevcs`.
     HostShutdown,
+    /// A landed lineage told `onevcs` which earlier attempts it superseded.
+    ///
+    /// Written when a node lands — publication closeout `merged`, a `settle`
+    /// carrying a `landing`, or a relayed `merge-completed` — and its lineage
+    /// holds earlier attempts on branches other than the one that landed, and by
+    /// `onepipeline supersessions --record` for a run that settled before this
+    /// existed. Labelled with nothing but the run; carries the landed `node`, the
+    /// `landing` `onevcs` was told, each `superseded` attempt's `node` and
+    /// `branch`, and the `failed` ones with the `error` that library answered.
+    /// A failure changes nothing about the node's settlement.
+    BranchesSuperseded,
+    /// An idle maintenance pass retired finished branches, or could not.
+    ///
+    /// Written by the sweep that runs `pool-maintenance`, once per sweep, and only
+    /// where `onevcs::retire_finished` deleted a branch or failed: each `retired`
+    /// entry is that library's report of one branch — `identity`, `branch`,
+    /// `class`, `proof`, `trigger` — and each `failed` one names the identity, the
+    /// branch where the failure was one branch's, and the `error`. A failed pass
+    /// never fails the run.
+    BranchesRetired,
 }
 
 impl PipelineKind {
@@ -311,6 +331,8 @@ impl PipelineKind {
             Self::PoolMaintenance => "pool-maintenance",
             Self::DispatchStopped => "dispatch-stopped",
             Self::HostShutdown => "host-shutdown",
+            Self::BranchesSuperseded => "branches-superseded",
+            Self::BranchesRetired => "branches-retired",
         }
     }
 
@@ -375,6 +397,8 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::PoolMaintenance,
     PipelineKind::DispatchStopped,
     PipelineKind::HostShutdown,
+    PipelineKind::BranchesSuperseded,
+    PipelineKind::BranchesRetired,
 ];
 
 /// The id of a stored artifact.

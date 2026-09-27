@@ -98,6 +98,7 @@ mod rendercost;
 mod shutdown;
 mod stopguard;
 mod summary;
+mod supersession;
 mod sys;
 mod taskgraph;
 mod unwatched;
