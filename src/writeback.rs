@@ -3035,8 +3035,8 @@ pub struct ProjectionRecord {
 /// them: [`ProjectionCalls::new`] refuses that, and is the only way to build one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectionCalls {
-    counts: BTreeMap<StoreCall, u64>,
-    updated_fields: Option<BTreeMap<UpdatedField, u64>>,
+    counts: BTreeMap<StoreCall, NonZeroU64>,
+    updated_fields: Option<BTreeMap<UpdatedField, NonZeroU64>>,
 }
 
 impl ProjectionCalls {
@@ -3046,16 +3046,10 @@ impl ProjectionCalls {
     ///
     /// Refuses `updated_fields` beside no `task-update` call: fields no update wrote.
     pub fn new(
-        counts: BTreeMap<StoreCall, u64>,
-        updated_fields: Option<BTreeMap<UpdatedField, u64>>,
+        counts: BTreeMap<StoreCall, NonZeroU64>,
+        updated_fields: Option<BTreeMap<UpdatedField, NonZeroU64>>,
     ) -> Result<Self, String> {
-        if updated_fields.is_some()
-            && counts
-                .get(&StoreCall::TaskUpdate)
-                .copied()
-                .unwrap_or_default()
-                == 0
-        {
+        if updated_fields.is_some() && !counts.contains_key(&StoreCall::TaskUpdate) {
             return Err(
                 "`updated_fields` is named without a `task-update` call to have written them"
                     .to_owned(),
@@ -3067,15 +3061,15 @@ impl ProjectionCalls {
         })
     }
 
-    /// How many times each store operation was called.
+    /// How many times each store operation was called; one not called is not named.
     #[must_use]
-    pub fn counts(&self) -> &BTreeMap<StoreCall, u64> {
+    pub fn counts(&self) -> &BTreeMap<StoreCall, NonZeroU64> {
         &self.counts
     }
 
     /// How many items each field was written on, where the attempt made a targeted update.
     #[must_use]
-    pub fn updated_fields(&self) -> Option<&BTreeMap<UpdatedField, u64>> {
+    pub fn updated_fields(&self) -> Option<&BTreeMap<UpdatedField, NonZeroU64>> {
         self.updated_fields.as_ref()
     }
 }
@@ -3249,7 +3243,11 @@ impl ProjectionRecord {
                 Err(failed) => failed.delivered.clone(),
             },
             calls: Some(ProjectionCalls {
-                counts: attempted.calls.clone(),
+                counts: attempted
+                    .calls
+                    .iter()
+                    .filter_map(|(call, count)| NonZeroU64::new(*count).map(|count| (*call, count)))
+                    .collect(),
                 updated_fields: None,
             }),
         }
@@ -3291,14 +3289,14 @@ struct ProjectionWire {
         deserialize_with = "named",
         skip_serializing_if = "Option::is_none"
     )]
-    calls: Option<Option<BTreeMap<StoreCall, u64>>>,
+    calls: Option<Option<BTreeMap<StoreCall, NonZeroU64>>>,
     /// Only a version 4 line that made a targeted update names it; held as `calls` is.
     #[serde(
         default,
         deserialize_with = "named",
         skip_serializing_if = "Option::is_none"
     )]
-    updated_fields: Option<Option<BTreeMap<UpdatedField, u64>>>,
+    updated_fields: Option<Option<BTreeMap<UpdatedField, NonZeroU64>>>,
 }
 
 /// A key that is on the line, whatever it holds — `null` included — as `Some`; the key left

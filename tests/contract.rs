@@ -4271,6 +4271,11 @@ fn json_type(value: &Value) -> &'static str {
     }
 }
 
+/// A count of calls, which the record never names as zero.
+fn count(calls: u64) -> std::num::NonZeroU64 {
+    std::num::NonZeroU64::new(calls).expect("a count the record names is not zero")
+}
+
 /// The write-back's projection record and member copy this build carries **beyond** the
 /// contract.
 ///
@@ -4380,12 +4385,12 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
             calls: Some(
                 ProjectionCalls::new(
                     std::collections::BTreeMap::from([
-                        (StoreCall::TaskUpdate, 2),
-                        (StoreCall::ProjectCopy, 1),
+                        (StoreCall::TaskUpdate, count(2)),
+                        (StoreCall::ProjectCopy, count(1)),
                     ]),
                     Some(std::collections::BTreeMap::from([
-                        (UpdatedField::Status, 2),
-                        (UpdatedField::Metadata, 1),
+                        (UpdatedField::Status, count(2)),
+                        (UpdatedField::Metadata, count(1)),
                     ])),
                 )
                 .expect("fields beside the task-update calls that wrote them"),
@@ -4622,10 +4627,10 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
     // Fields no update wrote cannot be built, as they cannot be read.
     assert!(
         ProjectionCalls::new(
-            std::collections::BTreeMap::from([(StoreCall::ProjectCopy, 1)]),
+            std::collections::BTreeMap::from([(StoreCall::ProjectCopy, count(1))]),
             Some(std::collections::BTreeMap::from([(
                 UpdatedField::Status,
-                1
+                count(1)
             )])),
         )
         .is_err(),
@@ -4789,6 +4794,15 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
         (
             "a call the record does not name",
             json!({"calls": {"task-delete": 1}}),
+        ),
+        // An operation not called is left off, never counted zero.
+        (
+            "a call counted zero times",
+            json!({"calls": {"project-show": 0}}),
+        ),
+        (
+            "a field written on no item",
+            json!({"calls": {"task-update": 1}, "updated_fields": {"status": 0}}),
         ),
         (
             "a version this build has never written",
