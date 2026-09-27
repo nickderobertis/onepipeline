@@ -703,6 +703,11 @@ impl Failed {
             ),
             delivered: Vec::new(),
             // The longest any of them asked for: asking sooner asks one that said not yet.
+            // llmlint: ignore[changed_behavior_has_e2e] every read that reaches `partial` is
+            // addressed to one source, for the reason recorded on this function, so the longest
+            // of its waits is that source's own — the wait `store::a_rate_limit_naming_a_wait_is_waited_out_with_no_store_call_inside_it`
+            // drives end to end; `writeback::tests::a_rate_limited_failure_carries_the_wait_its_source_asked_for`
+            // holds the longest of several.
             wait: errors
                 .iter()
                 .filter_map(|failure| asked_to_wait(&failure.error))
@@ -1791,6 +1796,12 @@ fn carry_the_difference(
 /// Every call's reported spend, summed into the one object the record carries: requests
 /// added, and each budget added to the one of the same name and unit, a lower bound wherever
 /// any summand was. `None` where no call reported any.
+// llmlint: ignore[changed_behavior_has_e2e] the copy is the one call of this build that reports
+// a spend, so an attempt sums one summand, which every metered journey drives end to end
+// (`writeback_projections::the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent`
+// and the comparable plan's `writeback_cost`); the targeted updates that add further summands
+// arrive with the next build, and `writeback::tests::spent_is_summed_across_every_call_that_reports_one`
+// holds the sum of several meanwhile.
 fn summed<'a>(
     spends: impl Iterator<Item = &'a onetaskgraph_core::Spent>,
 ) -> Option<Map<String, Value>> {
@@ -3827,6 +3838,35 @@ mod tests {
             Some(Duration::from_secs(9))
         );
         assert_eq!(Failed::from("cancelled".to_owned()).wait, None);
+    }
+
+    /// Spent is summed across every call that reports one: requests added, each budget added
+    /// to the one of the same name and unit — a lower bound wherever any summand was — and a
+    /// budget only one call reported carried through; nothing at all where no call reported.
+    #[test]
+    fn spent_is_summed_across_every_call_that_reports_one() {
+        let spent = |value: Value| -> onetaskgraph_core::Spent {
+            serde_json::from_value(value).expect("a spend")
+        };
+        let copy = spent(json!({"requests": 7, "budgets": [
+            {"budget": "graphql", "unit": "points", "amount": 12, "lower_bound": false}
+        ]}));
+        let update = spent(json!({"requests": 3, "budgets": [
+            {"budget": "graphql", "unit": "points", "amount": 4, "lower_bound": true},
+            {"budget": "rest", "unit": "requests", "amount": 1, "lower_bound": false}
+        ]}));
+        assert_eq!(
+            Value::Object(super::summed([&copy, &update].into_iter()).expect("a sum")),
+            json!({"requests": 10, "budgets": [
+                {"budget": "graphql", "unit": "points", "amount": 16, "lower_bound": true},
+                {"budget": "rest", "unit": "requests", "amount": 1, "lower_bound": false}
+            ]})
+        );
+        assert_eq!(
+            Value::Object(super::summed([&copy].into_iter()).expect("one")),
+            serde_json::to_value(&copy).expect("serializes")
+        );
+        assert_eq!(super::summed(std::iter::empty()), None);
     }
 
     /// The name a refusal gives each store call is the word the record serializes it as, and
