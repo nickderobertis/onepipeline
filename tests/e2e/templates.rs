@@ -756,6 +756,21 @@ fn every_name_resolves_at_the_first_layer_that_supplies_it_and_says_which() {
         resolved["path"],
         json!(text(&repo.join(".onepipeline/templates/plan-task.md.j2")))
     );
+    // A single origin `onevcs` cannot resolve is refused, never read as the working
+    // directory.
+    verb(
+        &world,
+        &repo,
+        &root,
+        &[
+            "resolve",
+            BUILT_IN,
+            "--repository",
+            "github.com/owner/unregistered",
+        ],
+    )
+    .exited(REFUSED)
+    .err_has("--repository github.com/owner/unregistered: its checkout could not be resolved");
     // An explicit file that is not there is refused, never passed over for the next layer.
     let absent = world.root.join("absent.md.j2");
     verb(
@@ -1455,6 +1470,58 @@ fn a_direct_node_resolves_against_the_launch_directory() {
             ],
         )
         .settled();
+}
+
+#[test]
+fn a_lifecycle_node_resolves_against_its_publication_checkout() {
+    let world = World::new("templates-lifecycle");
+    let root = host(&world);
+    let dir = world.project.clone();
+    let repository = world.repository("local-direct", &[]);
+    let overridden = repository
+        .checkout
+        .join(".onepipeline/templates/plan-task.md.j2");
+    write(&overridden, &task_template("the service's own"));
+    let loader = verb(
+        &world,
+        &dir,
+        &root,
+        &[
+            "resolve",
+            BUILT_IN,
+            "--repo",
+            &text(&repository.checkout),
+            "--json",
+        ],
+    );
+    assert_eq!(loader.whole()["layer"], "repository");
+    let (plan, native) = project(&world, "lifecycle");
+    created(
+        &world,
+        &native,
+        "service",
+        &loader.stdout,
+        &answers("Ship it.", &["It ships."]),
+        &["--metadata", "onepipeline.repo=\"service\""],
+    );
+    let args = [
+        "plan",
+        "check",
+        plan.as_str(),
+        "--require-rendered",
+        "true",
+        "--template-root",
+        root.to_str().expect("a path"),
+    ];
+    // Checked from a launch directory holding no override: the node's own checkout is
+    // where its repository layer is.
+    world.run_from(&dir, &args).exited(0);
+    std::fs::remove_file(&overridden).expect("the override is removed");
+    world
+        .run_from(&dir, &args)
+        .exited(HAS_REFUSALS)
+        .out_has(RULE_TEMPLATE_CHANGED)
+        .out_has("built-in layer");
 }
 
 /// The settings that declare a second source, `board`: `scripted-source`, the real

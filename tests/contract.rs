@@ -8428,7 +8428,16 @@ fn the_task_templates_are_what_the_contract_names() {
         ])
     );
     let rules = &block["rules"];
+    assert_eq!(
+        block["require_rendered"]["default"],
+        json!(onepipeline::templates::REQUIRE_RENDERED_DEFAULT)
+    );
     for (name, rule) in [
+        (
+            "not_registered",
+            onepipeline::templates::RULE_NOT_REGISTERED,
+        ),
+        ("no_layer", onepipeline::templates::RULE_NO_LAYER),
         ("not_extended", RULE_NOT_EXTENDED),
         ("criteria_type", RULE_CRITERIA_TYPE),
         ("no_provenance", RULE_NO_PROVENANCE),
@@ -8512,6 +8521,57 @@ fn the_task_templates_are_what_the_contract_names() {
         .is_ok();
         assert_eq!(accepted, matches(name), "the name {name:?}");
     }
+    // Each entry key the block names is required, and no other is read.
+    let entry_keys: Vec<&str> = registration["entry_keys"]
+        .as_array()
+        .expect("the block names the entry keys")
+        .iter()
+        .map(|key| key.as_str().expect("a key"))
+        .collect();
+    let entry = |keys: &[&str]| {
+        let body: String = keys
+            .iter()
+            .map(|key| match *key {
+                "role" => "    role: task\n".to_owned(),
+                other => format!("    {other}: probe\n"),
+            })
+            .collect();
+        std::fs::write(
+            probe_root.join(REGISTRATION_FILE),
+            format!("{REGISTRATION_KEY}: 1\ntemplates:\n  probe:\n{body}"),
+        )
+        .expect("the probe registration is written");
+        onepipeline::verbs::template_list(&TemplateOptions {
+            template_root: Some(probe_root.clone()),
+            working_dir: probe_root.clone(),
+            ..TemplateOptions::default()
+        })
+    };
+    assert!(
+        entry(&entry_keys).is_ok(),
+        "every entry key the block names"
+    );
+    for missing in &entry_keys {
+        let rest: Vec<&str> = entry_keys
+            .iter()
+            .copied()
+            .filter(|key| key != missing)
+            .collect();
+        let refused = entry(&rest).expect_err("an entry key is required");
+        assert!(
+            refused
+                .to_string()
+                .contains(&format!("missing field `{missing}`")),
+            "{refused}"
+        );
+    }
+    let mut extra = entry_keys.clone();
+    extra.push("colour");
+    let refused = entry(&extra).expect_err("no other key is read");
+    assert!(
+        refused.to_string().contains("unknown field `colour`"),
+        "{refused}"
+    );
     let _ = std::fs::remove_dir_all(&probe_root);
 
     // The base declares exactly what the block says, read by onetaskgraph's own loader.

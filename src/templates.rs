@@ -94,6 +94,15 @@ pub const RULE_NOT_EXTENDED: &str = "does not extend onepipeline/plan-task.md.j2
 /// C6a's rule for a role-`task` template whose criteria are not a list of strings.
 pub const RULE_CRITERIA_TYPE: &str = "acceptance_criteria not a list of strings";
 
+/// C4's refusal for a name no registration declares, `<name>` filled in.
+pub const RULE_NOT_REGISTERED: &str = "template <name> is not registered";
+
+/// C4's refusal for a registered name no layer supplies, `<name>` filled in.
+pub const RULE_NO_LAYER: &str = "no template for <name>";
+
+/// Whether the rendered-only check is on where no rung says.
+pub const REQUIRE_RENDERED_DEFAULT: bool = false;
+
 /// C7's refusal for a node carrying no provenance.
 pub const RULE_NO_PROVENANCE: &str = "not rendered: no provenance";
 
@@ -345,7 +354,8 @@ enum Registration {
     Read(PathBuf),
 }
 
-/// Whether `name` is one a registration may declare: [`NAME_PATTERN`].
+/// [`NAME_PATTERN`], read by hand: this crate links no regular-expression engine, and
+/// `tests/contract.rs` probes every class boundary of the pattern against it.
 fn is_template_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars.next().is_some_and(|first| first.is_ascii_lowercase())
@@ -474,7 +484,10 @@ impl Registry {
                          launch config's `{ROOT_KEY}`), so only {BUILT_IN} is registered"
                     ),
                 };
-                Error::Refused(format!("template {name} is not registered ({whence})"))
+                Error::Refused(format!(
+                    "{} ({whence})",
+                    RULE_NOT_REGISTERED.replace("<name>", name)
+                ))
             })
     }
 }
@@ -588,11 +601,10 @@ pub(crate) fn resolve(registry: &Registry, name: &str, search: Search<'_>) -> Re
     })
 }
 
-/// The layer `name` resolves at and the file it resolves to, without loading it.
-///
 /// # Errors
 ///
-/// As [`resolve`], for everything but a chain that does not load.
+/// As [`resolve`], for everything but a chain that does not load — which is why
+/// `template list` asks this: a broken template still reports the layer it sits at.
 pub(crate) fn locate(name: &str, search: Search<'_>) -> Result<(Layer, Option<PathBuf>)> {
     if let Some(explicit) = search.explicit {
         if !explicit.is_file() {
@@ -630,7 +642,8 @@ pub(crate) fn locate(name: &str, search: Search<'_>) -> Result<(Layer, Option<Pa
         format!("searched {}", searched.join(", "))
     };
     Err(Error::Refused(format!(
-        "no template for {name}: {searched}"
+        "{}: {searched}",
+        RULE_NO_LAYER.replace("<name>", name)
     )))
 }
 
@@ -938,7 +951,7 @@ pub(crate) fn resolve_require_rendered(
             "{REQUIRE_RENDERED_ENVIRONMENT} holds something this build cannot read as text; \
              set it to true or false, or unset it"
         ))),
-        Err(std::env::VarError::NotPresent) => Ok(configured.unwrap_or(false)),
+        Err(std::env::VarError::NotPresent) => Ok(configured.unwrap_or(REQUIRE_RENDERED_DEFAULT)),
     }
 }
 
@@ -982,7 +995,6 @@ pub(crate) fn verb_checkout(options: &TemplateOptions) -> Result<PathBuf> {
     Ok(options.working_dir.clone())
 }
 
-/// The explicit layer's file, absolute, for the verbs.
 pub(crate) fn verb_explicit(options: &TemplateOptions) -> Option<PathBuf> {
     options
         .template
