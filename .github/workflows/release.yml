@@ -296,9 +296,14 @@ jobs:
 
   # PyPI wheels: maturin's `bin` bindings wrap the prebuilt binary in
   # per-platform wheels (the ruff/uv pattern), so `pip install onepipeline-cli`
-  # is a seconds-fast binary install anywhere PyPI is reachable. maturin-action
-  # compiles inside manylinux containers on Linux for broad glibc compatibility,
-  # which is why this is a separate matrix from `upload` rather than a step in it.
+  # is a seconds-fast binary install anywhere PyPI is reachable. Linux wheels
+  # compile inside manylinux containers for broad glibc compatibility, which is
+  # why this is a separate matrix from `upload` rather than a step in it.
+  #
+  # The Linux legs run `just wheel-linux`, the same build ci.yml's `wheel` check
+  # runs on every pull request: v0.50.0's Linux legs failed in manylinux2014 on a
+  # vendored OpenSSL whose Perl prerequisites the image lacks, while that check,
+  # then building on the bare runner, had passed.
   build-wheels:
     name: build-wheels (${{ matrix.target }})
     needs: test
@@ -321,14 +326,23 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        if: runner.os == 'Linux'
+        with:
+          tool: just
+      - name: Build wheel (Linux)
+        if: runner.os == 'Linux'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: just wheel-linux "$TARGET"
       - name: Build wheel
+        if: runner.os != 'Linux'
         env:
           RUSTFLAGS: "-D warnings"
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
           args: --release --locked --out dist
-          manylinux: auto
           maturin-version: v1.14.1
       - uses: actions/upload-artifact@v4
         with:

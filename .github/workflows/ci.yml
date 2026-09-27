@@ -393,22 +393,24 @@ jobs:
   # The other end-user install path: the maturin wheel `pip install
   # onepipeline-cli` serves. Built and installed from this revision so the
   # packaging is proven on every pull request rather than first at a release,
-  # where a broken wheel is already public.
+  # where a broken wheel is already public. Built by `just wheel-linux`, the
+  # recipe release.yml's Linux `build-wheels` legs run, so it compiles in the
+  # release's manylinux image rather than on the bare runner — the difference
+  # that let this check pass on a tree whose v0.50.0 Linux wheels could not build.
   wheel:
     needs: changes
     if: needs.changes.outputs.crate == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Build the wheel
-        uses: PyO3/maturin-action@v1
-        with:
-          args: --release --locked --out dist
-          maturin-version: v1.14.1
+        run: just wheel-linux x86_64-unknown-linux-gnu
       - name: Install it and smoke-test what it put on PATH
         run: |
           pip install --no-index --find-links dist onepipeline-cli
