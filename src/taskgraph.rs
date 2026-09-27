@@ -460,8 +460,16 @@ impl Reader {
         if !task.item.title.trim().is_empty() {
             node.insert("title".to_owned(), Value::String(task.item.title.clone()));
         }
-        if let Some(content) = task.item.content.as_ref().filter(|c| !c.trim().is_empty()) {
-            node.insert("task".to_owned(), Value::String(content.clone()));
+        // Trimmed here because `local-md` stopped trimming a body at 0.2.45: whitespace a
+        // file ends its body with is the file's layout, not part of what a step is handed.
+        if let Some(content) = task
+            .item
+            .content
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
+            node.insert("task".to_owned(), Value::String(content.to_owned()));
         }
         // An entry that arrives bare names this task's own source, which is the store's
         // own rule for a bare id, applied by the store's own type. Anything still not a
@@ -1205,6 +1213,36 @@ mod tests {
         );
         // Each task's own metadata, verbatim, keys this engine does not read included.
         assert_eq!(read.metadata["test"]["team.owner"], json!("qa"));
+    }
+
+    /// A body's surrounding whitespace is the store's layout, so a step is handed the body
+    /// without it, and a body that is only whitespace is no task prose at all.
+    #[test]
+    fn a_task_body_is_handed_over_without_the_whitespace_around_it() {
+        let read = load(store(
+            json!({}),
+            vec![task(
+                "t-padded",
+                node("padded"),
+                json!({"content": "\n## What\nDo padded.\n\n"}),
+            )],
+            vec![],
+        ))
+        .unwrap_or_else(|_| panic!("the project reads as a plan"));
+        assert_eq!(
+            read.plan.tasks[0].task.as_deref(),
+            Some("## What\nDo padded.")
+        );
+
+        let message = refusal(load(store(
+            json!({}),
+            vec![task("t-blank", node("blank"), json!({"content": " \n\n"}))],
+            vec![],
+        )));
+        assert!(
+            message.contains("'blank'") && message.contains("task prose"),
+            "{message}"
+        );
     }
 
     /// A store too large for one page is read to its end, so a plan is never a prefix.
