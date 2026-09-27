@@ -558,18 +558,10 @@ resolver = "2"
 # fails with `cannot lock ref`, on Windows every time, in
 # `tests/e2e/lifecycle.rs`'s pooled-identity journey.
 #
-# `onevcs` 0.34.0 is the first release carrying **branch retirement**:
-# `record_supersession`/`Supersession`, which `src/supersession.rs` calls when a
-# retry on a fresh branch lands, and `retire_finished`/`RetirePass`/`BranchRef`/
-# `RetirementPassReport`, which `src/maintenance.rs`'s idle sweep calls after
-# `pool_maintain`. It also adds the `branch-superseded` and `branch-retired` stream
-# kinds, which `src/vcs.rs`'s `kind_of` relays as that library spells them, and
-# `LandingEvidence::Retired`, which nothing here matches arm by arm. A
-# **requirement**, because `^0.33` admits no 0.34.x. `tests/e2e/retirement.rs` drives
-# both calls against the linked release over real git and a bare origin.
-#
-# The floor is 0.34.1, that line's published release, and `onevcs-testing` 0.8.5
-# with it, the release that requires exactly `^0.34.1`: the two pins move as one.
+# `onevcs` 0.34.1 is the floor because it is the published release carrying
+# branch retirement — `record_supersession` and `retire_finished`, which
+# `src/supersession.rs` and `src/maintenance.rs` call — and `^0.33` admits none of
+# it. `onevcs-testing` 0.8.5 requires exactly `^0.34.1`, so the two pins move as one.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
