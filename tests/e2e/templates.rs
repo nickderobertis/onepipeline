@@ -286,6 +286,25 @@ fn a_host_registers_names_beside_plan_task_and_each_bad_declaration_is_refused_b
         .exited(0)
         .out_has("follow-up [task] no layer supplies it: Work a finished node leaves for later.")
         .out_has("plan-task [task] built-in:");
+    // The variable names the root where no flag does, and the flag beats it.
+    let mut command = world.cmd(&["template", "list", "--json"]);
+    command.current_dir(dir).env(ROOT_ENVIRONMENT, text(&root));
+    let listed = world.run_on(command, "template list").whole();
+    assert_eq!(
+        listed["registration"],
+        json!(text(&root.join("templates.yaml")))
+    );
+    let mut command = world.cmd(&[
+        "template",
+        "list",
+        "--json",
+        "--template-root",
+        &text(&empty),
+    ]);
+    command.current_dir(dir).env(ROOT_ENVIRONMENT, text(&root));
+    let listed = world.run_on(command, "template list").whole();
+    assert_eq!(listed["registration"], Value::Null);
+    assert_eq!(listed["templates"].as_array().map(Vec::len), Some(1));
 
     // Each bad declaration, refused naming the file and what is wrong with it — by the
     // verbs, by `plan check` and by `start` alike.
@@ -856,6 +875,27 @@ fn c6a_holds_a_task_template_to_the_base_and_its_criteria_and_a_rendering_to_lis
     verb(&world, &dir, &root, &["check", "follow-up"])
         .exited(REFUSED)
         .err_has(RULE_NOT_EXTENDED);
+
+    // A chain that does not load is refused naming the layer and the file, and a stored
+    // item named by anything but a qualified id is refused before any store is asked.
+    write(
+        &hosted,
+        "{% extends \"onepipeline/plan-task.md.j2\" %}{% block unclosed %}",
+    );
+    verb(&world, &dir, &root, &["check", "follow-up"])
+        .exited(REFUSED)
+        .err_has(&format!(
+            "template follow-up (host layer, {}) does not load",
+            hosted.display()
+        ));
+    verb(
+        &world,
+        &dir,
+        &root,
+        &["check", BUILT_IN, "--item", "not-qualified"],
+    )
+    .exited(REFUSED)
+    .err_has("'not-qualified' is not a qualified onetaskgraph id");
 
     // A document extending nothing passes; so do task templates using their variables any
     // way minijinja allows — nothing is rendered to check them. Both below redeclare the
