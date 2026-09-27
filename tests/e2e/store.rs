@@ -1561,13 +1561,23 @@ fn a_rate_limit_naming_a_wait_is_waited_out_with_no_store_call_inside_it() {
         failed_at.elapsed()
     );
     // The attempt after the wait carried what had not landed — the change the limited attempt
-    // lost and the one made while it waited — and nothing more.
-    let lines: Vec<Value> =
+    // lost and the one made while it waited — and nothing more. Its line is appended once the
+    // copy has landed, so it is waited for rather than read the moment the board moves.
+    let recorded = |world: &World| -> Vec<Value> {
         std::fs::read_to_string(world.run_file(run, "writeback-projections.jsonl"))
             .expect("the projection record reads")
             .lines()
             .map(|line| serde_json::from_str(line).expect("a record line"))
-            .collect();
+            .collect()
+    };
+    world.until("the attempt after the wait to be recorded", |world| {
+        let lines = recorded(world);
+        lines
+            .iter()
+            .rposition(|line| line["kind"] == "rate-limited")
+            .is_some_and(|limited| lines.len() > limited + 1)
+    });
+    let lines = recorded(&world);
     let limited = lines
         .iter()
         .rposition(|line| line["kind"] == "rate-limited")
