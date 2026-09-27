@@ -54,9 +54,19 @@ done
 
 # The Linux targets release.yml's `build-wheels` matrix builds;
 # tests/linux_wheel.rs fails when the two sets differ.
+# Each carries the SHA-256 static.rust-lang.org publishes for rustup-init
+# $rustup_version on that architecture, so the installer the container runs is
+# the one pinned here and not whatever the download returned.
+rustup_version="1.29.1"
 case "$target" in
-  x86_64-unknown-linux-gnu) arch=x86_64 platform=linux/amd64 ;;
-  aarch64-unknown-linux-gnu) arch=aarch64 platform=linux/arm64 ;;
+  x86_64-unknown-linux-gnu)
+    arch=x86_64 platform=linux/amd64
+    rustup_sha256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+    ;;
+  aarch64-unknown-linux-gnu)
+    arch=aarch64 platform=linux/arm64
+    rustup_sha256=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433
+    ;;
   "") fail_usage "--target is required" ;;
   *) fail_usage "no manylinux build is defined for $target" ;;
 esac
@@ -125,9 +135,13 @@ trap give_back EXIT
 at "installing OpenSSL's Perl prerequisites with yum" \
   "check that the image's yum repositories answer, then re-run"
 yum install -y -q perl-IPC-Cmd perl-Time-Piece
-at "installing rustup" "check that https://sh.rustup.rs answers, then re-run"
-curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
-  | sh -s -- -y -q --profile minimal --default-toolchain none
+at "installing rustup $RUSTUP_VERSION" \
+  "check that static.rust-lang.org serves rustup $RUSTUP_VERSION for $TARGET with the SHA-256 this script pins, then re-run"
+curl --proto "=https" --tlsv1.2 -sSf -o "$HOME/rustup-init" \
+  "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/$TARGET/rustup-init"
+echo "$RUSTUP_SHA256  $HOME/rustup-init" | sha256sum -c --quiet -
+chmod +x "$HOME/rustup-init"
+"$HOME/rustup-init" -y -q --profile minimal --default-toolchain none
 export PATH="$HOME/.cargo/bin:$PATH" RUSTUP_TOOLCHAIN="$CHANNEL"
 at "installing Rust $CHANNEL for $TARGET" \
   "check that $CHANNEL, rust-toolchain.toml's channel, is a published release, then re-run"
@@ -145,6 +159,7 @@ SCRIPT
 docker run --rm --platform "$platform" \
   -v "$root":/io:ro -v "$root/$cargo_target":"/io/$cargo_target" -v "$out_abs":"/io/$out_rel" -w /io \
   -e TARGET="$target" -e OUT="$out_rel" -e CHANNEL="$channel" -e MATURIN_VERSION="$maturin_version" \
+  -e RUSTUP_VERSION="$rustup_version" -e RUSTUP_SHA256="$rustup_sha256" \
   -e HOST_OWNER="$(id -u):$(id -g)" \
   -e CARGO_TARGET_DIR="$cargo_target" \
   -e RUSTFLAGS="-D warnings" \

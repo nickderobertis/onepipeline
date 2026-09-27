@@ -48,8 +48,6 @@ fn scratch(name: &str) -> (Scratch, PathBuf) {
     (Scratch(dir.clone()), dir)
 }
 
-/// A `docker` that writes each argument on its own line to `docker.log` beside
-/// it, then exits with `status`.
 fn docker_double(dir: &Path, status: i32) {
     executable(
         &dir.join("bin/docker"),
@@ -67,24 +65,36 @@ fn docker_double(dir: &Path, status: i32) {
 /// whose call begins with `fail_at`, which exits 1. Nothing on the host's PATH is
 /// reachable from it, so no real `rustup` or `yum` can answer instead.
 fn container_double(dir: &Path, fail_at: Option<&str>) {
-    let bash = std::env::split_paths(&std::env::var_os("PATH").expect("the host has a PATH"))
-        .map(|candidate| candidate.join("bash"))
-        .find(|candidate| candidate.is_file())
-        .expect("bash is on this host's PATH");
+    let bash = which("bash");
     let bash = bash.display();
     let fail_at = fail_at.unwrap_or("no call begins with this");
     let log = dir.join("container.log");
     let log = log.display();
     fs::create_dir_all(dir.join("container-bin")).expect("the image's tool directory");
-    for tool in ["yum", "curl", "sh", "rustup", "python3.12", "chown"] {
-        executable(
-            &dir.join("container-bin").join(tool),
-            format!(
-                "#!{bash}\ncall=\"{tool} $*\"\nprintf '%s\\n' \"$call\" >> '{log}'\n\
-                 [[ \"$call\" != '{fail_at}'* ]] || exit 1\n"
-            ),
-        );
+    fs::create_dir_all(dir.join("home")).expect("the image's home directory");
+    let record = |tool: &str| {
+        format!(
+            "#!{bash}\ncall=\"{tool} $*\"\nprintf '%s\\n' \"$call\" >> '{log}'\n\
+             [[ \"$call\" != '{fail_at}'* ]] || exit 1\n"
+        )
+    };
+    for tool in ["yum", "sha256sum", "chmod", "rustup", "python3.12", "chown"] {
+        executable(&dir.join("container-bin").join(tool), record(tool));
     }
+    // What `curl -o` downloads is the installer the script then runs, so this
+    // one also leaves a recording `rustup-init` where it was asked to write.
+    let chmod = which("chmod");
+    let chmod = chmod.display();
+    executable(
+        &dir.join("container-bin/curl"),
+        format!(
+            "{}while [ $# -gt 0 ]; do [ \"$1\" != -o ] || out=\"$2\"; shift; done\n\
+             read -r -d '' stub <<'STUB' || true\n{}\nSTUB\n\
+             printf '%s\\n' \"$stub\" > \"$out\"\n'{chmod}' +x \"$out\"\n",
+            record("curl"),
+            record("rustup-init").trim_end()
+        ),
+    );
     executable(
         &dir.join("bin/docker"),
         format!(
@@ -100,6 +110,13 @@ fn container_double(dir: &Path, fail_at: Option<&str>) {
             bin = dir.join("container-bin").display(),
         ),
     );
+}
+
+fn which(tool: &str) -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").expect("the host has a PATH"))
+        .map(|candidate| candidate.join(tool))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| panic!("{tool} is on this host's PATH"))
 }
 
 fn container_calls(dir: &Path) -> Vec<String> {
@@ -144,7 +161,6 @@ fn logged(output: Output, dir: &Path) -> Output {
     output
 }
 
-/// The double's directory ahead of the host's PATH.
 fn path_with_double(dir: &Path) -> std::ffi::OsString {
     let host = std::env::var_os("PATH").expect("the host has a PATH");
     let mut dirs = vec![dir.join("bin")];
@@ -265,6 +281,7 @@ fn every_linux_target_the_release_builds_is_handed_to_its_own_manylinux_image() 
         let cargo_target = format!("target/wheel-{target}");
         for expected in [
             "yum install -y -q perl-IPC-Cmd perl-Time-Piece".to_string(),
+            "rustup-init -y -q --profile minimal --default-toolchain none".to_string(),
             format!("python3.12 -m pip install -q maturin=={maturin}"),
             format!(
                 "python3.12 -m maturin build --release --locked --target {target} \
@@ -299,8 +316,15 @@ fn a_container_step_that_fails_is_named_with_its_action_and_its_files_are_still_
         ),
         (
             "curl",
-            "installing rustup",
-            "check that https://sh.rustup.rs answers",
+            "installing rustup 1.29.1",
+            "check that static.rust-lang.org serves rustup 1.29.1 for x86_64-unknown-linux-gnu \
+             with the SHA-256 this script pins",
+        ),
+        (
+            "sha256sum",
+            "installing rustup 1.29.1",
+            "check that static.rust-lang.org serves rustup 1.29.1 for x86_64-unknown-linux-gnu \
+             with the SHA-256 this script pins",
         ),
         (
             "rustup toolchain install",
@@ -621,7 +645,6 @@ fn a_build_directory_that_cannot_be_created_is_named() {
     let (_scratch, dir) = scratch("uncreatable");
     docker_double(&dir, 0);
     let checkout = checkout_with_channel(&dir, "1.97.1");
-    // A file where the build's target directory has to go.
     fs::write(checkout.join("target"), "").expect("the obstructing file");
     let output = script_in(&checkout, &dir);
     assert_eq!(output.status.code(), Some(1));
