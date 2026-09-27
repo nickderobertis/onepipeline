@@ -235,6 +235,7 @@ fn a_retry_its_closeout_lands_records_the_attempt_it_superseded() {
 /// The first attempt again, in a run a held direct node keeps a driver alive for,
 /// so what follows is applied by the loop rather than by the process replying.
 /// Answers the pid the detached launch announced for that driver.
+#[cfg(unix)]
 fn first_attempt_beside_a_hold(world: &World, run: &str) -> u32 {
     world.script("svc.work", FIRST_WORK);
     world.script("svc.fail", "1");
@@ -256,6 +257,7 @@ fn first_attempt_beside_a_hold(world: &World, run: &str) -> u32 {
 }
 
 /// Wait until a node has recorded a settlement.
+#[cfg(unix)]
 fn until_settled(world: &World, run: &str, node: &str) {
     world.until(&format!("{node} to settle"), |world| {
         world
@@ -267,6 +269,7 @@ fn until_settled(world: &World, run: &str, node: &str) {
 
 /// Land the replacement's preserved branch on the base by hand, from a person's
 /// clone, and answer the commit it landed at.
+#[cfg(unix)]
 fn landed_by_hand(world: &World, repo: &Repository) -> String {
     let clone = person(world, repo);
     git(
@@ -284,6 +287,7 @@ fn landed_by_hand(world: &World, repo: &Repository) -> String {
 
 /// Squash the replacement's preserved branch onto the base by hand, as a host
 /// merges the change request at `url`: one commit whose subject names it.
+#[cfg(unix)]
 fn squashed_by_hand(world: &World, repo: &Repository, url: &str) {
     let clone = person(world, repo);
     git(
@@ -303,6 +307,7 @@ fn squashed_by_hand(world: &World, repo: &Repository, url: &str) {
 }
 
 /// Settle `svc-2` done at `landing`, as a planner does once a person landed it.
+#[cfg(unix)]
 fn settle_at(world: &World, run: &str, landing: &str) {
     world
         .run_with_stdin(&["reply", run], &settling_at(landing).to_string())
@@ -311,6 +316,7 @@ fn settle_at(world: &World, run: &str, landing: &str) {
 }
 
 /// The envelope a planner settles `svc-2` done at `landing` with.
+#[cfg(unix)]
 fn settling_at(landing: &str) -> Value {
     json!({"version": 2, "commands": [{
         "op": "settle", "id": "svc-2", "outcome": "done",
@@ -409,10 +415,13 @@ fn a_settle_stating_where_a_retry_landed_records_the_attempt_it_superseded() {
     first_is_superseded_then_retirable(&world, &repository_of(&world));
 }
 
-/// The world's `service` repository, as [`World::repository`] laid it out.
 /// An attempt whose driver died mid-dispatch never settles, so nothing but the
 /// session it opened names its branch — and that branch is what is recorded as
 /// superseded once the retry an adopting driver runs lands.
+///
+/// **Unix**, because that driver is ended by pid and `harness::end_process` has
+/// no Windows spelling — the terms `driver.rs`'s adoption journeys are gated on.
+#[cfg(unix)]
 #[test]
 fn an_attempt_that_never_settled_is_recorded_on_the_branch_its_session_opened() {
     let world = World::new("retirement-unsettled");
@@ -479,6 +488,8 @@ fn a_settle_stating_a_change_request_records_its_url_as_the_landing() {
     assert_eq!(class["superseded_by"]["branch"], SECOND, "{class}");
 }
 
+/// The world's `service` repository, as [`World::repository`] laid it out.
+#[cfg(unix)]
 fn repository_of(world: &World) -> Repository {
     Repository {
         origin: world.root.join("origin.git"),
@@ -713,6 +724,7 @@ fn a_retry_on_the_branch_its_first_attempt_left_records_nothing() {
 // exactly this build's journal less the records of the one kind it did not know, which is
 // what is written here; everything else in the run, the lineage and the landing included,
 // is the real binary's own.
+#[cfg(unix)]
 fn as_an_older_build_left_it(world: &World, run: &str) {
     let journal = world.run_file(run, "events.jsonl");
     let kept: String = std::fs::read_to_string(&journal)
