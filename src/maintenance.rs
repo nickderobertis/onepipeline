@@ -1342,6 +1342,33 @@ mod tests {
         }));
     }
 
+    /// The one cell of the exclusion matrix a journey cannot isolate: a running
+    /// node's session is open under a live owner, which `onevcs` keeps its branch
+    /// for on that alone, so
+    /// `retirement::an_idle_pass_keeps_the_branch_a_running_nodes_session_is_on`
+    /// shows the branch survives and this holds that the engine names it.
+    #[test]
+    fn a_running_node_names_its_open_sessions_branch() {
+        let (mut state, statuses) = named_by(&[("running", NodeStatus::Running)]);
+        let node = state.graph.get_mut("running").expect("the node");
+        node.branch = None;
+        node.resume = None;
+        let named = live_branches(&state, &statuses);
+        assert!(
+            named.contains(&Named {
+                repo: Some("service".to_owned()),
+                branch: "running/session".to_owned(),
+            }),
+            "{named:?}"
+        );
+        assert!(
+            !named
+                .iter()
+                .any(|one| one.branch.starts_with("running/") && one.branch != "running/session"),
+            "{named:?}"
+        );
+    }
+
     /// An identity's pass is told the branches named against it and the ones
     /// named against no repository, and none named against another identity.
     #[test]

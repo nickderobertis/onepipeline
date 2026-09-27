@@ -1376,45 +1376,79 @@ fn control_made_lossless(world: &World, repo: &Repository) {
 }
 
 /// A world for one exclusion case: an idle, sweeping host with one warm slot for
-/// `service`, the control [`left_by_another_run`], and `named` — the branch the
-/// case is about — lossless: its one path is on the base byte for byte, so
-/// `onevcs` answers it `retirable`, the class its pass acts on.
-fn excluding(name: &str, named: &str) -> (World, Repository) {
-    let world = sweeping_world(name);
+/// `service`, and the control [`left_by_another_run`]. A cancelled dispatch is
+/// reaped after a second, for the cases that park a running node.
+fn excluding(name: &str) -> (World, Repository) {
+    let world = sweeping_world(name).with_env(crate::harness::CANCEL_GRACE_ENV, "1");
     let repo = world.repository("local-direct", &[]);
     pooled(&world);
     left_by_another_run(&world);
-    lossless(&world, &repo, named, "named.md");
-    let class = classified(&world, named);
+    (world, repo)
+}
+
+/// `named` cut before the run starts, lossless: its one commit adds `named.md`,
+/// which the base carries byte for byte, so `onevcs` answers it `retirable`.
+fn named_lossless(world: &World, repo: &Repository, named: &str) -> String {
+    lossless(world, repo, named, "named.md");
+    let class = classified(world, named);
     assert_eq!(
         class["class"], "retirable",
         "{named} is not lossless: {class}"
     );
-    (world, repo)
+    named.to_owned()
 }
 
-/// Launch `live` — its direct node `hold` holding until released, beside `nodes` —
-/// and wait for `state`, the live state the case is about. Only then is the
-/// control made lossless, so the pass that retires it runs while that state
-/// holds; the case then reads that `named` survived that very pass, that the pass
-/// retired nothing else, and that no node of `live` settled — and none of
-/// `undispatched` was dispatched — before the pass was read.
+/// What `onepipeline results live` says `node` is.
+fn state_of(world: &World, node: &str) -> String {
+    let results = world.run(&["results", "live"]).exited(0).stdout.clone();
+    results
+        .lines()
+        .find_map(|line| {
+            let mut words = line.split_whitespace();
+            (words.next() == Some(node)).then(|| words.next().unwrap_or_default().to_owned())
+        })
+        .unwrap_or_else(|| panic!("results names no {node}:\n{results}"))
+}
+
+/// How many `node-dispatched` and `node-settled` records `live` holds.
+fn moves(world: &World) -> (usize, usize) {
+    (
+        world.events_of("live", "node-dispatched").len(),
+        world.events_of("live", "node-settled").len(),
+    )
+}
+
+/// One exclusion case. Launch `live` — its direct node `hold` holding until
+/// released, beside `nodes` — and let `reach` bring `node` into `state` and answer
+/// the branch it then names, lossless by then. Only after that is the control
+/// made lossless, so the pass that retires it runs while `node` is in `state`: no
+/// node of `live` is dispatched or settles between the two readings, and
+/// `results` reads `node` in `state` after the pass. That same pass retired the
+/// control and nothing else, and the named branch is still there. Once `live` is
+/// stopped and nothing names it, the next run's pass retires it, which shows the
+/// name was all that kept it.
 fn kept_by_the_pass(
     world: &World,
     repo: &Repository,
-    named: &str,
     (hold, nodes): (Value, Vec<Value>),
-    state: (&str, impl FnMut(&World) -> bool),
-    undispatched: &[&str],
+    (node, state): (&str, &str),
+    reach: impl FnOnce(&World, &Repository) -> String,
 ) {
-    let ids: Vec<String> = [vec![hold.clone()], nodes.clone()]
-        .concat()
-        .iter()
-        .map(|node| node["id"].as_str().expect("a node id").to_owned())
-        .collect();
     sweeping(world, "live", hold, nodes);
-    world.until(state.0, state.1);
-    assert!(retired(world, "live").is_empty(), "{}", world.dump());
+    let named = reach(world, repo);
+    assert_eq!(state_of(world, node), state, "{}", world.dump());
+    let class = classified(world, &named);
+    assert_eq!(
+        class["class"], "retirable",
+        "{named} is not lossless: {class}"
+    );
+    let reached = moves(world);
+    let early = retired(world, "live");
+    assert!(
+        early.iter().all(|entry| entry["branch"] != named.as_str()),
+        "{named} was retired while {node}, {state}, named it: {early:?}"
+    );
+    assert!(early.is_empty(), "{early:?}\n{}", world.dump());
     control_made_lossless(world, repo);
     until_retired(world, "live", &[LEFT]);
 
@@ -1424,8 +1458,8 @@ fn kept_by_the_pass(
         "the control was journalled retired and is still there"
     );
     assert!(
-        holds(world, &repo.checkout, named),
-        "{named} was retired while a live node named it\n{statuses}"
+        holds(world, &repo.checkout, &named),
+        "{named} was retired while {node}, {state}, named it\n{statuses}"
     );
     assert!(
         retired(world, "live")
@@ -1434,23 +1468,13 @@ fn kept_by_the_pass(
         "beside {LEFT}, the pass retired {:?}",
         retired(world, "live")
     );
-    assert!(
-        world
-            .events_of("live", "node-settled")
-            .iter()
-            .all(|event| !ids.iter().any(|id| event["labels"]["node"] == id.as_str())),
-        "a live node settled before the pass was read\n{statuses}"
+    assert_eq!(
+        moves(world),
+        reached,
+        "a node was dispatched or settled while the pass ran\n{statuses}"
     );
-    assert!(
-        world
-            .events_of("live", "node-dispatched")
-            .iter()
-            .all(|event| !undispatched
-                .contains(&event["labels"]["node"].as_str().unwrap_or_default())),
-        "a node the case holds undispatched was dispatched\n{statuses}"
-    );
-    // Once nothing names it, it is retired like the control was: the pass had
-    // left it for the name alone.
+    assert_eq!(state_of(world, node), state, "{statuses}");
+
     world.run(&["stop", "live", "--force"]).exited(0);
     sweeping(
         world,
@@ -1458,135 +1482,390 @@ fn kept_by_the_pass(
         crate::harness::agent("hold", &[]),
         Vec::new(),
     );
-    until_retired(world, "after", &[named]);
+    until_retired(world, "after", &[named.as_str()]);
     world.release("hold.go");
     world.until("the after run to settle", |world| {
         world.run_file("after", "result.json").is_file()
     });
 }
 
-fn dispatched(id: &str) -> impl FnMut(&World) -> bool + '_ {
-    move |world| {
+/// Wait until `live`'s node `id` has been dispatched.
+fn until_dispatched(world: &World, id: &str) {
+    world.until(&format!("{id} to be dispatched"), |world| {
         world
             .events_of("live", "node-dispatched")
             .iter()
             .any(|event| event["labels"]["node"] == id)
-    }
+    });
 }
 
-/// Pending, by a node's `branch`: a node waiting on the held one.
+/// Wait until `live` holds `id` ready for want of a workspace.
+fn until_held_for_a_workspace(world: &World, id: &str) {
+    world.until(&format!("{id} to be held for its workspace"), |world| {
+        world.events_of("live", "node-held").iter().any(|event| {
+            event["labels"]["node"] == id
+                && event["payload"]["reasons"]
+                    .as_array()
+                    .is_some_and(|reasons| reasons.iter().any(|r| r["kind"] == "workspace"))
+        })
+    });
+}
+
+fn reply(world: &World, commands: Value) {
+    world
+        .run_with_stdin(
+            &["reply", "live"],
+            &json!({"version": 2, "commands": commands}).to_string(),
+        )
+        .exited(0);
+}
+
+/// A lifecycle node asking for the identity's one warm slot and no overflow, so
+/// the engine holds it ready while another node sits in that slot rather than
+/// dispatching it into a refusal that would settle it.
+fn slot_bound(id: &str, deps: &[&str]) -> Value {
+    let mut node = lifecycle(id, deps);
+    node["pool"] = json!(1);
+    node["overflow"] = json!(0);
+    node
+}
+
+/// Script `id`'s worker to hold its turn open until the case parks it, and then
+/// to stop, committing what the interruption asked of it.
+fn parkable(world: &World, id: &str) {
+    world.script(&format!("{id}.wait"), id);
+    world.script(&format!("{id}.turn-open"), "");
+    world.script(&format!("{id}.stops-when-interrupted"), "");
+}
+
+/// Park `id` while it runs: its dispatch stops, `onevcs` preserves what it
+/// committed on its session's branch and closes the session, and the node settles
+/// `cancelled` under its park — so the engine reads it `parked`, still naming
+/// that session as its current one. Every path the branch differs from the base
+/// in is then carried onto the base, so the branch is lossless and, its session
+/// closed, nothing in `onevcs` holds it. Answers the branch.
+fn parked_off_its_session(world: &World, repo: &Repository, id: &str) -> String {
+    world.until(&format!("{id}'s session to open"), |world| {
+        world
+            .events_of("live", "session-opened")
+            .iter()
+            .any(|event| event["labels"]["node"] == id)
+    });
+    reply(world, json!([{"op": "cancel", "id": id}]));
+    world.until(&format!("{id} to settle under its park"), |world| {
+        world
+            .events_of("live", "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == id)
+    });
+    let branch = world
+        .events_of("live", "session-closed")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == id)
+        .and_then(|event| event["payload"]["branch"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| panic!("{id}'s session never closed\n{}", world.dump()));
+    let class = classified(world, &branch);
+    for path in class["differing_paths"].as_array().expect("paths") {
+        let path = path.as_str().expect("a path");
+        let carried = git(
+            world,
+            &repo.checkout,
+            &["show", &format!("{branch}:{path}")],
+        );
+        on_the_base(world, repo, path, &carried);
+    }
+    branch
+}
+
+// By a node's `branch`, in each live state.
+
+/// Pending: a node waiting on the held one, pinned to the branch.
 #[test]
 fn an_idle_pass_keeps_the_branch_a_pending_node_pins() {
-    let (world, repo) = excluding("retirement-pending", "keep/pending");
+    let (world, repo) = excluding("retirement-pending-pin");
     let mut pending = crate::harness::agent("pending", &["hold"]);
     pending["branch"] = json!("keep/pending");
     kept_by_the_pass(
         &world,
         &repo,
-        "keep/pending",
         (crate::harness::agent("hold", &[]), vec![pending]),
-        ("the held node to be dispatched", dispatched("hold")),
-        &["pending"],
+        ("pending", "pending"),
+        |world, repo| {
+            until_dispatched(world, "hold");
+            named_lossless(world, repo, "keep/pending")
+        },
     );
 }
 
-/// Held, by a node's `branch`: a parked lifecycle node pinned to it.
+/// Held: a parked lifecycle node pinned to the branch.
 #[test]
 fn an_idle_pass_keeps_the_branch_a_held_node_pins() {
-    let (world, repo) = excluding("retirement-held", "keep/held");
+    let (world, repo) = excluding("retirement-held-pin");
     let mut parked = lifecycle("parked", &[]);
     parked["parked"] = json!(true);
     parked["branch"] = json!("keep/held");
     kept_by_the_pass(
         &world,
         &repo,
-        "keep/held",
         (crate::harness::agent("hold", &[]), vec![parked]),
-        ("the held node to be dispatched", dispatched("hold")),
-        &["parked"],
+        ("parked", "parked"),
+        |world, repo| {
+            until_dispatched(world, "hold");
+            named_lossless(world, repo, "keep/held")
+        },
     );
 }
 
-/// Ready, by a node's `branch`: a lifecycle node asking for the identity's one
-/// warm slot and no overflow while a working node sits in it, which the engine
-/// holds ready rather than dispatching into a refusal that would settle it.
+/// Ready: a slot-bound lifecycle node pinned to the branch, held ready while a
+/// working node sits in the one slot.
 #[test]
 fn an_idle_pass_keeps_the_branch_a_ready_node_pins() {
-    let (world, repo) = excluding("retirement-ready", "keep/ready");
+    let (world, repo) = excluding("retirement-ready-pin");
     world.script("working.wait", "hold");
-    let mut ready = lifecycle("ready", &[]);
+    let mut ready = slot_bound("ready", &[]);
     ready["branch"] = json!("keep/ready");
-    ready["pool"] = json!(1);
-    ready["overflow"] = json!(0);
     kept_by_the_pass(
         &world,
         &repo,
-        "keep/ready",
         (
             crate::harness::agent("hold", &[]),
-            vec![lifecycle("working", &[]), ready],
+            vec![slot_bound("working", &[]), ready],
         ),
-        (
-            "the ready node to be held for its workspace",
-            |world: &World| {
-                world.events_of("live", "node-held").iter().any(|event| {
-                    event["labels"]["node"] == "ready"
-                        && event["payload"]["reasons"]
-                            .as_array()
-                            .is_some_and(|reasons| reasons.iter().any(|r| r["kind"] == "workspace"))
-                })
-            },
-        ),
-        &["ready"],
+        ("ready", "ready"),
+        |world, repo| {
+            until_held_for_a_workspace(world, "ready");
+            named_lossless(world, repo, "keep/ready")
+        },
     );
 }
 
-/// Running, by a node's `branch`: the held direct node itself is pinned to it.
+/// Running: the held direct node itself, pinned to the branch.
 #[test]
 fn an_idle_pass_keeps_the_branch_a_running_node_pins() {
-    let (world, repo) = excluding("retirement-running", "keep/running");
+    let (world, repo) = excluding("retirement-running-pin");
     let mut hold = crate::harness::agent("hold", &[]);
     hold["branch"] = json!("keep/running");
     kept_by_the_pass(
         &world,
         &repo,
-        "keep/running",
         (hold, Vec::new()),
-        ("the held node to be dispatched", dispatched("hold")),
-        &[],
+        ("hold", "running"),
+        |world, repo| {
+            until_dispatched(world, "hold");
+            named_lossless(world, repo, "keep/running")
+        },
     );
 }
 
-/// By a node's `resume.branch`: a lifecycle node waiting on the held one, set to
-/// continue the branch rather than pinned to it.
+// By a node's `resume.branch`, in each live state.
+
+/// Pending: a lifecycle node waiting on the held one, set to continue the branch.
 #[test]
-fn an_idle_pass_keeps_the_branch_a_node_resumes() {
-    let (world, repo) = excluding("retirement-resume", "keep/resumed");
+fn an_idle_pass_keeps_the_branch_a_pending_node_resumes() {
+    let (world, repo) = excluding("retirement-pending-resume");
     let mut resuming = lifecycle("resuming", &["hold"]);
     resuming["resume"] = json!({"branch": "keep/resumed"});
     kept_by_the_pass(
         &world,
         &repo,
-        "keep/resumed",
         (crate::harness::agent("hold", &[]), vec![resuming]),
-        ("the held node to be dispatched", dispatched("hold")),
-        &["resuming"],
+        ("resuming", "pending"),
+        |world, repo| {
+            until_dispatched(world, "hold");
+            named_lossless(world, repo, "keep/resumed")
+        },
     );
 }
 
-/// By a node's current dispatch session's branch: a running lifecycle node whose
-/// session `onevcs` cut fresh from the base, so the branch is content-identical to
-/// it. That session is open under a live owner, which `onevcs` keeps a branch for
-/// on that alone, so this case shows the branch survives beside a retired control
-/// and cannot tell the engine's exclusion from that hold; `maintenance`'s unit
-/// test `a_live_node_names_its_pin_its_resume_and_its_session_and_a_settled_one_names_nothing`
-/// holds that the engine names it.
+/// Held: a parked lifecycle node set to continue the branch.
+#[test]
+fn an_idle_pass_keeps_the_branch_a_held_node_resumes() {
+    let (world, repo) = excluding("retirement-held-resume");
+    let mut parked = lifecycle("parked", &[]);
+    parked["parked"] = json!(true);
+    parked["resume"] = json!({"branch": "keep/resumed"});
+    kept_by_the_pass(
+        &world,
+        &repo,
+        (crate::harness::agent("hold", &[]), vec![parked]),
+        ("parked", "parked"),
+        |world, repo| {
+            until_dispatched(world, "hold");
+            named_lossless(world, repo, "keep/resumed")
+        },
+    );
+}
+
+/// Ready: a slot-bound lifecycle node set to continue the branch, held ready
+/// while a working node sits in the one slot.
+#[test]
+fn an_idle_pass_keeps_the_branch_a_ready_node_resumes() {
+    let (world, repo) = excluding("retirement-ready-resume");
+    world.script("working.wait", "hold");
+    let mut ready = slot_bound("ready", &[]);
+    ready["resume"] = json!({"branch": "keep/resumed"});
+    kept_by_the_pass(
+        &world,
+        &repo,
+        (
+            crate::harness::agent("hold", &[]),
+            vec![slot_bound("working", &[]), ready],
+        ),
+        ("ready", "ready"),
+        |world, repo| {
+            until_held_for_a_workspace(world, "ready");
+            named_lossless(world, repo, "keep/resumed")
+        },
+    );
+}
+
+/// Running: the held direct node itself, set to continue the branch. A direct
+/// node opens no session, so nothing in `onevcs` holds the branch for it.
+#[test]
+fn an_idle_pass_keeps_the_branch_a_running_node_resumes() {
+    let (world, repo) = excluding("retirement-running-resume");
+    let mut hold = crate::harness::agent("hold", &[]);
+    hold["resume"] = json!({"branch": "keep/resumed"});
+    kept_by_the_pass(
+        &world,
+        &repo,
+        (hold, Vec::new()),
+        ("hold", "running"),
+        |world, repo| {
+            until_dispatched(world, "hold");
+            named_lossless(world, repo, "keep/resumed")
+        },
+    );
+}
+
+// By a node's current dispatch session's branch, in each live state. A pending,
+// held or ready node names one only after a dispatch that has since ended, so
+// each of those cases parks a running node off its session — which closes it, so
+// `onevcs` holds nothing for the branch. Parking also pins the node's `branch` and
+// `resume.branch` to the one its session preserved, so each case requeues it
+// amended onto [`ELSEWHERE`] in both: the session is then the only thing naming
+// the branch.
+
+/// Where each session case re-pins its node, so its `branch` names another one.
+const ELSEWHERE: &str = "x/elsewhere";
+
+fn requeued_elsewhere() -> Value {
+    json!({"op": "requeue", "id": "x", "amend": {
+        "branch": ELSEWHERE,
+        "resume": {"branch": ELSEWHERE},
+    }})
+}
+
+/// Pending: parked off its session, then requeued elsewhere and reparented onto
+/// the held node in one reply, so it waits on it again naming that session.
+#[test]
+fn an_idle_pass_keeps_the_branch_a_pending_nodes_last_session_is_on() {
+    let (world, repo) = excluding("retirement-pending-session");
+    parkable(&world, "x");
+    kept_by_the_pass(
+        &world,
+        &repo,
+        (
+            crate::harness::agent("hold", &[]),
+            vec![lifecycle("x", &[])],
+        ),
+        ("x", "pending"),
+        |world, repo| {
+            let branch = parked_off_its_session(world, repo, "x");
+            reply(
+                world,
+                json!([
+                    requeued_elsewhere(),
+                    {"op": "reparent", "id": "x", "deps": ["hold"]},
+                ]),
+            );
+            world.until("x to wait on the held node", |world| {
+                state_of(world, "x") == "pending"
+            });
+            branch
+        },
+    );
+}
+
+/// Held: parked off its session, then requeued elsewhere and parked again in one
+/// reply, before anything could dispatch it.
+#[test]
+fn an_idle_pass_keeps_the_branch_a_held_nodes_last_session_is_on() {
+    let (world, repo) = excluding("retirement-held-session");
+    parkable(&world, "x");
+    kept_by_the_pass(
+        &world,
+        &repo,
+        (
+            crate::harness::agent("hold", &[]),
+            vec![lifecycle("x", &[])],
+        ),
+        ("x", "parked"),
+        |world, repo| {
+            let branch = parked_off_its_session(world, repo, "x");
+            reply(
+                world,
+                json!([requeued_elsewhere(), {"op": "cancel", "id": "x"}]),
+            );
+            world.until("x to be parked elsewhere", |world| {
+                world
+                    .events_of("live", "edit-committed")
+                    .iter()
+                    .filter(|event| event["payload"]["command"]["op"] == "cancel")
+                    .count()
+                    == 2
+            });
+            branch
+        },
+    );
+}
+
+/// Ready: a slot-bound node parked off its session, then requeued elsewhere once
+/// another slot-bound node — held back behind `gate` until then — has taken the
+/// slot.
+#[test]
+fn an_idle_pass_keeps_the_branch_a_ready_nodes_last_session_is_on() {
+    let (world, repo) = excluding("retirement-ready-session");
+    parkable(&world, "x");
+    world.script("gate.wait", "gate");
+    world.script("y.wait", "y");
+    kept_by_the_pass(
+        &world,
+        &repo,
+        (
+            crate::harness::agent("hold", &[]),
+            vec![
+                slot_bound("x", &[]),
+                crate::harness::agent("gate", &[]),
+                slot_bound("y", &["gate"]),
+            ],
+        ),
+        ("x", "ready"),
+        |world, repo| {
+            let branch = parked_off_its_session(world, repo, "x");
+            world.release("gate.go");
+            world.until("y's session to open in the slot", |world| {
+                world
+                    .events_of("live", "session-opened")
+                    .iter()
+                    .any(|event| event["labels"]["node"] == "y")
+            });
+            reply(world, json!([requeued_elsewhere()]));
+            until_held_for_a_workspace(world, "x");
+            branch
+        },
+    );
+}
+
+/// Running: a running lifecycle node's session, which `onevcs` cut fresh from the
+/// base, so the branch is content-identical to it. That session is open under a
+/// live owner, which `onevcs` keeps a branch for on that alone, so this case
+/// shows the branch survives beside a retired control and cannot tell the
+/// engine's exclusion from that hold; `maintenance`'s unit test
+/// `a_running_node_names_its_open_sessions_branch` holds that the engine names it.
 #[test]
 fn an_idle_pass_keeps_the_branch_a_running_nodes_session_is_on() {
-    let world = sweeping_world("retirement-session");
-    let repo = world.repository("local-direct", &[]);
-    pooled(&world);
-    left_by_another_run(&world);
+    let (world, repo) = excluding("retirement-running-session");
     world.script("working.wait", "hold");
     sweeping(
         &world,
@@ -1606,6 +1885,8 @@ fn an_idle_pass_keeps_the_branch_a_running_nodes_session_is_on() {
         .find(|event| event["labels"]["node"] == "working")
         .and_then(|event| event["payload"]["branch"].as_str().map(str::to_owned))
         .expect("the working node's session names its branch");
+    assert_eq!(state_of(&world, "working"), "running");
+    let reached = moves(&world);
     control_made_lossless(&world, &repo);
     until_retired(&world, "live", &[LEFT]);
     assert!(
@@ -1615,16 +1896,17 @@ fn an_idle_pass_keeps_the_branch_a_running_nodes_session_is_on() {
         "beside {LEFT}, the pass retired {:?} (the working session is on {session})",
         retired(&world, "live")
     );
+    // The session's branch is in its slot's clone rather than the registered
+    // checkout, so it is read where `onevcs` says it is held.
     let class = classified(&world, &session);
     assert_ne!(class["class"], "retirable", "{session}: {class}");
     assert!(
-        world
-            .events_of("live", "node-settled")
-            .iter()
-            .all(|event| event["labels"]["node"] != "working"),
-        "the working node settled before the pass was read\n{}",
-        world.dump()
+        class["holders"]
+            .as_array()
+            .is_some_and(|holders| !holders.is_empty()),
+        "{session} was retired: {class}"
     );
+    assert_eq!(moves(&world), reached, "{}", world.dump());
     world.run(&["stop", "live", "--force"]).exited(0);
 }
 
