@@ -1150,7 +1150,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "86886cf6dbf4e614b19c9a1eec9775f021869d7eadde0fc73921a81b90c9b4c9"
 dependencies = [
  "memo-map",
+ "percent-encoding",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1408,12 +1410,13 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-core"
-version = "0.2.45"
+version = "0.2.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c7f0d2c5aa3ddf08aae8e2baf1ba31ce02820d1028dbb7fb343e1386b4e2286"
+checksum = "a23173176c907b0e07ffd48a115d84ff0b41372726b7a1a80389b61767b3f75a"
 dependencies = [
  "async-trait",
  "jsonschema 0.50.1",
+ "minijinja",
  "onetaskgraph-github-projects",
  "onetaskgraph-in-memory",
  "onetaskgraph-linear",
@@ -1425,14 +1428,15 @@ dependencies = [
  "serde_json",
  "serde_norway",
  "serde_path_to_error",
+ "sha2",
  "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "onetaskgraph-github-projects"
-version = "0.2.45"
+version = "0.2.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "083339ea41e8e9d0601c83cf819cac4cb68a46c24933ef364f388163570f251c"
+checksum = "75176e3bf2696f8b5134b84b65682aef48d5a8c49e3950ec3c930c20b3d29a5f"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1448,9 +1452,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-in-memory"
-version = "0.2.45"
+version = "0.2.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1ab000990e2e8443c381b07c57c31247143dfa13b4e22fa1ef5c9b68dca83c7"
+checksum = "660315a5521192a2f5985ab2067a8bc00aedd6c4d00190f634ce29f9c29309e3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1462,9 +1466,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-linear"
-version = "0.2.45"
+version = "0.2.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8171d59b2a42eee75877bebccadb279710f8ace279c3d26220e3216ab0aef7f"
+checksum = "80f2b7b8091a9200d36b2deaf75c02520f87ee421433151cbb3df2ce46ebf218"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1478,9 +1482,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-local-md"
-version = "0.2.45"
+version = "0.2.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "abbb3566995523c1d3379224ed8ea9a091f2fe454b44242b40c727332331ab6a"
+checksum = "9b79d218e0052ee3b5457ba8dc2c9c802477038699233c71fa3b986ac2550fa5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1494,9 +1498,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-plugin-api"
-version = "0.2.45"
+version = "0.2.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a41ad12a49364d657b382dcb191ac3015f1418d8d02af4634b9e54c8faa290b"
+checksum = "991aabd205ca283f4287ba05b0ff5a67d3c11ee58a6a643311cbdd8baac8b47a"
 dependencies = [
  "async-trait",
  "chrono",

@@ -568,27 +568,14 @@ impl Classified {
         }
     }
 
-    /// The store's failure for one delivered ticket it could not keep in step.
-    ///
-    /// The one failure that arrives as a [`Failure`] with no [`EngineError`] behind it, and
-    /// at the `onetaskgraph-core` release this build links that type publishes no accessor for
-    /// its class or kind — so, here and nowhere else, both are read off the failure's own
-    /// serialised form, the class into the store's own
-    /// [`onetaskgraph_core::FailureClass`]: a value of the store's type written by the store's
-    /// serialiser, never a document parsed off a process. A failure that does not carry a
-    /// class this build reads leaves the entry unclassified, and so on the retry schedule.
-    ///
-    /// Temporary: the `Failure::class()` and `Failure::kind()` accessors onetaskgraph merged
-    /// in nickderobertis/onetaskgraph#2645 replace this read, and the serialised form with it,
-    /// once a release carries them.
-    fn of_delivery_until_failure_publishes_its_class(failure: &Failure) -> Option<Self> {
-        let written = serde_json::to_value(failure).ok()?;
-        let class: onetaskgraph_core::FailureClass =
-            serde_json::from_value(written.get("class")?.clone()).ok()?;
-        Some(Self {
-            class: class.into(),
-            kind: written.get("kind")?.as_str()?.to_owned(),
-        })
+    /// The store's failure for one delivered ticket it could not keep in step: the one
+    /// failure that arrives as a [`Failure`] with no [`EngineError`] behind it, so its class
+    /// and kind are the ones the store decided, read through the failure's own accessors.
+    fn of_delivery(failure: &Failure) -> Self {
+        Self {
+            class: failure.class().into(),
+            kind: failure.kind().to_owned(),
+        }
     }
 }
 
@@ -1535,13 +1522,9 @@ fn project(
                     .delivered
                     .iter()
                     .filter_map(|entry| match &entry.outcome {
-                        DeliveryOutcome::Failed { failure, .. } => Some(
-                            Classified::of_delivery_until_failure_publishes_its_class(failure)
-                                .unwrap_or(Classified {
-                                    class: FailureClass::Transient,
-                                    kind: "unclassified".to_owned(),
-                                }),
-                        ),
+                        DeliveryOutcome::Failed { failure, .. } => {
+                            Some(Classified::of_delivery(failure))
+                        }
                         DeliveryOutcome::Written { .. }
                         | DeliveryOutcome::Unchanged { .. }
                         | DeliveryOutcome::Left { .. } => None,
@@ -3319,12 +3302,11 @@ mod tests {
         ];
         for failure in &failures {
             let classified = Classified::of_engine(failure);
-            let document = serde_json::to_value(onetaskgraph_core::Failure::from(failure))
-                .expect("the store's failure serializes");
-            assert_eq!(json!(classified.kind), document["kind"], "{failure:?}");
+            let store = onetaskgraph_core::Failure::from(failure);
+            assert_eq!(classified.kind, store.kind(), "{failure:?}");
             assert_eq!(
-                json!(classified.class),
-                document["class"],
+                classified.class,
+                store.class().into(),
                 "{failure:?} is classed otherwise than the store classes it"
             );
         }
@@ -3589,26 +3571,48 @@ mod tests {
     #[test]
     fn a_delivered_report_names_each_failed_ticket_and_is_classed_by_every_one() {
         use super::failed_deliveries;
-        let failure = |class: &str, kind: &str| {
-            json!({"class": class, "kind": kind, "source": "tickets",
-                   "message": "cannot write\nnext: fix it", "retry_after_seconds": null})
+        // Built through the store's own types, so each failure's class is the one the store
+        // decides for its cause rather than one written into a document here.
+        let failure = |error: SourceError| {
+            onetaskgraph_core::Failure::from(&EngineError::SourceRefused {
+                name: "tickets".into(),
+                error,
+            })
         };
-        let entry = |ticket: &str, failure: Value| {
-            json!({"ticket": ticket, "deliverer": "plans:p/a", "outcome": "failed",
-                   "from": "queued", "failure": failure})
+        let a_refusal = || {
+            failure(SourceError::Refused {
+                message: "cannot write\nnext: fix it".to_owned(),
+            })
         };
-        let report = |entries: Vec<Value>| -> Vec<onetaskgraph_core::Delivered> {
-            serde_json::from_value(json!(entries)).expect("the store's own entries")
+        let rate_limited = || {
+            failure(SourceError::RateLimited {
+                retry_after_seconds: None,
+                message: Some("slow down".to_owned()),
+            })
         };
-        let refused = report(vec![entry("tickets:t/one", failure("refused", "refused"))]);
-        assert_eq!(
-            failed_deliveries(&refused).as_deref(),
-            Some("ticket tickets:t/one (delivered by plans:p/a): cannot write next: fix it")
+        let id = |id: &str| id.parse::<GlobalId>().expect("an id");
+        let entry =
+            |ticket: &str, failure: onetaskgraph_core::Failure| onetaskgraph_core::Delivered {
+                ticket: id(ticket),
+                deliverer: id("plans:p/a"),
+                outcome: onetaskgraph_core::DeliveryOutcome::Failed {
+                    from: Some(StatusCategory::Queued),
+                    failure,
+                },
+                pruned: Vec::new(),
+            };
+        let refused = vec![entry("tickets:t/one", a_refusal())];
+        let named = failed_deliveries(&refused).expect("a failed ticket is named");
+        assert!(
+            named.starts_with("ticket tickets:t/one (delivered by plans:p/a): ")
+                && named.contains("cannot write next: fix it")
+                && !named.contains('\n'),
+            "the failed ticket is not named on one line with the store's words: {named}"
         );
         let classed = |entries: &[onetaskgraph_core::Delivered]| {
             Classified::of_all(entries.iter().filter_map(|entry| match &entry.outcome {
                 onetaskgraph_core::DeliveryOutcome::Failed { failure, .. } => {
-                    Classified::of_delivery_until_failure_publishes_its_class(failure)
+                    Some(Classified::of_delivery(failure))
                 }
                 _ => None,
             }))
@@ -3620,10 +3624,10 @@ mod tests {
                 kind: "refused".to_owned()
             })
         );
-        let mixed = report(vec![
-            entry("tickets:t/one", failure("refused", "refused")),
-            entry("tickets:t/two", failure("transient", "rate-limited")),
-        ]);
+        let mixed = vec![
+            entry("tickets:t/one", a_refusal()),
+            entry("tickets:t/two", rate_limited()),
+        ];
         assert_eq!(
             classed(&mixed),
             Some(Classified {
@@ -3631,10 +3635,15 @@ mod tests {
                 kind: "refused, rate-limited".to_owned(),
             })
         );
-        let written = report(vec![json!({
-            "ticket": "tickets:t/two", "deliverer": "plans:p/a", "outcome": "written",
-            "from": "todo", "to": "queued"
-        })]);
+        let written = vec![onetaskgraph_core::Delivered {
+            ticket: id("tickets:t/two"),
+            deliverer: id("plans:p/a"),
+            outcome: onetaskgraph_core::DeliveryOutcome::Written {
+                from: StatusCategory::Todo,
+                to: StatusCategory::Queued,
+            },
+            pruned: Vec::new(),
+        }];
         assert_eq!(
             failed_deliveries(&written),
             None,
