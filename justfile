@@ -389,9 +389,9 @@ linked-engines:
 # Outside `check` and `gate` because it pulls the manylinux image and a toolchain
 # over the network and needs Docker. release.yml's Linux `build-wheels` legs and
 # ci.yml's `wheel` job both call this, so there is one Linux wheel build.
-# Build the Linux wheel for TARGET inside the release's manylinux image, into dist/.
-wheel-linux target:
-    @bash scripts/build-linux-wheel.sh --target {{target}}
+# Build the Linux wheel for TARGET inside the release's manylinux image, into OUT.
+wheel-linux target out="dist":
+    @bash scripts/build-linux-wheel.sh --target {{quote(target)}} --out {{quote(out)}}
 
 # Reads the floor from Cargo.toml's `rust-version`; that toolchain must be
 # installed (`rustup toolchain install <version>`). Warnings are errors here too.

@@ -300,10 +300,8 @@ jobs:
   # compile inside manylinux containers for broad glibc compatibility, which is
   # why this is a separate matrix from `upload` rather than a step in it.
   #
-  # The Linux legs run `just wheel-linux`, the same build ci.yml's `wheel` check
-  # runs on every pull request: v0.50.0's Linux legs failed in manylinux2014 on a
-  # vendored OpenSSL whose Perl prerequisites the image lacks, while that check,
-  # then building on the bare runner, had passed.
+  # The Linux legs run `just wheel-linux`, the build ci.yml's `wheel` legs run on
+  # every pull request, so a release builds nothing a pull request did not.
   build-wheels:
     name: build-wheels (${{ matrix.target }})
     needs: test

@@ -394,13 +394,24 @@ jobs:
   # onepipeline-cli` serves. Built and installed from this revision so the
   # packaging is proven on every pull request rather than first at a release,
   # where a broken wheel is already public. Built by `just wheel-linux`, the
-  # recipe release.yml's Linux `build-wheels` legs run, so it compiles in the
-  # release's manylinux image rather than on the bare runner — the difference
-  # that let this check pass on a tree whose v0.50.0 Linux wheels could not build.
+  # recipe release.yml's Linux `build-wheels` legs run, for both of their targets
+  # on the same native runners. The x86_64 leg keeps the bare `wheel` name
+  # branch protection already requires.
   wheel:
+    name: ${{ matrix.check }}
     needs: changes
     if: needs.changes.outputs.crate == 'true'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: wheel
+            target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - check: wheel (aarch64-unknown-linux-gnu)
+            target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2
@@ -410,7 +421,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Build the wheel
-        run: just wheel-linux x86_64-unknown-linux-gnu
+        env:
+          TARGET: ${{ matrix.target }}
+        run: just wheel-linux "$TARGET"
       - name: Install it and smoke-test what it put on PATH
         run: |
           pip install --no-index --find-links dist onepipeline-cli
