@@ -1513,7 +1513,9 @@ pub fn template_check(
             }
             templates::check_rendered(
                 &registry,
-                search,
+                explicit.as_deref(),
+                options.template_root.as_deref(),
+                || Ok(checkout.clone()),
                 role,
                 Some(name),
                 &templates::Stored {

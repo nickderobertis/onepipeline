@@ -1562,6 +1562,35 @@ fn a_lifecycle_node_resolves_against_its_publication_checkout() {
         .exited(HAS_REFUSALS)
         .out_has(RULE_TEMPLATE_CHANGED)
         .out_has("built-in layer");
+
+    // Provenance is checked first: a lifecycle node carrying none is refused for that,
+    // before anything asks `onevcs` about a repository that does not resolve.
+    let unresolved = world.plan(
+        "unresolved",
+        &plan_of(
+            "unresolved",
+            vec![json!({
+                "id": "ship", "repo": "nowhere", "persona": "engineer", "title": "feat: ship it",
+                "task": "## What\nShip it.\n\n## Acceptance criteria\n- It ships.",
+            })],
+        ),
+    );
+    world
+        .run_from(
+            &dir,
+            &[
+                "plan",
+                "check",
+                &unresolved,
+                "--require-rendered",
+                "true",
+                "--template-root",
+                &text(&root),
+            ],
+        )
+        .exited(HAS_REFUSALS)
+        .out_has(&format!("node 'ship': {RULE_NO_PROVENANCE}"))
+        .out_lacks("could not be resolved");
 }
 
 /// The settings that declare a second source, `board`: `scripted-source`, the real

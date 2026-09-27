@@ -212,7 +212,7 @@ pub struct ListedTemplate {
     pub layer: Option<Layer>,
     /// The file it resolves to now, or null for the built-in and for a name no layer
     /// supplies.
-    // llmlint: ignore[invalid_states_unrepresentable] `layer` and `path` side by side, `path` null for the built-in, is the wire shape C8 fixes for every consumer of `template list --json` and `template resolve --json` (`docs/contract.md`'s `listed_keys` and `resolved_keys`, reconciled by `tests/contract.rs`); the one producer of these values is `templates::locate`, which pairs a file with every layer but the built-in and none with it, and a nested enum would change the JSON the UI and ai-orchestrator nodes read.
+    // llmlint: ignore[invalid_states_unrepresentable] `layer` beside `path`, null for the built-in, is the flat wire shape C8's `listed_keys`, `resolved_keys` and `checked_keys` fix and `tests/contract.rs` reconciles; `templates::locate`, the one producer, pairs a file with every layer but the built-in.
     pub path: Option<PathBuf>,
 }
 
@@ -260,7 +260,7 @@ pub struct ResolvedTemplate {
     /// The layer it resolved at.
     pub layer: Layer,
     /// The file it resolved to, absolute, or null for the built-in.
-    // llmlint: ignore[invalid_states_unrepresentable] `layer` and `path` side by side, `path` null for the built-in, is the wire shape C8 fixes for every consumer of `template list --json` and `template resolve --json` (`docs/contract.md`'s `listed_keys` and `resolved_keys`, reconciled by `tests/contract.rs`); the one producer of these values is `templates::locate`, which pairs a file with every layer but the built-in and none with it, and a nested enum would change the JSON the UI and ai-orchestrator nodes read.
+    // llmlint: ignore[invalid_states_unrepresentable] the flat `layer`/`path` wire shape, for the reason stated at `ListedTemplate::path`.
     pub path: Option<PathBuf>,
 }
 
@@ -301,7 +301,7 @@ pub struct TemplateChecked {
     /// The layer it resolved at.
     pub layer: Layer,
     /// The file it resolved to, or null for the built-in.
-    // llmlint: ignore[invalid_states_unrepresentable] `layer` and `path` side by side, `path` null for the built-in, is the wire shape C8 fixes for every consumer of `template list --json` and `template resolve --json` (`docs/contract.md`'s `listed_keys` and `resolved_keys`, reconciled by `tests/contract.rs`); the one producer of these values is `templates::locate`, which pairs a file with every layer but the built-in and none with it, and a nested enum would change the JSON the UI and ai-orchestrator nodes read.
+    // llmlint: ignore[invalid_states_unrepresentable] the flat `layer`/`path` wire shape, for the reason stated at `ListedTemplate::path`.
     pub path: Option<PathBuf>,
     /// The chain's digest.
     pub digest: String,
@@ -793,14 +793,18 @@ pub(crate) struct Stored<'a> {
 /// recorded body digest.
 ///
 /// It reads no answers and renders nothing, so it answers the same over a copy of the item
-/// on another board. It trusts the recorded provenance.
+/// on another board. It trusts the recorded provenance. `checkout` — the repository layer's
+/// checkout, which for a lifecycle node is asked of `onevcs` — is asked only once the
+/// provenance has passed, so a node with none is refused for that, whatever its checkout.
 ///
 /// # Errors
 ///
 /// The refusal, followed by the remedy that clears it.
 pub(crate) fn check_rendered(
     registry: &Registry,
-    search: Search<'_>,
+    explicit: Option<&Path>,
+    root: Option<&Path>,
+    checkout: impl FnOnce() -> std::result::Result<PathBuf, String>,
     role: Role,
     expected: Option<&str>,
     item: &Stored<'_>,
@@ -849,6 +853,12 @@ pub(crate) fn check_rendered(
             provenance.template,
             remedy(fallback, true)
         ));
+    };
+    let checkout = checkout()?;
+    let search = Search {
+        explicit,
+        repo: Some(&checkout),
+        root,
     };
     let resolution = resolve(registry, name, search).map_err(|error| match error {
         Error::Refused(why) | Error::Invalid(why) => why,
@@ -1032,20 +1042,16 @@ pub(crate) fn check_plan(
         if node.kind == crate::plan::NodeKind::Human {
             continue;
         }
-        let checkout = match &node.repo {
+        let checkout = || match &node.repo {
             Some(repo) => crate::destination::resolve(repo)
                 .map(|destination| destination.resolved.publication_checkout)
                 .map_err(|why| {
-                    Refusal::node(
-                        &node.id,
-                        format!(
-                            "its template cannot be resolved: the checkout of {repo} could not \
-                             be resolved: {why}"
-                        ),
+                    format!(
+                        "its template cannot be resolved: the checkout of {repo} could not be \
+                         resolved: {why}"
                     )
-                    .field("task")
-                })?,
-            None => launch_dir.to_path_buf(),
+                }),
+            None => Ok(launch_dir.to_path_buf()),
         };
         let Some(stored) = read.stored.get(&node.id) else {
             continue;
@@ -1057,11 +1063,9 @@ pub(crate) fn check_plan(
             .unwrap_or_default();
         check_rendered(
             &registry,
-            Search {
-                explicit: None,
-                repo: Some(&checkout),
-                root: launch.root.as_deref(),
-            },
+            None,
+            launch.root.as_deref(),
+            checkout,
             Role::Task,
             None,
             &Stored {
