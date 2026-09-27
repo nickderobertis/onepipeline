@@ -1,0 +1,78 @@
+{
+  "what": "The comparable plan's store calls and metered spend, as tests/e2e/writeback_cost.rs takes them: one launch of a five-node plan (a chain of three and a parallel pair) through the real engine binary and the real linked store over scripted-source; every node dispatched and settled done but one, which fails and is retried to done; one amend, one add, one reparent; a transient store outage of three failures that recovers; one rate-limited refusal carrying a two-second wait; a stop and an adopt; and closeout. calls count the plugin protocol's own methods as the source logged them, split at the launch read's connection; spent is what the source's meter charged, one request and one graphql point per answered request.",
+  "before": {
+    "engine": "onepipeline at cb8228d25a10d59c2d945e8a1583c6abf8337158, this branch's merge base: whole copies on a driver's first projection, after a failure and on a stop's release",
+    "figures": {
+      "launch_read": {
+        "calls": {
+          "get_project": 1,
+          "initialize": 1,
+          "query_tasks": 1,
+          "task_dependencies": 5
+        },
+        "spent": {
+          "requests": 7,
+          "graphql_points": 7
+        }
+      },
+      "writeback": {
+        "calls": {
+          "get_project": 38,
+          "get_task": 59,
+          "initialize": 21,
+          "metering": 34,
+          "project_dependencies": 17,
+          "query_tasks": 11,
+          "task_dependencies": 44,
+          "write_task": 35
+        },
+        "calls_total": 259,
+        "spent": {
+          "requests": 200,
+          "graphql_points": 200
+        },
+        "attempts": 21,
+        "failed_attempts": 4,
+        "whole_attempts": 7
+      }
+    }
+  },
+  "after": {
+    "engine": "this tree: every attempt carries the difference from the landed baseline (entry 93)",
+    "figures": {
+      "launch_read": {
+        "calls": {
+          "get_project": 1,
+          "initialize": 1,
+          "query_tasks": 1,
+          "task_dependencies": 5
+        },
+        "spent": {
+          "requests": 7,
+          "graphql_points": 7
+        }
+      },
+      "writeback": {
+        "calls": {
+          "get_project": 36,
+          "get_task": 58,
+          "initialize": 20,
+          "metering": 32,
+          "project_dependencies": 16,
+          "query_tasks": 1,
+          "task_dependencies": 29,
+          "write_task": 30
+        },
+        "calls_total": 222,
+        "spent": {
+          "requests": 166,
+          "graphql_points": 166
+        },
+        "attempts": 21,
+        "failed_attempts": 4,
+        "whole_attempts": 0
+      }
+    }
+  },
+  "creation_lookup": "The one query_tasks in the write-back's calls on this branch is Engine::copy's own origin scan before it creates the add-ed node's item (onetaskgraph-core engine/copy.rs, target rule 2), which no CopyRequest field skips: one per item created, inside that attempt's project-copy. The planner ruled it stays (the onetaskgraph-side skip is their follow-up); the journey holds it to at most one per created item and to no attempt that creates nothing. The merge base's eleven come from its whole copies: each whole attempt's page of tasks, and the copies' own lookups."
+}

@@ -509,8 +509,8 @@ fn a_failed_first_projection_does_not_hold_back_the_first_dispatch() {
 /// A launch whose first projection the store never answers waits for it only as long as the
 /// store call deadline allows, and then dispatches: nothing is dispatched while the held copy
 /// is inside its deadline, the ready node is dispatched once it has passed, and the planner hears
-/// the copy was cancelled. The deadline is the store's sixty-second floor, so this journey takes a
-/// minute by construction.
+/// the copy was cancelled. The deadline is the store's sixty-second floor plus one item's budget,
+/// so this journey takes more than a minute by construction.
 #[test]
 fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch() {
     let world = a_world_with_tickets("delivers-first-held");
@@ -1011,3 +1011,114 @@ fn a_partial_copy_mixing_refused_and_transient_tickets_is_classed_transient() {
         "a mixed partial copy was taken off the retry timer: {message}"
     );
 }
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey waits out the
+// four seconds the store's rate limit names by construction — that no call reaches the store
+// inside a wait cannot be observed in less than the wait — and the edge it needs is the crate
+// under test: the compiled `onepipeline` binary against its own write-back worker, as this
+// module's minute-long first-projection journey records.
+/// A copy whose deliverer's ticket the store refused for a rate limit naming a wait lands every
+/// item but that deliverer's: the store is handed nothing, the tickets' source included, until
+/// the wait has passed, and the attempt after it carries the deliverer again — though nothing
+/// about it changed since, its ticket is behind — beside what did change, and none of what
+/// already landed. The ticket then moves off `todo`.
+#[test]
+fn a_ticket_rate_limited_with_a_wait_holds_every_call_and_the_retry_carries_its_deliverer_alone() {
+    let wait = Duration::from_secs(4);
+    let world = a_world_with_scripted_tickets("delivers-ticket-rate-limited");
+    world.script("gate.wait", "hold");
+    let delivered = ticket(&world, "work", "todo");
+    let name = "ticket-rate-limited";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                agent("gate", &[]),
+                // Both unstarted until `gate` settles, so the claim is all either has to say.
+                delivering(agent("work", &["gate"]), &[&delivered]),
+                agent("aside", &["gate"]),
+            ],
+        ),
+    );
+    let native = delivered
+        .split_once(':')
+        .map(|(_, native)| native)
+        .expect("a qualified ticket");
+    let refusal = format!(
+        "{TICKETS}.set_task_status@{}.refuse",
+        onepipeline_testfakes::segment(native)
+    );
+    world.script(
+        &refusal,
+        &json!({"kind": "rate-limited", "retry_after_seconds": wait.as_secs(),
+                "message": "API rate limit exceeded"})
+        .to_string(),
+    );
+    // The plans source is scripted too, so every call either source is handed is on record.
+    let world = world.through_scripted_source();
+    let store_calls = |world: &World| -> Vec<Value> {
+        world
+            .invocations()
+            .into_iter()
+            .filter(|call| call["tool"] == TICKETS || call["tool"] == crate::harness::SCRIPTED_KEY)
+            .collect()
+    };
+    world.run(&["start", &project, "--detach"]).exited(0);
+
+    // The claim: both items land, and the ticket it delivers is refused.
+    let records = |world: &World| -> Vec<Value> {
+        std::fs::read_to_string(world.run_file(name, "writeback-projections.jsonl"))
+            .map(|text| {
+                text.lines()
+                    .map(|line| serde_json::from_str(line).expect("a record line"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    world.until("the claim's ticket to be refused", |world| {
+        records(world)
+            .first()
+            .is_some_and(|record| record["outcome"] == "failed")
+    });
+    let failed_at = std::time::Instant::now();
+    let asked = store_calls(&world).len();
+    let claim = records(&world)[0].clone();
+    assert_eq!(claim["items"], json!(["aside", "gate", "work"]), "{claim}");
+    assert_eq!(claim["kind"], "rate-limited", "{claim}");
+    world.unscript(&refusal);
+    while failed_at.elapsed() + Duration::from_millis(500) < wait {
+        assert_eq!(
+            store_calls(&world).len(),
+            asked,
+            "the store was handed a call {:?} into the {wait:?} a ticket asked for: {:?}",
+            failed_at.elapsed(),
+            &store_calls(&world)[asked..]
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    world.until("the deliverer to be carried again", |world| {
+        records(world).len() >= 2
+    });
+    let retried = records(&world)[1].clone();
+    // `gate` was dispatched meanwhile; `work` changed nowhere, and is carried for its ticket;
+    // `aside`, whose claim landed, is not.
+    assert_eq!(
+        retried["items"],
+        json!(["gate", "work"]),
+        "the retry did not carry the deliverer whose ticket fell behind, or carried what \
+         landed: {retried}"
+    );
+    assert_eq!(retried["outcome"], "projected", "{retried}");
+    assert!(
+        failed_at.elapsed() >= wait - Duration::from_millis(500),
+        "the retry came {:?} after a ticket asked for {wait:?}",
+        failed_at.elapsed()
+    );
+    world.until("the ticket to move off `todo`", |world| {
+        ticket_reads(world, &delivered) != "todo"
+    });
+    world.release("gate.go");
+    world.until("the run to settle", |world| settled(world, name));
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

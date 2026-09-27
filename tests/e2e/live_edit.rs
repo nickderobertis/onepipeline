@@ -2552,8 +2552,8 @@ fn from_entry_57(field: &str) -> Value {
 ///
 /// A node an `add` or a `retry` introduces carries no title unless the envelope
 /// names one — deliberately, for the reason `graph::check_declared_version`
-/// records — and the projection is a whole-project write, so an item a
-/// destination refuses for having no title is every item of the run missing. A
+/// records — and a copy is one write of every item it carries, so an item a
+/// destination refuses for having no title is every item of that copy missing. A
 /// `retry`'s replacement is written onto the superseded node's item (entry 80 of
 /// `docs/contract-divergences.md`), so the id it reaches the board under is its
 /// lineage root's, and that is the title it gets.
@@ -2617,10 +2617,16 @@ fn nodes_a_live_edit_added_reach_the_board_titled_by_their_own_ids() {
             })
             .collect()
     };
+    // Every node the assertions below read, since each lineage lands by the attempt that
+    // carries its own change rather than all of them in one copy.
     let projected = |world: &World| {
-        board(world)
+        let board = board(world);
+        board
             .get("slow")
             .is_some_and(|(_, head)| head == "slow-again")
+            && ["no-title", "blank-title", "titled"]
+                .iter()
+                .all(|id| board.contains_key(*id))
     };
     world.until_store("the edited graph to reach the project", projected);
 

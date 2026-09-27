@@ -194,12 +194,18 @@ mod views;
 // sits; that project is edged on conversational cost, which this module has none of.
 mod watch;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] three of its journeys
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] four of its journeys
 // wait past the write-back's sixty-second floor by construction, for the reason at the
 // head of `tests/e2e/writeback_budget.rs`; this declaration is the other site the rule
 // reads, and the module belongs to this binary for the reason the minute-long schedule
 // journeys in `mod store` above do.
 mod writeback_budget;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] one whole run of the
+// comparable plan, measured at the store: it exercises writeback, engine and taskgraph
+// together, so a narrower project edge would omit it from nx affected when the projection
+// changes — the reason `mod writeback_projections` below records.
+mod writeback_cost;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] These journeys exercise
 // writeback, engine, and taskgraph together; a narrower project edge would omit them

@@ -478,16 +478,15 @@ refuses, is the channel section of [`docs/contract.md`](docs/contract.md).
 
 A launch may also set the **write-back item budget** — how long the settlement
 write-back allows its store's `project copy` per item it writes. The copy's
-deadline is that budget multiplied by the number of items the run projects, and
-never below the sixty-second floor every other store call is bounded by, so the
-backstop that cancels an unreachable store's copy scales with the plan instead of
-being outgrown by it; a copy that outlasts its deadline is reported with the
-seconds it was allowed, the item count, the per-item budget, and whether the floor
-governed. It is named by `--writeback-item-budget SECONDS`, by
-`ONEPIPELINE_WRITEBACK_ITEM_BUDGET`, or by a launch config's
-`writeback_item_budget`, in that order of precedence, as a positive whole number
-of seconds — zero is refused at whichever spelling carried it — and naming none
-takes ten seconds per item.
+deadline is the sixty-second floor every other store call is bounded by plus that
+budget multiplied by the number of items the copy carries, so the backstop that
+cancels an unreachable store's copy scales with the plan instead of being outgrown
+by it; a copy that outlasts its deadline is reported with the seconds it was
+allowed, the floor, the item count and the per-item budget. It is named by
+`--writeback-item-budget SECONDS`, by `ONEPIPELINE_WRITEBACK_ITEM_BUDGET`, or by a
+launch config's `writeback_item_budget`, in that order of precedence, as a
+positive whole number of seconds — zero is refused at whichever spelling carried
+it — and naming none takes twelve seconds per item.
 
 A launch may name **run-end hooks**: `--success-hook COMMAND`, run once when the
 run ends with every node `done`, and `--failure-hook COMMAND`, run once when it

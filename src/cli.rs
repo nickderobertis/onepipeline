@@ -40,31 +40,33 @@ pub const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 600;
 ///
 /// The bottom rung of four: `--writeback-item-budget` beats
 /// [`WRITEBACK_ITEM_BUDGET_ENV`], which beats the launch config's own
-/// `writeback_item_budget`, and this is what every launch ran under before any
-/// of the three existed. Multiplied by the number of items a settlement projects
-/// to bound the store's `project copy`, and never below
-/// [`WRITEBACK_COMMAND_FLOOR_SECONDS`]. A [`NonZeroU64`] because zero is no
-/// budget at all, and every rung that names one refuses it.
-pub const DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS: NonZeroU64 = NonZeroU64::new(10).unwrap();
+/// `writeback_item_budget`. Multiplied by the number of items a settlement
+/// projects and added to [`WRITEBACK_COMMAND_FLOOR_SECONDS`] to bound the store's
+/// `project copy`. Twelve, because a copy onto the `plans` board measured about
+/// 10.2 seconds per item (#521): the floor plus twelve per item lands that copy
+/// with at least a sixth to spare at any size. A [`NonZeroU64`] because zero is
+/// no budget at all, and every rung that names one refuses it.
+pub const DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS: NonZeroU64 = NonZeroU64::new(12).unwrap();
 
 /// The least any store call the write-back makes is allowed, in seconds.
 ///
 /// The whole deadline for the reads that are not linear in plan size — the
-/// project and each page of its tasks — and the floor under the copy's, which
-/// the per-item budget lifts once a plan carries enough items to need it. A
+/// project and each item it reads — and the floor the copy's per-item budget is
+/// added to, so a copy of a few items keeps the round trips every copy makes. A
 /// liveness backstop for an unreachable store rather than a latency target:
 /// the projection stays off the reconcile loop while the call runs, and a call
 /// that outlasts its deadline is cancelled.
 pub const WRITEBACK_COMMAND_FLOOR_SECONDS: u64 = 60;
 
 /// The store calls one write-back attempt makes, by the name each one's refusals carry:
-/// the project, each page of its tasks, and the copy.
+/// the project, each item it reads by its own id, and the copy.
 ///
 /// Each one's failure is classified by its own type — the store's `EngineError` and
 /// `SourceError`, through the store's own classifier — and any one of them classed
 /// [`WRITEBACK_REFUSED_CLASS`] makes the whole attempt refused, because a projection needs
-/// all three.
-pub const WRITEBACK_CLASSIFIED_COMMANDS: [&str; 3] = ["project-show", "task-list", "project-copy"];
+/// all three. No attempt reads a page of the project's tasks: the landed baseline answers
+/// where every item it holds is.
+pub const WRITEBACK_CLASSIFIED_COMMANDS: [&str; 3] = ["project-show", "task-show", "project-copy"];
 
 /// The class that stops the write-back's retry timer: a failure asking again cannot change.
 ///
@@ -81,15 +83,32 @@ pub const WRITEBACK_PROJECTIONS_FILE: &str = "writeback-projections.jsonl";
 /// The schema version every line of [`WRITEBACK_PROJECTIONS_FILE`] is written at.
 ///
 /// Version 2 added `delivered`; version 3 added `actions.reopened`, which every landed attempt
-/// at that version names. A line naming no version is version 1, the shape before either, and
-/// still reads, as does a version 2 line; a version 1 line naming `delivered`, a version 1 or 2
-/// line naming `actions.reopened`, and any version this build has never written, are refused.
-pub const WRITEBACK_PROJECTIONS_SCHEMA_VERSION: u32 = 3;
+/// at that version names; version 4 added `calls`, which every line names, and defined
+/// `updated_fields`. A line naming no version is version 1, the shape before any of them, and
+/// still reads, as do versions 2 and 3; a line naming a key a later version added, and any
+/// version this build has never written, are refused.
+pub const WRITEBACK_PROJECTIONS_SCHEMA_VERSION: u32 = 4;
 
-/// The store call a member projection reads one named member's destination item with, by
-/// the name its refusals carry. It stands in for [`WRITEBACK_CLASSIFIED_COMMANDS`]' page of
-/// tasks, which a member projection never reads, and its failures are classified by the same
-/// rule.
+/// The file, in a run's directory, the write-back's landed baseline is kept in: what the run
+/// last put on the board, per lineage, which every projection carries the difference from.
+/// Entry 93 of `docs/contract-divergences.md` states its shape.
+pub const WRITEBACK_LANDED_FILE: &str = "writeback-landed.json";
+
+/// The schema version [`WRITEBACK_LANDED_FILE`] is written at.
+pub const WRITEBACK_LANDED_SCHEMA_VERSION: u32 = 1;
+
+/// The file, in a run's directory, a wait the store asked for is kept in — the instant before
+/// which the write-back asks the store nothing — so a stop's release and an adopting driver
+/// honour a wait another process met. Entry 72 of `docs/contract-divergences.md` states it.
+pub const WRITEBACK_WAIT_FILE: &str = "writeback-wait.json";
+
+/// The schema version [`WRITEBACK_WAIT_FILE`] is written at.
+pub const WRITEBACK_WAIT_SCHEMA_VERSION: u32 = 1;
+
+/// The store call a projection reads one destination item with, by its own id and by the
+/// name its refusals carry: each lineage the copy carries, and each the landed baseline does
+/// not hold. No projection reads a page of tasks, and its failures are classified by the same
+/// rule as [`WRITEBACK_CLASSIFIED_COMMANDS`]'.
 pub const WRITEBACK_MEMBER_READ: &str = "task-show";
 
 /// The environment variable naming the write-back's per-item budget, in seconds.
@@ -403,13 +422,13 @@ pub struct StartArgs {
     /// How long the settlement write-back allows its store's `project copy` per
     /// item it writes, in seconds.
     ///
-    /// The copy's deadline is this multiplied by the number of items the run
-    /// projects, and never below the sixty-second floor every other store
-    /// command is bounded by, so the backstop that kills an unreachable store's
-    /// copy scales with the plan instead of being outgrown by it. A positive
-    /// whole number: zero is no budget at all and is refused. Given here it
-    /// beats `ONEPIPELINE_WRITEBACK_ITEM_BUDGET` and the launch config's own
-    /// field; naming none takes the shipped ten seconds per item.
+    /// The copy's deadline is the sixty-second floor every other store command
+    /// is bounded by plus this multiplied by the number of items the copy
+    /// carries, so the backstop that cancels an unreachable store's copy scales
+    /// with the plan instead of being outgrown by it. A positive whole number:
+    /// zero is no budget at all and is refused. Given here it beats
+    /// `ONEPIPELINE_WRITEBACK_ITEM_BUDGET` and the launch config's own field;
+    /// naming none takes the shipped twelve seconds per item.
     #[arg(long, value_name = "SECONDS")]
     pub writeback_item_budget: Option<u64>,
     /// The command run once when this run ends with every node `done`.
