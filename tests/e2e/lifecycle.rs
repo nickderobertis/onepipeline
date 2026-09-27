@@ -104,15 +104,21 @@ fn held_merge_path(world: &World, rendezvous: &std::path::Path) -> crate::harnes
 
 /// The commit `onevcs` last recorded preserving on `branch` in one run — where it
 /// left that branch. Read from its record rather than from the branch, because
-/// `onevcs` retires a landed session's branch when it closes it.
+/// `onevcs` retires a landed session's branch when it closes it. The newest record
+/// for the branch is the answer, and one that does not carry a full commit id is
+/// refused rather than passed over for an older one.
 fn preserved_head(world: &World, run: &str, branch: &str) -> String {
-    world
+    let record = world
         .events_of(run, "commit-preserved")
         .into_iter()
-        .filter(|event| event["payload"]["branch"] == branch)
-        .filter_map(|event| event["payload"]["sha"].as_str().map(str::to_string))
-        .next_back()
-        .unwrap_or_else(|| panic!("onevcs recorded no commit on {branch}\n{}", why(world, run)))
+        .rfind(|event| event["payload"]["branch"] == branch)
+        .unwrap_or_else(|| panic!("onevcs recorded no commit on {branch}\n{}", why(world, run)));
+    match record["payload"]["sha"].as_str() {
+        Some(sha) if sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()) => {
+            sha.to_string()
+        }
+        _ => panic!("onevcs's record of {branch} names no commit id: {record}"),
+    }
 }
 
 /// Whether a repository's object store holds a commit — the work a branch
@@ -1617,6 +1623,8 @@ const REPLACED_HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 /// happens while the *first* publication is still failing over it — `onevcs`
 /// gives up on the reading it has already made — so the attempt that follows
 /// meets a host with a different answer.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] 3.8s here under load; it settles
+// through the publication path over the linked `onevcs`, which any change under `src/` can move.
 #[test]
 fn a_publication_its_checks_reject_is_redispatched_on_the_branch_it_preserved() {
     let world = World::new("lifecycle-checksfailed");
@@ -1756,6 +1764,7 @@ fn a_publication_its_checks_reject_is_redispatched_on_the_branch_it_preserved() 
         "the branch the attempts shared was not handed back to the checkout"
     );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A matrix job's name carries whitespace, and its log has to survive that.
 ///
@@ -2036,6 +2045,8 @@ fn a_push_the_merge_path_refuses_for_a_missing_host_prerequisite_settles_once_na
 /// is the outage that ends; nothing on the repository side is scripted at all, so
 /// the branch arriving on the origin is a fact this journey reads out of real git
 /// rather than one it arranges.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] 22.3s here under load; it settles
+// through the publication path over the linked `onevcs`, which any change under `src/` can move.
 #[test]
 fn a_merge_path_that_goes_dark_and_comes_back_is_answered_by_reading_it_again() {
     let world = World::new("lifecycle-rereadhost")
@@ -2085,6 +2096,7 @@ fn a_merge_path_that_goes_dark_and_comes_back_is_answered_by_reading_it_again() 
         "the branch the publication pushed is not on the origin"
     );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A verdict that arrives on a later read is what the node settles on, and where
 /// that verdict is the tree being rejected the agent is dispatched again.
@@ -5155,6 +5167,8 @@ fn a_change_request_open_for_review_outranks_the_word_for_a_dispatch_that_died()
 /// request is opened, because a local-direct publication has none, which keeps
 /// this journey about the classification rather than about the outcome that
 /// carries a change request's link.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] 17.4s here under load; it settles
+// through the publication path over the linked `onevcs`, which any change under `src/` can move.
 #[test]
 fn a_dispatch_that_died_rather_than_failing_its_task_settles_naming_what_killed_it() {
     let world = World::new("lifecycle-dispatchdied");
@@ -5216,6 +5230,7 @@ fn a_dispatch_that_died_rather_than_failing_its_task_settles_naming_what_killed_
     world.run(&["results", &run]).exited(0).out_has(&said);
     world.run(&["status", &run]).exited(0).out_has(&said);
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A dispatch that died having committed nothing names its branch and no commit.
 ///
@@ -5268,6 +5283,8 @@ fn a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_co
 /// `provider-failed` rather than the general `dispatch-died`: what a person reads
 /// afterwards decides where they go looking, and `task-failed` sent them after
 /// what the work got wrong when nothing was wrong with the work at all.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] 17.6s here under load; it settles
+// through the publication path over the linked `onevcs`, which any change under `src/` can move.
 #[test]
 fn a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published() {
     let world = World::new("lifecycle-memberdied");
@@ -5340,6 +5357,7 @@ fn a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_
         .exited(0)
         .out_has("provider-failed");
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The same failure with nothing published settles exactly as it always did.
 ///
@@ -5415,6 +5433,8 @@ fn a_verdict_that_delimits_a_token_without_naming_the_machinery_stays_a_task_fai
 /// It settles the plain failure, because nothing here can say the work passed a
 /// bar no report was settled against — carrying the commit its branch was left
 /// at, which is the half that stops anyone re-running finished work.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] 17.2s here under load; it settles
+// through the publication path over the linked `onevcs`, which any change under `src/` can move.
 #[test]
 fn a_provider_death_the_turns_own_record_contradicts_is_not_settled_as_one() {
     let world = World::new("lifecycle-deathcontradicted");
@@ -5485,6 +5505,7 @@ fn a_provider_death_the_turns_own_record_contradicts_is_not_settled_as_one() {
         "the commit the settlement names is not the one onevcs left the branch at"
     );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The new word names provider deaths and **only** those: a node that failed its
 /// own task, and a node that died to something that is not its provider, each
@@ -6464,6 +6485,8 @@ fn a_node_declared_draft_leaves_its_change_request_as_a_draft_and_settles_done()
 /// the tree as it now stands, and what the host carries afterwards is the second
 /// draft rather than the first — where before, the re-drafted body was silently
 /// ignored for an adopted change request.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] 4.9s here under load; it settles
+// through the publication path over the linked `onevcs`, which any change under `src/` can move.
 #[test]
 fn a_retry_on_a_branch_whose_change_request_is_open_rewrites_its_description() {
     let world = World::new("lifecycle-redescribed");
@@ -6560,6 +6583,7 @@ fn a_retry_on_a_branch_whose_change_request_is_open_rewrites_its_description() {
         "{settled}"
     );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A node that settles without publishing while its session holds a change
 /// request the worker opened carries that change request's URL, so `results`
