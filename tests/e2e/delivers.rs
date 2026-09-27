@@ -1012,6 +1012,11 @@ fn a_partial_copy_mixing_refused_and_transient_tickets_is_classed_transient() {
     );
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey waits out the
+// four seconds the store's rate limit names by construction — that no call reaches the store
+// inside a wait cannot be observed in less than the wait — and the edge it needs is the crate
+// under test: the compiled `onepipeline` binary against its own write-back worker, as this
+// module's minute-long first-projection journey records.
 /// A copy whose deliverer's ticket the store refused for a rate limit naming a wait lands every
 /// item but that deliverer's: the store is handed nothing, the tickets' source included, until
 /// the wait has passed, and the attempt after it carries the deliverer again — though nothing
@@ -1116,3 +1121,4 @@ fn a_ticket_rate_limited_with_a_wait_holds_every_call_and_the_retry_carries_its_
     world.release("gate.go");
     world.until("the run to settle", |world| settled(world, name));
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

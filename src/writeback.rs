@@ -1112,7 +1112,6 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
         per_item_budget(launch),
         &snapshot,
         &mut baseline,
-        &mut BTreeMap::new(),
         Scope::Release,
     );
     append_record(
@@ -1154,10 +1153,6 @@ fn worker(
     // What this run has already put on the board, which every attempt carries the difference
     // from — read once, off the file the launch seeded or the driver before this one left.
     let mut baseline: Option<Baseline> = None;
-    // Each lineage's rendering as this driver last landed it, beside the baseline, which
-    // records only what the board holds: a field the baseline does not keep — a repository —
-    // still marks a lineage changed within one driver.
-    let mut landed: BTreeMap<String, Rendering> = BTreeMap::new();
     loop {
         let snapshot = {
             let (lock, ready) = &*pending;
@@ -1184,14 +1179,7 @@ fn worker(
         let baseline = baseline.get_or_insert_with(|| Baseline::load(&run_dir, &snapshot.project));
         let at = crate::sys::now_rfc3339();
         let started = Instant::now();
-        let attempted = project(
-            &store,
-            per_item,
-            &snapshot,
-            baseline,
-            &mut landed,
-            Scope::Driven,
-        );
+        let attempted = project(&store, per_item, &snapshot, baseline, Scope::Driven);
         append_record(
             &run_dir,
             &ProjectionRecord::of(at, &snapshot.project, started.elapsed(), &attempted),
@@ -1561,7 +1549,6 @@ fn project(
     per_item: NonZeroU64,
     snapshot: &Snapshot,
     baseline: &mut Baseline,
-    landed: &mut BTreeMap<String, Rendering>,
     scope: Scope,
 ) -> Attempted {
     let mut items = Vec::new();
@@ -1574,7 +1561,7 @@ fn project(
                 .map(|rendering| (root.clone(), rendering))
         })
         .collect();
-    let decided = decide(snapshot, &lineages, &renderings, baseline, landed, scope);
+    let decided = decide(snapshot, &lineages, &renderings, baseline, scope);
     // Nothing differs from what landed and nothing is unknown: the board already says all of
     // it, so the store is not opened, let alone asked.
     if decided.carried.is_empty()
@@ -1610,7 +1597,6 @@ fn project(
                 snapshot,
                 (&renderings, decided),
                 baseline,
-                landed,
                 &mut items,
             );
             (result, attempt.calls.take())
@@ -1629,7 +1615,6 @@ fn carry_the_difference(
     snapshot: &Snapshot,
     (renderings, decided): (&BTreeMap<String, Rendering>, Decided),
     baseline: &mut Baseline,
-    landed: &mut BTreeMap<String, Rendering>,
     items: &mut Vec<String>,
 ) -> Result<Landed, Failed> {
     let scope = decided.scope;
@@ -1747,7 +1732,6 @@ fn carry_the_difference(
             .landed
             .items
             .insert(root.clone(), now.item.landed_at(&origin.id));
-        landed.insert(root.clone(), now.clone());
     }
     baseline.landed.project_metadata =
         owned(&projected_project_metadata(snapshot, &destination_project));
@@ -1838,17 +1822,18 @@ struct Decided {
 /// Decide what one attempt carries.
 ///
 /// A lineage the baseline holds is carried when its projection, rendered from the snapshot
-/// alone, differs from what the baseline says landed — or from what this driver last landed
-/// for it, which also notices a field the baseline does not keep. A lineage the baseline does
-/// not hold is read by the id the run knows for it, or, where it knows none, carried: the copy
-/// creates it. A stop's release carries only the unstarted lineages the baseline says are
-/// `queued`, and creates nothing.
+/// alone, differs from what the baseline says landed. The one field a copy writes that the
+/// baseline does not keep is a node's GitHub repository, and no edit changes that alone: a
+/// `retry` moves the lineage's head, so `onepipeline.node` differs, and a `requeue` moves its
+/// word — so a lineage whose repository moved differs from the baseline in a field it does
+/// keep, whichever driver asks. A lineage the baseline does not hold is read by the id the run
+/// knows for it, or, where it knows none, carried: the copy creates it. A stop's release
+/// carries only the unstarted lineages the baseline says are `queued`, and creates nothing.
 fn decide(
     snapshot: &Snapshot,
     lineages: &Lineages,
     renderings: &BTreeMap<String, Rendering>,
     baseline: &Baseline,
-    landed: &BTreeMap<String, Rendering>,
     scope: Scope,
 ) -> Decided {
     let mut decided = Decided {
@@ -1868,8 +1853,7 @@ fn decide(
         match scope {
             Scope::Driven => match held {
                 Some(held) => {
-                    if !held.says_what(&now.item) || landed.get(root).is_some_and(|was| was != now)
-                    {
+                    if !held.says_what(&now.item) {
                         decided.carried.insert(root.clone());
                     }
                 }
@@ -1941,12 +1925,9 @@ fn shadow_origin(path: &Path) -> Option<GlobalId> {
         .ok()
 }
 
-/// One lineage as the snapshot alone renders it: its shadow task, and the half of it the
-/// landed baseline keeps.
-#[derive(Clone, PartialEq)]
+/// One lineage as the snapshot alone renders it: the half of its shadow task the landed
+/// baseline keeps.
 struct Rendering {
-    front: Value,
-    content: String,
     /// What the baseline would record were this to land, its destination not yet known.
     item: LandedItem,
 }
@@ -1983,11 +1964,7 @@ impl Rendering {
                 .map(|dep| lineages.root_of(dep).to_owned())
                 .collect(),
         };
-        Ok(Self {
-            front,
-            content,
-            item,
-        })
+        Ok(Self { item })
     }
 }
 
@@ -2250,6 +2227,12 @@ impl LandedBaseline {
                 .destination
                 .parse::<GlobalId>()
                 .map_err(|why| format!("item '{root}': `destination` {why}"))?;
+            // llmlint: ignore[boundary_inputs_validated] the destination's source is what an id's
+            // spelling decides on every store and is refused here; its project is not — a GitHub
+            // issue's id names no project, and a `local-md` one is a file path — so no check of
+            // the file alone could hold that line without refusing every hosted board's
+            // baseline. The file is this engine's own record of its own writes, written only by
+            // `Baseline::save`, and everything its spelling can refuse is refused in this function.
             if destination.source != project.global().source {
                 return Err(format!(
                     "item '{root}': `destination` '{}' is not an item of this run's destination \
@@ -2491,8 +2474,9 @@ fn write_shadow(
         written.insert(path);
     }
     // A superseded node has no shadow task of its own, and neither has anything an earlier
-    // build left here: a whole copy carries every task the shadow store holds, so a document
-    // this snapshot did not write would reach the board as an item of its own.
+    // build left here: the copy reads every task the shadow store holds as a member of the
+    // project, so a document this snapshot did not write — keyed by no lineage, and read by
+    // `known_id` before this runs — would stand as a member the run knows nothing of.
     for entry in std::fs::read_dir(&tasks).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
         if !written.contains(&path) {
@@ -2509,7 +2493,7 @@ fn write_shadow(
 /// id where it carries none), word, body, edges, `delivers` and fields, with `onepipeline.id`
 /// the root's, `onepipeline.node` the head's and `onepipeline.supersedes` the ids between.
 /// Rendered with no origin, it is the half the run alone decides, which is what tells a
-/// lineage whose projection changed from one whose did not: see [`Carry::decide`].
+/// lineage whose projection changed from what landed from one whose did not: see [`decide`].
 fn task_document(
     snapshot: &Snapshot,
     lineages: &Lineages,
@@ -5308,7 +5292,6 @@ mod tests {
             &now.lineages(),
             &renderings,
             &landed_as(last),
-            &BTreeMap::new(),
             Scope::Driven,
         );
         assert!(decided.unread.is_empty(), "{:?}", decided.unread);
@@ -5381,24 +5364,23 @@ mod tests {
             "a change only the project item carries named a task"
         );
 
-        // What this driver last landed marks a lineage changed where the baseline keeps no
-        // field that moved: a repository.
-        let mut elsewhere = last.clone();
-        elsewhere.nodes.get_mut("build").expect("a node").repo =
+        // A repository is the one field a copy writes that the baseline does not keep, and the
+        // edits that change one move the lineage's word too — a requeue of a parked node — so
+        // the lineage is carried on a field the baseline keeps.
+        let mut parked = last.clone();
+        parked
+            .statuses
+            .insert("build".to_owned(), NodeStatus::Parked);
+        let mut requeued = parked.clone();
+        requeued
+            .statuses
+            .insert("build".to_owned(), NodeStatus::Ready);
+        requeued.nodes.get_mut("build").expect("a node").repo =
             Some("github.com/owner/elsewhere".to_owned());
-        let before = renderings(&last);
-        let decided = decide(
-            &elsewhere,
-            &elsewhere.lineages(),
-            &renderings(&elsewhere),
-            &landed_as(&last),
-            &before,
-            Scope::Driven,
-        );
         assert_eq!(
-            decided.carried.into_iter().collect::<Vec<_>>(),
+            carried(&parked, &requeued),
             ["build"],
-            "a changed repository was not carried"
+            "a requeue that moved the repository was not carried"
         );
     }
 
@@ -5420,14 +5402,7 @@ mod tests {
         for item in seeded.landed.items.values_mut() {
             item.status = None;
         }
-        let decided = decide(
-            &snapshot,
-            &lineages,
-            &now,
-            &seeded,
-            &BTreeMap::new(),
-            Scope::Driven,
-        );
+        let decided = decide(&snapshot, &lineages, &now, &seeded, Scope::Driven);
         assert_eq!(
             decided.carried.iter().cloned().collect::<Vec<_>>(),
             lineages.roots().cloned().collect::<Vec<_>>()
@@ -5449,7 +5424,6 @@ mod tests {
             &known.lineages(),
             &renderings(&known),
             &empty,
-            &BTreeMap::new(),
             Scope::Driven,
         );
         assert_eq!(
@@ -5484,7 +5458,6 @@ mod tests {
             &released.lineages(),
             &renderings(&released),
             &claimed,
-            &BTreeMap::new(),
             Scope::Release,
         );
         assert_eq!(
@@ -6131,7 +6104,6 @@ mod tests {
             DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
             &snapshot,
             &mut baseline,
-            &mut BTreeMap::new(),
             super::Scope::Driven,
         );
         assert!(attempted.calls.is_empty(), "{:?}", attempted.calls);

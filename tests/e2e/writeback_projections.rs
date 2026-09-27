@@ -1404,12 +1404,12 @@ fn an_adoption_of_a_run_an_older_build_started_reads_the_furthest_along_item_by_
     // and what this journey is about is a driver reading the board cold.
     let reused_by_a_member_projection = |world: &World, what: &str, cold: bool| {
         // Stopped only once it is quiet. An adopted driver dispatches the head and `hold`
-        // again as soon as its whole projection lands, and that dispatch is projected by a
-        // member copy of its own; a stop takes no closeout — its signal ends the driver where
-        // it stands — so a stop during that copy leaves the double's record of it with no
-        // attempt beside it, and nothing after can read every attempt as landed. The
-        // adoption's whole projection writes the re-readied nodes `queued`, so `in-progress`
-        // on both items is that member copy having landed.
+        // again as soon as its first projection lands, and that dispatch is projected by a
+        // copy of its own; a stop takes no closeout — its signal ends the driver where it
+        // stands — so a stop during that copy leaves the double's record of it with no attempt
+        // beside it, and nothing after can read every attempt as landed. The adoption's first
+        // projection writes the re-readied nodes `queued`, so `in-progress` on both items is
+        // the copy after it having landed.
         projected_until(
             world,
             run,
@@ -1450,31 +1450,31 @@ fn an_adoption_of_a_run_an_older_build_started_reads_the_furthest_along_item_by_
         world.until(&format!("{what} to be recorded"), |world| {
             records(world, run).len() > mark && every_attempt_landed(world, run)
         });
-        let whole = records(world, run)[mark].clone();
-        assert_eq!(whole["scope"], "members", "{whole}");
-        assert_eq!(whole["whole_because"], Value::Null, "{whole}");
-        assert_eq!(whole["outcome"], "projected", "{whole}");
+        let first = records(world, run)[mark].clone();
+        assert_eq!(first["scope"], "members", "{first}");
+        assert_eq!(first["whole_because"], Value::Null, "{first}");
+        assert_eq!(first["outcome"], "projected", "{first}");
         assert_eq!(
-            whole["items"],
+            first["items"],
             json!(["flaky", "hold"]),
-            "the projection carried other than one item per lineage: {whole}"
+            "the projection carried other than one item per lineage: {first}"
         );
         if cold {
             // Each lineage read once, by its own id, and neither read again to be carried.
             assert_eq!(
-                whole["calls"],
+                first["calls"],
                 json!({"project-show": 1, "task-show": 2, "project-copy": 1}),
-                "{whole}"
+                "{first}"
             );
         }
-        assert_eq!(whole["actions"]["created"], 0, "{whole}");
+        assert_eq!(first["actions"]["created"], 0, "{first}");
         // The reused item may still carry the older build's origin when the copy rewrites it,
         // so the store can report it once as the lineage it updated and again as an orphan of
         // that origin: it is one item, rewritten, and counts under `updated` alone.
-        assert_eq!(whole["actions"]["orphaned"], 0, "{whole}");
+        assert_eq!(first["actions"]["orphaned"], 0, "{first}");
         assert!(
-            whole["actions"]["updated"].as_u64() >= Some(1),
-            "the reused item was not counted as rewritten: {whole}"
+            first["actions"]["updated"].as_u64() >= Some(1),
+            "the reused item was not counted as rewritten: {first}"
         );
         assert_eq!(
             std::fs::read(&root_file).expect("the root item reads"),
