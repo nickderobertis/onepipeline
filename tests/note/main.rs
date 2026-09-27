@@ -1363,7 +1363,7 @@ fn a_retry_replacement_spends_the_notes_the_node_it_supersedes_read_and_says_so(
                 "node": {
                     "id": "build-again",
                     "persona": "engineer",
-                    "task": "## What\nDo build again.",
+                    "task": "## What\nDo build again.\n\n## Acceptance criteria\n- build is done.",
                 },
             })),
         )
