@@ -1956,7 +1956,7 @@ fn a_retry_may_name_only_one_branch() {
                     "id": "service-2",
                     "repo": "owner/service",
                     "persona": "engineer",
-                    "task": "## What\nagain",
+                    "task": "## What\nagain\n\n## Acceptance criteria\n- again is done",
                     "branch": "pinned",
                     "resume": {"branch": "preserved"},
                 },
@@ -1987,7 +1987,7 @@ fn an_edit_carrying_the_retired_bar_is_refused_by_name_at_both_boundaries() {
     let refusal = world.run_with_stdin(
         &["reply", &run],
         &envelope(json!([{"op": "add", "node": {
-            "id": "extra", "persona": "engineer", "task": "## What\nextra",
+            "id": "extra", "persona": "engineer", "task": "## What\nextra\n\n## Acceptance criteria\n- extra is done",
             "done_when": "the gate is green"}}])),
     );
     refusal
@@ -2127,14 +2127,14 @@ fn an_edit_writing_an_unpublishable_title_is_refused_with_the_limit_it_broke() {
 
     refuses(
         json!({"op": "add", "node": {
-            "id": "publish", "persona": "engineer", "task": "## What\npublish",
+            "id": "publish", "persona": "engineer", "task": "## What\npublish\n\n## Acceptance criteria\n- publish is done",
             "repo": "service", "title": &over}}),
         "publish",
     );
 
     refuses(
         json!({"op": "retry", "id": "slow", "node": {
-            "id": "slow-2", "persona": "engineer", "task": "## What\nagain",
+            "id": "slow-2", "persona": "engineer", "task": "## What\nagain\n\n## Acceptance criteria\n- again is done",
             "repo": "service", "title": &over}}),
         "slow-2",
     );
