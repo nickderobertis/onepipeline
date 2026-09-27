@@ -106,10 +106,15 @@ fn superseded(world: &World, run: &str) -> Vec<Value> {
 /// `onevcs`'s own classification of one branch of `service`, through the verb a
 /// person asks it with.
 fn classified(world: &World, branch: &str) -> Value {
+    classified_in(world, "service", branch)
+}
+
+/// What `onevcs` would do retiring `branch` of the repository `repo` names.
+fn classified_in(world: &World, repo: &str, branch: &str) -> Value {
     let output = world
         .cmd_on(
             &onevcs_binary(),
-            &["retire", branch, "--repo", "service", "--dry-run", "--json"],
+            &["retire", branch, "--repo", repo, "--dry-run", "--json"],
         )
         .output()
         .expect("onevcs runs");
@@ -123,14 +128,21 @@ fn classified(world: &World, branch: &str) -> Value {
 }
 
 /// A person's own clone of the origin, for the commits a journey makes on the
-/// base by hand.
+/// base by hand: one per origin, so a journey over two repositories keeps each
+/// one's history to itself.
 fn person(world: &World, repo: &Repository) -> PathBuf {
-    let clone = world.root.join("person");
+    let origin = repo
+        .origin
+        .file_name()
+        .expect("an origin directory")
+        .to_string_lossy();
+    let name = format!("person-{origin}");
+    let clone = world.root.join(&name);
     if !clone.is_dir() {
         git(
             world,
             &world.root,
-            &["clone", &repo.origin.to_string_lossy(), "person"],
+            &["clone", &repo.origin.to_string_lossy(), &name],
         );
     }
     git(world, &clone, &["checkout", "main"]);
@@ -2082,6 +2094,161 @@ fn a_branch_a_node_comes_to_name_mid_sweep_is_left_by_that_sweeps_pass() {
         "{:?}",
         retired(&world, "live")
     );
+    world.run(&["stop", "live", "--force"]).exited(0);
+}
+
+/// A branch a node comes to name after the retirement pass has begun — added
+/// while the pass is held at `service`'s origin, before it reaches `tail` — is
+/// left alone by `tail`'s pass, which retires the control beside it: the pass
+/// reads what the run names as it reaches each identity, not once as it begins.
+/// Once `live` is stopped, the next run's pass retires it, which shows the name
+/// was all that kept it.
+#[cfg(unix)]
+#[test]
+fn a_branch_a_node_comes_to_name_between_two_identities_passes_is_left_by_the_second() {
+    let world = sweeping_world("retirement-between-identities");
+    let repo = world.repository("local-direct", &[]);
+    let tail = world.extra_repository("tail");
+    published_and_superseded(&world, &repo, "done/published", "published.md");
+    lossless(&world, &tail, "done/tail", "tail.md");
+    lossless(&world, &tail, "keep/late", "late.md");
+    for branch in ["done/tail", "keep/late"] {
+        let class = classified_in(&world, "tail", branch);
+        assert_eq!(class["class"], "retirable", "{class}");
+    }
+    let (entered, go) = origin_held(&world, &repo);
+
+    sweeping(
+        &world,
+        "live",
+        crate::harness::agent("hold", &[]),
+        Vec::new(),
+    );
+    world.until("the retirement pass to reach service's origin", |_| {
+        entered.is_file()
+    });
+    let mut late = lifecycle("late", &["hold"]);
+    late["repo"] = json!("tail");
+    late["branch"] = json!("keep/late");
+    world
+        .run_with_stdin(
+            &["reply", "live"],
+            &json!({"version": 2, "commands": [{"op": "add", "node": late}]}).to_string(),
+        )
+        .exited(0);
+    world.until("the driver to take the late node up", |world| {
+        world
+            .journal("live")
+            .iter()
+            .any(|event| event["labels"]["node"] == "late")
+    });
+    assert!(retired(&world, "live").is_empty(), "{}", world.dump());
+
+    std::fs::write(&go, "go").expect("the origin is released");
+    until_retired(&world, "live", &["done/published", "done/tail"]);
+    assert!(!holds(&world, &tail.checkout, "done/tail"));
+    assert!(
+        holds(&world, &tail.checkout, "keep/late"),
+        "keep/late was retired by a pass that began before a node named it"
+    );
+    let entries = retired(&world, "live");
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry["branch"] == "done/published" || entry["branch"] == "done/tail"),
+        "{entries:?}"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["branch"] == "done/tail"
+                && entry["identity"] == "github.com/owner/tail"),
+        "{entries:?}"
+    );
+
+    world.run(&["stop", "live", "--force"]).exited(0);
+    sweeping(
+        &world,
+        "after",
+        crate::harness::agent("hold", &[]),
+        Vec::new(),
+    );
+    until_retired(&world, "after", &["keep/late"]);
+    assert!(!holds(&world, &tail.checkout, "keep/late"));
+    world.release("hold.go");
+    world.until("the after run to settle", |world| {
+        world.run_file("after", "result.json").is_file()
+    });
+}
+
+/// A branch a node stops naming while a sweep is already running — its one
+/// held node dropped while the sweep's maintenance is held — is retired by
+/// that sweep's retirement pass beside the control another run left: the pass
+/// reads what the run names as it reaches an identity, not what it named when
+/// the sweep began.
+#[cfg(unix)]
+#[test]
+fn a_branch_a_node_stops_naming_mid_sweep_is_retired_by_that_sweeps_pass() {
+    let world = sweeping_world("retirement-unnamed-mid-sweep");
+    let repo = world.repository("local-direct", &[]);
+    let maintaining = world.root.join("maintain.go");
+    crate::maintenance::pooled_with_maintenance(&world, Some(&maintaining));
+    crate::maintenance::cut_a_slot(&world, &repo.checkout);
+    left_by_another_run(&world);
+    named_lossless(&world, &repo, "keep/gone");
+    control_made_lossless(&world, &repo);
+    let mut gone = lifecycle("gone", &["hold"]);
+    gone["branch"] = json!("keep/gone");
+
+    sweeping(
+        &world,
+        "live",
+        crate::harness::agent("hold", &[]),
+        vec![gone],
+    );
+    world.until("the sibling to report the slot maintaining", |world| {
+        pool_status(world)["slots"][0]["state"]["state"] == "maintaining"
+    });
+    world
+        .run_with_stdin(
+            &["reply", "live"],
+            &json!({
+                "version": 2,
+                "commands": [{"op": "drop", "id": "gone", "dependents": "detach"}],
+            })
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the driver to drop the node", |world| {
+        world
+            .events_of("live", "edit-committed")
+            .iter()
+            .any(|event| event["payload"]["command"]["op"] == "drop")
+    });
+    assert!(retired(&world, "live").is_empty(), "{}", world.dump());
+
+    std::fs::write(&maintaining, "go").expect("the maintenance is released");
+    until_retired(&world, "live", &[LEFT]);
+    // The sweep that was held is the one whose record comes first; a later sweep,
+    // begun after the drop, would retire the branch whatever this one read.
+    let first = world
+        .events_of("live", "branches-retired")
+        .into_iter()
+        .next()
+        .expect("the held sweep's record");
+    let branches: std::collections::BTreeSet<&str> = first["payload"]["retired"]
+        .as_array()
+        .expect("retired entries")
+        .iter()
+        .map(|entry| entry["branch"].as_str().expect("a branch"))
+        .collect();
+    assert_eq!(
+        branches,
+        ["keep/gone", LEFT].into(),
+        "keep/gone was kept by a sweep that began while a node named it: {first}"
+    );
+    assert!(!holds(&world, &repo.checkout, LEFT));
+    assert!(!holds(&world, &repo.checkout, "keep/gone"));
     world.run(&["stop", "live", "--force"]).exited(0);
 }
 
