@@ -1391,9 +1391,10 @@ fn should_retry_after(pending: &(Mutex<Pending>, Condvar), interval: Interval) -
     }
 }
 
-/// One attempt that landed: what the copy said it did and spent.
+/// One attempt that landed: what the copy said it did and spent — no report at all for an
+/// attempt that had nothing to carry, and so asked the store nothing.
 struct Landed {
-    actions: ProjectionActions,
+    actions: Option<ProjectionActions>,
     spent: Option<Map<String, Value>>,
     delivered: Vec<Map<String, Value>>,
 }
@@ -1560,11 +1561,43 @@ fn project(
     scope: Scope,
 ) -> Attempted {
     let mut items = Vec::new();
+    let lineages = snapshot.lineages();
+    let renderings: BTreeMap<String, Rendering> = lineages
+        .roots()
+        .filter_map(|root| {
+            Rendering::of(snapshot, &lineages, root)
+                .ok()
+                .map(|rendering| (root.clone(), rendering))
+        })
+        .collect();
+    let decided = decide(snapshot, &lineages, &renderings, baseline, landed, scope);
+    // Nothing differs from what landed and nothing is unknown: the board already says all of
+    // it, so the store is not opened, let alone asked.
+    if decided.carried.is_empty()
+        && decided.unread.is_empty()
+        && !baseline.project_differs(snapshot)
+    {
+        return Attempted {
+            items,
+            calls: BTreeMap::new(),
+            result: Ok(Landed {
+                actions: None,
+                spent: None,
+                delivered: Vec::new(),
+            }),
+        };
+    }
     let (result, calls) = match Attempt::open(store, snapshot) {
         Err(failed) => (Err(failed), BTreeMap::new()),
         Ok(attempt) => {
             let result = carry_the_difference(
-                &attempt, per_item, snapshot, baseline, landed, scope, &mut items,
+                &attempt,
+                per_item,
+                snapshot,
+                (&renderings, decided),
+                baseline,
+                landed,
+                &mut items,
             );
             (result, attempt.calls.take())
         }
@@ -1580,21 +1613,12 @@ fn carry_the_difference(
     attempt: &Attempt,
     per_item: NonZeroU64,
     snapshot: &Snapshot,
+    (renderings, decided): (&BTreeMap<String, Rendering>, Decided),
     baseline: &mut Baseline,
     landed: &mut BTreeMap<String, Rendering>,
-    scope: Scope,
     items: &mut Vec<String>,
 ) -> Result<Landed, Failed> {
-    let lineages = snapshot.lineages();
-    let renderings: BTreeMap<String, Rendering> = lineages
-        .roots()
-        .filter_map(|root| {
-            Rendering::of(snapshot, &lineages, root)
-                .ok()
-                .map(|rendering| (root.clone(), rendering))
-        })
-        .collect();
-    let decided = decide(snapshot, &lineages, &renderings, baseline, landed, scope);
+    let scope = decided.scope;
     // What the run knows of every lineage the baseline holds: where its item is. The labels are
     // read for the lineages the copy carries, below; an unnamed one is neither read nor written.
     let mut origins = baseline.origins();
@@ -1756,7 +1780,7 @@ fn carry_the_difference(
         return Err(failed);
     }
     Ok(Landed {
-        actions,
+        actions: Some(actions),
         spent: summed(report.spent.iter()),
         delivered,
     })
@@ -1796,6 +1820,8 @@ fn summed<'a>(
 
 /// Which lineages one attempt carries, decided off the baseline before anything is read.
 struct Decided {
+    /// What the decision was made for.
+    scope: Scope,
     /// Roots whose projection differs from what the baseline says landed: the copy's members.
     carried: BTreeSet<String>,
     /// Roots the baseline does not hold whose item the run knows an id for: each read once by
@@ -1820,6 +1846,7 @@ fn decide(
     scope: Scope,
 ) -> Decided {
     let mut decided = Decided {
+        scope,
         carried: BTreeSet::new(),
         unread: BTreeMap::new(),
     };
@@ -2042,6 +2069,18 @@ impl Baseline {
             } // llmlint: ignore-end[changed_behavior_has_e2e]
         };
         Self { path, landed }
+    }
+
+    /// Whether the snapshot restates a project key the destination holds with another value
+    /// than the one last projected — the one project-level change a copy carries. A key the
+    /// destination does not hold is never written, so it is no change.
+    fn project_differs(&self, snapshot: &Snapshot) -> bool {
+        snapshot.project_metadata.iter().any(|(key, value)| {
+            self.landed
+                .project_metadata
+                .get(key)
+                .is_some_and(|held| held != value)
+        })
     }
 
     /// Where the run knows each lineage's item to be: the baseline's own destination ids.
@@ -3088,7 +3127,7 @@ impl ProjectionRecord {
             duration_ms: u64::try_from(took.as_millis()).unwrap_or(u64::MAX),
             ended: match &attempted.result {
                 Ok(landed) => ProjectionEnded::Projected {
-                    actions: Some(landed.actions),
+                    actions: landed.actions,
                     spent: landed.spent.clone(),
                 },
                 Err(failed) => ProjectionEnded::Failed {
@@ -4106,7 +4145,21 @@ mod tests {
         };
         let launch = a_launch(&paths);
         let writeback = Writeback::start(&paths, &launch).expect("a write-back worker");
-        writeback.publish(&paths, &launch, &RunState::default(), &BTreeMap::new());
+        // One node, so there is something to carry: a run with nothing to project asks the
+        // store nothing at all.
+        let plan = crate::plan::Plan {
+            schema_version: crate::plan::PLAN_SCHEMA_VERSION,
+            goal: None,
+            name: Some("stop-mid-wait".into()),
+            concurrency: 1,
+            tasks: vec![serde_json::from_value(json!({"id": "node"})).expect("a node")],
+        };
+        let state = RunState {
+            graph: crate::graph::Graph::from_plan(&plan),
+            plan: Some(plan),
+            ..RunState::default()
+        };
+        writeback.publish(&paths, &launch, &state, &BTreeMap::new());
 
         // Four attempts in, the interval the worker is now waiting out is longer than every
         // one before it — so the last one this test actually watched is a lower bound on

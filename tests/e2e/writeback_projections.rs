@@ -85,17 +85,26 @@ fn native(id: &str) -> &str {
 /// Counted, not timed: each command that reaches the store opens a connection of its own to
 /// the scripted source, whose handshake is the first thing it records. One of those was the
 /// plan read the launch made; each of the rest is an attempt, which is in flight from its
-/// handshake until the worker appends its record.
+/// handshake until the worker appends its record. An attempt with nothing to carry opens no
+/// connection, and its record says it called nothing.
 fn every_attempt_landed(world: &World, run: &str) -> bool {
     let opened = store_calls(world)
         .iter()
         .filter(|call| is_call(call, "initialize"))
         .count();
     let records = records(world, run);
-    records.len() + 1 == opened
+    opened_the_store(&records) + 1 == opened
         && records
             .iter()
             .all(|record| record["outcome"] == "projected")
+}
+
+/// How many recorded attempts opened the store: every one but those that called nothing.
+fn opened_the_store(records: &[Value]) -> usize {
+    records
+        .iter()
+        .filter(|record| record["calls"] != json!({}))
+        .count()
 }
 
 fn board_word(tasks: &[Value], node: &str) -> Option<String> {
@@ -356,9 +365,9 @@ fn a_runs_first_projection_carries_its_claim_by_member_and_a_later_transition_th
         .filter(|call| is_call(call, "initialize"))
         .count();
     assert!(
-        opened >= later.len(),
+        opened >= opened_the_store(&later),
         "{} attempts were made over {opened} stores, so one answered from another's reads",
-        later.len()
+        opened_the_store(&later)
     );
     for record in &later {
         assert_eq!(record["scope"], "members", "{record}");

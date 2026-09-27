@@ -5896,7 +5896,10 @@ before it left. After a failed attempt the next carries what has still not lande
 of the changes the failure lost — and, after a copy that landed every item but a deliverer
 whose tickets the store could not keep in step, nothing that did land. Project-level metadata
 is carried by the project item, which every copy includes, so a projection whose only change
-is project-level names no task and copies the project without its tasks.
+is project-level names no task and copies the project without its tasks. An attempt with
+nothing to carry at all — no lineage differs, none is unknown, and no project key the
+destination holds changed — opens no store and asks it nothing: its line names no items,
+`calls` `{}` and `actions` `null`.
 
 **What a projection reads.** The project item, and each lineage the copy carries, one read of
 that task by its own id apiece — its labels are the destination's own, and a person may have
@@ -6027,6 +6030,7 @@ recorded exactly. No line of any of them is `whole`, and no line's `calls` names
     "carries": "the lineages whose projection differs from the landed baseline (entry 93) or from what this driver last landed",
     "copy_scope": "CopyScope::Members",
     "naming_none": "CopyScope::Projects { tasks: false }",
+    "carrying_nothing": "no store call at all: items [], calls {}, actions null",
     "release_carries": "the unstarted lineages the landed baseline says are queued"
   }
 }
