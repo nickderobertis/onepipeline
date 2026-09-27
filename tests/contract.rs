@@ -4779,10 +4779,52 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
         ),
         ("version 0", json!({"schema_version": 0})),
     ] {
+        // A `calls` patched to `null` is a line that leaves the key off; every other key is
+        // written as the patch says.
         let mut line = example.clone();
         for (key, value) in patch.as_object().expect("a patch") {
-            line[key] = value.clone();
+            if key == "calls" && value.is_null() {
+                line.as_object_mut()
+                    .expect("a line is an object")
+                    .remove(key);
+            } else {
+                line[key] = value.clone();
+            }
         }
+        assert!(
+            serde_json::from_value::<ProjectionRecord>(line.clone()).is_err(),
+            "{refused} was read as a record: {line}"
+        );
+    }
+    // A key version 4 added, named as `null`, is still named: refused on an earlier line by
+    // its name, and refused on a version 4 line, which names `calls` as an object.
+    for (refused, version, key) in [
+        ("a version 3 line naming `calls` as null", 3, "calls"),
+        ("a version 1 line naming `calls` as null", 1, "calls"),
+        (
+            "a version 3 line naming `updated_fields` as null",
+            3,
+            "updated_fields",
+        ),
+        ("a version 4 line naming `calls` as null", 4, "calls"),
+        (
+            "a version 4 line naming `updated_fields` as null",
+            4,
+            "updated_fields",
+        ),
+    ] {
+        let mut line = without_calls(delivered_example);
+        line["schema_version"] = json!(version);
+        if version < 3 {
+            line["actions"] = older_actions.clone();
+            line.as_object_mut()
+                .expect("a line is an object")
+                .remove("delivered");
+        }
+        if version == 4 && key != "calls" {
+            line["calls"] = json!({"project-show": 1});
+        }
+        line[key] = Value::Null;
         assert!(
             serde_json::from_value::<ProjectionRecord>(line.clone()).is_err(),
             "{refused} was read as a record: {line}"

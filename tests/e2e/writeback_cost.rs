@@ -44,7 +44,6 @@ fn meter() -> Value {
     ]})
 }
 
-/// One held node of the plan.
 fn node(id: &str, deps: &[&str]) -> Value {
     json!({
         "id": id,
@@ -130,7 +129,6 @@ fn then_at_rest(world: &World, what: &str, ready: impl Fn(&World) -> bool) {
     at_rest(world, what);
 }
 
-/// Count calls by method.
 fn by_method<'a>(calls: impl Iterator<Item = &'a Vec<String>>) -> BTreeMap<String, u64> {
     let mut counted = BTreeMap::new();
     for call in calls {
@@ -139,7 +137,6 @@ fn by_method<'a>(calls: impl Iterator<Item = &'a Vec<String>>) -> BTreeMap<Strin
     counted
 }
 
-/// The meter's charges, summed.
 fn spent<'a>(charged: impl Iterator<Item = &'a Value>) -> Value {
     let mut requests = 0;
     let mut points = 0;
@@ -181,7 +178,6 @@ fn the_comparable_plan() -> (Value, Vec<Value>) {
         .with_env(RENDEZVOUS_SECONDS_ENV, "600");
     let go = |node: &str| world.release(&format!("{node}.go"));
 
-    // The launch: its read, the claim, and the first three dispatches.
     world.run(&["start", &project, "--detach"]).exited(0);
     then_at_rest(&world, "the first dispatches", |world| {
         ["a", "d", "e"]
@@ -189,7 +185,6 @@ fn the_comparable_plan() -> (Value, Vec<Value>) {
             .all(|node| dispatched(world, node) == 1)
     });
 
-    // One node fails, and is retried.
     go("d");
     then_at_rest(&world, "the failure", |world| settled(world, "d", "failed"));
     reply(
@@ -198,7 +193,6 @@ fn the_comparable_plan() -> (Value, Vec<Value>) {
     );
     then_at_rest(&world, "the retry", |world| dispatched(world, "d-2") == 1);
 
-    // An amend, an add, and a reparent.
     reply(
         &world,
         json!({"op": "amend", "id": "c", "text": "## What\nDo c, as amended.\n\n## Why\nSo the run can settle.\n\n## Acceptance criteria\n- c is done."}),
@@ -217,7 +211,6 @@ fn the_comparable_plan() -> (Value, Vec<Value>) {
         world.events_of(RUN, "edit-committed").len() > edits
     });
 
-    // A transient outage of three failures, which recovers.
     let failed_before = failures(&world);
     world.store_refuses(
         "get_project",
@@ -237,7 +230,6 @@ fn the_comparable_plan() -> (Value, Vec<Value>) {
         "the outage was not three failures"
     );
 
-    // One rate-limited refusal, carrying a wait.
     world.store_refuses_once(
         "get_project",
         &json!({"kind": "rate-limited", "retry_after_seconds": 2,
@@ -253,7 +245,6 @@ fn the_comparable_plan() -> (Value, Vec<Value>) {
         "the rate limit was not one failure"
     );
 
-    // A stop, and an adoption.
     world.run(&["stop", RUN]).exited(0);
     let recorded = records(&world).len();
     world.run(&["adopt", RUN, "--detach"]).exited(0);
@@ -263,7 +254,6 @@ fn the_comparable_plan() -> (Value, Vec<Value>) {
             && dispatched(world, "d-2") == 2
     });
 
-    // Every node done, and closeout.
     go("b");
     then_at_rest(&world, "b", |world| {
         settled(world, "b", "done") && dispatched(world, "c") == 1
@@ -373,6 +363,26 @@ fn the_comparable_plan_spends_what_the_committed_record_says() {
         points(before)
     );
     assert_eq!(measured["writeback"]["whole_attempts"], 0);
+    // An attempt with nothing left to carry asks the store nothing: it opens no connection, and
+    // its line names no items, no calls and no report.
+    let idle: Vec<&Value> = recorded
+        .iter()
+        .filter(|record| record["calls"] == json!({}))
+        .collect();
+    assert!(
+        !idle.is_empty(),
+        "no attempt was left with nothing to carry"
+    );
+    for record in &idle {
+        assert_eq!(record["items"], json!([]), "{record}");
+        assert_eq!(record["outcome"], "projected", "{record}");
+        assert_eq!(record["actions"], Value::Null, "{record}");
+    }
+    assert_eq!(
+        measured["writeback"]["calls"]["initialize"].as_u64(),
+        Some((recorded.len() - idle.len()) as u64),
+        "an attempt that called nothing opened the store"
+    );
     for record in &recorded {
         assert_eq!(record["scope"], "members", "{record}");
         assert!(

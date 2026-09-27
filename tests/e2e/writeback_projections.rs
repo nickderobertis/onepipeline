@@ -674,6 +674,70 @@ fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
     world.release("work.go");
 }
 
+/// A landed baseline the adopting driver cannot read — here, one holding a key the engine does
+/// not own, which only a hand or another tool could have put there — is said on the driver's
+/// standard error, naming the file and why, and treated as absent: each lineage is read once by
+/// its own id, nothing is copied whole, no page of tasks is read, and the file is written again
+/// in the shape this build reads once the projection lands.
+#[test]
+fn a_landed_baseline_the_driver_cannot_read_is_said_and_each_item_read_by_its_id() {
+    let run = "projections-unreadable-baseline";
+    let (world, project) = a_run_projecting_through_a_recording_store(
+        "writeback-projections-unreadable-baseline",
+        run,
+        vec![agent("work", &[]), agent("later", &["work"])],
+        &["work"],
+    );
+    projected_until(
+        &world,
+        run,
+        &project,
+        "the running node to reach the board",
+        |tasks| board_word(tasks, "work").as_deref() == Some("in-progress"),
+    );
+    world.run(&["stop", run]).exited(0);
+    let path = world.run_file(run, &in_run_dir(&landed_block()["file"]));
+    let mut unreadable = landed(&world, run);
+    // llmlint: ignore-block[tests_mirror_real_usage] a baseline this build refuses is one
+    // nothing this build writes, so the file is edited the way a hand or another tool would.
+    unreadable["items"]["work"]["metadata"]["authored.note"] = json!("not the engine's");
+    std::fs::write(&path, unreadable.to_string()).expect("the baseline is rewritten");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let mark = records(&world, run).len();
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    world.until("the adopted driver's first projection", |world| {
+        records(world, run).len() > mark && every_attempt_landed(world, run)
+    });
+    let log = std::fs::read_to_string(world.run_file(run, "driver.log")).expect("the log");
+    assert!(
+        log.contains(&format!("cannot read {}", path.display()))
+            && log.contains("authored.note")
+            && log.contains("read from the store once instead"),
+        "the driver did not say it could not read the baseline, and why:\n{log}"
+    );
+    let first = records(&world, run)[mark].clone();
+    assert_eq!(first["scope"], "members", "{first}");
+    // Both lineages read once by their own id, and none read again to be carried.
+    assert_eq!(first["calls"]["task-show"], 2, "{first}");
+    assert_eq!(first["calls"]["project-show"], 1, "{first}");
+    assert!(first["calls"].get("task-list").is_none(), "{first}");
+    let rewritten = landed(&world, run);
+    assert!(
+        rewritten["items"]["work"]["metadata"]
+            .get("authored.note")
+            .is_none(),
+        "the unreadable baseline was kept: {rewritten}"
+    );
+    assert_eq!(
+        rewritten["items"]["later"]["destination"],
+        board_task(&world.store_tasks(&project), "later")["id"],
+        "{rewritten}"
+    );
+    no_record_is_whole_or_reads_a_page_of_tasks(&world, run);
+    world.release("work.go");
+}
+
 /// The attempt after a failed one carries exactly the lineages whose change had not landed —
 /// never the whole project — whatever failed: the store refusing the copy, each recorded failed
 /// with the store's class and kind and the reason, carrying no report, and the planner told the

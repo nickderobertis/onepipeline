@@ -1373,15 +1373,19 @@ fn should_retry_after(pending: &(Mutex<Pending>, Condvar), interval: Interval) -
         Interval::Scheduled(wait) => (wait, false),
         Interval::Asked(wait) => (wait, true),
     };
-    let due = Instant::now() + wait;
+    // A wait past what the clock can name is waited out until the run stops: a store asking
+    // for longer than a host runs is not asked again, rather than the sum overflowing.
+    let due = Instant::now().checked_add(wait);
     loop {
         match state.phase {
             RunPhase::Stopping => return false,
             RunPhase::ClosingOut if !binding => return true,
             RunPhase::ClosingOut | RunPhase::Running => {}
         }
-        let left = due.saturating_duration_since(Instant::now());
-        if left.is_zero() {
+        let left = due.map_or(RETRY_CEILING, |due| {
+            due.saturating_duration_since(Instant::now())
+        });
+        if due.is_some() && left.is_zero() {
             return true;
         }
         let Ok((next, _)) = ready.wait_timeout(state, left) else {
@@ -2256,6 +2260,16 @@ impl LandedBaseline {
             if let Some(key) = foreign(&item.metadata) {
                 return Err(format!(
                     "item '{root}': `metadata` holds `{key}`, which is not the engine's"
+                ));
+            }
+            for ticket in &item.delivers {
+                ticket.parse::<GlobalId>().map_err(|why| {
+                    format!("item '{root}': `delivers` names '{ticket}', which {why}")
+                })?;
+            }
+            if item.depends_on.iter().any(String::is_empty) {
+                return Err(format!(
+                    "item '{root}': `depends_on` names an empty node id"
                 ));
             }
         }
@@ -3179,11 +3193,31 @@ struct ProjectionWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     delivered: Option<Vec<Map<String, Value>>>,
     /// Every version 4 line names it; an earlier one names none, and is refused naming it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    calls: Option<BTreeMap<StoreCall, u64>>,
-    /// Only a version 4 line that made a targeted update names it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    updated_fields: Option<BTreeMap<UpdatedField, u64>>,
+    /// Held twice optional, so a line naming it as `null` is told apart from one leaving it off
+    /// and refused by the key's own name rather than read as never having named it.
+    #[serde(
+        default,
+        deserialize_with = "named",
+        skip_serializing_if = "Option::is_none"
+    )]
+    calls: Option<Option<BTreeMap<StoreCall, u64>>>,
+    /// Only a version 4 line that made a targeted update names it; held as `calls` is.
+    #[serde(
+        default,
+        deserialize_with = "named",
+        skip_serializing_if = "Option::is_none"
+    )]
+    updated_fields: Option<Option<BTreeMap<UpdatedField, u64>>>,
+}
+
+/// A key that is on the line, whatever it holds — `null` included — as `Some`; the key left
+/// off stays `None` through `#[serde(default)]`.
+fn named<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 /// The version of a projection line that names none: the shape before `delivered` existed.
@@ -3270,12 +3304,15 @@ impl TryFrom<ProjectionWire> for ProjectionRecord {
                 ));
             }
             WRITEBACK_PROJECTIONS_SCHEMA_VERSION => {
-                let Some(calls) = &wire.calls else {
+                let Some(Some(calls)) = &wire.calls else {
                     return Err(format!(
-                        "a version {WRITEBACK_PROJECTIONS_SCHEMA_VERSION} line names no `calls`, \
-                         which every line at that version names"
+                        "a version {WRITEBACK_PROJECTIONS_SCHEMA_VERSION} line names no `calls` \
+                         object, which every line at that version names"
                     ));
                 };
+                if matches!(wire.updated_fields, Some(None)) {
+                    return Err("a line names `updated_fields` as null".to_owned());
+                }
                 if wire.updated_fields.is_some()
                     && calls
                         .get(&StoreCall::TaskUpdate)
@@ -3382,8 +3419,8 @@ impl TryFrom<ProjectionWire> for ProjectionRecord {
             duration_ms: wire.duration_ms,
             ended,
             delivered: wire.delivered.unwrap_or_default(),
-            calls: wire.calls,
-            updated_fields: wire.updated_fields,
+            calls: wire.calls.flatten(),
+            updated_fields: wire.updated_fields.flatten(),
         })
     }
 }
@@ -3432,8 +3469,8 @@ impl From<ProjectionRecord> for ProjectionWire {
             actions,
             spent,
             delivered: (!record.delivered.is_empty()).then_some(record.delivered),
-            calls: record.calls,
-            updated_fields: record.updated_fields,
+            calls: record.calls.map(Some),
+            updated_fields: record.updated_fields.map(Some),
         }
     }
 }
@@ -5517,6 +5554,12 @@ mod tests {
             ),
             ("a digest that is not one", "content_sha256", json!("ABC")),
             ("a word the engine never writes", "status", json!("blocked")),
+            (
+                "a ticket that is not a qualified id",
+                "delivers",
+                json!(["bare"]),
+            ),
+            ("an edge naming no node", "depends_on", json!([""])),
             ("labels", "labels", json!([])),
         ] {
             let mut file = example.clone();
