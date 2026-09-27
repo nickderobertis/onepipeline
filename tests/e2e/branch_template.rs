@@ -7,17 +7,18 @@
 //! off the session's own record — the name the sibling actually cut, not a string
 //! this crate rendered.
 //!
-//! A plan here is read out of the real `onetaskgraph`, whose `local-md` source
-//! has no task key. The journeys about a keyed task read the same real store
-//! through `fake-onetaskgraph`, delegating every call and growing `key` onto each
-//! task it lists — the one field no offline source can answer with.
+//! A plan here is read out of the linked store, whose `local-md` source has no
+//! task key. The journeys about a keyed task read the same folder through
+//! `crates/testfakes`' `scripted-source`, the real `local-md` plugin served over
+//! the store's own plugin protocol, which grows `key` onto each task it answers
+//! with — the one field no offline source can answer with.
 
 // llmlint: ignore-file[e2e_not_mocked] the crate under test is driven as a real compiled
 // binary and `onevcs` — the sibling that cuts the branch — is the real library over real
 // git. `oneagentgraph` is substituted at its subprocess boundary so a journey states a
 // dispatch outcome rather than paying for a model turn, and a keyed task is served by the
-// real store through `fake-onetaskgraph`, which adds the one field a local source cannot
-// carry. `harness.rs` carries the same suppression and the full rationale.
+// real `local-md` plugin through `scripted-source`, which adds the one field a local source
+// cannot carry. `harness.rs` carries the same suppression and the full rationale.
 
 // llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
 // assumed: the sixteen journeys here take about 50 seconds on the wall under the suite's
@@ -31,12 +32,11 @@
 use serde_json::{json, Value};
 
 use crate::harness::{
-    double, git, human, lifecycle, onetaskgraph_binary, plan_of, World, NOTHING_DRIVING, REFUSED,
-    STORE_BINARY_ENV, USAGE_ERROR,
+    git, human, lifecycle, plan_of, World, NOTHING_DRIVING, REFUSED, USAGE_ERROR,
 };
 use onepipeline::branchname::{DEFAULT_TEMPLATE, ENVIRONMENT, FLAG, KEY};
 
-/// The key the double grows onto every task it lists.
+/// The key the scripted source grows onto every task it answers with.
 const TASK_KEY: &str = "ENG-123";
 
 /// The branch every session **the sibling itself** opened is on — cut or
@@ -54,26 +54,17 @@ fn opened_branches(world: &World, run: &str) -> Vec<String> {
         .collect()
 }
 
-/// A world whose store is read through the double, every task it lists carrying
+/// A world whose store is read through the scripted source, every task it answers with carrying
 /// [`TASK_KEY`] — what a source with a handle of its own answers with.
 fn keyed(world: World) -> World {
     keyed_as(world, TASK_KEY)
 }
 
-/// [`keyed`], with every task the double lists carrying `key` instead.
+/// [`keyed`], with every task the scripted source answers with carrying `key` instead.
 fn keyed_as(world: World, key: &str) -> World {
-    world.script(
-        "onetaskgraph.delegate",
-        &onetaskgraph_binary().to_string_lossy(),
-    );
-    world.script(
-        "onetaskgraph.task-list.grow",
-        &json!({ "key": key }).to_string(),
-    );
-    world.with_env(
-        STORE_BINARY_ENV,
-        &double("fake-onetaskgraph").to_string_lossy(),
-    )
+    let world = world.through_scripted_source();
+    world.store_keys_tasks(key);
+    world
 }
 
 /// A world with one repository publishing straight onto its base, and a worker
@@ -106,7 +97,7 @@ fn settlement(world: &World, run: &str, node: &str) -> Value {
 
 #[test]
 fn with_no_template_anywhere_a_task_with_no_key_cuts_its_branch_at_the_plan_and_node() {
-    // The real released store over `local-md`, which has no task key: this is the
+    // The linked store over `local-md`, which has no task key: this is the
     // case every journey of this repository's own runs is in.
     let world = publishing("branch-default-unkeyed");
     // Named by the project's own title, with no `onepipeline.name` stating one: the
@@ -220,7 +211,7 @@ fn a_template_the_flag_names_reaches_every_variable_it_is_rendered_over() {
     node["delivers"] = json!([ticket]);
     let project = world.plan("vars", &plan_of("vars", vec![node]));
     let native = world
-        .store_tasks(project.split_once(':').expect("a qualified id").1)
+        .store_tasks(&project)
         .into_iter()
         .find(|task| task["item"]["metadata"]["onepipeline.id"] == "service")
         .and_then(|task| task["id"].as_str().map(str::to_owned))

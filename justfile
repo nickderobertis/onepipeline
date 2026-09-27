@@ -23,27 +23,11 @@ set positional-arguments := true
 # recipes whose failure needs project-level context (_crate-fmt-check,
 # _crate-coverage-clean, _crate-coverage, msrv) add one explicitly.
 
-# The released `onetaskgraph` this build's own checks read their plans through.
-# A plan is one project of that store and this crate *drives* the binary rather
-# than linking it, so cargo cannot bring it into the build graph and `bootstrap`
-# installs it instead — pinned to a published release, so a green check says
-# something about what a host that installs one runs. It is the newest release
-# when it was pinned, and the one the engine's store journeys were run against
-# and pass through: installed by this recipe, not merely read. Any release from
-# 0.2.0 carries the custom metadata the mapping reads, which is
-# `src/taskgraph.rs`'s floor. It is written bare on purpose: `cargo install
-# --version` reads a `MAJOR.MINOR.PATCH` with no operator as that exact release,
-# never as the caret requirement the same string means in a manifest.
-#
-# **This is the only place the release is named.** `_ensure-onetaskgraph` reads
-# it, and `taskgraph::tests::the_release_the_checks_install_meets_the_floor_and_is_named_once`
-# fails if it falls below that floor, is named twice, or stops being what the
-# recipe installs.
-#
-# The crate under test still drives the binary rather than linking it. What does
-# link onetaskgraph is `crates/testfakes` — see `[workspace.dependencies]`, which
-# requires the same release this line names and is why `rust-version` is 1.97.
-onetaskgraph-version := "0.2.44"
+# No `onetaskgraph` is installed: the store every plan is read out of is linked into
+# this crate (`onetaskgraph-core` in `[workspace.dependencies]`), so cargo builds it
+# with everything else and the release is the one `Cargo.lock` resolves.
+# `tests/linked_engines.rs` holds the lock to that one release, and fails if a recipe
+# here ever installs an `onetaskgraph` binary at another.
 
 # The renderer the visual-docs capture draws each scene with (`just screenshots`).
 # NOT part of `check`, `gate` or `bootstrap`: screenshots are informational, and
@@ -91,35 +75,8 @@ _crate-bootstrap:
       || { echo "cannot add toolchain components — install rustup (https://rustup.rs/) and re-run" >&2; exit 1; }
     @just _ensure-tool cargo-nextest
     @just _ensure-tool cargo-llvm-cov
-    @just _ensure-onetaskgraph
     @just _ensure-strace
     @cargo fetch --locked --quiet
-
-# The one binary this crate composes that cargo cannot build for it: `onevcs` and
-# `oneagentgraph` are linked crates, and this one is driven as a subprocess by
-# design — that is onetaskgraph's own recorded decision for its SDKs, and it is
-# what keeps a crates.io release ordering out of every release here. Installed at
-# bootstrap, so `check` itself stays offline; the e2e suite **fails** without one
-# rather than skipping, because a plan read through a stand-in would prove the
-# stand-in.
-_ensure-onetaskgraph:
-    @resolved="${ONETASKGRAPH_BIN:-$(command -v onetaskgraph 2>/dev/null || true)}"; \
-      cargo_root="${CARGO_HOME:-$HOME/.cargo}"; \
-      if [[ "$resolved" == */bin/onetaskgraph ]]; then \
-        resolved_root="${resolved%/bin/onetaskgraph}"; \
-        if [[ "$resolved_root" != "$cargo_root" ]]; then \
-          cargo install onetaskgraph --version {{onetaskgraph-version}} --locked --quiet --force \
-            --root "$resolved_root"; \
-        else \
-          cargo install onetaskgraph --version {{onetaskgraph-version}} --locked --quiet --force; \
-        fi; \
-      else \
-        cargo install onetaskgraph --version {{onetaskgraph-version}} --locked --quiet --force; \
-      fi; \
-      if [[ -n "$resolved" && "$resolved" != */bin/onetaskgraph ]]; then \
-        cp "$cargo_root/bin/onetaskgraph" "$resolved"; \
-        chmod +x "$resolved"; \
-      fi
 
 # The tracer the Linux-only e2e journeys (`channel.rs`, `listing.rs`,
 # `unwatched.rs`) run the binary under, and refuse without. A system package,

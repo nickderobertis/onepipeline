@@ -2596,14 +2596,25 @@ fn members_reset_in(world: &World, graph_run: &str) -> std::collections::BTreeSe
 /// One observed launch of an observer graph of this world's own, with the
 /// observer held so the graph run the record names stays the one every clock
 /// below belongs to. Answers the graph run's id.
+///
+/// The graph run's clocks live in the driver's process, so the run is also kept
+/// driving: one dispatch held in flight. A plan whose only work waits on a person
+/// converges at once, and its driver closes out and exits — taking every clock with
+/// it — as soon as its write-back settles, which is before a surface can be read.
 fn observed_by_clocks(world: &World, run: &str, graph: &str) -> String {
     world.script("observer.wait", "hold");
-    let path = world.plan(run, &plan_of(run, vec![human("approve", &[])]));
+    // The sibling runs the graph here, so the hold is the worker's turn, which
+    // the harness double keeps open until `turn.go`.
+    world.script("turn.hold", "hold");
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
     world
         .run_on_agentgraph(&["start", &path, "--detach", "--dag-graph", graph])
         .exited(0);
     world.until("the observer to be watching the run", |world| {
         world.observer_saw().len() == 1
+    });
+    world.until("the run to hold a dispatch in flight", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
     });
     let graph_run = world.run_json(run, "launch.json")["graph_run"]
         .as_str()

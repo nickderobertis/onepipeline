@@ -19,15 +19,13 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::harness::{
-    agent, double, onetaskgraph_binary, plan_of, World, REFUSED, RENDEZVOUS_SECONDS_ENV,
-    STORE_BINARY_ENV,
-};
+use crate::harness::{agent, double, plan_of, World, REFUSED, RENDEZVOUS_SECONDS_ENV};
 
 /// The second source, holding the tickets a plan's tasks deliver.
 const TICKETS: &str = "tickets";
-/// The store double's rendezvous key for `project copy`.
-const COPY: &str = "onetaskgraph.project-copy";
+/// The call a copy writes each task with, which is where the scripted source holds a copy — at
+/// its first task, once per attempt — or refuses one.
+const COPY: &str = "write_task";
 
 /// A world whose store configures a second `local-md` source of tickets beside the plan's.
 fn a_world_with_tickets(name: &str) -> World {
@@ -49,17 +47,24 @@ fn a_world_with_tickets(name: &str) -> World {
         .with_env(RENDEZVOUS_SECONDS_ENV, "600")
 }
 
-/// The same world with every store command going through the double, delegating to the real
-/// store, so a journey can hold or refuse one named command.
-fn through_the_double(world: World) -> World {
-    world.script(
-        "onetaskgraph.delegate",
-        &onetaskgraph_binary().to_string_lossy(),
-    );
-    world.with_env(
-        STORE_BINARY_ENV,
-        &double("fake-onetaskgraph").to_string_lossy(),
-    )
+/// The same world, its tickets source reached through the scripted source under the key
+/// `tickets` — the same folder, through the real `local-md` plugin — so a journey can refuse
+/// the store's write of one ticket.
+fn a_world_with_scripted_tickets(name: &str) -> World {
+    let world = World::new(name);
+    let prefix = format!("ONETASKGRAPH_SOURCES__{}", TICKETS.to_uppercase());
+    let root = tickets_root(&world).to_string_lossy().into_owned();
+    let script = world.fakes.to_string_lossy().into_owned();
+    world
+        .with_env(&format!("{prefix}__PLUGIN"), "subprocess")
+        .with_env(
+            &format!("{prefix}__CONFIG__COMMAND"),
+            &double("scripted-source").to_string_lossy(),
+        )
+        .with_env(&format!("{prefix}__CONFIG__SETTINGS__ROOT"), &root)
+        .with_env(&format!("{prefix}__CONFIG__SETTINGS__SCRIPT"), &script)
+        .with_env(&format!("{prefix}__CONFIG__SETTINGS__KEY"), TICKETS)
+        .with_env(RENDEZVOUS_SECONDS_ENV, "600")
 }
 
 fn tickets_root(world: &World) -> PathBuf {
@@ -92,19 +97,18 @@ fn delivering(mut node: Value, tickets: &[&str]) -> Value {
 
 /// The ticket's status category, read through the real store as any other reader reads it.
 fn ticket_reads(world: &World, id: &str) -> String {
-    let output = world
-        .store_cmd(&["task", "show", id, "--json"])
-        .output()
-        .expect("the real onetaskgraph runs");
-    assert!(
-        output.status.success(),
-        "the ticket {id} could not be read: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let answer: Value = serde_json::from_slice(&output.stdout).expect("task show answers JSON");
-    answer["items"][0]["item"]["status"]["category"]
+    let ticket = crate::harness::global(id);
+    let answer = world.store_call(|engine| async move { engine.task(&ticket).await });
+    let answer =
+        answer.unwrap_or_else(|error| panic!("the ticket {id} could not be read: {error}"));
+    let task = answer
+        .items
+        .first()
+        .unwrap_or_else(|| panic!("the store holds no ticket {id}: {:?}", answer.errors));
+    serde_json::to_value(task.item.status.category)
+        .expect("a category renders")
         .as_str()
-        .unwrap_or_else(|| panic!("the ticket {id} carries no status category: {answer}"))
+        .expect("a category is a word")
         .to_owned()
 }
 
@@ -202,13 +206,14 @@ fn every_task_and_every_delivered_ticket_reads_queued_at_the_first_dispatch() {
             ],
         ),
     );
-    let world = through_the_double(world);
-    let copies = world.rendezvous(COPY);
+    let world = world.through_scripted_source();
+    let copies = world.store_holds(COPY);
     let build = world.rendezvous("build");
     world.run(&["start", &project, "--detach"]).exited(0);
 
     let claim = copies.arrived();
-    // The copy that claims the plan is still with the double, so the board is as authored.
+    // The copy that claims the plan is still held at the scripted source, so the board is as
+    // authored.
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(
         dispatches(&world, name),
@@ -238,8 +243,7 @@ fn every_task_and_every_delivered_ticket_reads_queued_at_the_first_dispatch() {
         );
     }
 
-    std::fs::remove_file(world.fakes.join(format!("{COPY}.rendezvous")))
-        .expect("the copy rendezvous is taken away");
+    world.store_stops_holding(COPY);
     next_copy.release();
     dispatched.release();
     world.until("the run to settle", |world| settled(world, name));
@@ -355,7 +359,7 @@ fn a_stopped_run_releases_its_unstarted_tickets_and_an_adoption_claims_them_agai
             ],
         ),
     );
-    let world = through_the_double(world);
+    let world = world.through_scripted_source();
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until_store("the run's claim to reach the store", |world| {
         let board = words(world, &project);
@@ -377,11 +381,10 @@ fn a_stopped_run_releases_its_unstarted_tickets_and_an_adoption_claims_them_agai
     );
 
     let dispatched_before = dispatches(&world, name);
-    let copies = world.rendezvous(COPY);
+    let copies = world.store_holds(COPY);
     world.run(&["adopt", name, "--detach"]).exited(0);
     let claim = copies.arrived();
-    std::fs::remove_file(world.fakes.join(format!("{COPY}.rendezvous")))
-        .expect("the copy rendezvous is taken away");
+    world.store_stops_holding(COPY);
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(
         dispatches(&world, name),
@@ -399,34 +402,12 @@ fn a_stopped_run_releases_its_unstarted_tickets_and_an_adoption_claims_them_agai
 /// A ticket the store cannot write is a projection that did not land: the planner hears of it,
 /// naming the ticket and what the store said, and the run settles exactly as it would have.
 #[test]
-fn a_refused_ticket_write_raises_the_planner_surface_and_settles_the_run_unchanged() {
-    let world = a_world_with_tickets("delivers-refused-ticket");
+fn a_ticket_the_store_cannot_write_raises_the_planner_surface_and_settles_the_run_unchanged() {
+    let world = a_world_with_scripted_tickets("delivers-refused-ticket");
     let delivered = ticket(&world, "work", "todo");
-    // Read-only on every platform: a file the store may not replace is a ticket it cannot move.
-    let file = tickets_root(&world)
-        .join("tasks")
-        .join("board")
-        .join("work.md");
-    let writable = std::fs::metadata(&file)
-        .expect("the ticket is on disk")
-        .permissions();
-    let mut read_only = writable.clone();
-    read_only.set_readonly(true);
-    std::fs::set_permissions(&file, read_only).expect("the ticket is made unwritable");
-    // And, where a rename can replace a read-only file, the directory around it: from
-    // onetaskgraph 0.2.44 the store replaces a ticket through a staging file beside it and a
-    // rename, which a read-only file in a writable directory does not stop on a Unix host.
-    #[cfg(unix)]
-    let directory = {
-        use std::os::unix::fs::PermissionsExt;
-        let directory = file.parent().expect("the ticket's directory").to_path_buf();
-        let open = std::fs::metadata(&directory)
-            .expect("the ticket's directory is there")
-            .permissions();
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o555))
-            .expect("the ticket's directory is made unwritable");
-        (directory, open)
-    };
+    // The tickets source cannot write this ticket's status, the way a hosted source that could
+    // not be reached cannot: its own error, at the source's own boundary.
+    copies_fail_tickets(&world, &[(&delivered, "unavailable")]);
     world.script("work.wait", "hold");
     let name = "refused-ticket";
     let project = world.plan(
@@ -446,9 +427,7 @@ fn a_refused_ticket_write_raises_the_planner_surface_and_settles_the_run_unchang
     });
     let message = unprojected_surfaces(&world, name).remove(0);
     assert!(
-        // The store's own words, which name the write it could not make on every platform;
-        // what the operating system appends after them is worded differently on each.
-        message.contains(&delivered) && message.contains("cannot write"),
+        message.contains(&delivered) && message.contains("the store answered unavailable"),
         "the surface does not name the ticket and what the store said of it: {message}"
     );
     // Classed off the ticket's own failure in the copy report: a source the store could not
@@ -487,11 +466,6 @@ fn a_refused_ticket_write_raises_the_planner_surface_and_settles_the_run_unchang
         2,
         "the refusal changed scheduling"
     );
-
-    #[cfg(unix)]
-    std::fs::set_permissions(&directory.0, directory.1)
-        .expect("the ticket's directory is writable again");
-    std::fs::set_permissions(&file, writable).expect("the ticket is writable again");
 }
 
 /// A launch whose first projection the store refuses still dispatches, and the planner hears
@@ -505,7 +479,7 @@ fn a_failed_first_projection_does_not_hold_back_the_first_dispatch() {
         name,
         &plan_of(name, vec![delivering(agent("work", &[]), &[&delivered])]),
     );
-    let world = through_the_double(world);
+    let world = world.through_scripted_source();
     refuse_every_copy(&world);
     world.run(&["start", &project, "--detach"]).exited(0);
 
@@ -527,10 +501,15 @@ fn a_failed_first_projection_does_not_hold_back_the_first_dispatch() {
     assert_eq!(world.run_json(name, "result.json")["state"], "complete");
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey waits past
+// the sixty-second floor by construction — a claim held past its deadline cannot be observed
+// in less than one — and the edge it needs is the crate under test: the compiled `onepipeline`
+// binary against its own write-back worker, exactly as `writeback_budget.rs`'s minute-long
+// journeys record.
 /// A launch whose first projection the store never answers waits for it only as long as the
-/// store command deadline allows, and then dispatches: nothing is dispatched while the held copy
+/// store call deadline allows, and then dispatches: nothing is dispatched while the held copy
 /// is inside its deadline, the ready node is dispatched once it has passed, and the planner hears
-/// the copy was killed. The deadline is the store's sixty-second floor, so this journey takes a
+/// the copy was cancelled. The deadline is the store's sixty-second floor, so this journey takes a
 /// minute by construction.
 #[test]
 fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch() {
@@ -541,8 +520,8 @@ fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispat
         name,
         &plan_of(name, vec![delivering(agent("work", &[]), &[&delivered])]),
     );
-    let world = through_the_double(world);
-    let copies = world.rendezvous(COPY);
+    let world = world.through_scripted_source();
+    let copies = world.store_holds(COPY);
     world.run(&["start", &project, "--detach"]).exited(0);
 
     let held = copies.arrived();
@@ -565,8 +544,7 @@ fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispat
     );
 
     // Later copies are not held: the one copy past its deadline is the evidence.
-    std::fs::remove_file(world.fakes.join(format!("{COPY}.rendezvous")))
-        .expect("the copy rendezvous is taken away");
+    world.store_stops_holding(COPY);
     world.until("the planner to hear the claim did not land", |world| {
         !unprojected_surfaces(world, name).is_empty()
     });
@@ -578,6 +556,7 @@ fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispat
     drop(held);
     world.until("the run to settle", |world| settled(world, name));
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// One ticket, one node: a plan in which two nodes deliver the same ticket is refused where it
 /// is read, naming both nodes and the ticket, and nothing is launched.
@@ -775,17 +754,12 @@ fn a_retried_deliverer_keeps_its_ticket_claimed_across_the_retry() {
     );
 }
 
-/// Have the store double refuse every `project copy` it is handed from now on, the way the store
-/// refuses a source it cannot write, while every other command still reaches the real store.
+/// Have the scripted source refuse every copy it is handed from now on, the way a store refuses
+/// a source it cannot write, while every other call still reaches the real store.
 fn refuse_every_copy(world: &World) {
-    world.script(
-        &format!("{COPY}.refuse.stdout"),
-        r#"{"failure":{"class":"refused","kind":"refused","source":"plans","message":"source plans refused the request","retry_after_seconds":null}}"#,
-    );
-    world.script(&format!("{COPY}.refuse.exit"), "1");
-    world.script(
-        &format!("{COPY}.refuse"),
-        "onetaskgraph: source plans refused the request",
+    world.store_refuses(
+        COPY,
+        &json!({"kind": "refused", "message": "source plans refused the request"}),
     );
 }
 
@@ -809,7 +783,7 @@ fn a_stop_whose_release_the_store_refuses_still_stops_and_says_so() {
             ],
         ),
     );
-    let world = through_the_double(world);
+    let world = world.through_scripted_source();
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until_store("the run's claim to reach the store", |world| {
         words(world, &project).get("first").map(String::as_str) == Some("in progress")
@@ -839,9 +813,10 @@ fn a_stop_whose_release_the_store_refuses_still_stops_and_says_so() {
     );
 }
 
-/// A stop run from a shell that cannot resolve the store still stops the run and answers as a
-/// stop does, and says on its own standard error that what the run claimed and never started was
-/// not released. The ticket stays claimed, because nothing reached the store.
+/// A stop run from a shell whose store cannot be reached — its source rooted at a folder that is
+/// not there — still stops the run and answers as a stop does, and says on its own standard error
+/// that what the run claimed and never started was not released. The ticket stays claimed,
+/// because nothing reached the store.
 #[test]
 fn a_stop_that_cannot_reach_the_store_still_stops_and_says_what_it_did_not_release() {
     let world = a_world_with_tickets("delivers-stop-no-store");
@@ -864,13 +839,16 @@ fn a_stop_that_cannot_reach_the_store_still_stops_and_says_what_it_did_not_relea
     });
 
     let mut stop = world.cmd(&["stop", name]);
-    stop.env(STORE_BINARY_ENV, world.root.join("no-such-onetaskgraph"));
+    stop.env(
+        crate::harness::store_root_env(),
+        world.root.join("no-such-store"),
+    );
     world
         .run_on(stop, "stop")
         .exited(0)
         .out_has("\"stopped\":true")
         .err_has("could not release the nodes this stopped run never started")
-        .err_has("no-such-onetaskgraph");
+        .err_has("no-such-store");
     assert_eq!(
         ticket_reads(&world, &delivered),
         "queued",
@@ -878,53 +856,11 @@ fn a_stop_that_cannot_reach_the_store_still_stops_and_says_what_it_did_not_relea
     );
 }
 
-/// A copy report whose `delivered` entry does not read as the store's shape is never described
-/// as tickets: the planner hears the copy's own exit and words, and the projection record keeps
-/// the entry exactly as the store wrote it.
-#[test]
-fn a_delivered_report_that_does_not_read_is_reported_by_the_copys_own_exit() {
-    let world = a_world_with_tickets("delivers-unreadable-report");
-    let name = "unreadable-report";
-    let project = world.plan(name, &plan_of(name, vec![agent("work", &[])]));
-    let world = through_the_double(world);
-    // Exit 4, the partial answer a copy writes when a ticket was not kept in step, carrying an
-    // entry whose ticket is not a qualified id.
-    world.script(
-        &format!("{COPY}.refuse.stdout"),
-        r#"{"items":[],"delivered":[{"ticket":"not qualified","deliverer":"plans:p/a","outcome":"failed","from":"queued","failure":{"class":"transient","kind":"unavailable","source":"tickets","message":"cannot write","retry_after_seconds":null}}]}"#,
-    );
-    world.script(&format!("{COPY}.refuse.exit"), "4");
-    world.script(
-        &format!("{COPY}.refuse"),
-        "onetaskgraph: task not qualified could not be kept in step",
-    );
-    world.run(&["start", &project, "--detach"]).exited(0);
-
-    world.until("the planner to hear the copy did not land", |world| {
-        !unprojected_surfaces(world, name).is_empty()
-    });
-    let message = unprojected_surfaces(&world, name).remove(0);
-    assert!(
-        message.contains("copy exited 4")
-            && !message.contains("could not keep every delivered ticket in step"),
-        "an entry that does not read was described as a ticket: {message}"
-    );
-    let failed = records(&world, name)
-        .into_iter()
-        .find(|record| record["outcome"] == "failed")
-        .expect("the refused copy is on the projection record");
-    assert_eq!(
-        failed["delivered"][0]["ticket"], "not qualified",
-        "the record did not keep the entry as the store wrote it: {failed}"
-    );
-    world.until("the run to settle", |world| settled(world, name));
-}
-
-/// A `delivers` entry a store answers bare names the task's own source, which is the store's rule
-/// for a bare id. The installed store always answers qualified, so the store double grows a bare
-/// entry into the plan's task list, naming a ticket kept in the plan's own source. The run claims
-/// that ticket, which it could only do had the bare entry been qualified with the task's source
-/// before it reached the board, and the board task carries it qualified.
+/// A `delivers` entry a task holds bare names the task's own source, which is the store's rule
+/// for a bare id. The plan's task is authored delivering a ticket kept in the plan's own source,
+/// named bare. The run claims that ticket, which it could only do had the bare entry been
+/// qualified with the task's source before it reached the board, and the board task carries it
+/// qualified.
 #[test]
 fn a_bare_delivers_entry_is_qualified_with_the_tasks_own_source() {
     let world = a_world_with_tickets("delivers-bare-entry");
@@ -956,11 +892,18 @@ fn a_bare_delivers_entry_is_qualified_with_the_tasks_own_source() {
         "the authored task already delivers something, so growing a bare entry proves nothing"
     );
 
-    let world = through_the_double(world);
-    world.script(
-        "onetaskgraph.task-list.grow",
-        &json!({"delivers": ["local-tickets/one"]}).to_string(),
+    // The task as a person authors a bare entry in their own Markdown.
+    let task = store
+        .join("tasks")
+        .join(crate::harness::project_id(name))
+        .join("000-work.md");
+    let authored = std::fs::read_to_string(&task).expect("the authored task");
+    let bare = authored.replacen("---\n", "---\ndelivers:\n- local-tickets/one\n", 1);
+    assert_ne!(
+        bare, authored,
+        "the task has no front matter to carry `delivers`"
     );
+    std::fs::write(&task, bare).expect("the task delivers a bare entry");
     world.run(&["start", &project, "--detach"]).exited(0);
 
     world.until_store(
@@ -976,31 +919,25 @@ fn a_bare_delivers_entry_is_qualified_with_the_tasks_own_source() {
     world.until("the run to settle", |world| settled(world, name));
 }
 
-/// Have the store double answer every `project copy` with the partial answer a copy writes when
-/// it could not keep delivered tickets in step — exit 4, and a report whose `delivered` fails each
-/// `(ticket, class, kind)` given — while every other command still reaches the real store.
-fn copies_fail_tickets(world: &World, failures: &[(&str, &str, &str)]) {
-    let delivered: Vec<Value> = failures
-        .iter()
-        .map(|(ticket, class, kind)| {
-            json!({
-                "ticket": ticket, "deliverer": "plan-store:board/work", "outcome": "failed",
-                "from": "queued",
-                "failure": {"class": class, "kind": kind, "source": TICKETS,
-                            "message": format!("the store answered {kind} for this ticket"),
-                            "retry_after_seconds": null}
-            })
-        })
-        .collect();
-    world.script(
-        &format!("{COPY}.refuse.stdout"),
-        &json!({"items": [], "delivered": delivered}).to_string(),
-    );
-    world.script(&format!("{COPY}.refuse.exit"), "4");
-    world.script(
-        &format!("{COPY}.refuse"),
-        "onetaskgraph: a delivered ticket could not be kept in step",
-    );
+/// Have the tickets source refuse the store's write of each `(ticket, kind)` given, with the
+/// source error of that kind, while every other call — the tickets' reads, and every write of
+/// the plan's own tasks — still reaches the real store. The copy lands, and what it could not
+/// keep in step is those tickets.
+fn copies_fail_tickets(world: &World, failures: &[(&str, &str)]) {
+    for (ticket, kind) in failures {
+        let native = ticket
+            .split_once(':')
+            .map(|(_, native)| native)
+            .expect("a qualified ticket");
+        world.script(
+            &format!(
+                "{TICKETS}.set_task_status@{}.refuse",
+                onepipeline_testfakes::segment(native)
+            ),
+            &json!({"kind": kind, "message": format!("the store answered {kind} for this ticket")})
+                .to_string(),
+        );
+    }
 }
 
 /// A partial copy is classed off its own `delivered` failures, by the rule a partial read's
@@ -1008,17 +945,15 @@ fn copies_fail_tickets(world: &World, failures: &[(&str, &str, &str)]) {
 /// `refused` with every kind it named, and that the projection is not attempted again on a timer.
 #[test]
 fn a_partial_copy_whose_every_failed_ticket_was_refused_is_classed_refused() {
-    let world = a_world_with_tickets("delivers-partial-refused");
+    let world = a_world_with_scripted_tickets("delivers-partial-refused");
+    let one = ticket(&world, "one", "todo");
+    let two = ticket(&world, "two", "todo");
     let name = "partial-refused";
-    let project = world.plan(name, &plan_of(name, vec![agent("work", &[])]));
-    let world = through_the_double(world);
-    copies_fail_tickets(
-        &world,
-        &[
-            ("tickets:board/one", "refused", "refused"),
-            ("tickets:board/two", "refused", "conflict"),
-        ],
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![delivering(agent("work", &[]), &[&one, &two])]),
     );
+    copies_fail_tickets(&world, &[(&one, "refused"), (&two, "config")]);
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("the run to settle", |world| settled(world, name));
 
@@ -1029,7 +964,7 @@ fn a_partial_copy_whose_every_failed_ticket_was_refused_is_classed_refused() {
     assert!(
         message
             .lines()
-            .any(|line| line == "class: refused, kind: refused, conflict"),
+            .any(|line| line == "class: refused, kind: refused, config"),
         "the surface does not class a report whose every ticket was refused as refused: {message}"
     );
     assert!(
@@ -1049,17 +984,15 @@ fn a_partial_copy_whose_every_failed_ticket_was_refused_is_classed_refused() {
 /// projection stays on the retry schedule rather than waiting for the graph to change.
 #[test]
 fn a_partial_copy_mixing_refused_and_transient_tickets_is_classed_transient() {
-    let world = a_world_with_tickets("delivers-partial-mixed");
+    let world = a_world_with_scripted_tickets("delivers-partial-mixed");
+    let one = ticket(&world, "one", "todo");
+    let two = ticket(&world, "two", "todo");
     let name = "partial-mixed";
-    let project = world.plan(name, &plan_of(name, vec![agent("work", &[])]));
-    let world = through_the_double(world);
-    copies_fail_tickets(
-        &world,
-        &[
-            ("tickets:board/one", "refused", "refused"),
-            ("tickets:board/two", "transient", "unavailable"),
-        ],
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![delivering(agent("work", &[]), &[&one, &two])]),
     );
+    copies_fail_tickets(&world, &[(&one, "refused"), (&two, "unavailable")]);
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("the run to settle", |world| settled(world, name));
 
@@ -1077,67 +1010,4 @@ fn a_partial_copy_mixing_refused_and_transient_tickets_is_classed_transient() {
         !message.contains("not attempted again on a timer"),
         "a mixed partial copy was taken off the retry timer: {message}"
     );
-}
-
-/// Against a store older than the first release carrying `queued` and `delivers`, unstarted
-/// nodes are written `todo`, no task carries `delivers`, no ticket moves, and the run says why
-/// exactly once however many projections it makes.
-#[test]
-fn an_older_store_writes_todo_carries_no_delivers_and_says_why_once() {
-    let world = a_world_with_tickets("delivers-older-store");
-    let delivered = ticket(&world, "later", "todo");
-    world.script("first.wait", "hold");
-    let name = "older-store";
-    let project = world.plan(
-        name,
-        &plan_of(
-            name,
-            vec![
-                agent("first", &[]),
-                delivering(agent("later", &["first"]), &[&delivered]),
-            ],
-        ),
-    );
-    let world = through_the_double(world);
-    world.script("onetaskgraph.version", "onetaskgraph 0.2.31\n");
-    world.run(&["start", &project, "--detach"]).exited(0);
-
-    world.until_store("the running node to reach the older store", |world| {
-        let board = words(world, &project);
-        board.get("first").map(String::as_str) == Some("in progress")
-            && board.get("later").map(String::as_str) == Some("todo")
-    });
-    // A second projection of the same run, so "once" is asked of more than one.
-    let before = records(&world, name).len();
-    edit(
-        &world,
-        name,
-        json!({"op": "note", "id": "later", "addressee": "worker", "text": "a change",
-               "deliver": "next"}),
-    )
-    .exited(0);
-    world.until("the note to be projected", |world| {
-        records(world, name).len() > before
-    });
-
-    let later = &tasks(&world, &project)["later"];
-    assert!(
-        later["item"]["delivers"]
-            .as_array()
-            .is_none_or(Vec::is_empty),
-        "a store without `delivers` was handed one: {later}"
-    );
-    assert_eq!(ticket_reads(&world, &delivered), "todo");
-    let log = std::fs::read_to_string(world.run_file(name, "driver.log")).unwrap_or_default();
-    assert_eq!(
-        log.matches("will not move the tickets this plan's tasks deliver")
-            .count(),
-        1,
-        "the run did not say exactly once why its tickets are not moved:\n{log}"
-    );
-    assert!(
-        log.contains(onepipeline::cli::WRITEBACK_DELIVERS_FROM),
-        "{log}"
-    );
-    world.run(&["stop", name]).exited(0);
 }

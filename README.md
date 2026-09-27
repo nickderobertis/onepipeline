@@ -176,12 +176,16 @@ metadata:
 Implement the approved API and rollout behaviour.
 ```
 
-onepipeline **drives the onetaskgraph binary** rather than linking the crate, so
-one has to be installed: from `ONETASKGRAPH_BIN` when that names one, and from
-`onetaskgraph` on the `PATH` otherwise. Its version is checked before anything is
-dispatched, and an absent, unusable, or too-old install refuses the launch —
-naming the path, the version, the minimum, and how to install one — rather than
-becoming a run that fails on its first node.
+onepipeline **links the onetaskgraph store** — `onetaskgraph-core`, with its
+`github-projects` and `linear` plugins — so nothing has to be installed beside it:
+every plan read and every settlement it projects goes through that library in
+process, and the store release is the one this build's `Cargo.lock` resolves,
+named in each release's notes. The store is configured exactly as the
+`onetaskgraph` CLI configures it: its `onetaskgraph.yaml`, discovered from the
+directory a launch runs in, and the `ONETASKGRAPH_*` settings, `secrets.env` and
+source credentials of the engine's own environment. A store that cannot be read
+refuses the launch before anything is dispatched, rather than becoming a run that
+fails on its first node. `ONETASKGRAPH_BIN` names nothing any more, and is ignored.
 
 A plan is checkable before it is launched, and the check is the engine's own
 loader — every refusal `start` makes before it dispatches anything, and no other
@@ -475,8 +479,8 @@ refuses, is the channel section of [`docs/contract.md`](docs/contract.md).
 A launch may also set the **write-back item budget** — how long the settlement
 write-back allows its store's `project copy` per item it writes. The copy's
 deadline is that budget multiplied by the number of items the run projects, and
-never below the sixty-second floor every other store command is bounded by, so the
-backstop that kills an unreachable store's copy scales with the plan instead of
+never below the sixty-second floor every other store call is bounded by, so the
+backstop that cancels an unreachable store's copy scales with the plan instead of
 being outgrown by it; a copy that outlasts its deadline is reported with the
 seconds it was allowed, the item count, the per-item budget, and whether the floor
 governed. It is named by `--writeback-item-budget SECONDS`, by

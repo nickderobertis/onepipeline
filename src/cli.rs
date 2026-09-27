@@ -47,41 +47,31 @@ pub const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 600;
 /// budget at all, and every rung that names one refuses it.
 pub const DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS: NonZeroU64 = NonZeroU64::new(10).unwrap();
 
-/// The least any store command the write-back spawns is allowed, in seconds.
+/// The least any store call the write-back makes is allowed, in seconds.
 ///
 /// The whole deadline for the reads that are not linear in plan size — the
 /// project and each page of its tasks — and the floor under the copy's, which
 /// the per-item budget lifts once a plan carries enough items to need it. A
 /// liveness backstop for an unreachable store rather than a latency target:
-/// the projection stays off the reconcile loop while the child runs.
+/// the projection stays off the reconcile loop while the call runs, and a call
+/// that outlasts its deadline is cancelled.
 pub const WRITEBACK_COMMAND_FLOOR_SECONDS: u64 = 60;
 
-/// The store commands one write-back attempt runs, and whose failures it reads the store's
-/// own class off: the project, each page of its tasks, and the copy.
+/// The store calls one write-back attempt makes, by the name each one's refusals carry:
+/// the project, each page of its tasks, and the copy.
 ///
-/// Any one of them answering [`WRITEBACK_REFUSED_CLASS`] makes the whole attempt refused,
-/// because a projection needs all three.
+/// Each one's failure is classified by its own type — the store's `EngineError` and
+/// `SourceError`, through the store's own classifier — and any one of them classed
+/// [`WRITEBACK_REFUSED_CLASS`] makes the whole attempt refused, because a projection needs
+/// all three.
 pub const WRITEBACK_CLASSIFIED_COMMANDS: [&str; 3] = ["project-show", "task-list", "project-copy"];
-
-/// The member of a store's failure document the write-back branches on, as a path.
-pub const WRITEBACK_FAILURE_CLASS_MEMBER: &str = "failure.class";
-
-/// The member of each entry of a store's partial answer the write-back reads, as a path.
-pub const WRITEBACK_PARTIAL_CLASS_MEMBER: &str = "errors[].class";
 
 /// The class that stops the write-back's retry timer: a failure asking again cannot change.
 ///
 /// A projection refused under it is reported once and attempted again only when a snapshot
-/// different from the refused one is published. Every other failure — another class, or no
+/// different from the refused one is published. Every other failure — `transient`, or no
 /// class at all — keeps the growing retry schedule.
 pub const WRITEBACK_REFUSED_CLASS: &str = "refused";
-
-/// The exit status a store command writes its failure document under.
-pub const WRITEBACK_FAILURE_EXIT: i32 = 1;
-
-/// The exit status a store command writes a partial answer under. Refused only where every
-/// entry of its `errors` carries [`WRITEBACK_REFUSED_CLASS`].
-pub const WRITEBACK_PARTIAL_EXIT: i32 = 4;
 
 /// The file, in a run's directory, each write-back projection attempt is appended to as one
 /// JSON object per line and never rewritten. Its shape is
@@ -96,26 +86,10 @@ pub const WRITEBACK_PROJECTIONS_FILE: &str = "writeback-projections.jsonl";
 /// line naming `actions.reopened`, and any version this build has never written, are refused.
 pub const WRITEBACK_PROJECTIONS_SCHEMA_VERSION: u32 = 3;
 
-/// The file, in a run's directory, holding whether the store offers a member copy — decided
-/// once per run, before its first projection, and read by every later driver of the run.
-pub const WRITEBACK_STORE_FILE: &str = "writeback-store.json";
-
-/// The first `onetaskgraph` release whose `project copy` takes `--member` and whose copy
-/// report carries `spent`. A store reporting an older version is projected whole.
-pub const WRITEBACK_MEMBERS_FROM: &str = "0.2.30";
-
-/// The first `onetaskgraph` release whose status vocabulary carries `queued` and whose tasks
-/// carry `delivers`, re-evaluating each delivered task on every write of its deliverer.
-///
-/// Against a store reporting an older version, a node the run has not started is written
-/// `todo`, the shadow task carries no `delivers`, and a plan whose tasks deliver tickets is
-/// told once why they are not moved.
-pub const WRITEBACK_DELIVERS_FROM: &str = "0.2.32";
-
-/// The store command a member projection reads one named member's destination item with,
-/// by the name its capture files and refusals carry. It stands in for
-/// [`WRITEBACK_CLASSIFIED_COMMANDS`]' page of tasks, which a member projection never reads,
-/// and its failures are classified by the same rule.
+/// The store call a member projection reads one named member's destination item with, by
+/// the name its refusals carry. It stands in for [`WRITEBACK_CLASSIFIED_COMMANDS`]' page of
+/// tasks, which a member projection never reads, and its failures are classified by the same
+/// rule.
 pub const WRITEBACK_MEMBER_READ: &str = "task-show";
 
 /// The environment variable naming the write-back's per-item budget, in seconds.

@@ -807,17 +807,6 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
             .to_owned()
     }
 
-    /// The onetaskgraph release this tree pins, read the way `tests/provisioning.rs`
-    /// reads it.
-    fn pinned_onetaskgraph() -> String {
-        include_str!("../justfile")
-            .lines()
-            .find_map(|line| line.strip_prefix("onetaskgraph-version := \""))
-            .and_then(|rest| rest.strip_suffix('"'))
-            .expect("the justfile names the onetaskgraph release")
-            .to_owned()
-    }
-
     /// The capture-command runs under the shell the reusable workflow gives it,
     /// which is `sh` and not bash.
     ///
@@ -854,21 +843,16 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
         let channel = pinned_channel();
         assert_eq!(
             reached(&root),
-            format!(
-                "install-freeze {channel}\n\
-                 cargo install onetaskgraph --locked --version {}\n\
-                 capture {channel}\n",
-                pinned_onetaskgraph()
-            ),
+            format!("install-freeze {channel}\ncapture {channel}\n"),
             "the capture-command reached the wrong work, or reached it carrying the wrong \
-             derived version: both guards accept what this tree pins, so what follows them \
-             is the pinned toolchain exported and the pinned release installed."
+             derived version: the guard accepts what this tree pins, so what follows it is \
+             the pinned toolchain exported — and no store binary installed, since the \
+             engine links the store."
         );
     }
 
-    /// Both guards still refuse a channel or a release that is not exactly one
-    /// line naming an exact version, and refuse it before the work it would have
-    /// been used for.
+    /// The guard still refuses a channel that is not exactly one line naming an
+    /// exact version, and refuses it before the work it would have been used for.
     ///
     /// The refusals are the reason the guards exist and they are the half a
     /// rewrite for another shell can quietly drop, so each is driven under that
@@ -925,38 +909,5 @@ print("remaining", sorted(n for n in os.environ if n.startswith("GIT_")))
             "the capture-command refused the doubled channel without showing both:\n{said}"
         );
         assert_eq!(reached(&root), "", "work was spent on a doubled channel");
-
-        // The second guard, reached only once the first has passed: the release
-        // named twice, refused before `cargo install` picks one of the two.
-        let (_release, root) = scratch("capture-command-release-twice");
-        let release = pinned_onetaskgraph();
-        capture_command_tree(
-            &root,
-            real_toolchain,
-            &real_justfile.replace(
-                &format!("onetaskgraph-version := \"{release}\""),
-                &format!(
-                    "onetaskgraph-version := \"{release}\"\nonetaskgraph-version := \"0.1.0\""
-                ),
-            ),
-        );
-        let done = run_capture_command(&root);
-        let said = String::from_utf8_lossy(&done.stderr).into_owned();
-        assert_eq!(
-            done.status.code(),
-            Some(1),
-            "a justfile naming the onetaskgraph release twice was accepted:\n{said}"
-        );
-        assert!(
-            said.contains(&format!("{release}\n0.1.0")),
-            "the capture-command refused the doubled release without showing both:\n{said}"
-        );
-        assert_eq!(
-            reached(&root),
-            format!("install-freeze {}\n", pinned_channel()),
-            "the second guard answered somewhere other than between the renderer's \
-             installer and `cargo install`, so either it ran before the first guard's \
-             value was used or the release reached `cargo` anyway"
-        );
     }
 }

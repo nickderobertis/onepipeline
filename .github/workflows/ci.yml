@@ -233,11 +233,6 @@ jobs:
       # The journey's own refusal names GH_TOKEN, the variable; a red job needs
       # the name of the secret to go set. Given a presence signal rather than the
       # PAT itself — nothing here needs the value.
-      # The store every plan in the suite is read out of. This job does not run
-      # `just bootstrap` — it needs none of the rest of it — so it provisions the
-      # one binary the journeys cannot run without, through the same recipe.
-      - name: The onetaskgraph every plan is read through
-        run: just _ensure-onetaskgraph
       - name: The smoke's credential is present
         env:
           HAS_CREDENTIAL: ${{ secrets.RELEASE_PLZ_TOKEN != '' }}
@@ -294,10 +289,6 @@ jobs:
         with:
           tool: just,nextest
       - uses: astral-sh/setup-uv@v6
-      # The store every world reads its plan through; this job runs no
-      # `just bootstrap`, so it provisions that one binary as `smoke` does.
-      - name: The onetaskgraph every plan is read through
-        run: just _ensure-onetaskgraph
       - name: The 0.28.2 wheel against this build
         run: just release-compat
   # llmlint: ignore-end[live_tier_compiles_and_requires_credential]
