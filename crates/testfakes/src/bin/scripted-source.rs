@@ -57,7 +57,10 @@
 //!   serves adds to its running total, which is what it answers `metering` with: a source
 //!   that meters its own requests, as a hosted one does, so a copy's `spent` is the store's
 //!   own figure rather than one a journey wrote into a report. Read when the source starts,
-//!   because a source says in its handshake whether it meters.
+//!   because a source says in its handshake whether it meters. Every request it charges is
+//!   also appended to `<key>.charged.jsonl` as `{"method": <method>, "spent": <Metering>}` —
+//!   the meter's own account across every connection, which a running total dies with — so
+//!   a journey sums what a whole run spent off what the source charged, not off a report.
 //!
 //! Every call is recorded into the directory's `invocations.jsonl` as
 //! `{"tool": <key>, "args": [<method>, <the id it names, where it names one>]}`, the
@@ -356,6 +359,8 @@ impl Scripted {
         if answered.contains_key("result") {
             if let Some(each) = metering(&metered)? {
                 self.spend(&each);
+                let charged = json!({"method": method, "spent": each}).to_string();
+                fake::append(&self.scenario("charged.jsonl"), &charged);
             }
         }
         Ok(Value::Object(answered))
