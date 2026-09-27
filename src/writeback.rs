@@ -577,6 +577,10 @@ impl Classified {
     /// [`onetaskgraph_core::FailureClass`]: a value of the store's type written by the store's
     /// serialiser, never a document parsed off a process. A failure that does not carry a
     /// class this build reads leaves the entry unclassified, and so on the retry schedule.
+    ///
+    /// Temporary: the `Failure::class()` and `Failure::kind()` accessors onetaskgraph merged
+    /// in nickderobertis/onetaskgraph#2645 replace this read, and the serialised form with it,
+    /// once a release carries them.
     fn of_delivery_until_failure_publishes_its_class(failure: &Failure) -> Option<Self> {
         let written = serde_json::to_value(failure).ok()?;
         let class: onetaskgraph_core::FailureClass =
