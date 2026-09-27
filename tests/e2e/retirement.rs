@@ -983,6 +983,54 @@ fn the_backfill_verb_answers_and_records_from_the_journal_alone() {
         format!("{whole}{{ not json\n"),
         "a refused --record wrote to the journal"
     );
+    // A record whose landing is neither a commit nor a change request's URL counts
+    // for nothing, though every other field of it reads: its pair is asked of
+    // `onevcs` again, which records a supersession once however often it is told.
+    let recorded = format!("\"landing\":\"{landing}\"");
+    let forged: String = whole
+        .lines()
+        .map(|line| {
+            if line.contains("\"kind\":\"branches-superseded\"") {
+                assert!(line.contains(&recorded), "{line}");
+                format!(
+                    "{}\n",
+                    line.replace(&recorded, "\"landing\":\"not a landing\"")
+                )
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect();
+    assert_ne!(forged, whole, "no branches-superseded record was forged");
+    std::fs::write(&journal, &forged).expect("a landing is forged");
+    let unreadable = "a branches-superseded record in this run's journal could not be read \
+                      (\"not a landing\" is neither a commit's object name nor a change \
+                      request's URL); what it names is asked of onevcs again";
+    world
+        .run(&["supersessions", run])
+        .exited(0)
+        .out_has(&format!(
+            "superseded svc on {FIRST}: to record: run again with --record"
+        ))
+        .err_has(unreadable);
+    world
+        .run(&["supersessions", run, "--record"])
+        .exited(0)
+        .out_has(&format!("superseded svc on {FIRST}: recorded"))
+        .err_has(unreadable);
+    let records = superseded(&world, run);
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(records[1]["payload"]["landing"], landing);
+    assert_eq!(
+        records[1]["payload"]["superseded"],
+        json!([{"node": "svc", "branch": FIRST}])
+    );
+    assert_eq!(classified(&world, FIRST)["class"], "retirable");
+    world
+        .run(&["supersessions", run, "--record"])
+        .exited(0)
+        .out_has(&format!("superseded svc on {FIRST}: already recorded"));
+    assert_eq!(superseded(&world, run).len(), 2);
     std::fs::write(&journal, "{ not json\n").expect("an unreadable journal is written");
     for args in [
         &["supersessions", run][..],

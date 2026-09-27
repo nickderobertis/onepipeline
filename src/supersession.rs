@@ -182,12 +182,6 @@ pub(crate) type RecordedPair = (String, String, Attempt);
 /// A record that does not read as one is said so on stderr and counts for
 /// nothing, so its pairs are asked of `onevcs` again — which records a
 /// supersession once however often it is told.
-// llmlint: ignore-block[changed_behavior_has_e2e] no entry point of this build writes an
-// unreadable record — every `branches-superseded` is serialized by `journal` from the typed
-// payload — so a journey reaches the arm only by editing the journal by hand, which is the
-// state it stands for: a record a person edited or another build wrote.
-// `tests::an_unreadable_record_counts_for_nothing_and_a_readable_one_for_its_head` drives
-// this reader over both.
 pub(crate) fn recorded_in(events: &[Envelope]) -> BTreeSet<RecordedPair> {
     events
         .iter()
@@ -228,7 +222,6 @@ pub(crate) fn recorded_in(events: &[Envelope]) -> BTreeSet<RecordedPair> {
         })
         .collect()
 }
-// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Record each of `attempts` as superseded by `lineage`'s landing, and say what
 /// `onevcs` answered for each.
