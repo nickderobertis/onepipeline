@@ -233,13 +233,6 @@ fn dispatched(world: &World, case: &str, branch: Option<&str>) -> (Value, Value)
     (world.run_json(case, "result.json"), opened(world, case))
 }
 
-/// The labels the sibling's own record of session `token` carries, as `onevcs
-/// session holders --json` reports them — the read a host's listing of whose
-/// sessions and branches these are makes, rather than this crate's journal.
-fn labels_of(world: &World, token: &str) -> Value {
-    holder_of(world, token)["labels"].clone()
-}
-
 /// The sibling's own `session holders --json` row for session `token`.
 fn holder_of(world: &World, token: &str) -> Value {
     let printed = onevcs(world, &["session", "holders", "service", "--json"]);
@@ -254,12 +247,41 @@ fn holder_of(world: &World, token: &str) -> Value {
         .unwrap_or_else(|| panic!("no holder of `service` is session {token}: {printed}"))
 }
 
-/// The token of the session a run's node opened, off the sibling's own record.
-fn token_of(world: &World, run: &str) -> String {
-    opened(world, run)["payload"]["token"]
-        .as_str()
-        .unwrap_or_else(|| panic!("run {run} opened no session\n{}", why(world, run)))
-        .to_owned()
+/// Launch run `case` detached with its one node held inside its dispatch, read the
+/// sibling's `session holders --json` row for the session that node opened **while
+/// it is working**, then let it go and answer the run's result once it settles,
+/// with that row.
+///
+/// Read in flight because that is the only time the row is there to read once the
+/// work lands: `onevcs` retires a landed branch as its session closes, and a closed
+/// session whose run root is gone is spent — nobody is left to answer for it — so
+/// the holders listing no longer names it.
+fn held_in_flight(world: &World, case: &str, node: Value) -> (Value, Value) {
+    let key = node["id"].as_str().expect("the node has an id").to_owned();
+    world.script(&format!("{key}.wait"), "hold");
+    let path = world.plan(case, &plan_of(case, vec![node]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    // The token off the `session-opened` this crate writes as the dispatch starts,
+    // which is on the journal while the node works; the sibling's own is relayed
+    // off its stream later.
+    let token = |world: &World| {
+        world
+            .events_of(case, "session-opened")
+            .into_iter()
+            .rev()
+            .find_map(|event| event["payload"]["token"].as_str().map(str::to_owned))
+    };
+    world.until(&format!("{case}'s session to be a holder"), |world| {
+        token(world).is_some_and(|token| {
+            onevcs(world, &["session", "holders", "service", "--json"]).contains(&token)
+        })
+    });
+    let holder = holder_of(world, &token(world).expect("a token"));
+    world.release(&format!("{key}.go"));
+    world.until("the run to settle", |world| {
+        world.run_file(case, "result.json").is_file()
+    });
+    (world.run_json(case, "result.json"), holder)
 }
 
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey lives
@@ -279,7 +301,8 @@ fn a_nodes_session_names_its_run_its_node_and_the_session_that_launched_it() {
     let world = World::new("session-labels");
     let _repo = world.repository("local-direct", &[]);
 
-    let (settled, _) = dispatched(&world, "labelled", None);
+    world.script("labelled.work", "labelled wrote this\n");
+    let (settled, holder) = held_in_flight(&world, "labelled", lifecycle("labelled", &[]));
     assert_eq!(
         settled["nodes"][0]["status"],
         "done",
@@ -287,7 +310,7 @@ fn a_nodes_session_names_its_run_its_node_and_the_session_that_launched_it() {
         why(&world, "labelled")
     );
     assert_eq!(
-        labels_of(&world, &token_of(&world, "labelled")),
+        holder["labels"],
         json!({"run": "labelled", "node": "labelled", "launcher": world.session}),
         "the fresh session does not say which run, node and launch opened it"
     );
@@ -296,19 +319,13 @@ fn a_nodes_session_names_its_run_its_node_and_the_session_that_launched_it() {
     world.script("pooled.work", "pooled wrote this\n");
     let mut pooled = lifecycle("pooled", &[]);
     pooled["pool"] = json!(1);
-    let path = world.plan("pooled", &plan_of("pooled", vec![pooled]));
-    world.run(&["start", &path, "--attach"]).settled();
-    world.until("the pooled run to settle", |world| {
-        world.run_file("pooled", "result.json").is_file()
-    });
-    let settled = world.run_json("pooled", "result.json");
+    let (settled, slot) = held_in_flight(&world, "pooled", pooled);
     assert_eq!(
         settled["nodes"][0]["status"],
         "done",
         "{settled}\n{}",
         why(&world, "pooled")
     );
-    let slot = holder_of(&world, &token_of(&world, "pooled"));
     assert!(
         Path::new(slot["worktree"].as_str().unwrap_or_default())
             .components()
@@ -327,7 +344,8 @@ fn a_nodes_session_names_its_run_its_node_and_the_session_that_launched_it() {
     let anonymous = world
         .as_session("ignored")
         .with_env("ONEPIPELINE_LAUNCHER_SESSION", "");
-    let (settled, _) = dispatched(&anonymous, "anonymous", None);
+    anonymous.script("anonymous.work", "anonymous wrote this\n");
+    let (settled, holder) = held_in_flight(&anonymous, "anonymous", lifecycle("anonymous", &[]));
     assert_eq!(
         settled["nodes"][0]["status"],
         "done",
@@ -335,26 +353,35 @@ fn a_nodes_session_names_its_run_its_node_and_the_session_that_launched_it() {
         why(&world, "anonymous")
     );
     assert_eq!(
-        labels_of(&world, &token_of(&world, "anonymous")),
+        holder["labels"],
         json!({"run": "anonymous", "node": "anonymous"}),
         "a launch nothing attributed stamped a launcher on its node's session"
     );
 
     // And nothing else opened one: the observer graph works in no session, so every
-    // session on the identity is one of the three nodes' own.
-    let printed = onevcs(&world, &["session", "holders", "service", "--json"]);
-    let held: Value = serde_json::from_str(printed.trim()).expect("holders print JSON");
-    let mut nodes: Vec<&str> = held
-        .as_array()
+    // session the sibling opened on the identity is one of the three nodes' own —
+    // read off the openings it recorded on its own streams, which outlive the
+    // sessions' records being spent.
+    let mut nodes: Vec<String> = ["labelled", "pooled", "anonymous"]
         .into_iter()
-        .flatten()
-        .map(|row| row["labels"]["node"].as_str().unwrap_or("<unlabelled>"))
+        .flat_map(|run| world.journal(run))
+        .filter(|event| {
+            event["source"] == "vcs"
+                && event["kind"] == "session-opened"
+                && event["payload"]["clone"].is_string()
+        })
+        .map(|event| {
+            event["labels"]["node"]
+                .as_str()
+                .unwrap_or("<unlabelled>")
+                .to_owned()
+        })
         .collect();
     nodes.sort_unstable();
     assert_eq!(
         nodes,
         ["anonymous", "labelled", "pooled"],
-        "a session opened for something other than a node: {printed}"
+        "a session opened for something other than a node"
     );
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
@@ -653,13 +680,7 @@ fn a_retry_lands_the_work_a_stopped_run_left_on_the_branch_it_pinned() {
     world.script("continuation.work", "and then the worker wrote this\n");
     let mut retry = lifecycle("continuation", &[]);
     retry["branch"] = json!(STRANDED);
-    let path = world.plan("retry", &plan_of("retry", vec![retry]));
-    world.run(&["start", &path, "--attach"]).settled();
-    world.until("the retry to settle", |world| {
-        world.run_file("retry", "result.json").is_file()
-    });
-
-    let result = world.run_json("retry", "result.json");
+    let (result, holder) = held_in_flight(&world, "retry", retry);
     assert_eq!(
         result["nodes"][0]["status"],
         "done",
@@ -688,7 +709,7 @@ fn a_retry_lands_the_work_a_stopped_run_left_on_the_branch_it_pinned() {
     // Whichever way the sibling reached it, the session the retry worked in says
     // it is the retry's — its run and its node — and not the stopped run's.
     assert_eq!(
-        labels_of(&world, &token_of(&world, "retry")),
+        holder["labels"],
         json!({"run": "retry", "node": "continuation", "launcher": world.session}),
         "the retry's session does not name the retried node"
     );
