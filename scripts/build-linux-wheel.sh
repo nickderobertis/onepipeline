@@ -61,13 +61,16 @@ case "$target" in
   *) fail_usage "no manylinux build is defined for $target" ;;
 esac
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)" \
+  || fail "cannot resolve the repository root from ${BASH_SOURCE[0]}" \
+    "run this from a checkout whose directories are readable"
 # Resolved through any symlink, because the container sees only the checkout: a
 # path that leaves it would be written somewhere the host never looks.
 case "$out" in
   /*) fail_usage "--out $out is absolute; name a directory relative to the repository root" ;;
 esac
-out_abs="$(realpath -m -- "$root/$out")"
+out_abs="$(realpath -m -- "$root/$out")" \
+  || fail_usage "--out $out does not resolve to a path under $root"
 case "$out_abs" in
   "$root"/?*) ;;
   *) fail_usage "--out $out resolves to $out_abs, outside the repository at $root" ;;
@@ -78,10 +81,12 @@ command -v docker >/dev/null \
   || fail "docker not found: the wheel is built inside the release's manylinux image" \
     "install Docker, then re-run"
 
+# Exactly one exact release, which is how rust-toolchain.toml pins it; anything
+# else would reach rustup as whatever the line happened to hold.
 channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$root/rust-toolchain.toml")"
-[ -n "$channel" ] \
-  || fail "no toolchain channel in $root/rust-toolchain.toml" \
-    "restore its [toolchain] channel = \"<version>\" line"
+[[ "$channel" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+  || fail "rust-toolchain.toml's channel is '$channel', not one exact release" \
+    "restore its single [toolchain] channel = \"<major>.<minor>.<patch>\" line"
 
 # The image maturin-action's `manylinux: auto` selected for these targets on the
 # release's native runners, and the maturin every release leg pins —
@@ -96,9 +101,10 @@ mkdir -p -- "$out_abs" "$root/$cargo_target" \
   || fail "could not create $out_abs and $root/$cargo_target" \
     "make both writable by $(id -un), or pass another --out"
 
-# Runs in the container. The EXIT trap hands the build's files back whatever the
-# build did, and a hand-back that fails fails the run: a checkout left with
-# root-owned files breaks the next build on this host.
+# Runs in the container, from the checkout's root, and names nothing outside
+# the image's PATH and the checkout. The EXIT trap hands the build's files back
+# whatever the build did, and a hand-back that fails fails the run: a checkout
+# left with root-owned files breaks the next build on this host.
 read -r -d '' inside <<'SCRIPT' || true
 step="" action=""
 at() { step="$1" action="$2"; }
@@ -108,8 +114,8 @@ give_back() {
     echo "the build stopped $step" >&2
     echo "ACTION: $action" >&2
   fi
-  if ! chown -R "$HOST_OWNER" "$CARGO_TARGET_DIR" "/io/$OUT"; then
-    echo "could not return $CARGO_TARGET_DIR and /io/$OUT to $HOST_OWNER" >&2
+  if ! chown -R "$HOST_OWNER" "$CARGO_TARGET_DIR" "$OUT"; then
+    echo "could not return $CARGO_TARGET_DIR and $OUT to $HOST_OWNER" >&2
     echo "ACTION: chown -R $HOST_OWNER them from a root container, as this build does, before building here again" >&2
     [ "$status" -ne 0 ] || status=1
   fi
@@ -127,10 +133,10 @@ at "installing Rust $CHANNEL for $TARGET" \
   "check that $CHANNEL, rust-toolchain.toml's channel, is a published release, then re-run"
 rustup toolchain install "$CHANNEL" --profile minimal --target "$TARGET"
 at "installing maturin $MATURIN_VERSION" "check that PyPI serves maturin $MATURIN_VERSION, then re-run"
-/opt/python/cp312-cp312/bin/python -m pip install -q "maturin==$MATURIN_VERSION"
+python3.12 -m pip install -q "maturin==$MATURIN_VERSION"
 at "compiling the wheel" \
   "fix the compile error above; 'just wheel-linux $TARGET' reproduces it in this image"
-/opt/python/cp312-cp312/bin/maturin build --release --locked \
+python3.12 -m maturin build --release --locked \
   --target "$TARGET" --compatibility manylinux2014 --out "$OUT"
 SCRIPT
 
@@ -138,7 +144,7 @@ docker run --rm --platform "$platform" \
   -v "$root":/io -w /io \
   -e TARGET="$target" -e OUT="$out_rel" -e CHANNEL="$channel" -e MATURIN_VERSION="$maturin_version" \
   -e HOST_OWNER="$(id -u):$(id -g)" \
-  -e CARGO_TARGET_DIR="/io/$cargo_target" \
+  -e CARGO_TARGET_DIR="$cargo_target" \
   -e CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-auto}" \
   -e RUSTFLAGS="-D warnings" \
   "$image" bash -euo pipefail -c "$inside" \

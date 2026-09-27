@@ -1,13 +1,15 @@
 //! The one Linux wheel build, `scripts/build-linux-wheel.sh`, driven as `just
 //! wheel-linux` drives it.
 //!
-//! What is substituted is `docker`, and only it: a double stood first on PATH
-//! records the invocation and answers with the exit status a scenario names.
-//! The real build — an image pull, a toolchain and a release compile — is
-//! minutes of network-bound work, so it is proven where it runs, by ci.yml's
-//! `wheel` legs and release.yml's `build-wheels`; what these hold is everything
-//! the script decides before and after handing over to the container, and that
-//! the container it hands over to is the one each workflow means.
+//! What is substituted is `docker` and the image's tools: a double stood first
+//! on PATH records the invocation, then either answers with an exit status or
+//! runs the build's in-container script as the image would, against recording
+//! doubles of `yum`, `rustup`, `python3.12` and the rest. The real build — an
+//! image pull, a toolchain and a release compile — is minutes of network-bound
+//! work, so it is proven where it runs, by ci.yml's `wheel` legs and
+//! release.yml's `build-wheels`; what these hold is every decision the script
+//! makes around those tools, and that the container it hands over to is the one
+//! each workflow means.
 //!
 //! The two workflows are read as the source of truth rather than restated:
 //! every Linux target release.yml's `build-wheels` matrix builds is built here,
@@ -56,6 +58,67 @@ fn docker_double(dir: &Path, status: i32) {
             dir.join("docker.log").display()
         ),
     );
+}
+
+/// A `docker` that records its arguments as [`docker_double`] does, then runs the
+/// build's in-container script as the image would — from the mounted checkout,
+/// with the `-e` environment it was given — except that the image's tools are
+/// doubles that record each call to `container.log` and succeed, bar the one
+/// whose call begins with `fail_at`, which exits 1. Nothing on the host's PATH is
+/// reachable from it, so no real `rustup` or `yum` can answer instead.
+fn container_double(dir: &Path, fail_at: Option<&str>) {
+    let bash = std::env::split_paths(&std::env::var_os("PATH").expect("the host has a PATH"))
+        .map(|candidate| candidate.join("bash"))
+        .find(|candidate| candidate.is_file())
+        .expect("bash is on this host's PATH");
+    let bash = bash.display();
+    let fail_at = fail_at.unwrap_or("no call begins with this");
+    let log = dir.join("container.log");
+    let log = log.display();
+    fs::create_dir_all(dir.join("container-bin")).expect("the image's tool directory");
+    for tool in ["yum", "curl", "sh", "rustup", "python3.12", "chown"] {
+        executable(
+            &dir.join("container-bin").join(tool),
+            format!(
+                "#!{bash}\ncall=\"{tool} $*\"\nprintf '%s\\n' \"$call\" >> '{log}'\n\
+                 [[ \"$call\" != '{fail_at}'* ]] || exit 1\n"
+            ),
+        );
+    }
+    executable(
+        &dir.join("bin/docker"),
+        format!(
+            "#!{bash}\nprintf '%s\\n' \"$@\" > '{docker_log}'\nenvs=()\n\
+             while [ $# -gt 0 ]; do\n  case \"$1\" in\n\
+             -e) envs+=(\"$2\"); shift 2 ;;\n\
+             -v) mount=\"${{2%%:*}}\"; shift 2 ;;\n\
+             -c) script=\"$2\"; shift 2 ;;\n\
+             *) shift ;;\n  esac\ndone\ncd \"$mount\"\n\
+             exec env -i HOME='{home}' PATH='{bin}' \"${{envs[@]}}\" '{bash}' -euo pipefail -c \"$script\"\n",
+            docker_log = dir.join("docker.log").display(),
+            home = dir.join("home").display(),
+            bin = dir.join("container-bin").display(),
+        ),
+    );
+}
+
+fn container_calls(dir: &Path) -> Vec<String> {
+    fs::read_to_string(dir.join("container.log"))
+        .expect("the container ran its tools")
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn host_owner() -> String {
+    let id = |flag: &str| {
+        let output = Command::new("id").arg(flag).output().expect("id runs");
+        String::from_utf8(output.stdout)
+            .expect("id prints text")
+            .trim()
+            .to_string()
+    };
+    format!("{}:{}", id("-u"), id("-g"))
 }
 
 fn run(dir: &Path, path: &std::ffi::OsStr, args: &[&str]) -> Output {
@@ -165,7 +228,7 @@ fn release_maturin_version() -> String {
 }
 
 #[test]
-fn every_linux_target_the_release_builds_is_built_in_its_own_manylinux_image() {
+fn every_linux_target_the_release_builds_is_handed_to_its_own_manylinux_image() {
     let targets = release_linux_targets();
     assert_eq!(
         targets,
@@ -175,7 +238,7 @@ fn every_linux_target_the_release_builds_is_built_in_its_own_manylinux_image() {
     let maturin = release_maturin_version();
     for target in &targets {
         let (_scratch, dir) = scratch(target);
-        docker_double(&dir, 0);
+        container_double(&dir, None);
         let out = out_arg(&dir);
         let output = run(&dir, &path_with_double(&dir), &[target, &out]);
         assert!(output.status.success(), "{target}: the build succeeds");
@@ -190,7 +253,6 @@ fn every_linux_target_the_release_builds_is_built_in_its_own_manylinux_image() {
         for expected in [
             platform,
             &format!("quay.io/pypa/manylinux2014_{arch}")[..],
-            &format!("TARGET={target}")[..],
             &format!("MATURIN_VERSION={maturin}")[..],
             "RUSTFLAGS=-D warnings",
         ] {
@@ -199,15 +261,81 @@ fn every_linux_target_the_release_builds_is_built_in_its_own_manylinux_image() {
                 "{target}: docker got {expected}; it got {args:?}"
             );
         }
-        assert!(
-            invocation.contains("yum install -y -q perl-IPC-Cmd perl-Time-Piece"),
-            "{target}: the container installs OpenSSL's Perl prerequisites"
-        );
+        let calls = container_calls(&dir);
+        let cargo_target = format!("target/wheel-{target}");
+        for expected in [
+            "yum install -y -q perl-IPC-Cmd perl-Time-Piece".to_string(),
+            format!("python3.12 -m pip install -q maturin=={maturin}"),
+            format!(
+                "python3.12 -m maturin build --release --locked --target {target} \
+                 --compatibility manylinux2014 --out {out}"
+            ),
+            format!("chown -R {} {cargo_target} {out}", host_owner()),
+        ] {
+            assert!(
+                calls.contains(&expected),
+                "{target}: the container ran `{expected}`; it ran {calls:?}"
+            );
+        }
         assert!(
             String::from_utf8_lossy(&output.stdout).contains(&format!("built the {target} wheel")),
             "{target}: success names the wheel it built"
         );
     }
+}
+
+#[test]
+fn a_container_step_that_fails_is_named_with_its_action_and_its_files_are_still_handed_back() {
+    for (fail_at, step, action) in [
+        (
+            "yum",
+            "installing OpenSSL's Perl prerequisites with yum",
+            "check that the image's yum repositories answer",
+        ),
+        (
+            "python3.12 -m maturin",
+            "compiling the wheel",
+            "fix the compile error above; 'just wheel-linux x86_64-unknown-linux-gnu' reproduces it",
+        ),
+    ] {
+        let (_scratch, dir) = scratch("failed-step");
+        container_double(&dir, Some(fail_at));
+        let out = out_arg(&dir);
+        let output = run(
+            &dir,
+            &path_with_double(&dir),
+            &["x86_64-unknown-linux-gnu", &out],
+        );
+        assert_eq!(output.status.code(), Some(1), "{fail_at}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(&format!("the build stopped {step}")), "{stderr}");
+        assert!(stderr.contains(&format!("ACTION: {action}")), "{stderr}");
+        let calls = container_calls(&dir);
+        assert!(
+            calls.last().is_some_and(|call| call.starts_with("chown -R ")),
+            "{fail_at}: the files are handed back after the failure; the container ran {calls:?}"
+        );
+    }
+}
+
+#[test]
+fn a_hand_back_that_fails_fails_a_build_that_compiled() {
+    let (_scratch, dir) = scratch("failed-hand-back");
+    container_double(&dir, Some("chown"));
+    let out = out_arg(&dir);
+    let output = run(
+        &dir,
+        &path_with_double(&dir),
+        &["x86_64-unknown-linux-gnu", &out],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("could not return target/wheel-x86_64-unknown-linux-gnu"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("ACTION: chown -R "), "{stderr}");
+    assert!(!stderr.contains("the build stopped"), "{stderr}");
 }
 
 #[test]
@@ -291,7 +419,7 @@ fn an_out_directory_that_leaves_the_checkout_through_a_symlink_is_refused() {
 }
 
 #[test]
-fn a_build_that_fails_in_the_container_exits_one_naming_the_image() {
+fn docker_that_cannot_run_the_image_exits_one_naming_it() {
     let (_scratch, dir) = scratch("failed-build");
     docker_double(&dir, 101);
     let output = run(&dir, &path_with_double(&dir), &["x86_64-unknown-linux-gnu"]);
@@ -351,7 +479,7 @@ fn an_absolute_out_directory_is_refused() {
 /// which is `nx.json`'s `crateSource`; a wheel-build input missing from it is a
 /// pull request that changes the build and never runs it.
 #[test]
-fn a_change_to_what_the_wheel_build_reads_selects_the_wheel_check() {
+fn the_wheel_check_is_gated_on_inputs_carrying_everything_its_build_reads() {
     let block = job_block("ci.yml", "wheel");
     assert!(
         block.contains("if: needs.changes.outputs.crate == 'true'"),
