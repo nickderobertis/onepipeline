@@ -7397,7 +7397,7 @@ stream's closed list of this library's own kinds, which gains the two below; the
 pool-maintenance paragraph, which gains the pass; and the post-launch verbs paragraph,
 which gains the verb and its function. `docs/contract.md` is unchanged until that ruling.
 
-`onevcs` 0.34.0 carries branch retirement: `record_supersession(&Supersession)` and
+`onevcs` 0.34.1 carries branch retirement: `record_supersession(&Supersession)` and
 `retire_finished(&Providers, &RetirePass) -> RetirementPassReport`, with `BranchRef` naming
 what a pass leaves alone. That library chains the sessions cut onto one branch itself, so
 an earlier attempt on the **same** branch as the retry that landed needs nothing more. An

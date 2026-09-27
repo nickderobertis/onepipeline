@@ -565,9 +565,13 @@ resolver = "2"
 # `pool_maintain`. It also adds the `branch-superseded` and `branch-retired` stream
 # kinds, which `src/vcs.rs`'s `kind_of` relays as that library spells them, and
 # `LandingEvidence::Retired`, which nothing here matches arm by arm. A
-# **requirement**, because `^0.33` admits no 0.34.x; `onevcs-testing` 0.8.4
-# requires exactly it, so the two move together. `tests/e2e/retirement.rs` drives
+# **requirement**, because `^0.33` admits no 0.34.x. `tests/e2e/retirement.rs` drives
 # both calls against the linked release over real git and a bare origin.
+#
+# `onevcs` 0.34.1 is the floor after it: the release `ov-branch-retirement` was
+# published as, and the one this engine's release hold names. Its library is the
+# 0.34.0 source unchanged, so nothing here changed with it. `onevcs-testing` 0.8.5
+# is the release that requires exactly `^0.34.1`, so the two move together.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
@@ -589,7 +593,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.2"
-onevcs = "0.34.0"
+onevcs = "0.34.1"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -754,7 +758,7 @@ oneharness-core = "0.18.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.8.4"
+onevcs-testing = "0.8.5"
 # **Test-support only**, and linked by `crates/testfakes` alone: the crate under test
 # still reads every plan by *driving* the `onetaskgraph` binary. These host the real
 # `local-md` plugin inside `label-strict-source`; that fake says why.
