@@ -213,11 +213,11 @@ fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
         "agent_graph": "node-override.yaml",
         "sets": [format!("members.worker.oneharness_config={selected}")],
         "steps": [
-            {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
+            {"id": "implement", "persona": "engineer", "task": "## What\nimplement\n\n## Acceptance criteria\n- It is done."},
             {
                 "id": "review",
                 "persona": "reviewer",
-                "task": "## What\nreview",
+                "task": "## What\nreview\n\n## Acceptance criteria\n- It is done.",
                 "deps": ["implement"],
                 "agent_graph": "step-override.yaml",
             },
@@ -451,7 +451,7 @@ fn a_blank_graph_reference_is_refused_before_any_path_is_read() {
             json!({
                 "id": "build",
                 "persona": "engineer",
-                "task": "## What\nbuild",
+                "task": "## What\nbuild\n\n## Acceptance criteria\n- It is done.",
                 "agent_graph": "",
             }),
         ),
@@ -505,7 +505,7 @@ fn unreadable_relative_plan_graphs_name_their_path_and_launch_base() {
             json!({
                 "id": "build",
                 "persona": "engineer",
-                "task": "## What\nbuild",
+                "task": "## What\nbuild\n\n## Acceptance criteria\n- It is done.",
                 "agent_graph": "graphs/missing-node-override.yaml",
             }),
             "graphs/missing-node-override.yaml",
@@ -519,7 +519,7 @@ fn unreadable_relative_plan_graphs_name_their_path_and_launch_base() {
                 "steps": [{
                     "id": "implement",
                     "persona": "engineer",
-                    "task": "## What\nimplement",
+                    "task": "## What\nimplement\n\n## Acceptance criteria\n- It is done.",
                     "agent_graph": "graphs/missing-step-override.yaml",
                 }],
             }),
@@ -1446,7 +1446,7 @@ fn a_drafted_body_reaches_the_change_request_through_the_real_siblings() {
         "repo": "service",
         "persona": "engineer",
         "title": "feat: land what the member made",
-        "task": "## What\nship the thing",
+        "task": "## What\nship the thing\n\n## Acceptance criteria\n- It is done.",
     });
     let path = world.plan("authored", &plan_of("authored", vec![node]));
     let launched =
@@ -1512,7 +1512,7 @@ fn a_validated_answer_carrying_no_body_publishes_the_change_request_without_one(
         "repo": "service",
         "persona": "engineer",
         "title": "feat: land it with a blank draft",
-        "task": "## What\nship the thing",
+        "task": "## What\nship the thing\n\n## Acceptance criteria\n- It is done.",
     });
     let path = world.plan("blankdraft", &plan_of("blankdraft", vec![node]));
     let launched =
@@ -1598,7 +1598,7 @@ fn a_drafting_graph_the_runner_refuses_still_publishes_the_change_request() {
         "repo": "service",
         "persona": "engineer",
         "title": "feat: land it with no body",
-        "task": "## What\nship the thing",
+        "task": "## What\nship the thing\n\n## Acceptance criteria\n- It is done.",
     });
     let path = world.plan("refuseddraft", &plan_of("refuseddraft", vec![node]));
     let launched = world.run_on_agentgraph(&[
@@ -1743,7 +1743,7 @@ fn a_worker_rewrites_what_the_base_carries(world: &World) -> crate::harness::Rep
         "repo": "service",
         "persona": "engineer",
         "title": "feat: land what the base already has",
-        "task": "## What\nship the thing",
+        "task": "## What\nship the thing\n\n## Acceptance criteria\n- It is done.",
     });
     let path = world.plan("rewritten", &plan_of("rewritten", vec![node]));
     let launched = world.run_on_agentgraph(&["start", &path, "--attach"]);
@@ -4155,7 +4155,7 @@ fn a_two_party_member_is_started_in_the_directory_the_graph_was_given() {
         "id": "service",
         "repo": "service",
         "persona": "./engineer.yaml",
-        "task": "## What\nship the thing",
+        "task": "## What\nship the thing\n\n## Acceptance criteria\n- It is done.",
         // The title its change request opens under, which a lifecycle node
         // states from plan schema 3 on.
         "title": "feat: land what the member made",
@@ -4209,7 +4209,7 @@ fn a_steps_turn_budget_reaches_that_steps_own_dispatch() {
         // states from plan schema 3 on.
         "title": "feat: land what the step made",
         "steps": [
-            {"id": "implement", "persona": "./implementer.yaml", "task": "## What\nimplement",
+            {"id": "implement", "persona": "./implementer.yaml", "task": "## What\nimplement\n\n## Acceptance criteria\n- It is done.",
              "max_turns": 45},
         ],
     });
@@ -4240,7 +4240,7 @@ fn a_node_set_takes_precedence_over_a_steps_turn_budget() {
         "id": "service", "repo": "service", "title": "feat: ship service",
         "sets": ["members.worker.max_turns=7"],
         "steps": [{"id": "implement", "persona": "./implementer.yaml",
-                   "task": "## What\nimplement", "max_turns": 45}]
+                   "task": "## What\nimplement\n\n## Acceptance criteria\n- It is done.", "max_turns": 45}]
     });
     let path = world.plan(
         "node-set-turn-budget",

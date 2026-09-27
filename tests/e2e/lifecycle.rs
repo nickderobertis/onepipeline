@@ -314,8 +314,8 @@ fn several_steps_share_one_branch_and_run_serially_in_topological_order() {
         "repo": "service",
         "title": "feat: land the workstream",
         "steps": [
-            {"id": "review", "persona": "reviewer", "task": "## What\nreview", "deps": ["implement"]},
-            {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
+            {"id": "review", "persona": "reviewer", "task": "## What\nreview\n\n## Acceptance criteria\n- It is done.", "deps": ["implement"]},
+            {"id": "implement", "persona": "engineer", "task": "## What\nimplement\n\n## Acceptance criteria\n- It is done."},
         ],
     });
     let run = settle(&world, "workstream", vec![node]);
@@ -409,8 +409,8 @@ fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
         // states from plan schema 3 on.
         "title": "feat: land what the steps made",
         "steps": [
-            {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
-            {"id": "review", "persona": "reviewer", "task": "## What\nreview", "deps": ["implement"]},
+            {"id": "implement", "persona": "engineer", "task": "## What\nimplement\n\n## Acceptance criteria\n- It is done."},
+            {"id": "review", "persona": "reviewer", "task": "## What\nreview\n\n## Acceptance criteria\n- It is done.", "deps": ["implement"]},
         ],
     });
     let path = world.plan("norecord", &plan_of("norecord", vec![node]));
@@ -529,7 +529,7 @@ fn a_human_step_holds_the_workstream_rather_than_being_inferred() {
         "repo": "service",
         "title": "feat: land the workstream",
         "steps": [
-            {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
+            {"id": "implement", "persona": "engineer", "task": "## What\nimplement\n\n## Acceptance criteria\n- It is done."},
             {"id": "staging-approval", "kind": "human", "task": "Exercise the staged service.", "deps": ["implement"]},
         ],
     });
@@ -4597,11 +4597,11 @@ fn a_step_dispatches_under_its_own_agent_graph_before_its_nodes() {
         "title": "feat: land the workstream",
         "agent_graph": node_graph.to_string_lossy(),
         "steps": [
-            {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
+            {"id": "implement", "persona": "engineer", "task": "## What\nimplement\n\n## Acceptance criteria\n- It is done."},
             {
                 "id": "review",
                 "persona": "reviewer",
-                "task": "## What\nreview",
+                "task": "## What\nreview\n\n## Acceptance criteria\n- It is done.",
                 "deps": ["implement"],
                 "agent_graph": step_graph.to_string_lossy(),
             },
@@ -4891,8 +4891,8 @@ fn a_continuation_skips_the_steps_the_preserved_branch_already_carries() {
         "repo": "service",
         "title": "feat: land the workstream",
         "steps": [
-            {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
-            {"id": "review", "persona": "reviewer", "task": "## What\nreview", "deps": ["implement"]},
+            {"id": "implement", "persona": "engineer", "task": "## What\nimplement\n\n## Acceptance criteria\n- It is done."},
+            {"id": "review", "persona": "reviewer", "task": "## What\nreview\n\n## Acceptance criteria\n- It is done.", "deps": ["implement"]},
         ],
     });
     let run = settle(&world, "resumed", vec![node]);
@@ -4924,8 +4924,8 @@ fn a_continuation_skips_the_steps_the_preserved_branch_already_carries() {
                              // rather than naming the base branch after a marker.
                              "title": "feat: land the workstream",
                              "steps": [
-                        {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
-                        {"id": "review", "persona": "reviewer", "task": "## What\nreview",
+                        {"id": "implement", "persona": "engineer", "task": "## What\nimplement\n\n## Acceptance criteria\n- It is done."},
+                        {"id": "review", "persona": "reviewer", "task": "## What\nreview\n\n## Acceptance criteria\n- It is done.",
                          "deps": ["implement"]},
                     ]},
                 }],
@@ -6653,8 +6653,8 @@ fn every_dispatch_in_a_session_names_its_session_and_every_dispatch_names_the_ru
         "repo": "service",
         "title": "feat: two steps and a draft",
         "steps": [
-            {"id": "implement", "persona": "engineer", "task": "## What\nImplement it."},
-            {"id": "review", "persona": "engineer", "task": "## What\nReview it.",
+            {"id": "implement", "persona": "engineer", "task": "## What\nImplement it.\n\n## Acceptance criteria\n- It is done."},
+            {"id": "review", "persona": "engineer", "task": "## What\nReview it.\n\n## Acceptance criteria\n- It is done.",
              "deps": ["implement"]},
         ],
     });
@@ -6775,8 +6775,8 @@ fn a_later_step_that_failed_after_an_earlier_one_drafted_settles_carrying_that_c
         "repo": "service",
         "title": "feat: two steps, one draft",
         "steps": [
-            {"id": "implement", "persona": "engineer", "task": "## What\nImplement it."},
-            {"id": "review", "persona": "engineer", "task": "## What\nReview it.",
+            {"id": "implement", "persona": "engineer", "task": "## What\nImplement it.\n\n## Acceptance criteria\n- It is done."},
+            {"id": "review", "persona": "engineer", "task": "## What\nReview it.\n\n## Acceptance criteria\n- It is done.",
              "deps": ["implement"]},
         ],
     });

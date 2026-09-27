@@ -1649,7 +1649,7 @@ fn an_edit_to_a_run_nothing_is_driving_is_applied_rather_than_refused() {
     world
         .run_with_stdin(
             &["reply", "settledgraph"],
-            r#"{"version":2,"commands":[{"op":"add","node":{"id":"late","persona":"e","task":"t"}}]}"#,
+            r#"{"version":2,"commands":[{"op":"add","node":{"id":"late","persona":"e","task":"t\n\n## Acceptance criteria\n- It is done."}}]}"#,
         )
         .exited(0)
         .out_has("\"applied\"");
@@ -3616,7 +3616,7 @@ fn a_commands_only_reply_applied_under_the_lock_leaves_the_observers_side_waitin
         .run_with_stdin(
             &["reply", "underlock"],
             &json!({"version": 2, "commands": [
-                {"op": "add", "node": {"id": "late", "persona": "engineer", "task": "## What\nsweep"}}
+                {"op": "add", "node": {"id": "late", "persona": "engineer", "task": "## What\nsweep\n\n## Acceptance criteria\n- It is done."}}
             ]})
             .to_string(),
         )

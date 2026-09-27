@@ -2420,7 +2420,7 @@ fn an_attached_launch_returns_once_its_observer_graph_has_stopped_and_the_run_ad
             vec![
                 json!({
                     "id": "record",
-                    "task": "## What\nRecord that nothing changes.",
+                    "task": "## What\nRecord that nothing changes.\n\n## Acceptance criteria\n- It is done.",
                     "expects_no_diff": true,
                 }),
                 agent("build", &["record"]),
@@ -5305,7 +5305,7 @@ fn an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go
         &["reply", run],
         &json!({"version": 2, "commands": [
             {"op": "add", "node": {"id": "extra", "persona": "engineer",
-                                   "task": "## What\nthe work the edit asked for"}}
+                                   "task": "## What\nthe work the edit asked for\n\n## Acceptance criteria\n- It is done."}}
         ]})
         .to_string(),
     );
@@ -5435,7 +5435,7 @@ fn queue_of(world: &World, run: &str) -> Vec<String> {
 fn adding_a_node() -> serde_json::Value {
     json!({"version": 2, "commands": [
         {"op": "add", "node": {"id": "extra", "persona": "engineer",
-                               "task": "## What\nthe work the edit asked for"}}
+                               "task": "## What\nthe work the edit asked for\n\n## Acceptance criteria\n- It is done."}}
     ]})
 }
 

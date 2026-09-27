@@ -264,7 +264,7 @@ fn the_shipped_rules_example_is_the_contracts_own() {
 fn the_dispatch_request_carries_every_field_the_contract_declares() {
     let request = DispatchRequest {
         graph: ConfigRef("./graphs/node-scope.yaml".into()),
-        task: "## What\nDo the thing.".into(),
+        task: "## What\nDo the thing.\n\n## Acceptance criteria\n- the thing is done.".into(),
         labels: Labels {
             run_id: Some("run-1".into()),
             round: Some(2),
@@ -414,7 +414,7 @@ fn dispatching_goes_through_the_oneagentgraph_seam_and_says_so_when_it_cannot() 
     // rather than unwrapped.
     let Err(err) = LocalExecutor.dispatch(DispatchRequest {
         graph: ConfigRef("./graphs/node-scope.yaml".into()),
-        task: "anything".into(),
+        task: "## What\nanything\n\n## Acceptance criteria\n- anything holds".into(),
         labels: Labels::default(),
         controls: NodeControls::default(),
         workspace: WorkspaceSpec::Path(PathBuf::from(".")),
@@ -1403,7 +1403,7 @@ fn every_node_shape() -> Value {
                     {
                         "id": "implement",
                         "persona": "engineer",
-                        "task": "## What\nx",
+                        "task": "## What\nx\n\n## Acceptance criteria\n- x holds",
                         "max_turns": 32,
                         "expects_no_diff": false,
                         "executor": "local",
@@ -1538,7 +1538,7 @@ fn the_contracts_plan_schema_version_is_the_one_this_crate_writes() {
     for version in PLAN_SCHEMA_VERSIONS_READ {
         let plan: Plan = serde_json::from_value(json!({
             "schema_version": version,
-            "tasks": [{"id": "a", "persona": "engineer", "task": "Do it."}],
+            "tasks": [{"id": "a", "persona": "engineer", "task": "## What\nDo it.\n\n## Acceptance criteria\n- it is done"}],
         }))
         .unwrap_or_else(|why| panic!("a version {version} plan is a readable document: {why}"));
         assert_eq!(plan.schema_version, version);
@@ -1547,7 +1547,7 @@ fn the_contracts_plan_schema_version_is_the_one_this_crate_writes() {
     // What this crate *writes* carries the current number, whatever it read.
     let earlier: Plan = serde_json::from_value(json!({
         "schema_version": 1,
-        "tasks": [{"id": "a", "persona": "engineer", "task": "Do it."}],
+        "tasks": [{"id": "a", "persona": "engineer", "task": "## What\nDo it.\n\n## Acceptance criteria\n- it is done"}],
     }))
     .expect("it still reads");
     let current = Plan {
@@ -1707,7 +1707,7 @@ fn a_plan_still_carrying_done_when_is_refused_by_name_and_told_where_the_bar_goe
         for field in ["done_when", "verify_via_ci"] {
             let refused = serde_json::from_value::<Plan>(json!({
                 "schema_version": version,
-                "tasks": [{"id": "contract", "persona": "engineer", "task": "t", field: true}],
+                "tasks": [{"id": "contract", "persona": "engineer", "task": "## What\nt\n\n## Acceptance criteria\n- t holds", field: true}],
             }))
             .expect_err("a retired field is not a field of this schema");
             assert!(
@@ -1724,7 +1724,7 @@ fn a_plan_still_carrying_done_when_is_refused_by_name_and_told_where_the_bar_goe
     // And a plan that carries none reads, with what it did declare intact.
     let plan: Plan = serde_json::from_value(json!({
         "schema_version": PLAN_SCHEMA_VERSION,
-        "tasks": [{"id": "contract", "persona": "engineer", "task": "t", "max_turns": 45}],
+        "tasks": [{"id": "contract", "persona": "engineer", "task": "## What\nt\n\n## Acceptance criteria\n- t holds", "max_turns": 45}],
     }))
     .expect("a plan without the retired field reads");
     assert_eq!(plan.tasks[0].max_turns, Some(45));
@@ -1757,7 +1757,7 @@ fn a_dispatch_built_outside_a_run_still_carries_its_controls_into_the_launch() {
 
     let request = |controls| DispatchRequest {
         graph: ConfigRef(graph.display().to_string()),
-        task: "## What\nDo the thing.".into(),
+        task: "## What\nDo the thing.\n\n## Acceptance criteria\n- the thing is done.".into(),
         labels: Labels::default(),
         controls,
         workspace: WorkspaceSpec::Path(root.clone()),
@@ -2105,7 +2105,7 @@ fn the_release_adoption_surface_is_what_the_divergence_record_names() {
     );
     // At schema 3, and optional: a plan naming neither field is the plan it
     // always was, and round-trips without either appearing.
-    let plain = json!({"id": "solo", "persona": "engineer", "task": "## What\nx"});
+    let plain = json!({"id": "solo", "persona": "engineer", "task": "## What\nx\n\n## Acceptance criteria\n- x holds"});
     let bare: Node = serde_json::from_value(plain.clone()).expect("a node naming neither parses");
     assert_eq!(bare.adoption, None);
     assert!(bare.consumes.is_empty());
@@ -2215,7 +2215,7 @@ fn the_workspace_placement_surface_is_what_the_divergence_record_names() {
     assert_eq!(node.overflow, Some(onevcs::Bound::Bounded(0)));
     // The word, as the sibling spells it, both ways.
     let unlimited: Node = serde_json::from_value(json!({
-        "id": "n", "persona": "engineer", "task": "## What\nx", "overflow": "unlimited"
+        "id": "n", "persona": "engineer", "task": "## What\nx\n\n## Acceptance criteria\n- x holds", "overflow": "unlimited"
     }))
     .expect("the sibling's word parses");
     assert_eq!(unlimited.overflow, Some(onevcs::Bound::Unlimited));
@@ -2225,7 +2225,7 @@ fn the_workspace_placement_surface_is_what_the_divergence_record_names() {
     );
     // At schema 3, and optional: a plan naming neither field round-trips
     // without either appearing.
-    let plain = json!({"id": "solo", "persona": "engineer", "task": "## What\nx"});
+    let plain = json!({"id": "solo", "persona": "engineer", "task": "## What\nx\n\n## Acceptance criteria\n- x holds"});
     let bare: Node = serde_json::from_value(plain.clone()).expect("a node naming neither parses");
     assert_eq!(bare.pool, None);
     assert_eq!(bare.overflow, None);
@@ -2462,6 +2462,172 @@ fn the_pool_maintenance_schedule_is_what_the_divergence_record_names() {
     ] {
         assert!(CONTRACT.contains(names), "the contract no longer states {names}");
     }
+}
+
+/// C6b, as the amended contract states it, is what the public check answers.
+///
+/// Each example in the block is driven through `onepipeline::plan::check_criteria`
+/// and answers the rule the block names, spelled as the block spells it; the
+/// three rule words are the whole of `CriteriaRule`. `tests/e2e/criteria_rule.rs`
+/// drives every load path and every edit the block names through the binary.
+#[test]
+fn c6b_is_what_the_contract_names() {
+    use onepipeline::plan::{check_criteria, CriteriaRule};
+    let block: Value = serde_json::from_str(&fenced_block_naming("json", "\"criteria_rule\": {"))
+        .expect("the C6b block is JSON");
+    let block = &block["criteria_rule"];
+    let rules = block["rules"].as_object().expect("the rules are a mapping");
+    let every = [
+        ("NoSection", CriteriaRule::NoSection),
+        ("Repeated", CriteriaRule::Repeated),
+        ("NoneListed", CriteriaRule::NoneListed),
+    ];
+    assert_eq!(rules.len(), every.len(), "{rules:?}");
+    let rule_named = |name: &str| {
+        every
+            .iter()
+            .find(|(named, _)| *named == name)
+            .unwrap_or_else(|| panic!("the block names a rule `{name}` the type does not carry"))
+            .1
+    };
+    for (name, rule) in every {
+        assert_eq!(rules[name].as_str(), Some(rule.as_str()), "{name}");
+        assert_eq!(rule.to_string(), rule.as_str());
+        assert!(
+            backticked().contains(rule.as_str()),
+            "the contract's prose no longer spells `{rule}`"
+        );
+    }
+    let examples = block["examples"]
+        .as_array()
+        .expect("the examples are a list");
+    for name in rules.keys() {
+        assert!(
+            examples
+                .iter()
+                .any(|example| example["rule"].as_str() == Some(name)),
+            "no example is refused as {name}"
+        );
+    }
+    assert!(examples.iter().any(|example| example["rule"].is_null()));
+    for example in examples {
+        let task = example["task"]
+            .as_str()
+            .expect("an example states its task");
+        let expected = example["rule"].as_str().map(rule_named);
+        assert_eq!(check_criteria(task).err(), expected, "{task:?}");
+    }
+    let heading = block["heading"]
+        .as_str()
+        .expect("the block states the heading");
+    let ends = block["section_ends_at"]
+        .as_str()
+        .expect("the block states where a section ends");
+    // The heading is the one line the check opens a section at: exactly it, and
+    // not a deeper heading of the same words.
+    assert_eq!(check_criteria(&format!("{heading}\n- It builds.")), Ok(()));
+    assert_eq!(
+        check_criteria(&format!("#{heading}\n- It builds.")),
+        Err(CriteriaRule::NoSection)
+    );
+    // A section ends at the next line opening with `ends`, and at nothing deeper.
+    assert_eq!(
+        check_criteria(&format!("{heading}\n{ends}Next\n- after")),
+        Err(CriteriaRule::NoneListed)
+    );
+    assert_eq!(
+        check_criteria(&format!("{heading}\n#{ends}Deeper\n- inside")),
+        Ok(())
+    );
+    // The markers the block lists are exactly the ones the check counts, out of
+    // every marker a Markdown list may open with.
+    let markers: BTreeSet<&str> = block["list_markers"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|marker| marker.as_str().expect("a marker"))
+        .collect();
+    for marker in ["- ", "* ", "+ ", "N. ", "N) "] {
+        let item = marker.replace('N', "1");
+        let counted = check_criteria(&format!("{heading}\n{item}It builds.")).is_ok();
+        assert_eq!(
+            counted,
+            markers.contains(marker),
+            "the block and the check disagree about `{marker}`"
+        );
+        if markers.contains(marker) {
+            assert!(
+                backticked().contains(marker),
+                "the prose no longer names `{marker}`"
+            );
+        }
+    }
+    assert_eq!(
+        block["exempt_kind"],
+        serde_json::to_value(onepipeline::plan::NodeKind::Human).expect("a kind serializes")
+    );
+    assert!(backticked().contains("kind: human"));
+    assert_eq!(
+        block["adopt_skips_status"].as_str(),
+        Some(onepipeline::channel::SettleOutcome::Done.as_str())
+    );
+    // Every entry point the rule is checked at, and no other: the two verbs a plan
+    // is loaded through and the adoption, by the command line that parses them, and
+    // the three edits that state task text, by the channel command that carries them.
+    let checked: Vec<&str> = block["checked_at"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|op| op.as_str().expect("a word"))
+        .collect();
+    assert_eq!(
+        checked,
+        ["start", "plan check", "adopt", "add", "retry", "requeue"]
+    );
+    for verb in [
+        &["start", "plans:demo"][..],
+        &["plan", "check", "plans:demo"],
+        &["adopt", "demo"],
+    ] {
+        let argv: Vec<&str> = std::iter::once("onepipeline")
+            .chain(verb.iter().copied())
+            .collect();
+        Cli::try_parse_from(&argv)
+            .unwrap_or_else(|e| panic!("`{}` is not a verb: {e}", verb.join(" ")));
+    }
+    let node = json!({"id": "n", "persona": "e", "task": "## What\nt\n\n## Acceptance criteria\n- t holds"});
+    for command in [
+        json!({"op": "add", "node": node}),
+        json!({"op": "retry", "id": "n", "node": node}),
+        json!({"op": "requeue", "id": "n", "amend": {"task": "## What\nt\n\n## Acceptance criteria\n- t holds"}}),
+    ] {
+        let parsed: onepipeline::channel::Command =
+            serde_json::from_value(command.clone()).expect("an op the block names parses");
+        assert_eq!(
+            serde_json::to_value(&parsed).expect("serializes")["op"],
+            command["op"]
+        );
+    }
+    for op in &checked {
+        assert!(
+            backticked().contains(*op),
+            "the prose no longer names `{op}`"
+        );
+    }
+    // The refusal shapes are held to the emitted refusals by
+    // `tests/e2e/criteria_rule.rs`, which renders every refusal it expects from them.
+    for key in ["refusal", "step_refusal"] {
+        let shape = block[key].as_str().expect("a string");
+        assert!(
+            backticked().contains(shape),
+            "the prose no longer states `{shape}`"
+        );
+    }
+    assert!(
+        backticked()
+            .contains("onepipeline::plan::check_criteria(task: &str) -> Result<(), CriteriaRule>"),
+        "the prose no longer names the public check"
+    );
 }
 
 /// The branch-name template this build takes is exactly what the amended contract
@@ -2848,7 +3014,7 @@ fn the_amendment_and_validator_surface_is_what_the_divergence_record_names() {
         "entry 41's node does not round-trip as written"
     );
     let text = node.amendment.clone().expect("the node carries one");
-    let plain = json!({"id": "solo", "persona": "engineer", "task": "## What\nx"});
+    let plain = json!({"id": "solo", "persona": "engineer", "task": "## What\nx\n\n## Acceptance criteria\n- x holds"});
     let bare: Node = serde_json::from_value(plain.clone()).expect("a node naming none parses");
     assert_eq!(bare.amendment, None);
     assert_eq!(
@@ -6475,6 +6641,10 @@ const RULINGS: &[(&str, &str)] = &[
         "90.",
         "`branch_template` is a key of launch-config `schema_version: 11`",
     ),
+    (
+        "91.",
+        "onepipeline::plan::check_criteria(task: &str) -> Result<(), CriteriaRule>",
+    ),
 ];
 
 #[test]
@@ -6733,7 +6903,10 @@ fn the_templated_adoption_instruction_is_what_the_divergence_record_names() {
     let node = Node {
         id: "consumer".into(),
         persona: Some("engineer".into()),
-        task: Some("## What\nbuild against the released engine".into()),
+        task: Some(
+            "## What\nbuild against the released engine\n\n## Acceptance criteria\n- it builds"
+                .into(),
+        ),
         ..Node::default()
     };
     let references = [reference];

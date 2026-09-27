@@ -491,7 +491,7 @@ fn a_template_that_cannot_render_holds_back_no_node_that_cuts_no_branch() {
             {
                 "id": "implement",
                 "persona": "engineer",
-                "task": "## What\nimplement",
+                "task": "## What\nimplement\n\n## Acceptance criteria\n- It is done.",
                 "deps": ["approval"],
             },
         ],
@@ -500,7 +500,7 @@ fn a_template_that_cannot_render_holds_back_no_node_that_cuts_no_branch() {
         "id": "quiet",
         "repo": "service",
         "title": "feat: change nothing",
-        "steps": [{"id": "note", "expects_no_diff": true, "task": "## What\nChange nothing."}],
+        "steps": [{"id": "note", "expects_no_diff": true, "task": "## What\nChange nothing.\n\n## Acceptance criteria\n- It is done."}],
     });
     let run = settle(
         &world,

@@ -1195,7 +1195,7 @@ fn telemetry_counts_a_no_diff_node_without_counting_a_dispatch() {
         "counted",
         vec![serde_json::json!({
             "id": "handoff",
-            "task": "## What\nNothing changes.",
+            "task": "## What\nNothing changes.\n\n## Acceptance criteria\n- It is done.",
             "expects_no_diff": true,
         })],
     );

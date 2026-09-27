@@ -771,6 +771,92 @@ pub(crate) fn is_section_heading(line: &str) -> bool {
     line.starts_with("##") && !line.starts_with("###")
 }
 
+/// The one rule of C6b a task body breaks, spelled as a refusal names it.
+///
+/// Three and only three, because C6b is fixed: `op-task-templates` applies the
+/// same rule to every rendering it checks, and the hosts restating it name these
+/// words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CriteriaRule {
+    /// No line of the body reads `## Acceptance criteria`.
+    NoSection,
+    /// More than one line of the body reads it.
+    Repeated,
+    /// The one section holds no list item whose text is not blank.
+    NoneListed,
+}
+
+impl CriteriaRule {
+    /// The rule as a refusal spells it: `no criteria section`, `criteria section
+    /// repeated`, or `no criteria listed`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoSection => "no criteria section",
+            Self::Repeated => "criteria section repeated",
+            Self::NoneListed => "no criteria listed",
+        }
+    }
+}
+
+impl std::fmt::Display for CriteriaRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Check a task body against C6b: **exactly one** line reading
+/// `## Acceptance criteria` and, before the next line opening a level-2 heading
+/// (`## `) or the end of the body, at least one list item (`- `, `* ` or `N. `)
+/// whose text is not blank.
+///
+/// Nothing is repaired: a body is accepted as it stands or refused with the one
+/// rule it breaks, checked in the order the rules are listed on
+/// [`CriteriaRule`]. A heading line may carry trailing whitespace, and a list
+/// item may be indented; nothing else about either is loosened.
+///
+/// # Errors
+///
+/// The [`CriteriaRule`] the body breaks.
+pub fn check_criteria(task: &str) -> std::result::Result<(), CriteriaRule> {
+    let lines: Vec<&str> = task.lines().map(str::trim_end).collect();
+    let mut headings = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| **line == CRITERIA_HEADING)
+        .map(|(at, _)| at);
+    let Some(at) = headings.next() else {
+        return Err(CriteriaRule::NoSection);
+    };
+    if headings.next().is_some() {
+        return Err(CriteriaRule::Repeated);
+    }
+    let listed = lines[at + 1..]
+        .iter()
+        .take_while(|line| !line.starts_with("## "))
+        .any(|line| criterion_listed(line.trim_start()));
+    if listed {
+        Ok(())
+    } else {
+        Err(CriteriaRule::NoneListed)
+    }
+}
+
+/// Whether a line is a list item C6b counts: `- `, `* ` or `N. ` followed by
+/// text that is not blank. Narrower than [`list_item`], which also reads the `+`
+/// and `N)` an amendment may be written in, because C6b names exactly these.
+fn criterion_listed(line: &str) -> bool {
+    let digits = line.chars().take_while(char::is_ascii_digit).count();
+    let text = line
+        .strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .or_else(|| {
+            (digits > 0)
+                .then(|| line[digits..].strip_prefix(". "))
+                .flatten()
+        });
+    text.is_some_and(|text| !text.trim().is_empty())
+}
+
 /// One task with the notes an earlier dispatch of its node read rendered into it.
 ///
 /// Placed exactly as an amendment is — above the operational notes, at the end
@@ -1317,6 +1403,75 @@ fn cell(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// C6b, called directly: each rule is refused by its own name, in order, and
+    /// a section that ends the body or is followed by further sections passes
+    /// with an item.
+    #[test]
+    fn c6b_refuses_each_rule_by_name_and_passes_a_listed_section_wherever_it_sits() {
+        for (task, rule) in [
+            ("## What\nBuild it.", CriteriaRule::NoSection),
+            ("### Acceptance criteria\n- deeper", CriteriaRule::NoSection),
+            (
+                "  ## Acceptance criteria\n- indented",
+                CriteriaRule::NoSection,
+            ),
+            (
+                "## Acceptance criteria\n- one\n\n## Acceptance criteria\n- two",
+                CriteriaRule::Repeated,
+            ),
+            (
+                "## Acceptance criteria\n\nProse only.",
+                CriteriaRule::NoneListed,
+            ),
+            (
+                "## Acceptance criteria\n- \n*   \n1. ",
+                CriteriaRule::NoneListed,
+            ),
+            (
+                "## Acceptance criteria\n+ plus\n1) paren",
+                CriteriaRule::NoneListed,
+            ),
+            (
+                "## Acceptance criteria\n## Next\n- after",
+                CriteriaRule::NoneListed,
+            ),
+            ("## Acceptance criteria", CriteriaRule::NoneListed),
+        ] {
+            assert_eq!(check_criteria(task), Err(rule), "{task:?}");
+        }
+        for task in [
+            "## What\nBuild it.\n\n## Acceptance criteria\n- it builds.",
+            "## Acceptance criteria  \n\n* starred\n\n## Additional info\nNotes.",
+            "## Acceptance criteria\n\n### Amendment\n  12. numbered and indented\n## Next",
+        ] {
+            assert_eq!(check_criteria(task), Ok(()), "{task:?}");
+        }
+        assert_eq!(CriteriaRule::NoSection.to_string(), "no criteria section");
+        assert_eq!(
+            CriteriaRule::Repeated.to_string(),
+            "criteria section repeated"
+        );
+        assert_eq!(CriteriaRule::NoneListed.to_string(), "no criteria listed");
+    }
+
+    /// A task that passes C6b renders its amendment exactly as before: `amended`
+    /// keeps its placement, into the one section the check found.
+    #[test]
+    fn a_task_passing_c6b_is_amended_into_its_one_section() {
+        let task =
+            "## What\nBuild.\n\n## Acceptance criteria\n- it builds.\n\n## Additional info\nNotes.";
+        assert_eq!(check_criteria(task), Ok(()));
+        let rendered = amended(task, "Also test it.");
+        assert_eq!(
+            rendered,
+            format!(
+                "## What\nBuild.\n\n## Acceptance criteria\n- it builds.\n\n{AMENDMENT_HEADING}\n\
+                 {AMENDMENT_PRECEDENCE}\n\n- Also test it.\n\n## Additional info\nNotes."
+            )
+        );
+        assert_eq!(check_criteria(&rendered), Ok(()));
+    }
 
     /// This schema's own source, which is where its documentation lives.
     ///

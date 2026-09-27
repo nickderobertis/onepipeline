@@ -118,7 +118,7 @@ fn stepped(id: &str) -> Value {
         "repo": "service",
         "title": format!("feat: ship {id}"),
         "steps": [
-            {"id": "implement", "persona": "engineer", "task": format!("## What\nImplement {id}.")},
+            {"id": "implement", "persona": "engineer", "task": format!("## What\nImplement {id}.\n\n## Acceptance criteria\n- {id} is implemented.")},
         ],
     })
 }
