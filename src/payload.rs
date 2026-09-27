@@ -1098,9 +1098,9 @@ pub(crate) struct BranchesRetired {
 /// carries it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct RetiredBranch {
-    /// The identity key.
+    /// The identity key the pass was scoped to, as `onevcs` reports it.
     pub(crate) identity: String,
-    /// The branch.
+    /// The branch name every copy of which the pass deleted.
     pub(crate) branch: String,
     /// Its class, as `onevcs` serializes it. That type derives no `JsonSchema`,
     /// so the document says a string and the type is what is read and written.

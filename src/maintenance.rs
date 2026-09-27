@@ -337,7 +337,8 @@ pub(crate) struct Named {
     /// The repository the node names, as it names it; `None` for a node naming a
     /// branch and no repository, which is left alone in every identity.
     pub(crate) repo: Option<String>,
-    /// The branch.
+    /// The branch name as the node, its `resume` or its session carries it, which
+    /// `onevcs` compares an exclusion by exactly.
     pub(crate) branch: String,
 }
 

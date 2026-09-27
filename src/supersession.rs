@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
+use crate::edits::StatedLanding;
 use crate::event::{Envelope, PipelineKind, Source};
 use crate::graph::Landing;
 use crate::journal::{self, Journal};
@@ -39,12 +40,14 @@ const NODE_LABEL: &str = "node";
 /// The label key naming the attempt whose landing superseded it.
 const BY_LABEL: &str = "superseded_by_node";
 
-/// One earlier attempt of a landed lineage: its node, and the branch it left.
+/// One earlier attempt of a landed lineage.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub(crate) struct Attempt {
-    /// The attempt's node.
+    /// The node id the retry edge names, which is the `node` label `onevcs` is
+    /// given.
     pub(crate) node: String,
-    /// The branch it left.
+    /// Its settlement's branch, else its `session-opened`'s: what `onevcs` is told
+    /// was superseded.
     pub(crate) branch: String,
 }
 
@@ -70,7 +73,7 @@ pub(crate) struct Lineage {
     pub(crate) repo: String,
     /// Where it landed: the commit, or the change request's URL where no commit
     /// is recorded.
-    pub(crate) landing: String,
+    pub(crate) landing: StatedLanding,
     /// Every earlier attempt, root first, whose branch is not the one that landed.
     /// An attempt on the landed branch is `onevcs`'s own to chain and is not here.
     pub(crate) superseded: Vec<Attempt>,
@@ -164,18 +167,22 @@ fn branch_of(state: &RunState, node: &str) -> Option<String> {
 }
 
 /// Where a node's work landed, as `onevcs` takes a landing: a commit, else a
-/// change request's URL.
-fn landing_of(state: &RunState, node: &str) -> Option<String> {
+/// change request's URL. A recorded value that is neither is no landing to tell it.
+fn landing_of(state: &RunState, node: &str) -> Option<StatedLanding> {
     let stated = state.stated_landings.get(node);
-    if let Some(crate::edits::StatedLanding::Commit(commit)) = stated {
+    if let Some(commit @ StatedLanding::Commit(_)) = stated {
         return Some(commit.clone());
     }
     state
         .landing_commits
         .get(node)
-        .cloned()
-        .or_else(|| stated.map(|stated| stated.reference().to_owned()))
-        .or_else(|| state.known_change_url(node))
+        .and_then(|commit| StatedLanding::parse(commit))
+        .or_else(|| stated.cloned())
+        .or_else(|| {
+            state
+                .known_change_url(node)
+                .and_then(|url| StatedLanding::parse(&url))
+        })
 }
 
 /// One attempt a landed node's `branches-superseded` record says `onevcs`
@@ -191,6 +198,12 @@ pub(crate) type RecordedPair = (String, Attempt);
 /// A record that does not read as one is said so on stderr and counts for
 /// nothing, so its pairs are asked of `onevcs` again — which records a
 /// supersession once however often it is told.
+// llmlint: ignore-block[changed_behavior_has_e2e] no entry point of this build writes an
+// unreadable record — every `branches-superseded` is serialized by `journal` from the typed
+// payload — so a journey reaches the arm only by editing the journal by hand, which is the
+// state it stands for: a record a person edited or another build wrote.
+// `tests::an_unreadable_record_counts_for_nothing_and_a_readable_one_for_its_head` drives
+// this reader over both.
 pub(crate) fn recorded_in(events: &[Envelope]) -> BTreeSet<RecordedPair> {
     events
         .iter()
@@ -224,6 +237,7 @@ pub(crate) fn recorded_in(events: &[Envelope]) -> BTreeSet<RecordedPair> {
         })
         .collect()
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Record each of `attempts` as superseded by `lineage`'s landing, and say what
 /// `onevcs` answered for each.
@@ -235,7 +249,7 @@ pub(crate) fn record(run: &str, lineage: &Lineage, attempts: &[Attempt]) -> Reco
             repo: lineage.repo.clone(),
             branch: attempt.branch.clone(),
             superseded_by: lineage.branch.clone(),
-            landing: lineage.landing.clone(),
+            landing: lineage.landing.reference().to_owned(),
             labels: BTreeMap::from([
                 (RUN_LABEL.to_owned(), run.to_owned()),
                 (NODE_LABEL.to_owned(), attempt.node.clone()),
@@ -262,7 +276,7 @@ pub(crate) fn journal(
 ) -> Result<()> {
     let payload = BranchesSuperseded {
         node: lineage.node.clone(),
-        landing: lineage.landing.clone(),
+        landing: lineage.landing.reference().to_owned(),
         superseded: recorded
             .recorded
             .iter()
@@ -388,7 +402,7 @@ pub(crate) enum Mode {
 /// became of recording them with `onevcs`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct Supersessions {
-    /// The run.
+    /// The run id the verb was given, as it resolved.
     pub(crate) run: String,
     /// What this call was asked to do.
     pub(crate) mode: Mode,
@@ -483,7 +497,9 @@ pub(crate) fn render(answered: &Supersessions) -> String {
         let head = &lineage.lineage;
         out.push_str(&format!(
             "{} landed {} at {}\n",
-            head.node, head.branch, head.landing
+            head.node,
+            head.branch,
+            head.landing.reference()
         ));
         if head.superseded.is_empty() {
             out.push_str(
@@ -617,7 +633,10 @@ mod tests {
             .insert("r3".to_owned(), "https://github.com/o/s/pull/7".to_owned());
         let found = lineages(&state);
         assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(found[0].landing, "https://github.com/o/s/pull/7");
+        assert_eq!(
+            found[0].landing.reference(),
+            "https://github.com/o/s/pull/7"
+        );
         assert_eq!(
             found[0].superseded,
             vec![Attempt {
@@ -629,7 +648,7 @@ mod tests {
         state
             .landing_commits
             .insert("r3".to_owned(), "f".repeat(40));
-        assert_eq!(lineages(&state)[0].landing, "f".repeat(40));
+        assert_eq!(lineages(&state)[0].landing.reference(), "f".repeat(40));
     }
 
     /// A head that did not land, or whose branch nothing recorded, is no lineage
@@ -653,6 +672,41 @@ mod tests {
         assert!(lineages(&state).is_empty(), "b's own branch is unrecorded");
     }
 
+    /// One `branches-superseded` envelope carrying `payload`.
+    fn superseded_record(payload: serde_json::Value) -> Envelope {
+        serde_json::from_value(serde_json::json!({
+            "v": 2, "ts": "2026-09-26T00:00:00.000Z", "stream": "s", "seq": 0,
+            "source": "pipeline", "kind": "branches-superseded",
+            "labels": {"run_id": "r"}, "payload": payload, "artifacts": [],
+        }))
+        .expect("an envelope reads")
+    }
+
+    /// A record that reads names its pairs under its own head; one that does not
+    /// names nothing, so what it held is asked again.
+    #[test]
+    fn an_unreadable_record_counts_for_nothing_and_a_readable_one_for_its_head() {
+        let events = [
+            superseded_record(serde_json::json!({
+                "node": "svc-2", "landing": "f".repeat(40),
+                "superseded": [{"node": "svc", "branch": "a"}], "failed": [],
+            })),
+            superseded_record(serde_json::json!({
+                "node": "svc-3", "superseded": "not a list",
+            })),
+        ];
+        assert_eq!(
+            recorded_in(&events),
+            BTreeSet::from([(
+                "svc-2".to_owned(),
+                Attempt {
+                    node: "svc".to_owned(),
+                    branch: "a".to_owned(),
+                }
+            )])
+        );
+    }
+
     /// A pair recorded under one landed node does not count for another's lineage.
     #[test]
     fn a_pair_counts_as_recorded_only_under_the_head_it_was_recorded_for() {
@@ -664,7 +718,7 @@ mod tests {
             node: "svc-2".to_owned(),
             branch: "b".to_owned(),
             repo: "service".to_owned(),
-            landing: "f".repeat(40),
+            landing: StatedLanding::Commit("f".repeat(40)),
             superseded: vec![attempt.clone()],
         };
         let elsewhere = BTreeSet::from([("other".to_owned(), attempt.clone())]);
@@ -692,7 +746,7 @@ mod tests {
                     node: "b".to_owned(),
                     branch: "y".to_owned(),
                     repo: "service".to_owned(),
-                    landing: "f".repeat(40),
+                    landing: StatedLanding::Commit("f".repeat(40)),
                     superseded: Vec::new(),
                 },
                 to_record: Vec::new(),
