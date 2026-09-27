@@ -205,6 +205,13 @@ fn matrix_legs(block: &str) -> Vec<(String, String)> {
 }
 
 fn release_linux_targets() -> Vec<String> {
+    release_linux_legs()
+        .into_iter()
+        .map(|(target, _)| target)
+        .collect()
+}
+
+fn release_linux_legs() -> Vec<(String, String)> {
     let legs = matrix_legs(&job_block("release.yml", "build-wheels"));
     assert!(
         !legs.is_empty(),
@@ -212,7 +219,6 @@ fn release_linux_targets() -> Vec<String> {
     );
     legs.into_iter()
         .filter(|(_, os)| os.starts_with("ubuntu"))
-        .map(|(target, _)| target)
         .collect()
 }
 
@@ -320,6 +326,18 @@ fn a_container_step_that_fails_is_named_with_its_action_and_its_files_are_still_
             "check that 1.97.1, rust-toolchain.toml's channel, is a published release",
         ),
         (
+            "chmod",
+            "installing rustup 1.29.1",
+            "check that static.rust-lang.org serves rustup 1.29.1 for x86_64-unknown-linux-gnu \
+             with the SHA-256 this script pins",
+        ),
+        (
+            "rustup-init",
+            "installing rustup 1.29.1",
+            "check that static.rust-lang.org serves rustup 1.29.1 for x86_64-unknown-linux-gnu \
+             with the SHA-256 this script pins",
+        ),
+        (
             "python3.12 -m pip",
             "installing maturin",
             "check that PyPI serves maturin",
@@ -366,16 +384,12 @@ fn a_hand_back_that_fails_fails_a_build_that_compiled() {
 }
 
 #[test]
-fn the_pull_request_check_builds_exactly_the_release_linux_targets_through_the_recipe() {
+fn the_pull_request_check_builds_the_release_linux_legs_through_the_recipe() {
     let block = job_block("ci.yml", "wheel");
-    let ci: Vec<String> = matrix_legs(&block)
-        .into_iter()
-        .map(|(target, _)| target)
-        .collect();
     assert_eq!(
-        ci,
-        release_linux_targets(),
-        "ci.yml's wheel legs build the release's Linux targets"
+        matrix_legs(&block),
+        release_linux_legs(),
+        "ci.yml's wheel legs build the release's Linux targets on the release's runners"
     );
     assert!(
         block.contains("run: just wheel-linux \"$TARGET\""),
