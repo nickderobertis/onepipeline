@@ -184,11 +184,12 @@ fn landing_of(state: &RunState, node: &str) -> Option<StatedLanding> {
 }
 
 /// One attempt a landed node's `branches-superseded` record says `onevcs`
-/// recorded: that node, and the attempt.
+/// recorded: that node, the landing it was recorded at, and the attempt.
 ///
-/// Keyed by the node that landed, so a record counts only for the lineage it was
-/// written for: an attempt a record names under another head is asked again.
-pub(crate) type RecordedPair = (String, Attempt);
+/// Keyed by the node that landed and its landing, so a record counts only for the
+/// lineage and the landing it was written for: an attempt a record names under
+/// another head, or at a landing the lineage no longer states, is asked again.
+pub(crate) type RecordedPair = (String, String, Attempt);
 
 /// Every attempt a `branches-superseded` record says `onevcs` recorded, under the
 /// landed node that record was written for.
@@ -222,16 +223,23 @@ pub(crate) fn recorded_in(events: &[Envelope]) -> BTreeSet<RecordedPair> {
             .ok()
         })
         .flat_map(|record| {
-            let head = record.node;
-            record.superseded.into_iter().map(move |attempt| {
-                (
-                    head.clone(),
-                    Attempt {
-                        node: attempt.node,
-                        branch: attempt.branch,
-                    },
-                )
-            })
+            let (head, landing) = (record.node, record.landing);
+            record
+                .superseded
+                .into_iter()
+                // A pair naming no node or no branch is none this build asked
+                // `onevcs` to record, so it stands for nothing recorded.
+                .filter(|attempt| !attempt.node.is_empty() && !attempt.branch.is_empty())
+                .map(move |attempt| {
+                    (
+                        head.clone(),
+                        landing.clone(),
+                        Attempt {
+                            node: attempt.node,
+                            branch: attempt.branch,
+                        },
+                    )
+                })
         })
         .collect()
 }
@@ -348,23 +356,29 @@ impl Watch {
             }
             let recorded = record(&paths.run, &lineage, &pending);
             self::journal(paths, journal, &lineage, &recorded)?;
-            self.recorded.extend(
-                recorded
-                    .recorded
-                    .into_iter()
-                    .map(|attempt| (lineage.node.clone(), attempt)),
-            );
+            self.recorded
+                .extend(recorded.recorded.into_iter().map(|attempt| {
+                    (
+                        lineage.node.clone(),
+                        lineage.landing.reference().to_owned(),
+                        attempt,
+                    )
+                }));
         }
         Ok(())
     }
 }
 
-/// A lineage's earlier attempts that `recorded` does not hold under its head.
+/// A lineage's earlier attempts that `recorded` does not hold under its head at
+/// its landing.
 fn unrecorded(lineage: &Lineage, recorded: &BTreeSet<RecordedPair>) -> Vec<Attempt> {
+    let landing = lineage.landing.reference();
     lineage
         .superseded
         .iter()
-        .filter(|attempt| !recorded.contains(&(lineage.node.clone(), (*attempt).clone())))
+        .filter(|attempt| {
+            !recorded.contains(&(lineage.node.clone(), landing.to_owned(), (*attempt).clone()))
+        })
         .cloned()
         .collect()
 }
@@ -442,10 +456,11 @@ impl Supersessions {
 /// `onepipeline supersessions RUN [--record]`.
 ///
 /// Reads the run's own store — its journal, and the launch record every run view
-/// opens — and nothing else, so it answers for a settled run with no driver. With `record`, each pair the journal does not already record
-/// is handed to `onevcs::record_supersession` — the function a driver calls when
-/// the retry lands — and one `branches-superseded` per lineage that had any is
-/// appended to the run's journal, so a second call records nothing new.
+/// opens — and nothing else, so it answers for a settled run with no driver.
+/// With `record`, each pair the journal does not already record is handed to
+/// `onevcs::record_supersession` — the function a driver calls when the retry
+/// lands — and one `branches-superseded` per lineage that had any is appended to
+/// the run's journal, so a second call records nothing new.
 ///
 /// # Errors
 ///
@@ -679,14 +694,20 @@ mod tests {
         .expect("an envelope reads")
     }
 
-    /// A record that reads names its pairs under its own head; one that does not
-    /// names nothing, so what it held is asked again.
+    /// A record that reads names its pairs under its own head and landing; one
+    /// that does not names nothing, and neither does a pair naming no node or no
+    /// branch, so what they held is asked again.
     #[test]
     fn an_unreadable_record_counts_for_nothing_and_a_readable_one_for_its_head() {
         let events = [
             superseded_record(serde_json::json!({
                 "node": "svc-2", "landing": "f".repeat(40),
-                "superseded": [{"node": "svc", "branch": "a"}], "failed": [],
+                "superseded": [
+                    {"node": "svc", "branch": "a"},
+                    {"node": "", "branch": "c"},
+                    {"node": "svc-1", "branch": ""},
+                ],
+                "failed": [],
             })),
             superseded_record(serde_json::json!({
                 "node": "svc-3", "superseded": "not a list",
@@ -696,6 +717,7 @@ mod tests {
             recorded_in(&events),
             BTreeSet::from([(
                 "svc-2".to_owned(),
+                "f".repeat(40),
                 Attempt {
                     node: "svc".to_owned(),
                     branch: "a".to_owned(),
@@ -704,9 +726,10 @@ mod tests {
         );
     }
 
-    /// A pair recorded under one landed node does not count for another's lineage.
+    /// A pair recorded under one landed node, or at another landing, does not
+    /// count for this lineage.
     #[test]
-    fn a_pair_counts_as_recorded_only_under_the_head_it_was_recorded_for() {
+    fn a_pair_counts_as_recorded_only_under_the_head_and_landing_it_was_recorded_for() {
         let attempt = Attempt {
             node: "svc".to_owned(),
             branch: "a".to_owned(),
@@ -718,12 +741,21 @@ mod tests {
             landing: StatedLanding::Commit("f".repeat(40)),
             superseded: vec![attempt.clone()],
         };
-        let elsewhere = BTreeSet::from([("other".to_owned(), attempt.clone())]);
-        assert_eq!(
-            unrecorded(&lineage, &elsewhere),
-            std::slice::from_ref(&attempt)
-        );
-        let here = BTreeSet::from([("svc-2".to_owned(), attempt)]);
+        let landing = "f".repeat(40);
+        for elsewhere in [
+            ("other".to_owned(), landing.clone(), attempt.clone()),
+            (
+                "svc-2".to_owned(),
+                "https://github.com/o/s/pull/7".to_owned(),
+                attempt.clone(),
+            ),
+        ] {
+            assert_eq!(
+                unrecorded(&lineage, &BTreeSet::from([elsewhere])),
+                std::slice::from_ref(&attempt)
+            );
+        }
+        let here = BTreeSet::from([("svc-2".to_owned(), landing, attempt)]);
         assert!(unrecorded(&lineage, &here).is_empty());
     }
 
