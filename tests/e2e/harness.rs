@@ -795,6 +795,7 @@ impl World {
                 let request = onetaskgraph_core::TaskRequest {
                     sources: Vec::new(),
                     filters: onetaskgraph_core::Filters::default(),
+                    priorities: Vec::new(),
                     project: onetaskgraph_core::ProjectSelector::Qualified(id.clone()),
                     paging: onetaskgraph_core::Paging {
                         limit: std::num::NonZeroU32::new(500).expect("not zero"),

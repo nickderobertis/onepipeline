@@ -1231,6 +1231,10 @@ fn read_published(path: &Path) -> std::io::Result<String> {
     }
 }
 
+/// A shadow document, parsed, or why it is not a whole one.
+///
+/// Its body is compared as `local-md` reads it: less that format's own framing, which is at
+/// most one line break under the front matter and one ending the file.
 fn shadow_document(path: &Path) -> Result<Value, String> {
     let text = match read_published(path) {
         Ok(text) => text,
@@ -1249,6 +1253,8 @@ fn shadow_document(path: &Path) -> Result<Value, String> {
         .ok_or_else(|| format!("{} closes no front matter: {text:?}", path.display()))?;
     let parsed: Value = serde_norway::from_str(front)
         .map_err(|error| format!("{} is not YAML ({error}): {text:?}", path.display()))?;
+    let body = body.strip_prefix('\n').unwrap_or(body);
+    let body = body.strip_suffix('\n').unwrap_or(body);
     if parsed.get("title").is_none() {
         return Err(format!(
             "{} carries no title, so it is not a whole document: {text:?}",

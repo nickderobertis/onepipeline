@@ -629,6 +629,7 @@ impl Reader {
             let request = TaskRequest {
                 sources: Vec::new(),
                 filters: Filters::default(),
+                priorities: Vec::new(),
                 project: selector.clone(),
                 paging: Paging {
                     limit: self.page,

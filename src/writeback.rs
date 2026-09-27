@@ -605,8 +605,11 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::NotWritable { .. }
         | EngineError::CommentsNotWritable { .. }
         | EngineError::StatusNotWritable { .. }
-        | EngineError::MetadataNotWritable { .. } => decided("not-writable"),
+        | EngineError::MetadataNotWritable { .. }
+        | EngineError::PriorityNotWritable { .. }
+        | EngineError::ContentNotWritable { .. } => decided("not-writable"),
         EngineError::NoDocuments { .. } => decided("no-documents"),
+        EngineError::NoPriority { .. } => decided("no-priority"),
         EngineError::NoComments { .. } => decided("no-comments"),
         EngineError::NoSuchItem { .. }
         | EngineError::NoSuchTask { .. }
@@ -1674,6 +1677,7 @@ fn destination_origins(
         let request = TaskRequest {
             sources: Vec::new(),
             filters: Filters::default(),
+            priorities: Vec::new(),
             project: selector.clone(),
             paging: Paging {
                 limit: TASK_PAGE,
@@ -3259,6 +3263,20 @@ mod tests {
                 name: "plans".into(),
                 kind: "in-memory".into(),
                 record: onetaskgraph_plugin_api::MetadataRecord::Task,
+            },
+            EngineError::PriorityNotWritable {
+                name: "plans".into(),
+                kind: "in-memory".into(),
+            },
+            EngineError::ContentNotWritable {
+                name: "plans".into(),
+                kind: "in-memory".into(),
+            },
+            EngineError::NoPriority {
+                name: "plans".into(),
+                kind: "in-memory".into(),
+                task: "plans:a".into(),
+                priority: onetaskgraph_plugin_api::Priority::High,
             },
             EngineError::UnrecordedMember {
                 item: id(),
