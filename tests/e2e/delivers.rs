@@ -67,12 +67,6 @@ fn a_world_with_scripted_tickets(name: &str) -> World {
         .with_env(RENDEZVOUS_SECONDS_ENV, "600")
 }
 
-/// The same world with the run reaching its plans source through the scripted source, in front
-/// of the real store, so a journey can hold or refuse one named call.
-fn through_the_double(world: World) -> World {
-    world.through_scripted_source()
-}
-
 fn tickets_root(world: &World) -> PathBuf {
     world.root.join("ticket-store")
 }
@@ -212,13 +206,14 @@ fn every_task_and_every_delivered_ticket_reads_queued_at_the_first_dispatch() {
             ],
         ),
     );
-    let world = through_the_double(world);
+    let world = world.through_scripted_source();
     let copies = world.store_holds(COPY);
     let build = world.rendezvous("build");
     world.run(&["start", &project, "--detach"]).exited(0);
 
     let claim = copies.arrived();
-    // The copy that claims the plan is still with the double, so the board is as authored.
+    // The copy that claims the plan is still held at the scripted source, so the board is as
+    // authored.
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(
         dispatches(&world, name),
@@ -364,7 +359,7 @@ fn a_stopped_run_releases_its_unstarted_tickets_and_an_adoption_claims_them_agai
             ],
         ),
     );
-    let world = through_the_double(world);
+    let world = world.through_scripted_source();
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until_store("the run's claim to reach the store", |world| {
         let board = words(world, &project);
@@ -484,7 +479,7 @@ fn a_failed_first_projection_does_not_hold_back_the_first_dispatch() {
         name,
         &plan_of(name, vec![delivering(agent("work", &[]), &[&delivered])]),
     );
-    let world = through_the_double(world);
+    let world = world.through_scripted_source();
     refuse_every_copy(&world);
     world.run(&["start", &project, "--detach"]).exited(0);
 
@@ -525,7 +520,7 @@ fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispat
         name,
         &plan_of(name, vec![delivering(agent("work", &[]), &[&delivered])]),
     );
-    let world = through_the_double(world);
+    let world = world.through_scripted_source();
     let copies = world.store_holds(COPY);
     world.run(&["start", &project, "--detach"]).exited(0);
 
@@ -788,7 +783,7 @@ fn a_stop_whose_release_the_store_refuses_still_stops_and_says_so() {
             ],
         ),
     );
-    let world = through_the_double(world);
+    let world = world.through_scripted_source();
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until_store("the run's claim to reach the store", |world| {
         words(world, &project).get("first").map(String::as_str) == Some("in progress")

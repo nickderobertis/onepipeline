@@ -1224,11 +1224,11 @@ fn surfaces_raised(world: &World, run: &str) -> Vec<String> {
 /// so across this window it would have asked three more times.
 const REFUSAL_WINDOW: Duration = Duration::from_secs(8);
 
-/// Nothing asks the store again for `run` across `window`, read off the `project show` every
+/// Nothing asks the store again for `run` across `window`, read off the project read every
 /// attempt opens with. `midway` runs halfway through, for a journey that puts the store right
 /// while it watches.
 fn asked_nothing_more(world: &World, run: &str, window: Duration, midway: impl FnOnce()) {
-    let asked = projections_asked_for(world);
+    let asked = project_reads(world);
     let watched = Instant::now();
     let mut midway = Some(midway);
     while watched.elapsed() < window {
@@ -1238,7 +1238,7 @@ fn asked_nothing_more(world: &World, run: &str, window: Duration, midway: impl F
             }
         }
         assert_eq!(
-            projections_asked_for(world),
+            project_reads(world),
             asked,
             "the store was asked again {:?} after it refused {run}'s projection",
             watched.elapsed()
@@ -1519,7 +1519,7 @@ fn closeout_attempts_what_changed_after_a_refusal_and_never_a_refused_snapshot_a
     let run = "writeback-refused-to-the-end";
     let (world, _project) =
         a_run_whose_destination_can_start_refusing("store-writeback-refused-to-the-end", run);
-    let asked_before = projections_asked_for(&world);
+    let asked_before = project_reads(&world);
     world.script("store.get_project.absent", "");
     noted(&world, run, "later", "refused until the run ends");
     world.until("the refusal to be reported", |world| {
@@ -1545,7 +1545,7 @@ fn closeout_attempts_what_changed_after_a_refusal_and_never_a_refused_snapshot_a
     // Every attempt since the store began refusing was a snapshot of its own, reported once:
     // one asked again — on a timer, or inside closeout, where the old schedule asked as fast as
     // the store refused — is an attempt with no line of its own.
-    let attempts = projections_asked_for(&world) - asked_before;
+    let attempts = project_reads(&world) - asked_before;
     let reported = streaks_reported(&world, run);
     assert!(
         attempts <= reported,
@@ -1726,8 +1726,10 @@ fn a_run_whose_destination_can_start_refusing(world: &str, run: &str) -> (World,
     (world, project)
 }
 
-/// How many attempts have asked the store: the project read every attempt opens with.
-fn projections_asked_for(world: &World) -> usize {
+/// How many times the store has been asked for a project: the read every write-back attempt
+/// opens with, and the launch's own plan read. Every journey here reads a difference taken
+/// after its launch, so what the difference counts is attempts.
+fn project_reads(world: &World) -> usize {
     world.store_asked("get_project")
 }
 
@@ -1849,7 +1851,7 @@ fn streaks_reported(world: &World, run: &str) -> usize {
 /// Both ends of every interval are read off something the destination or its operator can
 /// see, rather than off the shape of the code: the streak's start is the moment the driver
 /// printed the line an operator reads, and each retry is the destination's own record of
-/// being asked again — the `project show` every attempt opens with, and the only call a
+/// being asked again — the project read every attempt opens with, and the only call a
 /// refusing destination ever gets that far.
 fn retry_intervals(
     world: &World,
@@ -1870,7 +1872,7 @@ fn retry_intervals(
     at.push(Instant::now());
     // Seeded at the failure rather than before it, so whatever the attempt that failed had
     // already asked for is behind us and the next thing counted is the retry.
-    let mut asked = projections_asked_for(world);
+    let mut asked = project_reads(world);
     while at.len() <= count {
         assert!(
             Instant::now() < deadline,
@@ -1879,7 +1881,7 @@ fn retry_intervals(
             at.len() - 1
         );
         std::thread::sleep(Duration::from_millis(10));
-        let now = projections_asked_for(world);
+        let now = project_reads(world);
         if now > asked {
             assert_eq!(
                 now,
@@ -2250,12 +2252,12 @@ fn a_stop_during_a_long_retry_interval_is_not_made_to_wait_it_out() {
 
     // A worker woken out of a wait by the stop leaves rather than taking its turn at the
     // destination: the run that was asking is over, so nothing more is asked for it.
-    let asked_by_the_stopped_run = projections_asked_for(&world);
+    let asked_by_the_stopped_run = project_reads(&world);
     let watched = Instant::now();
     while watched.elapsed() < Duration::from_secs(3) {
         std::thread::sleep(Duration::from_millis(20));
         assert_eq!(
-            projections_asked_for(&world),
+            project_reads(&world),
             asked_by_the_stopped_run,
             "the destination was asked again {:?} after the run was stopped",
             watched.elapsed()

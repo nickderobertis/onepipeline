@@ -365,15 +365,20 @@ impl Scripted {
 }
 
 /// The id one request names — a read's `id`, or a write's `target` — or nothing, for a
-/// request that names none or a write that creates. An id that is there and is not a
-/// non-empty string is refused rather than read as none: it would be recorded against no
-/// item and match no scenario a journey scripted for it.
+/// request that names none or a write that creates, which the protocol spells as a `null`
+/// target. Any other id that is there and is not a non-empty string — a read's `null` `id`
+/// included — is refused rather than read as none: it would be recorded against no item and
+/// match no scenario a journey scripted for it.
 fn named(params: &Value) -> Result<String, String> {
-    let named = params
-        .get("id")
-        .or_else(|| params.get("write").and_then(|write| write.get("target")));
+    let named = match params.get("id") {
+        Some(id) => Some(id),
+        None => match params.get("write").and_then(|write| write.get("target")) {
+            None | Some(Value::Null) => None,
+            target => target,
+        },
+    };
     match named {
-        None | Some(Value::Null) => Ok(String::new()),
+        None => Ok(String::new()),
         Some(Value::String(id)) if !id.is_empty() => Ok(id.clone()),
         Some(other) => Err(format!(
             "a request names its item as {other}, which is not an id"
@@ -441,5 +446,43 @@ fn metering(path: &Path) -> Result<Option<Metering>, String> {
         }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("cannot read {}: {error}", path.display())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::named;
+    use serde_json::json;
+
+    /// A read names its item by `id`, an update by its write's `target`, and a create by a
+    /// `null` target, which the protocol writes for every create.
+    #[test]
+    fn a_request_names_the_item_its_protocol_spelling_names() {
+        assert_eq!(named(&json!({"id": "board"})), Ok("board".to_owned()));
+        assert_eq!(
+            named(&json!({"write": {"target": "work"}})),
+            Ok("work".to_owned())
+        );
+        assert_eq!(
+            named(&json!({"write": {"target": null}})),
+            Ok(String::new())
+        );
+        assert_eq!(named(&json!({"project": "board"})), Ok(String::new()));
+    }
+
+    /// A read's `null` id is no create, so it is refused rather than read as naming nothing.
+    #[test]
+    fn an_id_that_is_there_and_is_not_one_is_refused() {
+        for params in [
+            json!({"id": null}),
+            json!({"id": ""}),
+            json!({"id": 7}),
+            json!({"write": {"target": ""}}),
+        ] {
+            assert!(
+                named(&params).is_err(),
+                "{params} was read as an id or as none"
+            );
+        }
     }
 }
