@@ -94,7 +94,10 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
     match cli.command {
         Verb::Start(args) => start(&args),
         Verb::Plan(crate::cli::PlanCommand::Check(args)) => crate::plancheck::check(&args),
-        Verb::Template(command) => template(command),
+        Verb::Template(command) => {
+            println!("{}", template(command)?);
+            Ok(EXIT_SUCCESS)
+        }
         Verb::Adopt(args) => {
             let paths = resolve(&args.run)?;
             let how = if args.detach {
@@ -687,8 +690,9 @@ fn resolved_sets(flags: &[String], variable: &str, configured: &[String]) -> Res
 /// `onepipeline template`: argument parsing over the `template` verbs.
 ///
 /// What the binary reads from its environment — the working directory, the host root's
-/// variable, a rendering on standard input — is read here and passed in.
-fn template(command: crate::cli::TemplateCommand) -> Result<i32> {
+/// variable, a rendering on standard input — is read here and passed in, and what it
+/// answers is the rendering `dispatch` prints; a refusal is the error.
+fn template(command: crate::cli::TemplateCommand) -> Result<String> {
     use crate::cli::TemplateCommand;
     use crate::verbs;
     let working_dir = launch_dir()?;
@@ -711,12 +715,12 @@ fn template(command: crate::cli::TemplateCommand) -> Result<i32> {
     match command {
         TemplateCommand::List(args) => {
             let listed = verbs::template_list(&options(args.search, None)?)?;
-            println!("{}", verbs::render_template_list(&listed, args.json)?);
+            verbs::render_template_list(&listed, args.json)
         }
         TemplateCommand::Resolve(args) => {
             let resolved =
                 verbs::template_resolve(&args.name, &options(args.search, args.template)?)?;
-            println!("{}", verbs::render_template_resolved(&resolved, args.json)?);
+            verbs::render_template_resolved(&resolved, args.json)
         }
         TemplateCommand::Check(args) => {
             let check = match (args.rendering, args.item) {
@@ -728,10 +732,9 @@ fn template(command: crate::cli::TemplateCommand) -> Result<i32> {
             };
             let checked =
                 verbs::template_check(&args.name, &options(args.search, args.template)?, &check)?;
-            println!("{}", verbs::render_template_checked(&checked));
+            Ok(verbs::render_template_checked(&checked))
         }
     }
-    Ok(EXIT_SUCCESS)
 }
 
 /// A rendering `template check --rendering` names: a file, or standard input for `-`.
