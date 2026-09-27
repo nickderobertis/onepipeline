@@ -338,11 +338,13 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
         Verb::Supersessions(args) => {
-            let answered = verbs::supersessions(&resolve(&args.run)?, args.record)?;
+            // The binary's alone until the contract names it: see
+            // `docs/contract-divergences.md` entry 91.
+            let answered = crate::supersession::backfill(&resolve(&args.run)?, args.record)?;
             if args.json {
-                println!("{}", verbs::render_supersessions_json(&answered));
+                println!("{}", crate::supersession::render_json(&answered));
             } else {
-                print!("{}", verbs::render_supersessions(&answered));
+                print!("{}", crate::supersession::render(&answered));
             }
             Ok(answered.exit_code())
         }

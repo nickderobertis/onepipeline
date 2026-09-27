@@ -41,48 +41,48 @@ const BY_LABEL: &str = "superseded_by_node";
 
 /// One earlier attempt of a landed lineage: its node, and the branch it left.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub struct Attempt {
+pub(crate) struct Attempt {
     /// The attempt's node.
-    pub node: String,
+    pub(crate) node: String,
     /// The branch it left.
-    pub branch: String,
+    pub(crate) branch: String,
 }
 
 /// One earlier attempt `onevcs` would not record, and what it answered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Unrecorded {
+pub(crate) struct Unrecorded {
     /// The attempt.
     #[serde(flatten)]
-    pub attempt: Attempt,
+    pub(crate) attempt: Attempt,
     /// What `onevcs` answered.
-    pub error: String,
+    pub(crate) error: String,
 }
 
 /// A lineage whose head landed, and the earlier attempts on other branches it
 /// superseded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Lineage {
+pub(crate) struct Lineage {
     /// The node that landed: the lineage's head.
-    pub node: String,
+    pub(crate) node: String,
     /// The branch it landed from.
-    pub branch: String,
+    pub(crate) branch: String,
     /// The repository its work lands in, as the node names it.
-    pub repo: String,
+    pub(crate) repo: String,
     /// Where it landed: the commit, or the change request's URL where no commit
     /// is recorded.
-    pub landing: String,
+    pub(crate) landing: String,
     /// Every earlier attempt, root first, whose branch is not the one that landed.
     /// An attempt on the landed branch is `onevcs`'s own to chain and is not here.
-    pub superseded: Vec<Attempt>,
+    pub(crate) superseded: Vec<Attempt>,
 }
 
 /// What one landed lineage's recording did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Recorded {
+pub(crate) struct Recorded {
     /// The attempts recorded as superseded.
-    pub recorded: Vec<Attempt>,
+    pub(crate) recorded: Vec<Attempt>,
     /// The attempts `onevcs` refused, and why.
-    pub failed: Vec<Unrecorded>,
+    pub(crate) failed: Vec<Unrecorded>,
 }
 
 /// Every landed lineage that has earlier attempts, in head order.
@@ -336,6 +336,160 @@ pub(crate) fn record_landed(paths: &RunPaths, journal: &mut Journal) -> Result<(
         answered: BTreeSet::new(),
     }
     .pass(paths, journal, &state)
+}
+
+/// `onepipeline supersessions RUN [--record]`: which earlier attempts of the run's
+/// landed retries were on a branch other than the one that landed, and what
+/// became of recording them with `onevcs`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct Supersessions {
+    /// The run.
+    pub(crate) run: String,
+    /// Whether this call recorded, rather than only answered.
+    pub(crate) record: bool,
+    /// Every landed lineage with earlier attempts, in head order.
+    pub(crate) lineages: Vec<SupersededLineage>,
+}
+
+/// One landed lineage of [`Supersessions`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct SupersededLineage {
+    /// The head that landed, and every earlier attempt on another branch.
+    #[serde(flatten)]
+    pub(crate) lineage: Lineage,
+    /// The attempts the run's journal did not yet record: what this call
+    /// records, or would.
+    pub(crate) to_record: Vec<Attempt>,
+    /// The attempts this call recorded.
+    pub(crate) recorded: Vec<Attempt>,
+    /// The attempts `onevcs` refused this call, and why.
+    pub(crate) failed: Vec<Unrecorded>,
+}
+
+impl Supersessions {
+    /// The status the binary exits with: [`EXIT_SUCCESS`](crate::error::EXIT_SUCCESS) when it answered or
+    /// recorded, nothing to record included, and `1` when `onevcs` refused a
+    /// record — the contract's code for work left unfinished.
+    pub(crate) fn exit_code(&self) -> i32 {
+        if self
+            .lineages
+            .iter()
+            .any(|lineage| !lineage.failed.is_empty())
+        {
+            crate::error::EXIT_QUEUED
+        } else {
+            crate::error::EXIT_SUCCESS
+        }
+    }
+}
+
+/// `onepipeline supersessions RUN [--record]`.
+///
+/// Reads the run's journal and nothing else, so it answers for a settled run
+/// with no driver. With `record`, each pair the journal does not already record
+/// is handed to `onevcs::record_supersession` — the function a driver calls when
+/// the retry lands — and one `branches-superseded` per lineage that had any is
+/// appended to the run's journal, so a second call records nothing new.
+///
+/// # Errors
+///
+/// A run whose store cannot be read, or whose journal cannot be written.
+pub(crate) fn backfill(paths: &RunPaths, record: bool) -> Result<Supersessions> {
+    let view = crate::views::RunView::open(paths)?;
+    let already = recorded_in(&view.events);
+    let mut journal = record.then(|| Journal::open(paths));
+    let mut lineages = Vec::new();
+    for lineage in self::lineages(&view.state) {
+        let to_record: Vec<Attempt> = lineage
+            .superseded
+            .iter()
+            .filter(|attempt| !already.contains(*attempt))
+            .cloned()
+            .collect();
+        let (recorded, failed) = match &mut journal {
+            Some(journal) if !to_record.is_empty() => {
+                let done = self::record(&paths.run, &lineage, &to_record);
+                self::journal(paths, journal, &lineage, &done)?;
+                (done.recorded, done.failed)
+            }
+            _ => (Vec::new(), Vec::new()),
+        };
+        lineages.push(SupersededLineage {
+            lineage,
+            to_record,
+            recorded,
+            failed,
+        });
+    }
+    Ok(Supersessions {
+        run: paths.run.clone(),
+        record,
+        lineages,
+    })
+}
+
+/// The lines `onepipeline supersessions RUN` prints.
+pub(crate) fn render(answered: &Supersessions) -> String {
+    if answered.lineages.is_empty() {
+        return format!(
+            "run {}: no retry that landed has an earlier attempt, so there is nothing to \
+             record\n",
+            answered.run
+        );
+    }
+    let mut out = String::new();
+    for lineage in &answered.lineages {
+        let head = &lineage.lineage;
+        out.push_str(&format!(
+            "{} landed {} at {}\n",
+            head.node, head.branch, head.landing
+        ));
+        if head.superseded.is_empty() {
+            out.push_str(
+                "  every earlier attempt was on the branch that landed, which onevcs chains \
+                 itself\n",
+            );
+        }
+        for attempt in &head.superseded {
+            let state = if let Some(failed) = lineage
+                .failed
+                .iter()
+                .find(|failed| &failed.attempt == attempt)
+            {
+                format!("not recorded: {}", failed.error)
+            } else if lineage.recorded.contains(attempt) {
+                "recorded".to_owned()
+            } else if lineage.to_record.contains(attempt) {
+                "to record: run again with --record".to_owned()
+            } else {
+                "already recorded".to_owned()
+            };
+            out.push_str(&format!(
+                "  superseded {} on {}: {state}\n",
+                attempt.node, attempt.branch
+            ));
+        }
+    }
+    let failed: Vec<String> = answered
+        .lineages
+        .iter()
+        .flat_map(|lineage| &lineage.failed)
+        .map(|failed| failed.attempt.branch.clone())
+        .collect();
+    if !failed.is_empty() {
+        out.push_str(&format!(
+            "onevcs refused to record {}; run `onepipeline supersessions {} --record` again \
+             once that is fixed\n",
+            failed.join(", "),
+            answered.run
+        ));
+    }
+    out
+}
+
+/// The one JSON object `onepipeline supersessions RUN --json` prints.
+pub(crate) fn render_json(answered: &Supersessions) -> String {
+    serde_json::to_string(answered).expect("the answer serializes")
 }
 
 #[cfg(test)]
