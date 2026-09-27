@@ -1441,7 +1441,7 @@ fn refuse_stated_task_record(op: &str, node: &Node) -> Result<()> {
 /// C6b over what an edit states, and only that: the rest of an edited graph was
 /// held to it where the run was loaded, and one launched before C6b would
 /// otherwise refuse every later edit over a task nobody restated.
-fn refuse_without_criteria(node: &Node) -> Result<()> {
+fn refuse_breaking_c6b(node: &Node) -> Result<()> {
     graph::check_criteria(node).map_err(|refusal| refuse(Error::from(refusal).to_string()))
 }
 
@@ -1451,7 +1451,7 @@ fn compile_add(graph: &mut Graph, node: &Node) -> Result<Vec<Operation>> {
     }
     refuse_stated_task_record("add", node)?;
     graph::validate_node(node).map_err(|e| refuse(e.to_string()))?;
-    refuse_without_criteria(node)?;
+    refuse_breaking_c6b(node)?;
     let mut operations = vec![Operation::NodeAdded {
         node: Box::new(node.clone()),
         retry_of: None,
@@ -1615,7 +1615,7 @@ fn compile_retry(
         &target,
     ));
     graph::validate_node(&replacement).map_err(|e| refuse(e.to_string()))?;
-    refuse_without_criteria(&replacement)?;
+    refuse_breaking_c6b(&replacement)?;
 
     let mut replacement = replacement;
     if replacement.deps.is_empty() {
@@ -1911,7 +1911,7 @@ fn compile_requeue(
             .iter()
             .any(|key| amend.contains_key(*key))
     }) {
-        refuse_without_criteria(&amended)?;
+        refuse_breaking_c6b(&amended)?;
     }
     graph.insert(amended);
 
