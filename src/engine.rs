@@ -1648,11 +1648,7 @@ fn converge(
                 Message::ChainStopped(stopped) => {
                     raise(paths, journal, chain_stopped_finding(&stopped))?;
                 }
-                // The sweep this driver started has maintained: its record
-                // written where it earned one.
                 Message::Maintained(swept) => maintenance.record(paths, journal, &swept)?,
-                // Its retirement pass is over, and so is the sweep: joined, and
-                // the pass's record written where it earned one.
                 Message::Retired(retirements) => {
                     maintenance.retired(paths, journal, &retirements)?;
                 }

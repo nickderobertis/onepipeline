@@ -1583,20 +1583,14 @@ fn a_node_pinned_to_a_retired_branch_is_cut_fresh_from_the_base() {
 /// A branch whose origin refuses its deletion is retired in part: the pass journals
 /// a failure naming the identity, the branch and what the origin answered, the
 /// copy the origin kept stays, and the run settles as it would have.
+/// A lossless branch the origin carries, published and named by a record of the
+/// host's — a supersession — which is what makes a branch whose commits an origin
+/// ref holds one a pass examines, and so one whose retirement pushes a deletion.
 #[cfg(unix)]
-#[test]
-fn a_deletion_the_origin_refuses_is_journalled_against_its_branch() {
-    let world = sweeping_world("retirement-incomplete");
-    let repo = world.repository("local-direct", &[]);
-    // Published, and named by a record of the host's — a supersession — which is
-    // what makes a branch whose commits an origin ref holds one a pass examines.
-    lossless(&world, &repo, "done/published", "published.md");
-    git(
-        &world,
-        &repo.checkout,
-        &["push", "origin", "done/published"],
-    );
-    let base = git(&world, &repo.origin, &["rev-parse", "main"])
+fn published_and_superseded(world: &World, repo: &Repository, branch: &str, file: &str) {
+    lossless(world, repo, branch, file);
+    git(world, &repo.checkout, &["push", "origin", branch]);
+    let base = git(world, &repo.origin, &["rev-parse", "main"])
         .trim()
         .to_owned();
     let supersede = world
@@ -1604,7 +1598,7 @@ fn a_deletion_the_origin_refuses_is_journalled_against_its_branch() {
             &onevcs_binary(),
             &[
                 "supersede",
-                "done/published",
+                branch,
                 "--repo",
                 "service",
                 "--by",
@@ -1620,18 +1614,48 @@ fn a_deletion_the_origin_refuses_is_journalled_against_its_branch() {
         "{}",
         String::from_utf8_lossy(&supersede.stderr)
     );
+}
+
+/// Install `script` as the origin's `pre-receive` hook.
+#[cfg(unix)]
+fn origin_hook(repo: &Repository, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
     let hook = repo.origin.join("hooks").join("pre-receive");
-    std::fs::write(
-        &hook,
+    std::fs::write(&hook, script).expect("the hook is written");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+        .expect("the hook is executable");
+}
+
+/// Hold every push the origin receives until the journey writes `go`, having
+/// written `entered` on arrival: a retirement pass deleting a published branch
+/// held mid-pass. Answers the two paths.
+#[cfg(unix)]
+fn origin_held(world: &World, repo: &Repository) -> (PathBuf, PathBuf) {
+    let entered = world.root.join("origin.entered");
+    let go = world.root.join("origin.go");
+    origin_hook(
+        repo,
+        &format!(
+            "#!/bin/sh\ncat >/dev/null\ntouch '{}'\nn=0\nwhile [ ! -f '{}' ] && [ $n -lt 6000 ]; do \
+             sleep 0.05; n=$((n+1)); done\n",
+            entered.display(),
+            go.display()
+        ),
+    );
+    (entered, go)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_deletion_the_origin_refuses_is_journalled_against_its_branch() {
+    let world = sweeping_world("retirement-incomplete");
+    let repo = world.repository("local-direct", &[]);
+    published_and_superseded(&world, &repo, "done/published", "published.md");
+    origin_hook(
+        &repo,
         "#!/bin/sh\nwhile read old new ref; do\n  case \"$new\" in\n    *[!0]*) ;;\n    \
          *) echo \"deleting $ref is not allowed here\" >&2; exit 1 ;;\n  esac\ndone\n",
-    )
-    .expect("the hook is written");
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
-            .expect("the hook is executable");
-    }
+    );
     let class = classified(&world, "done/published");
     assert_eq!(class["class"], "retirable", "{class}");
     assert!(
@@ -1682,4 +1706,127 @@ fn a_deletion_the_origin_refuses_is_journalled_against_its_branch() {
     });
     let result = world.run_json("sweeper", "result.json");
     assert_eq!(result["nodes"][0]["status"], "done", "{result}");
+}
+
+/// A sweep's `pool-maintenance` record is journalled once every identity is
+/// maintained, while its retirement pass is still running, and the pass's own
+/// `branches-retired` follows when the pass is done.
+///
+/// The pass is held at the origin, deleting a published lossless branch, so the
+/// record can only be on the journal if it was written before the pass ended.
+#[cfg(unix)]
+#[test]
+fn a_sweep_records_its_maintenance_before_its_retirement_pass_ends() {
+    let world = sweeping_world("retirement-after-maintenance");
+    let repo = world.repository("local-direct", &[]);
+    crate::maintenance::pooled_with_maintenance(&world, None);
+    crate::maintenance::cut_a_slot(&world, &repo.checkout);
+    published_and_superseded(&world, &repo, "done/published", "published.md");
+    let (entered, go) = origin_held(&world, &repo);
+
+    sweeping(
+        &world,
+        "sweeper",
+        crate::harness::agent("hold", &[]),
+        Vec::new(),
+    );
+    world.until("the retirement pass to reach the origin", |_| {
+        entered.is_file()
+    });
+    world.until("the maintenance record", |world| {
+        !crate::maintenance::records(world, "sweeper").is_empty()
+    });
+    assert!(
+        world.events_of("sweeper", "branches-retired").is_empty(),
+        "{}",
+        world.dump()
+    );
+    assert!(
+        world.run_file("sweeper", "maintenance.json").is_file(),
+        "the sweep ended while its retirement pass was held"
+    );
+    world
+        .run(&["status", "sweeper"])
+        .exited(0)
+        .out_has("pool maintenance: a sweep of the host's worktree pools is in progress");
+
+    std::fs::write(&go, "go").expect("the origin is released");
+    until_retired(&world, "sweeper", &["done/published"]);
+    assert!(!holds(&world, &repo.origin, "done/published"));
+    let kinds: Vec<Value> = world
+        .journal("sweeper")
+        .into_iter()
+        .map(|event| event["kind"].clone())
+        .filter(|kind| kind == "pool-maintenance" || kind == "branches-retired")
+        .collect();
+    assert_eq!(
+        kinds,
+        [json!("pool-maintenance"), json!("branches-retired")],
+        "{}",
+        world.dump()
+    );
+
+    world.release("hold.go");
+    world.until("the sweeper to settle", |world| {
+        world.run_file("sweeper", "result.json").is_file()
+    });
+}
+
+/// A run whose last node settles while its sweep is still maintaining waits for
+/// the sweep's retirement pass too, and journals both of the sweep's records —
+/// maintenance first — before its result.
+#[cfg(unix)]
+#[test]
+fn a_run_settling_mid_sweep_journals_its_maintenance_and_retirement_before_its_result() {
+    let world = sweeping_world("retirement-closeout-sweep");
+    let repo = world.repository("local-direct", &[]);
+    let maintaining = world.root.join("maintain.go");
+    crate::maintenance::pooled_with_maintenance(&world, Some(&maintaining));
+    crate::maintenance::cut_a_slot(&world, &repo.checkout);
+    published_and_superseded(&world, &repo, "done/published", "published.md");
+    let (entered, go) = origin_held(&world, &repo);
+
+    sweeping(
+        &world,
+        "closing",
+        crate::harness::agent("hold", &[]),
+        Vec::new(),
+    );
+    world.until("the sibling to report the slot maintaining", |world| {
+        pool_status(world)["slots"][0]["state"]["state"] == "maintaining"
+    });
+    world.release("hold.go");
+    world.until("the held node to settle", |world| {
+        !world.events_of("closing", "node-settled").is_empty()
+    });
+
+    std::fs::write(&maintaining, "go").expect("the maintenance is released");
+    world.until("the retirement pass to reach the origin", |_| {
+        entered.is_file()
+    });
+    assert!(
+        !world.run_file("closing", "result.json").is_file(),
+        "the run settled while its sweep's retirement pass was held"
+    );
+
+    std::fs::write(&go, "go").expect("the origin is released");
+    world.until("the run to settle", |world| {
+        world.run_file("closing", "result.json").is_file()
+    });
+    let kinds: Vec<Value> = world
+        .journal("closing")
+        .into_iter()
+        .map(|event| event["kind"].clone())
+        .filter(|kind| kind == "pool-maintenance" || kind == "branches-retired")
+        .collect();
+    assert_eq!(
+        kinds,
+        [json!("pool-maintenance"), json!("branches-retired")],
+        "{}",
+        world.dump()
+    );
+    assert!(retired(&world, "closing")
+        .iter()
+        .any(|entry| entry["branch"] == "done/published"));
+    assert!(!holds(&world, &repo.origin, "done/published"));
 }

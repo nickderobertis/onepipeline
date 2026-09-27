@@ -91,7 +91,7 @@ fn interpreted_script(world: &World, stem: &str) -> String {
 /// one warm slot, no overflow, and the marker-writing script — holding on
 /// `hold` where a journey names one — under a generous bound. Every other
 /// identity takes the shipped default, which names no maintenance at all.
-fn pooled_with_maintenance(world: &World, hold: Option<&Path>) {
+pub(crate) fn pooled_with_maintenance(world: &World, hold: Option<&Path>) {
     pooled_with_maintenance_bounded(world, hold, "120s");
 }
 
@@ -129,7 +129,7 @@ fn pooled_with_commands(world: &World, named: &[(&str, &str)], timeout: &str) {
 
 /// Cut the identity's one slot: a real session opened and closed through the
 /// linked library, which is the only thing that places a slot under a pool.
-fn cut_a_slot(world: &World, checkout: &Path) {
+pub(crate) fn cut_a_slot(world: &World, checkout: &Path) {
     world.on_onevcs(|| {
         let vcs = onevcs::Providers::real().vcs;
         let session = vcs
@@ -202,7 +202,7 @@ fn marker_lines(world: &World) -> usize {
 }
 
 /// Every `pool-maintenance` record one run wrote.
-fn records(world: &World, run: &str) -> Vec<Value> {
+pub(crate) fn records(world: &World, run: &str) -> Vec<Value> {
     world.events_of(run, "pool-maintenance")
 }
 
