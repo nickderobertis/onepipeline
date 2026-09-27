@@ -60,12 +60,9 @@ mod checkpoint;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod concurrency;
 mod criteria;
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys drive the compiled
-// binary over the real store and exercise `plan`, `graph`, `taskgraph`, `plancheck`, `edits` and
-// `driver` together — every plan load, every edit that states a task, and the adoption — so the
-// narrowest edge they can honestly sit behind is the crate itself, which is this target's. The
-// unrelated dependency the target carries is the shared target's, and `plan_check.rs` and
-// `live_edit.rs` already run under it for the same reason; same grounds as `mod delivers` below.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] C6b is checked in `plan`,
+// `graph`, `edits` and `driver` at once, so the crate is the narrowest edge these journeys can
+// honestly sit behind; same grounds as `mod delivers` below.
 mod criteria_rule;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod crossdag;

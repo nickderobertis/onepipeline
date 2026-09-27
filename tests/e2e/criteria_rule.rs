@@ -284,10 +284,10 @@ fn an_add_retry_or_requeue_stating_a_task_that_breaks_c6b_is_refused_and_changes
 /// Rewrite the plan a run was launched with so node `id`'s task is `task` —
 /// the record a build from before C6b left for a plan it loaded — and drop the
 /// fold checkpoint, which the rewritten journal would no longer corroborate.
-// llmlint: ignore-block[tests_mirror_real_usage] the state `adopt` is refused over — a run whose
-// graph holds an undone agent node with no criteria — is reachable through no interface of this
-// build by design, because C6b refuses every route in; it exists only as the record a build from
-// before C6b wrote. That record differs from the one this build writes for the same plan in
+// llmlint: ignore-block[tests_mirror_real_usage] this block is the helper and the three journeys
+// that call it. The state they start from — a run whose graph holds an agent task with no
+// criteria — is reachable through no interface of this build by design, because C6b refuses every
+// route in; it exists only as the record a build from before C6b wrote. That record differs from the one this build writes for the same plan in
 // exactly the task text, which is what this rewrites, and a run root with no checkpoint is the
 // documented fallback every predecessor's run root already takes. `adopt` itself is the compiled
 // binary's own.
@@ -314,7 +314,6 @@ fn launched_before_c6b(world: &World, run: &str, id: &str, task: &str) {
     std::fs::write(&path, rewritten.join("\n") + "\n").expect("the journal is rewritten");
     let _ = std::fs::remove_file(world.run_file(run, "checkpoint.json"));
 }
-// llmlint: ignore-end[tests_mirror_real_usage]
 
 #[test]
 fn adopt_refuses_a_run_whose_undone_node_breaks_c6b_before_writing_anything() {
@@ -436,3 +435,4 @@ fn a_run_launched_before_c6b_still_takes_edits_that_state_no_task_text() {
         .out_has("\"applied\"");
     assert_eq!(world.events_of(name, "edit-committed").len(), committed + 2);
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
