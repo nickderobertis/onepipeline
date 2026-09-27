@@ -626,12 +626,8 @@ fn a_settle_a_dead_drivers_queue_held_records_the_attempt_it_superseded() {
     until_settled(&world, run, "svc-2");
     let landing = landed_by_hand(&world, &repo);
 
-    // llmlint: ignore-block[tests_mirror_real_usage] a write-back shadow store that cannot be
-    // written is a state a host produces on its own — a full disk, a permission change — and
-    // `driver.rs`'s `a_driver_that_owns_a_run_and_claims_nothing` states the same fixture
-    // through the same helper, for the same reason: the driver has to hold the run without
-    // claiming its queue for long enough for a planner's reply to reach it, and how long a
-    // store takes to refuse is not an input the CLI exposes.
+    // llmlint: ignore-block[tests_mirror_real_usage] an unwritable shadow store is a host
+    // state no verb produces; `driver.rs`'s `unwritable_shadow_store` says why its fixture is.
     crate::driver::unwritable_shadow_store(&world, run);
     // llmlint: ignore-end[tests_mirror_real_usage]
     world.release("hold.go");
@@ -1401,8 +1397,6 @@ fn an_idle_pass_leaves_what_its_live_nodes_name_and_what_holds_work() {
     until_retired(&world, "live", &["other/finished"]);
 
     let statuses = world.run(&["status", "live"]).exited(0).stdout.clone();
-    // Every named node is still in the state its case is about: the ready one was
-    // never dispatched, and nothing of the four settled.
     assert!(
         world
             .events_of("live", "node-dispatched")
