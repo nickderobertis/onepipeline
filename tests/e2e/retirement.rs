@@ -626,18 +626,13 @@ fn a_settle_a_dead_drivers_queue_held_records_the_attempt_it_superseded() {
     until_settled(&world, run, "svc-2");
     let landing = landed_by_hand(&world, &repo);
 
-    // llmlint: ignore-block[tests_mirror_real_usage] a write-back capture path that cannot be
+    // llmlint: ignore-block[tests_mirror_real_usage] a write-back shadow store that cannot be
     // written is a state a host produces on its own — a full disk, a permission change — and
-    // `driver.rs`'s `a_driver_that_owns_a_run_and_claims_nothing` states the same fixture the
-    // same way, for the same reason: the driver has to hold the run without claiming its
-    // queue for long enough for a planner's reply to reach it, and how long a store takes to
-    // refuse is not an input the CLI exposes.
-    let capture = world.run_file(run, "writeback-project-show.stdout");
-    world.until("a projection to leave its capture behind", |_| {
-        capture.is_file()
-    });
-    std::fs::remove_file(&capture).expect("the completed capture is removed");
-    std::fs::create_dir(&capture).expect("a directory makes the capture path unwritable");
+    // `driver.rs`'s `a_driver_that_owns_a_run_and_claims_nothing` states the same fixture
+    // through the same helper, for the same reason: the driver has to hold the run without
+    // claiming its queue for long enough for a planner's reply to reach it, and how long a
+    // store takes to refuse is not an input the CLI exposes.
+    crate::driver::unwritable_shadow_store(&world, run);
     // llmlint: ignore-end[tests_mirror_real_usage]
     world.release("hold.go");
     until_settled(&world, run, "hold");
