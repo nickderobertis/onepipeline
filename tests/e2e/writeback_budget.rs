@@ -853,6 +853,14 @@ fn a_store_that_does_not_open_within_the_floor_is_refused_retried_and_recovers()
             && log.contains("retrying"),
         "a store that did not open was not reported as a failure to retry:\n{log}"
     );
+    // Its record names what the attempt set out to carry, though the store never opened.
+    let recorded = std::fs::read_to_string(world.run_file(run, "writeback-projections.jsonl"))
+        .expect("the failed attempt was recorded");
+    let first: Value =
+        serde_json::from_str(recorded.lines().next().expect("a line")).expect("a record line");
+    assert_eq!(first["outcome"], "failed", "{first}");
+    assert_eq!(first["items"], serde_json::json!(["work"]), "{first}");
+    assert_eq!(first["calls"], serde_json::json!({}), "{first}");
 
     // The store answers: nothing is held from here, and the retry lands.
     world.unscript(&format!("{SCRIPTED_KEY}.initialize.rendezvous"));

@@ -1591,6 +1591,16 @@ fn project(
             }),
         };
     }
+    // Named before the store is opened, so an attempt whose store never opens still names what
+    // it set out to carry; the reads below settle which of the unknown ones it does.
+    items.extend(
+        decided
+            .carried
+            .iter()
+            .chain(decided.unread.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+    );
     let (result, calls) = match Attempt::open(store, snapshot) {
         Err(failed) => (Err(failed), BTreeMap::new()),
         Ok(attempt) => {
@@ -1627,14 +1637,6 @@ fn carry_the_difference(
     // read for the lineages the copy carries, below; an unnamed one is neither read nor written.
     let mut origins = baseline.origins();
     let mut carried = decided.carried;
-    // Named up front, so a failure below still names what the attempt set out to carry.
-    *items = carried
-        .iter()
-        .chain(decided.unread.keys())
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
     let destination_project = destination_project(attempt, snapshot)?;
     let mut read: BTreeSet<String> = BTreeSet::new();
     let mut seeded = false;
@@ -2244,9 +2246,18 @@ impl LandedBaseline {
             if root.is_empty() {
                 return Err("`items` holds an item under no node id".to_owned());
             }
-            item.destination
+            let destination = item
+                .destination
                 .parse::<GlobalId>()
                 .map_err(|why| format!("item '{root}': `destination` {why}"))?;
+            if destination.source != project.global().source {
+                return Err(format!(
+                    "item '{root}': `destination` '{}' is not an item of this run's destination \
+                     '{}'",
+                    item.destination,
+                    project.global().source
+                ));
+            }
             let digest = &item.content_sha256;
             if digest.len() != 64
                 || !digest
@@ -5551,6 +5562,11 @@ mod tests {
                 "a destination that is not a qualified id",
                 "destination",
                 json!("bare"),
+            ),
+            (
+                "a destination in another source",
+                "destination",
+                json!("elsewhere:writeback-quota-plan/002-build"),
             ),
             ("a digest that is not one", "content_sha256", json!("ABC")),
             ("a word the engine never writes", "status", json!("blocked")),
