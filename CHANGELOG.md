@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.50.0](https://github.com/nickderobertis/onepipeline/compare/v0.49.0...v0.50.0) - 2026-09-27
+
+### Added
+
+- *(taskgraph)* read and project plans through the linked onetaskgraph crates ([#542](https://github.com/nickderobertis/onepipeline/pull/542))
+
 ## [0.49.0](https://github.com/nickderobertis/onepipeline/compare/v0.48.1...v0.49.0) - 2026-09-27
 
 ### Added
