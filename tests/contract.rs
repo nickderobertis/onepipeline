@@ -5622,13 +5622,60 @@ fn the_three_merged_streams_are_the_three_libraries_the_contract_composes() {
     serde_json::from_value::<Source>(json!("harness")).expect_err("an unknown source is refused");
 }
 
+/// Entry 92's proposal is this build's own: its kinds are spelled by `PipelineKind`,
+/// which is what emits them, and its verb and flags are the binary's parser's, with
+/// the exit statuses the SDK answers.
+#[test]
+fn the_retirement_proposal_names_exactly_this_builds_kinds_and_verb() {
+    let block = divergence_block("92.");
+    let kinds: Vec<String> =
+        serde_json::from_value(block["event_kinds"].clone()).expect("entry 92 names its kinds");
+    assert_eq!(
+        kinds,
+        [
+            PipelineKind::BranchesSuperseded,
+            PipelineKind::BranchesRetired
+        ]
+        .map(|kind| kind.as_str().to_owned())
+    );
+    for kind in &kinds {
+        assert!(
+            PipelineKind::from_wire(&EventKind(kind.clone())).is_some(),
+            "{kind} is not a kind this build emits"
+        );
+    }
+
+    let command = Cli::command();
+    let verb = block["verb"].as_str().expect("entry 92 names its verb");
+    let parsed = command
+        .find_subcommand(verb)
+        .unwrap_or_else(|| panic!("`{verb}` is not a verb of the binary"));
+    let proposed: BTreeSet<String> = serde_json::from_value(block["verb_flags"].clone())
+        .expect("entry 92 names its flags as a list");
+    let parsed_flags: BTreeSet<String> = parsed
+        .get_arguments()
+        .filter_map(|argument| argument.get_long())
+        .map(|flag| format!("--{flag}"))
+        .collect();
+    assert_eq!(proposed, parsed_flags, "`{verb}`'s flags");
+    assert_eq!(
+        block["verb_exits"]["answered_or_recorded"],
+        json!(EXIT_SUCCESS)
+    );
+    assert_eq!(block["verb_exits"]["onevcs_refused"], json!(EXIT_QUEUED));
+    assert_eq!(
+        block["verb_exits"]["refused_invocation"],
+        json!(EXIT_REFUSED)
+    );
+}
+
 #[test]
 fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // Both directions. A kind the crate emits and the contract does not list is
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 35, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 37, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -5637,7 +5684,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         .collect();
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70."]
+    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92."]
         .into_iter()
         .flat_map(|entry| {
             serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())

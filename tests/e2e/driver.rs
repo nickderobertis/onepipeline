@@ -5406,7 +5406,7 @@ fn a_driver_that_owns_a_run_and_claims_nothing(world: &World, name: &str) -> (St
 /// Make the run's write-back shadow store unwritable once its first projection has written
 /// it: a file where its projects folder belongs, which every later attempt fails on and
 /// retries — the failing projection that holds a close-out open.
-fn unwritable_shadow_store(world: &World, run: &str) {
+pub(crate) fn unwritable_shadow_store(world: &World, run: &str) {
     let shadow = world.run_file(run, "writeback").join("projects");
     world.until("the first projection to write its shadow store", |_| {
         shadow.is_dir()

@@ -198,6 +198,12 @@ pub enum Command {
     // llmlint: ignore-end[new_command_or_client_gets_its_own_project]
     /// Per-node outcomes, with each node's own evidence.
     Results(RunArgs),
+    // llmlint: ignore[new_command_or_client_gets_its_own_project] a verb of this one binary
+    // rather than a new command or client: it reads the run store the engine owns and records
+    // through the `onevcs` library it already links, as the verbs in the block above do.
+    /// Which earlier attempts of a run's landed retries are superseded, read off
+    /// its journal alone, and — with `--record` — record them with onevcs.
+    Supersessions(SupersessionsArgs),
     /// What each run is for, and how far it has got.
     Goals(OptionalRunArgs),
     /// A dispatched turn's tools and reasoning, from the evidence it retained.
@@ -984,6 +990,24 @@ pub struct DriveArgs {
 pub struct RunArgs {
     /// The run id.
     pub run: String,
+}
+
+/// `onepipeline supersessions`.
+///
+/// Exits 0 when it answered or recorded — nothing to record included — 2 for a
+/// refused invocation such as an unknown run, and 1 when onevcs refused a record,
+/// naming the branches it refused.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct SupersessionsArgs {
+    /// The run id. Its journal is all that is read: no driver need be alive.
+    pub run: String,
+    /// Record each pair with onevcs and journal `branches-superseded`, rather
+    /// than only printing what would be recorded.
+    #[arg(long)]
+    pub record: bool,
+    /// Print one JSON object rather than lines.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// A view that defaults to every run when given none.
