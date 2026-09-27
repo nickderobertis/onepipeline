@@ -5617,12 +5617,12 @@ and neither given a judge's receipt when the dispatch is reaped before one.
 ## 71. The write-back's copy is bounded by a fixed minute, which a plan outgrows — OPEN
 
 **Proposal (for the planner who owns the contract): bound the settlement
-write-back's `project copy` by a **per-item budget multiplied by the number of
-items it projects**, never below the sixty-second floor every other store command
-keeps, and make the per-item figure a launch-level setting named by
+write-back's `project copy` by the sixty-second floor every other store command
+keeps **plus a per-item budget multiplied by the number of items it projects**,
+and make the per-item figure a launch-level setting named by
 `--writeback-item-budget`, `ONEPIPELINE_WRITEBACK_ITEM_BUDGET`, and a
 `writeback_item_budget` key at launch-config schema 5, with the shipped default
-of ten seconds per item beneath all three.**
+of twelve seconds per item beneath all three.**
 
 The contract's write-back is best-effort and off the reconcile loop, so a run
 settles identically whether or not its projection landed, and what keeps the
@@ -5644,19 +5644,25 @@ proves nothing about the board, and a fixed minute is the mechanism that makes
 that true more often as plans grow.
 
 What this crate does today is the block below, and the block is the source. The
-copy's deadline is `max(floor, budget × items)`, where the item count is the
-number of nodes in the snapshot being projected — the same list the
-`Unprojected` surface names as `items:` when the copy fails. The floor stays
-sixty seconds, stays the whole deadline for the project read and each page of its
-tasks, and stays what it was: a liveness backstop rather than a latency target. The
+copy's deadline is `floor + budget × items`, where the item count is the number
+of lineages the copy carries — the same list the `Unprojected` surface names as
+`items:` when the copy fails. It was `max(floor, budget × items)` until a
+seven-item copy onto the `plans` board measured 71 to 72 seconds against the 70
+that allowed it (#521): every copy also spends the fixed round trips a read does,
+so the floor is added under the per-item figure rather than traded against it,
+and the shipped default moved from ten seconds per item to **twelve**, which lands
+a copy at the measured 10.2 seconds per item with at least a sixth to spare at any
+size. The floor stays sixty seconds, stays the whole deadline for the project read
+and each item read, and stays what it was: a liveness backstop rather than a
+latency target. The
 store is linked, so a call that outlasts its deadline is **cancelled** rather than a
 child killed: its future is dropped where it waits, and the engine that drove it —
 with any plugin process it started — is dropped before the attempt is recorded, so
 no write the cancelled copy started lands after the record says it was refused. The
-refusal names the seconds the copy was allowed, the item count and the per-item
-budget it was computed from, and — where the floor governed — says so, so the
-line on the driver's stderr and the surface built from it read as the arithmetic
-they are. Nothing else about how the failure is reported changes.
+refusal names the seconds the copy was allowed, the floor, the item count and the
+per-item budget it was computed from, so the line on the driver's stderr and the
+surface built from it read as the arithmetic they are. Nothing else about how the
+failure is reported changes.
 
 The budget is nameable three ways, in the order entry 41 states and for the same
 reason: the flag, then the environment variable, then the launch config field,
@@ -5688,9 +5694,10 @@ resolves, and the default and the floor must be the constants the code carries.
 and drives them against the compiled binary and a real store served through
 `crates/testfakes`' `scripted-source`, which holds the copy's writes: a copy held
 past the floor that still lands because the item count lifted its deadline above
-it, a copy held past what a deliberately tiny budget allows — which the floor then
-governs — cancelled and reported with the computed budget, the item count and the
-floor in the refusal, and nothing it held landing on the board afterwards, and the
+it, a seven-item copy held at eleven seconds per item that lands inside the floor
+plus seven items of the shipped budget, a copy held past what a deliberately tiny
+budget allows — which adds one second to the floor — cancelled and reported with
+the computed budget, the item count and the floor in the refusal, and nothing it held landing on the board afterwards, and the
 precedence between the three spellings observable on the launch record an `adopt`
 replays.
 
@@ -5702,21 +5709,27 @@ replays.
     "config_key": "writeback_item_budget",
     "config_schema_version": 5,
     "precedence": ["flag", "environment", "config_key"],
-    "default_seconds": 10,
+    "default_seconds": 12,
     "floor_seconds": 60,
-    "deadline": "max(floor_seconds, budget × items)",
+    "deadline": "floor_seconds + budget × items",
     "examples": [
       {
-        "items": 34,
-        "budget_seconds": 10,
-        "deadline_seconds": 340,
-        "refusal": "project-copy exceeded 340 seconds (34 items × 10 seconds per item)"
+        "items": 7,
+        "budget_seconds": 12,
+        "deadline_seconds": 144,
+        "refusal": "project-copy exceeded 144 seconds (the 60 second floor + 7 items × 12 seconds per item)"
       },
       {
-        "items": 2,
-        "budget_seconds": 10,
-        "deadline_seconds": 60,
-        "refusal": "project-copy exceeded 60 seconds (the 60 second floor; 2 items × 10 seconds per item is less)"
+        "items": 34,
+        "budget_seconds": 12,
+        "deadline_seconds": 468,
+        "refusal": "project-copy exceeded 468 seconds (the 60 second floor + 34 items × 12 seconds per item)"
+      },
+      {
+        "items": 1,
+        "budget_seconds": 1,
+        "deadline_seconds": 61,
+        "refusal": "project-copy exceeded 61 seconds (the 60 second floor + 1 item × 1 second per item)"
       }
     ]
   }

@@ -40,18 +40,19 @@ pub const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 600;
 ///
 /// The bottom rung of four: `--writeback-item-budget` beats
 /// [`WRITEBACK_ITEM_BUDGET_ENV`], which beats the launch config's own
-/// `writeback_item_budget`, and this is what every launch ran under before any
-/// of the three existed. Multiplied by the number of items a settlement projects
-/// to bound the store's `project copy`, and never below
-/// [`WRITEBACK_COMMAND_FLOOR_SECONDS`]. A [`NonZeroU64`] because zero is no
-/// budget at all, and every rung that names one refuses it.
-pub const DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS: NonZeroU64 = NonZeroU64::new(10).unwrap();
+/// `writeback_item_budget`. Multiplied by the number of items a settlement
+/// projects and added to [`WRITEBACK_COMMAND_FLOOR_SECONDS`] to bound the store's
+/// `project copy`. Twelve, because a copy onto the `plans` board measured about
+/// 10.2 seconds per item (#521): the floor plus twelve per item lands that copy
+/// with at least a sixth to spare at any size. A [`NonZeroU64`] because zero is
+/// no budget at all, and every rung that names one refuses it.
+pub const DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS: NonZeroU64 = NonZeroU64::new(12).unwrap();
 
 /// The least any store call the write-back makes is allowed, in seconds.
 ///
 /// The whole deadline for the reads that are not linear in plan size — the
-/// project and each page of its tasks — and the floor under the copy's, which
-/// the per-item budget lifts once a plan carries enough items to need it. A
+/// project and each item it reads — and the floor the copy's per-item budget is
+/// added to, so a copy of a few items keeps the round trips every copy makes. A
 /// liveness backstop for an unreachable store rather than a latency target:
 /// the projection stays off the reconcile loop while the call runs, and a call
 /// that outlasts its deadline is cancelled.
@@ -403,13 +404,13 @@ pub struct StartArgs {
     /// How long the settlement write-back allows its store's `project copy` per
     /// item it writes, in seconds.
     ///
-    /// The copy's deadline is this multiplied by the number of items the run
-    /// projects, and never below the sixty-second floor every other store
-    /// command is bounded by, so the backstop that kills an unreachable store's
-    /// copy scales with the plan instead of being outgrown by it. A positive
-    /// whole number: zero is no budget at all and is refused. Given here it
-    /// beats `ONEPIPELINE_WRITEBACK_ITEM_BUDGET` and the launch config's own
-    /// field; naming none takes the shipped ten seconds per item.
+    /// The copy's deadline is the sixty-second floor every other store command
+    /// is bounded by plus this multiplied by the number of items the copy
+    /// carries, so the backstop that cancels an unreachable store's copy scales
+    /// with the plan instead of being outgrown by it. A positive whole number:
+    /// zero is no budget at all and is refused. Given here it beats
+    /// `ONEPIPELINE_WRITEBACK_ITEM_BUDGET` and the launch config's own field;
+    /// naming none takes the shipped twelve seconds per item.
     #[arg(long, value_name = "SECONDS")]
     pub writeback_item_budget: Option<u64>,
     /// The command run once when this run ends with every node `done`.

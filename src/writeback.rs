@@ -176,26 +176,27 @@ const STORE_OPEN: &str = "store-open";
 /// it was refused.
 ///
 /// The reads are the same size whatever the plan, so [`COMMAND_FLOOR`] alone bounds them.
-/// The copy writes one item per node it carries, so its deadline is the launch's per-item
-/// budget multiplied by those nodes — every node for a whole copy, the named ones for a
-/// member copy, and the list an [`Unprojected`] surface names either way — with the floor
-/// governing until a copy is large enough to lift it. The account is derived from the
+/// The copy writes one item per lineage it carries, so its deadline is the floor **plus** the
+/// launch's per-item budget multiplied by those items — the list an [`Unprojected`] surface
+/// names. Added rather than the larger of the two, because every copy also spends the fixed
+/// round trips a read does: a seven-item copy onto the `plans` board measured 71 to 72 seconds
+/// against the 70 the larger of the two allowed it (#521). The account is derived from the
 /// figure rather than stored beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Deadline {
     /// The fixed floor, which is the whole deadline for a read.
     Floor,
-    /// The copy's: `max(floor, per_item × items)`, with the budget in seconds.
+    /// The copy's: `floor + per_item × items`, with the budget in seconds.
     Copy { per_item: NonZeroU64, items: usize },
 }
 
 impl Deadline {
-    /// The budget multiplied through, in seconds, before the floor is applied.
+    /// The budget multiplied through, in seconds, before the floor is added.
     ///
     /// Exact for every product that fits in a `u64` of seconds, and `u64::MAX` seconds for
     /// one that does not — saturating rather than wrapping, because a product that wrapped
-    /// to nothing would leave the floor governing exactly the plan the budget exists to
-    /// accommodate.
+    /// to nothing would leave the floor alone governing exactly the plan the budget exists
+    /// to accommodate.
     fn product(per_item: NonZeroU64, items: usize) -> Duration {
         // llmlint: ignore[changed_behavior_has_e2e] a product past `u64::MAX` seconds is
         // more items than any store holds and more seconds than any host runs, so no
@@ -209,7 +210,9 @@ impl Deadline {
     fn within(self) -> Duration {
         match self {
             Self::Floor => COMMAND_FLOOR,
-            Self::Copy { per_item, items } => Self::product(per_item, items).max(COMMAND_FLOOR),
+            Self::Copy { per_item, items } => {
+                COMMAND_FLOOR.saturating_add(Self::product(per_item, items))
+            }
         }
     }
 
@@ -218,27 +221,18 @@ impl Deadline {
         let seconds = self.within().as_secs();
         match self {
             Self::Floor => format!("{name} exceeded {seconds} seconds"),
-            Self::Copy { per_item, items } => {
-                let arithmetic = format!(
-                    "{items} {} × {} {} per item",
-                    if items == 1 { "item" } else { "items" },
-                    per_item,
-                    if per_item.get() == 1 {
-                        "second"
-                    } else {
-                        "seconds"
-                    }
-                );
-                if Self::product(per_item, items) < COMMAND_FLOOR {
-                    format!(
-                        "{name} exceeded {seconds} seconds (the {} second floor; {arithmetic} \
-                         is less)",
-                        COMMAND_FLOOR.as_secs()
-                    )
+            Self::Copy { per_item, items } => format!(
+                "{name} exceeded {seconds} seconds (the {} second floor + {items} {} × {} {} \
+                 per item)",
+                COMMAND_FLOOR.as_secs(),
+                if items == 1 { "item" } else { "items" },
+                per_item,
+                if per_item.get() == 1 {
+                    "second"
                 } else {
-                    format!("{name} exceeded {seconds} seconds ({arithmetic})")
+                    "seconds"
                 }
-            }
+            ),
         }
     }
 }
@@ -2818,38 +2812,43 @@ mod tests {
         })
     }
 
-    /// The copy's deadline is the per-item budget multiplied by the item count, and never
-    /// below the floor; the refusal says which governed and what it was computed from.
+    /// The copy's deadline is the floor plus the per-item budget multiplied by the item count;
+    /// the refusal says what it was computed from.
     ///
-    /// The incident: 34 items under the fixed sixty seconds. Under the shipped budget that
-    /// run is allowed 340, and the line an operator reads says so — and a plan the floor
-    /// still governs says that instead, rather than a figure that was never the deadline.
+    /// The incident: a seven-item copy onto the `plans` board measured 71 to 72 seconds, and
+    /// the larger of the floor and ten seconds per item allowed it 70 (#521). Under the
+    /// shipped budget that copy is allowed the floor and seven twelve-second items besides.
     #[test]
-    fn the_copy_deadline_is_the_budget_times_the_items_and_never_below_the_floor() {
+    fn the_copy_deadline_is_the_floor_plus_the_budget_times_the_items() {
         let shipped = DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS;
         let copy = |items: usize| Deadline::Copy {
             per_item: shipped,
             items,
         };
-        assert_eq!(copy(34).within(), Duration::from_secs(340));
+        assert_eq!(copy(7).within(), Duration::from_secs(144));
         assert_eq!(
-            copy(34).refusal("project-copy"),
-            "project-copy exceeded 340 seconds (34 items × 10 seconds per item)"
+            copy(7).refusal("project-copy"),
+            "project-copy exceeded 144 seconds (the 60 second floor + 7 items × 12 seconds \
+             per item)"
         );
+        // Seven items at eleven seconds apiece — slower than the board measured — land.
+        assert!(copy(7).within() > Duration::from_secs(7 * 11));
+        // And a copy at the measured 10.2 seconds per item lands with a sixth to spare
+        // however many items it carries, which the floor alone could never promise.
+        for items in [1_usize, 7, 34, 1_000] {
+            let measured = Duration::from_millis(10_200 * items as u64);
+            assert!(
+                copy(items).within() > measured + measured / 6,
+                "{items} items at the measured pace outrun their deadline"
+            );
+        }
 
-        assert_eq!(copy(2).within(), COMMAND_FLOOR);
+        // No items is the floor alone, and said as the arithmetic it is.
+        assert_eq!(copy(0).within(), COMMAND_FLOOR);
         assert_eq!(
-            copy(2).refusal("project-copy"),
-            "project-copy exceeded 60 seconds (the 60 second floor; 2 items × 10 seconds \
-             per item is less)"
-        );
-
-        // Exactly the floor is the product, and said as the product: the floor did not
-        // lift anything.
-        assert_eq!(copy(6).within(), COMMAND_FLOOR);
-        assert_eq!(
-            copy(6).refusal("project-copy"),
-            "project-copy exceeded 60 seconds (6 items × 10 seconds per item)"
+            copy(0).refusal("project-copy"),
+            "project-copy exceeded 60 seconds (the 60 second floor + 0 items × 12 seconds \
+             per item)"
         );
 
         // One of each, in the singular, so the line reads as a sentence.
@@ -2859,8 +2858,8 @@ mod tests {
         };
         assert_eq!(
             one.refusal("project-copy"),
-            "project-copy exceeded 60 seconds (the 60 second floor; 1 item × 1 second per \
-             item is less)"
+            "project-copy exceeded 61 seconds (the 60 second floor + 1 item × 1 second per \
+             item)"
         );
 
         // The reads are the floor alone, and their refusal is the line it always was.
@@ -2870,28 +2869,32 @@ mod tests {
             "project-show exceeded 60 seconds"
         );
         assert_eq!(
-            Deadline::Floor.refusal("task-list"),
-            "task-list exceeded 60 seconds"
+            Deadline::Floor.refusal("task-show"),
+            "task-show exceeded 60 seconds"
         );
 
         // The product is exact for every count a `u64` of seconds can carry — well past
         // the four billion a narrower multiplication would have capped at — and saturates
         // to `u64::MAX` seconds beyond that, rather than wrapping to a figure the floor
-        // would then govern.
+        // would then govern alone.
         let vast = Deadline::Copy {
             per_item: NonZeroU64::MIN,
             items: usize::MAX / 2,
         };
-        assert_eq!(vast.within(), Duration::from_secs(usize::MAX as u64 / 2));
+        assert_eq!(
+            vast.within(),
+            Duration::from_secs(usize::MAX as u64 / 2 + COMMAND_FLOOR.as_secs())
+        );
         let saturated = Deadline::Copy {
             per_item: NonZeroU64::MAX,
             items: 2,
         };
-        assert_eq!(saturated.within(), Duration::from_secs(u64::MAX));
+        assert_eq!(saturated.within(), Duration::MAX);
         assert_eq!(
             saturated.refusal("project-copy"),
             format!(
-                "project-copy exceeded {} seconds (2 items × {} seconds per item)",
+                "project-copy exceeded {} seconds (the 60 second floor + 2 items × {} seconds \
+                 per item)",
                 u64::MAX,
                 u64::MAX
             )
@@ -2931,7 +2934,7 @@ mod tests {
         );
         assert_eq!(
             budget["deadline"].as_str(),
-            Some("max(floor_seconds, budget × items)"),
+            Some("floor_seconds + budget × items"),
             "entry 71 states a deadline formula other than the one `Deadline::within` computes"
         );
         let examples = budget["examples"]
@@ -3532,8 +3535,9 @@ mod tests {
         assert!(pending.latest.take().is_some());
         assert_eq!(
             super::launch_wait(per_item, &pending),
-            Duration::from_secs(120),
-            "the launch wait did not follow the 12 × 10 second deadline of the queued copy"
+            Duration::from_secs(60 + 120),
+            "the launch wait did not follow the floor + 12 × 10 second deadline of the queued \
+             copy"
         );
     }
 

@@ -3468,11 +3468,11 @@ fn the_writeback_budget_surface_is_what_the_divergence_record_names() {
         "entry 71 states a shipped default of zero"
     );
     // The formula the entry states is the one each example below is computed by
-    // — the floor or the product, whichever is larger — so a block whose formula
-    // and examples disagreed would fail here rather than read as two truths.
+    // — the floor plus the product — so a block whose formula and examples
+    // disagreed would fail here rather than read as two truths.
     assert_eq!(
         budget["deadline"].as_str(),
-        Some("max(floor_seconds, budget × items)"),
+        Some("floor_seconds + budget × items"),
         "entry 71 states a deadline other than the arithmetic its examples are held to"
     );
     // And each worked example is that arithmetic, computed from those two
@@ -3487,20 +3487,20 @@ fn the_writeback_budget_surface_is_what_the_divergence_record_names() {
         let deadline = example["deadline_seconds"].as_u64().expect("a deadline");
         assert_eq!(
             deadline,
-            (per_item * items).max(WRITEBACK_COMMAND_FLOOR_SECONDS),
+            WRITEBACK_COMMAND_FLOOR_SECONDS + per_item * items,
             "entry 71's example is not the arithmetic it states: {example}"
         );
         let refusal = example["refusal"].as_str().expect("the refusal");
-        assert!(
-            refusal.starts_with(&format!("project-copy exceeded {deadline} seconds ("))
-                && refusal.contains(&format!("{items} items × {per_item} seconds per item")),
-            "entry 71's refusal does not name what it computed: {refusal}"
-        );
+        let item_word = if items == 1 { "item" } else { "items" };
+        let second_word = if per_item == 1 { "second" } else { "seconds" };
         assert_eq!(
-            refusal.contains("floor"),
-            per_item * items < WRITEBACK_COMMAND_FLOOR_SECONDS,
-            "entry 71's refusal says the floor governed where it did not, or the reverse: \
-             {refusal}"
+            refusal,
+            format!(
+                "project-copy exceeded {deadline} seconds (the \
+                 {WRITEBACK_COMMAND_FLOOR_SECONDS} second floor + {items} {item_word} × \
+                 {per_item} {second_word} per item)"
+            ),
+            "entry 71's refusal does not name what it computed: {refusal}"
         );
     }
 
@@ -3524,10 +3524,10 @@ fn the_writeback_budget_surface_is_what_the_divergence_record_names() {
          {precedence:?} at {found:?}"
     );
     for promise in [
-        "multiplied by the number of items",
-        "never below the sixty-second floor",
+        "the sixty-second floor every other store call is bounded by plus that budget \
+         multiplied by the number of items the copy carries",
         "zero is refused",
-        "naming none takes ten seconds per item",
+        "naming none takes twelve seconds per item",
     ] {
         assert!(
             prose.contains(promise),
