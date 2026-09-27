@@ -5790,7 +5790,14 @@ the refused snapshot, so that publishing the same one again attempts nothing.
 Everything else is retried exactly as before: a `transient` failure — a rate limit
 included — a partial answer with any source that is not refused, and every failure that
 carries no class at all: a call cancelled at its deadline, or a shadow store this worker
-could not write. Closeout attempts a terminal snapshot published after a refusal, because
+could not write. **A rate limit that names its wait is waited out in full.** The store's
+`SourceError::RateLimited` carries the `retry_after_seconds` its source gave — read off the
+typed value, and off `Failure::retry_after_seconds` for a delivered ticket — and until that
+wait has passed the worker hands the store no call of any kind: not on the schedule, not for
+a snapshot published meanwhile, and not at closeout, which otherwise suspends the schedule.
+Where a partial answer names several waits, the longest is taken. A rate limit naming none is
+asked again on the schedule. The attempt after the wait carries what has still not landed,
+and nothing more. Closeout attempts a terminal snapshot published after a refusal, because
 it is a different snapshot, and does not re-attempt the refused one; stopping stays
 prompt; no store read feeds back into scheduling, and no store call delays closeout, a
 settlement, or an edit ruling.
@@ -5825,6 +5832,12 @@ closeout over a refusal.
     "matched_on": ["EngineError", "SourceError", "SourceFailure", "Delivered"],
     "stops_the_timer": "refused",
     "transient": ["rate-limited", "unavailable"],
+    "rate_limit_wait": {
+      "read_off": ["SourceError::RateLimited.retry_after_seconds", "Failure::retry_after_seconds"],
+      "no_call_before_it_passes": ["the retry schedule", "a snapshot published meanwhile", "closeout"],
+      "several": "the longest",
+      "none_named": "the retry schedule"
+    },
     "commands": ["project-show", "task-list", "project-copy"],
     "empty_show": {"class": "refused", "kind": "no-such-item"},
     "partial_answer": {

@@ -4,7 +4,8 @@
 //! snapshots to this worker, and the worker only projects them. Store reads never feed back
 //! into scheduling, and a failed or slow write is reported and retried off the engine thread
 //! — unless the store *refused* it, which no retry changes: that is reported once and
-//! attempted again only when the run's graph does. See [`FailureClass`].
+//! attempted again only when the run's graph does. See [`FailureClass`]. A rate limit that
+//! names how long to wait is waited out in full, with no call of any kind before it passes.
 //!
 //! # Ownership: the write-back owns exactly what the plan document declares
 //!
@@ -632,6 +633,26 @@ struct Failed {
     classified: Option<Classified>,
     /// The copy report's `delivered` entries, where a copy that landed in part wrote one.
     delivered: Vec<Map<String, Value>>,
+    /// How long the store asked to be left alone: the `retry_after_seconds` a rate-limited
+    /// failure carried, read off the store's own typed value. `None` where it gave none, and
+    /// then the retry schedule decides.
+    wait: Option<Duration>,
+}
+
+/// How long one source error asked the caller to wait before asking again: the rate limit's
+/// own `retry_after_seconds`, where it gave one, and nothing for every other failure.
+fn asked_to_wait(error: &SourceError) -> Option<Duration> {
+    match error {
+        SourceError::RateLimited {
+            retry_after_seconds,
+            ..
+        } => retry_after_seconds.map(Duration::from_secs),
+        SourceError::Config { .. }
+        | SourceError::Auth { .. }
+        | SourceError::Refused { .. }
+        | SourceError::Unavailable { .. }
+        | SourceError::Malformed { .. } => None,
+    }
 }
 
 impl Failed {
@@ -641,15 +662,19 @@ impl Failed {
             reason,
             classified: Some(classified),
             delivered: Vec::new(),
+            wait: None,
         }
     }
 
-    /// One store call the engine refused to run.
+    /// One store call the engine refused to run, with the wait its source asked for.
     fn engine(call: &str, error: &EngineError) -> Self {
-        Self::classed(
-            format!("{call} failed: {error}"),
-            Classified::of_engine(error),
-        )
+        Self {
+            wait: cause_of(error).1.and_then(asked_to_wait),
+            ..Self::classed(
+                format!("{call} failed: {error}"),
+                Classified::of_engine(error),
+            )
+        }
     }
 
     /// One store call answered in part, naming every source that could not contribute.
@@ -672,6 +697,11 @@ impl Failed {
                     .map(|failure| Classified::of_source(&failure.error)),
             ),
             delivered: Vec::new(),
+            // The longest any of them asked for: asking sooner asks one that said not yet.
+            wait: errors
+                .iter()
+                .filter_map(|failure| asked_to_wait(&failure.error))
+                .max(),
         }
     }
 
@@ -705,6 +735,7 @@ impl From<String> for Failed {
             reason,
             classified: None,
             delivered: Vec::new(),
+            wait: None,
         }
     }
 }
@@ -1231,17 +1262,34 @@ fn worker(
                 };
                 let first = failures == NonZeroU32::MIN;
                 standing = Standing::Failing(failures);
+                // A store that said how long to leave it alone is left alone that long: no
+                // call of any kind reaches it before then — not on the schedule, not for a
+                // snapshot published meanwhile, and not at closeout. One that said nothing is
+                // asked again on the schedule.
+                let asked = failed.wait;
                 if first {
                     // The one line on the driver's stderr that ever says a projection is in
                     // trouble, so it says what an operator's next question is: whether to
                     // expect another attempt in a moment or in a minute.
-                    eprintln!(
-                        "onetaskgraph write-back failed for '{}': {}; retrying, spacing \
-                         further attempts out to {} seconds apart while it keeps failing",
-                        snapshot.project,
-                        failed.said(),
-                        RETRY_CEILING.as_secs()
-                    );
+                    match asked {
+                        Some(wait) => eprintln!(
+                            "onetaskgraph write-back failed for '{}': {}; the store asked to \
+                             be left alone for {} seconds, so nothing is asked of it before \
+                             then, and further attempts are spaced out to {} seconds apart \
+                             while it keeps failing",
+                            snapshot.project,
+                            failed.said(),
+                            wait.as_secs(),
+                            RETRY_CEILING.as_secs()
+                        ),
+                        None => eprintln!(
+                            "onetaskgraph write-back failed for '{}': {}; retrying, spacing \
+                             further attempts out to {} seconds apart while it keeps failing",
+                            snapshot.project,
+                            failed.said(),
+                            RETRY_CEILING.as_secs()
+                        ),
+                    }
                 }
                 // How soon the planner hears of it, which is this sum and no deadline: the
                 // surface is recorded one [`FIRST_RETRY_AFTER`] after the call that failed, and
@@ -1250,7 +1298,11 @@ fn worker(
                 // root that is gone, and answers so in milliseconds — so [`COMMAND_FLOOR`] is
                 // no part of it: that is spent only by a call that has not returned, which is a
                 // store answering slowly.
-                if !should_retry_after(&pending, retry_after(failures.get())) {
+                let interval = match asked {
+                    Some(wait) => Interval::Asked(wait),
+                    None => Interval::Scheduled(retry_after(failures.get())),
+                };
+                if !should_retry_after(&pending, interval) {
                     return;
                 }
                 let (lock, ready) = &*pending;
@@ -1291,25 +1343,41 @@ fn retry_after(failures: u32) -> Duration {
         .min(RETRY_CEILING)
 }
 
+/// How long one failure is waited out before the projection is attempted again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Interval {
+    /// The retry schedule's own, which a closeout suspends.
+    Scheduled(Duration),
+    /// What the store asked for, which nothing shortens: asking a limiter inside the window
+    /// it named is asking one that has already said no.
+    Asked(Duration),
+}
+
 /// Wait out at most one retry interval, answering whether to attempt again at all.
 ///
 /// `false` is [`RunPhase::Stopping`] and the caller returns on it; `true` is the wait
-/// having been served, or [`RunPhase::ClosingOut`]. Both phases are read on entry as well
-/// as on every wake, so one the run reached while this worker was projecting is honoured
-/// rather than missed. A snapshot published meanwhile deliberately does *not* shorten the
-/// wait: what the interval spaces is the destination's refusal, and a run that keeps
-/// folding new graph state would otherwise retry as fast as it publishes.
-fn should_retry_after(pending: &(Mutex<Pending>, Condvar), interval: Duration) -> bool {
+/// having been served, or — for a scheduled interval alone — [`RunPhase::ClosingOut`]. Both
+/// phases are read on entry as well as on every wake, so one the run reached while this
+/// worker was projecting is honoured rather than missed. A snapshot published meanwhile
+/// deliberately does *not* shorten the wait: what the interval spaces is the destination's
+/// refusal, and a run that keeps folding new graph state would otherwise retry as fast as it
+/// publishes. An interval the store asked for is not shortened by a closeout either, so a
+/// closeout inside it projects nothing and ends when its own bounded window does.
+fn should_retry_after(pending: &(Mutex<Pending>, Condvar), interval: Interval) -> bool {
     let (lock, ready) = pending;
     let Ok(mut state) = lock.lock() else {
         return false;
     };
-    let due = Instant::now() + interval;
+    let (wait, binding) = match interval {
+        Interval::Scheduled(wait) => (wait, false),
+        Interval::Asked(wait) => (wait, true),
+    };
+    let due = Instant::now() + wait;
     loop {
         match state.phase {
             RunPhase::Stopping => return false,
-            RunPhase::ClosingOut => return true,
-            RunPhase::Running => {}
+            RunPhase::ClosingOut if !binding => return true,
+            RunPhase::ClosingOut | RunPhase::Running => {}
         }
         let left = due.saturating_duration_since(Instant::now());
         if left.is_zero() {
@@ -1525,6 +1593,17 @@ fn project(
                     }),
             );
         failed.delivered = delivered;
+        failed.wait = report
+            .delivered
+            .iter()
+            .filter_map(|entry| match &entry.outcome {
+                DeliveryOutcome::Failed { failure, .. } => failure.retry_after_seconds(),
+                DeliveryOutcome::Written { .. }
+                | DeliveryOutcome::Unchanged { .. }
+                | DeliveryOutcome::Left { .. } => None,
+            })
+            .max()
+            .map(Duration::from_secs);
         return Err(failed);
     }
     // Counted off the origins as the pre-copy read left them, before the report teaches the
@@ -2958,6 +3037,69 @@ mod tests {
                 "entry 71's example is not the refusal the copy is killed with: {example}"
             );
         }
+    }
+
+    /// A rate-limited failure carries the wait its source asked for, read off the store's own
+    /// typed value wherever the failure arrives — a call the engine failed, wrapped once more
+    /// in a copy it could not undo, or one source of a partial answer, where the longest wait
+    /// any of them asked for is the one taken — and every other failure, a rate limit naming
+    /// no wait included, carries none, so the schedule decides.
+    #[test]
+    fn a_rate_limited_failure_carries_the_wait_its_source_asked_for() {
+        use super::Failed;
+        let limited = |seconds: Option<u64>| SourceError::RateLimited {
+            retry_after_seconds: seconds,
+            message: None,
+        };
+        let failed = |error: SourceError| EngineError::SourceFailed {
+            name: "plans".to_owned(),
+            error,
+        };
+        assert_eq!(
+            Failed::engine("project-show", &failed(limited(Some(7)))).wait,
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(
+            Failed::engine("project-show", &failed(limited(None))).wait,
+            None
+        );
+        let unreachable = SourceError::Unavailable {
+            message: "gone".to_owned(),
+        };
+        assert_eq!(
+            Failed::engine("project-show", &failed(unreachable.clone())).wait,
+            None
+        );
+        let undone = EngineError::CopyNotUndone {
+            error: Box::new(failed(limited(Some(30)))),
+            left_behind: onetaskgraph_core::LeftBehind::new(
+                "plans:board/1".parse::<GlobalId>().expect("an id"),
+            ),
+            refusal: SourceError::Refused {
+                message: "no".to_owned(),
+            },
+        };
+        assert_eq!(
+            Failed::engine("project-copy", &undone).wait,
+            Some(Duration::from_secs(30))
+        );
+        let source = |error: SourceError| onetaskgraph_core::SourceFailure {
+            source: onetaskgraph_plugin_api::SourceName::new("plans").expect("a source name"),
+            error,
+        };
+        assert_eq!(
+            Failed::partial(
+                "task-show",
+                &[
+                    source(limited(Some(4))),
+                    source(unreachable),
+                    source(limited(Some(9)))
+                ]
+            )
+            .wait,
+            Some(Duration::from_secs(9))
+        );
+        assert_eq!(Failed::from("cancelled".to_owned()).wait, None);
     }
 
     /// The budget the worker runs under is the one the launch record retained, and a

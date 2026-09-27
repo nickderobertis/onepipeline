@@ -1163,9 +1163,15 @@ fn source_misconfigured() -> Value {
            No such file or directory (os error 2)"})
 }
 
-/// A source that rate-limited the request, in GitHub's own words.
+/// A source that rate-limited the request, in GitHub's own words, naming no wait: GitHub's
+/// secondary limiter is reported by nothing a caller can poll, so the schedule decides.
 fn rate_limited() -> Value {
-    json!({"kind": "rate-limited", "retry_after_seconds": 60, "message": RATE_LIMITED})
+    json!({"kind": "rate-limited", "retry_after_seconds": null, "message": RATE_LIMITED})
+}
+
+/// The same, naming how long the source asked to be left alone.
+fn rate_limited_for(seconds: u64) -> Value {
+    json!({"kind": "rate-limited", "retry_after_seconds": seconds, "message": RATE_LIMITED})
 }
 
 /// A source that could not be reached at all.
@@ -1247,15 +1253,15 @@ fn asked_nothing_more(world: &World, run: &str, window: Duration, midway: impl F
     }
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these five wait on
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these seven wait on
 // is the schedule and its absence — a refused projection not being asked again across a window
-// the old schedule retried in, a transient one being asked at intervals that grow, and a run
-// settling over refusals — which cannot be observed in less time than the schedule takes. The
-// edge they need is the crate under test: they drive the compiled `onepipeline` binary against
-// its own write-back worker and the real store, four of them through the store double, exactly
-// as the six schedule journeys below do, so a project of their own would declare the same
-// dependency and skip nothing. The reason those six record for staying in this binary is these
-// five's too.
+// the old schedule retried in, a transient one being asked at intervals that grow, a rate
+// limit's own wait being served in full, and a run settling over refusals — which cannot be
+// observed in less time than the schedule takes. The edge they need is the crate under test:
+// they drive the compiled `onepipeline` binary against its own write-back worker and the real
+// store, six of them through the store double, exactly as the six schedule journeys below do,
+// so a project of their own would declare the same dependency and skip nothing. The reason
+// those six record for staying in this binary is these seven's too.
 /// A projection the store **refuses** is reported once and is not asked again on a timer: the
 /// store would refuse the same projection the same way, and against a hosted destination every
 /// attempt spends its allowance for nothing. It is attempted again when the run's graph next
@@ -1484,6 +1490,130 @@ fn a_failure_the_store_does_not_refuse_is_retried_on_the_schedule() {
             "{scenario}: one streak raised other than one surface"
         );
     }
+}
+
+/// A rate limit that names a wait is waited out in full: from the attempt it failed until that
+/// wait has passed the store is handed no call of any kind — not on the schedule, whose first
+/// retry is a quarter of a second in, and not for the graph changing inside the wait — and then
+/// the projection is attempted again and lands, carrying what changed while it waited. The line
+/// an operator reads says how long the store asked for.
+#[test]
+fn a_rate_limit_naming_a_wait_is_waited_out_with_no_store_call_inside_it() {
+    let wait = Duration::from_secs(6);
+    let run = "writeback-rate-limit-wait";
+    let (world, project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-rate-limit-wait", run);
+    world.until("every attempt so far to be recorded", |world| {
+        world.run_file(run, "writeback-projections.jsonl").is_file()
+            && !world.store_calls().is_empty()
+    });
+
+    let before = streaks_reported(&world, run);
+    world.store_refuses_once("get_project", &rate_limited_for(wait.as_secs()));
+    noted(&world, run, "later", "projected once the limiter lets go");
+    world.until("the rate-limited attempt to be reported", |world| {
+        streaks_reported(world, run) > before
+    });
+    let failed_at = Instant::now();
+    let calls = world.store_calls().len();
+    let line = the_line_reported(&world, run);
+    assert!(
+        line.contains(&format!(
+            "the store asked to be left alone for {} seconds",
+            wait.as_secs()
+        )) && line.contains("kind: rate-limited"),
+        "the line does not say how long the store asked for: {line}"
+    );
+
+    // The graph changes inside the wait, which publishes a snapshot the worker does not take.
+    noted(
+        &world,
+        run,
+        "work",
+        "changed while the limiter was refusing",
+    );
+    while failed_at.elapsed() + Duration::from_millis(500) < wait {
+        assert_eq!(
+            world.store_calls().len(),
+            calls,
+            "the store was handed a call {:?} into a {wait:?} wait it asked for: {:?}",
+            failed_at.elapsed(),
+            &world.store_calls()[calls..]
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    world.until_store("both changes to reach the board", |world| {
+        let tasks = world.store_tasks(&project);
+        let noted_on = |node: &str, text: &str| {
+            tasks.iter().any(|task| {
+                task["item"]["metadata"]["onepipeline.id"] == node
+                    && task["item"]["metadata"]["onepipeline.context"]
+                        .as_str()
+                        .is_some_and(|said| said.contains(text))
+            })
+        };
+        noted_on("later", "projected once the limiter lets go")
+            && noted_on("work", "changed while the limiter was refusing")
+    });
+    assert!(
+        failed_at.elapsed() >= wait - Duration::from_millis(500),
+        "the projection landed {:?} after a failure that asked for {wait:?}",
+        failed_at.elapsed()
+    );
+    assert_eq!(
+        dispatched(&world, run),
+        ["work"],
+        "the rate limit changed what executed"
+    );
+}
+
+/// A closeout that falls inside a wait the store asked for asks the store nothing: the run
+/// settles on time, and the terminal projection is not attempted inside the window the
+/// limiter named, which a closeout suspending the retry schedule would otherwise do.
+#[test]
+fn a_closeout_inside_a_rate_limit_wait_asks_the_store_nothing() {
+    let wait = Duration::from_secs(30);
+    let run = "writeback-rate-limit-closeout";
+    let (world, _project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-rate-limit-closeout", run);
+    world.until("every attempt so far to be recorded", |world| {
+        world.run_file(run, "writeback-projections.jsonl").is_file()
+            && !world.store_calls().is_empty()
+    });
+    let before = streaks_reported(&world, run);
+    world.store_refuses_once("get_project", &rate_limited_for(wait.as_secs()));
+    noted(&world, run, "later", "limited before the run ends");
+    world.until("the rate-limited attempt to be reported", |world| {
+        streaks_reported(world, run) > before
+    });
+    let failed_at = Instant::now();
+    let calls = world.store_calls().len();
+
+    world.release("work.go");
+    world.until("the run to write its result", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert!(
+        failed_at.elapsed() < wait,
+        "the run took {:?} to settle, outlasting the {wait:?} it was meant to settle inside",
+        failed_at.elapsed()
+    );
+    let result = world.run_json(run, "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+    // The driver has ended by now, closeout included; a little longer still asks nothing.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        world.store_calls().len(),
+        calls,
+        "the store was handed a call inside the {wait:?} it asked for: {:?}",
+        &world.store_calls()[calls..]
+    );
+    assert_eq!(
+        dispatched(&world, run),
+        ["work", "later"],
+        "the rate limit changed what executed"
+    );
 }
 
 /// Closeout attempts a terminal snapshot published after a refusal, because it is a different
