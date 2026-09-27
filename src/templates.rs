@@ -55,6 +55,15 @@ pub const REPOSITORY_DIR: &str = ".onepipeline/templates";
 /// What a template file for a name is called: `<name>` and this.
 pub const EXTENSION: &str = ".md.j2";
 
+/// The pattern a registered name matches. [`is_template_name`] is its one reading, and
+/// `tests/contract.rs` holds the two to each other and to the contract's block.
+pub const NAME_PATTERN: &str = "^[a-z][a-z0-9-]*$";
+
+/// The remedy every C7 refusal names, with `<name>` and `<qualified id>` filled in — and
+/// `task render` read as `document render` for a role-`document` item.
+pub const REMEDY: &str = "onepipeline template resolve <name> --json | onetaskgraph task render \
+                          <qualified id> --template-loader -";
+
 /// What a loader document this crate states records as its `reference`: this and the name.
 pub const REFERENCE_PREFIX: &str = "onepipeline:";
 
@@ -253,6 +262,7 @@ pub enum TemplateCheck {
     Rendering(String),
     /// The template, and the stored item with this qualified id (C6b for role `task`,
     /// and C7's three checks).
+    // llmlint: ignore[invalid_states_unrepresentable] the id as the caller spelled it, parsed into the store's own qualified-id type by `template_check` before anything is read and refused there by name when it is not `<source>:<native>`, exactly as `start` and `plan check` take a project id; a validated id type here would be a public item the contract never promised.
     Item(String),
 }
 
@@ -310,7 +320,7 @@ pub(crate) struct Registry {
     names: Vec<Registered>,
 }
 
-/// Whether `name` is one a registration may declare: `^[a-z][a-z0-9-]*$`.
+/// Whether `name` is one a registration may declare: [`NAME_PATTERN`].
 fn is_template_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars.next().is_some_and(|first| first.is_ascii_lowercase())
@@ -378,7 +388,7 @@ impl Registry {
             }
             if !is_template_name(&name) {
                 return Err(refused(format!(
-                    "`{name}` is not a template name: a name matches ^[a-z][a-z0-9-]*$"
+                    "`{name}` is not a template name: a name matches {NAME_PATTERN}"
                 )));
             }
             if declared.description.trim().is_empty() {
@@ -725,15 +735,16 @@ pub(crate) fn check_rendered(
     expected: Option<&str>,
     item: &Stored<'_>,
 ) -> std::result::Result<(), String> {
-    let kind = match role {
-        Role::Task => "task",
-        Role::Document => "document",
-    };
     let remedy = |name: &str, answers: bool| {
+        let command = REMEDY
+            .replace("<name>", name)
+            .replace("<qualified id>", item.qualified);
+        let command = match role {
+            Role::Task => command,
+            Role::Document => command.replace(" task render ", " document render "),
+        };
         format!(
-            "; re-render it: onepipeline template resolve {name} --json | onetaskgraph {kind} \
-             render {} --template-loader -{}",
-            item.qualified,
+            "; re-render it: {command}{}",
             if answers {
                 " --answers FILE (FILE holding every required answer)"
             } else {
@@ -883,7 +894,16 @@ pub(crate) fn resolve_require_rendered(
 /// [`Error::Invalid`] for an origin `onevcs` cannot resolve to a checkout.
 pub(crate) fn verb_checkout(options: &TemplateOptions) -> Result<PathBuf> {
     if let Some(repo) = &options.repo {
-        return Ok(absolute(repo, &options.working_dir));
+        let checkout = absolute(repo, &options.working_dir);
+        // A checkout that is not there would search nothing at the repository layer and
+        // resolve the name one layer down, as though the repository overrode nothing.
+        std::fs::read_dir(&checkout).map_err(|error| {
+            Error::Invalid(format!(
+                "--repo {} cannot be read as a checkout: {error}",
+                checkout.display()
+            ))
+        })?;
+        return Ok(checkout);
     }
     if let [origin] = options.repositories.as_slice() {
         return crate::destination::resolve(origin)

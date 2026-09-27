@@ -214,13 +214,13 @@ impl Store {
         self.load(project)
     }
 
-    /// One task — or, with `document`, one document — read by its qualified id.
+    /// One task or one document, read by its qualified id.
     ///
     /// # Errors
     ///
     /// [`Error::Sibling`] for a configuration that does not load or a store that
     /// cannot answer, and for an id naming nothing.
-    pub(crate) fn item(&self, id: &QualifiedId, document: bool) -> Result<StoredItem> {
+    pub(crate) fn item(&self, id: &QualifiedId, kind: StoredKind) -> Result<StoredItem> {
         let built = self
             .engine(&Layer::default())
             .map_err(|error| Error::Sibling {
@@ -232,7 +232,7 @@ impl Store {
             })?;
         let reader = Reader::over(built)?;
         let global = id.global();
-        if document {
+        if kind == StoredKind::Document {
             let read = reader
                 .call(reader.engine.document(&global))
                 .map_err(|error| failed("document show", id.as_str(), &error))?;
@@ -899,6 +899,13 @@ pub(crate) struct StoredTask {
     pub qualified: String,
     /// Its content, byte for byte; empty where it has none.
     pub content: String,
+}
+
+/// Which kind of item [`Store::item`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoredKind {
+    Task,
+    Document,
 }
 
 /// One stored item read by its qualified id: its content as stored, and its metadata.

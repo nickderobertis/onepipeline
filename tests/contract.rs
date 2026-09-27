@@ -8443,6 +8443,76 @@ fn the_task_templates_are_what_the_contract_names() {
         );
     }
     assert!(backticked().contains(block["remedy"].as_str().expect("the remedy")));
+    // The remedy every C7 refusal is built from is the block's, character for character.
+    assert_eq!(
+        block["remedy"].as_str(),
+        Some(onepipeline::templates::REMEDY)
+    );
+
+    // The name pattern: the block's is the constant's, and what a registration accepts is
+    // what that pattern — read as the `^[first][rest]*$` it is — admits, probed at every
+    // class boundary.
+    let pattern = block["registration"]["name_pattern"]
+        .as_str()
+        .expect("the block states the name pattern");
+    assert_eq!(pattern, onepipeline::templates::NAME_PATTERN);
+    let classes: Vec<Vec<(char, char)>> = pattern
+        .split('[')
+        .skip(1)
+        .map(|class| {
+            let class: Vec<char> = class.split(']').next().expect("a class").chars().collect();
+            let mut ranges = Vec::new();
+            let mut at = 0;
+            while at < class.len() {
+                if at + 2 < class.len() && class[at + 1] == '-' {
+                    ranges.push((class[at], class[at + 2]));
+                    at += 3;
+                } else {
+                    ranges.push((class[at], class[at]));
+                    at += 1;
+                }
+            }
+            ranges
+        })
+        .collect();
+    let [first, rest] = classes.as_slice() else {
+        panic!("the pattern is `^[first][rest]*$`: {pattern}")
+    };
+    assert!(
+        pattern.starts_with('^') && pattern.ends_with("]*$"),
+        "{pattern}"
+    );
+    let admits =
+        |ranges: &[(char, char)], c: char| ranges.iter().any(|(lo, hi)| (*lo..=*hi).contains(&c));
+    let matches = |name: &str| {
+        let mut chars = name.chars();
+        chars.next().is_some_and(|c| admits(first, c)) && chars.all(|c| admits(rest, c))
+    };
+    let probe_root = std::env::temp_dir().join(format!(
+        "onepipeline-contract-template-names-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&probe_root).expect("a probe root");
+    for name in [
+        "a", "z", "a-b", "a9", "z-0-y", "A", "0a", "-a", "a_b", "a.b", "aB", "a b", "é",
+    ] {
+        std::fs::write(
+            probe_root.join(REGISTRATION_FILE),
+            format!(
+                "{REGISTRATION_KEY}: 1\ntemplates:\n  \"{name}\":\n    role: task\n    \
+                 description: probe\n"
+            ),
+        )
+        .expect("the probe registration is written");
+        let accepted = onepipeline::verbs::template_list(&TemplateOptions {
+            template_root: Some(probe_root.clone()),
+            working_dir: probe_root.clone(),
+            ..TemplateOptions::default()
+        })
+        .is_ok();
+        assert_eq!(accepted, matches(name), "the name {name:?}");
+    }
+    let _ = std::fs::remove_dir_all(&probe_root);
 
     // The base declares exactly what the block says, read by onetaskgraph's own loader.
     let base = onetaskgraph_core::LoaderDocument::new("onepipeline:plan-task", BASE)

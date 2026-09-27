@@ -62,7 +62,7 @@ Rules:
   C4, C6a, C7); it states a resolved template as onetaskgraph's loader document
   and **never renders into a store**. The only template this crate embeds is
   `templates/onepipeline/plan-task.md.j2`; a host's own names live under its
-  root, and `tests/e2e/templates.rs` fails if a second one is committed.
+  root.
 - `engine.rs` is the one continuous reconcile loop — the **single writer**,
   holding the run's ownership lock for as long as it drives. There are no
   rounds: a node dispatches on the pass that observed its last dependency

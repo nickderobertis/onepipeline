@@ -1500,8 +1500,13 @@ pub fn template_check(
         }
         TemplateCheck::Item(id) => {
             let qualified: crate::taskgraph::QualifiedId = id.parse()?;
-            let stored = crate::taskgraph::Store::discovered()?
-                .item(&qualified, role == templates::Role::Document)?;
+            let stored = crate::taskgraph::Store::discovered()?.item(
+                &qualified,
+                match role {
+                    templates::Role::Task => crate::taskgraph::StoredKind::Task,
+                    templates::Role::Document => crate::taskgraph::StoredKind::Document,
+                },
+            )?;
             let refused = |why: &str| Error::Refused(format!("item {id}: {why}"));
             if role == templates::Role::Task {
                 templates::check_rendering(&stored.content).map_err(&refused)?;

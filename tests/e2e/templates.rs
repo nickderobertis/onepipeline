@@ -14,6 +14,14 @@
 // answers, which the manager ruled in place of a GitHub Projects loopback this repository
 // does not have (`docs/contract-divergences.md` entry 93).
 
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
+// assumed: these journeys take about a minute on the wall under the suite's parallelism,
+// most of it the released `onetaskgraph` and a few attached launches. What they exercise is
+// `templates`, `taskgraph`, `plancheck`, `driver`, `filter` and `verbs` together, and the
+// seam to the store the engine links, which any change under `src/` can move; a project
+// edged narrower than the crate would drop them out of `nx affected` for the very changes
+// they exist to catch — the ground `branch_template.rs` and `criteria_rule.rs` carry.
+
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -530,6 +538,7 @@ fn every_name_resolves_at_the_first_layer_that_supplies_it_and_says_which() {
     let world = World::new("templates-layers");
     let root = host(&world);
     let repo = world.root.join("repo");
+    std::fs::create_dir_all(&repo).expect("a checkout overriding nothing yet");
     let dir = world.project.clone();
 
     // `plan-task` with nothing over it is the built-in.
@@ -693,6 +702,40 @@ fn every_name_resolves_at_the_first_layer_that_supplies_it_and_says_which() {
         "The sibling says hello.\n\n## Acceptance criteria\n\n- the sibling is there\n"
     );
 
+    // The single `--repository` origin names the checkout `onevcs` resolves it to, and a
+    // `--repo` that is not there is refused rather than searched as empty.
+    let repository = world.repository("local-direct", &[]);
+    let registered = repository
+        .checkout
+        .join(".onepipeline/templates")
+        .join("plan-task.md.j2");
+    write(&registered, &task_template("the registered checkout's"));
+    let resolved = verb(
+        &world,
+        &dir,
+        &root,
+        &[
+            "resolve",
+            BUILT_IN,
+            "--repository",
+            "github.com/owner/service",
+            "--json",
+        ],
+    )
+    .whole();
+    assert_eq!(resolved["layer"], "repository");
+    assert_eq!(resolved["path"], json!(text(&registered)));
+    verb(
+        &world,
+        &dir,
+        &root,
+        &["resolve", BUILT_IN, "--repo", "no-such-checkout"],
+    )
+    .exited(REFUSED)
+    .err_has("--repo")
+    .err_has("no-such-checkout")
+    .err_has("cannot be read as a checkout");
+
     // An unregistered name, refused naming the registration read.
     verb(&world, &dir, &root, &["resolve", "nope"])
         .exited(REFUSED)
@@ -824,6 +867,28 @@ fn c6a_holds_a_task_template_to_the_base_and_its_criteria_and_a_rendering_to_lis
     world
         .run_with_stdin_on(command, "no criteria at all, and that is fine")
         .exited(0);
+    let rendering = world.root.join("rendering.md");
+    write(
+        &rendering,
+        "## Acceptance criteria\n\n- it is listed in a file\n",
+    );
+    verb(
+        &world,
+        &dir,
+        &root,
+        &["check", BUILT_IN, "--rendering", &text(&rendering)],
+    )
+    .exited(0)
+    .out_has("rendering: ok");
+    let missing = world.root.join("no-such-rendering.md");
+    verb(
+        &world,
+        &dir,
+        &root,
+        &["check", BUILT_IN, "--rendering", &text(&missing)],
+    )
+    .exited(REFUSED)
+    .err_has(&format!("--rendering {} cannot be read", missing.display()));
 }
 
 /// The seam, end to end, for one role-`task` name: rendered by the released `onetaskgraph`
@@ -1131,6 +1196,22 @@ fn require_rendered_refuses_each_node_that_is_not_its_rendering_and_off_refuses_
         )
         .exited(0);
 
+    // A variable that is neither `true` nor `false` is refused by name, not read as off.
+    let mut command = world.cmd(&[
+        "plan",
+        "check",
+        &unrendered,
+        "--template-root",
+        &text(&root),
+    ]);
+    command
+        .current_dir(&dir)
+        .env(REQUIRE_RENDERED_ENVIRONMENT, "yes");
+    world
+        .run_on(command, "plan check yes")
+        .exited(REFUSED)
+        .err_has(&format!("{REQUIRE_RENDERED_ENVIRONMENT} is \"yes\""));
+
     // `start` refuses by each of its three rungs, and mints no run; `false` on a higher
     // rung turns a lower one off.
     let config = world.root.join("strict.yaml");
@@ -1339,11 +1420,13 @@ fn a_rendered_node_on_a_board_that_keeps_no_answers_loads_under_the_check_until_
     // The board holds the item's content and its metadata — provenance included — and no
     // answers: `scripted-source` serves this folder through the store's own subprocess plugin
     // protocol, the way a hosted board that keeps no answers is reached.
-    // llmlint: ignore[tests_mirror_real_usage] the item is placed on the board by writing the
-    // board's own file rather than by `onetaskgraph project copy`, on the manager's ruling:
-    // that verb in onetaskgraph 0.2.47 trims a copied item's content, which is a store defect
-    // an onetaskgraph node is fixing, and what this journey proves is C7 over a board that
-    // keeps no answers, which only needs the item's bytes there as rendered.
+    // llmlint: ignore-block[tests_mirror_real_usage] the item is placed on the board by writing
+    // the board's own file rather than by `onetaskgraph project copy`, on the manager's ruling
+    // (`docs/contract-divergences.md` entry 93): that verb in onetaskgraph 0.2.47 writes a
+    // copied item's content trimmed, which is a store defect an onetaskgraph node is fixing,
+    // and what this journey proves is C7 over a board that keeps no answers, which needs the
+    // item's bytes there exactly as rendered. Every read and the edit below go through the
+    // store's own verbs.
     let board_root = world.root.join("board");
     write(
         &board_root.join("projects").join(format!("{native}.md")),
@@ -1364,6 +1447,7 @@ fn a_rendered_node_on_a_board_that_keeps_no_answers_loads_under_the_check_until_
         !held.contains("template-answers"),
         "the board keeps answers:\n{held}"
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     let env = board(&world);
     let on_board = format!("board:{native}");
@@ -1391,18 +1475,79 @@ fn a_rendered_node_on_a_board_that_keeps_no_answers_loads_under_the_check_until_
     };
     check(0);
 
-    // One interior line changed on the board: refused as differing from its rendering.
-    std::fs::write(
-        &item,
-        held.replacen("- It builds.", "- It builds, on the board.", 1),
-    )
-    .expect("the board's item is edited");
+    // One interior line changed on the board, through the store's own content verb: refused
+    // as differing from its rendering.
+    let edited = world.root.join("edited-on-board.md");
+    write(
+        &edited,
+        &content.replacen("- It builds.", "- It builds, on the board.", 1),
+    );
+    otg_with(
+        &world,
+        &[
+            "task",
+            "content",
+            "set",
+            &format!("{on_board}-build"),
+            "--file",
+            &text(&edited),
+            "--no-interactive",
+        ],
+        None,
+        &env,
+    );
     let refused = check(HAS_REFUSALS);
     assert!(refused.contains(RULE_BODY_CHANGED), "{refused}");
     assert!(
         refused.contains(&format!("{REMEDY} {on_board}-build --template-loader -")),
         "{refused}"
     );
+}
+
+#[test]
+fn a_stored_document_is_checked_against_its_host_registered_document_template() {
+    let world = World::new("templates-document");
+    let root = host(&world);
+    let dir = world.project.clone();
+    let hosted = root.join("design-doc.md.j2");
+    write(&hosted, &document_template("first draft"));
+    let loader = verb(&world, &dir, &root, &["resolve", "design-doc", "--json"]).stdout;
+    let (_, native) = project(&world, "documented");
+    let made = otg(
+        &world,
+        &[
+            "document",
+            "create",
+            crate::harness::STORE_SOURCE,
+            "--project",
+            &native,
+            "--title",
+            "The design",
+            "--template-loader",
+            "-",
+            "--no-interactive",
+            "--json",
+        ],
+        Some(&loader),
+    )
+    .whole();
+    let id = made["items"][0]["id"]
+        .as_str()
+        .expect("a created document has an id")
+        .to_owned();
+
+    // No criteria are asked of a document: its own C7 checks are what it is held to.
+    verb(&world, &dir, &root, &["check", "design-doc", "--item", &id])
+        .exited(0)
+        .out_has(&format!("item {id}: ok"));
+    write(&hosted, &document_template("second draft"));
+    verb(&world, &dir, &root, &["check", "design-doc", "--item", &id])
+        .exited(REFUSED)
+        .err_has(RULE_TEMPLATE_CHANGED)
+        .err_has(&format!(
+            "onepipeline template resolve design-doc --json | onetaskgraph document render {id} \
+             --template-loader -"
+        ));
 }
 
 #[test]
