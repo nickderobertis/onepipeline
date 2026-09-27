@@ -59,13 +59,14 @@ pub const DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS: NonZeroU64 = NonZeroU64::new(12
 pub const WRITEBACK_COMMAND_FLOOR_SECONDS: u64 = 60;
 
 /// The store calls one write-back attempt makes, by the name each one's refusals carry:
-/// the project, each page of its tasks, and the copy.
+/// the project, each item it reads by its own id, and the copy.
 ///
 /// Each one's failure is classified by its own type — the store's `EngineError` and
 /// `SourceError`, through the store's own classifier — and any one of them classed
 /// [`WRITEBACK_REFUSED_CLASS`] makes the whole attempt refused, because a projection needs
-/// all three.
-pub const WRITEBACK_CLASSIFIED_COMMANDS: [&str; 3] = ["project-show", "task-list", "project-copy"];
+/// all three. No attempt reads a page of the project's tasks: the landed baseline answers
+/// where every item it holds is.
+pub const WRITEBACK_CLASSIFIED_COMMANDS: [&str; 3] = ["project-show", "task-show", "project-copy"];
 
 /// The class that stops the write-back's retry timer: a failure asking again cannot change.
 ///
@@ -82,15 +83,24 @@ pub const WRITEBACK_PROJECTIONS_FILE: &str = "writeback-projections.jsonl";
 /// The schema version every line of [`WRITEBACK_PROJECTIONS_FILE`] is written at.
 ///
 /// Version 2 added `delivered`; version 3 added `actions.reopened`, which every landed attempt
-/// at that version names. A line naming no version is version 1, the shape before either, and
-/// still reads, as does a version 2 line; a version 1 line naming `delivered`, a version 1 or 2
-/// line naming `actions.reopened`, and any version this build has never written, are refused.
-pub const WRITEBACK_PROJECTIONS_SCHEMA_VERSION: u32 = 3;
+/// at that version names; version 4 added `calls`, which every line names, and defined
+/// `updated_fields`. A line naming no version is version 1, the shape before any of them, and
+/// still reads, as do versions 2 and 3; a line naming a key a later version added, and any
+/// version this build has never written, are refused.
+pub const WRITEBACK_PROJECTIONS_SCHEMA_VERSION: u32 = 4;
 
-/// The store call a member projection reads one named member's destination item with, by
-/// the name its refusals carry. It stands in for [`WRITEBACK_CLASSIFIED_COMMANDS`]' page of
-/// tasks, which a member projection never reads, and its failures are classified by the same
-/// rule.
+/// The file, in a run's directory, the write-back's landed baseline is kept in: what the run
+/// last put on the board, per lineage, which every projection carries the difference from.
+/// Entry 93 of `docs/contract-divergences.md` states its shape.
+pub const WRITEBACK_LANDED_FILE: &str = "writeback-landed.json";
+
+/// The schema version [`WRITEBACK_LANDED_FILE`] is written at.
+pub const WRITEBACK_LANDED_SCHEMA_VERSION: u32 = 1;
+
+/// The store call a projection reads one destination item with, by its own id and by the
+/// name its refusals carry: each lineage the copy carries, and each the landed baseline does
+/// not hold. No projection reads a page of tasks, and its failures are classified by the same
+/// rule as [`WRITEBACK_CLASSIFIED_COMMANDS`]'.
 pub const WRITEBACK_MEMBER_READ: &str = "task-show";
 
 /// The environment variable naming the write-back's per-item budget, in seconds.

@@ -1368,8 +1368,7 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
 /// copy, or the project read answered as a partial response every source of which refused.
 /// Each is reported once under the store's own kind, and none is asked again on a timer. The
 /// graph change each scenario makes is a member projection, which reads a named member rather
-/// than a page of the project's tasks; a whole projection's page of tasks refused
-/// is `writeback_projections::a_projection_after_a_failed_attempt_is_whole`'s.
+/// than a page of the project's tasks — which no projection reads.
 #[test]
 fn a_refusal_of_the_member_read_the_copy_or_the_project_read_stops_the_retry_timer() {
     for (scenario, method, error, kind) in [
@@ -1561,6 +1560,28 @@ fn a_rate_limit_naming_a_wait_is_waited_out_with_no_store_call_inside_it() {
         "the projection landed {:?} after a failure that asked for {wait:?}",
         failed_at.elapsed()
     );
+    // The attempt after the wait carried what had not landed — the change the limited attempt
+    // lost and the one made while it waited — and nothing more.
+    let lines: Vec<Value> =
+        std::fs::read_to_string(world.run_file(run, "writeback-projections.jsonl"))
+            .expect("the projection record reads")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("a record line"))
+            .collect();
+    let limited = lines
+        .iter()
+        .rposition(|line| line["kind"] == "rate-limited")
+        .expect("the limited attempt was recorded");
+    assert_eq!(
+        lines[limited]["items"],
+        json!(["later"]),
+        "{}",
+        lines[limited]
+    );
+    let after = &lines[limited + 1];
+    assert_eq!(after["outcome"], "projected", "{after}");
+    assert_eq!(after["scope"], "members", "{after}");
+    assert_eq!(after["items"], json!(["later", "work"]), "{after}");
     assert_eq!(
         dispatched(&world, run),
         ["work"],

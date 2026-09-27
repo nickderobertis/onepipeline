@@ -58,7 +58,8 @@ use onepipeline::verbs;
 use onepipeline::views::{
     FailureClass, Listing, NodeLanding, ProjectGroup, ProjectionActions, ProjectionEnded,
     ProjectionFailure, ProjectionRecord, ProjectionScope, Projects, RunPaths, RunSummary,
-    RunTelemetry, WholeBecause, GROUP_HEADER, NO_PROJECT, SUMMARY_SCHEMA_VERSION,
+    RunTelemetry, StoreCall, UpdatedField, WholeBecause, GROUP_HEADER, NO_PROJECT,
+    SUMMARY_SCHEMA_VERSION,
 };
 use onevcs::{Adoption, MergePolicy, SessionRequest};
 use serde_json::{json, Value};
@@ -4301,8 +4302,12 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
     );
     assert_eq!(
         member["never_reads"],
-        json!([WRITEBACK_CLASSIFIED_COMMANDS[1]]),
+        json!([serde_json::to_value(StoreCall::TaskList).expect("a call serializes")]),
         "entry 73 no longer says a member projection runs no page of tasks"
+    );
+    assert!(
+        !WRITEBACK_CLASSIFIED_COMMANDS.contains(&"task-list"),
+        "the worker still names a page of tasks among the calls an attempt makes"
     );
 
     // The example is one line of the record, and written back it is the same line.
@@ -4367,6 +4372,19 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
             .as_object()
             .cloned()
             .expect("a delivered entry is an object")],
+            ..record.clone()
+        },
+        // A line counting targeted updates, which this build never makes and a later one
+        // writes: `updated_fields` beside a `task-update` call.
+        ProjectionRecord {
+            calls: Some(std::collections::BTreeMap::from([
+                (StoreCall::TaskUpdate, 2),
+                (StoreCall::ProjectCopy, 1),
+            ])),
+            updated_fields: Some(std::collections::BTreeMap::from([
+                (UpdatedField::Status, 2),
+                (UpdatedField::Metadata, 1),
+            ])),
             ..record.clone()
         },
     ];
@@ -4548,10 +4566,60 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
         Some(u64::from(current)),
         "entry 73 names a different current schema version than the worker writes"
     );
-    assert_eq!(schema["read"], json!([1, 2, current]));
+    assert_eq!(schema["read"], json!([1, 2, 3, current]));
     assert_eq!(schema["absent_means"], json!(1));
     assert_eq!(schema["added_at_2"], json!(["delivered"]));
     assert_eq!(schema["added_at_3"], json!(["actions.reopened"]));
+    assert_eq!(schema["added_at_4"], json!(["calls", "updated_fields"]));
+    assert_eq!(schema["earlier_written_back_at"], json!(3));
+    // The closed sets `calls` and `updated_fields` are keyed by are the record's own words.
+    let words = |values: Vec<Value>| -> BTreeSet<String> {
+        values
+            .into_iter()
+            .map(|word| word.as_str().expect("a word").to_owned())
+            .collect()
+    };
+    assert_eq!(
+        serde_json::from_value::<BTreeSet<String>>(fields["calls"]["keys"].clone())
+            .expect("entry 73 names the calls"),
+        words(
+            [
+                StoreCall::ProjectShow,
+                StoreCall::TaskList,
+                StoreCall::TaskShow,
+                StoreCall::ProjectCopy,
+                StoreCall::TaskUpdate,
+                StoreCall::ProjectMetadataSet,
+            ]
+            .into_iter()
+            .map(|call| serde_json::to_value(call).expect("a call serializes"))
+            .collect()
+        )
+    );
+    assert_eq!(
+        serde_json::from_value::<BTreeSet<String>>(fields["updated_fields"]["keys"].clone())
+            .expect("entry 73 names the fields"),
+        words(
+            [
+                UpdatedField::Title,
+                UpdatedField::Content,
+                UpdatedField::Status,
+                UpdatedField::Priority,
+                UpdatedField::Metadata,
+                UpdatedField::Delivers,
+                UpdatedField::DependsOn,
+            ]
+            .into_iter()
+            .map(|field| serde_json::to_value(field).expect("a field serializes"))
+            .collect()
+        )
+    );
+    // Every golden line is `members` and counts its calls, and none reads a page of tasks.
+    for golden in [example, &projection["example_delivered"]] {
+        assert_eq!(golden["scope"], "members", "{golden}");
+        assert!(golden["calls"].is_object(), "{golden}");
+        assert!(golden["calls"].get("task-list").is_none(), "{golden}");
+    }
     let delivered_example = &projection["example_delivered"];
     for golden in [example, delivered_example] {
         assert_eq!(
@@ -4599,16 +4667,23 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
     );
     assert_eq!(example["actions"]["reopened"], json!(0));
 
-    // A line an earlier build wrote names no version, no `delivered` and no
-    // `actions.reopened`: it still reads, as version 1, and is written back at the current
-    // version with `reopened` read as zero. A version 2 line — `delivered` allowed, still no
-    // `reopened` — reads the same way.
+    // A line an earlier build wrote names no version, no `delivered`, no `actions.reopened`
+    // and no `calls`: it still reads, as version 1, and is written back at version 3 — the last
+    // that counted no calls — with `reopened` read as zero. Version 2 and 3 lines — `delivered`
+    // allowed, `reopened` at 3, still no `calls` — read the same way.
     let mut older_actions = example["actions"].clone();
     older_actions
         .as_object_mut()
         .expect("actions is an object")
         .remove("reopened");
-    let mut unversioned = example.clone();
+    let without_calls = |line: &Value| {
+        let mut line = line.clone();
+        line.as_object_mut()
+            .expect("a line is an object")
+            .remove("calls");
+        line
+    };
+    let mut unversioned = without_calls(example);
     unversioned
         .as_object_mut()
         .expect("a line is an object")
@@ -4616,27 +4691,43 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
     unversioned["actions"] = older_actions.clone();
     let older: ProjectionRecord = serde_json::from_value(unversioned)
         .unwrap_or_else(|error| panic!("a version 1 line did not read: {error}"));
+    let mut expected = without_calls(example);
+    expected["schema_version"] = json!(3);
     assert_eq!(
         serde_json::to_value(&older).expect("a record serializes"),
-        *example,
-        "a version 1 line was not written back at the current version"
+        expected,
+        "a version 1 line was not written back at version 3"
     );
-    let mut second = delivered_example.clone();
+    let mut second = without_calls(delivered_example);
     second["schema_version"] = json!(2);
     second["actions"] = older_actions.clone();
     let second: ProjectionRecord = serde_json::from_value(second)
         .unwrap_or_else(|error| panic!("a version 2 line did not read: {error}"));
-    let mut expected = delivered_example.clone();
+    let mut expected = without_calls(delivered_example);
+    expected["schema_version"] = json!(3);
     expected["actions"]["reopened"] = json!(0);
     assert_eq!(
         serde_json::to_value(&second).expect("a record serializes"),
         expected,
-        "a version 2 line was not written back at the current version with `reopened` zero"
+        "a version 2 line was not written back at version 3 with `reopened` zero"
+    );
+    // A version 3 line — what the build before this one wrote, a whole copy included — reads
+    // and writes back as itself.
+    let mut third = without_calls(delivered_example);
+    third["schema_version"] = json!(3);
+    third["scope"] = json!("whole");
+    third["whole_because"] = json!("after-failure");
+    let read_third: ProjectionRecord = serde_json::from_value(third.clone())
+        .unwrap_or_else(|error| panic!("a version 3 line did not read: {error}"));
+    assert_eq!(
+        serde_json::to_value(&read_third).expect("a record serializes"),
+        third,
+        "a version 3 line did not write back as itself"
     );
     for (refused, patch) in [
         (
             "a version 1 line naming `delivered`",
-            json!({"schema_version": 1, "actions": older_actions,
+            json!({"schema_version": 1, "actions": older_actions, "calls": null,
                    "delivered": delivered_example["delivered"]}),
         ),
         // Refused by the key's own name rather than by what it holds: a line that names it
@@ -4644,20 +4735,43 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
         // one that left the key off would let that shape through the boundary unremarked.
         (
             "a version 1 line naming an empty `delivered`",
-            json!({"schema_version": 1, "actions": older_actions, "delivered": []}),
+            json!({"schema_version": 1, "actions": older_actions, "calls": null,
+                   "delivered": []}),
         ),
         // The same, for the key version 3 added: named as zero is still named.
         (
             "a version 1 line naming `actions.reopened`",
-            json!({"schema_version": 1}),
+            json!({"schema_version": 1, "calls": null}),
         ),
         (
             "a version 2 line naming `actions.reopened`",
-            json!({"schema_version": 2}),
+            json!({"schema_version": 2, "calls": null}),
+        ),
+        (
+            "a version 4 line naming `actions` without `reopened`",
+            json!({"actions": older_actions}),
         ),
         (
             "a version 3 line naming `actions` without `reopened`",
-            json!({"actions": older_actions}),
+            json!({"schema_version": 3, "actions": older_actions, "calls": null}),
+        ),
+        // The key version 4 added, named on an earlier line, is refused by its name.
+        (
+            "a version 3 line naming `calls`",
+            json!({"schema_version": 3}),
+        ),
+        (
+            "a version 3 line naming an empty `calls`",
+            json!({"schema_version": 3, "calls": {}}),
+        ),
+        ("a version 4 line naming no `calls`", json!({"calls": null})),
+        (
+            "a version 4 line naming `updated_fields` without a `task-update` call",
+            json!({"updated_fields": {"status": 1}}),
+        ),
+        (
+            "a call the record does not name",
+            json!({"calls": {"task-delete": 1}}),
         ),
         (
             "a version this build has never written",

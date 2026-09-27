@@ -197,25 +197,19 @@ impl Store {
         })
     }
 
-    /// Read one qualified project id as the plan it holds.
+    /// Read one qualified project id as the plan it holds, keeping what a checker and the
+    /// write-back need beside it.
     ///
     /// The project is external input, so every refusal it earns is made here,
     /// before a run is minted: a reserved key of the wrong JSON type, a key no
     /// plan field answers to, a task carrying no node id, and a dependency edge
     /// whose far end this plan cannot name.
-    pub fn plan(&self, project: &QualifiedId) -> Result<Plan> {
-        self.load(project)
-            .map(|read| read.plan)
-            .map_err(Error::from)
-    }
-
-    /// The same read, keeping both halves a checker needs.
     ///
-    /// The loaded plan, and each task's own metadata map **verbatim** — including
+    /// Beside the loaded plan, each task's own metadata map **verbatim** — including
     /// the keys outside this consumer's reserved namespace, which the mapping
-    /// above drops because no plan field answers to them. A consumer's check
-    /// reads keys this engine does not, so what it is handed is the engine's
-    /// resolved node beside the store's own record of the task it came from.
+    /// above drops because no plan field answers to them — and each task exactly as
+    /// the store answered it. A consumer's check reads keys this engine does not, and
+    /// the launch seeds the write-back's landed baseline from the tasks.
     pub(crate) fn read_plan(&self, project: &QualifiedId) -> std::result::Result<Read, Load> {
         self.load(project)
     }
@@ -425,7 +419,19 @@ impl Reader {
                     .map(|task| task.item.metadata.clone().into_iter().collect()),
             )
             .collect();
-        Ok(Read { plan, metadata })
+        let tasks = plan
+            .tasks
+            .iter()
+            .map(|node| node.id.clone())
+            .zip(tasks)
+            .collect();
+        let project_metadata = held.item.metadata.clone().into_iter().collect();
+        Ok(Read {
+            plan,
+            metadata,
+            tasks,
+            project_metadata,
+        })
     }
 
     /// One node, assembled out of its task.
@@ -846,6 +852,11 @@ pub(crate) struct Read {
     pub plan: Plan,
     /// Each task's own metadata map, verbatim, by node id.
     pub metadata: BTreeMap<String, Map<String, Value>>,
+    /// Each task exactly as the store answered it, by node id: what the write-back's landed
+    /// baseline is seeded from, so its first projection re-reads nothing the launch just read.
+    pub tasks: BTreeMap<String, Qualified<Task>>,
+    /// The project's own metadata, verbatim.
+    pub project_metadata: BTreeMap<String, Value>,
 }
 
 /// Why a project did not become a plan.

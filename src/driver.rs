@@ -693,7 +693,11 @@ fn start(args: &StartArgs) -> Result<i32> {
     // Parsed once, here: a bare id names nothing a store can answer for, and
     // this is where a person typed it.
     let project: crate::taskgraph::QualifiedId = args.project.parse()?;
-    let mut plan = store.plan(&project)?;
+    // Read whole, keeping each task as the store answered it beside the plan: the write-back's
+    // landed baseline is seeded from this one read, so its first projection reads nothing the
+    // launch has just read.
+    let read = store.read_plan(&project).map_err(Error::from)?;
+    let mut plan = read.plan.clone();
     graph::validate(&plan)?;
     let launch_dir = launch_dir()?;
     // The launch config is read once, here, and both halves of what it declares
@@ -967,6 +971,8 @@ fn start(args: &StartArgs) -> Result<i32> {
     let paths = RunPaths::under(&root, &run);
     paths.create()?;
     ledger::write_json(&paths.plan(), &plan)?;
+    // Before anything could project: the first projection carries the difference from this.
+    crate::writeback::seed_landed(&paths.dir, &project, &read);
 
     let mut record = LaunchRecord {
         run_id: run.clone(),
