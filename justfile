@@ -384,6 +384,13 @@ engines-current:
 # Compose the release note recording the engine versions this build links.
 linked-engines:
     @bash scripts/linked-engines.sh --format notes
+
+# Outside `check` and `gate` because it pulls the manylinux image and a toolchain
+# over the network and needs Docker. release.yml's Linux `build-wheels` legs and
+# ci.yml's `wheel` legs both call this, so there is one Linux wheel build.
+# Build the Linux wheel for TARGET inside the release's manylinux image, into OUT.
+wheel-linux target out="dist":
+    @bash scripts/build-linux-wheel.sh --target {{quote(target)}} --out {{quote(out)}}
 # llmlint: ignore-end[comments_earn_their_place]
 
 # Reads the floor from Cargo.toml's `rust-version`; that toolchain must be

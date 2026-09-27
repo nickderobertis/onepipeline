@@ -393,22 +393,38 @@ jobs:
   # The other end-user install path: the maturin wheel `pip install
   # onepipeline-cli` serves. Built and installed from this revision so the
   # packaging is proven on every pull request rather than first at a release,
-  # where a broken wheel is already public.
+  # where a broken wheel is already public. Built by `just wheel-linux`, the
+  # recipe release.yml's Linux `build-wheels` legs run, for both of their targets
+  # on the same native runners. The x86_64 leg keeps the bare `wheel` name
+  # branch protection already requires.
   wheel:
+    name: ${{ matrix.check }}
     needs: changes
     if: needs.changes.outputs.crate == 'true'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: wheel
+            target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          # llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the required set lives in GitHub, which no check in this tree can read; AGENTS.md reconciles it by re-applying governance whenever a leg is added
+          - check: wheel (aarch64-unknown-linux-gnu)
+            target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Build the wheel
-        uses: PyO3/maturin-action@v1
-        with:
-          args: --release --locked --out dist
-          maturin-version: v1.14.1
+        env:
+          TARGET: ${{ matrix.target }}
+        run: just wheel-linux "$TARGET"
       - name: Install it and smoke-test what it put on PATH
         run: |
           pip install --no-index --find-links dist onepipeline-cli
