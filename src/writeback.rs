@@ -4633,8 +4633,7 @@ mod tests {
 
     /// A copy report is counted item by item, the project item included, and teaches the run
     /// where a node the copy created landed — without which the next member copy naming it would
-    /// create it again. An item that is no shadow task of this snapshot teaches nothing, and an
-    /// action this build has never heard of leaves the report unread rather than miscounted.
+    /// create it again. An item that is no shadow task of this snapshot teaches nothing.
     #[test]
     fn a_copy_report_is_counted_and_teaches_the_run_where_a_created_node_landed() {
         let fixture = Fixture::new("report");

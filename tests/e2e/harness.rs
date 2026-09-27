@@ -791,6 +791,7 @@ impl World {
         self.store_call(|engine| async move {
             let mut items = Vec::new();
             let mut token = None;
+            let mut seen = std::collections::HashSet::new();
             loop {
                 let request = onetaskgraph_core::TaskRequest {
                     sources: Vec::new(),
@@ -817,7 +818,15 @@ impl World {
                         .map(|task| serde_json::to_value(task).expect("a store task renders")),
                 );
                 match page.next {
-                    Some(next) => token = Some(next),
+                    // A token the store has already handed back would read the same page
+                    // again, forever, so it is refused rather than followed.
+                    Some(next) => {
+                        assert!(
+                            seen.insert(next.clone()),
+                            "the store handed back the tasks page token {next:?} for {id} again"
+                        );
+                        token = Some(next);
+                    }
                     None => return items,
                 }
             }
@@ -953,6 +962,7 @@ impl World {
         self.store_call(|engine| async move {
             let mut edges = Vec::new();
             let mut token = None;
+            let mut seen = std::collections::HashSet::new();
             loop {
                 let request = onetaskgraph_core::DependencyRequest {
                     id: id.clone(),
@@ -973,7 +983,15 @@ impl World {
                         .map(|edge| serde_json::to_value(edge).expect("an edge renders")),
                 );
                 match page.next {
-                    Some(next) => token = Some(next),
+                    // A token the store has already handed back would read the same page
+                    // again, forever, so it is refused rather than followed.
+                    Some(next) => {
+                        assert!(
+                            seen.insert(next.clone()),
+                            "the store handed back the edges page token {next:?} for {id} again"
+                        );
+                        token = Some(next);
+                    }
                     None => return edges,
                 }
             }
