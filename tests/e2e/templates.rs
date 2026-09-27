@@ -1483,6 +1483,22 @@ fn require_rendered_refuses_each_node_that_is_not_its_rendering_and_off_refuses_
         .run_on(command, "plan check yes")
         .exited(REFUSED)
         .err_has(&format!("{REQUIRE_RENDERED_ENVIRONMENT} is \"yes\""));
+    // Either variable holding bytes that are not text is refused by its name, not read as
+    // unset. Only Unix hands a process an environment value that is not UTF-8.
+    #[cfg(unix)]
+    for variable in [REQUIRE_RENDERED_ENVIRONMENT, ROOT_ENVIRONMENT] {
+        use std::os::unix::ffi::OsStrExt;
+        let mut command = world.cmd(&["plan", "check", &unrendered]);
+        command
+            .current_dir(&dir)
+            .env(variable, std::ffi::OsStr::from_bytes(b"\xff\xfe"));
+        world
+            .run_on(command, variable)
+            .exited(REFUSED)
+            .err_has(&format!(
+                "{variable} holds something this build cannot read as text"
+            ));
+    }
 
     // `start` refuses by each of its three rungs, and mints no run; `false` on a higher
     // rung turns a lower one off.
