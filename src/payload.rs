@@ -1055,7 +1055,8 @@ pub(crate) struct BranchesSuperseded {
     /// The node whose landing superseded them: the head of the lineage.
     pub(crate) node: String,
     /// Where it landed, as `onevcs` was told: a commit, or a change request's URL.
-    pub(crate) landing: String,
+    #[schemars(with = "String")]
+    pub(crate) landing: crate::edits::StatedLanding,
     /// Every earlier attempt recorded as superseded.
     pub(crate) superseded: Vec<SupersededAttempt>,
     /// Every earlier attempt whose record `onevcs` refused, and why.

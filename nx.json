@@ -33,6 +33,11 @@
       "{workspaceRoot}/scripts/record-channel-answers.sh",
       "{workspaceRoot}/scripts/linked-engines.sh",
       "{workspaceRoot}/scripts/smoke-published.sh",
+      "{workspaceRoot}/scripts/build-linux-wheel.sh",
+      "{workspaceRoot}/pyproject.toml",
+      "{workspaceRoot}/README.md",
+      "{workspaceRoot}/.github/workflows/ci.yml",
+      "{workspaceRoot}/.github/workflows/release.yml",
       "sharedGlobals"
     ],
     "noteJourneySource": [
