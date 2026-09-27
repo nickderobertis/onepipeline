@@ -967,6 +967,14 @@ pub(crate) fn verb_checkout(options: &TemplateOptions) -> Result<PathBuf> {
                 ))
             });
     }
+    // For the reason `--repo` is read above: a working directory that is not there would
+    // search nothing at the repository layer.
+    std::fs::read_dir(&options.working_dir).map_err(|error| {
+        Error::Invalid(format!(
+            "the working directory {} cannot be read as the checkout: {error}",
+            options.working_dir.display()
+        ))
+    })?;
     Ok(options.working_dir.clone())
 }
 
@@ -1160,6 +1168,17 @@ mod tests {
         assert!(
             listed.is_err(),
             "the SDK listed names under a root that is not there"
+        );
+        let nowhere = crate::verbs::template_list(&TemplateOptions {
+            working_dir: missing.clone(),
+            ..TemplateOptions::default()
+        })
+        .expect_err("a working directory that is not there is not a checkout");
+        assert!(
+            nowhere
+                .to_string()
+                .contains("cannot be read as the checkout"),
+            "{nowhere}"
         );
         let registry = Registry::load(None).expect("no root registers the built-in");
         assert_eq!(registry.names().len(), 1);

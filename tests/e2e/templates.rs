@@ -1185,6 +1185,43 @@ fn require_rendered_refuses_each_node_that_is_not_its_rendering_and_off_refuses_
             *answers,
             "{plan}: {refused}"
         );
+        // `template check --item` refuses the stored item on the same rule, and `--json`
+        // carries the refusal as the engine's, about the node's task.
+        let id = world.store_tasks(plan)[0]["id"]
+            .as_str()
+            .expect("an id")
+            .to_owned();
+        verb(&world, &dir, &root, &["check", BUILT_IN, "--item", &id])
+            .exited(REFUSED)
+            .err_has(&format!("item {id}: {rule}"))
+            .err_has(REMEDY);
+        let json = world.run_from(
+            &dir,
+            &[
+                "plan",
+                "check",
+                plan,
+                "--require-rendered",
+                "true",
+                "--template-root",
+                &text(&root),
+                "--json",
+            ],
+        );
+        json.exited(HAS_REFUSALS);
+        assert_eq!(json.stderr, "", "{plan}");
+        let answered = json.whole();
+        assert_eq!(answered["accepted"], json!(false), "{answered}");
+        let refusal = &answered["refusals"][0];
+        assert_eq!(refusal["source"], "engine", "{answered}");
+        assert_eq!(refusal["node"], "build", "{answered}");
+        assert_eq!(refusal["field"], "task", "{answered}");
+        assert!(
+            refusal["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains(rule.as_str())),
+            "{answered}"
+        );
         // Off, the same plan is refused by nothing.
         world
             .run_from(
