@@ -672,9 +672,58 @@ fn every_name_resolves_at_the_first_layer_that_supplies_it_and_says_which() {
         }
     }
 
+    // A parent a chain names in a subdirectory resolves over the same search path — the
+    // resolved file's own directory — as every other name, and a template reaching the base
+    // through it passes C6a and renders through the released renderer.
+    let templates = repo.join(".onepipeline/templates");
+    write(
+        &templates.join("parts/parent.md.j2"),
+        &format!(
+            "{{% extends \"{BASE}\" %}}\n{{% block before_criteria %}}From the parent.\n\n\
+             {{% endblock %}}\n"
+        ),
+    );
+    write(
+        &templates.join("follow-up.md.j2"),
+        "{% extends \"parts/parent.md.j2\" %}\n",
+    );
+    verb(
+        &world,
+        &dir,
+        &root,
+        &["check", "follow-up", "--repo", &text(&repo)],
+    )
+    .exited(0)
+    .out_has("ok (repository layer,");
+    let loader = verb(
+        &world,
+        &dir,
+        &root,
+        &["resolve", "follow-up", "--repo", &text(&repo), "--json"],
+    )
+    .stdout;
+    let rendered = otg(
+        &world,
+        &[
+            "template",
+            "render",
+            "--template-loader",
+            "-",
+            "--var",
+            "acceptance_criteria=[\"the parent is there\"]",
+            "--no-interactive",
+            "--json",
+        ],
+        Some(&loader),
+    )
+    .whole();
+    assert_eq!(
+        rendered["body"],
+        "From the parent.\n\n## Acceptance criteria\n\n- the parent is there\n"
+    );
+
     // A repository template extending the base and including a sibling in its own
     // directory: it passes C6a, and renders with the sibling in it.
-    let templates = repo.join(".onepipeline/templates");
     write(
         &templates.join("sibling.md.j2"),
         "The sibling says hello.\n",
@@ -1253,16 +1302,33 @@ fn require_rendered_refuses_each_node_that_is_not_its_rendering_and_off_refuses_
         Some(&loader),
     );
     let (edited, native) = project(&world, "edited");
-    let (_, file) = created(&world, &native, "build", &loader, &rendered, &[]);
-    let stored = std::fs::read_to_string(&file).expect("the stored task");
-    std::fs::write(
-        &file,
-        stored.replacen("- It builds.", "- It builds, edited by hand.", 1),
-    )
-    .expect("the task is edited by hand");
+    let (edited_id, _) = created(&world, &native, "build", &loader, &rendered, &[]);
+    let content = world.store_tasks(&edited)[0]["item"]["content"]
+        .as_str()
+        .expect("a rendered task has content")
+        .replacen("- It builds.", "- It builds, edited by hand.", 1);
+    let edited_file = world.root.join("edited.md");
+    write(&edited_file, &content);
+    otg(
+        &world,
+        &[
+            "task",
+            "content",
+            "set",
+            &edited_id,
+            "--file",
+            &text(&edited_file),
+            "--no-interactive",
+        ],
+        None,
+    );
 
     // A provenance entry a person broke by hand, in the store's own file: no provenance
     // this build can read.
+    // llmlint: ignore-block[tests_mirror_real_usage] onetaskgraph refuses every write to its
+    // reserved `onetaskgraph.` metadata namespace through each of its verbs, so a broken
+    // provenance entry arises only from editing the item's own file — which is how a person
+    // edits a `local-md` store, and is the case this refusal exists for.
     let (malformed, native) = project(&world, "malformed");
     world.write_store_item(
         &format!("tasks/{native}/000-build.md"),
@@ -1276,6 +1342,8 @@ fn require_rendered_refuses_each_node_that_is_not_its_rendering_and_off_refuses_
             })
         ),
     );
+
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     let cases = [
         (&unrendered, RULE_NO_PROVENANCE.to_owned(), true),
