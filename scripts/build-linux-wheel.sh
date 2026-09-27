@@ -5,9 +5,7 @@
 # This is the one definition of a Linux wheel build: release.yml's Linux
 # `build-wheels` legs and ci.yml's `wheel` legs both run it through `just
 # wheel-linux`, so a pull request builds under the image, prerequisites and
-# maturin invocation a release does. v0.50.0 shipped no Linux wheel because the
-# release built in manylinux2014 while the pull-request check built on the bare
-# runner, and only one of the two had the Perl below.
+# maturin invocation a release does.
 #
 # The prerequisites: `openssl-sys` is built with its vendored feature (the linked
 # onetaskgraph stores reach `reqwest` with `native-tls-vendored`), which compiles
@@ -66,6 +64,9 @@ esac
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # Resolved through any symlink, because the container sees only the checkout: a
 # path that leaves it would be written somewhere the host never looks.
+case "$out" in
+  /*) fail_usage "--out $out is absolute; name a directory relative to the repository root" ;;
+esac
 out_abs="$(realpath -m -- "$root/$out")"
 case "$out_abs" in
   "$root"/?*) ;;
@@ -99,21 +100,36 @@ mkdir -p -- "$out_abs" "$root/$cargo_target" \
 # build did, and a hand-back that fails fails the run: a checkout left with
 # root-owned files breaks the next build on this host.
 read -r -d '' inside <<'SCRIPT' || true
+step="" action=""
+at() { step="$1" action="$2"; }
 give_back() {
   status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "the build stopped $step" >&2
+    echo "ACTION: $action" >&2
+  fi
   if ! chown -R "$HOST_OWNER" "$CARGO_TARGET_DIR" "/io/$OUT"; then
     echo "could not return $CARGO_TARGET_DIR and /io/$OUT to $HOST_OWNER" >&2
+    echo "ACTION: chown -R $HOST_OWNER them from a root container, as this build does, before building here again" >&2
     [ "$status" -ne 0 ] || status=1
   fi
   exit "$status"
 }
 trap give_back EXIT
+at "installing OpenSSL's Perl prerequisites with yum" \
+  "check that the image's yum repositories answer, then re-run"
 yum install -y -q perl-IPC-Cmd perl-Time-Piece
+at "installing rustup" "check that https://sh.rustup.rs answers, then re-run"
 curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
   | sh -s -- -y -q --profile minimal --default-toolchain none
 export PATH="$HOME/.cargo/bin:$PATH" RUSTUP_TOOLCHAIN="$CHANNEL"
+at "installing Rust $CHANNEL for $TARGET" \
+  "check that $CHANNEL, rust-toolchain.toml's channel, is a published release, then re-run"
 rustup toolchain install "$CHANNEL" --profile minimal --target "$TARGET"
+at "installing maturin $MATURIN_VERSION" "check that PyPI serves maturin $MATURIN_VERSION, then re-run"
 /opt/python/cp312-cp312/bin/python -m pip install -q "maturin==$MATURIN_VERSION"
+at "compiling the wheel" \
+  "fix the compile error above; 'just wheel-linux $TARGET' reproduces it in this image"
 /opt/python/cp312-cp312/bin/maturin build --release --locked \
   --target "$TARGET" --compatibility manylinux2014 --out "$OUT"
 SCRIPT
@@ -126,7 +142,7 @@ docker run --rm --platform "$platform" \
   -e CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-auto}" \
   -e RUSTFLAGS="-D warnings" \
   "$image" bash -euo pipefail -c "$inside" \
-  || fail "the $target wheel did not build in $image (its output is above)" \
-    "fix what the output above names; a registry or network error is retried by re-running"
+  || fail "the $target wheel did not build in $image" \
+    "follow the ACTION above; with none, Docker could not start $image — check that it can pull from quay.io"
 
 echo "built the $target wheel into $out_rel/"

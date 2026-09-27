@@ -304,7 +304,7 @@ fn a_build_that_fails_in_the_container_exits_one_naming_the_image() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("ACTION: fix what the output above names"),
+        stderr.contains("ACTION: follow the ACTION above"),
         "{stderr}"
     );
 }
@@ -329,4 +329,55 @@ fn a_host_without_docker_is_told_to_install_it() {
         stderr.contains("ACTION: install Docker, then re-run"),
         "{stderr}"
     );
+}
+
+#[test]
+fn an_absolute_out_directory_is_refused() {
+    let (_scratch, dir) = scratch("absolute-out");
+    docker_double(&dir, 0);
+    let absolute = dir.join("dist").display().to_string();
+    let output = run(
+        &dir,
+        &path_with_double(&dir),
+        &["x86_64-unknown-linux-gnu", &absolute],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("is absolute"), "{stderr}");
+    assert!(!dir.join("docker.log").exists(), "docker was not run");
+}
+
+/// ci.yml's `wheel` legs run only when `changes` reports the crate affected,
+/// which is `nx.json`'s `crateSource`; a wheel-build input missing from it is a
+/// pull request that changes the build and never runs it.
+#[test]
+fn a_change_to_what_the_wheel_build_reads_selects_the_wheel_check() {
+    let block = job_block("ci.yml", "wheel");
+    assert!(
+        block.contains("if: needs.changes.outputs.crate == 'true'"),
+        "ci.yml's wheel legs are gated on the crate being affected"
+    );
+    let nx: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(repo_root().join("nx.json")).expect("nx.json is readable"),
+    )
+    .expect("nx.json is JSON");
+    let inputs = nx["namedInputs"]["crateSource"]
+        .as_array()
+        .expect("nx.json names crateSource");
+    for read in [
+        "scripts/build-linux-wheel.sh",
+        "pyproject.toml",
+        "rust-toolchain.toml",
+        "Cargo.toml",
+        "Cargo.lock",
+        "src/**/*",
+    ] {
+        let input = format!("{{workspaceRoot}}/{read}");
+        assert!(
+            inputs
+                .iter()
+                .any(|entry| entry.as_str() == Some(input.as_str())),
+            "crateSource carries {input}"
+        );
+    }
 }
