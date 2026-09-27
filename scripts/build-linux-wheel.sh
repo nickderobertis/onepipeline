@@ -140,12 +140,13 @@ python3.12 -m maturin build --release --locked \
   --target "$TARGET" --compatibility manylinux2014 --out "$OUT"
 SCRIPT
 
+# The checkout is read-only in the container; only the two directories the
+# build writes are mounted writable over it.
 docker run --rm --platform "$platform" \
-  -v "$root":/io -w /io \
+  -v "$root":/io:ro -v "$root/$cargo_target":"/io/$cargo_target" -v "$out_abs":"/io/$out_rel" -w /io \
   -e TARGET="$target" -e OUT="$out_rel" -e CHANNEL="$channel" -e MATURIN_VERSION="$maturin_version" \
   -e HOST_OWNER="$(id -u):$(id -g)" \
   -e CARGO_TARGET_DIR="$cargo_target" \
-  -e CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-auto}" \
   -e RUSTFLAGS="-D warnings" \
   "$image" bash -euo pipefail -c "$inside" \
   || fail "the $target wheel did not build in $image" \

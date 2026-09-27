@@ -301,7 +301,7 @@ jobs:
   # why this is a separate matrix from `upload` rather than a step in it.
   #
   # The Linux legs run `just wheel-linux`, the build ci.yml's `wheel` legs run on
-  # every pull request, so a release builds nothing a pull request did not.
+  # every pull request, so a release builds no Linux wheel a pull request did not.
   build-wheels:
     name: build-wheels (${{ matrix.target }})
     needs: test

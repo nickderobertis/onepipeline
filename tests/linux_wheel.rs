@@ -91,7 +91,7 @@ fn container_double(dir: &Path, fail_at: Option<&str>) {
             "#!{bash}\nprintf '%s\\n' \"$@\" > '{docker_log}'\nenvs=()\n\
              while [ $# -gt 0 ]; do\n  case \"$1\" in\n\
              -e) envs+=(\"$2\"); shift 2 ;;\n\
-             -v) mount=\"${{2%%:*}}\"; shift 2 ;;\n\
+             -v) [[ \"$2\" != *:/io:ro ]] || mount=\"${{2%%:*}}\"; shift 2 ;;\n\
              -c) script=\"$2\"; shift 2 ;;\n\
              *) shift ;;\n  esac\ndone\ncd \"$mount\"\n\
              exec env -i HOME='{home}' PATH='{bin}' \"${{envs[@]}}\" '{bash}' -euo pipefail -c \"$script\"\n",
@@ -297,6 +297,21 @@ fn a_container_step_that_fails_is_named_with_its_action_and_its_files_are_still_
             "compiling the wheel",
             "fix the compile error above; 'just wheel-linux x86_64-unknown-linux-gnu' reproduces it",
         ),
+        (
+            "curl",
+            "installing rustup",
+            "check that https://sh.rustup.rs answers",
+        ),
+        (
+            "rustup toolchain install",
+            "installing Rust",
+            "check that 1.97.1, rust-toolchain.toml's channel, is a published release",
+        ),
+        (
+            "python3.12 -m pip",
+            "installing maturin",
+            "check that PyPI serves maturin",
+        ),
     ] {
         let (_scratch, dir) = scratch("failed-step");
         container_double(&dir, Some(fail_at));
@@ -479,7 +494,7 @@ fn an_absolute_out_directory_is_refused() {
 /// which is `nx.json`'s `crateSource`; a wheel-build input missing from it is a
 /// pull request that changes the build and never runs it.
 #[test]
-fn the_wheel_check_is_gated_on_inputs_carrying_everything_its_build_reads() {
+fn the_wheel_check_is_gated_on_inputs_carrying_what_its_build_reads() {
     let block = job_block("ci.yml", "wheel");
     assert!(
         block.contains("if: needs.changes.outputs.crate == 'true'"),
@@ -495,6 +510,9 @@ fn the_wheel_check_is_gated_on_inputs_carrying_everything_its_build_reads() {
     for read in [
         "scripts/build-linux-wheel.sh",
         "pyproject.toml",
+        "README.md",
+        ".github/workflows/ci.yml",
+        ".github/workflows/release.yml",
         "rust-toolchain.toml",
         "Cargo.toml",
         "Cargo.lock",
@@ -508,4 +526,111 @@ fn the_wheel_check_is_gated_on_inputs_carrying_everything_its_build_reads() {
             "crateSource carries {input}"
         );
     }
+}
+
+fn script(args: &[&str], dir: &Path) -> Output {
+    let output = Command::new("bash")
+        .current_dir(repo_root())
+        .arg("scripts/build-linux-wheel.sh")
+        .args(args)
+        .env("PATH", path_with_double(dir))
+        .output()
+        .expect("the script runs");
+    logged(output, dir)
+}
+
+#[test]
+fn a_malformed_invocation_is_refused_with_the_usage() {
+    let (_scratch, dir) = scratch("malformed");
+    docker_double(&dir, 0);
+    for (args, says) in [
+        (&["--target"][..], "--target needs a value"),
+        (
+            &["--target", "x86_64-unknown-linux-gnu", "--out"][..],
+            "--out needs a value",
+        ),
+        (&["--bogus"][..], "unknown argument: --bogus"),
+        (&[][..], "--target is required"),
+    ] {
+        let output = script(args, &dir);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(says), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("ACTION: run 'build-linux-wheel.sh --target"),
+            "{stderr}"
+        );
+    }
+    assert!(!dir.join("docker.log").exists(), "docker was not run");
+}
+
+/// A copy of the script at the root of a scratch checkout of its own, whose
+/// `rust-toolchain.toml` pins `channel`: the script reads the checkout it sits
+/// in, so this is how a checkout other than this one is put in front of it.
+fn checkout_with_channel(dir: &Path, channel: &str) -> PathBuf {
+    let checkout = dir.join("checkout");
+    fs::create_dir_all(checkout.join("scripts")).expect("the scratch checkout");
+    fs::copy(
+        repo_root().join("scripts/build-linux-wheel.sh"),
+        checkout.join("scripts/build-linux-wheel.sh"),
+    )
+    .expect("the script is copied");
+    fs::write(
+        checkout.join("rust-toolchain.toml"),
+        format!("[toolchain]\nchannel = \"{channel}\"\n"),
+    )
+    .expect("the toolchain file is written");
+    checkout
+}
+
+fn script_in(checkout: &Path, dir: &Path) -> Output {
+    let output = Command::new("bash")
+        .current_dir(checkout)
+        .args([
+            "scripts/build-linux-wheel.sh",
+            "--target",
+            "x86_64-unknown-linux-gnu",
+        ])
+        .env("PATH", path_with_double(dir))
+        .output()
+        .expect("the script runs");
+    logged(output, dir)
+}
+
+#[test]
+fn a_toolchain_channel_that_is_not_one_exact_release_is_refused() {
+    let (_scratch, dir) = scratch("inexact-channel");
+    docker_double(&dir, 0);
+    let checkout = checkout_with_channel(&dir, "stable");
+    let output = script_in(&checkout, &dir);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("rust-toolchain.toml's channel is 'stable', not one exact release"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("ACTION: restore its single [toolchain] channel"),
+        "{stderr}"
+    );
+    assert!(!dir.join("docker.log").exists(), "docker was not run");
+}
+
+#[test]
+fn a_build_directory_that_cannot_be_created_is_named() {
+    let (_scratch, dir) = scratch("uncreatable");
+    docker_double(&dir, 0);
+    let checkout = checkout_with_channel(&dir, "1.97.1");
+    // A file where the build's target directory has to go.
+    fs::write(checkout.join("target"), "").expect("the obstructing file");
+    let output = script_in(&checkout, &dir);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("could not create"), "{stderr}");
+    assert!(
+        stderr.contains("target/wheel-x86_64-unknown-linux-gnu"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("ACTION: make both writable by"), "{stderr}");
+    assert!(!dir.join("docker.log").exists(), "docker was not run");
 }
