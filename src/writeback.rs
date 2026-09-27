@@ -1447,9 +1447,23 @@ fn opened_within(
             let _ = built.send(store.engine(&flags));
         })
         .map_err(|error| format!("the store cannot be opened: {error}"))?;
+    opened_by(&arrived, deadline)
+}
+
+/// What the thread building an attempt's store sent, or why nothing arrived: the deadline
+/// passed, or the thread ended without an answer, which only a panic in the build does and
+/// which is not the store being slow.
+fn opened_by<T>(arrived: &std::sync::mpsc::Receiver<T>, deadline: Deadline) -> Result<T, Failed> {
     arrived
         .recv_timeout(deadline.within())
-        .map_err(|_| Failed::from(deadline.refusal(STORE_OPEN)))
+        .map_err(|error| match error {
+            std::sync::mpsc::RecvTimeoutError::Timeout => {
+                Failed::from(deadline.refusal(STORE_OPEN))
+            }
+            std::sync::mpsc::RecvTimeoutError::Disconnected => Failed::from(format!(
+                "{STORE_OPEN} ended without an answer: building the store stopped short"
+            )),
+        })
 }
 
 fn project(
@@ -3309,6 +3323,36 @@ mod tests {
                 "{failure:?} is classed otherwise than the store classes it"
             );
         }
+    }
+
+    /// A build thread that ends without sending — which only a panic does — is its own
+    /// failure, answered at once, and never reported as the store outlasting the deadline.
+    #[test]
+    fn a_store_build_that_ends_without_an_answer_is_not_a_timeout() {
+        let (built, arrived) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let _held = built;
+            panic!("the build stopped short");
+        })
+        .join()
+        .expect_err("the build panicked");
+        let started = std::time::Instant::now();
+        let failed = super::opened_by(&arrived, Deadline::Floor).expect_err("nothing arrived");
+        assert!(
+            started.elapsed() < super::COMMAND_FLOOR,
+            "the floor was waited out"
+        );
+        assert!(
+            failed.reason.contains("ended without an answer")
+                && !failed.reason.contains("exceeded"),
+            "{}",
+            failed.reason
+        );
+        assert_eq!(failed.classified, None);
+
+        let (built, arrived) = std::sync::mpsc::channel();
+        built.send(7).expect("the receiver is held");
+        assert_eq!(super::opened_by(&arrived, Deadline::Floor).ok(), Some(7));
     }
 
     #[test]
