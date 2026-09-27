@@ -314,6 +314,47 @@ impl<'de> serde::de::Visitor<'de> for PositiveSeconds {
     }
 }
 
+/// Read `template_root` as the directory it names.
+///
+/// Serde's own reading of an optional string would take the key present and holding
+/// nothing — `template_root:`, a YAML null — as the document omitting it, so a root a launch
+/// half-wrote would be read as none. That is refused here by the key's own name; a blank
+/// string is refused by [`LaunchConfig::load`]'s loop in the same sentence.
+fn template_root<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    struct Root;
+
+    impl<'de> serde::de::Visitor<'de> for Root {
+        type Value = Option<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("the template root directory")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, text: &str) -> std::result::Result<Self::Value, E> {
+            Ok(Some(text.to_owned()))
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+            Err(E::custom(refused_blank(crate::templates::ROOT_KEY)))
+        }
+
+        fn visit_none<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+            self.visit_unit()
+        }
+
+        fn visit_some<D2: Deserializer<'de>>(
+            self,
+            deserializer: D2,
+        ) -> std::result::Result<Self::Value, D2::Error> {
+            deserializer.deserialize_any(self)
+        }
+    }
+
+    deserializer.deserialize_any(Root)
+}
+
 /// Read `require_rendered` as the `true` or `false` it is.
 ///
 /// Serde's own reading of an optional boolean would take the key present and
@@ -598,7 +639,11 @@ pub struct LaunchConfig {
     /// [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may not carry
     /// one, refused blank by its own name, and omitted when absent.
     // llmlint: ignore[invalid_states_unrepresentable] a path spelled as the launch config document wrote it, exactly as `bus_config` beside it is: resolved against the launch directory at the launch and read there, where a root that cannot be read is refused naming this key. It is a public field of the type `docs/contract.md`'s launch config names, and a path newtype would be a public item that contract never promised.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "template_root"
+    )]
     pub template_root: Option<String>,
     /// Whether the plan's agent nodes have to be the renderings their provenance
     /// records (contract C7), if the launch says.

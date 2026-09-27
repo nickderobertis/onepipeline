@@ -508,6 +508,10 @@ fn the_host_root_is_the_flag_then_the_variable_then_the_schema_12_key_and_adopt_
             "`template_root` is present and names nothing",
         ),
         (
+            "schema_version: 12\ntemplate_root:\n",
+            "`template_root` is present and names nothing",
+        ),
+        (
             "schema_version: 12\nrequire_rendered:\n",
             "`require_rendered` is present and names nothing",
         ),
