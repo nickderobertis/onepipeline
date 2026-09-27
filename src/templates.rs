@@ -278,6 +278,7 @@ pub enum Checked {
     /// A rendering too.
     Rendering,
     /// The stored item with this qualified id too.
+    // llmlint: ignore[invalid_states_unrepresentable] the id as `template_check` printed it after parsing it into the store's own qualified-id type — this value is only ever built from that parsed id — and a public qualified-id type here would be a public item the contract never promised, exactly as `TemplateCheck::Item` and every run and project id the post-launch verbs answer with are strings.
     Item(String),
 }
 
@@ -347,9 +348,11 @@ impl Registry {
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] naming the file for a registration that does not parse, carries
-    /// an unknown key, declares a version this build does not read, a bad name, a blank
-    /// description, or [`BUILT_IN`] again; and for a file that is there and cannot be read.
+    /// [`Error::Invalid`] naming the root for one that cannot be read — so a root that is
+    /// not there is never read as one holding no registration — and naming the file for a
+    /// registration that does not parse, carries an unknown key, declares a version this
+    /// build does not read, a bad name, a blank description, or [`BUILT_IN`] again; and for
+    /// a file that is there and cannot be read.
     pub(crate) fn load(root: Option<&Path>) -> Result<Self> {
         let built_in = Registered {
             name: BUILT_IN.to_owned(),
@@ -364,6 +367,12 @@ impl Registry {
                 names: vec![built_in],
             });
         };
+        std::fs::read_dir(root).map_err(|error| {
+            Error::Invalid(format!(
+                "template root {} cannot be read: {error}",
+                root.display()
+            ))
+        })?;
         let file = root.join(REGISTRATION_FILE);
         let text = match std::fs::read_to_string(&file) {
             Ok(text) => text,
@@ -754,7 +763,7 @@ pub(crate) fn check_rendering(text: &str) -> std::result::Result<(), &'static st
 /// One stored item C7 is asked about.
 pub(crate) struct Stored<'a> {
     /// Its qualified id, which the remedy names.
-    pub qualified: &'a str,
+    pub qualified: &'a crate::taskgraph::QualifiedId,
     /// Its metadata, where its provenance is.
     pub metadata: &'a BTreeMap<String, Value>,
     /// Its content exactly as stored.
@@ -782,7 +791,7 @@ pub(crate) fn check_rendered(
     let remedy = |name: &str, answers: bool| {
         let command = REMEDY
             .replace("<name>", name)
-            .replace("<qualified id>", item.qualified);
+            .replace("<qualified id>", item.qualified.as_str());
         let command = match role {
             Role::Task => command,
             Role::Document => command.replace(" task render ", " document render "),
@@ -1127,6 +1136,34 @@ mod tests {
             "## Acceptance criteria\n\n- it builds\n- two\n  lines\n"
         );
         assert_eq!(check_rendering(&rendered.body), Ok(()));
+    }
+
+    #[test]
+    fn a_root_that_is_not_there_is_refused_and_never_read_as_registering_nothing() {
+        let missing = std::env::temp_dir().join(format!(
+            "onepipeline-no-such-template-root-{}",
+            std::process::id()
+        ));
+        let refused = Registry::load(Some(&missing)).expect_err("a missing root is refused");
+        assert!(
+            refused.to_string().contains(&format!(
+                "template root {} cannot be read",
+                missing.display()
+            )),
+            "{refused}"
+        );
+        let listed = crate::verbs::template_list(&TemplateOptions {
+            template_root: Some(missing.clone()),
+            working_dir: std::env::temp_dir(),
+            ..TemplateOptions::default()
+        });
+        assert!(
+            listed.is_err(),
+            "the SDK listed names under a root that is not there"
+        );
+        let registry = Registry::load(None).expect("no root registers the built-in");
+        assert_eq!(registry.names().len(), 1);
+        assert_eq!(registry.file(), None);
     }
 
     #[test]

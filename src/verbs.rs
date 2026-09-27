@@ -1517,7 +1517,7 @@ pub fn template_check(
                 role,
                 Some(name),
                 &templates::Stored {
-                    qualified: qualified.as_str(),
+                    qualified: &qualified,
                     metadata: &stored.metadata,
                     content: &stored.content,
                 },

@@ -459,7 +459,7 @@ impl Reader {
             .iter()
             .map(|node| node.id.clone())
             .zip(tasks.iter().map(|task| StoredTask {
-                qualified: task.id.to_string(),
+                qualified: QualifiedId::from(&task.id),
                 content: task.item.content.clone().unwrap_or_default(),
             }))
             .collect();
@@ -895,8 +895,8 @@ pub(crate) struct Read {
 
 /// One task as the store holds it.
 pub(crate) struct StoredTask {
-    /// Its qualified id, `<source>:<native>`.
-    pub qualified: String,
+    /// Its qualified id, as the store answered with it.
+    pub qualified: QualifiedId,
     /// Its content, byte for byte; empty where it has none.
     pub content: String,
 }
@@ -991,6 +991,18 @@ impl QualifiedId {
                 .expect("a qualified id's source is a source name the store accepts"),
             NativeId::from(self.native()),
         )
+    }
+}
+
+impl From<&GlobalId> for QualifiedId {
+    /// An id the store answered with, which that library has already qualified: its
+    /// source name holds no colon, so the first one is where the two halves meet.
+    fn from(id: &GlobalId) -> Self {
+        let whole = id.to_string();
+        let colon = whole
+            .find(':')
+            .expect("a store id is written `<source>:<native>`");
+        Self { whole, colon }
     }
 }
 
