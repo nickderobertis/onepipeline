@@ -1224,14 +1224,14 @@ mod tests {
             vec![task(
                 "t-padded",
                 node("padded"),
-                json!({"content": "\n## What\nDo padded.\n\n"}),
+                json!({"content": "\n## What\nDo padded.\n\n## Acceptance criteria\n- padded is done.\n\n"}),
             )],
             vec![],
         ))
         .unwrap_or_else(|_| panic!("the project reads as a plan"));
         assert_eq!(
             read.plan.tasks[0].task.as_deref(),
-            Some("## What\nDo padded.")
+            Some("## What\nDo padded.\n\n## Acceptance criteria\n- padded is done.")
         );
 
         let message = refusal(load(store(
