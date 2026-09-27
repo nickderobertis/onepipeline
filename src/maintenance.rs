@@ -1313,7 +1313,7 @@ mod tests {
     /// Entry 92 tells a planner the fields `branches-retired` and each of its
     /// retired entries carry; these are the types that write them.
     #[test]
-    fn entry_91_names_the_fields_a_retirement_record_carries() {
+    fn entry_92_names_the_fields_a_retirement_record_carries() {
         use crate::supersession::{declared, proposed};
         assert_eq!(
             proposed("branches_retired_fields"),

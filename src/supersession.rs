@@ -786,7 +786,7 @@ mod tests {
     /// Entry 92 tells a planner the fields `branches-superseded` carries and the
     /// shape `--json` prints; these are the types that write both.
     #[test]
-    fn entry_91_names_the_fields_this_build_writes() {
+    fn entry_92_names_the_fields_this_build_writes() {
         assert_eq!(
             proposed("branches_superseded_fields"),
             declared::<BranchesSuperseded>()
@@ -826,7 +826,7 @@ mod tests {
 
     /// The label keys entry 92 tells a planner are the ones `onevcs` is given.
     #[test]
-    fn entry_91_names_the_labels_each_supersession_carries() {
+    fn entry_92_names_the_labels_each_supersession_carries() {
         assert_eq!(
             proposed("supersession_labels"),
             BTreeSet::from([RUN_LABEL, NODE_LABEL, BY_LABEL].map(String::from))
