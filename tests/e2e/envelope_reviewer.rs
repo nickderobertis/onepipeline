@@ -878,11 +878,8 @@ fn a_blank_rung_names_no_reviewer_and_an_unreadable_variable_is_refused() {
             "a launch naming {which} ran a reviewer"
         );
         world.release("slow.go");
-        // Each launch reads its plan out of the store every run here projects
-        // onto, and a local-md copy writes a task's file in place rather than
-        // through a rename, so the next launch's read could meet this run's
-        // write half done and refuse the plan as partially answered. The next
-        // launch waits for this run's driver to let go of it.
+        // The next launch reads the store this run projects onto, and a local-md
+        // copy writes in place: it waits until nothing of this run can be mid-write.
         world.until("the run to settle", |world| {
             world.run_file(&name, "result.json").is_file()
         });
