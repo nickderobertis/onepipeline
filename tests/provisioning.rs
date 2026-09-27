@@ -8,6 +8,7 @@ mod unix {
     use std::path::PathBuf;
     use std::process::Command;
 
+    #[cfg(target_os = "linux")]
     use onepipeline_testfakes::executable;
 
     struct Scratch(PathBuf);
