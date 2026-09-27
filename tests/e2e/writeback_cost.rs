@@ -121,7 +121,6 @@ fn at_rest(world: &World, what: &str) {
     }
 }
 
-/// Wait for `ready`, then for the write-back to come to rest.
 fn then_at_rest(world: &World, what: &str, ready: impl Fn(&World) -> bool) {
     world.until(what, &ready);
     at_rest(world, what);
@@ -150,7 +149,6 @@ fn spent<'a>(charged: impl Iterator<Item = &'a Value>) -> Value {
     json!({"requests": requests, "graphql_points": points})
 }
 
-/// Run the comparable plan and take its figures, with the run's projection record beside them.
 fn the_comparable_plan() -> (Value, Vec<Value>) {
     let world = World::new("writeback-comparable-plan");
     for held in ["a", "b", "c", "d", "e", "d-2", "f"] {

@@ -1526,7 +1526,6 @@ fn opened_by<T>(arrived: &std::sync::mpsc::Receiver<T>, deadline: Deadline) -> R
         })
 }
 
-/// Which lineages one attempt may carry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scope {
     /// A driver's: every lineage whose projection differs from what landed.
@@ -2010,7 +2009,6 @@ impl Rendering {
     }
 }
 
-/// The lowercase hex SHA-256 of a text's UTF-8 bytes.
 fn sha256(text: &str) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(text.as_bytes())
