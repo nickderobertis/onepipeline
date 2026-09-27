@@ -826,6 +826,84 @@ fn an_adoption_whose_every_read_matches_reads_each_item_once_and_copies_nothing(
     no_record_is_whole_or_reads_a_page_of_tasks(&world, run);
 }
 
+/// A read of one task does not answer its edges, so a lineage a cold adoption reads by its own
+/// id that has any is carried even where everything the read did answer matches — and the copy
+/// puts back an edge a person took off the board meanwhile — while one without edges that
+/// matches is not.
+#[test]
+fn a_lineage_read_cold_with_edges_is_carried_and_its_edges_put_right() {
+    let run = "projections-cold-edges";
+    let world = World::new("writeback-projections-cold-edges");
+    for node in ["first", "second"] {
+        world.script(&format!("{node}.wait"), "hold");
+    }
+    world.script("second.stops-when-interrupted", "");
+    let project = world.plan(
+        run,
+        &plan_of(run, vec![agent("first", &[]), agent("second", &["first"])]),
+    );
+    let world = world
+        .through_scripted_source()
+        .with_env(RENDEZVOUS_SECONDS_ENV, "600")
+        .with_env(CANCEL_GRACE_ENV, "1");
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the first node to be dispatched", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+    world.release("first.go");
+    world.until("the second node to be dispatched", |world| {
+        world.events_of(run, "node-dispatched").len() >= 2
+    });
+    cancelled(&world, run, "second");
+    projected_until(&world, run, &project, "the board to say it all", |tasks| {
+        board_word(tasks, "first").as_deref() == Some("done")
+            && board_task(tasks, "second")["item"]["status"]["name"] == "parked"
+    });
+    world.run(&["stop", run]).exited(0);
+
+    let second = board_task(&world.store_tasks(&project), "second").clone();
+    let second_id = second["id"].as_str().expect("an id").to_owned();
+    assert!(
+        !world.store_deps(&second_id).is_empty(),
+        "the fixture drew no edge"
+    );
+    // llmlint: ignore-block[tests_mirror_real_usage] a run directory an older build left holds
+    // no landed baseline, and a person taking an edge off a `local-md` board edits its file;
+    // no invocation of this build produces either.
+    std::fs::remove_file(world.run_file(run, &in_run_dir(&landed_block()["file"])))
+        .expect("this build seeded a landed baseline");
+    rewritten(
+        &item_file(&world, &second),
+        &item_file(&world, &second),
+        |front| {
+            front.remove("depends_on");
+        },
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    assert!(
+        world.store_deps(&second_id).is_empty(),
+        "the edge was not taken off the board"
+    );
+
+    let mark = records(&world, run).len();
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    world.until("the adopted driver's first projection", |world| {
+        records(world, run).len() > mark && every_attempt_landed(world, run)
+    });
+    let first = records(&world, run)[mark].clone();
+    assert_eq!(
+        first["items"],
+        json!(["second"]),
+        "a lineage with edges read cold was not carried, or one without was: {first}"
+    );
+    assert_eq!(first["calls"]["task-show"], 2, "{first}");
+    assert!(
+        !world.store_deps(&second_id).is_empty(),
+        "the copy did not put the edge back"
+    );
+    no_record_is_whole_or_reads_a_page_of_tasks(&world, run);
+}
+
 /// The attempt after a failed one carries exactly the lineages whose change had not landed —
 /// never the whole project — whatever failed: the store refusing the copy, each recorded failed
 /// with the store's class and kind and the reason, carrying no report, and the planner told the

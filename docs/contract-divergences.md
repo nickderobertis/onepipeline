@@ -7702,7 +7702,10 @@ store answered them. Each copy that lands advances every item it carried to what
 except a deliverer whose tickets the store could not keep in step, which stays unlanded so the
 next attempt carries it again. A lineage it does not hold — every lineage of a run an older build
 started, whose directory holds no file — is read once by its own id and compared against that
-read; an item that says what the run would write is recorded as read and not carried. A stop's
+read; an item that says what the run would write is recorded as read and not carried. A read of
+one task does not answer its edges, so a lineage that has any is carried all the same — the copy
+writes its edges, sending only their difference — and its baseline entry is what that copy
+landed. A stop's
 release reads it in the stopping process and advances it by what the release wrote.
 
 **One page read remains, and it is the copy's own.** When a copy *creates* an item — the one an

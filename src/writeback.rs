@@ -1775,10 +1775,13 @@ fn carry_the_difference(
         let held = LandedItem::read(&task, depends_on);
         origins.insert(root.clone(), Origin::of(task));
         read.insert(root.clone());
+        // A read of one task does not answer its edges, so a lineage that has any is carried —
+        // the copy writes them, sending only their difference — rather than trusted to hold
+        // them; one with none is compared on everything the read did answer.
         let differs = match scope {
             Scope::Driven => !renderings
                 .get(root)
-                .is_some_and(|now| held.says_what(&now.item)),
+                .is_some_and(|now| now.item.depends_on.is_empty() && held.says_what(&now.item)),
             Scope::Release => held.status == Some(ProjectedStatus::Queued),
         };
         if differs {
