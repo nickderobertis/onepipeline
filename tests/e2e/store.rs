@@ -1253,15 +1253,15 @@ fn asked_nothing_more(world: &World, run: &str, window: Duration, midway: impl F
     }
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these seven wait on
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these eight wait on
 // is the schedule and its absence — a refused projection not being asked again across a window
 // the old schedule retried in, a transient one being asked at intervals that grow, a rate
 // limit's own wait being served in full, and a run settling over refusals — which cannot be
 // observed in less time than the schedule takes. The edge they need is the crate under test:
 // they drive the compiled `onepipeline` binary against its own write-back worker and the real
-// store, six of them through the store double, exactly as the six schedule journeys below do,
+// store, seven of them through the store double, exactly as the six schedule journeys below do,
 // so a project of their own would declare the same dependency and skip nothing. The reason
-// those six record for staying in this binary is these seven's too.
+// those six record for staying in this binary is these eight's too.
 /// A projection the store **refuses** is reported once and is not asked again on a timer: the
 /// store would refuse the same projection the same way, and against a hosted destination every
 /// attempt spends its allowance for nothing. It is attempted again when the run's graph next
@@ -1634,6 +1634,73 @@ fn a_closeout_inside_a_rate_limit_wait_asks_the_store_nothing() {
         dispatched(&world, run),
         ["work", "later"],
         "the rate limit changed what executed"
+    );
+}
+
+/// A store that is rate-limited for the whole run, asking each time to be left alone for longer
+/// than the run lasts, changes nothing about the run: it dispatches, settles and closes out on
+/// time, and every settlement is the one the same plan settles with against a healthy store.
+/// The write-back stays best effort and off the reconcile loop, and the wait it honours is its
+/// own.
+#[test]
+fn a_run_whose_store_is_rate_limited_throughout_settles_as_it_does_against_a_healthy_one() {
+    let settle = |name: &str, limited: bool| -> (Value, Duration) {
+        let world = World::new(&format!("store-writeback-{name}"));
+        world.script("work.wait", "hold");
+        let project = world.plan(
+            name,
+            &plan_of(name, vec![agent("work", &[]), agent("later", &["work"])]),
+        );
+        if limited {
+            // Every write the copy makes is refused for a rate limit asking for a minute.
+            world.store_refuses("write_task", &rate_limited_for(60));
+        }
+        let world = world
+            .through_scripted_source()
+            .with_env(RENDEZVOUS_SECONDS_ENV, "600");
+        let started = Instant::now();
+        world.run(&["start", &project, "--detach"]).exited(0);
+        world.until("the held node to be dispatched", |world| {
+            dispatched(world, name) == ["work"]
+        });
+        world.release("work.go");
+        world.until("the run to write its result", |world| {
+            world.run_file(name, "result.json").is_file()
+        });
+        let took = started.elapsed();
+        if limited {
+            let log = std::fs::read_to_string(world.run_file(name, "driver.log"))
+                .expect("the driver log is readable");
+            assert!(
+                log.contains("kind: rate-limited"),
+                "the store was never rate-limited, so this proves nothing:\n{log}"
+            );
+        }
+        assert_eq!(dispatched(&world, name), ["work", "later"]);
+        let result = world.run_json(name, "result.json");
+        let settled: BTreeMap<String, Value> = result["nodes"]
+            .as_array()
+            .expect("result nodes")
+            .iter()
+            .map(|node| {
+                (
+                    node["id"].as_str().expect("a node id").to_owned(),
+                    json!({"status": node["status"], "outcome": node["outcome"]}),
+                )
+            })
+            .collect();
+        (json!({"state": result["state"], "nodes": settled}), took)
+    };
+    let (healthy, _) = settle("writeback-healthy-throughout", false);
+    let (limited, took) = settle("writeback-limited-throughout", true);
+    assert_eq!(healthy["state"], "complete", "{healthy}");
+    assert_eq!(
+        limited, healthy,
+        "a rate-limited store changed how the run settled"
+    );
+    assert!(
+        took < Duration::from_secs(60),
+        "the run took {took:?}, which is the store's wait rather than the run's own time"
     );
 }
 
