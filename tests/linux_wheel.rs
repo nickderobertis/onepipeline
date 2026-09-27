@@ -1,21 +1,9 @@
-//! The one Linux wheel build, `scripts/build-linux-wheel.sh`, driven as `just
-//! wheel-linux` drives it.
+//! `scripts/build-linux-wheel.sh`, driven as `just wheel-linux` drives it.
 //!
-//! What is substituted is `docker` and the image's tools: a double stood first
-//! on PATH records the invocation, then either answers with an exit status or
-//! runs the build's in-container script as the image would, against recording
-//! doubles of `yum`, `rustup`, `python3.12` and the rest. The real build — an
-//! image pull, a toolchain and a release compile — is minutes of network-bound
-//! work, so it is proven where it runs, by ci.yml's `wheel` legs and
-//! release.yml's `build-wheels`; what these hold is every decision the script
-//! makes around those tools, and that the container it hands over to is the one
-//! each workflow means.
-//!
-//! The two workflows are read as the source of truth rather than restated:
-//! every Linux target release.yml's `build-wheels` matrix builds is built here,
-//! in its own manylinux image, with the maturin release.yml pins; and ci.yml's
-//! `wheel` legs build exactly those targets, so a pull request cannot drift
-//! back to building something the release does not.
+//! `docker` and the image's tools are doubles because the real build is minutes
+//! of network-bound compile, which ci.yml's `wheel` legs run for real on every
+//! pull request. The two workflows are read rather than restated, so the targets
+//! and maturin they name cannot drift from what the script builds.
 
 #![cfg(target_os = "linux")]
 
@@ -655,7 +643,10 @@ fn a_build_directory_that_cannot_be_created_is_named() {
         stderr.contains("target/wheel-x86_64-unknown-linux-gnu"),
         "{stderr}"
     );
-    assert!(stderr.contains("ACTION: make both writable by"), "{stderr}");
+    assert!(
+        stderr.contains("ACTION: remove whatever file stands on either path"),
+        "{stderr}"
+    );
     assert!(!dir.join("docker.log").exists(), "docker was not run");
 }
 

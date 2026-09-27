@@ -408,6 +408,7 @@ jobs:
           - check: wheel
             target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+          # llmlint: ignore[contracts_have_one_source_or_a_drift_gate] GitHub holds the required set and nothing in this tree can read it; AGENTS.md's reconciliation is re-applying governance with every context whenever a leg is added, which is a settings write left for after this merges — until then this leg reports on every pull request as an advisory check
           - check: wheel (aarch64-unknown-linux-gnu)
             target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm

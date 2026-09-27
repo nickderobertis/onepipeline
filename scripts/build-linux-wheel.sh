@@ -110,8 +110,8 @@ maturin_version="1.14.1"
 # missing parent as root.
 cargo_target="target/wheel-$target"
 mkdir -p -- "$out_abs" "$root/$cargo_target" \
-  || fail "could not create $out_abs and $root/$cargo_target" \
-    "make both writable by $(id -un), or pass another --out"
+  || fail "could not create $out_abs and $root/$cargo_target (mkdir's reason is above)" \
+    "remove whatever file stands on either path, or make its parent writable by $(id -un)"
 
 # Runs in the container, from the checkout's root, and names nothing outside
 # the image's PATH and the checkout. The EXIT trap hands the build's files back
@@ -165,6 +165,6 @@ docker run --rm --platform "$platform" \
   -e RUSTFLAGS="-D warnings" \
   "$image" bash -euo pipefail -c "$inside" \
   || fail "the $target wheel did not build in $image (docker exited $?)" \
-    "follow the ACTION above; with none, docker itself failed and its own error above says why"
+    "follow the ACTION above; with none, docker itself failed: check 'docker info' answers and 'docker pull $image' succeeds, then re-run"
 
 echo "built the $target wheel into $out_rel/"
