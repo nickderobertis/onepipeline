@@ -115,6 +115,16 @@ fn preserved_head(world: &World, run: &str, branch: &str) -> String {
         .unwrap_or_else(|| panic!("onevcs recorded no commit on {branch}\n{}", why(world, run)))
 }
 
+/// Whether a repository's object store holds a commit — the work a branch
+/// carried, which outlives the branch `onevcs` retires once that work landed.
+fn holds_commit(repo: &std::path::Path, sha: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
+        .current_dir(repo)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 /// Every `onevcs`-produced event one run recorded, by kind.
 fn vcs_kinds(world: &World, run: &str) -> Vec<String> {
     world
@@ -1738,10 +1748,11 @@ fn a_publication_its_checks_reject_is_redispatched_on_the_branch_it_preserved() 
         "the re-dispatch opened a second change request for one branch: {opened:?}"
     );
     assert_eq!(opened[0]["head"], json!(branch), "{:?}", opened[0]);
-    // The branch is still in the checkout the failed attempt handed it back to,
-    // which is where the attempt that recovered found it.
+    // The branch was handed back to the checkout the failed attempt left it in,
+    // which is where the attempt that recovered found it. `onevcs` retires it once
+    // it lands, so what is read is the work it carried rather than the name.
     assert!(
-        repo.has_branch(&world, branch),
+        holds_commit(&repo.checkout, &preserved_head(&world, &run, branch)),
         "the branch the attempts shared was not handed back to the checkout"
     );
 }
@@ -2066,12 +2077,11 @@ fn a_merge_path_that_goes_dark_and_comes_back_is_answered_by_reading_it_again() 
         asked > 1,
         "the host was asked {asked} time(s), so nothing re-read the merge path"
     );
-    // The work is on the origin, which is where the first publication left it.
+    // The work is on the origin, which is where the first publication left it —
+    // read as the commit it pushed, since `onevcs` retires a branch once it lands.
     let branch = node["branch"].as_str().expect("the node names its branch");
     assert!(
-        !git(&world, &repo.origin, &["branch", "--list", branch])
-            .trim()
-            .is_empty(),
+        holds_commit(&repo.origin, &preserved_head(&world, &run, branch)),
         "the branch the publication pushed is not on the origin"
     );
 }
@@ -6487,7 +6497,10 @@ fn a_retry_on_a_branch_whose_change_request_is_open_rewrites_its_description() {
     assert_eq!(node["status"], "done", "{node}\n{}", why(&world, run));
     assert_eq!(node["outcome"], "merged", "{node}");
     let branch = node["branch"].as_str().expect("the node names its branch");
-    assert!(repo.has_branch(&world, branch));
+    assert!(holds_commit(
+        &repo.checkout,
+        &preserved_head(&world, run, branch)
+    ));
 
     // One change request, and its description is the last one drafted.
     let opened = world.changes_opened();
