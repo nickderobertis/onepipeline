@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.51.0](https://github.com/nickderobertis/onepipeline/compare/v0.50.1...v0.51.0) - 2026-09-27
+
+### Added
+
+- *(lifecycle)* record the branches a landed retry superseded and retire finished branches when idle ([#543](https://github.com/nickderobertis/onepipeline/pull/543))
+
+### Fixed
+
+- *(retirement)* keep branches a node names mid-sweep, and lock and validate supersession recording ([#553](https://github.com/nickderobertis/onepipeline/pull/553))
+- *(release)* build the Linux wheels now that the linked store brings vendored OpenSSL ([#550](https://github.com/nickderobertis/onepipeline/pull/550))
+
 ## [0.50.1](https://github.com/nickderobertis/onepipeline/compare/v0.50.0...v0.50.1) - 2026-09-27
 
 ### Added
