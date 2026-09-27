@@ -13,7 +13,7 @@ use crate::edits::StatedLanding;
 use crate::event::{Envelope, PipelineKind, Source};
 use crate::graph::Landing;
 use crate::journal::{self, Journal};
-use crate::ledger::RunPaths;
+use crate::ledger::{OwnershipLock, RunPaths};
 use crate::payload::{BranchesSuperseded, SupersededAttempt, UnrecordedAttempt};
 use crate::projection::RunState;
 use crate::Result;
@@ -399,6 +399,10 @@ pub(crate) enum Mode {
     Record,
 }
 
+/// The verb `supersessions --record` writes into the run's ownership lock: what a
+/// `start`, `adopt` or `reply` refused while it holds the lock names as the holder.
+const RECORD_VERB: &str = "supersessions --record";
+
 /// `onepipeline supersessions RUN [--record]`: which earlier attempts of the run's
 /// landed retries were on a branch other than the one that landed, and what
 /// became of recording them with `onevcs`.
@@ -451,12 +455,16 @@ impl Supersessions {
 /// With `record`, each pair the journal does not already record is handed to
 /// `onevcs::record_supersession` — the function a driver calls when the retry
 /// lands — and one `branches-superseded` per lineage that had any is appended to
-/// the run's journal, so a second call records nothing new.
+/// the run's journal, so a second call records nothing new. It does so holding
+/// the run's ownership lock, so it refuses a run a driver is driving — that
+/// driver records its own landings, and two recorders would each journal the
+/// same pairs — and no driver adopts the run while it reads and appends.
 ///
 /// # Errors
 ///
 /// A run with no directory under the runs root, one whose journal cannot be read
-/// or holds no record this build reads, or one whose journal cannot be written.
+/// or holds no record this build reads, one whose ownership lock another process
+/// holds where `record` is asked, or one whose journal cannot be written.
 pub(crate) fn supersessions(paths: &RunPaths, mode: Mode) -> Result<Supersessions> {
     if !paths.exists() {
         return Err(crate::Error::NoSuchRun {
@@ -468,6 +476,10 @@ pub(crate) fn supersessions(paths: &RunPaths, mode: Mode) -> Result<Supersession
                 .to_path_buf(),
         });
     }
+    let _owned = match mode {
+        Mode::Record => Some(OwnershipLock::acquire(paths, RECORD_VERB)?),
+        Mode::Answer => None,
+    };
     let mut events = journal_of(paths)?;
     journal::merge_order(&mut events);
     let state = crate::projection::fold(&events);
@@ -605,7 +617,6 @@ pub(crate) fn render_refusals(answered: &Supersessions) -> String {
     out
 }
 
-/// The one JSON object `onepipeline supersessions RUN --json` prints.
 pub(crate) fn render_json(answered: &Supersessions) -> String {
     serde_json::to_string(answered).expect("the answer serializes")
 }

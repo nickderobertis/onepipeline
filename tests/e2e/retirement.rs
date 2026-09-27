@@ -1003,7 +1003,41 @@ fn the_backfill_verb_answers_and_records_from_the_journal_alone() {
     assert!(!journal.exists(), "a refused --record wrote a journal");
 }
 
-/// The identity the world's `service` checkout registers as.
+/// `--record` beside a live driver is refused, naming that driver, and writes
+/// nothing: the driver records its own landings. Answering without `--record`
+/// still works, and once the driver has let go `--record` does too.
+#[cfg(unix)]
+#[test]
+fn the_backfill_verb_refuses_to_record_a_run_a_driver_is_driving() {
+    let world = World::new("retirement-backfill-driven");
+    world.repository("local-direct", &[]);
+    let run = "driven";
+    let pid = first_attempt_beside_a_hold(&world, run);
+    world.script("svc-2.work", "the second attempt wrote this\n");
+    world.script("svc-2.fail", "1");
+    retry(&world, run, Some(SECOND));
+    until_settled(&world, run, "svc-2");
+    let journal = world.run_file(run, "events.jsonl");
+    let before = std::fs::read_to_string(&journal).expect("the journal reads");
+
+    world
+        .run(&["supersessions", run, "--record"])
+        .exited(crate::harness::REFUSED)
+        .err_has(&format!("run '{run}' is being written by pid {pid}"));
+    assert_eq!(
+        std::fs::read_to_string(&journal).expect("the journal reads"),
+        before,
+        "a refused --record wrote to the journal"
+    );
+    world.run(&["supersessions", run]).exited(0);
+
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    world.run(&["supersessions", run, "--record"]).exited(0);
+}
+
 const SERVICE_IDENTITY: &str = "github.com/owner/service";
 
 /// A world whose drivers read the host as idle and sweep every second.
@@ -1431,7 +1465,6 @@ fn kept_by_the_pass(
     });
 }
 
-/// Whether `live`'s node `id` has been dispatched.
 fn dispatched(id: &str) -> impl FnMut(&World) -> bool + '_ {
     move |world| {
         world

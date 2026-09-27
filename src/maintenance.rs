@@ -378,7 +378,8 @@ pub(crate) fn live_branches(
     named.into_iter().collect()
 }
 
-/// What one sweep's retirement pass did across every identity.
+/// Folded from every identity's `retire_finished` answer, and journalled as one
+/// `branches-retired` only where it holds a retirement or a failure.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Retirements {
     pub(crate) retired: Vec<RetiredBranch>,
@@ -636,7 +637,6 @@ fn retire(keys: &[String], named: &Mutex<Vec<Named>>) -> Retirements {
     retirements
 }
 
-/// Maintain one identity's pool on the schedule.
 fn maintain(config: &MaintenanceConfig, identity: String) -> Maintained {
     let every = match config.every_for(&identity) {
         Ok(every) => every,
