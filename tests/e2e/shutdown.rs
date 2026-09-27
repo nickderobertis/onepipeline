@@ -852,15 +852,18 @@ fn the_last_section_says_when_the_host_could_not_be_read() {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// A worker that ends when it is asked has its branch on the origin afterwards.
+/// A worker that ends when it is asked lands inside the grace, and its branch is
+/// not offered afterwards.
 ///
 /// The preserving push's other half beside the survivor journey: here the
 /// teardown ended everything and nothing was killed. The worker took the
-/// redirection, wrote what it was told to and ended, its node published inside
-/// the grace, and the branch it had been on is still offered to `onevcs` and is
-/// on the origin afterwards — a clean shutdown, at exit 0.
+/// redirection, wrote what it was told to and ended, and its node published
+/// inside the grace — so its work is on the base, `onevcs` retired the branch
+/// when it closed the landed session, and the reading after the teardown is what
+/// says so. Offering the branch from the reading before it would only report a
+/// refusal over work nobody could lose. A clean shutdown, at exit 0.
 #[test]
-fn a_worker_that_ends_on_its_interrupt_has_its_branch_on_the_origin_afterwards() {
+fn a_worker_that_ends_on_its_interrupt_and_lands_inside_the_grace_has_nothing_left_to_preserve() {
     let world = World::new("shutdown-graceful-branch");
     let repository = world.repository("local-direct", &[]);
     held(&world, "service");
@@ -881,14 +884,12 @@ fn a_worker_that_ends_on_its_interrupt_has_its_branch_on_the_origin_afterwards()
         "the worker's last work did not survive the shutdown:\n{}",
         shutdown.stdout
     );
+    let branches = host_shutdown(&world, &run)["branches"].clone();
     assert!(
-        on_origin(&world, &repository.origin, &branch).is_some(),
-        "{branch} is not on the origin after a worker that took the ask:\n{}",
-        shutdown.stdout
-    );
-    assert_eq!(
-        host_shutdown(&world, &run)["branches"][0]["result"],
-        "pushed"
+        branches
+            .as_array()
+            .is_some_and(|offered| offered.iter().all(|pair| pair["branch"] != json!(branch))),
+        "the shutdown offered {branch}, which landed inside the grace: {branches}"
     );
 }
 

@@ -1137,9 +1137,12 @@ fn preserve_every_branch(view: &RunView, now: Option<&RunView>) -> Vec<BranchPre
     let mut preserved = Vec::new();
     // Both readings, the one the shutdown began from and the one after the
     // teardown: a dispatch whose session opened, or a node whose settlement
-    // recorded a branch, while the grace ran is named only by the second.
-    let mut offered = branches_of(view);
-    for pair in now.map(branches_of).unwrap_or_default() {
+    // recorded a branch, while the grace ran is named only by the second. Whether
+    // a node's change landed is read from the latest of them, because a node that
+    // landed inside the grace has had its branch retired by `onevcs`'s close.
+    let latest = now.unwrap_or(view);
+    let mut offered = branches_of(view, latest);
+    for pair in now.map(|now| branches_of(now, now)).unwrap_or_default() {
         if !offered.contains(&pair) {
             offered.push(pair);
         }
@@ -1188,10 +1191,11 @@ fn preserve_every_branch(view: &RunView, now: Option<&RunView>) -> Vec<BranchPre
 /// `onevcs::recoverable` draws — and a session branch its publication has
 /// finished with may no longer be anywhere to push from, which would report a
 /// refusal over work nobody could lose. Work in flight is always offered.
-fn branches_of(view: &RunView) -> Vec<(String, String)> {
-    let statuses = view.state.statuses();
+/// `landed` is the reading that decides both, which may be later than `view`.
+fn branches_of(view: &RunView, landed: &RunView) -> Vec<(String, String)> {
+    let statuses = landed.state.statuses();
     let finished_landing = |node: &str| {
-        view.state.landings.get(node) == Some(&crate::graph::Landing::Landed)
+        landed.state.landings.get(node) == Some(&crate::graph::Landing::Landed)
             && statuses.get(node) != Some(&crate::graph::NodeStatus::Running)
     };
     let repo_of = |node: &str| {

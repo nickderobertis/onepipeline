@@ -102,6 +102,19 @@ fn held_merge_path(world: &World, rendezvous: &std::path::Path) -> crate::harnes
     crate::harness::held_publication(world, rendezvous)
 }
 
+/// The commit `onevcs` last recorded preserving on `branch` in one run — where it
+/// left that branch. Read from its record rather than from the branch, because
+/// `onevcs` retires a landed session's branch when it closes it.
+fn preserved_head(world: &World, run: &str, branch: &str) -> String {
+    world
+        .events_of(run, "commit-preserved")
+        .into_iter()
+        .filter(|event| event["payload"]["branch"] == branch)
+        .filter_map(|event| event["payload"]["sha"].as_str().map(str::to_string))
+        .next_back()
+        .unwrap_or_else(|| panic!("onevcs recorded no commit on {branch}\n{}", why(world, run)))
+}
+
 /// Every `onevcs`-produced event one run recorded, by kind.
 fn vcs_kinds(world: &World, run: &str) -> Vec<String> {
     world
@@ -5135,7 +5148,7 @@ fn a_change_request_open_for_review_outranks_the_word_for_a_dispatch_that_died()
 #[test]
 fn a_dispatch_that_died_rather_than_failing_its_task_settles_naming_what_killed_it() {
     let world = World::new("lifecycle-dispatchdied");
-    let repo = published_locally(&world);
+    published_locally(&world);
     world.script("service.work", "the work its harness never got to judge\n");
     world.script(
         "service.publishes",
@@ -5180,8 +5193,8 @@ fn a_dispatch_that_died_rather_than_failing_its_task_settles_naming_what_killed_
         .expect("the node names the commit its branch was left at");
     assert_eq!(
         head,
-        git(&world, &repo.checkout, &["rev-parse", branch]).trim(),
-        "the commit the settlement names is not the one the branch is at"
+        preserved_head(&world, &run, branch),
+        "the commit the settlement names is not the one onevcs left the branch at"
     );
 
     // And a manager reads all of it without opening the store: what killed the
@@ -5248,7 +5261,7 @@ fn a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_co
 #[test]
 fn a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published() {
     let world = World::new("lifecycle-memberdied");
-    let repo = published_locally(&world);
+    published_locally(&world);
     world.script("service.work", "the work its judge never got to score\n");
     world.script(
         "service.publishes",
@@ -5292,8 +5305,8 @@ fn a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_
         .expect("the node names the commit its branch was left at");
     assert_eq!(
         head,
-        git(&world, &repo.checkout, &["rev-parse", branch]).trim(),
-        "the commit the settlement names is not the one the branch is at"
+        preserved_head(&world, &run, branch),
+        "the commit the settlement names is not the one onevcs left the branch at"
     );
 
     // And a manager tells the two apart in both views a run is read through,
@@ -5395,7 +5408,7 @@ fn a_verdict_that_delimits_a_token_without_naming_the_machinery_stays_a_task_fai
 #[test]
 fn a_provider_death_the_turns_own_record_contradicts_is_not_settled_as_one() {
     let world = World::new("lifecycle-deathcontradicted");
-    let repo = published_locally(&world);
+    published_locally(&world);
     world.script(
         "service.work",
         "the work its provider was said to have taken\n",
@@ -5458,8 +5471,8 @@ fn a_provider_death_the_turns_own_record_contradicts_is_not_settled_as_one() {
         .expect("the node names the commit its branch was left at");
     assert_eq!(
         head,
-        git(&world, &repo.checkout, &["rev-parse", branch]).trim(),
-        "the commit the settlement names is not the one the branch is at"
+        preserved_head(&world, &run, branch),
+        "the commit the settlement names is not the one onevcs left the branch at"
     );
 }
 
