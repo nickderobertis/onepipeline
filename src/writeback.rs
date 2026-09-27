@@ -109,7 +109,7 @@ use crate::cli::{
     DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_CLASSIFIED_COMMANDS,
     WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_LANDED_FILE, WRITEBACK_LANDED_SCHEMA_VERSION,
     WRITEBACK_MEMBER_READ, WRITEBACK_PROJECTIONS_FILE, WRITEBACK_PROJECTIONS_SCHEMA_VERSION,
-    WRITEBACK_REFUSED_CLASS,
+    WRITEBACK_REFUSED_CLASS, WRITEBACK_WAIT_FILE, WRITEBACK_WAIT_SCHEMA_VERSION,
 };
 use crate::edits::Operation;
 use crate::event::Source;
@@ -1099,6 +1099,28 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
         return;
     };
     let mut baseline = Baseline::load(&paths.dir, &snapshot.project);
+    // A rate limit the driver was waiting out binds this process too: the release asks the store
+    // nothing before the wait the store named has passed. It waits that out where the wait ends
+    // inside the release's own deadline, and otherwise leaves the claim standing and says so,
+    // rather than holding a stop for as long as a limiter likes.
+    if let Some(left) = AskedWait::left(&paths.dir) {
+        let bound = Deadline::Copy {
+            per_item: per_item_budget(launch),
+            items: snapshot.lineages().len(),
+        }
+        .within();
+        if left > bound {
+            eprintln!(
+                "onetaskgraph write-back did not release the nodes this stopped run never started \
+                 for '{}': the store asked to be left alone for {} seconds more, longer than the \
+                 release may wait; a driver that adopts the run projects them",
+                snapshot.project,
+                left.as_secs()
+            );
+            return;
+        }
+        std::thread::sleep(left);
+    }
     let at = crate::sys::now_rfc3339();
     let started = Instant::now();
     // llmlint: ignore-block[changed_behavior_has_e2e] a stop whose release outlasts its deadline
@@ -1128,6 +1150,9 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
         &ProjectionRecord::of(at, &snapshot.project, started.elapsed(), &attempted),
     );
     if let Err(failed) = attempted.result {
+        if let Some(wait) = failed.wait {
+            AskedWait::record(&paths.dir, wait);
+        }
         eprintln!(
             "onetaskgraph write-back could not release the nodes this stopped run never started \
              for '{}': {}",
@@ -1185,6 +1210,15 @@ fn worker(
                 .take()
                 .expect("the worker was woken by a snapshot")
         };
+        // A driver's first attempt honours a wait an earlier process recorded — the driver an
+        // adoption displaced, or a stop's release — exactly as it honours its own.
+        if baseline.is_none() {
+            if let Some(left) = AskedWait::left(&run_dir) {
+                if !should_retry_after(&pending, Interval::Asked(left)) {
+                    return;
+                }
+            }
+        }
         let baseline = baseline.get_or_insert_with(|| Baseline::load(&run_dir, &snapshot.project));
         let at = crate::sys::now_rfc3339();
         let started = Instant::now();
@@ -1265,6 +1299,9 @@ fn worker(
                 // snapshot published meanwhile, and not at closeout. One that said nothing is
                 // asked again on the schedule.
                 let asked = failed.wait;
+                if let Some(wait) = asked {
+                    AskedWait::record(&run_dir, wait);
+                }
                 if first {
                     // The one line on the driver's stderr that ever says a projection is in
                     // trouble, so it says what an operator's next question is: whether to
@@ -1339,6 +1376,100 @@ fn retry_after(failures: u32) -> Duration {
     FIRST_RETRY_AFTER
         .saturating_mul(RETRY_GROWTH.saturating_pow(failures.saturating_sub(1)))
         .min(RETRY_CEILING)
+}
+
+/// A wait the store asked for, kept in the run's directory so every process that projects the
+/// run honours it: the driver that met it, a stop's release in the stopping process, and the
+/// driver an adoption starts. `writeback-wait.json` — entry 72 states it — holds the instant,
+/// as Unix milliseconds, before which the store is asked nothing. It is neither the landed
+/// baseline nor the projection record, and changes neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AskedWait {
+    schema_version: u32,
+    not_before_unix_ms: u64,
+}
+
+impl AskedWait {
+    fn now_unix_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            })
+    }
+
+    /// Record that the store is to be asked nothing for `wait` from now. Best effort: a file
+    /// that cannot be written is said, and the process that met the wait still serves it.
+    fn record(run_dir: &Path, wait: Duration) {
+        let not_before_unix_ms =
+            Self::now_unix_ms().saturating_add(u64::try_from(wait.as_millis()).unwrap_or(u64::MAX));
+        let path = run_dir.join(WRITEBACK_WAIT_FILE);
+        // llmlint: ignore-block[changed_behavior_has_e2e] writing a file in the run's own
+        // directory fails only on a host whose run directory has been made unwritable, which no
+        // CLI journey arranges; every journey about a wait drives the write that lands.
+        let written = serde_json::to_vec(&Self {
+            schema_version: WRITEBACK_WAIT_SCHEMA_VERSION,
+            not_before_unix_ms,
+        })
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| {
+            crate::ledger::write_atomic(&path, &bytes, crate::ledger::Durability::Record)
+                .map_err(|error| error.to_string())
+        });
+        if let Err(error) = written {
+            eprintln!(
+                "onetaskgraph write-back could not record the store's wait at {}: {error}",
+                path.display()
+            );
+        }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+    }
+
+    /// How much of a recorded wait is left, or `None` where none is recorded or it has passed.
+    /// A file this build cannot read is said, and read as no wait.
+    fn left(run_dir: &Path) -> Option<Duration> {
+        let path = run_dir.join(WRITEBACK_WAIT_FILE);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => {
+                eprintln!(
+                    "onetaskgraph write-back cannot read {}: {error}; no recorded wait is \
+                     honoured",
+                    path.display()
+                );
+                return None;
+            }
+        };
+        let wait = serde_json::from_str::<Self>(&text)
+            .map_err(|error| error.to_string())
+            .and_then(|wait| {
+                (wait.schema_version == WRITEBACK_WAIT_SCHEMA_VERSION)
+                    .then_some(wait)
+                    .ok_or_else(|| {
+                        format!(
+                            "`schema_version` {} is not one this build reads \
+                             ({WRITEBACK_WAIT_SCHEMA_VERSION})",
+                            wait.schema_version
+                        )
+                    })
+            });
+        match wait {
+            Ok(wait) => {
+                let left = wait.not_before_unix_ms.saturating_sub(Self::now_unix_ms());
+                (left > 0).then(|| Duration::from_millis(left))
+            }
+            Err(why) => {
+                eprintln!(
+                    "onetaskgraph write-back cannot read {}: {why}; no recorded wait is \
+                     honoured",
+                    path.display()
+                );
+                None
+            }
+        }
+    }
 }
 
 /// How long one failure is waited out before the projection is attempted again.
@@ -3897,6 +4028,50 @@ mod tests {
                 StoreCall::ProjectCopy.as_str()
             ]
         );
+    }
+
+    /// A wait the store asked for is kept where entry 72 says, and read back by any process as
+    /// what is left of it: nothing once it has passed, and nothing — said, not guessed — from a
+    /// file of another version or none this build can read.
+    #[test]
+    fn a_recorded_wait_is_read_back_as_what_is_left_of_it() {
+        use super::AskedWait;
+        let block = divergence_block("72.");
+        assert_eq!(
+            block["failure"]["rate_limit_wait"]["kept_in"].as_str(),
+            Some(format!("<run dir>/{}", crate::cli::WRITEBACK_WAIT_FILE).as_str())
+        );
+        let dir = scratch("asked-wait");
+        assert_eq!(
+            AskedWait::left(&dir),
+            None,
+            "a wait nobody recorded was read"
+        );
+        AskedWait::record(&dir, Duration::from_secs(30));
+        let left = AskedWait::left(&dir).expect("the wait is still running");
+        assert!(
+            left > Duration::from_secs(25) && left <= Duration::from_secs(30),
+            "{left:?}"
+        );
+        AskedWait::record(&dir, Duration::ZERO);
+        assert_eq!(
+            AskedWait::left(&dir),
+            None,
+            "a wait that has passed still binds"
+        );
+        let path = dir.join(crate::cli::WRITEBACK_WAIT_FILE);
+        for unreadable in [
+            json!({"schema_version": 2, "not_before_unix_ms": u64::MAX}),
+            json!({"schema_version": 1, "not_before_unix_ms": u64::MAX, "extra": 1}),
+            json!("not a wait"),
+        ] {
+            std::fs::write(&path, unreadable.to_string()).expect("the file is written");
+            assert_eq!(
+                AskedWait::left(&dir),
+                None,
+                "{unreadable} was read as a wait"
+            );
+        }
     }
 
     /// The budget the worker runs under is the one the launch record retained, and a

@@ -1253,15 +1253,15 @@ fn asked_nothing_more(world: &World, run: &str, window: Duration, midway: impl F
     }
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these eight wait on
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these nine wait on
 // is the schedule and its absence — a refused projection not being asked again across a window
 // the old schedule retried in, a transient one being asked at intervals that grow, a rate
 // limit's own wait being served in full, and a run settling over refusals — which cannot be
 // observed in less time than the schedule takes. The edge they need is the crate under test:
 // they drive the compiled `onepipeline` binary against its own write-back worker and the real
-// store, seven of them through the store double, exactly as the six schedule journeys below do,
+// store, eight of them through the store double, exactly as the six schedule journeys below do,
 // so a project of their own would declare the same dependency and skip nothing. The reason
-// those six record for staying in this binary is these eight's too.
+// those six record for staying in this binary is these nine's too.
 /// A projection the store **refuses** is reported once and is not asked again on a timer: the
 /// store would refuse the same projection the same way, and against a hosted destination every
 /// attempt spends its allowance for nothing. It is attempted again when the run's graph next
@@ -1635,6 +1635,116 @@ fn a_closeout_inside_a_rate_limit_wait_asks_the_store_nothing() {
         ["work", "later"],
         "the rate limit changed what executed"
     );
+}
+
+/// A `stop` that lands inside a rate limit's wait the driver was serving honours it from the
+/// stopping process: the stop's release asks the store nothing until the wait the store named
+/// has passed — the wait is kept in the run's directory, since the stopping process cannot see
+/// the driver's memory — and then releases what the run never started. A wait longer than the
+/// release may hold a stop leaves the claim standing, says so, and asks the store nothing; and
+/// the driver an adoption then starts asks it nothing either while the wait lasts.
+#[test]
+fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
+    for (scenario, wait, released) in [
+        ("inside", Duration::from_secs(6), true),
+        ("past-the-release", Duration::from_secs(600), false),
+    ] {
+        let run = format!("writeback-stop-limited-{scenario}");
+        let (world, project) = a_run_whose_destination_can_start_refusing(
+            &format!("store-writeback-stop-limited-{scenario}"),
+            &run,
+        );
+        world.until("every attempt so far to be recorded", |world| {
+            world
+                .run_file(&run, "writeback-projections.jsonl")
+                .is_file()
+                && !world.store_calls().is_empty()
+        });
+        let before = streaks_reported(&world, &run);
+        world.store_refuses_once("get_project", &rate_limited_for(wait.as_secs()));
+        noted(&world, &run, "later", "limited before the stop");
+        world.until("the rate-limited attempt to be reported", |world| {
+            streaks_reported(world, &run) > before
+        });
+        let failed_at = Instant::now();
+        let calls = world.store_calls().len();
+        assert!(
+            world.run_file(&run, "writeback-wait.json").is_file(),
+            "{scenario}: the wait was not kept where another process can read it"
+        );
+
+        let stop = world
+            .cmd(&["stop", &run])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the stop starts");
+        if released {
+            while failed_at.elapsed() + Duration::from_millis(500) < wait {
+                assert_eq!(
+                    world.store_calls().len(),
+                    calls,
+                    "{scenario}: the store was handed a call {:?} into a {wait:?} wait: {:?}",
+                    failed_at.elapsed(),
+                    &world.store_calls()[calls..]
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        let stopped = stop.wait_with_output().expect("the stop ends");
+        assert!(stopped.status.success(), "{scenario}: {stopped:?}");
+        let said = String::from_utf8_lossy(&stopped.stderr).into_owned();
+        let later_word = || {
+            world.store_tasks(&project).iter().find_map(|task| {
+                (task["item"]["metadata"]["onepipeline.id"] == "later")
+                    .then(|| task["item"]["status"]["name"].clone())
+            })
+        };
+        if released {
+            assert!(
+                failed_at.elapsed() >= wait - Duration::from_millis(500),
+                "{scenario}: the stop released {:?} after a failure asking for {wait:?}",
+                failed_at.elapsed()
+            );
+            assert!(
+                world.store_calls().len() > calls,
+                "{scenario}: the stop released nothing once the wait had passed"
+            );
+            assert_eq!(later_word(), Some(json!("todo")), "{scenario}");
+        } else {
+            assert!(
+                said.contains("did not release") && said.contains("left alone"),
+                "{scenario}: the stop did not say it left the claim standing: {said}"
+            );
+            assert!(
+                failed_at.elapsed() < Duration::from_secs(60),
+                "{scenario}: the stop was held {:?} by a wait it could not serve",
+                failed_at.elapsed()
+            );
+            assert_eq!(
+                world.store_calls().len(),
+                calls,
+                "{scenario}: the store was handed a call inside a {wait:?} wait: {:?}",
+                &world.store_calls()[calls..]
+            );
+            assert_eq!(later_word(), Some(json!("queued")), "{scenario}");
+            // And the driver an adoption starts honours the same wait: its first projection
+            // asks the store nothing while the wait lasts.
+            world.run(&["adopt", &run, "--detach"]).exited(0);
+            let adopted = Instant::now();
+            while adopted.elapsed() < Duration::from_secs(5) {
+                assert_eq!(
+                    world.store_calls().len(),
+                    calls,
+                    "{scenario}: the adopted driver asked the store {:?} into a {wait:?} wait: \
+                     {:?}",
+                    adopted.elapsed(),
+                    &world.store_calls()[calls..]
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
 }
 
 /// A store that is rate-limited for the whole run, asking each time to be left alone for longer

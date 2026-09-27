@@ -73,5 +73,6 @@
         "whole_attempts": 0
       }
     }
-  }
+  },
+  "creation_lookup": "The one query_tasks in the write-back's calls on this branch is Engine::copy's own origin scan before it creates the add-ed node's item (onetaskgraph-core engine/copy.rs, target rule 2), which no CopyRequest field skips: one per item created, inside that attempt's project-copy. The planner ruled it stays (the onetaskgraph-side skip is their follow-up); the journey holds it to at most one per created item and to no attempt that creates nothing. The merge base's eleven come from its whole copies: each whole attempt's page of tasks, and the copies' own lookups."
 }

@@ -149,7 +149,7 @@ fn spent<'a>(charged: impl Iterator<Item = &'a Value>) -> Value {
     json!({"requests": requests, "graphql_points": points})
 }
 
-fn the_comparable_plan() -> (Value, Vec<Value>) {
+fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
     let world = World::new("writeback-comparable-plan");
     for held in ["a", "b", "c", "d", "e", "d-2", "f"] {
         world.script(&format!("{held}.wait"), "hold");
@@ -302,7 +302,19 @@ fn the_comparable_plan() -> (Value, Vec<Value>) {
             "whole_attempts": recorded.iter().filter(|record| record["scope"] == "whole").count(),
         },
     });
-    (figures, recorded)
+    // Each attempt that opened the store, as the calls its own connection made: the
+    // write-back's connections in order, beside the records of the attempts that opened one.
+    let mut connections: Vec<Vec<Vec<String>>> = Vec::new();
+    for call in writeback {
+        if call[0] == "initialize" {
+            connections.push(Vec::new());
+        }
+        connections
+            .last_mut()
+            .expect("every write-back call follows its connection's handshake")
+            .push(call.clone());
+    }
+    (figures, recorded, connections)
 }
 
 fn failures(world: &World) -> usize {
@@ -324,7 +336,7 @@ fn failures(world: &World) -> usize {
 /// looking for a counterpart before it creates one, which is the copy's own work.)
 #[test]
 fn the_comparable_plan_spends_what_the_committed_record_says() {
-    let (measured, recorded) = the_comparable_plan();
+    let (measured, recorded, connections) = the_comparable_plan();
     let record: Value = serde_json::from_str(
         &std::fs::read_to_string(repo_file(RECORD)).expect("the comparable plan's record ships"),
     )
@@ -359,6 +371,48 @@ fn the_comparable_plan_spends_what_the_committed_record_says() {
         points(before)
     );
     assert_eq!(measured["writeback"]["whole_attempts"], 0);
+    // The one page read the store is asked during the write-back is `Engine::copy`'s own
+    // creation lookup — its origin scan for an item it is about to create — so it appears only
+    // in an attempt that created an item, at most once per item created, and inside that
+    // attempt's copy: never in the reads the write-back makes itself.
+    let opened: Vec<&Value> = recorded
+        .iter()
+        .filter(|record| record["calls"] != json!({}))
+        .collect();
+    assert_eq!(
+        opened.len(),
+        connections.len(),
+        "an attempt and a connection do not pair"
+    );
+    let mut lookups = 0;
+    for (record, calls) in opened.iter().zip(&connections) {
+        let pages = calls.iter().filter(|call| call[0] == "query_tasks").count();
+        let created = record["actions"]["created"].as_u64().unwrap_or(0);
+        assert!(
+            pages as u64 <= created,
+            "an attempt that created {created} items read {pages} pages of tasks: {record}"
+        );
+        if pages > 0 {
+            let first_page = calls
+                .iter()
+                .position(|call| call[0] == "query_tasks")
+                .expect("a page");
+            let copy_began = calls
+                .iter()
+                .position(|call| call[0] == "metering")
+                .expect("the copy reads the meter before it starts");
+            assert!(
+                first_page > copy_began,
+                "a page of tasks was read before the copy began: {calls:?}"
+            );
+        }
+        lookups += pages;
+    }
+    assert_eq!(
+        measured["writeback"]["calls"]["query_tasks"].as_u64(),
+        Some(lookups as u64),
+        "a page of tasks was read outside every attempt's copy"
+    );
     // An attempt with nothing left to carry asks the store nothing: it opens no connection, and
     // its line names no items, no calls and no report.
     let idle: Vec<&Value> = recorded

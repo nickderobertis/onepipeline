@@ -97,6 +97,14 @@ pub const WRITEBACK_LANDED_FILE: &str = "writeback-landed.json";
 /// The schema version [`WRITEBACK_LANDED_FILE`] is written at.
 pub const WRITEBACK_LANDED_SCHEMA_VERSION: u32 = 1;
 
+/// The file, in a run's directory, a wait the store asked for is kept in — the instant before
+/// which the write-back asks the store nothing — so a stop's release and an adopting driver
+/// honour a wait another process met. Entry 72 of `docs/contract-divergences.md` states it.
+pub const WRITEBACK_WAIT_FILE: &str = "writeback-wait.json";
+
+/// The schema version [`WRITEBACK_WAIT_FILE`] is written at.
+pub const WRITEBACK_WAIT_SCHEMA_VERSION: u32 = 1;
+
 /// The store call a projection reads one destination item with, by its own id and by the
 /// name its refusals carry: each lineage the copy carries, and each the landed baseline does
 /// not hold. No projection reads a page of tasks, and its failures are classified by the same

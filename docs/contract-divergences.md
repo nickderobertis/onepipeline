@@ -5796,7 +5796,14 @@ typed value, and off `Failure::retry_after_seconds` for a delivered ticket — a
 wait has passed the worker hands the store no call of any kind: not on the schedule, not for
 a snapshot published meanwhile, and not at closeout, which otherwise suspends the schedule.
 Where a partial answer names several waits, the longest is taken. A rate limit naming none is
-asked again on the schedule. The attempt after the wait carries what has still not landed,
+asked again on the schedule. The wait binds every process that projects the run, not only the
+driver that met it: it is kept in `<run dir>/writeback-wait.json` — `{"schema_version": 1,
+"not_before_unix_ms": <instant>}`, written atomically by whichever process met the wait — and
+a stop's release, in the stopping process, asks the store nothing before that instant: it waits
+the rest out where that ends inside the release's own deadline, and otherwise leaves the claim
+standing and says so on standard error. The driver an adoption starts serves what is left of the
+wait before its first projection. The file is neither the landed baseline (entry 93) nor the
+projection record (entry 73), and changes neither. The attempt after the wait carries what has still not landed,
 and nothing more. Closeout attempts a terminal snapshot published after a refusal, because
 it is a different snapshot, and does not re-attempt the refused one; stopping stays
 prompt; no store read feeds back into scheduling, and no store call delays closeout, a
@@ -5836,7 +5843,10 @@ closeout over a refusal.
       "read_off": ["SourceError::RateLimited.retry_after_seconds", "Failure::retry_after_seconds"],
       "no_call_before_it_passes": ["the retry schedule", "a snapshot published meanwhile", "closeout"],
       "several": "the longest",
-      "none_named": "the retry schedule"
+      "none_named": "the retry schedule",
+      "kept_in": "<run dir>/writeback-wait.json",
+      "honoured_by": ["the driver that met it", "a stop's release", "the driver an adoption starts"],
+      "release_past_its_deadline": "the claim is left standing and said"
     },
     "commands": ["project-show", "task-show", "project-copy"],
     "empty_show": {"class": "refused", "kind": "no-such-item"},
@@ -5969,6 +5979,9 @@ failure lost reaching the board; an `adopt` carrying only what differs from the 
 previous driver left; a run directory holding no baseline adopted and projected with each
 lineage read once by its own id; a stop's release; and a copy's own `spent` and action counts
 recorded exactly. No line of any of them is `whole`, and no line's `calls` names `task-list`.
+The one page read a store is asked during a write-back is the copy's own origin lookup before
+it creates an item, which entry 93 states: once per item created, inside that attempt's
+`project-copy`, and in no attempt that creates nothing.
 
 ```json
 {
@@ -6032,7 +6045,8 @@ recorded exactly. No line of any of them is `whole`, and no line's `calls` names
     "copy_scope": "CopyScope::Members",
     "naming_none": "CopyScope::Projects { tasks: false }",
     "carrying_nothing": "no store call at all: items [], calls {}, actions null",
-    "release_carries": "the unstarted lineages the landed baseline says are queued"
+    "release_carries": "the unstarted lineages the landed baseline says are queued",
+    "creation_lookup": "Engine::copy's origin scan (query_tasks) before it creates an item: at most once per item created, inside project-copy; none in an attempt that creates nothing"
   }
 }
 ```
@@ -7689,6 +7703,16 @@ next attempt carries it again. A lineage it does not hold — every lineage of a
 started, whose directory holds no file — is read once by its own id and compared against that
 read; an item that says what the run would write is recorded as read and not carried. A stop's
 release reads it in the stopping process and advances it by what the release wrote.
+
+**One page read remains, and it is the copy's own.** When a copy *creates* an item — the one an
+`add`ed node needs — `onetaskgraph`'s `Engine::copy` first looks for an item already recording
+that origin (`engine/copy.rs`, `target`, rule 2: `scan` over `query_tasks`), so a retried
+creation never mints a second item. No `CopyRequest` field skips it, and `copy` is the only
+creation path the engine offers, so onepipeline cannot remove it without re-implementing the
+copy; the planner ruled it stays, and the creation path that skips the scan is a follow-up for
+`onetaskgraph`. It appears only in an attempt that creates an item, at most once per item
+created, inside that attempt's `project-copy` call; an attempt that creates nothing reads no
+page of tasks, and no line's `calls` names `task-list`.
 
 `writeback::tests` deserializes `example` through `LandedBaseline`, the type that writes the
 file, and serializes it back byte-equal, and holds each refusal. `tests/e2e/writeback_projections.rs`
