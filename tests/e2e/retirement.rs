@@ -405,6 +405,56 @@ fn a_settle_stating_where_a_retry_landed_records_the_attempt_it_superseded() {
 }
 
 /// The world's `service` repository, as [`World::repository`] laid it out.
+/// An attempt whose driver died mid-dispatch never settles, so nothing but the
+/// session it opened names its branch — and that branch is what is recorded as
+/// superseded once the retry an adopting driver runs lands.
+#[test]
+fn an_attempt_that_never_settled_is_recorded_on_the_branch_its_session_opened() {
+    let world = World::new("retirement-unsettled");
+    world.repository("local-direct", &[]);
+    let run = "unsettled";
+    world.script("svc.wait", "hold");
+    let mut node = lifecycle("svc", &[]);
+    node["branch"] = json!(FIRST);
+    let path = world.plan(run, &plan_of(run, vec![node]));
+    let started = world.run(&["start", &path, "--detach"]);
+    started.exited(0);
+    let driver = started.json()["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .expect("a detached launch announces its driver's pid");
+    world.until("the first attempt's session to open", |world| {
+        !world.events_of(run, "session-opened").is_empty()
+    });
+    crate::harness::end_process(driver);
+    // What the attempt committed before its driver died.
+    let opened = &world.events_of(run, "session-opened")[0]["payload"];
+    assert_eq!(opened["branch"], FIRST, "{opened}");
+    let worktree = PathBuf::from(opened["worktree"].as_str().expect("a worktree"));
+    std::fs::write(worktree.join("svc.md"), FIRST_WORK).expect("the work is written");
+    git(&world, &worktree, &["add", "-A"]);
+    git(&world, &worktree, &["commit", "-m", "feat: ship svc"]);
+
+    world.script("svc-2.work", "the second attempt wrote this\n");
+    retry(&world, run, Some(SECOND));
+    world.release("svc.go");
+    adopted(&world, run);
+    let landed = settlement(&world, run, "svc-2");
+    assert_eq!(landed["outcome"], "merged", "{landed}\n{}", world.dump());
+    assert!(
+        !world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "svc"),
+        "the first attempt settled, so its branch was not read off its session\n{}",
+        world.dump()
+    );
+    recorded_the_first_attempt(&world, run);
+    let class = classified(&world, FIRST);
+    assert_eq!(class["class"], "superseded-with-changes", "{class}");
+    assert_eq!(class["superseded_by"]["branch"], SECOND, "{class}");
+}
+
 /// A `settle` whose landing is the change request's URL, with no commit stated,
 /// tells `onevcs` that URL as the landing.
 #[cfg(unix)]
