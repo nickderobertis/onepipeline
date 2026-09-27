@@ -525,7 +525,6 @@ pub(crate) struct Swept {
     pub(crate) identities: Vec<Maintained>,
     /// Why the identities could not be enumerated at all, where they could not.
     pub(crate) failure: Option<String>,
-    pub(crate) retirements: Retirements,
 }
 
 impl Swept {
@@ -561,53 +560,72 @@ fn identities() -> std::result::Result<Vec<String>, String> {
         .map_err(|error| format!("the host's registered identities could not be read: {error}"))
 }
 
-/// Maintain every registered identity once, on the schedule, and then retire
-/// its finished branches, leaving alone every branch in `named`.
-fn sweep(config: &MaintenanceConfig, named: &[Named]) -> Swept {
+/// Maintain every registered identity once, on the schedule; and the keys it
+/// visited, which the retirement pass then walks.
+fn sweep(config: &MaintenanceConfig) -> (Swept, Vec<String>) {
     let started_at = crate::sys::now_rfc3339();
     let keys = match identities() {
         Ok(keys) => keys,
         Err(failure) => {
-            return Swept {
-                started_at,
-                identities: Vec::new(),
-                failure: Some(failure),
-                retirements: Retirements::default(),
-            }
+            return (
+                Swept {
+                    started_at,
+                    identities: Vec::new(),
+                    failure: Some(failure),
+                },
+                Vec::new(),
+            )
         }
     };
-    let vcs = onevcs::Providers::real().vcs;
+    let identities = keys
+        .iter()
+        .map(|identity| maintain(config, identity.clone()))
+        .collect();
+    (
+        Swept {
+            started_at,
+            identities,
+            failure: None,
+        },
+        keys,
+    )
+}
+
+/// Retire each identity's finished branches, leaving alone every branch in
+/// `named`.
+///
+/// A pass of its own once every identity is maintained, rather than one
+/// interleaved with them, so the maintenance is recorded when it is done: a
+/// retirement pass costs several times what a pool maintenance does, and a
+/// record held back behind it reaches a reader only after the next sweep may
+/// already have maintained the same slots again.
+fn retire(keys: &[String], named: &[Named]) -> Retirements {
+    let mut retirements = Retirements::default();
+    if keys.is_empty() {
+        return retirements;
+    }
+    let providers = onevcs::Providers::real();
     let named = resolved(named, |repo| {
-        vcs.resolve_identity(repo)
+        providers
+            .vcs
+            .resolve_identity(repo)
             .map(|identity| identity.origin)
             .map_err(|error| error.to_string())
     });
-    let mut retirements = Retirements::default();
-    let identities = keys
-        .into_iter()
-        .map(|identity| {
-            let maintained = maintain(config, identity);
-            let providers = onevcs::Providers::real();
-            retirements.take(
-                &maintained.identity,
-                onevcs::retire_finished(
-                    &providers,
-                    &onevcs::RetirePass {
-                        scope: Scope::Repo(maintained.identity.clone()),
-                        exclude: excluded_in(&maintained.identity, &named),
-                        dry_run: false,
-                    },
-                ),
-            );
-            maintained
-        })
-        .collect();
-    Swept {
-        started_at,
-        identities,
-        failure: None,
-        retirements,
+    for identity in keys {
+        retirements.take(
+            identity,
+            onevcs::retire_finished(
+                &providers,
+                &onevcs::RetirePass {
+                    scope: Scope::Repo(identity.clone()),
+                    exclude: excluded_in(identity, &named),
+                    dry_run: false,
+                },
+            ),
+        );
     }
+    retirements
 }
 
 /// Maintain one identity's pool on the schedule.
@@ -682,10 +700,11 @@ impl Sweep {
         let handle = std::thread::Builder::new()
             .name("pool-maintenance".to_owned())
             .spawn(move || {
-                let swept = sweep(&config, &named);
+                let (swept, keys) = sweep(&config);
                 // A loop that has gone has nobody to record it; the slots keep
                 // their own stamps regardless.
                 let _ = tx.send(Message::Maintained(Box::new(swept)));
+                let _ = tx.send(Message::Retired(Box::new(retire(&keys, &named))));
             });
         match handle {
             Ok(handle) => {
@@ -970,8 +989,9 @@ impl Maintenance {
         }
     }
 
-    /// Take up a finished sweep: join its thread, take the marker back, and
-    /// write the one record it earned, if it earned one.
+    /// Take up a sweep's maintenance, and write the one record it earned, if
+    /// it earned one. The sweep goes on to its retirement pass, and is over
+    /// only at [`Self::retired`].
     ///
     /// # Errors
     ///
@@ -982,9 +1002,6 @@ impl Maintenance {
         journal: &mut crate::journal::Journal,
         swept: &Swept,
     ) -> Result<()> {
-        if let Some(mut sweep) = self.sweep.take() {
-            sweep.join();
-        }
         if let Some(failure) = &swept.failure {
             eprintln!("onepipeline: the pool-maintenance sweep could not enumerate this host's identities: {failure}");
         }
@@ -995,11 +1012,29 @@ impl Maintenance {
                 swept.payload(),
             )?;
         }
-        if swept.retirements.is_recorded() {
+        Ok(())
+    }
+
+    /// Take up a finished sweep's retirement pass: join its thread, take the
+    /// marker back, and write the record the pass earned, if it earned one.
+    ///
+    /// # Errors
+    ///
+    /// The reason the run's journal could not be written.
+    pub(crate) fn retired(
+        &mut self,
+        paths: &RunPaths,
+        journal: &mut crate::journal::Journal,
+        retirements: &Retirements,
+    ) -> Result<()> {
+        if let Some(mut sweep) = self.sweep.take() {
+            sweep.join();
+        }
+        if retirements.is_recorded() {
             journal.emit(
                 crate::journal::PipelineKind::BranchesRetired,
                 crate::journal::labels(&paths.run, None),
-                swept.retirements.payload(),
+                retirements.payload(),
             )?;
         }
         Ok(())
@@ -1008,11 +1043,12 @@ impl Maintenance {
     /// Wait for a sweep still running as the driver closes out, and record what
     /// it did.
     ///
-    /// The thread hands its report over the loop's channel, which the loop has
-    /// stopped reading; so it is joined here and the channel drained for its
-    /// report. Nothing else can be queued there by then — the loop closes out
-    /// with nothing in flight, and every dispatch thread has settled — so the
-    /// drain takes the sweep's report and nothing of consequence with it.
+    /// The thread hands its reports over the loop's channel, which the loop has
+    /// stopped reading; so it is joined here and the channel drained for
+    /// whichever of its two reports the loop had not taken up. Nothing else can
+    /// be queued there by then — the loop closes out with nothing in flight,
+    /// and every dispatch thread has settled — so the drain takes the sweep's
+    /// reports and nothing of consequence with it.
     ///
     /// # Errors
     ///
@@ -1028,18 +1064,14 @@ impl Maintenance {
         };
         sweep.join();
         drop(sweep);
-        let swept = rx.try_iter().find_map(|message| match message {
-            Message::Maintained(swept) => Some(swept),
-            _ => None,
-        });
-        match swept {
-            Some(swept) => self.record(paths, journal, &swept),
-            // llmlint: ignore[changed_behavior_has_e2e] unreachable by construction:
-            // the thread sends its report before it ends, and it was joined above, so
-            // the report is on the channel — nothing else drains it once the loop's own
-            // reads have ended.
-            None => Ok(()),
+        for message in rx.try_iter() {
+            match message {
+                Message::Maintained(swept) => self.record(paths, journal, &swept)?,
+                Message::Retired(retirements) => self.retired(paths, journal, &retirements)?,
+                _ => {}
+            }
         }
+        Ok(())
     }
 
     /// Whether a sweep of this driver's is running now.
@@ -1420,7 +1452,6 @@ mod tests {
                 ),
             ],
             failure: None,
-            retirements: Retirements::default(),
         };
         assert!(!nothing.is_recorded());
 
@@ -1445,7 +1476,6 @@ mod tests {
                     }]),
                 )],
                 failure: None,
-                retirements: Retirements::default(),
             };
             assert!(held.is_recorded(), "{kept:?} was not recorded");
         }
@@ -1463,7 +1493,6 @@ mod tests {
                 },
             ],
             failure: None,
-            retirements: Retirements::default(),
         };
         assert!(something.is_recorded());
         let payload = Value::Object(something.payload());
@@ -1503,7 +1532,6 @@ mod tests {
             started_at: "2026-09-20T00:00:00.000Z".into(),
             identities: Vec::new(),
             failure: Some("the host's registered identities could not be read".into()),
-            retirements: Retirements::default(),
         };
         assert!(failed.is_recorded());
         let payload = Value::Object(failed.payload());

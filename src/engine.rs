@@ -527,9 +527,12 @@ pub(crate) enum Message {
     ChainStopped(Box<ChainStopped>),
     /// The dispatch settled.
     Settled(Box<Settled>),
-    /// The pool-maintenance sweep this driver started has finished, and this is
-    /// what it did.
+    /// The pool-maintenance sweep this driver started has maintained every
+    /// identity, and this is what it did.
     Maintained(Box<crate::maintenance::Swept>),
+    /// That sweep's retirement pass has finished, which ends the sweep, and
+    /// this is what it retired.
+    Retired(Box<crate::maintenance::Retirements>),
 }
 
 /// A node's settlement, and the thread that is waiting to hear it was recorded.
@@ -1645,9 +1648,14 @@ fn converge(
                 Message::ChainStopped(stopped) => {
                     raise(paths, journal, chain_stopped_finding(&stopped))?;
                 }
-                // The sweep this driver started is over: joined, and its one
-                // record written where it earned one.
+                // The sweep this driver started has maintained: its record
+                // written where it earned one.
                 Message::Maintained(swept) => maintenance.record(paths, journal, &swept)?,
+                // Its retirement pass is over, and so is the sweep: joined, and
+                // the pass's record written where it earned one.
+                Message::Retired(retirements) => {
+                    maintenance.retired(paths, journal, &retirements)?;
+                }
                 Message::Settled(settled) => {
                     let settlement = &settled.settlement;
                     in_flight.remove(&settlement.node);
