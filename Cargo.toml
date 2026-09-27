@@ -761,9 +761,9 @@ onevcs-testing = "0.8.5"
 # `every_onetaskgraph_crate_in_the_lock_is_the_one_release_the_manifest_names` holds the
 # lock's whole family to this one release, and fails as well if anything this
 # repository installs as an `onetaskgraph` binary names another.
-onetaskgraph-core = "=0.2.45"
-onetaskgraph-plugin-api = "=0.2.45"
-onetaskgraph-local-md = "=0.2.45"
+onetaskgraph-core = "=0.2.46"
+onetaskgraph-plugin-api = "=0.2.46"
+onetaskgraph-local-md = "=0.2.46"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
@@ -771,7 +771,7 @@ tokio = "1"
 
 [package]
 name = "onepipeline"
-version = "0.50.0"
+version = "0.50.1"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
