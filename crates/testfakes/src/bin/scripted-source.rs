@@ -163,7 +163,7 @@ struct Request {
 // purpose: this source relays every method the hosted plugin serves, and a closed set would
 // refuse one the protocol adds before the hosted plugin could answer it — the one failure a
 // relay must not have. What is refused is what could not be a scenario file's name.
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(try_from = "String")]
 struct Method(String);
 
@@ -266,7 +266,7 @@ struct Scripted {
     /// What the requests served so far have spent, where the scenario meters them.
     spent: Metering,
     /// The methods this source has been handed at least once, answered or not.
-    handed: std::collections::BTreeSet<String>,
+    handed: std::collections::BTreeSet<Method>,
 }
 
 impl Scripted {
@@ -299,8 +299,8 @@ impl Scripted {
     }
 
     fn answer(&mut self, host: &mut Host, request: &Request) -> Result<Value, String> {
+        let first = self.handed.insert(request.method.clone());
         let method = request.method.0.as_str();
-        let first = self.handed.insert(method.to_owned());
         let mut holds = vec![format!("{}.{method}", self.key.0)];
         if first {
             holds.push(format!("{}.{method}.first", self.key.0));
