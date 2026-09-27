@@ -5172,7 +5172,7 @@ fn a_change_request_open_for_review_outranks_the_word_for_a_dispatch_that_died()
 #[test]
 fn a_dispatch_that_died_rather_than_failing_its_task_settles_naming_what_killed_it() {
     let world = World::new("lifecycle-dispatchdied");
-    published_locally(&world);
+    let repo = published_locally(&world);
     world.script("service.work", "the work its harness never got to judge\n");
     world.script(
         "service.publishes",
@@ -5219,6 +5219,16 @@ fn a_dispatch_that_died_rather_than_failing_its_task_settles_naming_what_killed_
         head,
         preserved_head(&world, &run, branch),
         "the commit the settlement names is not the one onevcs left the branch at"
+    );
+    // The worker published before its harness died, so its change is on the base —
+    // rewritten onto it as a new commit rather than fast-forwarded — and that is
+    // why `onevcs` could retire the branch on close without losing anything.
+    git(&world, &repo.checkout, &["fetch", "-q", "origin"]);
+    let cherry = git(&world, &repo.checkout, &["cherry", "origin/main", head]);
+    assert!(
+        !cherry.trim().is_empty() && cherry.lines().all(|line| line.starts_with("- ")),
+        "the died dispatch's commit {head} is not contained in the base, yet its branch is gone: \
+         {cherry:?}"
     );
 
     // And a manager reads all of it without opening the store: what killed the
