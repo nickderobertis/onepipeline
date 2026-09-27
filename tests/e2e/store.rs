@@ -1652,14 +1652,17 @@ fn a_closeout_inside_a_rate_limit_wait_asks_the_store_nothing() {
 /// has passed — the wait is kept in the run's directory, since the stopping process cannot see
 /// the driver's memory — and then releases what the run never started. A wait longer than the
 /// release may hold a stop leaves the claim standing, says so, and asks the store nothing; and
-/// the driver an adoption then starts asks it nothing either while the wait lasts.
+/// the driver an adoption then starts asks it nothing either while the wait lasts. A kept wait
+/// that cannot be read may still be a wait that has not passed, so both fail closed on it: the
+/// stop says why and leaves the claim standing, the adopted driver says why and asks the store
+/// nothing, and only once the file is repaired does the adopted driver reach the store.
 #[test]
 fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
     for (scenario, wait, released) in [
         ("inside", Duration::from_secs(6), true),
         ("past-the-release", Duration::from_secs(600), false),
-        // A kept wait this build cannot read is said and read as none, so the release is made.
-        ("unreadable", Duration::from_secs(600), true),
+        // A kept wait this build cannot read is said, and no store call is made on it.
+        ("unreadable", Duration::from_secs(600), false),
     ] {
         let run = format!("writeback-stop-limited-{scenario}");
         let (world, project) = a_run_whose_destination_can_start_refusing(
@@ -1722,15 +1725,49 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
             })
         };
         if unreadable {
+            let path = world.run_file(&run, "writeback-wait.json");
             assert!(
-                said.contains("cannot read") && said.contains("no recorded wait is honoured"),
+                said.contains("did not release")
+                    && said.contains(&format!("cannot read {}", path.display()))
+                    && said.contains("repaired"),
                 "{scenario}: the stop did not say it could not read the kept wait: {said}"
             );
-            assert!(
-                world.store_calls().len() > calls,
-                "{scenario}: a wait nobody could read held the release back"
+            assert_eq!(
+                world.store_calls().len(),
+                calls,
+                "{scenario}: the stop called the store on a wait it could not read: {:?}",
+                &world.store_calls()[calls..]
             );
-            assert_eq!(later_word(), Some(json!("todo")), "{scenario}");
+            assert_eq!(later_word(), Some(json!("queued")), "{scenario}");
+            // The driver an adoption starts fails closed on it too.
+            world.run(&["adopt", &run, "--detach"]).exited(0);
+            let adopted = Instant::now();
+            while adopted.elapsed() < Duration::from_secs(5) {
+                assert_eq!(
+                    world.store_calls().len(),
+                    calls,
+                    "{scenario}: the adopted driver called the store {:?} after adopting, on a \
+                     wait it could not read: {:?}",
+                    adopted.elapsed(),
+                    &world.store_calls()[calls..]
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            world.until_run_file_holds(
+                &run,
+                "driver.log",
+                &format!("cannot read {}", path.display()),
+            );
+            // Repaired — here, taken away, which is what an operator clearing it does — the
+            // adopted driver reaches the store.
+            // llmlint: ignore-block[tests_mirror_real_usage] the operator's repair of a file
+            // this build cannot read is removing it; no verb of this build does that.
+            std::fs::remove_file(&path).expect("the kept wait is removed");
+            // llmlint: ignore-end[tests_mirror_real_usage]
+            world.until(
+                "the adopted driver to reach the store once repaired",
+                |world| world.store_calls().len() > calls,
+            );
         } else if released {
             assert!(
                 failed_at.elapsed() >= wait - Duration::from_millis(500),

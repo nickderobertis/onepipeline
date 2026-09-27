@@ -1109,7 +1109,17 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     // only whether the rest of the wait is served before the release; the release after it is
     // the attempt the block below covers, under its own copy deadline, so a wait that fits and a
     // release that then runs long take no line those journeys and that block do not reach.
-    if let Some(left) = AskedWait::left(&paths.dir) {
+    let kept = AskedWait::kept(&paths.dir);
+    if let Kept::Unreadable(why) = &kept {
+        eprintln!(
+            "onetaskgraph write-back did not release the nodes this stopped run never started \
+             for '{}': {why}; it may hold a wait the store asked for that has not passed, so no \
+             store call is made until it can be read or is repaired",
+            snapshot.project
+        );
+        return;
+    }
+    if let Kept::Left(left) = kept {
         let bound = Deadline::Copy {
             per_item: per_item_budget(launch),
             items: snapshot.lineages().len(),
@@ -1213,13 +1223,30 @@ fn worker(
                 .take()
                 .expect("the worker was woken by a snapshot")
         };
-        // A driver's first attempt honours a wait an earlier process recorded — the driver an
-        // adoption displaced, or a stop's release — exactly as it honours its own.
-        if baseline.is_none() {
-            if let Some(left) = AskedWait::left(&run_dir) {
-                if !should_retry_after(&pending, Interval::Asked(left)) {
-                    return;
+        // Every attempt honours a wait the run's directory keeps — one an earlier process
+        // recorded, the driver an adoption displaced or a stop's release, as well as its own —
+        // and asks the store nothing on a kept wait it cannot read, which may be one that has
+        // not passed: it says so once, and looks again until the file reads or is repaired.
+        let mut said_unreadable = false;
+        loop {
+            let interval = match AskedWait::kept(&run_dir) {
+                Kept::Nothing => break,
+                Kept::Left(left) => left,
+                Kept::Unreadable(why) => {
+                    if !said_unreadable {
+                        eprintln!(
+                            "onetaskgraph write-back for '{}': {why}; it may hold a wait the \
+                             store asked for that has not passed, so no store call is made \
+                             until it can be read or is repaired",
+                            snapshot.project
+                        );
+                        said_unreadable = true;
+                    }
+                    UNREADABLE_WAIT_RECHECK
                 }
+            };
+            if !should_retry_after(&pending, Interval::Asked(interval)) {
+                return;
             }
         }
         let baseline = baseline.get_or_insert_with(|| Baseline::load(&run_dir, &snapshot.project));
@@ -1429,20 +1456,16 @@ impl AskedWait {
         // llmlint: ignore-end[changed_behavior_has_e2e]
     }
 
-    /// How much of a recorded wait is left, or `None` where none is recorded or it has passed.
-    /// A file this build cannot read is said, and read as no wait.
-    fn left(run_dir: &Path) -> Option<Duration> {
+    /// What the run's directory says about a wait the store asked for. A file this build cannot
+    /// read is **not** read as no wait — it may hold one that has not passed — so it is answered
+    /// as [`Kept::Unreadable`], and every caller asks the store nothing on it.
+    fn kept(run_dir: &Path) -> Kept {
         let path = run_dir.join(WRITEBACK_WAIT_FILE);
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Kept::Nothing,
             Err(error) => {
-                eprintln!(
-                    "onetaskgraph write-back cannot read {}: {error}; no recorded wait is \
-                     honoured",
-                    path.display()
-                );
-                return None;
+                return Kept::Unreadable(format!("cannot read {}: {error}", path.display()))
             }
         };
         let wait = serde_json::from_str::<Self>(&text)
@@ -1461,19 +1484,32 @@ impl AskedWait {
         match wait {
             Ok(wait) => {
                 let left = wait.not_before_unix_ms.saturating_sub(Self::now_unix_ms());
-                (left > 0).then(|| Duration::from_millis(left))
+                if left > 0 {
+                    Kept::Left(Duration::from_millis(left))
+                } else {
+                    Kept::Nothing
+                }
             }
-            Err(why) => {
-                eprintln!(
-                    "onetaskgraph write-back cannot read {}: {why}; no recorded wait is \
-                     honoured",
-                    path.display()
-                );
-                None
-            }
+            Err(why) => Kept::Unreadable(format!("cannot read {}: {why}", path.display())),
         }
     }
 }
+
+/// What a run's directory says about a wait the store asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Kept {
+    /// None is recorded, or the one recorded has passed.
+    Nothing,
+    /// A wait is recorded, and this much of it is left.
+    Left(Duration),
+    /// A file is there that cannot be read as a wait — it may hold one that has not passed —
+    /// with why, naming the file.
+    Unreadable(String),
+}
+
+/// How often a driver looks again at a kept wait it could not read, while it asks the store
+/// nothing on it: soon enough that repairing the file puts the board back in step promptly.
+const UNREADABLE_WAIT_RECHECK: Duration = Duration::from_secs(2);
 
 /// How long one failure is waited out before the projection is attempted again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4037,46 +4073,52 @@ mod tests {
     }
 
     /// A wait the store asked for is kept where entry 72 says, and read back by any process as
-    /// what is left of it: nothing once it has passed, and nothing — said, not guessed — from a
-    /// file of another version or none this build can read.
+    /// what is left of it: nothing once it has passed, and — from a file of another version or
+    /// none this build can read — not "no wait" but unreadable, naming the file and why, since it
+    /// may hold one that has not passed.
     #[test]
     fn a_recorded_wait_is_read_back_as_what_is_left_of_it() {
-        use super::AskedWait;
+        use super::{AskedWait, Kept};
         let block = divergence_block("72.");
         assert_eq!(
             block["failure"]["rate_limit_wait"]["kept_in"].as_str(),
             Some(format!("<run dir>/{}", crate::cli::WRITEBACK_WAIT_FILE).as_str())
         );
+        assert_eq!(
+            block["failure"]["rate_limit_wait"]["unreadable"].as_str(),
+            Some("no store call until it reads or is repaired")
+        );
         let dir = scratch("asked-wait");
         assert_eq!(
-            AskedWait::left(&dir),
-            None,
+            AskedWait::kept(&dir),
+            Kept::Nothing,
             "a wait nobody recorded was read"
         );
         AskedWait::record(&dir, Duration::from_secs(30));
-        let left = AskedWait::left(&dir).expect("the wait is still running");
+        let Kept::Left(left) = AskedWait::kept(&dir) else {
+            panic!("the wait is still running");
+        };
         assert!(
             left > Duration::from_secs(25) && left <= Duration::from_secs(30),
             "{left:?}"
         );
         AskedWait::record(&dir, Duration::ZERO);
         assert_eq!(
-            AskedWait::left(&dir),
-            None,
+            AskedWait::kept(&dir),
+            Kept::Nothing,
             "a wait that has passed still binds"
         );
         let path = dir.join(crate::cli::WRITEBACK_WAIT_FILE);
         for unreadable in [
-            json!({"schema_version": 2, "not_before_unix_ms": u64::MAX}),
-            json!({"schema_version": 1, "not_before_unix_ms": u64::MAX, "extra": 1}),
+            json!({"schema_version": 2, "not_before_unix_ms": 1}),
+            json!({"schema_version": 1, "not_before_unix_ms": 1, "extra": 1}),
             json!("not a wait"),
         ] {
             std::fs::write(&path, unreadable.to_string()).expect("the file is written");
-            assert_eq!(
-                AskedWait::left(&dir),
-                None,
-                "{unreadable} was read as a wait"
-            );
+            let Kept::Unreadable(why) = AskedWait::kept(&dir) else {
+                panic!("{unreadable} was read as no wait, or as a wait");
+            };
+            assert!(why.contains(&path.display().to_string()), "{why}");
         }
     }
 

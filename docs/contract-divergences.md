@@ -5802,7 +5802,11 @@ driver that met it: it is kept in `<run dir>/writeback-wait.json` — `{"schema_
 a stop's release, in the stopping process, asks the store nothing before that instant: it waits
 the rest out where that ends inside the release's own deadline, and otherwise leaves the claim
 standing and says so on standard error. The driver an adoption starts serves what is left of the
-wait before its first projection. The file is neither the landed baseline (entry 93) nor the
+wait before its first projection. A file there that cannot be read as a wait — unreadable,
+malformed, or of a version this build does not read — may still hold one that has not passed,
+so it is never read as no wait: a stop's release says why, names the file, and leaves the claim
+standing; a driver says so once on standard error and asks the store nothing, looking again
+until the file reads or is repaired. The file is neither the landed baseline (entry 93) nor the
 projection record (entry 73), and changes neither. The attempt after the wait carries what has still not landed,
 and nothing more. Closeout attempts a terminal snapshot published after a refusal, because
 it is a different snapshot, and does not re-attempt the refused one; stopping stays
@@ -5846,7 +5850,8 @@ closeout over a refusal.
       "none_named": "the retry schedule",
       "kept_in": "<run dir>/writeback-wait.json",
       "honoured_by": ["the driver that met it", "a stop's release", "the driver an adoption starts"],
-      "release_past_its_deadline": "the claim is left standing and said"
+      "release_past_its_deadline": "the claim is left standing and said",
+      "unreadable": "no store call until it reads or is repaired"
     },
     "commands": ["project-show", "task-show", "project-copy"],
     "empty_show": {"class": "refused", "kind": "no-such-item"},
