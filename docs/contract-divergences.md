@@ -6,19 +6,19 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83 and 89** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89 and 91** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88 and 91 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88 and 92 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80, 84 to 88 and 91 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80, 84 to 88 and 92 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -7387,7 +7387,45 @@ the key's name, pointed at 11. `tests/contract.rs`'s
 `the_branch_name_template_is_what_the_contract_names` drives the block, and
 `tests/e2e/branch_template.rs` drives the refusal through the real binary.
 
-## 91. A landed retry's earlier attempts are told to `onevcs`, and an idle driver retires what holds no work — OPEN
+## 91. A dispatched task with no acceptance criteria was dispatched, and C6b now refuses it, a breaking change — RESOLVED
+
+**Ruling: C6b is part of the contract, on the user's ruling relayed by the manager of run
+`task-templates`, and it is breaking on purpose.** A task without acceptance criteria is one no
+judge can hold to anything, so every host's task template must produce them; this crate
+guarantees that and nothing more about a task's shape.
+
+**What diverged.** The approved contract names *What/Why/Acceptance-criteria task prose* as the
+node shape, and the loader held a task only to being non-blank: a node whose task carried no
+`## Acceptance criteria` section loaded, dispatched, and was judged against nothing, while the
+rendering that places an amendment quietly created the section such a task lacked.
+
+**Why it is breaking.** A plan that loaded under 0.48 is refused at `start` and `plan check`
+when an agent node's or agent step's task breaks C6b; a run launched before it whose graph holds
+such a node that is not settled `done` is refused by `adopt`; and an `add`, `retry` or `requeue`
+stating such a task is refused where it was applied before. Nothing is repaired on the author's
+behalf, because a section the engine wrote would be a bar nobody set. Pre-1.0 that is a minor
+release, driven by a `feat!` commit.
+
+**Two manager rulings inside it**, relayed while it was built: a `kind: human` **step** is exempt
+exactly as a `kind: human` node is, since nothing is dispatched for either and no judge reads a
+bar off either; and `adopt` skips a node settled `done`, since it is never dispatched again, while
+a `failed` or `cancelled` node, which a retry or requeue re-dispatches with its stored task, is
+held to C6b with everything else.
+
+**What this build does.** `onepipeline::plan::check_criteria` is the one implementation, public
+because `op-task-templates`' `template check` applies the same rule to every rendering. The
+loader runs it after the shape rules, so a node missing its task is still told that; an edited
+graph is not re-checked as a whole — only the node an edit states — so a live run's later edits
+are not held hostage to a task it was launched with. `tests/contract.rs`'s
+`c6b_is_what_the_contract_names` reconciles the block against the function, and
+`tests/e2e/criteria_rule.rs` drives each load path and each edit through the binary over a real
+`local-md` store.
+
+C6b is fixed once the plan runs: `op-task-templates`, the onepipeline-ui node and the
+ai-orchestrator nodes restate it, so a change to it is a proposal to the manager, never an edit
+here.
+
+## 92. A landed retry's earlier attempts are told to `onevcs`, and an idle driver retires what holds no work — OPEN
 
 **Proposal: two pipeline kinds, `branches-superseded` and `branches-retired`; one
 post-launch verb, `onepipeline supersessions <RUN> [--record] [--json]`, with its SDK

@@ -454,7 +454,41 @@ pub(crate) fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
         return Err(Refusal::plain("a plan needs at least one node").field("tasks"));
     }
     check_edited(plan)?;
-    check_declared_version(plan)
+    check_declared_version(plan)?;
+    plan.tasks.iter().try_for_each(check_criteria)
+}
+
+/// C6b over one node: the task of an agent node, and the task of every agent
+/// step it carries, each passes [`check_criteria`](crate::plan::check_criteria).
+///
+/// A `kind: human` node or step is exempt: nothing is dispatched for it and no
+/// judge reads a bar off it. An `expects_no_diff` node or step is an agent one
+/// and is held to it.
+///
+/// Here, and not in [`check_node`], because that is also the shape check every
+/// **edited** graph is held to: a graph folded from a run launched before C6b
+/// carries the tasks it was launched with, and refusing them there would refuse
+/// every later edit to it. What an edit states is held to C6b where the edit is
+/// compiled, and a run's whole graph where it is loaded or adopted.
+pub(crate) fn check_criteria(node: &Node) -> std::result::Result<(), Refusal> {
+    if node.kind == NodeKind::Human {
+        return Ok(());
+    }
+    if let Some(task) = &node.task {
+        crate::plan::check_criteria(task)
+            .map_err(|rule| Refusal::node(&node.id, rule.as_str()).field("task"))?;
+    }
+    for step in node.steps.iter().flatten() {
+        if step.kind == NodeKind::Human {
+            continue;
+        }
+        if let Some(task) = &step.task {
+            crate::plan::check_criteria(task).map_err(|rule| {
+                Refusal::node(&node.id, format!("step '{}': {rule}", step.id)).field("steps")
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// The two rules a plan's **own declared version** decides.
@@ -1615,7 +1649,7 @@ mod tests {
             goal: None,
             tasks: vec![Node {
                 id: " ".into(),
-                task: Some("## What\nwork".into()),
+                task: Some("## What\nwork\n\n## Acceptance criteria\n- it is done.".into()),
                 persona: Some("engineer".into()),
                 ..Node::default()
             }],
@@ -1671,7 +1705,7 @@ mod tests {
         Node {
             id: id.into(),
             persona: Some("engineer".into()),
-            task: Some("## What\ndo it".into()),
+            task: Some("## What\ndo it\n\n## Acceptance criteria\n- it is done.".into()),
             deps: deps.iter().map(|d| (*d).to_string()).collect(),
             ..Node::default()
         }
@@ -1719,7 +1753,7 @@ mod tests {
                 id: "publish".into(),
                 repo: Some("owner/repo".into()),
                 persona: Some("engineer".into()),
-                task: Some("## What\nship".into()),
+                task: Some("## What\nship\n\n## Acceptance criteria\n- it is done.".into()),
                 title: Some("feat: ship it".into()),
                 deps: vec!["approve".into()],
                 ..Node::default()
@@ -1817,7 +1851,7 @@ mod tests {
             (
                 Node {
                     id: "no-persona".into(),
-                    task: Some("t".into()),
+                    task: Some("t\n\n## Acceptance criteria\n- it is done.".into()),
                     ..Node::default()
                 },
                 "needs a persona",
@@ -1826,7 +1860,7 @@ mod tests {
                 Node {
                     id: "with/slash".into(),
                     kind: NodeKind::Human,
-                    task: Some("t".into()),
+                    task: Some("t\n\n## Acceptance criteria\n- it is done.".into()),
                     ..Node::default()
                 },
                 "cannot contain '/'",
@@ -1835,7 +1869,7 @@ mod tests {
                 Node {
                     id: "human-persona".into(),
                     kind: NodeKind::Human,
-                    task: Some("t".into()),
+                    task: Some("t\n\n## Acceptance criteria\n- it is done.".into()),
                     persona: Some("engineer".into()),
                     ..Node::default()
                 },
@@ -1845,7 +1879,7 @@ mod tests {
                 Node {
                     id: "human-context".into(),
                     kind: NodeKind::Human,
-                    task: Some("t".into()),
+                    task: Some("t\n\n## Acceptance criteria\n- it is done.".into()),
                     context: Some("a note".into()),
                     ..Node::default()
                 },
@@ -1855,7 +1889,7 @@ mod tests {
                 Node {
                     id: "nodiff-persona".into(),
                     expects_no_diff: true,
-                    task: Some("t".into()),
+                    task: Some("t\n\n## Acceptance criteria\n- it is done.".into()),
                     persona: Some("engineer".into()),
                     ..Node::default()
                 },
@@ -1867,7 +1901,7 @@ mod tests {
                     steps: Some(vec![Step {
                         id: "one".into(),
                         persona: Some("engineer".into()),
-                        task: Some("t".into()),
+                        task: Some("t\n\n## Acceptance criteria\n- it is done.".into()),
                         ..Step::default()
                     }]),
                     ..Node::default()
@@ -1878,11 +1912,11 @@ mod tests {
                 Node {
                     id: "steps-and-task".into(),
                     repo: Some("o/r".into()),
-                    task: Some("t".into()),
+                    task: Some("t\n\n## Acceptance criteria\n- it is done.".into()),
                     steps: Some(vec![Step {
                         id: "one".into(),
                         persona: Some("engineer".into()),
-                        task: Some("t".into()),
+                        task: Some("t\n\n## Acceptance criteria\n- it is done.".into()),
                         ..Step::default()
                     }]),
                     ..Node::default()
@@ -1895,7 +1929,7 @@ mod tests {
                     repo: Some("o/r".into()),
                     steps: Some(vec![Step {
                         id: "one".into(),
-                        task: Some("t".into()),
+                        task: Some("t\n\n## Acceptance criteria\n- it is done.".into()),
                         ..Step::default()
                     }]),
                     ..Node::default()
@@ -1906,7 +1940,7 @@ mod tests {
                 Node {
                     id: "human-budget".into(),
                     kind: NodeKind::Human,
-                    task: Some("t".into()),
+                    task: Some("t\n\n## Acceptance criteria\n- it is done.".into()),
                     max_turns: Some(45),
                     ..Node::default()
                 },
@@ -1916,7 +1950,7 @@ mod tests {
                 Node {
                     id: "nodiff-budget".into(),
                     expects_no_diff: true,
-                    task: Some("t".into()),
+                    task: Some("t\n\n## Acceptance criteria\n- it is done.".into()),
                     max_turns: Some(45),
                     ..Node::default()
                 },
@@ -1930,7 +1964,7 @@ mod tests {
                     steps: Some(vec![Step {
                         id: "one".into(),
                         persona: Some("engineer".into()),
-                        task: Some("t".into()),
+                        task: Some("t\n\n## Acceptance criteria\n- it is done.".into()),
                         ..Step::default()
                     }]),
                     ..Node::default()
@@ -1944,7 +1978,7 @@ mod tests {
                     steps: Some(vec![Step {
                         id: "sign-off".into(),
                         kind: NodeKind::Human,
-                        task: Some("t".into()),
+                        task: Some("t\n\n## Acceptance criteria\n- it is done.".into()),
                         max_turns: Some(45),
                         ..Step::default()
                     }]),
@@ -1959,7 +1993,7 @@ mod tests {
                     steps: Some(vec![Step {
                         id: "one".into(),
                         persona: Some("engineer".into()),
-                        task: Some("t".into()),
+                        task: Some("t\n\n## Acceptance criteria\n- it is done.".into()),
                         deps: vec!["one".into()],
                         ..Step::default()
                     }]),

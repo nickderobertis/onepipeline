@@ -43,7 +43,7 @@
 //! measured in days, and a record of them would be a record of nothing.
 //!
 //! **The same sweep retires finished branches** through `onevcs::retire_finished`,
-//! excluding what this run's live nodes name; divergence entry 91 states the pass
+//! excluding what this run's live nodes name; divergence entry 92 states the pass
 //! and its `branches-retired` record.
 
 use std::path::Path;
@@ -1200,7 +1200,7 @@ mod tests {
 
     /// A run whose graph holds one node per status given, each naming the branch
     /// `<id>/branch` pinned, `<id>/resume.branch` resumed and `<id>/session` as its
-    /// current dispatch session's — one per word of entry 91's `excluded_by` —
+    /// current dispatch session's — one per word of entry 92's `excluded_by` —
     /// against `service`, and one direct node naming a branch and no repository.
     fn named_by(statuses: &[(&str, NodeStatus)]) -> (RunState, BTreeMap<String, NodeStatus>) {
         let mut state = crate::projection::fold(&[]);
@@ -1255,7 +1255,7 @@ mod tests {
         ];
         let (state, statuses) = named_by(&[&live[..], &settled[..]].concat());
         let named = live_branches(&state, &statuses);
-        // Every means entry 91 names, and no other: each live node names exactly
+        // Every means entry 92 names, and no other: each live node names exactly
         // one branch per word.
         let means = crate::supersession::proposed("excluded_by");
         for (id, _) in live {
@@ -1265,7 +1265,7 @@ mod tests {
                     .filter(|one| one.branch.starts_with(&format!("{id}/")))
                     .count(),
                 means.len(),
-                "{id} names other than entry 91's means: {named:?}"
+                "{id} names other than entry 92's means: {named:?}"
             );
             for means in &means {
                 assert!(
@@ -1310,7 +1310,7 @@ mod tests {
         assert_eq!(told, ["a", "c"]);
     }
 
-    /// Entry 91 tells a planner the fields `branches-retired` and each of its
+    /// Entry 92 tells a planner the fields `branches-retired` and each of its
     /// retired entries carry; these are the types that write them.
     #[test]
     fn entry_91_names_the_fields_a_retirement_record_carries() {

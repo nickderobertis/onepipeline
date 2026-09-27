@@ -55,8 +55,8 @@ fn plan_check_applies_node_sets_to_each_steps_own_graph() {
         "id": "service", "repo": "service", "title": "feat: ship service",
         "sets": ["members.worker.agent.model=chosen"],
         "steps": [
-            {"id": "build", "persona": "engineer", "task": "## What\nbuild"},
-            {"id": "review", "persona": "reviewer", "task": "## What\nreview",
+            {"id": "build", "persona": "engineer", "task": "## What\nbuild\n\n## Acceptance criteria\n- It is done."},
+            {"id": "review", "persona": "reviewer", "task": "## What\nreview\n\n## Acceptance criteria\n- It is done.",
              "deps": ["build"], "agent_graph": "./single-sided.yaml"}
         ]
     });
@@ -387,13 +387,13 @@ fn a_registered_check_is_handed_the_loaded_plan_and_each_tasks_own_metadata() {
         "tasks/carried/000-build.md",
         "---\ntitle: \"feat: build it\"\nproject: \"carried\"\nrepositories: \
          [\"github.com/owner/service\"]\nmetadata: {\"onepipeline.id\": \"build\", \
-         \"onepipeline.persona\": \"engineer\", \"review.record\": \"REV-7\"}\n---\n\nDo the work.\n",
+         \"onepipeline.persona\": \"engineer\", \"review.record\": \"REV-7\"}\n---\n\nDo the work.\n\n## Acceptance criteria\n- It is done.\n",
     );
     world.write_store_item(
         "tasks/carried/001-verify.md",
         "---\ntitle: \"verify\"\nproject: \"carried\"\ndepends_on: [\"carried/000-build\"]\n\
          metadata: {\"onepipeline.id\": \"verify\", \"onepipeline.persona\": \"engineer\"}\n\
-         ---\n\nCheck the work.\n",
+         ---\n\nCheck the work.\n\n## Acceptance criteria\n- It is checked.\n",
     );
 
     let capture = world.root.join("handed.json");
@@ -424,7 +424,11 @@ fn a_registered_check_is_handed_the_loaded_plan_and_each_tasks_own_metadata() {
     assert_eq!(build["repo"], json!("github.com/owner/service"), "{handed}");
     assert_eq!(build["persona"], json!("engineer"), "{handed}");
     assert_eq!(build["title"], json!("feat: build it"), "{handed}");
-    assert_eq!(build["task"], json!("Do the work."), "{handed}");
+    assert_eq!(
+        build["task"],
+        json!("Do the work.\n\n## Acceptance criteria\n- It is done."),
+        "{handed}"
+    );
     // The store's own metadata map for that task, verbatim — the reserved keys
     // and the one outside the namespace alike.
     assert_eq!(

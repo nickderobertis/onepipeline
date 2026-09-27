@@ -61,7 +61,7 @@ fn plan() -> Plan {
         tasks: vec![Node {
             id: "slow".into(),
             persona: Some("engineer".into()),
-            task: Some("## What\nhold the workspace open".into()),
+            task: Some("## What\nhold the workspace open\n\n## Acceptance criteria\n- the workspace is held".into()),
             ..Node::default()
         }],
     }

@@ -136,8 +136,8 @@ fn node_sets_are_refused_against_each_effective_step_graph_before_dispatch() {
         "id": "service", "repo": "service", "title": "feat: ship service",
         "sets": ["members.worker.agent.model=chosen"],
         "steps": [
-            {"id":"build", "persona":"engineer", "task":"## What\nbuild"},
-            {"id":"review", "persona":"reviewer", "task":"## What\nreview",
+            {"id":"build", "persona":"engineer", "task":"## What\nbuild\n\n## Acceptance criteria\n- It is done."},
+            {"id":"review", "persona":"reviewer", "task":"## What\nreview\n\n## Acceptance criteria\n- It is done.",
              "deps":["build"], "agent_graph":other.to_string_lossy()}
         ]
     });
@@ -392,7 +392,7 @@ fn an_expects_no_diff_node_settles_without_spending_a_dispatch() {
         "nodiff",
         vec![json!({
             "id": "handoff",
-            "task": "## What\nRecord that nothing changes.",
+            "task": "## What\nRecord that nothing changes.\n\n## Acceptance criteria\n- It is done.",
             "expects_no_diff": true,
         })],
     );
@@ -426,7 +426,7 @@ fn a_node_readied_by_a_settlement_no_dispatch_reported_is_still_dispatched() {
             vec![
                 json!({
                     "id": "record",
-                    "task": "## What\nRecord that nothing changes.",
+                    "task": "## What\nRecord that nothing changes.\n\n## Acceptance criteria\n- It is done.",
                     "expects_no_diff": true,
                 }),
                 agent("build", &["record"]),
@@ -894,7 +894,7 @@ fn task_prose_reaches_the_dispatch_as_the_characters_the_store_holds() {
     let project = world.plan(
         "emoji",
         &json!({"schema_version": 2, "name": "emoji", "tasks": [
-            {"id": "build", "persona": "engineer", "task": "😀 ship it"}]}),
+            {"id": "build", "persona": "engineer", "task": "😀 ship it\n\n## Acceptance criteria\n- It is done."}]}),
     );
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("the run to settle", |world| {

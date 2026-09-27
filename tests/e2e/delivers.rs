@@ -672,7 +672,7 @@ fn edits_carry_delivers_and_refuse_a_duplicate_or_unqualified_ticket() {
         &world,
         name,
         json!({"op": "retry", "id": "held", "node": delivering(json!({
-            "id": "held-again", "persona": "engineer", "task": "## What\nAgain."
+            "id": "held-again", "persona": "engineer", "task": "## What\nAgain.\n\n## Acceptance criteria\n- It is done."
         }), &[&held])}),
     )
     .exited(0);
@@ -720,7 +720,7 @@ fn a_retried_deliverer_keeps_its_ticket_claimed_across_the_retry() {
         &world,
         name,
         json!({"op": "retry", "id": "build", "node": {
-            "id": "build-2", "persona": "engineer", "task": "## What\nAgain."
+            "id": "build-2", "persona": "engineer", "task": "## What\nAgain.\n\n## Acceptance criteria\n- It is done."
         }}),
     )
     .exited(0);

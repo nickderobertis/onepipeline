@@ -770,7 +770,7 @@ fn a_requeued_node_and_a_retrys_replacement_each_run_the_hook_again_before_their
         json!({"op": "cancel", "id": "sweep"}),
         json!({"op": "requeue", "id": "sweep"}),
         json!({"op": "retry", "id": "retried", "node": {
-            "id": "replacement", "persona": "engineer", "task": "## What\nRetry it.",
+            "id": "replacement", "persona": "engineer", "task": "## What\nRetry it.\n\n## Acceptance criteria\n- It is done.",
         }}),
     ] {
         world

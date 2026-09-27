@@ -3,7 +3,7 @@
 //! Each landed lineage's earlier attempts on other branches go to
 //! [`onevcs::record_supersession`] and are journalled as `branches-superseded`;
 //! nothing here changes a settlement. `onepipeline supersessions` backfills the
-//! same record from a run's journal. Divergence entry 91 states the proposal.
+//! same record from a run's journal. Divergence entry 92 states the proposal.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,7 +18,7 @@ use crate::payload::{BranchesSuperseded, SupersededAttempt, UnrecordedAttempt};
 use crate::projection::RunState;
 use crate::Result;
 
-// The labels every supersession carries, spelled as entry 91's
+// The labels every supersession carries, spelled as entry 92's
 // `supersession_labels` states them; a unit test holds the two together.
 const RUN_LABEL: &str = "run";
 const NODE_LABEL: &str = "node";
@@ -597,28 +597,28 @@ pub(crate) fn render_json(answered: &Supersessions) -> String {
     serde_json::to_string(answered).expect("the answer serializes")
 }
 
-/// Entry 91's block in `docs/contract-divergences.md`: the proposal this module
+/// Entry 92's block in `docs/contract-divergences.md`: the proposal this module
 /// and `maintenance`'s retirement pass are held to.
 #[cfg(test)]
 pub(crate) fn proposal() -> serde_json::Value {
     let record = include_str!("../docs/contract-divergences.md");
     let entry = record
         .split("\n## ")
-        .find(|entry| entry.starts_with("91."))
-        .expect("the divergence record carries entry 91");
+        .find(|entry| entry.starts_with("92."))
+        .expect("the divergence record carries entry 92");
     let block = entry
         .split("```json")
         .nth(1)
         .and_then(|rest| rest.split("```").next())
-        .expect("entry 91 carries its json block");
-    serde_json::from_str(block).expect("entry 91's block is JSON")
+        .expect("entry 92 carries its json block");
+    serde_json::from_str(block).expect("entry 92's block is JSON")
 }
 
 /// The words a list of `proposal()` names.
 #[cfg(test)]
 pub(crate) fn proposed(key: &str) -> BTreeSet<String> {
     serde_json::from_value(proposal()[key].clone())
-        .unwrap_or_else(|error| panic!("entry 91's {key} is a list of words: {error}"))
+        .unwrap_or_else(|error| panic!("entry 92's {key} is a list of words: {error}"))
 }
 
 /// The top-level properties the payload document generated from `T` declares.
@@ -783,7 +783,7 @@ mod tests {
         assert!(unrecorded(&lineage, &here).is_empty());
     }
 
-    /// Entry 91 tells a planner the fields `branches-superseded` carries and the
+    /// Entry 92 tells a planner the fields `branches-superseded` carries and the
     /// shape `--json` prints; these are the types that write both.
     #[test]
     fn entry_91_names_the_fields_this_build_writes() {
@@ -824,7 +824,7 @@ mod tests {
         assert_eq!(printed["mode"], "record");
     }
 
-    /// The label keys entry 91 tells a planner are the ones `onevcs` is given.
+    /// The label keys entry 92 tells a planner are the ones `onevcs` is given.
     #[test]
     fn entry_91_names_the_labels_each_supersession_carries() {
         assert_eq!(

@@ -179,8 +179,8 @@ fn run_wide_edit_refuses_a_future_steps_effective_graph() {
         "id":"service", "repo":"service", "title":"feat: service",
         "deps":["held"],
         "steps":[
-            {"id":"build", "persona":"engineer", "task":"## What\nbuild"},
-            {"id":"review", "persona":"reviewer", "task":"## What\nreview",
+            {"id":"build", "persona":"engineer", "task":"## What\nbuild\n\n## Acceptance criteria\n- It is done."},
+            {"id":"review", "persona":"reviewer", "task":"## What\nreview\n\n## Acceptance criteria\n- It is done.",
              "deps":["build"], "agent_graph":other.to_string_lossy()}
         ]
     });
@@ -226,8 +226,8 @@ fn set_edits_during_a_running_step_reach_the_lifecycle_nodes_next_step() {
         "id":"service", "repo":"service", "title":"feat: service",
         "sets":["members.worker.agent.model=planned"],
         "steps":[
-            {"id":"build", "persona":"engineer", "task":"## What\nbuild"},
-            {"id":"review", "persona":"reviewer", "task":"## What\nreview", "deps":["build"]}
+            {"id":"build", "persona":"engineer", "task":"## What\nbuild\n\n## Acceptance criteria\n- It is done."},
+            {"id":"review", "persona":"reviewer", "task":"## What\nreview\n\n## Acceptance criteria\n- It is done.", "deps":["build"]}
         ]
     });
     let run = "sets-between-steps";
@@ -582,7 +582,7 @@ fn add_and_retry_resolve_relative_graphs_before_dispatch() {
         .run_with_stdin(
             &["reply", "relative-add-retry"],
             &json!({"version":3,"commands":[{"op":"add","node":{
-                "id":"missing", "persona":"engineer", "task":"## What\nmissing",
+                "id":"missing", "persona":"engineer", "task":"## What\nmissing\n\n## Acceptance criteria\n- It is done.",
                 "agent_graph":"./missing-node.yaml", "sets":["members.worker.agent.model=wrong"]
             }}]})
             .to_string(),
@@ -592,12 +592,12 @@ fn add_and_retry_resolve_relative_graphs_before_dispatch() {
         .err_has("missing-node.yaml");
     for command in [
         json!({"op":"add","node":{
-            "id":"extra", "persona":"engineer", "task":"## What\nextra",
+            "id":"extra", "persona":"engineer", "task":"## What\nextra\n\n## Acceptance criteria\n- It is done.",
             "deps":["slow"], "agent_graph":relative,
             "sets":["members.worker.agent.model=added"]
         }}),
         json!({"op":"retry","id":"retried","node":{
-            "id":"replacement", "persona":"engineer", "task":"## What\nretry",
+            "id":"replacement", "persona":"engineer", "task":"## What\nretry\n\n## Acceptance criteria\n- It is done.",
             "agent_graph":relative,
             "sets":["members.worker.agent.model=retried"]
         }}),
@@ -656,7 +656,7 @@ fn requeue_resolves_relative_node_and_step_graph_amendments() {
     world.script("service.work", "the worker wrote this");
     let node = json!({
         "id":"service", "repo":"service", "title":"feat: ship service", "deps":["slow"],
-        "steps":[{"id":"build", "persona":"engineer", "task":"## What\nbuild"}]
+        "steps":[{"id":"build", "persona":"engineer", "task":"## What\nbuild\n\n## Acceptance criteria\n- It is done."}]
     });
     let path = world.plan(
         "relative-requeue",
@@ -688,8 +688,8 @@ fn requeue_resolves_relative_node_and_step_graph_amendments() {
             &json!({"version":3,"commands":[{"op":"requeue","id":"service","amend":{
                 "agent_graph":relative_node,
                 "steps":[
-                    {"id":"build", "persona":"engineer", "task":"## What\nbuild"},
-                    {"id":"review", "persona":"reviewer", "task":"## What\nreview",
+                    {"id":"build", "persona":"engineer", "task":"## What\nbuild\n\n## Acceptance criteria\n- It is done."},
+                    {"id":"review", "persona":"reviewer", "task":"## What\nreview\n\n## Acceptance criteria\n- It is done.",
                      "deps":["build"], "agent_graph":relative_step}
                 ],
                 "sets":["members.worker.agent.model=chosen"]
@@ -854,7 +854,7 @@ fn add_reparent_and_note_are_applied_and_reported_applied() {
         .run_with_stdin(
             &["reply", &run],
             &envelope(json!([
-                {"op": "add", "node": {"id": "extra", "persona": "engineer", "task": "## What\nextra", "max_turns": 2, "branch": "topic/extra", "sets": ["members.worker.agent.model=added"]}},
+                {"op": "add", "node": {"id": "extra", "persona": "engineer", "task": "## What\nextra\n\n## Acceptance criteria\n- It is done.", "max_turns": 2, "branch": "topic/extra", "sets": ["members.worker.agent.model=added"]}},
                 {"op": "reparent", "id": "extra", "deps": ["slow"]},
                 {"op": "note", "id": "extra", "addressee": "worker",
                  "text": "the fixture moved", "deliver": "next"},
@@ -991,7 +991,7 @@ fn retry_cancel_requeue_and_drop_are_projected_after_their_rulings() {
         json!({"op": "requeue", "id": "cancelled", "amend": {"branch": "topic/resumed"}}),
         json!({"op": "drop", "id": "dropped", "dependents": "detach"}),
         json!({"op": "retry", "id": "retried", "node": {
-            "id": "replacement", "persona": "engineer", "task": "## What\nRetry it.",
+            "id": "replacement", "persona": "engineer", "task": "## What\nRetry it.\n\n## Acceptance criteria\n- It is done.",
             "branch": "topic/replacement", "sets": ["members.worker.agent.model=retried"]
         }}),
     ] {
@@ -1035,7 +1035,7 @@ fn retry_cancel_requeue_and_drop_are_projected_after_their_rulings() {
         "the retry was projected onto an item other than the one the node held: {lineage}"
     );
     assert_eq!(
-        lineage["item"]["content"], "## What\nRetry it.",
+        lineage["item"]["content"], "## What\nRetry it.\n\n## Acceptance criteria\n- It is done.",
         "{lineage}"
     );
     assert_eq!(lineage["item"]["metadata"]["onepipeline.id"], "retried");
@@ -1137,7 +1137,7 @@ fn a_node_a_retry_superseded_reads_as_superseded_and_one_that_was_not_still_read
         .run_with_stdin(
             &["reply", run],
             &envelope(json!([{"op": "retry", "id": "lost", "node": {
-                "id": "lost-2", "persona": "engineer", "task": "## What\nRedo it."
+                "id": "lost-2", "persona": "engineer", "task": "## What\nRedo it.\n\n## Acceptance criteria\n- It is done."
             }}])),
         )
         .exited(0);
@@ -1204,7 +1204,7 @@ fn a_node_a_retry_superseded_reads_as_superseded_and_one_that_was_not_still_read
         .run_with_stdin(
             &["reply", run],
             &envelope(json!([{"op": "retry", "id": "lost", "node": {
-                "id": "lost-3", "persona": "engineer", "task": "## What\nAgain."
+                "id": "lost-3", "persona": "engineer", "task": "## What\nAgain.\n\n## Acceptance criteria\n- It is done."
             }}])),
         )
         .exited(REFUSED);
@@ -1212,7 +1212,7 @@ fn a_node_a_retry_superseded_reads_as_superseded_and_one_that_was_not_still_read
         .run_with_stdin(
             &["reply", run],
             &envelope(json!([{"op": "retry", "id": "kept", "node": {
-                "id": "kept-2", "persona": "engineer", "task": "## What\nRedo it."
+                "id": "kept-2", "persona": "engineer", "task": "## What\nRedo it.\n\n## Acceptance criteria\n- It is done."
             }}])),
         )
         .exited(0);
@@ -1531,7 +1531,7 @@ fn retry_supersedes_a_running_node_and_redirects_its_dependents() {
             &envelope(json!([{
                 "op": "retry",
                 "id": "flaky",
-                "node": {"id": "flaky-2", "persona": "engineer", "task": "## What\nagain"},
+                "node": {"id": "flaky-2", "persona": "engineer", "task": "## What\nagain\n\n## Acceptance criteria\n- It is done."},
             }])),
         )
         .exited(0);
@@ -1617,7 +1617,7 @@ fn a_node_another_node_consumes_is_retried_and_its_target_follows_the_edge() {
             &envelope(json!([{
                 "op": "retry",
                 "id": "engine",
-                "node": {"id": "engine-2", "persona": "engineer", "task": "## What\nagain"},
+                "node": {"id": "engine-2", "persona": "engineer", "task": "## What\nagain\n\n## Acceptance criteria\n- It is done."},
             }])),
         )
         .exited(0);
@@ -1705,7 +1705,7 @@ fn a_replacement_inherits_the_targets_it_inherits_deps_with_or_states_its_own() 
             &envelope(json!([{
                 "op": "retry",
                 "id": "build",
-                "node": {"id": "build-2", "persona": "engineer", "task": "## What\nagain"},
+                "node": {"id": "build-2", "persona": "engineer", "task": "## What\nagain\n\n## Acceptance criteria\n- It is done."},
             }])),
         )
         .exited(0);
@@ -1752,7 +1752,7 @@ fn a_replacement_inherits_the_targets_it_inherits_deps_with_or_states_its_own() 
                 "node": {
                     "id": "build-3",
                     "persona": "engineer",
-                    "task": "## What\nonce more",
+                    "task": "## What\nonce more\n\n## Acceptance criteria\n- It is done.",
                     "deps": ["packager"],
                     "consumes": {"packager": "crate"},
                 },
@@ -1814,7 +1814,7 @@ fn an_add_and_a_reparent_carry_the_targets_of_the_edges_they_move() {
         .run_with_stdin(
             &["reply", &run],
             &envelope(json!([
-                {"op": "add", "node": {"id": "extra", "persona": "engineer", "task": "## What\nextra", "deps": ["packager"], "consumes": {"packager": "crate"}}},
+                {"op": "add", "node": {"id": "extra", "persona": "engineer", "task": "## What\nextra\n\n## Acceptance criteria\n- It is done.", "deps": ["packager"], "consumes": {"packager": "crate"}}},
                 {"op": "reparent", "id": "ship", "deps": ["packager", "docs"]},
             ])),
         )
@@ -1956,7 +1956,7 @@ fn a_retry_may_name_only_one_branch() {
                     "id": "service-2",
                     "repo": "owner/service",
                     "persona": "engineer",
-                    "task": "## What\nagain",
+                    "task": "## What\nagain\n\n## Acceptance criteria\n- again is done",
                     "branch": "pinned",
                     "resume": {"branch": "preserved"},
                 },
@@ -1987,7 +1987,7 @@ fn an_edit_carrying_the_retired_bar_is_refused_by_name_at_both_boundaries() {
     let refusal = world.run_with_stdin(
         &["reply", &run],
         &envelope(json!([{"op": "add", "node": {
-            "id": "extra", "persona": "engineer", "task": "## What\nextra",
+            "id": "extra", "persona": "engineer", "task": "## What\nextra\n\n## Acceptance criteria\n- extra is done",
             "done_when": "the gate is green"}}])),
     );
     refusal
@@ -2127,14 +2127,14 @@ fn an_edit_writing_an_unpublishable_title_is_refused_with_the_limit_it_broke() {
 
     refuses(
         json!({"op": "add", "node": {
-            "id": "publish", "persona": "engineer", "task": "## What\npublish",
+            "id": "publish", "persona": "engineer", "task": "## What\npublish\n\n## Acceptance criteria\n- publish is done",
             "repo": "service", "title": &over}}),
         "publish",
     );
 
     refuses(
         json!({"op": "retry", "id": "slow", "node": {
-            "id": "slow-2", "persona": "engineer", "task": "## What\nagain",
+            "id": "slow-2", "persona": "engineer", "task": "## What\nagain\n\n## Acceptance criteria\n- again is done",
             "repo": "service", "title": &over}}),
         "slow-2",
     );
@@ -2316,12 +2316,12 @@ fn every_ops_refusal_case_is_answered_with_its_reason_and_exit_two() {
     let cases: &[(&str, Value, &str)] = &[
         (
             "add over an existing id",
-            json!([{"op": "add", "node": {"id": "running", "persona": "e", "task": "t"}}]),
+            json!([{"op": "add", "node": {"id": "running", "persona": "e", "task": "t\n\n## Acceptance criteria\n- It is done."}}]),
             "already exists",
         ),
         (
             "add with a dangling dependency",
-            json!([{"op": "add", "node": {"id": "new", "persona": "e", "task": "t", "deps": ["nowhere"]}}]),
+            json!([{"op": "add", "node": {"id": "new", "persona": "e", "task": "t\n\n## Acceptance criteria\n- It is done.", "deps": ["nowhere"]}}]),
             "not in the plan",
         ),
         (
@@ -2336,12 +2336,12 @@ fn every_ops_refusal_case_is_answered_with_its_reason_and_exit_two() {
         ),
         (
             "retry a node that is not running, failed, or cancelled",
-            json!([{"op": "retry", "id": "pending", "node": {"id": "p2", "persona": "e", "task": "t"}}]),
+            json!([{"op": "retry", "id": "pending", "node": {"id": "p2", "persona": "e", "task": "t\n\n## Acceptance criteria\n- It is done."}}]),
             "not running, failed, or cancelled",
         ),
         (
             "retry onto an id that already exists",
-            json!([{"op": "retry", "id": "running", "node": {"id": "pending", "persona": "e", "task": "t"}}]),
+            json!([{"op": "retry", "id": "running", "node": {"id": "pending", "persona": "e", "task": "t\n\n## Acceptance criteria\n- It is done."}}]),
             "must be new",
         ),
         (
@@ -2405,7 +2405,7 @@ fn an_edit_to_a_run_no_loop_is_driving_is_applied_under_the_lock() {
     world
         .run_with_stdin(
             &["reply", "undrivengraph"],
-            &envelope(json!([{"op": "add", "node": {"id": "late", "persona": "e", "task": "t"}}])),
+            &envelope(json!([{"op": "add", "node": {"id": "late", "persona": "e", "task": "t\n\n## Acceptance criteria\n- It is done."}}])),
         )
         .exited(0)
         .out_has("\"applied\"");
@@ -2573,8 +2573,7 @@ fn nodes_a_live_edit_added_reach_the_board_titled_by_their_own_ids() {
     // all, an `add` naming a blank one, and the replacement a `retry` of the held
     // node clones.
     let added = |id: &str, title: Option<&str>| {
-        let mut node =
-            json!({"id": id, "persona": "engineer", "task": format!("## What\nDo {id}.")});
+        let mut node = json!({"id": id, "persona": "engineer", "task": format!("## What\nDo {id}.\n\n## Acceptance criteria\n- {id} is done.")});
         if let Some(title) = title {
             node["title"] = json!(title);
         }
@@ -2587,7 +2586,7 @@ fn nodes_a_live_edit_added_reach_the_board_titled_by_their_own_ids() {
                 added("no-title", None),
                 added("blank-title", Some("   ")),
                 {"op": "retry", "id": "slow",
-                 "node": {"id": "slow-again", "persona": "engineer", "task": "## What\nDo slow again."}},
+                 "node": {"id": "slow-again", "persona": "engineer", "task": "## What\nDo slow again.\n\n## Acceptance criteria\n- It is done."}},
             ])),
         )
         .exited(0)
@@ -2812,7 +2811,7 @@ fn a_park_records_its_author_and_reason_and_another_author_may_not_undo_the_plan
             &["reply", run],
             &by_watcher(json!([
                 {"op": "add", "node": {"id": "extra", "persona": "engineer",
-                                       "task": "## What\nsweep up", "deps": ["slow"]}},
+                                       "task": "## What\nsweep up\n\n## Acceptance criteria\n- It is done.", "deps": ["slow"]}},
                 {"op": "cancel", "id": "extra", "reason": "it is plainly redundant"},
                 {"op": "requeue", "id": "extra"},
             ])),
@@ -3061,7 +3060,7 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
             &["reply", &run],
             &envelope(json!([
                 {"op": "add", "node": {"id": "waits", "persona": "engineer",
-                                       "task": "## What\nwait", "deps": ["slow"]}},
+                                       "task": "## What\nwait\n\n## Acceptance criteria\n- It is done.", "deps": ["slow"]}},
                 {"op": "settle", "id": "waits", "outcome": "failed",
                  "evidence": "the upstream run was abandoned, so this wait can never clear"},
             ])),
@@ -3571,7 +3570,7 @@ fn an_envelope_refused_by_the_only_writer_a_run_has_leaves_no_record_of_any_of_i
             &["reply", "atomicundriven"],
             &envelope(json!([
                 {"op": "add", "node": {"id": "late", "persona": "engineer",
-                                       "task": "## What\nlate"}},
+                                       "task": "## What\nlate\n\n## Acceptance criteria\n- It is done."}},
                 {"op": "note", "id": "late", "addressee": "worker",
                  "text": "start from the fixture", "deliver": "live", "persist": false},
             ])),
@@ -3681,7 +3680,7 @@ fn an_envelope_whose_commands_all_succeed_applies_and_records_every_one() {
             &["reply", &run],
             &envelope(json!([
                 {"op": "add", "node": {"id": "extra", "persona": "engineer",
-                                       "task": "## What\nextra", "max_turns": 2}},
+                                       "task": "## What\nextra\n\n## Acceptance criteria\n- It is done.", "max_turns": 2}},
                 {"op": "reparent", "id": "extra", "deps": ["slow"]},
                 {"op": "amend", "id": "extra", "text": CORRECTION},
                 {"op": "note", "id": "extra", "addressee": "worker",
@@ -3984,7 +3983,7 @@ fn a_command_that_changes_no_graph_is_journalled_apart_from_one_that_does() {
             &["reply", &run],
             &envelope(json!([
                 {"op": "add", "node": {"id": "extra", "persona": "engineer",
-                                       "task": "## What\nextra", "deps": ["slow"]}}
+                                       "task": "## What\nextra\n\n## Acceptance criteria\n- It is done.", "deps": ["slow"]}}
             ])),
         )
         .exited(0)

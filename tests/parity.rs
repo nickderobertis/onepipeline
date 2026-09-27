@@ -839,7 +839,7 @@ fn reply_refuses_a_malformed_envelope_and_a_verdict_nobody_will_read_and_applies
     );
 
     // An edit, applied by the reply itself because nothing is driving the run.
-    let edit = r###"{"version": 2, "commands": [{"op": "add", "node": {"id": "extra", "persona": "engineer", "task": "## What\ndo more"}}]}"###;
+    let edit = r###"{"version": 2, "commands": [{"op": "add", "node": {"id": "extra", "persona": "engineer", "task": "## What\ndo more\n\n## Acceptance criteria\n- more is done"}}]}"###;
     let receipt = verbs::reply(&ours.paths(), None, edit).expect("applied");
     same(
         "reply RUN, applied",

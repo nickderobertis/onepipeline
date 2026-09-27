@@ -339,7 +339,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         }
         Verb::Supersessions(args) => {
             // The binary's alone until the contract names it: see
-            // `docs/contract-divergences.md` entry 91.
+            // `docs/contract-divergences.md` entry 92.
             let mode = if args.record {
                 crate::supersession::Mode::Record
             } else {
@@ -2082,6 +2082,17 @@ fn validate_and_displace_for_adoption(paths: &RunPaths) -> Result<(LaunchRecord,
             "run '{}' is still being driven; end it with `onepipeline stop {}` first",
             paths.run, paths.run
         )));
+    }
+    // C6b over the graph this adoption would drive, before anything is written.
+    // A node settled `done` is never dispatched again, so refusing the run over
+    // one would strand finished work and protect nothing; every other node — a
+    // failed or cancelled one included, which a retry or requeue re-dispatches
+    // with its stored task — could still be dispatched, and is held to it.
+    let statuses = view.state.statuses();
+    for node in view.state.graph.iter() {
+        if statuses.get(&node.id) != Some(&graph::NodeStatus::Done) {
+            graph::check_criteria(node)?;
+        }
     }
     // A driver this host has proved is *not working* still holds the run's
     // ownership lock, and the loop this adoption is about to start is the run's
