@@ -5937,8 +5937,8 @@ added to the one of the same name and unit, `lower_bound` true where any summand
 `null` wherever no call reported any, which is every attempt against a destination that meters
 nothing, a local Markdown one included; the copy is the one call that reports today.
 `updated_fields` counts how many items each field was written on by an attempt's targeted
-updates, and is written only by an attempt that made one: this build makes none, so it never
-writes it. `delivered` is the copy report's own list of what the store did to each ticket a
+updates, and is written by exactly the attempts that made one — a `task-update` call names it,
+and it names none without one: this build makes none, so it never writes it. `delivered` is the copy report's own list of what the store did to each ticket a
 carried task delivers, verbatim, on a landed attempt and on a failed one alike, and absent
 wherever the report named no ticket.
 
@@ -5950,9 +5950,10 @@ do versions 2 and 3 — `whole` and every `whole_because` included — and each 
 version 3, the last version that counted no calls, with `reopened` read as zero. A line naming a
 key a later version added — by the key's own name, zero or empty included — a version 3 or 4
 line naming `actions` without `reopened`, a version 4 line naming no `calls`, one naming
-`updated_fields` without a `task-update` call, and a version this build has never written, are
-refused. `example_delivered` is the golden line carrying a report's `delivered` entries, one
-member this build never names included, and a reopen, and it writes back as itself.
+`updated_fields` without a `task-update` call or a `task-update` call without `updated_fields`,
+a count of zero, and a version this build has never written, are refused. `example_delivered`
+is the golden line carrying a report's `delivered` entries, one member this build never names
+included, and a reopen, and it writes back as itself.
 
 `tests/contract.rs` holds this block against the published constants and the record type: the
 record's path, the reads, every field and its admitted values, and the example lines read and

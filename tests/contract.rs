@@ -4636,6 +4636,14 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
         .is_err(),
         "a record could say fields were written by no task-update call"
     );
+    assert!(
+        ProjectionCalls::new(
+            std::collections::BTreeMap::from([(StoreCall::TaskUpdate, count(1))]),
+            None,
+        )
+        .is_err(),
+        "a record could say a task-update was made and not what it wrote"
+    );
     // Every golden line is `members` and counts its calls, and none reads a page of tasks.
     for golden in [example, &projection["example_delivered"]] {
         assert_eq!(golden["scope"], "members", "{golden}");
@@ -4796,6 +4804,10 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
             json!({"calls": {"task-delete": 1}}),
         ),
         // An operation not called is left off, never counted zero.
+        (
+            "a task-update call beside no `updated_fields`",
+            json!({"calls": {"task-update": 1}}),
+        ),
         (
             "a call counted zero times",
             json!({"calls": {"project-show": 0}}),

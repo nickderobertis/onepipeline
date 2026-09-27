@@ -1106,7 +1106,11 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     // `writeback_budget::a_copy_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithmetic`
     // and `delivers::a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch`.
     // A journey holding a `stop` past the sixty-second floor would spend that minute on no line
-    // those three do not already reach.
+    // those three do not already reach. A stop that lands inside a rate limit's wait the driver
+    // was serving makes its one release attempt all the same: the stopping process cannot see
+    // the driver's wait, which lives in the driver's memory, and neither record this run keeps
+    // — the landed baseline (entry 93) and the projection record (entry 73), both fixed shapes —
+    // has a field to carry it across, so there is no branch here a journey could hold.
     let attempted = project(
         &store,
         per_item_budget(launch),
@@ -2026,7 +2030,6 @@ fn owned(metadata: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
         .collect()
 }
 
-/// The prefix of every metadata key this engine owns.
 const OWNED_PREFIX: &str = "onepipeline.";
 
 /// The project metadata a copy writes: the destination's own, with each engine-owned key it
@@ -2234,6 +2237,15 @@ impl LandedBaseline {
     /// Refuse a file this build did not write for this run: another version, another project,
     /// a destination that is not a qualified id, a digest that is not one, or a key the engine
     /// does not own.
+    // llmlint: ignore-block[changed_behavior_has_e2e] every refusal below is one arm of this one
+    // function, and they share one consequence, which is the only behaviour a driver shows: the
+    // file is said on standard error with the arm's reason and the baseline is taken as empty,
+    // each lineage then read once by its own id. That consequence is driven end to end by
+    // `writeback_projections::a_landed_baseline_the_driver_cannot_read_is_said_and_each_item_read_by_its_id`
+    // through the foreign-key arm, and
+    // `writeback::tests::entry_93s_example_is_the_landed_baseline_the_worker_writes_and_reads`
+    // holds every arm's refusal against the entry's own example. A journey per arm would drive
+    // the same lines with a different sentence in the log.
     fn checked(&self, project: &QualifiedId) -> Result<(), String> {
         if self.schema_version != WRITEBACK_LANDED_SCHEMA_VERSION {
             return Err(format!(
@@ -2309,6 +2321,7 @@ impl LandedBaseline {
         }
         Ok(())
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 impl LandedItem {
@@ -3042,16 +3055,29 @@ impl ProjectionCalls {
     ///
     /// # Errors
     ///
-    /// Refuses `updated_fields` beside no `task-update` call: fields no update wrote.
+    /// Refuses `updated_fields` beside no `task-update` call — fields no update wrote — and a
+    /// `task-update` call beside no `updated_fields`, which every attempt that made one names.
     pub fn new(
         counts: BTreeMap<StoreCall, NonZeroU64>,
         updated_fields: Option<BTreeMap<UpdatedField, NonZeroU64>>,
     ) -> Result<Self, String> {
-        if updated_fields.is_some() && !counts.contains_key(&StoreCall::TaskUpdate) {
-            return Err(
-                "`updated_fields` is named without a `task-update` call to have written them"
-                    .to_owned(),
-            );
+        match (
+            updated_fields.is_some(),
+            counts.contains_key(&StoreCall::TaskUpdate),
+        ) {
+            (true, false) => {
+                return Err(
+                    "`updated_fields` is named without a `task-update` call to have written them"
+                        .to_owned(),
+                )
+            }
+            (false, true) => {
+                return Err(
+                    "`task-update` was called and no `updated_fields` says what it wrote"
+                        .to_owned(),
+                )
+            }
+            (true, true) | (false, false) => {}
         }
         Ok(Self {
             counts,
