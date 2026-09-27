@@ -1618,7 +1618,7 @@ fn origin_hook(repo: &Repository, script: &str) {
     use std::os::unix::fs::PermissionsExt;
     let hook = repo.origin.join("hooks").join("pre-receive");
     std::fs::write(&hook, script).expect("the hook is written");
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700))
         .expect("the hook is executable");
 }
 

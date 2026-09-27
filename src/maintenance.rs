@@ -522,16 +522,17 @@ pub(crate) struct PoolsMaintained {
     /// to the record as the record's own document spells it.
     // llmlint: ignore[invalid_states_unrepresentable] the instant is a `String` on every record this crate writes — `LaunchRecord::started_at`, the envelope's `ts` — and on the sibling's `SlotStatus::last_maintained` beside it; the one writer is `sys::now_rfc3339`, and `payload::PoolMaintenance` declares the same shape.
     pub(crate) started_at: String,
-    /// Every identity, in sorted order.
-    pub(crate) identities: Vec<Maintained>,
-    /// Why the identities could not be enumerated at all, where they could not.
-    pub(crate) failure: Option<String>,
+    /// Every identity, in sorted order; or why the identities could not be
+    /// enumerated at all, where they could not.
+    pub(crate) identities: std::result::Result<Vec<Maintained>, String>,
 }
 
 impl PoolsMaintained {
     /// Whether this sweep is written into the record at all.
     fn is_recorded(&self) -> bool {
-        self.failure.is_some() || self.identities.iter().any(Maintained::is_recorded)
+        self.identities.as_ref().map_or(true, |identities| {
+            identities.iter().any(Maintained::is_recorded)
+        })
     }
 
     /// The `pool-maintenance` record's payload.
@@ -543,13 +544,14 @@ impl PoolsMaintained {
                 Value::Array(
                     self.identities
                         .iter()
+                        .flatten()
                         .filter(|identity| identity.is_recorded())
                         .map(Maintained::payload)
                         .collect(),
                 ),
             ),
         ]);
-        if let Some(failure) = &self.failure {
+        if let Err(failure) = &self.identities {
             payload.insert("error".to_owned(), json!(crate::engine::bounded(failure)));
         }
         payload
@@ -571,8 +573,7 @@ fn maintain_pools(config: &MaintenanceConfig) -> (PoolsMaintained, Vec<String>) 
             return (
                 PoolsMaintained {
                     started_at,
-                    identities: Vec::new(),
-                    failure: Some(failure),
+                    identities: Err(failure),
                 },
                 Vec::new(),
             )
@@ -585,8 +586,7 @@ fn maintain_pools(config: &MaintenanceConfig) -> (PoolsMaintained, Vec<String>) 
     (
         PoolsMaintained {
             started_at,
-            identities,
-            failure: None,
+            identities: Ok(identities),
         },
         keys,
     )
@@ -1003,7 +1003,7 @@ impl Maintenance {
         journal: &mut crate::journal::Journal,
         swept: &PoolsMaintained,
     ) -> Result<()> {
-        if let Some(failure) = &swept.failure {
+        if let Err(failure) = &swept.identities {
             eprintln!("onepipeline: the pool-maintenance sweep could not enumerate this host's identities: {failure}");
         }
         if swept.is_recorded() {
@@ -1431,7 +1431,7 @@ mod tests {
     fn a_sweep_is_recorded_where_something_ran_or_a_due_slot_could_not_and_never_otherwise() {
         let nothing = PoolsMaintained {
             started_at: "2026-09-20T00:00:00.000Z".into(),
-            identities: vec![
+            identities: Ok(vec![
                 quiet("a", IdentityOutcome::NoMaintainCommand),
                 quiet("b", IdentityOutcome::NoSlots),
                 quiet(
@@ -1451,8 +1451,7 @@ mod tests {
                         },
                     ]),
                 ),
-            ],
-            failure: None,
+            ]),
         };
         assert!(!nothing.is_recorded());
 
@@ -1469,21 +1468,20 @@ mod tests {
         ] {
             let held = PoolsMaintained {
                 started_at: "2026-09-20T00:00:00.000Z".into(),
-                identities: vec![quiet(
+                identities: Ok(vec![quiet(
                     "a",
                     IdentityOutcome::Slots(vec![SlotMaintenance {
                         number: 1,
                         outcome: kept.clone(),
                     }]),
-                )],
-                failure: None,
+                )]),
             };
             assert!(held.is_recorded(), "{kept:?} was not recorded");
         }
 
         let something = PoolsMaintained {
             started_at: "2026-09-20T00:00:00.000Z".into(),
-            identities: vec![
+            identities: Ok(vec![
                 quiet("a", IdentityOutcome::NoMaintainCommand),
                 ran("b"),
                 quiet("c", IdentityOutcome::Claimed { by_pid: 42 }),
@@ -1492,8 +1490,7 @@ mod tests {
                     every: "1d".parse().expect("a span"),
                     outcome: Err("the registry could not be read".into()),
                 },
-            ],
-            failure: None,
+            ]),
         };
         assert!(something.is_recorded());
         let payload = Value::Object(something.payload());
@@ -1531,8 +1528,7 @@ mod tests {
 
         let failed = PoolsMaintained {
             started_at: "2026-09-20T00:00:00.000Z".into(),
-            identities: Vec::new(),
-            failure: Some("the host's registered identities could not be read".into()),
+            identities: Err("the host's registered identities could not be read".into()),
         };
         assert!(failed.is_recorded());
         let payload = Value::Object(failed.payload());
