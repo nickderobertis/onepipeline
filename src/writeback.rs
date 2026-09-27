@@ -2530,9 +2530,11 @@ fn write_shadow(
         written.insert(path);
     }
     // A superseded node has no shadow task of its own, and neither has anything an earlier
-    // build left here: the copy reads every task the shadow store holds as a member of the
-    // project, so a document this snapshot did not write — keyed by no lineage, and read by
-    // `known_id` before this runs — would stand as a member the run knows nothing of.
+    // build left here. A member copy writes only the members it names, but it first lists the
+    // shadow project's tasks to tell those from the rest, and a listed task naming no
+    // destination item is one an edge of a named member may not point at — so a document this
+    // snapshot did not write, keyed by no lineage (and read by `known_id` before this runs), is
+    // taken out rather than left to stand as a task the run knows nothing of.
     for entry in std::fs::read_dir(&tasks).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
         if !written.contains(&path) {
