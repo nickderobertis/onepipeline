@@ -327,6 +327,10 @@ fn settling_at(landing: &str) -> Value {
 /// repository is refused as naming no registered one. What does **not** refuse
 /// it is a stream it cannot write: `onevcs` warns on a record it could not append
 /// and goes on, by design, so that is not a refusal a journey can reach.
+// llmlint: ignore-block[tests_mirror_real_usage] no `onevcs` verb makes the library refuse
+// a record, and the task names a host-side fault as the way a refusal happens; a registry
+// the process cannot read is that fault, produced as a host produces it. Every call
+// through it is still the real library's, reached through the real binary.
 #[cfg(unix)]
 fn registry_readable(world: &World, yes: bool) {
     use std::os::unix::fs::PermissionsExt;
@@ -336,6 +340,7 @@ fn registry_readable(world: &World, yes: bool) {
     )
     .expect("the permission changes");
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A run whose replacement failed on [`SECOND`] and was then landed by hand and
 /// settled at that landing by a planner, with a driver alive beside it —
@@ -772,7 +777,6 @@ fn the_backfill_verb_records_what_a_settled_run_never_did_once() {
     let class = classified(&world, FIRST);
     assert_ne!(class["class"], "superseded-with-changes", "{class}");
 
-    // Answered: the pair, and nothing recorded.
     world
         .run(&["supersessions", run])
         .exited(0)
@@ -826,7 +830,6 @@ fn the_backfill_verb_records_what_a_settled_run_never_did_once() {
     );
     registry_readable(&world, true);
 
-    // Recorded: the same function a driver calls, and the same record.
     world
         .run(&["supersessions", run, "--record"])
         .exited(0)
@@ -859,7 +862,6 @@ fn the_backfill_verb_records_what_a_settled_run_never_did_once() {
     assert_eq!(recorded["lineages"][0]["failed"], json!([]), "{recorded}");
     assert_eq!(superseded(&world, run).len(), 1);
 
-    // Twice: nothing new, and still a success.
     let before = superseded(&world, run).len();
     world
         .run(&["supersessions", run, "--record"])
@@ -1159,7 +1161,6 @@ fn an_idle_pass_retires_what_other_runs_left_and_keeps_the_slot_that_held_one() 
             world.dump()
         );
     }
-    // And then a person merges both change requests on the host.
     world.script("gh.merged", "");
     for run in ["slotted", "overflowed"] {
         let url = settlement(&world, run, run)["change_url"]
@@ -1188,7 +1189,6 @@ fn an_idle_pass_retires_what_other_runs_left_and_keeps_the_slot_that_held_one() 
         );
     }
 
-    // What each is to `onevcs` before the pass, and every place holding it.
     let mut places: Vec<(String, Value)> = Vec::new();
     for branch in ["done/slotted", "done/overflowed"] {
         let class = classified(&world, branch);
@@ -1441,7 +1441,6 @@ fn a_pass_that_fails_is_journalled_and_the_run_settles_as_it_would_have() {
     let sessions = world.onevcs_home().join("sessions");
     std::fs::create_dir_all(&sessions).expect("the sessions directory exists");
 
-    // Without a pass: the plan's own settlement.
     world.script("hold.go", "go");
     let path = world.plan(
         "plain",
