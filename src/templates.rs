@@ -55,7 +55,7 @@ pub const REPOSITORY_DIR: &str = ".onepipeline/templates";
 /// What a template file for a name is called: `<name>` and this.
 pub const EXTENSION: &str = ".md.j2";
 
-/// The pattern a registered name matches. [`is_template_name`] is its one reading, and
+/// The pattern a registered name matches. One function in this module is its reading, and
 /// `tests/contract.rs` holds the two to each other and to the contract's block.
 pub const NAME_PATTERN: &str = "^[a-z][a-z0-9-]*$";
 
