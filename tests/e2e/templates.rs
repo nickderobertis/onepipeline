@@ -790,6 +790,16 @@ fn every_name_resolves_at_the_first_layer_that_supplies_it_and_says_which() {
     )
     .exited(REFUSED)
     .err_has("--repository github.com/owner/unregistered: its checkout could not be resolved");
+    // A layer's file that is there and is not a template file is refused where it is,
+    // never passed over for the layer under it.
+    let odd_root = world.root.join("odd-root");
+    std::fs::create_dir_all(odd_root.join("plan-task.md.j2")).expect("a directory by that name");
+    verb(&world, &dir, &odd_root, &["resolve", BUILT_IN])
+        .exited(REFUSED)
+        .err_has(&format!(
+            "{} (host layer) is not a template file",
+            odd_root.join("plan-task.md.j2").display()
+        ));
     // An explicit file that is not there is refused, never passed over for the next layer.
     let absent = world.root.join("absent.md.j2");
     verb(
@@ -1146,6 +1156,9 @@ fn a_rendered_task_holds_until_its_template_changes(world: &World, name: &str) {
     );
     let refused = check(HAS_REFUSALS);
     assert!(refused.contains("no criteria listed"), "{refused}");
+    verb(world, &dir, &root, &["check", name, "--item", &id])
+        .exited(REFUSED)
+        .err_has(&format!("item {id}: no criteria listed"));
     world
         .run_from(&dir, &["plan", "check", &plan])
         .exited(HAS_REFUSALS)

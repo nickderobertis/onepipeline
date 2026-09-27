@@ -211,7 +211,8 @@ an accept. A loader refusal short-circuits: there is no loaded plan to hand a
 check, so each is reported as not run.
 
 `--template-root` names the host's template root and `--require-rendered` turns
-on the rendered-only check, each read exactly as `start` reads it.
+on the rendered-only check, each read by its flag and then its environment
+variable; `plan check` reads no launch config.
 
 The run's own record does not move: the journal, the ledger, and the graph a run
 is executing are still this crate's, projected from that journal under the run's
@@ -225,7 +226,7 @@ A task's shape is a template its host owns. `<root>/templates.yaml` registers
 named templates beside the one this crate ships, `plan-task`. Each name resolves
 at the first layer that supplies it: `--template FILE`, then the repository's
 `.onepipeline/templates/<name>.md.j2`, then `<root>/<name>.md.j2`, then the
-built-in. `onepipeline template list`, `template resolve <NAME> --json` and
+built-in. `onepipeline template list`, `template resolve <NAME> [--json]` and
 `template check <NAME> [--rendering FILE|- | --item <ID>]` report, state and
 validate them. None of them writes anything; the rendering is `onetaskgraph`'s:
 

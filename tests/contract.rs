@@ -8720,3 +8720,49 @@ fn the_task_templates_are_what_the_contract_names() {
     assert_eq!(config.require_rendered, Some(true));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The README's template paragraph restates the contract's C4 and C8: every backticked run
+/// in it is one `docs/contract.md` writes, and its example is a command line this binary
+/// parses piped into the loader-document flag the contract names.
+#[test]
+fn the_readmes_template_passage_is_a_gated_copy_of_the_contract() {
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("the README");
+    let passage = readme
+        .split_once("A task's shape is a template its host owns.")
+        .expect("the README has a template passage")
+        .1
+        .split_once("## What it does")
+        .expect("that passage ends at the next section")
+        .0;
+    let (prose, example) = passage
+        .split_once("```bash\n")
+        .expect("the passage shows an example");
+    for token in backticked_runs(prose) {
+        assert!(
+            CONTRACT.contains(&token),
+            "the README's template passage writes `{token}`, which the contract does not"
+        );
+    }
+    let example = example
+        .split_once("\n```")
+        .expect("the example's fence closes")
+        .0
+        .replace("\\\n", " ");
+    let (ours, theirs) = example
+        .split_once(" | ")
+        .expect("the example pipes this binary into onetaskgraph");
+    let parsed = Cli::try_parse_from(ours.split_whitespace())
+        .unwrap_or_else(|error| panic!("the README shows `{ours}`, which does not parse: {error}"));
+    assert!(
+        matches!(
+            parsed.command,
+            Command::Template(onepipeline::cli::TemplateCommand::Resolve(ref resolve))
+                if resolve.json
+        ),
+        "the README's example is not a `template resolve --json`: {ours}"
+    );
+    assert!(
+        theirs.contains("--template-loader -") && CONTRACT.contains("--template-loader -"),
+        "the README's example does not hand the loader document on stdin: {theirs}"
+    );
+}

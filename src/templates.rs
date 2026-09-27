@@ -628,8 +628,24 @@ pub(crate) fn locate(name: &str, search: Search<'_>) -> Result<(Layer, Option<Pa
             continue;
         };
         let candidate = directory.join(&file);
-        if candidate.is_file() {
-            return Ok((layer, Some(candidate)));
+        // Absent is the one answer that passes the name to the next layer: a file that is
+        // there and cannot be read, or is not a file, is refused where it is, so a layer
+        // under it never wins by an error nobody saw.
+        match std::fs::metadata(&candidate) {
+            Ok(held) if held.is_file() => return Ok((layer, Some(candidate))),
+            Ok(_) => {
+                return Err(Error::Invalid(format!(
+                    "{} ({layer} layer) is not a template file",
+                    candidate.display()
+                )))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Error::Invalid(format!(
+                    "{} ({layer} layer) cannot be read: {error}",
+                    candidate.display()
+                )))
+            }
         }
         searched.push(candidate.display().to_string());
     }
