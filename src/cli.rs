@@ -224,6 +224,9 @@ pub enum Command {
     // llmlint: ignore-end[new_command_or_client_gets_its_own_project]
     /// Per-node outcomes, with each node's own evidence.
     Results(RunArgs),
+    // llmlint: ignore[new_command_or_client_gets_its_own_project] a verb of this one binary
+    // rather than a new command or client: it reads the run store the engine owns and records
+    // through the `onevcs` library it already links, as the verbs in the block above do.
     /// Which earlier attempts of a run's landed retries are superseded, read off
     /// its journal alone, and — with `--record` — record them with onevcs.
     Supersessions(SupersessionsArgs),

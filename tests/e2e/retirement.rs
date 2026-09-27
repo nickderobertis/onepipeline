@@ -20,6 +20,11 @@
 // boundary so a journey states a dispatch outcome rather than paying for a model turn, and
 // GitHub at `onevcs`'s own `ONEVCS_GH` override. `harness.rs` carries the same suppression
 // and the full rationale.
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] every journey here
+// verifies behavior of the root crate's own source — `src/supersession.rs`'s recording and
+// backfill verb and `src/maintenance.rs`'s retirement pass — through the real sibling, so
+// the root source edge is the edge that owns it, as `dispatch.rs`'s real-sibling journeys
+// state for theirs.
 
 use std::path::{Path, PathBuf};
 
@@ -94,7 +99,6 @@ fn settlement(world: &World, run: &str, node: &str) -> Value {
         .clone()
 }
 
-/// Every `branches-superseded` a run journalled.
 fn superseded(world: &World, run: &str) -> Vec<Value> {
     world.events_of(run, "branches-superseded")
 }
@@ -772,8 +776,12 @@ fn the_backfill_verb_refuses_a_run_whose_launch_record_does_not_read() {
     first_attempt(&world, run);
     let journal = world.run_file(run, "events.jsonl");
     let before = std::fs::read_to_string(&journal).expect("the journal reads");
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb writes an unreadable launch
+    // record — a truncated or corrupted file on disk is the only way a run reaches this
+    // state, so the journey writes one; the verb under test is still the real binary's.
     std::fs::write(world.run_file(run, "launch.json"), "{ not json")
         .expect("the record is written");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     for args in [
         &["supersessions", run][..],
         &["supersessions", run, "--record"][..],
@@ -835,7 +843,6 @@ fn sweeping(world: &World, run: &str, hold: Value, nodes: Vec<Value>) {
         .exited(0);
 }
 
-/// Every branch a run's `branches-retired` records name, in order.
 fn retired(world: &World, run: &str) -> Vec<Value> {
     world
         .events_of(run, "branches-retired")
@@ -886,7 +893,6 @@ fn until_retired(world: &World, run: &str, branches: &[&str]) {
     });
 }
 
-/// Whether a repository on disk carries a branch.
 fn holds(world: &World, repo: &Path, branch: &str) -> bool {
     !git(world, repo, &["branch", "--list", branch])
         .trim()

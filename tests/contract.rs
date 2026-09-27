@@ -5508,18 +5508,14 @@ fn the_retirement_proposal_names_exactly_this_builds_kinds_and_verb() {
     let parsed = command
         .find_subcommand(verb)
         .unwrap_or_else(|| panic!("`{verb}` is not a verb of the binary"));
-    for flag in block["verb_flags"]
-        .as_array()
-        .expect("entry 91 names its flags")
-    {
-        let flag = flag.as_str().expect("a flag").trim_start_matches("--");
-        assert!(
-            parsed
-                .get_arguments()
-                .any(|argument| argument.get_long() == Some(flag)),
-            "`{verb}` takes no --{flag}"
-        );
-    }
+    let proposed: BTreeSet<String> = serde_json::from_value(block["verb_flags"].clone())
+        .expect("entry 91 names its flags as a list");
+    let parsed_flags: BTreeSet<String> = parsed
+        .get_arguments()
+        .filter_map(|argument| argument.get_long())
+        .map(|flag| format!("--{flag}"))
+        .collect();
+    assert_eq!(proposed, parsed_flags, "`{verb}`'s flags");
     assert_eq!(
         block["verb_exits"]["answered_or_recorded"],
         json!(EXIT_SUCCESS)
