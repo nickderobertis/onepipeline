@@ -1647,9 +1647,13 @@ fn a_lifecycle_node_resolves_against_its_publication_checkout() {
     let root = host(&world);
     let dir = world.project.clone();
     let repository = world.repository("local-direct", &[]);
+    // Joined a component at a time, so the path the refusal is held to below is spelled
+    // with the platform's own separator, as the engine joins it.
     let overridden = repository
         .checkout
-        .join(".onepipeline/templates/plan-task.md.j2");
+        .join(".onepipeline")
+        .join("templates")
+        .join("plan-task.md.j2");
     write(&overridden, &task_template("the service's own"));
     let loader = verb(
         &world,
