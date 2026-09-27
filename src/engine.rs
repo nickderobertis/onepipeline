@@ -529,7 +529,7 @@ pub(crate) enum Message {
     Settled(Box<Settled>),
     /// The pool-maintenance sweep this driver started has maintained every
     /// identity, and this is what it did.
-    Maintained(Box<crate::maintenance::Swept>),
+    Maintained(Box<crate::maintenance::PoolsMaintained>),
     /// That sweep's retirement pass has finished, which ends the sweep, and
     /// this is what it retired.
     Retired(Box<crate::maintenance::Retirements>),

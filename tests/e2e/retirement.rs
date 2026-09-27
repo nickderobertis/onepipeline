@@ -1583,9 +1583,9 @@ fn a_node_pinned_to_a_retired_branch_is_cut_fresh_from_the_base() {
 /// A branch whose origin refuses its deletion is retired in part: the pass journals
 /// a failure naming the identity, the branch and what the origin answered, the
 /// copy the origin kept stays, and the run settles as it would have.
-/// A lossless branch the origin carries, published and named by a record of the
-/// host's — a supersession — which is what makes a branch whose commits an origin
-/// ref holds one a pass examines, and so one whose retirement pushes a deletion.
+/// Cut `branch` lossless, push it to the origin, and record it superseded by
+/// `main`: a pass examines a branch an origin ref holds only where a record of
+/// the host's names it, so this is one a pass retires by pushing a deletion.
 #[cfg(unix)]
 fn published_and_superseded(world: &World, repo: &Repository, branch: &str, file: &str) {
     lossless(world, repo, branch, file);
@@ -1616,7 +1616,6 @@ fn published_and_superseded(world: &World, repo: &Repository, branch: &str, file
     );
 }
 
-/// Install `script` as the origin's `pre-receive` hook.
 #[cfg(unix)]
 fn origin_hook(repo: &Repository, script: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -1708,19 +1707,29 @@ fn a_deletion_the_origin_refuses_is_journalled_against_its_branch() {
     assert_eq!(result["nodes"][0]["status"], "done", "{result}");
 }
 
-/// A sweep's `pool-maintenance` record is journalled once every identity is
-/// maintained, while its retirement pass is still running, and the pass's own
-/// `branches-retired` follows when the pass is done.
+/// A sweep maintains every identity before its retirement pass begins, and its
+/// `pool-maintenance` record is journalled while that pass is still running;
+/// the pass's own `branches-retired` follows when the pass is done.
 ///
-/// The pass is held at the origin, deleting a published lossless branch, so the
-/// record can only be on the journal if it was written before the pass ended.
+/// The pass is held at `service`'s origin, deleting a published lossless branch.
+/// `tail` sorts after `service`, so a record naming both identities while the
+/// hold stands is one written after every identity was maintained and before
+/// the pass ended.
 #[cfg(unix)]
 #[test]
 fn a_sweep_records_its_maintenance_before_its_retirement_pass_ends() {
     let world = sweeping_world("retirement-after-maintenance");
     let repo = world.repository("local-direct", &[]);
-    crate::maintenance::pooled_with_maintenance(&world, None);
+    let tail = world.extra_repository("tail");
+    let maintain = crate::maintenance::interpreted_script(&world, "maintain");
+    let command = serde_json::to_string(&[maintain.as_str()]).expect("an argv serializes");
+    crate::maintenance::pooled_with_commands(
+        &world,
+        &[("service", command.as_str()), ("tail", command.as_str())],
+        "120s",
+    );
     crate::maintenance::cut_a_slot(&world, &repo.checkout);
+    crate::maintenance::cut_a_slot(&world, &tail.checkout);
     published_and_superseded(&world, &repo, "done/published", "published.md");
     let (entered, go) = origin_held(&world, &repo);
 
@@ -1736,6 +1745,24 @@ fn a_sweep_records_its_maintenance_before_its_retirement_pass_ends() {
     world.until("the maintenance record", |world| {
         !crate::maintenance::records(world, "sweeper").is_empty()
     });
+    let record = &crate::maintenance::records(&world, "sweeper")[0];
+    let identities = record["payload"]["identities"]
+        .as_array()
+        .expect("identities");
+    assert_eq!(
+        identities
+            .iter()
+            .map(|entry| entry["identity"].as_str().expect("a key"))
+            .collect::<Vec<_>>(),
+        [SERVICE_IDENTITY, "github.com/owner/tail"],
+        "{record}"
+    );
+    for entry in identities {
+        assert_eq!(
+            entry["outcome"]["slots"][0]["outcome"]["ran"]["outcome"], "succeeded",
+            "{record}"
+        );
+    }
     assert!(
         world.events_of("sweeper", "branches-retired").is_empty(),
         "{}",

@@ -67,7 +67,7 @@ fn sweeps(world: &World, run: &str) -> u64 {
 ///
 /// A `.bat` on Windows, with CRLF for the reason `harness::write_hook_script`
 /// gives; the POSIX script everywhere else, marked executable.
-fn interpreted_script(world: &World, stem: &str) -> String {
+pub(crate) fn interpreted_script(world: &World, stem: &str) -> String {
     #[cfg(windows)]
     {
         let path = world.root.join(format!("{stem}.bat"));
@@ -115,7 +115,7 @@ fn pooled_with_command(world: &World, command: &str, timeout: &str) {
     pooled_with_commands(world, &[("service", command)], timeout);
 }
 
-fn pooled_with_commands(world: &World, named: &[(&str, &str)], timeout: &str) {
+pub(crate) fn pooled_with_commands(world: &World, named: &[(&str, &str)], timeout: &str) {
     let mut document = "version: 1\nrules:\n".to_owned();
     for (name, command) in named {
         document.push_str(&format!(

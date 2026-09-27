@@ -514,9 +514,10 @@ fn resolved(
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
-/// What one sweep did: every identity it visited, and how the enumeration went.
+/// What one sweep's maintenance did: every identity it visited, and how the
+/// enumeration went. The sweep's retirement pass reports apart, as [`Retirements`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Swept {
+pub(crate) struct PoolsMaintained {
     /// When the sweep started, RFC3339, stamped by `sys::now_rfc3339` and carried
     /// to the record as the record's own document spells it.
     // llmlint: ignore[invalid_states_unrepresentable] the instant is a `String` on every record this crate writes — `LaunchRecord::started_at`, the envelope's `ts` — and on the sibling's `SlotStatus::last_maintained` beside it; the one writer is `sys::now_rfc3339`, and `payload::PoolMaintenance` declares the same shape.
@@ -527,7 +528,7 @@ pub(crate) struct Swept {
     pub(crate) failure: Option<String>,
 }
 
-impl Swept {
+impl PoolsMaintained {
     /// Whether this sweep is written into the record at all.
     fn is_recorded(&self) -> bool {
         self.failure.is_some() || self.identities.iter().any(Maintained::is_recorded)
@@ -562,13 +563,13 @@ fn identities() -> std::result::Result<Vec<String>, String> {
 
 /// Maintain every registered identity once, on the schedule; and the keys it
 /// visited, which the retirement pass then walks.
-fn sweep(config: &MaintenanceConfig) -> (Swept, Vec<String>) {
+fn maintain_pools(config: &MaintenanceConfig) -> (PoolsMaintained, Vec<String>) {
     let started_at = crate::sys::now_rfc3339();
     let keys = match identities() {
         Ok(keys) => keys,
         Err(failure) => {
             return (
-                Swept {
+                PoolsMaintained {
                     started_at,
                     identities: Vec::new(),
                     failure: Some(failure),
@@ -582,7 +583,7 @@ fn sweep(config: &MaintenanceConfig) -> (Swept, Vec<String>) {
         .map(|identity| maintain(config, identity.clone()))
         .collect();
     (
-        Swept {
+        PoolsMaintained {
             started_at,
             identities,
             failure: None,
@@ -659,10 +660,10 @@ fn maintain(config: &MaintenanceConfig, identity: String) -> Maintained {
 
 /// The one maintenance thread a driver runs at a time.
 ///
-/// Started on an idle pass, it hands its [`Swept`] back over the loop's own
-/// channel and is joined where the loop takes it up — or, where the loop ends
-/// first, when this is dropped, which is what makes a driver closing out wait
-/// for it. The join is bounded by construction: every command the sweep runs is
+/// Started on an idle pass, it hands its [`PoolsMaintained`] and then its
+/// [`Retirements`] back over the loop's own channel, and is joined where the
+/// loop takes up the second — or, where the loop ends first, when this is
+/// dropped, which is what makes a driver closing out wait for it. The join is bounded by construction: every command the sweep runs is
 /// under its identity's own `timeout`.
 ///
 /// While it is live the run root carries a marker, which is what lets `status`
@@ -700,7 +701,7 @@ impl Sweep {
         let handle = std::thread::Builder::new()
             .name("pool-maintenance".to_owned())
             .spawn(move || {
-                let (swept, keys) = sweep(&config);
+                let (swept, keys) = maintain_pools(&config);
                 // A loop that has gone has nobody to record it; the slots keep
                 // their own stamps regardless.
                 let _ = tx.send(Message::Maintained(Box::new(swept)));
@@ -1000,7 +1001,7 @@ impl Maintenance {
         &mut self,
         paths: &RunPaths,
         journal: &mut crate::journal::Journal,
-        swept: &Swept,
+        swept: &PoolsMaintained,
     ) -> Result<()> {
         if let Some(failure) = &swept.failure {
             eprintln!("onepipeline: the pool-maintenance sweep could not enumerate this host's identities: {failure}");
@@ -1428,7 +1429,7 @@ mod tests {
     /// each with the sibling's own outcome shape.
     #[test]
     fn a_sweep_is_recorded_where_something_ran_or_a_due_slot_could_not_and_never_otherwise() {
-        let nothing = Swept {
+        let nothing = PoolsMaintained {
             started_at: "2026-09-20T00:00:00.000Z".into(),
             identities: vec![
                 quiet("a", IdentityOutcome::NoMaintainCommand),
@@ -1466,7 +1467,7 @@ mod tests {
                 reason: "its worktree is not a repository".into(),
             },
         ] {
-            let held = Swept {
+            let held = PoolsMaintained {
                 started_at: "2026-09-20T00:00:00.000Z".into(),
                 identities: vec![quiet(
                     "a",
@@ -1480,7 +1481,7 @@ mod tests {
             assert!(held.is_recorded(), "{kept:?} was not recorded");
         }
 
-        let something = Swept {
+        let something = PoolsMaintained {
             started_at: "2026-09-20T00:00:00.000Z".into(),
             identities: vec![
                 quiet("a", IdentityOutcome::NoMaintainCommand),
@@ -1528,7 +1529,7 @@ mod tests {
             outcome: read,
         };
 
-        let failed = Swept {
+        let failed = PoolsMaintained {
             started_at: "2026-09-20T00:00:00.000Z".into(),
             identities: Vec::new(),
             failure: Some("the host's registered identities could not be read".into()),
