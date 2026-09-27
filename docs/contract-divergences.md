@@ -7469,7 +7469,10 @@ branch fresh from the base.
 Driven end to end by `tests/e2e/retirement.rs` against the linked `onevcs` over real git
 and a bare origin: the recording on each of the three landing paths, with the first
 attempt's branch then classified `superseded-with-changes` by that library while it still
-differs from the base and `retirable` once the base carries it; a refused recording
+differs from the base and `retirable` once the base carries it; a lineage retried twice
+recording both earlier attempts root first; a `settle` applied by a `reply` with nothing
+driving the run, and one a dead driver's queue held applied by the `reply` that takes the
+run over, each recording there; a refused recording
 journalled with the settlement unchanged; a same-branch retry recording nothing; the
 backfill verb's three exits, both output forms and its idempotence; the pass retiring what
 other runs left while keeping the slot, with the `trigger` it journals the one `onevcs`

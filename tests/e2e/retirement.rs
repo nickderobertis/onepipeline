@@ -29,6 +29,7 @@ use crate::harness::{git, lifecycle, onevcs_binary, plan_of, Repository, World};
 
 const FIRST: &str = "try/first";
 const SECOND: &str = "try/second";
+const THIRD: &str = "try/third";
 const FIRST_WORK: &str = "the first attempt wrote this\n";
 
 /// The first attempt of the lineage every journey here retries: a lifecycle node
@@ -55,8 +56,13 @@ fn first_attempt(world: &World, run: &str) {
 /// Replace `svc` with `svc-2`, on `branch` or — `None` — on whatever the
 /// reconciler pins it to, which is the branch `svc` preserved.
 fn retry(world: &World, run: &str, branch: Option<&str>) {
+    retry_of(world, run, "svc", "svc-2", branch);
+}
+
+/// Replace `retried` with `replacement`, on `branch` or the one it preserved.
+fn retry_of(world: &World, run: &str, retried: &str, replacement: &str, branch: Option<&str>) {
     let mut node = json!({
-        "id": "svc-2", "repo": "service", "persona": "engineer",
+        "id": replacement, "repo": "service", "persona": "engineer",
         "title": "feat: ship svc",
         "task": "## What\nShip it again.\n\n## Why\nThe first try failed.\n\n\
                  ## Acceptance criteria\n- shipped.",
@@ -67,7 +73,7 @@ fn retry(world: &World, run: &str, branch: Option<&str>) {
     world
         .run_with_stdin(
             &["reply", run],
-            &json!({"version": 2, "commands": [{"op": "retry", "id": "svc", "node": node}]})
+            &json!({"version": 2, "commands": [{"op": "retry", "id": retried, "node": node}]})
                 .to_string(),
         )
         .exited(0);
@@ -221,7 +227,8 @@ fn a_retry_its_closeout_lands_records_the_attempt_it_superseded() {
 
 /// The first attempt again, in a run a held direct node keeps a driver alive for,
 /// so what follows is applied by the loop rather than by the process replying.
-fn first_attempt_beside_a_hold(world: &World, run: &str) {
+/// Answers the pid the detached launch announced for that driver.
+fn first_attempt_beside_a_hold(world: &World, run: &str) -> u32 {
     world.script("svc.work", FIRST_WORK);
     world.script("svc.fail", "1");
     world.script("hold.wait", "hold");
@@ -231,9 +238,14 @@ fn first_attempt_beside_a_hold(world: &World, run: &str) {
         run,
         &plan_of(run, vec![node, crate::harness::agent("hold", &[])]),
     );
-    world.run(&["start", &path, "--detach"]).exited(0);
+    let started = world.run(&["start", &path, "--detach"]);
+    started.exited(0);
     until_settled(world, run, "svc");
     assert_eq!(settlement(world, run, "svc")["status"], "failed");
+    started.json()["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .expect("a detached launch announces its driver's pid")
 }
 
 /// Wait until a node has recorded a settlement.
@@ -266,17 +278,18 @@ fn landed_by_hand(world: &World, repo: &Repository) -> String {
 /// Settle `svc-2` done at `landing`, as a planner does once a person landed it.
 fn settle_at(world: &World, run: &str, landing: &str) {
     world
-        .run_with_stdin(
-            &["reply", run],
-            &json!({"version": 2, "commands": [{
-                "op": "settle", "id": "svc-2", "outcome": "done",
-                "evidence": "a person landed its branch on the base by hand",
-                "landing": landing,
-            }]})
-            .to_string(),
-        )
+        .run_with_stdin(&["reply", run], &settling_at(landing).to_string())
         .exited(0)
         .out_has("\"applied\"");
+}
+
+/// The envelope a planner settles `svc-2` done at `landing` with.
+fn settling_at(landing: &str) -> Value {
+    json!({"version": 2, "commands": [{
+        "op": "settle", "id": "svc-2", "outcome": "done",
+        "evidence": "a person landed its branch on the base by hand",
+        "landing": landing,
+    }]})
 }
 
 /// Take the sibling's registry away from it — the document it resolves a
@@ -429,6 +442,126 @@ fn a_merge_completed_a_retry_recorded_records_the_attempt_it_superseded() {
     first_is_superseded_then_retirable(&world, &repo);
 }
 
+/// A lineage retried twice, each attempt on a branch of its own, records every
+/// earlier attempt against the one landing, root first.
+#[test]
+fn a_lineage_retried_twice_records_every_earlier_attempt_root_first() {
+    let world = World::new("retirement-chain");
+    let repo = world.repository("local-direct", &[]);
+    let run = "chain";
+    first_attempt(&world, run);
+    world.script("svc-2.work", "the second attempt wrote this\n");
+    world.script("svc-2.fail", "1");
+    retry(&world, run, Some(SECOND));
+    adopted(&world, run);
+    assert_eq!(settlement(&world, run, "svc-2")["status"], "failed");
+
+    world.script("svc-3.work", "the third attempt wrote this\n");
+    retry_of(&world, run, "svc-2", "svc-3", Some(THIRD));
+    adopted(&world, run);
+    let landed = settlement(&world, run, "svc-3");
+    assert_eq!(landed["outcome"], "merged", "{landed}\n{}", world.dump());
+
+    let records = superseded(&world, run);
+    assert_eq!(records.len(), 1, "{records:?}");
+    let payload = &records[0]["payload"];
+    assert_eq!(payload["node"], "svc-3", "{payload}");
+    assert_eq!(
+        payload["superseded"],
+        json!([{"node": "svc", "branch": FIRST}, {"node": "svc-2", "branch": SECOND}]),
+        "{payload}"
+    );
+    assert_eq!(
+        git(&world, &repo.origin, &["rev-parse", "main"]).trim(),
+        payload["landing"]
+    );
+    for branch in [FIRST, SECOND] {
+        let class = classified(&world, branch);
+        assert_eq!(class["class"], "superseded-with-changes", "{class}");
+        assert_eq!(class["superseded_by"]["branch"], THIRD, "{class}");
+    }
+}
+
+/// A `settle` stating where a retry landed, queued behind a driver that then dies
+/// holding the run, is applied by the `reply` that accepted it — which takes the
+/// run over and reconciles its queue — and the attempt the retry superseded is
+/// recorded there, with nothing driving the run.
+#[cfg(unix)]
+#[test]
+fn a_settle_a_dead_drivers_queue_held_records_the_attempt_it_superseded() {
+    use std::io::Write;
+
+    let world = World::new("retirement-takeover");
+    let repo = world.repository("local-direct", &[]);
+    let run = "takeover";
+    let driver = first_attempt_beside_a_hold(&world, run);
+    world.script("svc-2.work", "the second attempt wrote this\n");
+    world.script("svc-2.fail", "1");
+    retry(&world, run, Some(SECOND));
+    until_settled(&world, run, "svc-2");
+    let landing = landed_by_hand(&world, &repo);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] a write-back capture path that cannot be
+    // written is a state a host produces on its own — a full disk, a permission change — and
+    // `driver.rs`'s `a_driver_that_owns_a_run_and_claims_nothing` states the same fixture the
+    // same way, for the same reason: the driver has to hold the run without claiming its
+    // queue for long enough for a planner's reply to reach it, and how long a store takes to
+    // refuse is not an input the CLI exposes.
+    let capture = world.run_file(run, "writeback-project-show.stdout");
+    world.until("a projection to leave its capture behind", |_| {
+        capture.is_file()
+    });
+    std::fs::remove_file(&capture).expect("the completed capture is removed");
+    std::fs::create_dir(&capture).expect("a directory makes the capture path unwritable");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.release("hold.go");
+    until_settled(&world, run, "hold");
+
+    let queue = world.run_file(run, "channel/commands.jsonl");
+    let queued = || {
+        std::fs::read_to_string(&queue)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count()
+    };
+    let before = queued();
+    let mut replying = world
+        .cmd(&["reply", run])
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "3")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the reply starts");
+    let mut stdin = replying.stdin.take().expect("stdin is piped");
+    write!(stdin, "{}", settling_at(&landing)).expect("the envelope is written");
+    drop(stdin);
+    world.until("the settle to reach the run's command queue", |_| {
+        queued() == before + 1
+    });
+    assert!(superseded(&world, run).is_empty(), "{}", world.dump());
+
+    // The driver dies holding the run, and the reply takes it over.
+    crate::harness::end_process(driver);
+    let answered = replying.wait_with_output().expect("the reply answers");
+    let said = String::from_utf8_lossy(&answered.stdout);
+    assert!(
+        answered.status.success() && said.contains("\"applied\""),
+        "the queued settle was not applied by the reply: {said}{}",
+        String::from_utf8_lossy(&answered.stderr)
+    );
+    assert!(
+        world.events_of(run, "driver-adopted").is_empty(),
+        "something adopted the run, so this journey proves nothing about the reply"
+    );
+    let payload = recorded_the_first_attempt(&world, run);
+    assert_eq!(payload["landing"], landing, "{payload}");
+    let class = classified(&world, FIRST);
+    assert_eq!(class["class"], "superseded-with-changes", "{class}");
+    assert_eq!(class["superseded_by"]["branch"], SECOND, "{class}");
+}
+
 /// A retry continuing the branch its first attempt preserved is one branch
 /// `onevcs` chains itself: nothing is recorded, and the backfill says so.
 #[test]
@@ -519,6 +652,16 @@ fn the_backfill_verb_records_what_a_settled_run_never_did_once() {
     registry_readable(&world, false);
     settle_at(&world, run, &landing);
     registry_readable(&world, true);
+    // The `reply` that applied it, with nothing driving the run, asked and
+    // journalled the refusal itself.
+    let asked = superseded(&world, run);
+    assert_eq!(asked.len(), 1, "{asked:?}\n{}", world.dump());
+    assert_eq!(asked[0]["payload"]["superseded"], json!([]), "{asked:?}");
+    assert_eq!(asked[0]["payload"]["failed"][0]["node"], "svc", "{asked:?}");
+    assert_eq!(
+        asked[0]["payload"]["failed"][0]["branch"], FIRST,
+        "{asked:?}"
+    );
     as_an_older_build_left_it(&world, run);
     let class = classified(&world, FIRST);
     assert_ne!(class["class"], "superseded-with-changes", "{class}");
@@ -870,7 +1013,6 @@ fn an_idle_pass_retires_what_other_runs_left_and_keeps_the_slot_that_held_one() 
         slot.display()
     );
 
-    // The pass.
     sweeping(
         &world,
         "sweeper",
