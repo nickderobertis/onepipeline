@@ -1049,7 +1049,7 @@ pub(crate) enum MaintainedAnswer {
 
 /// `branches-superseded`: what one landed lineage told `onevcs` about the earlier
 /// attempts it superseded on branches of their own.
-// llmlint: ignore[boundary_inputs_validated] this module's own rule, stated at its head: a key no document names is not refused, because a record a later build wrote is the ordinary contents of a runs root — no payload document here denies unknown fields, and a reader of this one that did would call a newer build's record unreadable. What a reader acts on is still typed and required.
+// llmlint: ignore[boundary_inputs_validated] the rule stated at this module's head: no payload document denies unknown fields, so a newer build's record still reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct BranchesSuperseded {
     /// The node whose landing superseded them: the head of the lineage.
@@ -1080,7 +1080,7 @@ pub(crate) struct UnrecordedAttempt {
 
 /// `branches-retired`: what one idle pass's `onevcs::retire_finished` retired, or
 /// why a pass over an identity could not be made.
-// llmlint: ignore[boundary_inputs_validated] this module's own rule, stated at its head: a key no document names is not refused, because a record a later build wrote is the ordinary contents of a runs root — no payload document here denies unknown fields, and a reader of this one that did would call a newer build's record unreadable. What a reader acts on is still typed and required.
+// llmlint: ignore[boundary_inputs_validated] the rule stated at this module's head: no payload document denies unknown fields, so a newer build's record still reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct BranchesRetired {
     /// Every branch the pass deleted.

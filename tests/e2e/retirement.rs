@@ -884,7 +884,7 @@ fn the_backfill_verb_records_what_a_settled_run_never_did_once() {
 /// The backfill verb reads the run's journal alone: over a settled run whose
 /// launch record is missing, and then unreadable, and whose result is gone too, it
 /// still previews the pair, records it with `--record`, and records nothing new
-/// the second time.
+/// the second time — and a run whose journal is unreadable or missing is refused.
 #[cfg(unix)]
 #[test]
 fn the_backfill_verb_answers_and_records_from_the_journal_alone() {
@@ -952,6 +952,30 @@ fn the_backfill_verb_answers_and_records_from_the_journal_alone() {
         .out_has(&format!("superseded svc on {FIRST}: already recorded"));
     assert_eq!(superseded(&world, run).len(), 1);
     first_is_superseded_then_retirable(&world, &repo);
+
+    // The journal is the one thing it reads, so a run without a readable one is
+    // refused rather than answered as having nothing to record.
+    let journal = world.run_file(run, "events.jsonl");
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb removes or corrupts a run's
+    // journal — a lost or truncated file on disk is the only way a run reaches this state.
+    std::fs::write(&journal, "{ not json\n").expect("an unreadable journal is written");
+    for args in [
+        &["supersessions", run][..],
+        &["supersessions", run, "--record"][..],
+    ] {
+        world
+            .run(args)
+            .exited(crate::harness::REFUSED)
+            .out_lacks("nothing to record")
+            .err_has("the journal holds no record this build can read");
+    }
+    std::fs::remove_file(&journal).expect("the journal is removed");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world
+        .run(&["supersessions", run, "--record"])
+        .exited(crate::harness::REFUSED)
+        .err_has("events.jsonl");
+    assert!(!journal.exists(), "a refused --record wrote a journal");
 }
 
 /// The identity the world's `service` checkout registers as.

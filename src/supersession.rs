@@ -347,6 +347,10 @@ impl Watch {
         state: &RunState,
     ) -> Result<()> {
         for lineage in lineages(state) {
+            // llmlint: ignore[changed_behavior_has_e2e] once per lineage per driver by design,
+            // so a landing that later gains a commit is not asked again: `onevcs` credits the
+            // change-request record by the base commit naming that change, so a second record
+            // at the commit changes no class, and `supersessions --record` keys by landing.
             if !self.answered.insert(lineage.node.clone()) {
                 continue;
             }
@@ -465,8 +469,8 @@ impl Supersessions {
 ///
 /// # Errors
 ///
-/// A run with no directory under the runs root, or whose journal cannot be
-/// written.
+/// A run with no directory under the runs root, one whose journal cannot be read
+/// or holds no record this build reads, or one whose journal cannot be written.
 pub(crate) fn supersessions(paths: &RunPaths, mode: Mode) -> Result<Supersessions> {
     if !paths.exists() {
         return Err(crate::Error::NoSuchRun {
@@ -478,7 +482,7 @@ pub(crate) fn supersessions(paths: &RunPaths, mode: Mode) -> Result<Supersession
                 .to_path_buf(),
         });
     }
-    let mut events = journal::read(&paths.journal());
+    let mut events = journal_of(paths)?;
     journal::merge_order(&mut events);
     let state = crate::projection::fold(&events);
     let already = recorded_in(&events);
@@ -506,6 +510,27 @@ pub(crate) fn supersessions(paths: &RunPaths, mode: Mode) -> Result<Supersession
         mode,
         lineages,
     })
+}
+
+/// Every record of a run's journal, refusing a journal that cannot be opened or
+/// holds none this build reads: every run's journal opens with its launch, so an
+/// empty read is a store this verb cannot answer for rather than a run with
+/// nothing to record.
+fn journal_of(paths: &RunPaths) -> Result<Vec<Envelope>> {
+    let path = paths.journal();
+    std::fs::File::open(&path).map_err(|source| crate::Error::Ledger {
+        path: path.clone(),
+        source,
+    })?;
+    let events = journal::read(&path);
+    if events.is_empty() {
+        return Err(crate::Error::Invalid(format!(
+            "{}: the journal holds no record this build can read, so there is no run to \
+             answer for",
+            path.display()
+        )));
+    }
+    Ok(events)
 }
 
 /// The lines `onepipeline supersessions RUN` prints on stdout. What `onevcs`

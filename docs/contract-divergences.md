@@ -7429,7 +7429,8 @@ each superseded `(node, branch)` pair with whether the journal already records i
 `--record` it records each pair the journal does not, through the same function a driver
 calls, and appends the same `branches-superseded` per lineage that had one; so a second
 `--record` records nothing new. It exits `0` when it answered or recorded, nothing to
-record included; `2` for a refused invocation, such as an unknown run; and `1` when
+record included; `2` for a refused invocation, such as an unknown run or one whose
+journal is missing or holds no record this build reads; and `1` when
 `onevcs` refused a record, naming the refused branches — on stderr, with what `onevcs`
 answered for each, whichever form stdout is in. `--json` prints one object on stdout:
 `verb_json_fields` below, `mode` being `answer` or `record`, and each of its `lineages`
