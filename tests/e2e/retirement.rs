@@ -1358,9 +1358,12 @@ fn an_idle_pass_leaves_what_its_live_nodes_name_and_what_holds_work() {
     );
 
     // Running: the held direct node names its branch. Pending: behind it. Held: a
-    // parked lifecycle node resuming a branch. Ready: a lifecycle node whose own
-    // `pool: 0` and `overflow: 0` leave it nowhere to open. And a running
-    // lifecycle node, whose current dispatch session's branch is the third means.
+    // parked lifecycle node resuming a branch. And a running lifecycle node, whose
+    // current dispatch session's branch is the third means — planned ahead of the
+    // ready one, so it is the one that takes the identity's single warm slot.
+    // Ready: a lifecycle node asking for that one slot and no overflow, which the
+    // engine holds ready for as long as the working node sits in it, rather than
+    // dispatching it into a refusal that would settle it and un-name its branch.
     let mut hold = crate::harness::agent("hold", &[]);
     hold["branch"] = json!("keep/running");
     let mut pending = crate::harness::agent("pending", &["hold"]);
@@ -1368,18 +1371,26 @@ fn an_idle_pass_leaves_what_its_live_nodes_name_and_what_holds_work() {
     let mut parked = lifecycle("parked", &[]);
     parked["parked"] = json!(true);
     parked["resume"] = json!({"branch": "keep/held"});
-    let mut ready = lifecycle("ready", &[]);
-    ready["branch"] = json!("keep/ready");
-    ready["pool"] = json!(0);
-    ready["overflow"] = json!(0);
     world.script("working.wait", "hold");
     let working = lifecycle("working", &[]);
-    sweeping(&world, "live", hold, vec![pending, parked, ready, working]);
+    let mut ready = lifecycle("ready", &[]);
+    ready["branch"] = json!("keep/ready");
+    ready["pool"] = json!(1);
+    ready["overflow"] = json!(0);
+    sweeping(&world, "live", hold, vec![pending, parked, working, ready]);
     world.until("the working node's session to open", |world| {
         world
             .events_of("live", "session-opened")
             .iter()
             .any(|event| event["labels"]["node"] == "working")
+    });
+    world.until("the ready node to be held for its workspace", |world| {
+        world.events_of("live", "node-held").iter().any(|event| {
+            event["labels"]["node"] == "ready"
+                && event["payload"]["reasons"]
+                    .as_array()
+                    .is_some_and(|reasons| reasons.iter().any(|r| r["kind"] == "workspace"))
+        })
     });
     let session_branch = world
         .events_of("live", "session-opened")
@@ -1390,6 +1401,23 @@ fn an_idle_pass_leaves_what_its_live_nodes_name_and_what_holds_work() {
     until_retired(&world, "live", &["other/finished"]);
 
     let statuses = world.run(&["status", "live"]).exited(0).stdout.clone();
+    // Every named node is still in the state its case is about: the ready one was
+    // never dispatched, and nothing of the four settled.
+    assert!(
+        world
+            .events_of("live", "node-dispatched")
+            .iter()
+            .all(|event| event["labels"]["node"] != "ready"),
+        "the ready node was dispatched\n{statuses}"
+    );
+    assert!(
+        world
+            .events_of("live", "node-settled")
+            .iter()
+            .all(|event| !["hold", "pending", "parked", "ready", "working"]
+                .contains(&event["labels"]["node"].as_str().unwrap_or_default())),
+        "a live node settled before the pass was read\n{statuses}"
+    );
     for (branch, _) in named {
         assert!(
             holds(&world, &repo.checkout, branch),
