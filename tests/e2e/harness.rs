@@ -738,6 +738,10 @@ impl World {
             // holds it. Spelled out because the engine's own name for it is not
             // public.
             .env_remove("ONEVCS_SESSION")
+            // And the branch-name template a host may export: a journey about the
+            // shipped default means a launch that names none, and one about the
+            // variable sets it with `.env` of its own.
+            .env_remove(onepipeline::branchname::ENVIRONMENT)
             .envs(self.environment.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null());
         command
@@ -2455,6 +2459,13 @@ impl World {
             &format!("{SCRIPTED_KEY}.{method}.refuse"),
             &error.to_string(),
         );
+    }
+
+    /// Have every task the scripted store answers with carry `key` — the short handle a hosted
+    /// source shows people and `local-md` never has. Only a world
+    /// [`through_scripted_source`](World::through_scripted_source) reaches it.
+    pub fn store_keys_tasks(&self, key: &str) {
+        self.script(&format!("{SCRIPTED_KEY}.task.key"), key);
     }
 
     /// The same, for the next call of `method` alone.

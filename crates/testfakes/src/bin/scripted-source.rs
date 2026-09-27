@@ -45,6 +45,10 @@
 //!   each plan read, each write-back attempt — so this holds one call per attempt: the first
 //!   task a copy writes, say, which is how a journey holds a copy without holding each of its
 //!   writes in turn.
+//! * `<key>.task.key` — the short handle every task this source answers `query_tasks` and
+//!   `get_task` with carries, read verbatim, for as long as the file is there: what a hosted
+//!   source with a handle of its own answers with, and the one field `local-md` never
+//!   carries.
 //! * `<key>.metering` — a `Metering` in the store's own shape that every request this source
 //!   serves adds to its running total, which is what it answers `metering` with: a source
 //!   that meters its own requests, as a hosted one does, so a copy's `spent` is the store's
@@ -335,7 +339,10 @@ impl Scripted {
         let relayed = json!({
             "id": request.id, "method": request.method.0, "params": request.params,
         });
-        let answered = host.ask(&relayed)?;
+        let mut answered = host.ask(&relayed)?;
+        if let Some(key) = handle(&self.scenario("task.key"))? {
+            keyed(method, &mut answered, &key);
+        }
         if answered.contains_key("result") {
             if let Some(each) = metering(&metered)? {
                 self.spend(&each);
@@ -432,6 +439,38 @@ fn refusal(path: &Path) -> Result<Option<SourceError>, String> {
         }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("cannot read {}: {error}", path.display())),
+    }
+}
+
+/// The handle a scenario file gives every task, read verbatim — a blank one included, which
+/// is how a source carries none — or `None` where no file is there.
+fn handle(path: &Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(key) => Ok(Some(key)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("cannot read {}: {error}", path.display())),
+    }
+}
+
+/// Give every task an answer to `method` carries `key`: a page's items for `query_tasks`, the
+/// one task for `get_task`, and nothing for any other method or for a refusal.
+fn keyed(method: &str, answered: &mut serde_json::Map<String, Value>, key: &str) {
+    let Some(result) = answered.get_mut("result") else {
+        return;
+    };
+    let tasks: Vec<&mut Value> = match method {
+        "query_tasks" => result
+            .get_mut("items")
+            .and_then(Value::as_array_mut)
+            .map(|items| items.iter_mut().collect())
+            .unwrap_or_default(),
+        "get_task" => result.get_mut("task").into_iter().collect(),
+        _ => Vec::new(),
+    };
+    for task in tasks {
+        if let Some(task) = task.as_object_mut() {
+            task.insert("key".to_owned(), Value::String(key.to_owned()));
+        }
     }
 }
 

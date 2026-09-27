@@ -107,6 +107,10 @@ const FILLED_FROM_THE_TASK: &[(&str, &str)] = &[
     ("title", "the task's own `title`"),
     ("task", "the task's own `content`"),
     ("delivers", "the task's own `delivers`"),
+    (
+        "task_record",
+        "the task itself — its native id, its `key` and its `title`",
+    ),
 ];
 
 /// The reserved key a repository identity the store cannot hold is carried
@@ -471,6 +475,19 @@ impl Reader {
                 .collect();
             node.insert("delivers".to_owned(), Value::Array(qualified));
         }
+        // The task's human-facing record, which is what a branch this node's session
+        // cuts is named from. A blank key is the store's way of carrying none, as a
+        // blank title is.
+        let mut record = Map::new();
+        record.insert(
+            "id".to_owned(),
+            Value::String(task.id.native.as_str().to_owned()),
+        );
+        if let Some(key) = task.item.key.as_ref().filter(|key| !key.trim().is_empty()) {
+            record.insert("key".to_owned(), Value::String(key.clone()));
+        }
+        record.insert("title".to_owned(), Value::String(task.item.title.clone()));
+        node.insert("task_record".to_owned(), Value::Object(record));
         match (task.item.repositories.first(), node.get("repo")) {
             (Some(_), Some(_)) => {
                 return Err(refused(

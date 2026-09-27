@@ -611,6 +611,8 @@ mod tests {
         let request = SessionRequest {
             repo: "nowhere".into(),
             branch: None,
+            branch_name: None,
+            branch_prefix: None,
             base: None,
             execution_checkout: None,
             pool: None,

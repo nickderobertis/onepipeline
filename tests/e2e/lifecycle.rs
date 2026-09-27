@@ -983,8 +983,12 @@ fn an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives() {
         let branch = result["nodes"][0]["branch"]
             .as_str()
             .unwrap_or_else(|| panic!("the node recorded no branch: {result}"));
+        // The branch is named for the node, so the derived subject names it too;
+        // anything else naming the node is a subject this crate composed.
         assert!(
-            !landed.iter().any(|subject| subject.contains("service")),
+            !landed
+                .iter()
+                .any(|subject| subject.contains("service") && *subject != derived_subject(branch)),
             "this crate composed a subject for a node that stated none: {landed:?}"
         );
         assert_eq!(
@@ -7101,6 +7105,8 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
             .open_session(onevcs::SessionRequest {
                 repo: unread.checkout.to_string_lossy().into_owned(),
                 branch: None,
+                branch_name: None,
+                branch_prefix: None,
                 base: None,
                 execution_checkout: None,
                 pool: None,

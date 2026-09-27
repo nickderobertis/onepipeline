@@ -1421,10 +1421,28 @@ fn refuse(what: impl Into<String>) -> Error {
     Error::Refused(what.into())
 }
 
+/// Refuse a node an edit submitted with a `task_record` of its own.
+///
+/// The record is the task a node was read out of, filled by `taskgraph` from the
+/// store and nowhere else; the branch its session cuts is named from it. An edit
+/// is a planner's document, so a record it stated would name a branch for a task
+/// nobody read — the provenance the field exists to carry.
+fn refuse_stated_task_record(op: &str, node: &Node) -> Result<()> {
+    if node.task_record.is_some() {
+        return Err(refuse(format!(
+            "{op}: node '{}' states `task_record`, which is read from the task a node \
+             came from and never stated by an edit",
+            node.id
+        )));
+    }
+    Ok(())
+}
+
 fn compile_add(graph: &mut Graph, node: &Node) -> Result<Vec<Operation>> {
     if graph.contains(&node.id) {
         return Err(refuse(format!("add: node '{}' already exists", node.id)));
     }
+    refuse_stated_task_record("add", node)?;
     graph::validate_node(node).map_err(|e| refuse(e.to_string()))?;
     let mut operations = vec![Operation::NodeAdded {
         node: Box::new(node.clone()),
@@ -1582,6 +1600,8 @@ fn compile_retry(
             replacement.id
         )));
     }
+    // Before anything is inherited, so what is refused is what the edit stated.
+    refuse_stated_task_record("retry", replacement)?;
     let replacement = pin_retry_branch(inherit_preserved_branch(
         validate_retry_pin(replacement)?,
         &target,
@@ -1606,6 +1626,12 @@ fn compile_retry(
     // back to `todo` for want of a deliverer.
     if replacement.delivers.is_empty() {
         replacement.delivers.clone_from(&target.delivers);
+    }
+    // And the task it was read out of, on the same terms: a replacement is the
+    // same task's work, so a branch it cuts is named for that task's ticket rather
+    // than falling back to the plan's name for want of a record.
+    if replacement.task_record.is_none() {
+        replacement.task_record.clone_from(&target.task_record);
     }
 
     let direct = graph.dependents_of(id);
@@ -1838,6 +1864,13 @@ fn compile_requeue(
                 forbidden.join(", ")
             )));
         }
+    }
+
+    if amend.is_some_and(|amend| amend.contains_key("task_record")) {
+        return Err(refuse(format!(
+            "requeue: node '{id}' cannot amend `task_record`, which is read from the task a \
+             node came from and never stated by an edit"
+        )));
     }
 
     let mut merged =
@@ -4996,6 +5029,98 @@ mod tests {
             vec!["tickets:board/other".to_string()],
             "the replacement was given the superseded node's delivers over its own"
         );
+    }
+
+    /// A replacement names the branch it cuts for the same task the node it
+    /// supersedes was read out of: it states no task record of its own, since a
+    /// planner writes a node rather than reading one out of the store.
+    #[test]
+    fn a_replacement_inherits_the_task_record_it_does_not_state() {
+        let record = crate::plan::TaskRecord {
+            id: "tasks/build.md".into(),
+            key: Some("ENG-7".into()),
+            title: "Build it".into(),
+        };
+        let mut read = agent("build", &[]);
+        read.task_record = Some(record.clone());
+        let mut graph = graph_of(vec![read]);
+        compile(
+            &mut graph,
+            &frontier(&[("build", NodeStatus::Failed)]),
+            &Command::Retry {
+                id: "build".into(),
+                node: agent("build-2", &[]),
+            },
+        )
+        .expect("a replacement is accepted");
+        assert_eq!(
+            graph.get("build-2").expect("the replacement").task_record,
+            Some(record)
+        );
+    }
+
+    /// A task record is the store's to fill, so an edit stating one is refused on
+    /// every op that submits a node — rather than naming a branch for a task
+    /// nobody read — and the graph is left as it was.
+    #[test]
+    fn an_edit_stating_a_task_record_is_refused_on_every_op_that_submits_a_node() {
+        let stated = crate::plan::TaskRecord {
+            id: "invented".into(),
+            key: Some("ENG-999".into()),
+            title: "Not this task".into(),
+        };
+        let claiming = |id: &str| {
+            let mut node = agent(id, &[]);
+            node.task_record = Some(stated.clone());
+            node
+        };
+        let mut parked = agent("held", &[]);
+        parked.parked = true;
+        let mut graph = graph_of(vec![agent("build", &[]), parked]);
+        let before = graph.clone();
+        let mut amend = Map::new();
+        amend.insert(
+            "task_record".into(),
+            serde_json::to_value(&stated).expect("a record serializes"),
+        );
+
+        for (op, command) in [
+            (
+                "add",
+                Command::Add {
+                    node: claiming("fresh"),
+                },
+            ),
+            (
+                "retry",
+                Command::Retry {
+                    id: "build".into(),
+                    node: claiming("build-2"),
+                },
+            ),
+            (
+                "requeue",
+                Command::Requeue {
+                    id: "held".into(),
+                    amend: Some(amend.clone()),
+                },
+            ),
+        ] {
+            let message = compile(
+                &mut graph,
+                &frontier(&[("build", NodeStatus::Failed)]),
+                &command,
+            )
+            .expect_err("a stated task record is refused")
+            .to_string();
+            assert!(
+                message.contains(&format!("{op}: node '"))
+                    && message.contains("`task_record`")
+                    && message.contains("never stated by an edit"),
+                "{op}: {message}"
+            );
+            assert_eq!(graph, before, "{op} changed the graph it refused");
+        }
     }
 
     /// Detaching takes the dependency away, so the target keyed on it names

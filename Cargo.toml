@@ -539,17 +539,24 @@ resolver = "2"
 # `oneagentgraph` 0.4.10 is the relink onto the `oneharness-core` 0.18.0 that
 # block asks for, and nothing else: nothing here reads anything new from it.
 #
-# `onevcs` 0.32.2 is the floor. It carries onevcs #173-#177, which
-# `src/maintenance.rs` is written to: `registered_identities()` in place of a
-# spawned `onevcs repos`, `SlotOutcome::Unavailable` beside a narrowed `Broken`,
-# a non-empty `maintain.command` argv, and listings that refuse unreadable
-# session records rather than read them as empty. And its `git fetch` into a
-# checkout takes turns under a lock in that checkout's common directory: below
-# it, a session opening and a landing could fetch into one identity's shared
-# checkout at once, and git failed the loser with `cannot lock ref` even where
-# the ref already held what it wanted — on Windows, every time, in
-# `tests/e2e/lifecycle.rs`'s pooled-identity journey. `onevcs-testing` 0.8.2
-# requires exactly it, so the two move together.
+# `onevcs` 0.33.0 is the floor because it carries `SessionRequest.branch_name` — a
+# name to **cut**, which that library sanitizes, prefixes with the host's branch
+# prefix and suffixes to the first free name — and `branch_prefix` beside it, which
+# every literal here fills. `src/vcs.rs::opening_for` hands it the name
+# `src/branchname.rs` renders, and `tests/e2e/branch_template.rs` drives the cut,
+# the suffix and the sanitizer over real git. A **requirement**, because `^0.32`
+# admits no 0.33.x; `onevcs-testing` 0.8.3 requires exactly it, so the two move
+# together.
+#
+# The floor also carries what `src/maintenance.rs` is written to:
+# `registered_identities()` in place of a spawned `onevcs repos`,
+# `SlotOutcome::Unavailable` beside a narrowed `Broken`, a non-empty
+# `maintain.command` argv, and listings that refuse unreadable session records
+# rather than read them as empty. And its `git fetch` into a checkout takes turns
+# under a lock in that checkout's common directory, so a session opening and a
+# landing never fetch into one identity's shared checkout at once — which git
+# fails with `cannot lock ref`, on Windows every time, in
+# `tests/e2e/lifecycle.rs`'s pooled-identity journey.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
@@ -572,7 +579,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.2"
-onevcs = "0.32.2"
+onevcs = "0.33.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -737,7 +744,7 @@ oneharness-core = "0.18.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.8.2"
+onevcs-testing = "0.8.3"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -759,7 +766,7 @@ tokio = "1"
 
 [package]
 name = "onepipeline"
-version = "0.47.0"
+version = "0.48.1"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
