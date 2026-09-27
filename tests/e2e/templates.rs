@@ -574,7 +574,7 @@ fn every_name_resolves_at_the_first_layer_that_supplies_it_and_says_which() {
     for name in [BUILT_IN, "follow-up", "design-doc"] {
         let file = format!("{name}.md.j2");
         let hosted = root.join(&file);
-        let overridden = repo.join(".onepipeline/templates").join(&file);
+        let overridden = repo.join(".onepipeline").join("templates").join(&file);
         let explicit = world.root.join(format!("explicit-{file}"));
 
         // Registered and supplied by no layer: refused naming every path searched.
@@ -679,7 +679,7 @@ fn every_name_resolves_at_the_first_layer_that_supplies_it_and_says_which() {
     // A parent a chain names in a subdirectory resolves over the same search path — the
     // resolved file's own directory — as every other name, and a template reaching the base
     // through it passes C6a and renders through the released renderer.
-    let templates = repo.join(".onepipeline/templates");
+    let templates = repo.join(".onepipeline").join("templates");
     write(
         &templates.join("parts/parent.md.j2"),
         &format!(
@@ -779,7 +779,8 @@ fn every_name_resolves_at_the_first_layer_that_supplies_it_and_says_which() {
     let repository = world.repository("local-direct", &[]);
     let registered = repository
         .checkout
-        .join(".onepipeline/templates")
+        .join(".onepipeline")
+        .join("templates")
         .join("plan-task.md.j2");
     write(&registered, &task_template("the registered checkout's"));
     let resolved = verb(
@@ -826,7 +827,12 @@ fn every_name_resolves_at_the_first_layer_that_supplies_it_and_says_which() {
     assert_eq!(resolved["layer"], "repository");
     assert_eq!(
         resolved["path"],
-        json!(text(&repo.join(".onepipeline/templates/plan-task.md.j2")))
+        json!(text(
+            &repo
+                .join(".onepipeline")
+                .join("templates")
+                .join("plan-task.md.j2")
+        ))
     );
     // A single origin `onevcs` cannot resolve is refused, never read as the working
     // directory.
@@ -902,7 +908,10 @@ fn c6a_holds_a_task_template_to_the_base_and_its_criteria_and_a_rendering_to_lis
             "template follow-up (host layer, {}): {RULE_NOT_EXTENDED}",
             hosted.display()
         ));
-    let overridden = repo.join(".onepipeline/templates/plan-task.md.j2");
+    let overridden = repo
+        .join(".onepipeline")
+        .join("templates")
+        .join("plan-task.md.j2");
     write(&overridden, "## Acceptance criteria\n\n- fixed\n");
     verb(
         &world,
@@ -1655,6 +1664,14 @@ fn a_lifecycle_node_resolves_against_its_publication_checkout() {
     // Checked from a launch directory holding no override: the node's own checkout is
     // where its repository layer is.
     world.run_from(&dir, &args).exited(0);
+    // A changed override is named at the path the caller registered the checkout under —
+    // on Windows too, where `onevcs` answers it in its extended-length spelling.
+    write(&overridden, &task_template("the service's edited"));
+    world
+        .run_from(&dir, &args)
+        .exited(HAS_REFUSALS)
+        .out_has(RULE_TEMPLATE_CHANGED)
+        .out_has(&format!("repository layer, {}", overridden.display()));
     std::fs::remove_file(&overridden).expect("the override is removed");
     world
         .run_from(&dir, &args)

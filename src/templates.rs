@@ -520,6 +520,38 @@ fn whence(layer: Layer, path: Option<&Path>) -> String {
     }
 }
 
+/// Where `repo` overrides a registered name: [`REPOSITORY_DIR`] joined a component at a
+/// time, so every separator in the path is the platform's own — the form a caller naming
+/// the checkout on Windows spells it in, and the one a refusal and a listing print.
+fn repository_dir(repo: &Path) -> PathBuf {
+    REPOSITORY_DIR
+        .split('/')
+        .fold(repo.to_path_buf(), |path, component| path.join(component))
+}
+
+/// `path` without the extended-length prefix Windows adds to a canonical path (`\\?\C:\…`,
+/// `\\?\UNC\server\…`), which is how `onevcs` can answer a checkout while the caller
+/// registered it plainly; any other path, and every path elsewhere, is returned as it is.
+fn plain(path: PathBuf) -> PathBuf {
+    if cfg!(windows) {
+        if let Some(stripped) = path.to_str().and_then(without_verbatim_prefix) {
+            return PathBuf::from(stripped);
+        }
+    }
+    path
+}
+
+/// The plain spelling of a verbatim disk or UNC path, and `None` for any other text.
+fn without_verbatim_prefix(path: &str) -> Option<String> {
+    let rest = path.strip_prefix(r"\\?\")?;
+    if let Some(share) = rest.strip_prefix(r"UNC\") {
+        return Some(format!(r"\\{share}"));
+    }
+    let bytes = rest.as_bytes();
+    (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        .then(|| rest.to_owned())
+}
+
 /// An absolute spelling of `path`, relative ones taken against `base`.
 fn absolute(path: &Path, base: &Path) -> PathBuf {
     let joined = if path.is_absolute() {
@@ -620,10 +652,7 @@ pub(crate) fn locate(name: &str, search: Search<'_>) -> Result<(Layer, Option<Pa
     let file = format!("{name}{EXTENSION}");
     let mut searched = Vec::new();
     for (layer, directory) in [
-        (
-            Layer::Repository,
-            search.repo.map(|repo| repo.join(REPOSITORY_DIR)),
-        ),
+        (Layer::Repository, search.repo.map(repository_dir)),
         (Layer::Host, search.root.map(Path::to_path_buf)),
     ] {
         let Some(directory) = directory else {
@@ -1025,7 +1054,7 @@ pub(crate) fn verb_checkout(options: &TemplateOptions) -> Result<PathBuf> {
     }
     if let [origin] = options.repositories.as_slice() {
         return crate::destination::resolve(origin)
-            .map(|destination| destination.resolved.publication_checkout)
+            .map(|destination| plain(destination.resolved.publication_checkout))
             .map_err(|why| {
                 Error::Invalid(format!(
                     "--repository {origin}: its checkout could not be resolved: {why}"
@@ -1082,7 +1111,7 @@ pub(crate) fn check_plan(
         }
         let checkout = || match &node.repo {
             Some(repo) => crate::destination::resolve(repo)
-                .map(|destination| destination.resolved.publication_checkout)
+                .map(|destination| plain(destination.resolved.publication_checkout))
                 .map_err(|why| {
                     format!(
                         "its template cannot be resolved: the checkout of {repo} could not be \
@@ -1120,6 +1149,44 @@ pub(crate) fn check_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_repository_layer_is_spelled_in_the_platform_s_own_separators() {
+        // Compared as text: a `PathBuf` reads either separator on Windows, so comparing
+        // paths would pass the mixed spelling this guards against.
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(
+            repository_dir(Path::new("checkout")).to_str(),
+            Some(format!("checkout{sep}.onepipeline{sep}templates").as_str())
+        );
+    }
+
+    #[test]
+    fn a_verbatim_disk_or_unc_path_loses_its_prefix_and_nothing_else_changes() {
+        assert_eq!(
+            without_verbatim_prefix(r"\\?\C:\Users\me\service").as_deref(),
+            Some(r"C:\Users\me\service")
+        );
+        assert_eq!(
+            without_verbatim_prefix(r"\\?\UNC\server\share\service").as_deref(),
+            Some(r"\\server\share\service")
+        );
+        for untouched in [
+            r"C:\Users\me\service",
+            "/home/me/service",
+            r"\\?\GLOBALROOT\Device\x",
+        ] {
+            assert_eq!(without_verbatim_prefix(untouched), None, "{untouched}");
+        }
+        if !cfg!(windows) {
+            let unix = PathBuf::from(r"\\?\C:\a");
+            assert_eq!(
+                plain(unix.clone()),
+                unix,
+                "a Unix file name is not a prefix"
+            );
+        }
+    }
 
     #[test]
     fn a_name_is_lowercase_led_and_kebab() {
