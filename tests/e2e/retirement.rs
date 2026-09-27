@@ -1805,7 +1805,8 @@ fn an_idle_pass_keeps_the_branch_a_running_node_resumes() {
 /// Where each session case re-pins its node, so its `branch` names another one.
 const ELSEWHERE: &str = "x/elsewhere";
 
-fn requeued_elsewhere() -> Value {
+/// The reply command that requeues `x` pinned to [`ELSEWHERE`].
+fn requeue_elsewhere() -> Value {
     json!({"op": "requeue", "id": "x", "amend": {
         "branch": ELSEWHERE,
         "resume": {"branch": ELSEWHERE},
@@ -1831,7 +1832,7 @@ fn an_idle_pass_keeps_the_branch_a_pending_nodes_last_session_is_on() {
             reply(
                 world,
                 json!([
-                    requeued_elsewhere(),
+                    requeue_elsewhere(),
                     {"op": "reparent", "id": "x", "deps": ["hold"]},
                 ]),
             );
@@ -1861,7 +1862,7 @@ fn an_idle_pass_keeps_the_branch_a_held_nodes_last_session_is_on() {
             let branch = parked_off_its_session(world, repo, "x");
             reply(
                 world,
-                json!([requeued_elsewhere(), {"op": "cancel", "id": "x"}]),
+                json!([requeue_elsewhere(), {"op": "cancel", "id": "x"}]),
             );
             world.until("x to be parked elsewhere", |world| {
                 world
@@ -1906,7 +1907,7 @@ fn an_idle_pass_keeps_the_branch_a_ready_nodes_last_session_is_on() {
                     .iter()
                     .any(|event| event["labels"]["node"] == "y")
             });
-            reply(world, json!([requeued_elsewhere()]));
+            reply(world, json!([requeue_elsewhere()]));
             until_held_for_a_workspace(world, "x");
             branch
         },
