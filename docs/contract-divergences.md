@@ -7422,7 +7422,9 @@ attempt to record: `{"node": <the landed node>, "landing": <what onevcs was told
 "superseded": [{"node", "branch"}], "failed": [{"node", "branch", "error"}]}`.
 
 **The backfill verb.** `onepipeline supersessions <RUN> [--record] [--json]` reads the
-run's journal and nothing else, so it needs no live driver and answers for a settled run.
+run's own store — its journal, and the launch record every run view opens — and nothing
+else, so it needs no live driver and answers for a settled run; a run whose launch record
+does not read is a refused invocation.
 Without `--record` it prints each landed lineage with earlier attempts, its landing, and
 each superseded `(node, branch)` pair with whether the journal already records it. With
 `--record` it records each pair the journal does not, through the same function a driver

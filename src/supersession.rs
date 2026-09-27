@@ -443,8 +443,8 @@ impl Supersessions {
 
 /// `onepipeline supersessions RUN [--record]`.
 ///
-/// Reads the run's journal and nothing else, so it answers for a settled run
-/// with no driver. With `record`, each pair the journal does not already record
+/// Reads the run's own store — its journal, and the launch record every run view
+/// opens — and nothing else, so it answers for a settled run with no driver. With `record`, each pair the journal does not already record
 /// is handed to `onevcs::record_supersession` — the function a driver calls when
 /// the retry lands — and one `branches-superseded` per lineage that had any is
 /// appended to the run's journal, so a second call records nothing new.
