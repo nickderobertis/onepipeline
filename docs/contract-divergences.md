@@ -7483,7 +7483,8 @@ by `src/maintenance.rs`'s unit tests alone, because `start` refuses one that doe
 resolve and `onevcs` has no verb that unregisters one.
 `tests/contract.rs` holds the kinds below to `PipelineKind` and the verb to the binary's
 parser; `src/supersession.rs`'s and `src/maintenance.rs`'s unit tests hold the field lists
-to the payload and answer types that write them, and `excluded_by` to the means the
+to the payload and answer types that write them, `supersession_labels` to the label keys
+`onevcs` is given, and `excluded_by` to the means the
 exclusion is built from.
 
 ```json
@@ -7491,6 +7492,7 @@ exclusion is built from.
   "event_kinds": ["branches-superseded", "branches-retired"],
   "branches_superseded_fields": ["node", "landing", "superseded", "failed"],
   "branches_retired_fields": ["retired", "failed"],
+  "supersession_labels": ["run", "node", "superseded_by_node"],
   "retired_entry_fields": ["identity", "branch", "class", "proof", "trigger"],
   "verb": "supersessions",
   "verb_flags": ["--record", "--json"],

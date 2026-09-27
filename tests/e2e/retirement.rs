@@ -760,6 +760,35 @@ fn the_backfill_verb_records_what_a_settled_run_never_did_once() {
         .exited(crate::harness::REFUSED);
 }
 
+/// A run whose journal reads but whose launch record does not is a store this
+/// verb cannot answer for: `supersessions` refuses it with `2`, naming the
+/// record, and appends nothing to the journal even with `--record`.
+#[cfg(unix)]
+#[test]
+fn the_backfill_verb_refuses_a_run_whose_launch_record_does_not_read() {
+    let world = World::new("retirement-backfill-unreadable");
+    world.repository("local-direct", &[]);
+    let run = "unreadable";
+    first_attempt(&world, run);
+    let journal = world.run_file(run, "events.jsonl");
+    let before = std::fs::read_to_string(&journal).expect("the journal reads");
+    std::fs::write(world.run_file(run, "launch.json"), "{ not json")
+        .expect("the record is written");
+    for args in [
+        &["supersessions", run][..],
+        &["supersessions", run, "--record"][..],
+    ] {
+        world
+            .run(args)
+            .exited(crate::harness::REFUSED)
+            .err_has("launch.json");
+    }
+    assert_eq!(
+        std::fs::read_to_string(&journal).expect("the journal reads"),
+        before
+    );
+}
+
 /// The identity the world's `service` checkout registers as.
 const SERVICE_IDENTITY: &str = "github.com/owner/service";
 

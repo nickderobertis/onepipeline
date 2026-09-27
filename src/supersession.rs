@@ -33,11 +33,10 @@ use crate::payload::{BranchesSuperseded, SupersededAttempt, UnrecordedAttempt};
 use crate::projection::RunState;
 use crate::Result;
 
-/// The label key naming the run a supersession was recorded by.
+// The labels every supersession carries, spelled as entry 91's
+// `supersession_labels` states them; a unit test holds the two together.
 const RUN_LABEL: &str = "run";
-/// The label key naming the attempt that was superseded.
 const NODE_LABEL: &str = "node";
-/// The label key naming the attempt whose landing superseded it.
 const BY_LABEL: &str = "superseded_by_node";
 
 /// One earlier attempt of a landed lineage.
@@ -769,5 +768,14 @@ mod tests {
             keys(&printed["lineages"][0])
         );
         assert_eq!(printed["mode"], "record");
+    }
+
+    /// The label keys entry 91 tells a planner are the ones `onevcs` is given.
+    #[test]
+    fn entry_91_names_the_labels_each_supersession_carries() {
+        assert_eq!(
+            proposed("supersession_labels"),
+            BTreeSet::from([RUN_LABEL, NODE_LABEL, BY_LABEL].map(String::from))
+        );
     }
 }

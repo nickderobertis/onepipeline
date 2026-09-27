@@ -1065,18 +1065,14 @@ pub(crate) struct BranchesSuperseded {
 /// One earlier attempt of a `branches-superseded` record.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct SupersededAttempt {
-    /// The attempt's node.
     pub(crate) node: String,
-    /// The branch it left.
     pub(crate) branch: String,
 }
 
 /// One earlier attempt whose supersession `onevcs` did not record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct UnrecordedAttempt {
-    /// The attempt's node.
     pub(crate) node: String,
-    /// The branch it left.
     pub(crate) branch: String,
     /// What `onevcs` answered, bounded as every payload text is.
     pub(crate) error: String,

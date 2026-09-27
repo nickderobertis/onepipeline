@@ -568,10 +568,8 @@ resolver = "2"
 # **requirement**, because `^0.33` admits no 0.34.x. `tests/e2e/retirement.rs` drives
 # both calls against the linked release over real git and a bare origin.
 #
-# `onevcs` 0.34.1 is the floor after it: the release `ov-branch-retirement` was
-# published as, and the one this engine's release hold names. Its library is the
-# 0.34.0 source unchanged, so nothing here changed with it. `onevcs-testing` 0.8.5
-# is the release that requires exactly `^0.34.1`, so the two move together.
+# `onevcs` 0.34.1 is the floor after it, and `onevcs-testing` 0.8.5 with it, the
+# release that requires exactly `^0.34.1`: the two pins move as one.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
