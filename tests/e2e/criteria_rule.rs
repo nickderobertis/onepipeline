@@ -45,11 +45,9 @@ fn step_refused(id: &str, step: &str, rule: &str) -> String {
 /// `plan check`'s exit when the loader refused the plan.
 const HAS_REFUSALS: i32 = 1;
 
-/// A task breaking no rule, with further sections after its criteria.
 const FOLLOWED: &str = "## What\nBuild it.\n\n## Acceptance criteria\n- It builds.\n\n\
                         ## Additional info\nRun the gate.";
 
-/// A task whose criteria section ends the body.
 const LAST: &str = "## What\nBuild it.\n\n## Acceptance criteria\n\n1. It builds.\n";
 
 fn stating(id: &str, task: &str, deps: &[&str]) -> Value {
@@ -69,7 +67,6 @@ fn stepped(id: &str, task: &str, deps: &[&str]) -> Value {
     })
 }
 
-/// The three rules, each with a task breaking exactly it.
 const BROKEN: [(&str, &str); 3] = [
     (
         "## What\nBuild it.\n\n## Why\nSo it is built.",
