@@ -1648,6 +1648,8 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
     for (scenario, wait, released) in [
         ("inside", Duration::from_secs(6), true),
         ("past-the-release", Duration::from_secs(600), false),
+        // A kept wait this build cannot read is said and read as none, so the release is made.
+        ("unreadable", Duration::from_secs(600), true),
     ] {
         let run = format!("writeback-stop-limited-{scenario}");
         let (world, project) = a_run_whose_destination_can_start_refusing(
@@ -1672,6 +1674,15 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
             world.run_file(&run, "writeback-wait.json").is_file(),
             "{scenario}: the wait was not kept where another process can read it"
         );
+        let unreadable = scenario == "unreadable";
+        if unreadable {
+            // llmlint: ignore-block[tests_mirror_real_usage] a kept wait this build cannot read
+            // is one nothing this build writes, so the file is edited as a hand or another tool
+            // would.
+            std::fs::write(world.run_file(&run, "writeback-wait.json"), "not a wait")
+                .expect("the kept wait is overwritten");
+            // llmlint: ignore-end[tests_mirror_real_usage]
+        }
 
         let stop = world
             .cmd(&["stop", &run])
@@ -1679,7 +1690,7 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("the stop starts");
-        if released {
+        if released && !unreadable {
             while failed_at.elapsed() + Duration::from_millis(500) < wait {
                 assert_eq!(
                     world.store_calls().len(),
@@ -1700,7 +1711,17 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
                     .then(|| task["item"]["status"]["name"].clone())
             })
         };
-        if released {
+        if unreadable {
+            assert!(
+                said.contains("cannot read") && said.contains("no recorded wait is honoured"),
+                "{scenario}: the stop did not say it could not read the kept wait: {said}"
+            );
+            assert!(
+                world.store_calls().len() > calls,
+                "{scenario}: a wait nobody could read held the release back"
+            );
+            assert_eq!(later_word(), Some(json!("todo")), "{scenario}");
+        } else if released {
             assert!(
                 failed_at.elapsed() >= wait - Duration::from_millis(500),
                 "{scenario}: the stop released {:?} after a failure asking for {wait:?}",

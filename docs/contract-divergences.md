@@ -5897,9 +5897,10 @@ What this crate does now is the block below, and the block is the source.
 
 **Which lineages are carried.** A lineage is carried when its projection, as the worker renders
 it from the snapshot alone, differs from what the landed baseline says landed — its title, the
-digest of its body, its word, its engine-owned metadata, its tickets or its edges — or from
-what this driver last landed for it, which also notices a field the baseline does not keep. The
-baseline is seeded from the launch's own read before the first projection, so a fresh launch's
+digest of its body, its word, its engine-owned metadata, its tickets or its edges. The one
+field a copy writes that the baseline does not keep is a node's GitHub repository, and no edit
+changes that alone — a `retry` moves the head and a `requeue` the word — so a lineage whose
+repository moved differs in a field the baseline keeps, whichever driver asks. The baseline is seeded from the launch's own read before the first projection, so a fresh launch's
 first projection carries the claim — every lineage, since the seed records no word — and
 nothing it did not change; a driver an `adopt` started compares against the file the driver
 before it left. After a failed attempt the next carries what has still not landed — the union
@@ -6041,7 +6042,7 @@ it creates an item, which entry 93 states: once per item created, inside that at
     "reads": ["project-show", "task-show"],
     "task_show_per": ["lineage the copy carries", "lineage the landed baseline does not hold, by the id the run knows for it"],
     "never_reads": ["task-list"],
-    "carries": "the lineages whose projection differs from the landed baseline (entry 93) or from what this driver last landed",
+    "carries": "the lineages whose projection differs from the landed baseline (entry 93)",
     "copy_scope": "CopyScope::Members",
     "naming_none": "CopyScope::Projects { tasks: false }",
     "carrying_nothing": "no store call at all: items [], calls {}, actions null",

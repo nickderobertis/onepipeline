@@ -676,7 +676,8 @@ fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
 /// A landed baseline the adopting driver cannot read — here, one holding a key the engine does
 /// not own, which only a hand or another tool could have put there — is said on the driver's
 /// standard error, naming the file and why, and treated as absent: each lineage is read once by
-/// its own id, nothing is copied whole, no page of tasks is read, and the file is written again
+/// its own id — a lineage whose shadow document cannot be read either, said too, at the task it
+/// was launched from — nothing is copied whole, no page of tasks is read, and the file is written again
 /// in the shape this build reads once the projection lands.
 #[test]
 fn a_landed_baseline_the_driver_cannot_read_is_said_and_each_item_read_by_its_id() {
@@ -701,6 +702,19 @@ fn a_landed_baseline_the_driver_cannot_read_is_said_and_each_item_read_by_its_id
     // nothing this build writes, so the file is edited the way a hand or another tool would.
     unreadable["items"]["work"]["metadata"]["authored.note"] = json!("not the engine's");
     std::fs::write(&path, unreadable.to_string()).expect("the baseline is rewritten");
+    // And the shadow document the previous driver left for `later`, which names where its item
+    // is, made unreadable too: said, and the lineage read at the task it was launched from.
+    let later_shadow = world
+        .run_file(run, "writeback")
+        .join("tasks")
+        .join(hex(&project))
+        .join(format!("{}.md", hex("later")));
+    assert!(
+        later_shadow.is_file(),
+        "no shadow document at {}",
+        later_shadow.display()
+    );
+    std::fs::write(&later_shadow, "not a shadow document").expect("the document is rewritten");
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     let mark = records(&world, run).len();
@@ -714,6 +728,13 @@ fn a_landed_baseline_the_driver_cannot_read_is_said_and_each_item_read_by_its_id
             && log.contains("authored.note")
             && log.contains("read from the store once instead"),
         "the driver did not say it could not read the baseline, and why:\n{log}"
+    );
+    assert!(
+        log.contains(&format!(
+            "cannot read {} as a shadow document",
+            later_shadow.display()
+        )),
+        "the driver did not say it could not read the shadow document:\n{log}"
     );
     let first = records(&world, run)[mark].clone();
     assert_eq!(first["scope"], "members", "{first}");

@@ -1103,6 +1103,12 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     // nothing before the wait the store named has passed. It waits that out where the wait ends
     // inside the release's own deadline, and otherwise leaves the claim standing and says so,
     // rather than holding a stop for as long as a limiter likes.
+    // llmlint: ignore-block[changed_behavior_has_e2e] both sides of the bound are driven end to
+    // end by `store::a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed` —
+    // a wait served and then released, and one past the bound left standing. The bound decides
+    // only whether the rest of the wait is served before the release; the release after it is
+    // the attempt the block below covers, under its own copy deadline, so a wait that fits and a
+    // release that then runs long take no line those journeys and that block do not reach.
     if let Some(left) = AskedWait::left(&paths.dir) {
         let bound = Deadline::Copy {
             per_item: per_item_budget(launch),
@@ -1121,6 +1127,7 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
         }
         std::thread::sleep(left);
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     let at = crate::sys::now_rfc3339();
     let started = Instant::now();
     // llmlint: ignore-block[changed_behavior_has_e2e] a stop whose release outlasts its deadline
@@ -1133,11 +1140,7 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     // `writeback_budget::a_copy_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithmetic`
     // and `delivers::a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch`.
     // A journey holding a `stop` past the sixty-second floor would spend that minute on no line
-    // those three do not already reach. A stop that lands inside a rate limit's wait the driver
-    // was serving makes its one release attempt all the same: the stopping process cannot see
-    // the driver's wait, which lives in the driver's memory, and neither record this run keeps
-    // — the landed baseline (entry 93) and the projection record (entry 73), both fixed shapes —
-    // has a field to carry it across, so there is no branch here a journey could hold.
+    // those three do not already reach.
     let attempted = project(
         &store,
         per_item_budget(launch),
