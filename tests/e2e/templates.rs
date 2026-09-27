@@ -735,6 +735,40 @@ fn every_name_resolves_at_the_first_layer_that_supplies_it_and_says_which() {
     .err_has("--repo")
     .err_has("no-such-checkout")
     .err_has("cannot be read as a checkout");
+    // Several origins name no single checkout, so the working directory is the one.
+    let resolved = verb(
+        &world,
+        &repo,
+        &root,
+        &[
+            "resolve",
+            BUILT_IN,
+            "--repository",
+            "github.com/owner/service",
+            "--repository",
+            "github.com/owner/other",
+            "--json",
+        ],
+    )
+    .whole();
+    assert_eq!(resolved["layer"], "repository");
+    assert_eq!(
+        resolved["path"],
+        json!(text(&repo.join(".onepipeline/templates/plan-task.md.j2")))
+    );
+    // An explicit file that is not there is refused, never passed over for the next layer.
+    let absent = world.root.join("absent.md.j2");
+    verb(
+        &world,
+        &dir,
+        &root,
+        &["resolve", BUILT_IN, "--template", &text(&absent)],
+    )
+    .exited(REFUSED)
+    .err_has(&format!(
+        "--template {} is not a readable template file",
+        absent.display()
+    ));
 
     // An unregistered name, refused naming the registration read.
     verb(&world, &dir, &root, &["resolve", "nope"])
@@ -1145,8 +1179,29 @@ fn require_rendered_refuses_each_node_that_is_not_its_rendering_and_off_refuses_
     )
     .expect("the task is edited by hand");
 
+    // A provenance entry a person broke by hand, in the store's own file: no provenance
+    // this build can read.
+    let (malformed, native) = project(&world, "malformed");
+    world.write_store_item(
+        &format!("tasks/{native}/000-build.md"),
+        &format!(
+            "---\ntitle: \"feat: malformed\"\nproject: \"{native}\"\nmetadata: {}\n---\n\n\
+             ## What\n\nBuild it.\n\n## Acceptance criteria\n\n- It builds.\n",
+            json!({
+                "onepipeline.id": "build",
+                "onepipeline.persona": "engineer",
+                "onetaskgraph.template": "not a provenance entry",
+            })
+        ),
+    );
+
     let cases = [
         (&unrendered, RULE_NO_PROVENANCE.to_owned(), true),
+        (
+            &malformed,
+            format!("{RULE_NO_PROVENANCE} this build can read"),
+            true,
+        ),
         (
             &foreign,
             format!("{RULE_FOREIGN}: {}", other.display()),

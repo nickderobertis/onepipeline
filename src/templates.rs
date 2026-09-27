@@ -327,12 +327,22 @@ pub(crate) struct Registered {
 /// Every name a host root registers, beside the built-in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Registry {
-    /// The host root, where one was named.
-    root: Option<PathBuf>,
-    /// Whether the root holds a registration file.
-    read: bool,
+    /// Where the names came from.
+    from: Registration,
     /// [`BUILT_IN`] first, then the host's names in name order.
     names: Vec<Registered>,
+}
+
+/// Where a [`Registry`]'s names came from: one of three, so a registration file is never
+/// read from a root that was not named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Registration {
+    /// No host root was named.
+    NoRoot,
+    /// A root was named and holds no registration file.
+    NoFile(PathBuf),
+    /// This registration file was read.
+    Read(PathBuf),
 }
 
 /// Whether `name` is one a registration may declare: [`NAME_PATTERN`].
@@ -362,8 +372,7 @@ impl Registry {
         };
         let Some(root) = root else {
             return Ok(Self {
-                root: None,
-                read: false,
+                from: Registration::NoRoot,
                 names: vec![built_in],
             });
         };
@@ -378,8 +387,7 @@ impl Registry {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self {
-                    root: Some(root.to_path_buf()),
-                    read: false,
+                    from: Registration::NoFile(file),
                     names: vec![built_in],
                 });
             }
@@ -426,18 +434,17 @@ impl Registry {
             });
         }
         Ok(Self {
-            root: Some(root.to_path_buf()),
-            read: true,
+            from: Registration::Read(file),
             names,
         })
     }
 
     /// The registration file read, where one was.
     pub(crate) fn file(&self) -> Option<PathBuf> {
-        self.root
-            .as_deref()
-            .filter(|_| self.read)
-            .map(|root| root.join(REGISTRATION_FILE))
+        match &self.from {
+            Registration::Read(file) => Some(file.clone()),
+            Registration::NoRoot | Registration::NoFile(_) => None,
+        }
     }
 
     /// Every registered name, [`BUILT_IN`] first.
@@ -456,16 +463,13 @@ impl Registry {
             .iter()
             .find(|registered| registered.name == name)
             .ok_or_else(|| {
-                let whence = match (&self.root, self.read) {
-                    (Some(root), true) => format!(
-                        "registration read: {}",
-                        root.join(REGISTRATION_FILE).display()
-                    ),
-                    (Some(root), false) => format!(
+                let whence = match &self.from {
+                    Registration::Read(file) => format!("registration read: {}", file.display()),
+                    Registration::NoFile(file) => format!(
                         "no registration file at {}, so only {BUILT_IN} is registered",
-                        root.join(REGISTRATION_FILE).display()
+                        file.display()
                     ),
-                    (None, _) => format!(
+                    Registration::NoRoot => format!(
                         "no template root was named ({ROOT_FLAG}, {ROOT_ENVIRONMENT} or the \
                          launch config's `{ROOT_KEY}`), so only {BUILT_IN} is registered"
                     ),
