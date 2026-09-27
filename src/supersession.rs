@@ -13,7 +13,7 @@ use crate::edits::StatedLanding;
 use crate::event::{Envelope, PipelineKind, Source};
 use crate::graph::Landing;
 use crate::journal::{self, Journal};
-use crate::ledger::RunPaths;
+use crate::ledger::{OwnershipLock, RunPaths};
 use crate::payload::{BranchesSuperseded, SupersededAttempt, UnrecordedAttempt};
 use crate::projection::RunState;
 use crate::Result;
@@ -182,12 +182,6 @@ pub(crate) type RecordedPair = (String, String, Attempt);
 /// A record that does not read as one is said so on stderr and counts for
 /// nothing, so its pairs are asked of `onevcs` again — which records a
 /// supersession once however often it is told.
-// llmlint: ignore-block[changed_behavior_has_e2e] no entry point of this build writes an
-// unreadable record — every `branches-superseded` is serialized by `journal` from the typed
-// payload — so a journey reaches the arm only by editing the journal by hand, which is the
-// state it stands for: a record a person edited or another build wrote.
-// `tests::an_unreadable_record_counts_for_nothing_and_a_readable_one_for_its_head` drives
-// this reader over both.
 pub(crate) fn recorded_in(events: &[Envelope]) -> BTreeSet<RecordedPair> {
     events
         .iter()
@@ -208,7 +202,7 @@ pub(crate) fn recorded_in(events: &[Envelope]) -> BTreeSet<RecordedPair> {
             .ok()
         })
         .flat_map(|record| {
-            let (head, landing) = (record.node, record.landing);
+            let (head, landing) = (record.node, record.landing.reference().to_owned());
             record
                 .superseded
                 .into_iter()
@@ -228,7 +222,6 @@ pub(crate) fn recorded_in(events: &[Envelope]) -> BTreeSet<RecordedPair> {
         })
         .collect()
 }
-// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Record each of `attempts` as superseded by `lineage`'s landing, and say what
 /// `onevcs` answered for each.
@@ -267,7 +260,7 @@ pub(crate) fn journal(
 ) -> Result<()> {
     let payload = BranchesSuperseded {
         node: lineage.node.clone(),
-        landing: lineage.landing.reference().to_owned(),
+        landing: lineage.landing.clone(),
         superseded: recorded
             .recorded
             .iter()
@@ -332,13 +325,14 @@ impl Watch {
         state: &RunState,
     ) -> Result<()> {
         for lineage in lineages(state) {
-            // llmlint: ignore[changed_behavior_has_e2e] once per lineage per driver by design,
-            // so a landing that later gains a commit is not asked again: `onevcs` credits the
-            // change-request record by the base commit naming that change, so a second record
-            // at the commit changes no class, and `supersessions --record` keys by landing.
+            // llmlint: ignore-block[changed_behavior_has_e2e] once per lineage per driver by
+            // design, so a landing that later gains a commit is not asked again: `onevcs`
+            // credits the change-request record by the base commit naming that change, so a
+            // second record at the commit changes no class, and `supersessions --record` keys
+            // by landing.
             if !self.answered.insert(lineage.node.clone()) {
                 continue;
-            }
+            } // llmlint: ignore-end[changed_behavior_has_e2e]
             let pending = unrecorded(&lineage, &self.recorded);
             if pending.is_empty() {
                 continue;
@@ -398,6 +392,10 @@ pub(crate) enum Mode {
     Record,
 }
 
+/// The verb `supersessions --record` writes into the run's ownership lock: what a
+/// `start`, `adopt` or `reply` refused while it holds the lock names as the holder.
+const RECORD_VERB: &str = "supersessions --record";
+
 /// `onepipeline supersessions RUN [--record]`: which earlier attempts of the run's
 /// landed retries were on a branch other than the one that landed, and what
 /// became of recording them with `onevcs`.
@@ -450,12 +448,16 @@ impl Supersessions {
 /// With `record`, each pair the journal does not already record is handed to
 /// `onevcs::record_supersession` — the function a driver calls when the retry
 /// lands — and one `branches-superseded` per lineage that had any is appended to
-/// the run's journal, so a second call records nothing new.
+/// the run's journal, so a second call records nothing new. It does so holding
+/// the run's ownership lock, so it refuses a run a driver is driving — that
+/// driver records its own landings, and two recorders would each journal the
+/// same pairs — and no driver adopts the run while it reads and appends.
 ///
 /// # Errors
 ///
 /// A run with no directory under the runs root, one whose journal cannot be read
-/// or holds no record this build reads, or one whose journal cannot be written.
+/// or holds no record this build reads, one whose ownership lock another process
+/// holds where `record` is asked, or one whose journal cannot be written.
 pub(crate) fn supersessions(paths: &RunPaths, mode: Mode) -> Result<Supersessions> {
     if !paths.exists() {
         return Err(crate::Error::NoSuchRun {
@@ -467,6 +469,10 @@ pub(crate) fn supersessions(paths: &RunPaths, mode: Mode) -> Result<Supersession
                 .to_path_buf(),
         });
     }
+    let _owned = match mode {
+        Mode::Record => Some(OwnershipLock::acquire(paths, RECORD_VERB)?),
+        Mode::Answer => None,
+    };
     let mut events = journal_of(paths)?;
     journal::merge_order(&mut events);
     let state = crate::projection::fold(&events);
@@ -497,10 +503,14 @@ pub(crate) fn supersessions(paths: &RunPaths, mode: Mode) -> Result<Supersession
     })
 }
 
-/// Every record of a run's journal, refusing a journal that cannot be opened or
-/// holds none this build reads: every run's journal opens with its launch, so an
-/// empty read is a store this verb cannot answer for rather than a run with
-/// nothing to record.
+/// Every record of a run's journal, refusing a journal that cannot be opened,
+/// holds none this build reads, or holds a line it cannot read among the ones it
+/// can. Every run's journal opens with its launch, so an empty read is a store
+/// this verb cannot answer for rather than a run with nothing to record; and a
+/// line it cannot read may be the retry edge, the landing or the record a lineage
+/// turns on, so an answer from the rest could say *nothing to record* of a run
+/// that has something — the same reason strict replay reports such a line rather
+/// than folding past it.
 fn journal_of(paths: &RunPaths) -> Result<Vec<Envelope>> {
     let path = paths.journal();
     std::fs::File::open(&path).map_err(|source| crate::Error::Ledger {
@@ -512,6 +522,14 @@ fn journal_of(paths: &RunPaths) -> Result<Vec<Envelope>> {
         return Err(crate::Error::Invalid(format!(
             "{}: the journal holds no record this build can read, so there is no run to \
              answer for",
+            path.display()
+        )));
+    }
+    if journal::has_unreadable_lines(&path) {
+        return Err(crate::Error::Invalid(format!(
+            "{}: the journal holds a line this build cannot read, so an answer from the \
+             rest could miss a retry, a landing or a record it states; read it with the \
+             build that wrote it, or repair the line",
             path.display()
         )));
     }
@@ -592,7 +610,6 @@ pub(crate) fn render_refusals(answered: &Supersessions) -> String {
     out
 }
 
-/// The one JSON object `onepipeline supersessions RUN --json` prints.
 pub(crate) fn render_json(answered: &Supersessions) -> String {
     serde_json::to_string(answered).expect("the answer serializes")
 }
