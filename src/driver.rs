@@ -94,6 +94,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
     match cli.command {
         Verb::Start(args) => start(&args),
         Verb::Plan(crate::cli::PlanCommand::Check(args)) => crate::plancheck::check(&args),
+        Verb::Template(command) => template(command),
         Verb::Adopt(args) => {
             let paths = resolve(&args.run)?;
             let how = if args.detach {
@@ -683,6 +684,71 @@ fn resolved_sets(flags: &[String], variable: &str, configured: &[String]) -> Res
     }
 }
 
+/// `onepipeline template`: argument parsing over the `template` verbs.
+///
+/// What the binary reads from its environment — the working directory, the host root's
+/// variable, a rendering on standard input — is read here and passed in.
+fn template(command: crate::cli::TemplateCommand) -> Result<i32> {
+    use crate::cli::TemplateCommand;
+    use crate::verbs;
+    let working_dir = launch_dir()?;
+    let options = |search: crate::cli::TemplateSearchArgs,
+                   template: Option<PathBuf>|
+     -> Result<crate::templates::TemplateOptions> {
+        Ok(crate::templates::TemplateOptions {
+            template_root: crate::templates::resolve_root(
+                search.template_root.as_deref(),
+                None,
+                &working_dir,
+                &working_dir,
+            )?,
+            repo: search.repo,
+            repositories: search.repositories,
+            template,
+            working_dir: working_dir.clone(),
+        })
+    };
+    match command {
+        TemplateCommand::List(args) => {
+            let listed = verbs::template_list(&options(args.search, None)?)?;
+            println!("{}", verbs::render_template_list(&listed, args.json)?);
+        }
+        TemplateCommand::Resolve(args) => {
+            let resolved =
+                verbs::template_resolve(&args.name, &options(args.search, args.template)?)?;
+            println!("{}", verbs::render_template_resolved(&resolved, args.json)?);
+        }
+        TemplateCommand::Check(args) => {
+            let check = match (args.rendering, args.item) {
+                (Some(rendering), _) => {
+                    crate::templates::TemplateCheck::Rendering(read_rendering(&rendering)?)
+                }
+                (None, Some(item)) => crate::templates::TemplateCheck::Item(item),
+                (None, None) => crate::templates::TemplateCheck::Template,
+            };
+            let checked =
+                verbs::template_check(&args.name, &options(args.search, args.template)?, &check)?;
+            println!("{}", verbs::render_template_checked(&checked));
+        }
+    }
+    Ok(EXIT_SUCCESS)
+}
+
+/// A rendering `template check --rendering` names: a file, or standard input for `-`.
+fn read_rendering(named: &str) -> Result<String> {
+    if named == "-" {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).map_err(|error| {
+            Error::Invalid(format!(
+                "--rendering -: standard input cannot be read: {error}"
+            ))
+        })?;
+        return Ok(text);
+    }
+    std::fs::read_to_string(named)
+        .map_err(|error| Error::Invalid(format!("--rendering {named} cannot be read: {error}")))
+}
+
 /// `onepipeline start`.
 fn start(args: &StartArgs) -> Result<i32> {
     // The store first: a plan that cannot be read is a launch that never starts,
@@ -693,8 +759,10 @@ fn start(args: &StartArgs) -> Result<i32> {
     // Parsed once, here: a bare id names nothing a store can answer for, and
     // this is where a person typed it.
     let project: crate::taskgraph::QualifiedId = args.project.parse()?;
-    let mut plan = store.plan(&project)?;
-    graph::validate(&plan)?;
+    // Read with each task's own record beside the plan, which the rendered-only
+    // check below reads once the launch config says whether it is on.
+    let read = store.read_plan(&project).map_err(Error::from)?;
+    graph::validate(&read.plan)?;
     let launch_dir = launch_dir()?;
     // The launch config is read once, here, and both halves of what it declares
     // are taken off that one strict reading: a second, later read would be a
@@ -855,6 +923,26 @@ fn start(args: &StartArgs) -> Result<i32> {
         declared.branch_template.as_deref(),
         args.launch_config.as_deref(),
     )?;
+
+    // The host's template root and the rendered-only check (contract C4 and C7),
+    // each by its three rungs: the flag, the environment, the launch config. The
+    // root is read here — a registration it holds that does not parse refuses the
+    // launch — and, where the check is on, every agent node is held to being the
+    // rendering its provenance records before the run directory exists.
+    let templates = crate::templates::Launch {
+        root: crate::templates::resolve_root(
+            args.template_root.as_deref(),
+            declared.template_root.as_deref(),
+            &launch_dir,
+            &launch_dir,
+        )?,
+        require_rendered: crate::templates::resolve_require_rendered(
+            args.require_rendered,
+            declared.require_rendered,
+        )?,
+    };
+    crate::templates::check_plan(&templates, &read, &launch_dir)?;
+    let mut plan = read.plan;
 
     // The write-back's per-item budget, by the same three rungs. Every rung is *read*
     // rather than merely present: zero is no budget at all, and each rung refuses it by
@@ -1029,6 +1117,12 @@ fn start(args: &StartArgs) -> Result<i32> {
             .as_ref()
             .map(|template| template.as_str().to_owned())
             .unwrap_or_default(),
+        template_root: templates
+            .root
+            .as_ref()
+            .map(|root| root.display().to_string())
+            .unwrap_or_default(),
+        require_rendered: templates.require_rendered,
         oneharness_sessions: Some(sessions_file(&paths)?),
     };
     record.driven_by_this_process();
@@ -3688,6 +3782,8 @@ mod tests {
             bus_config: Default::default(),
             maintenance_config: None,
             branch_template: String::new(),
+            template_root: String::new(),
+            require_rendered: false,
             oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         }

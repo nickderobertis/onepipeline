@@ -1005,6 +1005,23 @@ pub struct LaunchRecord {
     /// [`branch_template`](Self::branch_template). Omitted when empty.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub branch_template: String,
+    /// The host's template root this run was launched with, absolute, or empty
+    /// on a record that names none.
+    ///
+    /// **Resolved once, at the launch**, out of the flag, the environment and
+    /// the launch config in that order, and replayed by every driver that
+    /// adopts the run — `adopt` takes none of its own. Empty is what a record
+    /// written before this field existed reads as. Omitted when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub template_root: String,
+    /// Whether this run's plan was held, at its launch, to its agent nodes being
+    /// the renderings their provenance records (contract C7).
+    ///
+    /// Resolved once, at the launch, as [`template_root`](Self::template_root)
+    /// is, and replayed by `adopt`. `false` is what a record written before this
+    /// field existed reads as. Omitted when `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_rendered: bool,
     /// The run's oneharness pointer file — every harness run under every
     /// launch this run starts appends one line to it saying where its session
     /// went — absolute, as the engine names it to each launch.
@@ -3505,6 +3522,8 @@ mod tests {
             bus_config: Default::default(),
             maintenance_config: None,
             branch_template: String::new(),
+            template_root: String::new(),
+            require_rendered: false,
             oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         }
@@ -4271,6 +4290,8 @@ mod tests {
             bus_config: Default::default(),
             maintenance_config: None,
             branch_template: String::new(),
+            template_root: String::new(),
+            require_rendered: false,
             oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         };
@@ -4312,6 +4333,8 @@ mod tests {
             bus_config: Default::default(),
             maintenance_config: None,
             branch_template: String::new(),
+            template_root: String::new(),
+            require_rendered: false,
             oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         };

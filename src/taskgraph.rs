@@ -197,19 +197,13 @@ impl Store {
         })
     }
 
-    /// Read one qualified project id as the plan it holds.
+    /// Read one qualified project id as the plan it holds, keeping both halves a
+    /// checker needs.
     ///
     /// The project is external input, so every refusal it earns is made here,
     /// before a run is minted: a reserved key of the wrong JSON type, a key no
     /// plan field answers to, a task carrying no node id, and a dependency edge
     /// whose far end this plan cannot name.
-    pub fn plan(&self, project: &QualifiedId) -> Result<Plan> {
-        self.load(project)
-            .map(|read| read.plan)
-            .map_err(Error::from)
-    }
-
-    /// The same read, keeping both halves a checker needs.
     ///
     /// The loaded plan, and each task's own metadata map **verbatim** — including
     /// the keys outside this consumer's reserved namespace, which the mapping
@@ -218,6 +212,41 @@ impl Store {
     /// resolved node beside the store's own record of the task it came from.
     pub(crate) fn read_plan(&self, project: &QualifiedId) -> std::result::Result<Read, Load> {
         self.load(project)
+    }
+
+    /// One task — or, with `document`, one document — read by its qualified id.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sibling`] for a configuration that does not load or a store that
+    /// cannot answer, and for an id naming nothing.
+    pub(crate) fn item(&self, id: &QualifiedId, document: bool) -> Result<StoredItem> {
+        let built = self
+            .engine(&Layer::default())
+            .map_err(|error| Error::Sibling {
+                tool: STORE,
+                message: format!(
+                    "the configuration discovered from {} cannot be read: {error}",
+                    self.dir.display()
+                ),
+            })?;
+        let reader = Reader::over(built)?;
+        let global = id.global();
+        if document {
+            let read = reader
+                .call(reader.engine.document(&global))
+                .map_err(|error| failed("document show", id.as_str(), &error))?;
+            let found = one(&global, "document show", read)?;
+            return Ok(StoredItem {
+                content: found.item.content.unwrap_or_default(),
+                metadata: found.item.metadata.into_iter().collect(),
+            });
+        }
+        let found = reader.show(&global)?;
+        Ok(StoredItem {
+            content: found.item.content.unwrap_or_default(),
+            metadata: found.item.metadata.into_iter().collect(),
+        })
     }
 
     fn load(&self, project: &QualifiedId) -> std::result::Result<Read, Load> {
@@ -425,7 +454,20 @@ impl Reader {
                     .map(|task| task.item.metadata.clone().into_iter().collect()),
             )
             .collect();
-        Ok(Read { plan, metadata })
+        let stored = plan
+            .tasks
+            .iter()
+            .map(|node| node.id.clone())
+            .zip(tasks.iter().map(|task| StoredTask {
+                qualified: task.id.to_string(),
+                content: task.item.content.clone().unwrap_or_default(),
+            }))
+            .collect();
+        Ok(Read {
+            plan,
+            metadata,
+            stored,
+        })
     }
 
     /// One node, assembled out of its task.
@@ -846,6 +888,23 @@ pub(crate) struct Read {
     pub plan: Plan,
     /// Each task's own metadata map, verbatim, by node id.
     pub metadata: BTreeMap<String, Map<String, Value>>,
+    /// Each task's qualified id and its content exactly as stored, by node id: what a
+    /// rendered-only check digests, before the mapping trims it into a node's `task`.
+    pub stored: BTreeMap<String, StoredTask>,
+}
+
+/// One task as the store holds it.
+pub(crate) struct StoredTask {
+    /// Its qualified id, `<source>:<native>`.
+    pub qualified: String,
+    /// Its content, byte for byte; empty where it has none.
+    pub content: String,
+}
+
+/// One stored item read by its qualified id: its content as stored, and its metadata.
+pub(crate) struct StoredItem {
+    pub content: String,
+    pub metadata: BTreeMap<String, Value>,
 }
 
 /// Why a project did not become a plan.

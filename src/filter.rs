@@ -52,9 +52,10 @@ pub const DETAILED_PROFILE: &str = "detailed";
 /// envelope reviewer judges against — `bus_config` and `envelope_reviewer_bar` —
 /// and **6** the commands a run fires when it ends — `success_hook`,
 /// `failure_hook` and `hook_timeout`. **10** adds the ordered node and dag
-/// graph override lists, and **11** the template a lifecycle node's branch is
-/// named from, `branch_template`.
-pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 11;
+/// graph override lists, **11** the template a lifecycle node's branch is
+/// named from, `branch_template`, and **12** the host's template root and the
+/// rendered-only check, `template_root` and `require_rendered`.
+pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 12;
 
 /// Every launch-config version this build **reads**, newest first.
 ///
@@ -68,12 +69,25 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 11;
 /// says nothing about the bus or a reviewer's bar, a version-7 one says nothing
 /// about a dispatch-env hook, a version-8 one says nothing about a maintenance
 /// schedule, a version-9 one says nothing about graph overrides, and a
-/// version-10 one says nothing about a branch-name template, which is what a
-/// launch naming none of them means — and
+/// version-10 one says nothing about a branch-name template, and a version-11
+/// one says nothing about templates, which is what a launch naming none of them
+/// means — and
 /// naming a later key there is refused by that field's name**, exactly as a key
 /// no version ever had is.
-pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 11] =
-    [LAUNCH_CONFIG_SCHEMA_VERSION, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
+pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 12] = [
+    LAUNCH_CONFIG_SCHEMA_VERSION,
+    11,
+    10,
+    9,
+    8,
+    7,
+    6,
+    5,
+    4,
+    3,
+    2,
+    1,
+];
 
 const OVERRIDE_LIST_SCHEMA_VERSION: u32 = 10;
 
@@ -123,6 +137,16 @@ const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
         crate::branchname::KEY,
         crate::branchname::CONFIG_SCHEMA_VERSION,
         BlankValue::Kept,
+    ),
+    (
+        crate::templates::ROOT_KEY,
+        crate::templates::CONFIG_SCHEMA_VERSION,
+        BlankValue::Refused,
+    ),
+    (
+        crate::templates::REQUIRE_RENDERED_KEY,
+        crate::templates::CONFIG_SCHEMA_VERSION,
+        BlankValue::Refused,
     ),
 ];
 
@@ -288,6 +312,52 @@ impl<'de> serde::de::Visitor<'de> for PositiveSeconds {
     ) -> std::result::Result<Self::Value, D2::Error> {
         deserializer.deserialize_any(self)
     }
+}
+
+/// Read `require_rendered` as the `true` or `false` it is.
+///
+/// Serde's own reading of an optional boolean would take the key present and
+/// holding nothing as the document omitting it — the half-written decision every
+/// refused-when-blank key is turned down for — so that, and anything that is not
+/// a boolean, is refused here by the key's own name.
+fn require_rendered<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<bool>, D::Error> {
+    struct Flag;
+
+    impl<'de> serde::de::Visitor<'de> for Flag {
+        type Value = Option<bool>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("true or false")
+        }
+
+        fn visit_bool<E: serde::de::Error>(
+            self,
+            value: bool,
+        ) -> std::result::Result<Self::Value, E> {
+            Ok(Some(value))
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+            Err(E::custom(refused_blank(
+                crate::templates::REQUIRE_RENDERED_KEY,
+            )))
+        }
+
+        fn visit_none<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+            self.visit_unit()
+        }
+
+        fn visit_some<D2: Deserializer<'de>>(
+            self,
+            deserializer: D2,
+        ) -> std::result::Result<Self::Value, D2::Error> {
+            deserializer.deserialize_any(self)
+        }
+    }
+
+    deserializer.deserialize_any(Flag)
 }
 
 /// What a key present and holding nothing means.
@@ -520,6 +590,29 @@ pub struct LaunchConfig {
     // llmlint: ignore[invalid_states_unrepresentable] a template spelled as the launch config document wrote it, exactly as the command keys beside it are: it is parsed where the launch reads it, and refused there naming this key, and a template newtype would be a public item `docs/contract.md`'s launch config never promised.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_template: Option<String>,
+    /// The host's template root — where `templates.yaml` registers names and
+    /// `<name>.md.j2` supplies each one's host layer — if the launch says.
+    ///
+    /// The lowest of the three rungs `--template-root` heads, below
+    /// `ONEPIPELINE_TEMPLATE_ROOT`, and relative to the launch directory. A key
+    /// [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may not carry
+    /// one, refused blank by its own name, and omitted when absent.
+    // llmlint: ignore[invalid_states_unrepresentable] a path spelled as the launch config document wrote it, exactly as `bus_config` beside it is: resolved against the launch directory at the launch and read there, where a root that cannot be read is refused naming this key. It is a public field of the type `docs/contract.md`'s launch config names, and a path newtype would be a public item that contract never promised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_root: Option<String>,
+    /// Whether the plan's agent nodes have to be the renderings their provenance
+    /// records (contract C7), if the launch says.
+    ///
+    /// The lowest of the three rungs `--require-rendered` heads, below
+    /// `ONEPIPELINE_REQUIRE_RENDERED`; `false` where none says. A key
+    /// [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, refused blank or other than a
+    /// boolean by its own name, and omitted when absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "require_rendered"
+    )]
+    pub require_rendered: Option<bool>,
 }
 
 impl Default for LaunchConfig {
@@ -542,6 +635,8 @@ impl Default for LaunchConfig {
             dispatch_env_hook_timeout: None,
             maintenance_config: None,
             branch_template: None,
+            template_root: None,
+            require_rendered: None,
         }
     }
 }
@@ -600,7 +695,7 @@ impl LaunchConfig {
         // request nobody drafted a body for, one who wrote a validator would
         // find it out from a node nothing checked, and one who wrote a budget
         // would find it out from a settlement that never reached the board.
-        let carried: [(&str, Carried); 13] = [
+        let carried: [(&str, Carried); 15] = [
             (
                 "pr_author_graph",
                 Carried::text(config.pr_author_graph.as_deref()),
@@ -660,6 +755,18 @@ impl LaunchConfig {
             (
                 crate::branchname::KEY,
                 Carried::text(config.branch_template.as_deref()),
+            ),
+            (
+                crate::templates::ROOT_KEY,
+                Carried::text(config.template_root.as_deref()),
+            ),
+            // Never `Blank`: `require_rendered` refused a blank one by name before
+            // this document existed.
+            (
+                crate::templates::REQUIRE_RENDERED_KEY,
+                config
+                    .require_rendered
+                    .map_or(Carried::Absent, |_| Carried::Named),
             ),
         ];
         for (key, value) in carried {
@@ -842,11 +949,12 @@ mod tests {
     /// without anyone deciding to move it. The earlier ones stay checked in for
     /// the half a single golden cannot pin — that a config written before the
     /// current version is still a document this build reads.
-    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v11.json");
+    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v12.json");
 
     /// The same document as each earlier version wrote it: the block it had, and
     /// no key that version never had, newest first.
-    const GOLDEN_EARLIER: [(u32, &str); 10] = [
+    const GOLDEN_EARLIER: [(u32, &str); 11] = [
+        (11, include_str!("../tests/golden/launch-config-v11.json")),
         (10, include_str!("../tests/golden/launch-config-v10.json")),
         (9, include_str!("../tests/golden/launch-config-v9.json")),
         (8, include_str!("../tests/golden/launch-config-v8.json")),
@@ -945,6 +1053,8 @@ mod tests {
             dispatch_env_hook_timeout: NonZeroU64::new(60),
             maintenance_config: Some("./maintenance.yml".to_string()),
             branch_template: Some("{{ task.key }}/{{ node.id }}".to_string()),
+            template_root: Some("./templates".to_string()),
+            require_rendered: Some(true),
         }
     }
 
@@ -1018,7 +1128,12 @@ mod tests {
                         .then(|| "./scripts/dispatch-env.sh".to_string()),
                     dispatch_env_hook_timeout: NonZeroU64::new(60).filter(|_| version >= 8),
                     maintenance_config: (version >= 9).then(|| "./maintenance.yml".to_string()),
-                    branch_template: None,
+                    // Version 11 declared the branch-name template, and none of them
+                    // the template root or the rendered-only check.
+                    branch_template: (version >= 11)
+                        .then(|| "{{ task.key }}/{{ node.id }}".to_string()),
+                    template_root: None,
+                    require_rendered: None,
                 }
             );
             assert!(

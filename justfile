@@ -23,11 +23,17 @@ set positional-arguments := true
 # recipes whose failure needs project-level context (_crate-fmt-check,
 # _crate-coverage-clean, _crate-coverage, msrv) add one explicitly.
 
-# No `onetaskgraph` is installed: the store every plan is read out of is linked into
-# this crate (`onetaskgraph-core` in `[workspace.dependencies]`), so cargo builds it
-# with everything else and the release is the one `Cargo.lock` resolves.
-# `tests/linked_engines.rs` holds the lock to that one release, and fails if a recipe
-# here ever installs an `onetaskgraph` binary at another.
+# The store every plan is read out of is linked into this crate (`onetaskgraph-core`
+# in `[workspace.dependencies]`), so cargo builds it with everything else and the
+# release is the one `Cargo.lock` resolves. The `onetaskgraph` **binary** is installed
+# for one reason only: the template journeys (`tests/e2e/templates.rs`) pipe
+# `onepipeline template resolve --json` into the released `onetaskgraph task create
+# --template-loader -`, which is the seam those journeys prove. It is installed at this
+# release into this clone's own build directory, never onto `PATH`, and
+# `tests/linked_engines.rs` fails if this line ever names a release other than the one
+# the lock links.
+onetaskgraph-version := "0.2.47"
+onetaskgraph-root := justfile_directory() / "target" / "tools" / ("onetaskgraph-" + onetaskgraph-version)
 
 # The renderer the visual-docs capture draws each scene with (`just screenshots`).
 # NOT part of `check`, `gate` or `bootstrap`: screenshots are informational, and
@@ -76,6 +82,7 @@ _crate-bootstrap:
     @just _ensure-tool cargo-nextest
     @just _ensure-tool cargo-llvm-cov
     @just _ensure-strace
+    @just _ensure-onetaskgraph
     @cargo fetch --locked --quiet
 
 # The tracer the Linux-only e2e journeys (`channel.rs`, `listing.rs`,
@@ -100,6 +107,19 @@ _strace-preflight:
     @[ "$(uname -s)" = Linux ] || exit 0; \
       command -v strace >/dev/null 2>&1 \
       || { echo "strace not installed — the Linux-only e2e journeys in tests/e2e/channel.rs, listing.rs and unwatched.rs run the binary under it and refuse without it: sudo apt-get install -y strace (or your distribution's strace package), then re-run" >&2; exit 1; }
+
+# The released `onetaskgraph` the template journeys drive, at the release the lock
+# links. Network, so it is installed by `bootstrap` and only asked for by the tiers.
+_ensure-onetaskgraph:
+    @[ -x "{{onetaskgraph-root}}/bin/onetaskgraph" ] || [ -x "{{onetaskgraph-root}}/bin/onetaskgraph.exe" ] \
+      || cargo install onetaskgraph --locked --quiet --version {{onetaskgraph-version}} --root "{{onetaskgraph-root}}" \
+      || { echo "onetaskgraph {{onetaskgraph-version}} could not be installed into {{onetaskgraph-root}}; the template journeys refuse without it" >&2; exit 1; }
+
+# Asked ahead of the tiers that hold the template journeys, so the missing binary is
+# named up front rather than by a panic inside a journey.
+_onetaskgraph-preflight:
+    @[ -x "{{onetaskgraph-root}}/bin/onetaskgraph" ] || [ -x "{{onetaskgraph-root}}/bin/onetaskgraph.exe" ] \
+      || { echo "onetaskgraph {{onetaskgraph-version}} is not installed — the template journeys in tests/e2e/templates.rs drive it and refuse without it: run 'just bootstrap' (or 'just _ensure-onetaskgraph'), then re-run" >&2; exit 1; }
 
 # These are test runners, not rules: their version cannot change the gate's
 # verdict, so both here and CI take the latest rather than keeping two pins that
@@ -263,6 +283,7 @@ _crate-coverage-clean dir=llvm-cov-target-dir:
 # The crate's own half of the offline suite, instrumented, reporting nothing.
 _crate-test-rest:
     @just _strace-preflight
+    @just _onetaskgraph-preflight
     @RUSTFLAGS="-D warnings" cargo llvm-cov --no-report nextest --locked -E '{{rest-tier}}' --final-status-level fail
 
 # `--failure-mode all` is load-bearing, and belongs here rather than on either
@@ -307,6 +328,7 @@ _note-test:
 # The offline suite without coverage instrumentation.
 test-quick:
     @just _strace-preflight
+    @just _onetaskgraph-preflight
     @cargo nextest run --locked -E '{{offline-tiers}}'
 
 # The one journey that is not offline: the real `onevcs`, real git against a real
@@ -335,6 +357,7 @@ release-compat:
 # narrowed to the journeys a nextest filter names when one is given.
 test-e2e filter="":
     @just _strace-preflight
+    @just _onetaskgraph-preflight
     @cargo nextest run --locked -E 'binary(e2e){{ if filter == "" { "" } else { " and (" + filter + ")" } }}'
 
 # Each journey starts a real two-party conversation and holds one side's turn

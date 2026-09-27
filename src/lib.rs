@@ -59,6 +59,7 @@ pub mod plan;
 pub mod report;
 pub mod rules;
 pub mod telemetry;
+pub mod templates;
 pub mod verbs;
 pub mod views;
 pub mod vocabulary;

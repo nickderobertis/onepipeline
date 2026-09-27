@@ -52,6 +52,10 @@ use crate::filter::EventFilter;
 use crate::journal::{self, Journal};
 use crate::ledger::{self, RunPaths};
 use crate::telemetry::RunTelemetry;
+use crate::templates::{
+    self, ListedTemplate, ResolvedTemplate, TemplateCheck, TemplateChecked, TemplateList,
+    TemplateOptions,
+};
 use crate::views::{self, Listing, Projects, RunView, Survey};
 
 pub use crate::agents::{AgentRun, AgentScope, AgentSession, Agents};
@@ -1349,4 +1353,203 @@ pub fn render_adopted(adopted: &Adopted) -> String {
 /// graph that refuses to start.
 pub fn drive_run(paths: &RunPaths, retained: Retained) -> Result<i32> {
     driver::drive_run(paths, retained)
+}
+
+/// `template list`: every registered name — [`BUILT_IN`](crate::templates::BUILT_IN) first,
+/// then the host's in name order — with its role, its description, and the layer and file
+/// it resolves to now, or none where no layer supplies it.
+///
+/// # Errors
+///
+/// A registration the host root holds that this build refuses, and a single `--repository`
+/// whose checkout cannot be resolved.
+pub fn template_list(options: &TemplateOptions) -> Result<TemplateList> {
+    let registry = templates::Registry::load(options.template_root.as_deref())?;
+    let checkout = templates::verb_checkout(options)?;
+    let search = templates::Search {
+        explicit: None,
+        repo: Some(&checkout),
+        root: options.template_root.as_deref(),
+    };
+    Ok(TemplateList {
+        registration: registry.file(),
+        templates: registry
+            .names()
+            .iter()
+            .map(|registered| {
+                let (layer, path) = templates::locate(&registered.name, search)
+                    .map_or((None, None), |(layer, path)| (Some(layer), path));
+                ListedTemplate {
+                    name: registered.name.clone(),
+                    role: registered.role,
+                    description: registered.description.clone(),
+                    layer,
+                    path,
+                }
+            })
+            .collect(),
+    })
+}
+
+/// What `template list` prints: one line per name, or with `json` the whole list as one
+/// object.
+///
+/// # Errors
+///
+/// Only a list that does not serialise, which a well-formed one always does.
+pub fn render_template_list(list: &TemplateList, json: bool) -> Result<String> {
+    if json {
+        return to_json(list);
+    }
+    Ok(list
+        .templates
+        .iter()
+        .map(|listed| {
+            let at = match (listed.layer, &listed.path) {
+                (Some(layer), Some(path)) => format!("{layer} {}", path.display()),
+                (Some(layer), None) => layer.to_string(),
+                (None, _) => "no layer supplies it".to_owned(),
+            };
+            format!(
+                "{} [{}] {at}: {}",
+                listed.name, listed.role, listed.description
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// `template resolve <NAME>`: the name resolved through its layers — explicit, repository,
+/// host, built-in — and stated as `onetaskgraph`'s loader document.
+///
+/// # Errors
+///
+/// `template <name> is not registered`, `no template for <name>` naming every path
+/// searched, and a chain that does not load, each naming the layer and file.
+pub fn template_resolve(name: &str, options: &TemplateOptions) -> Result<ResolvedTemplate> {
+    let registry = templates::Registry::load(options.template_root.as_deref())?;
+    let checkout = templates::verb_checkout(options)?;
+    let explicit = templates::verb_explicit(options);
+    templates::resolve(
+        &registry,
+        name,
+        templates::Search {
+            explicit: explicit.as_deref(),
+            repo: Some(&checkout),
+            root: options.template_root.as_deref(),
+        },
+    )
+    .map(|resolution| resolution.stated)
+}
+
+/// What `template resolve` prints: where the name resolved and its digest, or with `json`
+/// the loader document itself.
+///
+/// # Errors
+///
+/// Only a document that does not serialise, which a well-formed one always does.
+pub fn render_template_resolved(resolved: &ResolvedTemplate, json: bool) -> Result<String> {
+    if json {
+        return to_json(resolved);
+    }
+    let at = match &resolved.path {
+        Some(path) => format!("{} layer, {}", resolved.layer, path.display()),
+        None => format!("{} layer", resolved.layer),
+    };
+    Ok(format!(
+        "{} [{}]: {at}\ndigest: {}",
+        resolved.name, resolved.role, resolved.digest
+    ))
+}
+
+/// `template check <NAME>`: C6a on the resolved template; with a rendering, C6b on it for a
+/// role-`task` name; with a stored item, C6b for a role-`task` name and C7's three checks.
+/// It writes nothing anywhere.
+///
+/// # Errors
+///
+/// [`Error::Refused`] naming the rule broken and where: the layer and file for the
+/// template, the rendering, or the item — and every refusal of [`template_resolve`].
+pub fn template_check(
+    name: &str,
+    options: &TemplateOptions,
+    check: &TemplateCheck,
+) -> Result<TemplateChecked> {
+    let registry = templates::Registry::load(options.template_root.as_deref())?;
+    let checkout = templates::verb_checkout(options)?;
+    let explicit = templates::verb_explicit(options);
+    let search = templates::Search {
+        explicit: explicit.as_deref(),
+        repo: Some(&checkout),
+        root: options.template_root.as_deref(),
+    };
+    let resolution = templates::resolve(&registry, name, search)?;
+    templates::validate(&resolution).map_err(|rule| {
+        Error::Refused(format!("template {name} ({}): {rule}", resolution.whence()))
+    })?;
+    let role = resolution.stated.role;
+    let mut item = None;
+    match check {
+        TemplateCheck::Template => {}
+        TemplateCheck::Rendering(text) => {
+            if role == templates::Role::Task {
+                templates::check_rendering(text).map_err(|rule| {
+                    Error::Refused(format!("template {name}: the rendering: {rule}"))
+                })?;
+            }
+        }
+        TemplateCheck::Item(id) => {
+            let qualified: crate::taskgraph::QualifiedId = id.parse()?;
+            let stored = crate::taskgraph::Store::discovered()?
+                .item(&qualified, role == templates::Role::Document)?;
+            let refused = |why: &str| Error::Refused(format!("item {id}: {why}"));
+            if role == templates::Role::Task {
+                templates::check_rendering(&stored.content).map_err(|rule| refused(rule))?;
+            }
+            templates::check_rendered(
+                &registry,
+                search,
+                role,
+                Some(name),
+                &templates::Stored {
+                    qualified: qualified.as_str(),
+                    metadata: &stored.metadata,
+                    content: &stored.content,
+                },
+            )
+            .map_err(|why| refused(&why))?;
+            item = Some(qualified.as_str().to_owned());
+        }
+    }
+    Ok(TemplateChecked {
+        name: resolution.stated.name,
+        role,
+        layer: resolution.stated.layer,
+        path: resolution.stated.path,
+        digest: resolution.stated.digest,
+        rendering: matches!(check, TemplateCheck::Rendering(_)),
+        item,
+    })
+}
+
+/// What `template check` prints when everything it was asked about passed.
+pub fn render_template_checked(checked: &TemplateChecked) -> String {
+    let at = match &checked.path {
+        Some(path) => format!("{} layer, {}", checked.layer, path.display()),
+        None => format!("{} layer", checked.layer),
+    };
+    let mut line = format!("template {} [{}]: ok ({at})", checked.name, checked.role);
+    if checked.rendering {
+        line.push_str("; rendering: ok");
+    }
+    if let Some(item) = &checked.item {
+        line.push_str(&format!("; item {item}: ok"));
+    }
+    line
+}
+
+/// One value as the pretty JSON the `template` verbs print under `--json`.
+fn to_json<T: serde::Serialize>(value: &T) -> Result<String> {
+    serde_json::to_string_pretty(value)
+        .map_err(|error| Error::Invalid(format!("the answer does not serialise: {error}")))
 }

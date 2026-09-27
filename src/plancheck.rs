@@ -242,6 +242,20 @@ fn check_node_sets(plan: &crate::plan::Plan) -> std::result::Result<(), Refusal>
 fn load_and_check(args: &PlanCheckArgs) -> Result<Answered> {
     let store = Store::discovered()?;
     let project: QualifiedId = args.project.parse()?;
+    // The host root and the rendered-only check, by the two rungs this verb has — the
+    // flag, then the environment — exactly as `start` reads them above its launch config.
+    let working_dir = std::env::current_dir().map_err(|error| {
+        crate::error::Error::Invalid(format!("the working directory cannot be read: {error}"))
+    })?;
+    let templates = crate::templates::Launch {
+        root: crate::templates::resolve_root(
+            args.template_root.as_deref(),
+            None,
+            &working_dir,
+            &working_dir,
+        )?,
+        require_rendered: crate::templates::resolve_require_rendered(args.require_rendered, None)?,
+    };
 
     // A check is handed the *loaded* plan, so a loader refusal leaves nothing to
     // hand it. Reporting each as not run is the whole point: a check that never
@@ -251,7 +265,10 @@ fn load_and_check(args: &PlanCheckArgs) -> Result<Answered> {
         Err(Load::Unreadable(error)) => return Err(error),
         Err(Load::Refused(refusal)) => refusal,
         Ok(read) => {
-            match crate::graph::check(&read.plan).and_then(|()| check_node_sets(&read.plan)) {
+            match crate::graph::check(&read.plan)
+                .and_then(|()| check_node_sets(&read.plan))
+                .and_then(|()| crate::templates::check_plan(&templates, &read, &working_dir))
+            {
                 Err(refusal) => refusal,
                 Ok(()) => {
                     let mut refusals = Vec::new();
