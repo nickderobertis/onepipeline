@@ -659,7 +659,9 @@ pub(crate) fn validate(resolution: &Resolution) -> std::result::Result<(), &'sta
         return Ok(());
     }
     if let Some(path) = &resolution.stated.path {
-        if !extends_base(path) {
+        // Both: the file's own `extends` reaches the base, and the chain onetaskgraph loaded
+        // holds it — so neither a stray mention nor a parent that never loads passes.
+        if !extends_base(path) || !resolution.template.chain().any(|file| file == BASE) {
             return Err(RULE_NOT_EXTENDED);
         }
     }
@@ -737,6 +739,24 @@ fn extends_literal(source: &str) -> Option<String> {
     }
 }
 
+/// A template's body: what follows its YAML front matter — a first line `---` closed by the
+/// next line `---` — which onetaskgraph strips before it compiles anything, so a tag spelled
+/// in a front matter value is text.
+fn body_of(source: &str) -> &str {
+    let mut lines = source.split_inclusive('\n');
+    if lines.next().map(str::trim_end) != Some("---") {
+        return source;
+    }
+    let mut at = source.find('\n').map_or(source.len(), |end| end + 1);
+    for line in lines {
+        at += line.len();
+        if line.trim_end() == "---" {
+            return &source[at..];
+        }
+    }
+    source
+}
+
 /// Whether the file at `path` reaches [`BASE`] by `extends`, following each parent it
 /// names in its own directory — the search path a stated loader document gives it.
 fn extends_base(path: &Path) -> bool {
@@ -750,7 +770,7 @@ fn extends_base(path: &Path) -> bool {
         let Ok(source) = std::fs::read_to_string(&at) else {
             return false;
         };
-        let Some(parent) = extends_literal(&source) else {
+        let Some(parent) = extends_literal(body_of(&source)) else {
             return false;
         };
         let within = Path::new(&parent)
@@ -1134,6 +1154,18 @@ mod tests {
             Some("after.md.j2".to_owned())
         );
         assert_eq!(extends_literal("{# unclosed comment"), None);
+        // A tag spelled in the front matter is a YAML value, not a tag.
+        let quoted = format!(
+            "---\nonetaskgraph_template: 1\ndescription: \"Say {{% extends '{BASE}' %}}\"\n---\n\
+             ## Acceptance criteria\n\n- fixed\n"
+        );
+        assert_eq!(extends_literal(body_of(&quoted)), None);
+        assert_eq!(
+            body_of("---\na: 1\n---\n{% extends \"x\" %}"),
+            "{% extends \"x\" %}"
+        );
+        assert_eq!(body_of("{% extends \"x\" %}"), "{% extends \"x\" %}");
+        assert_eq!(body_of("---\nunclosed: 1\n"), "---\nunclosed: 1\n");
     }
 
     #[test]

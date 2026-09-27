@@ -867,6 +867,17 @@ fn c6a_holds_a_task_template_to_the_base_and_its_criteria_and_a_rendering_to_lis
                 hosted.display()
             ));
     }
+    // An `extends` spelled in the front matter is a YAML value: the template extends nothing.
+    write(
+        &hosted,
+        &format!(
+            "---\nonetaskgraph_template: 1\ndescription: \"Written as {{% extends '{BASE}' %}}\"\n\
+             ---\n## Acceptance criteria\n\n- fixed\n"
+        ),
+    );
+    verb(&world, &dir, &root, &["check", "follow-up"])
+        .exited(REFUSED)
+        .err_has(RULE_NOT_EXTENDED);
     // An `extends` inside a comment is text: the template extends nothing.
     write(
         &hosted,
