@@ -208,7 +208,7 @@ pub(crate) fn recorded_in(events: &[Envelope]) -> BTreeSet<RecordedPair> {
             .ok()
         })
         .flat_map(|record| {
-            let (head, landing) = (record.node, record.landing);
+            let (head, landing) = (record.node, record.landing.reference().to_owned());
             record
                 .superseded
                 .into_iter()
@@ -267,7 +267,7 @@ pub(crate) fn journal(
 ) -> Result<()> {
     let payload = BranchesSuperseded {
         node: lineage.node.clone(),
-        landing: lineage.landing.reference().to_owned(),
+        landing: lineage.landing.clone(),
         superseded: recorded
             .recorded
             .iter()

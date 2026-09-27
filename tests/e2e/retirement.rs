@@ -1577,8 +1577,6 @@ fn parked_off_its_session(world: &World, repo: &Repository, id: &str) -> String 
     branch
 }
 
-// By a node's `branch`, in each live state.
-
 /// Pending: a node waiting on the held one, pinned to the branch.
 #[test]
 fn an_idle_pass_keeps_the_branch_a_pending_node_pins() {
@@ -1656,8 +1654,6 @@ fn an_idle_pass_keeps_the_branch_a_running_node_pins() {
         },
     );
 }
-
-// By a node's `resume.branch`, in each live state.
 
 /// Pending: a lifecycle node waiting on the held one, set to continue the branch.
 #[test]
