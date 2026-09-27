@@ -9,6 +9,39 @@ use serde_json::{json, Value};
 
 use crate::harness::{agent, human, plan_of, World, REFUSED};
 
+/// The contract's own C6b block, which every refusal these journeys expect is
+/// rendered from, so the shapes it states are the ones the binary prints.
+fn contract_block() -> Value {
+    let contract = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract.md"),
+    )
+    .expect("the contract ships");
+    let block = contract
+        .split("```json\n")
+        .skip(1)
+        .filter_map(|rest| rest.split("\n```").next())
+        .find(|body| body.contains("\"criteria_rule\": {"))
+        .expect("the contract carries the C6b block");
+    serde_json::from_str::<Value>(block).expect("the C6b block is JSON")["criteria_rule"].clone()
+}
+
+fn refused(id: &str, rule: &str) -> String {
+    contract_block()["refusal"]
+        .as_str()
+        .expect("the block states the refusal")
+        .replace("<id>", id)
+        .replace("<rule>", rule)
+}
+
+fn step_refused(id: &str, step: &str, rule: &str) -> String {
+    contract_block()["step_refusal"]
+        .as_str()
+        .expect("the block states the step refusal")
+        .replace("<id>", id)
+        .replace("<step>", step)
+        .replace("<rule>", rule)
+}
+
 /// `plan check`'s exit when the loader refused the plan.
 const HAS_REFUSALS: i32 = 1;
 
@@ -68,7 +101,7 @@ fn start_and_plan_check_refuse_each_rule_naming_the_node_and_create_no_run() {
         world
             .run(&["start", &project, "--detach"])
             .exited(REFUSED)
-            .err_has(&format!("node 'build': {rule}"));
+            .err_has(&refused("build", rule));
         assert!(
             !world.runs.join(&name).exists(),
             "a refused launch minted the run '{name}'"
@@ -90,7 +123,7 @@ fn start_and_plan_check_refuse_each_rule_naming_the_node_and_create_no_run() {
     world
         .run(&["start", &project, "--detach"])
         .exited(REFUSED)
-        .err_has("node 'wait': no criteria section");
+        .err_has(&refused("wait", "no criteria section"));
 }
 
 #[test]
@@ -102,7 +135,7 @@ fn a_steps_task_is_refused_naming_the_step_and_a_human_step_is_exempt() {
         world
             .run(&["start", &project, "--detach"])
             .exited(REFUSED)
-            .err_has(&format!("node 'ship': step 'implement': {rule}"));
+            .err_has(&step_refused("ship", "implement", rule));
         world
             .run(&["plan", "check", &project])
             .exited(HAS_REFUSALS)
@@ -196,25 +229,33 @@ fn an_add_retry_or_requeue_stating_a_task_that_breaks_c6b_is_refused_and_changes
     let (no_section, repeated, none_listed) = (BROKEN[0].0, BROKEN[1].0, BROKEN[2].0);
     edit(json!({"op": "add", "node": stating("late", no_section, &[])}))
         .exited(REFUSED)
-        .err_has("node 'late': no criteria section");
+        .err_has(&refused("late", "no criteria section"));
     edit(json!({"op": "add", "node": stepped("ship-late", none_listed, &[])}))
         .exited(REFUSED)
-        .err_has("node 'ship-late': step 'implement': no criteria listed");
+        .err_has(&step_refused(
+            "ship-late",
+            "implement",
+            "no criteria listed",
+        ));
     edit(json!({"op": "retry", "id": "flaky", "node": stating("flaky-2", repeated, &[])}))
         .exited(REFUSED)
-        .err_has("node 'flaky-2': criteria section repeated");
+        .err_has(&refused("flaky-2", "criteria section repeated"));
     edit(json!({"op": "requeue", "id": "build", "amend": {"task": none_listed}}))
         .exited(REFUSED)
-        .err_has("node 'build': no criteria listed");
+        .err_has(&refused("build", "no criteria listed"));
     // A requeue restating the steps is held to C6b step by step, and one turning a
     // person's action into an agent's holds the task it already had to it.
     let restated = stepped("ship", repeated, &["approve"])["steps"].clone();
     edit(json!({"op": "requeue", "id": "ship", "amend": {"steps": restated}}))
         .exited(REFUSED)
-        .err_has("node 'ship': step 'implement': criteria section repeated");
+        .err_has(&step_refused(
+            "ship",
+            "implement",
+            "criteria section repeated",
+        ));
     edit(json!({"op": "requeue", "id": "sign", "amend": {"kind": "agent", "persona": "engineer"}}))
         .exited(REFUSED)
-        .err_has("node 'sign': no criteria section");
+        .err_has(&refused("sign", "no criteria section"));
 
     assert_eq!(
         world.events_of(name, "edit-committed").len(),
@@ -237,7 +278,6 @@ fn an_add_retry_or_requeue_stating_a_task_that_breaks_c6b_is_refused_and_changes
         );
     }
 
-    // The same edits stating tasks that pass are applied.
     edit(json!({"op": "requeue", "id": "build", "amend": {"task": LAST}})).exited(0);
     edit(json!({"op": "add", "node": stating("late", FOLLOWED, &[])})).exited(0);
     edit(json!({"op": "retry", "id": "flaky", "node": stating("flaky-2", LAST, &[])})).exited(0);
@@ -316,12 +356,12 @@ fn adopt_refuses_a_run_whose_undone_node_breaks_c6b_before_writing_anything() {
         world
             .run(&["adopt", name])
             .exited(REFUSED)
-            .err_has(&format!("node '{broken}': no criteria section"));
+            .err_has(&refused(broken, "no criteria section"));
     }
     world
         .run(&["adopt", name, "--detach"])
         .exited(REFUSED)
-        .err_has("node 'held': no criteria section");
+        .err_has(&refused("held", "no criteria section"));
     assert_eq!(
         std::fs::read_to_string(world.run_file(name, "launch.json"))
             .expect("the launch record reads"),

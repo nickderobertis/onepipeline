@@ -2517,33 +2517,105 @@ fn c6b_is_what_the_contract_names() {
         let expected = example["rule"].as_str().map(rule_named);
         assert_eq!(check_criteria(task).err(), expected, "{task:?}");
     }
-    for (key, token) in [
-        ("heading", "## Acceptance criteria"),
-        ("section_ends_at", "## "),
-        ("exempt_kind", "kind: human"),
-        ("adopt_skips_status", "done"),
+    let heading = block["heading"]
+        .as_str()
+        .expect("the block states the heading");
+    let ends = block["section_ends_at"]
+        .as_str()
+        .expect("the block states where a section ends");
+    // The heading is the one line the check opens a section at: exactly it, and
+    // not a deeper heading of the same words.
+    assert_eq!(check_criteria(&format!("{heading}\n- It builds.")), Ok(()));
+    assert_eq!(
+        check_criteria(&format!("#{heading}\n- It builds.")),
+        Err(CriteriaRule::NoSection)
+    );
+    // A section ends at the next line opening with `ends`, and at nothing deeper.
+    assert_eq!(
+        check_criteria(&format!("{heading}\n{ends}Next\n- after")),
+        Err(CriteriaRule::NoneListed)
+    );
+    assert_eq!(
+        check_criteria(&format!("{heading}\n#{ends}Deeper\n- inside")),
+        Ok(())
+    );
+    // The markers the block lists are exactly the ones the check counts, out of
+    // every marker a Markdown list may open with.
+    let markers: BTreeSet<&str> = block["list_markers"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|marker| marker.as_str().expect("a marker"))
+        .collect();
+    for marker in ["- ", "* ", "+ ", "N. ", "N) "] {
+        let item = marker.replace('N', "1");
+        let counted = check_criteria(&format!("{heading}\n{item}It builds.")).is_ok();
+        assert_eq!(
+            counted,
+            markers.contains(marker),
+            "the block and the check disagree about `{marker}`"
+        );
+        if markers.contains(marker) {
+            assert!(
+                backticked().contains(marker),
+                "the prose no longer names `{marker}`"
+            );
+        }
+    }
+    assert_eq!(
+        block["exempt_kind"],
+        serde_json::to_value(onepipeline::plan::NodeKind::Human).expect("a kind serializes")
+    );
+    assert!(backticked().contains("kind: human"));
+    assert_eq!(
+        block["adopt_skips_status"].as_str(),
+        Some(onepipeline::channel::SettleOutcome::Done.as_str())
+    );
+    // Every entry point the rule is checked at, and no other: the two verbs a plan
+    // is loaded through and the adoption, by the command line that parses them, and
+    // the three edits that state task text, by the channel command that carries them.
+    let checked: Vec<&str> = block["checked_at"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|op| op.as_str().expect("a word"))
+        .collect();
+    assert_eq!(
+        checked,
+        ["start", "plan check", "adopt", "add", "retry", "requeue"]
+    );
+    for verb in [
+        &["start", "plans:demo"][..],
+        &["plan", "check", "plans:demo"],
+        &["adopt", "demo"],
     ] {
-        let stated = block[key].as_str().expect("a string");
-        assert!(token.contains(stated), "{key}: {stated}");
-        assert!(
-            backticked().contains(token),
-            "the prose no longer names `{token}`"
+        let argv: Vec<&str> = std::iter::once("onepipeline")
+            .chain(verb.iter().copied())
+            .collect();
+        Cli::try_parse_from(&argv)
+            .unwrap_or_else(|e| panic!("`{}` is not a verb: {e}", verb.join(" ")));
+    }
+    let node = json!({"id": "n", "persona": "e", "task": "t"});
+    for command in [
+        json!({"op": "add", "node": node}),
+        json!({"op": "retry", "id": "n", "node": node}),
+        json!({"op": "requeue", "id": "n", "amend": {"task": "t"}}),
+    ] {
+        let parsed: onepipeline::channel::Command =
+            serde_json::from_value(command.clone()).expect("an op the block names parses");
+        assert_eq!(
+            serde_json::to_value(&parsed).expect("serializes")["op"],
+            command["op"]
         );
     }
-    for marker in block["list_markers"].as_array().expect("a list") {
-        let marker = marker.as_str().expect("a marker");
+    for op in &checked {
         assert!(
-            backticked().contains(marker),
-            "the prose no longer names `{marker}`"
-        );
-    }
-    for op in block["checked_at"].as_array().expect("a list") {
-        let op = op.as_str().expect("a word");
-        assert!(
-            backticked().contains(op),
+            backticked().contains(*op),
             "the prose no longer names `{op}`"
         );
     }
+    // The refusal shapes are held to the emitted refusals by
+    // `tests/e2e/criteria_rule.rs`, which renders every refusal it expects from them.
     for key in ["refusal", "step_refusal"] {
         let shape = block[key].as_str().expect("a string");
         assert!(
