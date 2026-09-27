@@ -386,7 +386,6 @@ pub(crate) fn live_branches(
 /// What one sweep's retirement pass did across every identity.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Retirements {
-    /// Every branch deleted.
     pub(crate) retired: Vec<RetiredBranch>,
     /// Every identity whose pass failed, and every branch whose deletion did not
     /// finish.
@@ -532,7 +531,6 @@ pub(crate) struct Swept {
     pub(crate) identities: Vec<Maintained>,
     /// Why the identities could not be enumerated at all, where they could not.
     pub(crate) failure: Option<String>,
-    /// What the retirement pass did.
     pub(crate) retirements: Retirements,
 }
 

@@ -345,7 +345,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             } else {
                 crate::supersession::Mode::Answer
             };
-            let answered = crate::supersession::backfill(&resolve(&args.run)?, mode)?;
+            let answered = crate::supersession::supersessions(&resolve(&args.run)?, mode)?;
             if args.json {
                 println!("{}", crate::supersession::render_json(&answered));
             } else {

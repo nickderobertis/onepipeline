@@ -226,6 +226,9 @@ fn a_retry_its_closeout_lands_records_the_attempt_it_superseded() {
         landing,
         "the landing recorded is not where the base stands"
     );
+    // A fresh driver is seeded from the journal, so it records nothing again.
+    adopted(&world, run);
+    assert_eq!(superseded(&world, run).len(), 1, "{}", world.dump());
     first_is_superseded_then_retirable(&world, &repo);
 }
 
@@ -279,6 +282,26 @@ fn landed_by_hand(world: &World, repo: &Repository) -> String {
     tip
 }
 
+/// Squash the replacement's preserved branch onto the base by hand, as a host
+/// merges the change request at `url`: one commit whose subject names it.
+fn squashed_by_hand(world: &World, repo: &Repository, url: &str) {
+    let clone = person(world, repo);
+    git(
+        world,
+        &clone,
+        &["fetch", &repo.checkout.to_string_lossy(), SECOND],
+    );
+    git(world, &clone, &["merge", "--squash", "FETCH_HEAD"]);
+    let number = url.rsplit('/').next().expect("a change request's number");
+    git(
+        world,
+        &clone,
+        &["commit", "-m", &format!("feat: ship svc (#{number})")],
+    );
+    git(world, &clone, &["push", "origin", "main"]);
+    synced(world, repo);
+}
+
 /// Settle `svc-2` done at `landing`, as a planner does once a person landed it.
 fn settle_at(world: &World, run: &str, landing: &str) {
     world
@@ -317,10 +340,17 @@ fn registry_readable(world: &World, yes: bool) {
 /// A run whose replacement failed on [`SECOND`] and was then landed by hand and
 /// settled at that landing by a planner, with a driver alive beside it —
 /// `onevcs` unable to read its registry while the settle is taken up, where
-/// `refused` says so. Answers the run's `result.json` entry for `svc-2` and the
-/// `branches-superseded` it wrote.
+/// `refused` says so. Landed as the change request at `stated` squashes, and
+/// settled at that URL, where one is given; else pushed as it is and settled at
+/// that commit. Answers the run's `result.json` entry for `svc-2`, the
+/// `branches-superseded` it wrote, and the landing the settle stated.
 #[cfg(unix)]
-fn settled_at_a_landing(world: &World, run: &str, refused: bool) -> (Value, Value, String) {
+fn settled_at_a_landing(
+    world: &World,
+    run: &str,
+    refused: bool,
+    stated: Option<&str>,
+) -> (Value, Value, String) {
     let repo = world.repository("local-direct", &[]);
     first_attempt_beside_a_hold(world, run);
     world.script("svc-2.work", "the second attempt wrote this\n");
@@ -328,7 +358,13 @@ fn settled_at_a_landing(world: &World, run: &str, refused: bool) -> (Value, Valu
     retry(world, run, Some(SECOND));
     until_settled(world, run, "svc-2");
     assert_eq!(settlement(world, run, "svc-2")["status"], "failed");
-    let landing = landed_by_hand(world, &repo);
+    let landing = match stated {
+        Some(url) => {
+            squashed_by_hand(world, &repo, url);
+            url.to_owned()
+        }
+        None => landed_by_hand(world, &repo),
+    };
 
     if refused {
         registry_readable(world, false);
@@ -360,7 +396,7 @@ fn settled_at_a_landing(world: &World, run: &str, refused: bool) -> (Value, Valu
 #[test]
 fn a_settle_stating_where_a_retry_landed_records_the_attempt_it_superseded() {
     let world = World::new("retirement-settle");
-    let (node, payload, landing) = settled_at_a_landing(&world, "settled", false);
+    let (node, payload, landing) = settled_at_a_landing(&world, "settled", false, None);
     assert_eq!(node["status"], "done", "{node}");
     assert_eq!(node["landing"], "landed", "{node}");
     recorded_the_first_attempt(&world, "settled");
@@ -369,6 +405,22 @@ fn a_settle_stating_where_a_retry_landed_records_the_attempt_it_superseded() {
 }
 
 /// The world's `service` repository, as [`World::repository`] laid it out.
+/// A `settle` whose landing is the change request's URL, with no commit stated,
+/// tells `onevcs` that URL as the landing.
+#[cfg(unix)]
+#[test]
+fn a_settle_stating_a_change_request_records_its_url_as_the_landing() {
+    let world = World::new("retirement-settle-url");
+    let url = "https://github.com/owner/service/pull/7";
+    let (node, payload, _) = settled_at_a_landing(&world, "settled", false, Some(url));
+    assert_eq!(node["status"], "done", "{node}");
+    recorded_the_first_attempt(&world, "settled");
+    assert_eq!(payload["landing"], url, "{payload}");
+    let class = classified(&world, FIRST);
+    assert_eq!(class["class"], "superseded-with-changes", "{class}");
+    assert_eq!(class["superseded_by"]["branch"], SECOND, "{class}");
+}
+
 fn repository_of(world: &World) -> Repository {
     Repository {
         origin: world.root.join("origin.git"),
@@ -383,7 +435,7 @@ fn repository_of(world: &World) -> Repository {
 #[test]
 fn a_recording_onevcs_refuses_is_journalled_and_changes_nothing_about_the_settlement() {
     let refused = World::new("retirement-refused");
-    let (node, payload, landing) = settled_at_a_landing(&refused, "refused", true);
+    let (node, payload, landing) = settled_at_a_landing(&refused, "refused", true, None);
     assert_eq!(payload["node"], "svc-2", "{payload}");
     assert_eq!(payload["landing"], landing, "{payload}");
     assert_eq!(payload["superseded"], json!([]), "{payload}");
@@ -403,7 +455,7 @@ fn a_recording_onevcs_refuses_is_journalled_and_changes_nothing_about_the_settle
 
     // The same run with the recording accepted settles the node identically.
     let accepted = World::new("retirement-accepted");
-    let (control, _, _) = settled_at_a_landing(&accepted, "refused", false);
+    let (control, _, _) = settled_at_a_landing(&accepted, "refused", false, None);
     for field in ["status", "outcome", "landing"] {
         assert_eq!(node[field], control[field], "{field}: {node} vs {control}");
     }
@@ -741,6 +793,21 @@ fn the_backfill_verb_records_what_a_settled_run_never_did_once() {
         recorded[0]["payload"]["superseded"],
         json!([{"node": "svc", "branch": FIRST}])
     );
+    // The same recording in `--json`, over the journal as an older build left it:
+    // the pair is asked again, and `onevcs` holds it once.
+    as_an_older_build_left_it(&world, run);
+    let recorded = world
+        .run(&["supersessions", run, "--record", "--json"])
+        .exited(0)
+        .json();
+    assert_eq!(recorded["mode"], "record", "{recorded}");
+    assert_eq!(
+        recorded["lineages"][0]["recorded"],
+        json!([{"node": "svc", "branch": FIRST}]),
+        "{recorded}"
+    );
+    assert_eq!(recorded["lineages"][0]["failed"], json!([]), "{recorded}");
+    assert_eq!(superseded(&world, run).len(), 1);
 
     // Twice: nothing new, and still a success.
     let before = superseded(&world, run).len();

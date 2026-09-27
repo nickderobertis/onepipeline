@@ -53,7 +53,6 @@ pub(crate) struct Attempt {
 /// One earlier attempt `onevcs` would not record, and what it answered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct Unrecorded {
-    /// The attempt.
     #[serde(flatten)]
     pub(crate) attempt: Attempt,
     /// What `onevcs` answered.
@@ -390,9 +389,9 @@ pub(crate) fn record_landed(paths: &RunPaths, journal: &mut Journal) -> Result<(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Mode {
-    /// Say what would be recorded, and record nothing.
+    /// Record nothing.
     Answer,
-    /// Record each pair the journal does not, with `--record`.
+    /// Record each pair the journal does not already.
     Record,
 }
 
@@ -403,7 +402,6 @@ pub(crate) enum Mode {
 pub(crate) struct Supersessions {
     /// The run id the verb was given, as it resolved.
     pub(crate) run: String,
-    /// What this call was asked to do.
     pub(crate) mode: Mode,
     /// Every landed lineage with earlier attempts, in head order.
     pub(crate) lineages: Vec<SupersededLineage>,
@@ -452,7 +450,7 @@ impl Supersessions {
 /// # Errors
 ///
 /// A run whose store cannot be read, or whose journal cannot be written.
-pub(crate) fn backfill(paths: &RunPaths, mode: Mode) -> Result<Supersessions> {
+pub(crate) fn supersessions(paths: &RunPaths, mode: Mode) -> Result<Supersessions> {
     let view = crate::views::RunView::open(paths)?;
     let already = recorded_in(&view.events);
     let mut journal = (mode == Mode::Record).then(|| Journal::open(paths));
