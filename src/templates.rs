@@ -605,6 +605,8 @@ pub(crate) fn resolve(registry: &Registry, name: &str, search: Search<'_>) -> Re
 ///
 /// As [`resolve`], for everything but a chain that does not load — which is why
 /// `template list` asks this: a broken template still reports the layer it sits at.
+/// [`Error::Refused`] is `no template for <name>` and nothing else, which is what lets a
+/// listing read it as a null layer and refuse every other error.
 pub(crate) fn locate(name: &str, search: Search<'_>) -> Result<(Layer, Option<PathBuf>)> {
     if let Some(explicit) = search.explicit {
         if !explicit.is_file() {

@@ -800,6 +800,9 @@ fn every_name_resolves_at_the_first_layer_that_supplies_it_and_says_which() {
             "{} (host layer) is not a template file",
             odd_root.join("plan-task.md.j2").display()
         ));
+    verb(&world, &dir, &odd_root, &["list"])
+        .exited(REFUSED)
+        .err_has("(host layer) is not a template file");
     // An explicit file that is not there is refused, never passed over for the next layer.
     let absent = world.root.join("absent.md.j2");
     verb(

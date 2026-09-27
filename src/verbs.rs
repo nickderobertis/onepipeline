@@ -1371,23 +1371,26 @@ pub fn template_list(options: &TemplateOptions) -> Result<TemplateList> {
         repo: Some(&checkout),
         root: options.template_root.as_deref(),
     };
+    let mut listed = Vec::with_capacity(registry.names().len());
+    for registered in registry.names() {
+        // No layer supplying the name is what a null layer says; a layer's file that is there
+        // and cannot be read is refused, as `resolve` refuses it.
+        let (layer, path) = match templates::locate(&registered.name, search) {
+            Ok((layer, path)) => (Some(layer), path),
+            Err(Error::Refused(_)) => (None, None),
+            Err(other) => return Err(other),
+        };
+        listed.push(ListedTemplate {
+            name: registered.name.clone(),
+            role: registered.role,
+            description: registered.description.clone(),
+            layer,
+            path,
+        });
+    }
     Ok(TemplateList {
         registration: registry.file(),
-        templates: registry
-            .names()
-            .iter()
-            .map(|registered| {
-                let (layer, path) = templates::locate(&registered.name, search)
-                    .map_or((None, None), |(layer, path)| (Some(layer), path));
-                ListedTemplate {
-                    name: registered.name.clone(),
-                    role: registered.role,
-                    description: registered.description.clone(),
-                    layer,
-                    path,
-                }
-            })
-            .collect(),
+        templates: listed,
     })
 }
 
