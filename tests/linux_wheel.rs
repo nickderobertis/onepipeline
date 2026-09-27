@@ -466,7 +466,8 @@ fn docker_that_cannot_run_the_image_exits_one_naming_it() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains(
-            "the x86_64-unknown-linux-gnu wheel did not build in quay.io/pypa/manylinux2014_x86_64"
+            "the x86_64-unknown-linux-gnu wheel did not build in \
+             quay.io/pypa/manylinux2014_x86_64 (docker exited 101)"
         ),
         "{stderr}"
     );
@@ -655,5 +656,22 @@ fn a_build_directory_that_cannot_be_created_is_named() {
         "{stderr}"
     );
     assert!(stderr.contains("ACTION: make both writable by"), "{stderr}");
+    assert!(!dir.join("docker.log").exists(), "docker was not run");
+}
+
+#[test]
+fn a_missing_toolchain_file_is_named() {
+    let (_scratch, dir) = scratch("missing-toolchain");
+    docker_double(&dir, 0);
+    let checkout = checkout_with_channel(&dir, "1.97.1");
+    fs::remove_file(checkout.join("rust-toolchain.toml")).expect("the toolchain file is removed");
+    let output = script_in(&checkout, &dir);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot read"), "{stderr}");
+    assert!(
+        stderr.contains("ACTION: restore rust-toolchain.toml at the repository root"),
+        "{stderr}"
+    );
     assert!(!dir.join("docker.log").exists(), "docker was not run");
 }

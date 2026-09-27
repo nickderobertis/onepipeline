@@ -93,7 +93,9 @@ command -v docker >/dev/null \
 
 # Exactly one exact release, which is how rust-toolchain.toml pins it; anything
 # else would reach rustup as whatever the line happened to hold.
-channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$root/rust-toolchain.toml")"
+channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$root/rust-toolchain.toml")" \
+  || fail "cannot read $root/rust-toolchain.toml" \
+    "restore rust-toolchain.toml at the repository root, readable by $(id -un)"
 [[ "$channel" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
   || fail "rust-toolchain.toml's channel is '$channel', not one exact release" \
     "restore its single [toolchain] channel = \"<major>.<minor>.<patch>\" line"
@@ -154,8 +156,6 @@ python3.12 -m maturin build --release --locked \
   --target "$TARGET" --compatibility manylinux2014 --out "$OUT"
 SCRIPT
 
-# The checkout is read-only in the container; only the two directories the
-# build writes are mounted writable over it.
 docker run --rm --platform "$platform" \
   -v "$root":/io:ro -v "$root/$cargo_target":"/io/$cargo_target" -v "$out_abs":"/io/$out_rel" -w /io \
   -e TARGET="$target" -e OUT="$out_rel" -e CHANNEL="$channel" -e MATURIN_VERSION="$maturin_version" \
@@ -164,7 +164,7 @@ docker run --rm --platform "$platform" \
   -e CARGO_TARGET_DIR="$cargo_target" \
   -e RUSTFLAGS="-D warnings" \
   "$image" bash -euo pipefail -c "$inside" \
-  || fail "the $target wheel did not build in $image" \
-    "follow the ACTION above; with none, Docker could not start $image — check that it can pull from quay.io"
+  || fail "the $target wheel did not build in $image (docker exited $?)" \
+    "follow the ACTION above; with none, docker itself failed and its own error above says why"
 
 echo "built the $target wheel into $out_rel/"
