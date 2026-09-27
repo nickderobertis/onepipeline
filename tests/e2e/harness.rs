@@ -2476,6 +2476,16 @@ impl World {
         );
     }
 
+    /// The same, for every call of `method` but the first one each command the binary under
+    /// test runs hands the scripted store: under a page size of one, a read whose first page
+    /// answered and whose next page failed.
+    pub fn store_refuses_after_first(&self, method: &str, error: &Value) {
+        self.script(
+            &format!("{SCRIPTED_KEY}.{method}.refuse.after-first"),
+            &error.to_string(),
+        );
+    }
+
     /// The scripted store answers `method` from the real store again.
     pub fn store_stops_refusing(&self, method: &str) {
         self.unscript(&format!("{SCRIPTED_KEY}.{method}.refuse"));

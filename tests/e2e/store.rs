@@ -2976,6 +2976,114 @@ fn a_project_larger_than_one_page_is_read_to_its_end() {
     );
 }
 
+/// A launch whose read of the project's tasks came back partial — the store answered
+/// the first page of them and failed the next — is refused before anything is
+/// dispatched, and the refusal names the query that came back partial.
+///
+/// The page size is turned down to one so the store really does walk the tasks a page at
+/// a time, and the plans source answers the first `query_tasks` call from the real store
+/// and fails every later one: one answer beside one failure. A launch that ran on the
+/// pages that did answer would execute a prefix of the project and never say which nodes
+/// it left out.
+#[test]
+fn a_launch_whose_task_query_came_back_partial_is_refused_naming_the_query() {
+    let world = World::new("store-partial-tasks")
+        .with_env("ONETASKGRAPH_PAGE_SIZE", "1")
+        .through_scripted_source();
+    let project = world.plan(
+        "partial",
+        &plan_of(
+            "partial",
+            vec![
+                agent("first", &[]),
+                agent("second", &[]),
+                agent("third", &[]),
+            ],
+        ),
+    );
+    world.store_refuses_after_first("query_tasks", &source_unreachable());
+
+    world
+        .run(&["start", &project, "--detach"])
+        .exited(REFUSED)
+        .err_has(&format!("`task list` of '{project}' answered in part"))
+        .err_has(UNREACHABLE);
+    assert_eq!(
+        world.store_asked("query_tasks"),
+        2,
+        "the refusal did not come from a read whose first page answered and whose next \
+         failed: {:?}",
+        world.store_calls()
+    );
+    refused_before_dispatch(&world, "partial");
+}
+
+/// A launch whose read of one task's dependencies came back partial is refused before
+/// anything is dispatched, naming that task's dependency query.
+///
+/// The first task the plan read walks the edges of depends on two others, and the page size
+/// is one, so its dependencies arrive a page at a time: the plans source answers the first
+/// page from the real store and fails the next. A launch that kept the edge that answered
+/// would run that node before a prerequisite it never read.
+#[test]
+fn a_launch_whose_dependency_query_came_back_partial_is_refused_naming_the_query() {
+    let world = World::new("store-partial-deps")
+        .with_env("ONETASKGRAPH_PAGE_SIZE", "1")
+        .through_scripted_source();
+    let project = world.plan(
+        "partial",
+        &plan_of(
+            "partial",
+            vec![
+                agent("first", &["second", "third"]),
+                agent("second", &[]),
+                agent("third", &[]),
+            ],
+        ),
+    );
+    world.store_refuses_after_first("task_dependencies", &source_unreachable());
+
+    let first = format!("{project}/000-first");
+    world
+        .run(&["start", &project, "--detach"])
+        .exited(REFUSED)
+        .err_has(&format!("`task deps` of '{first}' answered in part"))
+        .err_has(UNREACHABLE);
+    let asked: Vec<Vec<String>> = world
+        .store_calls()
+        .into_iter()
+        .filter(|call| call[0] == "task_dependencies")
+        .collect();
+    assert_eq!(
+        asked.len(),
+        2,
+        "the refusal did not come from a dependency read whose first page answered and \
+         whose next failed: {asked:?}"
+    );
+    assert!(
+        asked.iter().all(|call| first.ends_with(&call[1])),
+        "the two pages were not one task's dependencies: {asked:?}"
+    );
+    refused_before_dispatch(&world, "partial");
+}
+
+/// A refused launch left nothing behind: no run, and no dispatch of any node.
+fn refused_before_dispatch(world: &World, run: &str) {
+    assert!(
+        !world.runs.join(run).exists(),
+        "a launch whose plan could not be read left a run behind"
+    );
+    let dispatched: Vec<Value> = world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] != crate::harness::SCRIPTED_KEY)
+        .collect();
+    assert!(
+        dispatched.is_empty(),
+        "a launch whose plan could not be read dispatched work: {dispatched:?}"
+    );
+}
+
 /// A launch that names something that is not a qualified project id is refused,
 /// and told what one looks like.
 ///

@@ -32,6 +32,10 @@
 //!   `<id>` is that item's native id as `fake::segment` spells a file name: one ticket of
 //!   several refused and the rest written.
 //! * `<key>.<method>.refuse.once` — the next call only, and the file is taken away.
+//! * `<key>.<method>.refuse.after-first` — every call of that method but the **first** this
+//!   source is handed, which the real store answers. The engine starts a source for each
+//!   command, so under a page size of one this is a read whose first page answered and
+//!   whose next page failed: one answer beside one failure.
 //! * `<key>.get_project.absent` and `<key>.get_task.absent` — the read answers that the
 //!   store holds no such item, with no failure beside it, for as long as the file is there:
 //!   what a hosted destination answers for a board or an issue somebody deleted.
@@ -307,6 +311,12 @@ impl Scripted {
         }
         for hold in holds {
             held(&self.script, &hold)?;
+        }
+        if !first {
+            let later = self.scenario(&format!("{method}.refuse.after-first"));
+            if let Some(error) = refusal(&later)? {
+                return Ok(json!({"id": request.id, "error": error}));
+            }
         }
         let once = self.scenario(&format!("{method}.refuse.once"));
         if let Some(error) = refusal(&once)? {
