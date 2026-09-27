@@ -792,6 +792,7 @@ include = [
   # The one template this crate embeds, `plan-task`'s base, which `src/templates.rs`
   # reads at compile time: without it the packaged **library** does not build.
   # `tests/package_bundle.rs` holds the packaged copy to the embedded one.
+  # llmlint: ignore[new_command_or_client_gets_its_own_project] a data file the library compiles in, not a command or client; the `template` verbs that read it are a verb group of the one existing binary, suppressed at their own site in `src/cli.rs`.
   "src/templates/onepipeline/plan-task.md.j2",
   "tests/**/*.rs",
   # The per-platform scripts the lifecycle journeys write into their own scratch:

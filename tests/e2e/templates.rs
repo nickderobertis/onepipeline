@@ -1120,6 +1120,11 @@ fn a_rendered_task_holds_until_its_template_changes(world: &World, name: &str) {
     verb(world, &dir, &root, &["check", name, "--item", &id])
         .exited(0)
         .out_has(&format!("item {id}: ok"));
+    // A well-formed id naming no item is refused naming it, rather than read as empty.
+    let missing = format!("{id}-missing");
+    let refused = verb(world, &dir, &root, &["check", name, "--item", &missing]);
+    assert_ne!(refused.code, 0, "an absent item passed");
+    refused.err_has(&missing);
     // No `template` verb wrote anything.
     verb(world, &dir, &root, &["list"]).exited(0);
     verb(world, &dir, &root, &["resolve", name, "--json"]).exited(0);
@@ -1707,6 +1712,26 @@ fn a_lifecycle_node_resolves_against_its_publication_checkout() {
         .exited(HAS_REFUSALS)
         .out_has(&format!("node 'ship': {RULE_NO_PROVENANCE}"))
         .out_lacks("could not be resolved");
+
+    // Provenance that passes, on a node whose repository `onevcs` cannot resolve: refused
+    // there, naming the repository, rather than searched as a checkout with no override.
+    // The service's own override back as it rendered, so its node passes and this one is
+    // the refusal.
+    write(&overridden, &task_template("the service's own"));
+    let built_in = verb(&world, &dir, &root, &["resolve", BUILT_IN, "--json"]).stdout;
+    created(
+        &world,
+        &native,
+        "stranded",
+        &built_in,
+        "acceptance_criteria: [It ships.]\n",
+        &["--metadata", "onepipeline.repo=\"nowhere\""],
+    );
+    world
+        .run_from(&dir, &args)
+        .exited(HAS_REFUSALS)
+        .out_has("node 'stranded'")
+        .out_has("the checkout of nowhere could not be resolved");
 }
 
 /// The settings that declare a second source, `board`: `scripted-source`, the real
