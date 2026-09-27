@@ -1580,9 +1580,6 @@ fn a_node_pinned_to_a_retired_branch_is_cut_fresh_from_the_base() {
     );
 }
 
-/// A branch whose origin refuses its deletion is retired in part: the pass journals
-/// a failure naming the identity, the branch and what the origin answered, the
-/// copy the origin kept stays, and the run settles as it would have.
 /// Cut `branch` lossless, push it to the origin, and record it superseded by
 /// `main`: a pass examines a branch an origin ref holds only where a record of
 /// the host's names it, so this is one a pass retires by pushing a deletion.
@@ -1644,6 +1641,9 @@ fn origin_held(world: &World, repo: &Repository) -> (PathBuf, PathBuf) {
     (entered, go)
 }
 
+/// A branch whose origin refuses its deletion is retired in part: the pass journals
+/// a failure naming the identity, the branch and what the origin answered, the
+/// copy the origin kept stays, and the run settles as it would have.
 #[cfg(unix)]
 #[test]
 fn a_deletion_the_origin_refuses_is_journalled_against_its_branch() {
@@ -1708,8 +1708,9 @@ fn a_deletion_the_origin_refuses_is_journalled_against_its_branch() {
 }
 
 /// A sweep maintains every identity before its retirement pass begins, and its
-/// `pool-maintenance` record is journalled while that pass is still running;
-/// the pass's own `branches-retired` follows when the pass is done.
+/// `pool-maintenance` record is journalled while that pass is still running; a
+/// run whose last node settles then waits for the pass, and journals its
+/// `branches-retired` before its result.
 ///
 /// The pass is held at `service`'s origin, deleting a published lossless branch.
 /// `tail` sorts after `service`, so a record naming both identities while the
@@ -1777,8 +1778,22 @@ fn a_sweep_records_its_maintenance_before_its_retirement_pass_ends() {
         .exited(0)
         .out_has("pool maintenance: a sweep of the host's worktree pools is in progress");
 
+    world.release("hold.go");
+    world.until("the held node to settle", |world| {
+        !world.events_of("sweeper", "node-settled").is_empty()
+    });
+    assert!(
+        !world.run_file("sweeper", "result.json").is_file(),
+        "the run settled while its sweep's retirement pass was held"
+    );
+
     std::fs::write(&go, "go").expect("the origin is released");
-    until_retired(&world, "sweeper", &["done/published"]);
+    world.until("the sweeper to settle", |world| {
+        world.run_file("sweeper", "result.json").is_file()
+    });
+    assert!(retired(&world, "sweeper")
+        .iter()
+        .any(|entry| entry["branch"] == "done/published"));
     assert!(!holds(&world, &repo.origin, "done/published"));
     let kinds: Vec<Value> = world
         .journal("sweeper")
@@ -1792,11 +1807,6 @@ fn a_sweep_records_its_maintenance_before_its_retirement_pass_ends() {
         "{}",
         world.dump()
     );
-
-    world.release("hold.go");
-    world.until("the sweeper to settle", |world| {
-        world.run_file("sweeper", "result.json").is_file()
-    });
 }
 
 /// A run whose last node settles while its sweep is still maintaining waits for
