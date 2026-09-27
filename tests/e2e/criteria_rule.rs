@@ -1,11 +1,4 @@
-//! C6b: a dispatched task states its acceptance criteria, or it is refused.
-//!
-//! Every journey drives the compiled binary against a real `local-md`
-//! `onetaskgraph` store: `start`, `plan check` and `adopt` refuse a plan whose
-//! agent node or agent step breaks the rule, naming the node, the step where
-//! there is one, and the rule; and an `add`, `retry` or `requeue` stating such a
-//! task is refused before anything is applied. A `kind: human` node or step is
-//! exempt, and a node settled `done` does not hold an adoption back. See
+//! C6b journeys, through the compiled binary over a real `local-md` store; see
 //! `docs/contract-divergences.md` entry 91.
 
 // llmlint: ignore-file[e2e_not_mocked] this suite's stand-ins are `harness.rs`'s, whose
@@ -26,16 +19,15 @@ const FOLLOWED: &str = "## What\nBuild it.\n\n## Acceptance criteria\n- It build
 /// A task whose criteria section ends the body.
 const LAST: &str = "## What\nBuild it.\n\n## Acceptance criteria\n\n1. It builds.\n";
 
-/// One direct agent node carrying `task`.
 fn stating(id: &str, task: &str, deps: &[&str]) -> Value {
     json!({"id": id, "persona": "engineer", "task": task, "deps": deps})
 }
 
 /// A lifecycle node whose two steps are an agent step carrying `task` and a
 /// human step whose prose states no criteria at all.
-fn stepped(task: &str) -> Value {
+fn stepped(id: &str, task: &str, deps: &[&str]) -> Value {
     json!({
-        "id": "ship", "repo": "service", "title": "feat: ship it",
+        "id": id, "repo": "service", "title": "feat: ship it", "deps": deps,
         "steps": [
             {"id": "implement", "persona": "engineer", "task": task},
             {"id": "approve", "kind": "human", "task": "Approve the branch.",
@@ -106,7 +98,7 @@ fn a_steps_task_is_refused_naming_the_step_and_a_human_step_is_exempt() {
     let world = World::new("c6b-steps");
     for (index, (task, rule)) in BROKEN.iter().enumerate() {
         let name = format!("steps{index}");
-        let project = world.plan(&name, &plan_of(&name, vec![stepped(task)]));
+        let project = world.plan(&name, &plan_of(&name, vec![stepped("ship", task, &[])]));
         world
             .run(&["start", &project, "--detach"])
             .exited(REFUSED)
@@ -118,7 +110,10 @@ fn a_steps_task_is_refused_naming_the_step_and_a_human_step_is_exempt() {
             .out_has(rule);
     }
     // The human step's prose states no criteria, and the plan loads.
-    let project = world.plan("stepsok", &plan_of("stepsok", vec![stepped(FOLLOWED)]));
+    let project = world.plan(
+        "stepsok",
+        &plan_of("stepsok", vec![stepped("ship", FOLLOWED, &[])]),
+    );
     world.run(&["plan", "check", &project]).exited(0);
 }
 
@@ -160,9 +155,10 @@ fn a_section_followed_by_more_sections_or_ending_the_body_loads_and_a_human_node
 fn an_add_retry_or_requeue_stating_a_task_that_breaks_c6b_is_refused_and_changes_nothing() {
     let world = World::new("c6b-edits");
     let name = "edited";
-    // `flaky` fails, so a `retry` may supersede it; `build` waits on a person, so a
-    // `cancel` parks it and a `requeue` may bring it back.
+    // `flaky` fails, so a `retry` may supersede it; `build`, `ship` and `sign` wait on
+    // a person, so a `cancel` parks each and a `requeue` may bring it back.
     world.script("flaky.fail", "1");
+    world.repository("local-direct", &[]);
     let project = world.plan(
         name,
         &plan_of(
@@ -171,6 +167,8 @@ fn an_add_retry_or_requeue_stating_a_task_that_breaks_c6b_is_refused_and_changes
                 human("approve", &[]),
                 agent("build", &["approve"]),
                 agent("flaky", &[]),
+                stepped("ship", FOLLOWED, &["approve"]),
+                human("sign", &["approve"]),
             ],
         ),
     );
@@ -189,7 +187,9 @@ fn an_add_retry_or_requeue_stating_a_task_that_breaks_c6b_is_refused_and_changes
             &json!({"version": 2, "commands": [command]}).to_string(),
         )
     };
-    edit(json!({"op": "cancel", "id": "build"})).exited(0);
+    for id in ["build", "ship", "sign"] {
+        edit(json!({"op": "cancel", "id": id})).exited(0);
+    }
     let committed = world.events_of(name, "edit-committed").len();
     let journal = world.journal(name).len();
 
@@ -197,15 +197,24 @@ fn an_add_retry_or_requeue_stating_a_task_that_breaks_c6b_is_refused_and_changes
     edit(json!({"op": "add", "node": stating("late", no_section, &[])}))
         .exited(REFUSED)
         .err_has("node 'late': no criteria section");
-    edit(json!({"op": "add", "node": stepped(none_listed)}))
+    edit(json!({"op": "add", "node": stepped("ship-late", none_listed, &[])}))
         .exited(REFUSED)
-        .err_has("node 'ship': step 'implement': no criteria listed");
+        .err_has("node 'ship-late': step 'implement': no criteria listed");
     edit(json!({"op": "retry", "id": "flaky", "node": stating("flaky-2", repeated, &[])}))
         .exited(REFUSED)
         .err_has("node 'flaky-2': criteria section repeated");
     edit(json!({"op": "requeue", "id": "build", "amend": {"task": none_listed}}))
         .exited(REFUSED)
         .err_has("node 'build': no criteria listed");
+    // A requeue restating the steps is held to C6b step by step, and one turning a
+    // person's action into an agent's holds the task it already had to it.
+    let restated = stepped("ship", repeated, &["approve"])["steps"].clone();
+    edit(json!({"op": "requeue", "id": "ship", "amend": {"steps": restated}}))
+        .exited(REFUSED)
+        .err_has("node 'ship': step 'implement': criteria section repeated");
+    edit(json!({"op": "requeue", "id": "sign", "amend": {"kind": "agent", "persona": "engineer"}}))
+        .exited(REFUSED)
+        .err_has("node 'sign': no criteria section");
 
     assert_eq!(
         world.events_of(name, "edit-committed").len(),
@@ -218,7 +227,7 @@ fn an_add_retry_or_requeue_stating_a_task_that_breaks_c6b_is_refused_and_changes
         "a refused edit wrote to the run's journal: {:?}",
         world.kinds(name)
     );
-    for id in ["late", "ship", "flaky-2"] {
+    for id in ["late", "ship-late", "flaky-2"] {
         assert!(
             !world
                 .journal(name)
@@ -238,6 +247,13 @@ fn an_add_retry_or_requeue_stating_a_task_that_breaks_c6b_is_refused_and_changes
 /// Rewrite the plan a run was launched with so node `id`'s task is `task` —
 /// the record a build from before C6b left for a plan it loaded — and drop the
 /// fold checkpoint, which the rewritten journal would no longer corroborate.
+// llmlint: ignore[tests_mirror_real_usage] the state `adopt` is refused over — a run whose
+// graph holds an undone agent node with no criteria — is reachable through no interface of this
+// build by design, because C6b refuses every route in; it exists only as the record a build from
+// before C6b wrote. That record differs from the one this build writes for the same plan in
+// exactly the task text, which is what this rewrites, and a run root with no checkpoint is the
+// documented fallback every predecessor's run root already takes. `adopt` itself is the compiled
+// binary's own.
 fn launched_before_c6b(world: &World, run: &str, id: &str, task: &str) {
     let path = world.run_file(run, "events.jsonl");
     let rewritten: Vec<String> = std::fs::read_to_string(&path)
@@ -266,26 +282,45 @@ fn launched_before_c6b(world: &World, run: &str, id: &str, task: &str) {
 fn adopt_refuses_a_run_whose_undone_node_breaks_c6b_before_writing_anything() {
     let world = World::new("c6b-adopt-refused");
     let name = "older";
+    // `build` is pending behind a person, `flaky` failed, and `held` is parked: each
+    // could still be dispatched, and each holds the adoption back on its own.
+    world.script("flaky.fail", "1");
     let project = world.plan(
         name,
         &plan_of(
             name,
-            vec![human("approve", &[]), agent("build", &["approve"])],
+            vec![
+                human("approve", &[]),
+                agent("build", &["approve"]),
+                agent("flaky", &[]),
+                agent("held", &["approve"]),
+            ],
         ),
     );
-    world.run(&["start", &project, "--attach"]).exited(0);
-    launched_before_c6b(&world, name, "build", BROKEN[0].0);
+    world.run(&["start", &project, "--attach"]);
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({"version": 2, "commands": [{"op": "cancel", "id": "held"}]}).to_string(),
+        )
+        .exited(0);
     let launch = std::fs::read_to_string(world.run_file(name, "launch.json"))
         .expect("the launch record reads");
 
-    world
-        .run(&["adopt", name])
-        .exited(REFUSED)
-        .err_has("node 'build': no criteria section");
+    for broken in ["build", "flaky", "held"] {
+        for id in ["build", "flaky", "held"] {
+            let task = if id == broken { BROKEN[0].0 } else { FOLLOWED };
+            launched_before_c6b(&world, name, id, task);
+        }
+        world
+            .run(&["adopt", name])
+            .exited(REFUSED)
+            .err_has(&format!("node '{broken}': no criteria section"));
+    }
     world
         .run(&["adopt", name, "--detach"])
         .exited(REFUSED)
-        .err_has("node 'build': no criteria section");
+        .err_has("node 'held': no criteria section");
     assert_eq!(
         std::fs::read_to_string(world.run_file(name, "launch.json"))
             .expect("the launch record reads"),

@@ -7392,8 +7392,7 @@ the key's name, pointed at 11. `tests/contract.rs`'s
 **Ruling: C6b is part of the contract, on the user's ruling relayed by the manager of run
 `task-templates`, and it is breaking on purpose.** A task without acceptance criteria is one no
 judge can hold to anything, so every host's task template must produce them; this crate
-guarantees that and nothing more about a task's shape. `docs/contract.md`'s C6b paragraph and
-its `criteria_rule` block state the rule, where it is checked, and the three refusal words.
+guarantees that and nothing more about a task's shape.
 
 **What diverged.** The approved contract names *What/Why/Acceptance-criteria task prose* as the
 node shape, and the loader held a task only to being non-blank: a node whose task carried no

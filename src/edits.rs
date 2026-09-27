@@ -1438,8 +1438,9 @@ fn refuse_stated_task_record(op: &str, node: &Node) -> Result<()> {
     Ok(())
 }
 
-/// Refuse a node an edit states whose task text breaks C6b, naming the node, the
-/// step where there is one, and the rule — before anything is applied.
+/// C6b over what an edit states, and only that: the rest of an edited graph was
+/// held to it where the run was loaded, and one launched before C6b would
+/// otherwise refuse every later edit over a task nobody restated.
 fn refuse_without_criteria(node: &Node) -> Result<()> {
     graph::check_criteria(node).map_err(|refusal| refuse(Error::from(refusal).to_string()))
 }
