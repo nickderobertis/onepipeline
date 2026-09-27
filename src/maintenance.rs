@@ -48,6 +48,7 @@
 
 use std::path::Path;
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -377,7 +378,8 @@ pub(crate) fn live_branches(
     named.into_iter().collect()
 }
 
-/// What one sweep's retirement pass did across every identity.
+/// Folded from every identity's `retire_finished` answer, and journalled as one
+/// `branches-retired` only where it holds a retirement or a failure.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Retirements {
     pub(crate) retired: Vec<RetiredBranch>,
@@ -593,27 +595,33 @@ fn maintain_pools(config: &MaintenanceConfig) -> (PoolsMaintained, Vec<String>) 
 }
 
 /// Retire each identity's finished branches, leaving alone every branch in
-/// `named`.
+/// `named` as it stands when the pass reaches that identity.
+///
+/// Read per identity rather than once for the sweep, because the loop keeps it
+/// current while the sweep runs: a node that came to name a branch after the
+/// sweep started — a retry pinned to it, a node added naming it — is left alone
+/// by every identity the pass has yet to reach.
 ///
 /// A pass of its own once every identity is maintained, rather than one
 /// interleaved with them, so the maintenance is recorded when it is done: a
 /// retirement pass costs several times what a pool maintenance does, and a
 /// record held back behind it reaches a reader only after the next sweep may
 /// already have maintained the same slots again.
-fn retire(keys: &[String], named: &[Named]) -> Retirements {
+fn retire(keys: &[String], named: &Mutex<Vec<Named>>) -> Retirements {
     let mut retirements = Retirements::default();
     if keys.is_empty() {
         return retirements;
     }
     let providers = onevcs::Providers::real();
-    let named = resolved(named, |repo| {
-        providers
-            .vcs
-            .resolve_identity(repo)
-            .map(|identity| identity.origin)
-            .map_err(|error| error.to_string())
-    });
     for identity in keys {
+        let current = named.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let named = resolved(&current, |repo| {
+            providers
+                .vcs
+                .resolve_identity(repo)
+                .map(|identity| identity.origin)
+                .map_err(|error| error.to_string())
+        });
         retirements.take(
             identity,
             onevcs::retire_finished(
@@ -629,7 +637,6 @@ fn retire(keys: &[String], named: &[Named]) -> Retirements {
     retirements
 }
 
-/// Maintain one identity's pool on the schedule.
 fn maintain(config: &MaintenanceConfig, identity: String) -> Maintained {
     let every = match config.every_for(&identity) {
         Ok(every) => every,
@@ -679,7 +686,7 @@ impl Sweep {
     /// next pace.
     fn start(
         config: MaintenanceConfig,
-        named: Vec<Named>,
+        named: Arc<Mutex<Vec<Named>>>,
         paths: &RunPaths,
         tx: Sender<Message>,
     ) -> Option<Self> {
@@ -920,6 +927,9 @@ pub(crate) struct Maintenance {
     pace: Duration,
     last_started: Option<Instant>,
     sweep: Option<Sweep>,
+    /// Every branch a live node of this run names, as of the loop's last pass:
+    /// shared with the running sweep, whose retirement pass reads it.
+    named: Arc<Mutex<Vec<Named>>>,
 }
 
 impl Maintenance {
@@ -934,6 +944,7 @@ impl Maintenance {
             pace: pace(),
             last_started: None,
             sweep: None,
+            named: Arc::default(),
         }
     }
 
@@ -950,8 +961,10 @@ impl Maintenance {
     /// running, and the pace has elapsed since it last started one. A launch
     /// naming no schedule starts nothing, ever.
     ///
-    /// `named` is asked only when a sweep starts: every branch a live node of
-    /// this run names, which the sweep's retirement pass leaves alone.
+    /// `named` is every branch a live node of this run names, which the sweep's
+    /// retirement pass leaves alone. It is asked when a sweep starts and on every
+    /// pass while one runs, so the pass reads what the run names as it reaches
+    /// each identity rather than what it named when the sweep began.
     pub(crate) fn consider(
         &mut self,
         idle: bool,
@@ -962,11 +975,16 @@ impl Maintenance {
         let Some(config) = &self.config else {
             return;
         };
-        if !idle || self.sweep.is_some() || !crate::engine::due(self.last_started, self.pace) {
+        if self.sweep.is_some() {
+            *self.named.lock().unwrap_or_else(PoisonError::into_inner) = named();
+            return;
+        }
+        if !idle || !crate::engine::due(self.last_started, self.pace) {
             return;
         }
         self.last_started = Some(Instant::now());
-        self.sweep = Sweep::start(config.clone(), named(), paths, tx.clone());
+        *self.named.lock().unwrap_or_else(PoisonError::into_inner) = named();
+        self.sweep = Sweep::start(config.clone(), Arc::clone(&self.named), paths, tx.clone());
     }
 
     /// How long until this driver could next start a sweep, for the loop's wait.
@@ -1322,6 +1340,33 @@ mod tests {
             repo: None,
             branch: "direct/branch".to_owned(),
         }));
+    }
+
+    /// The one cell of the exclusion matrix a journey cannot isolate: a running
+    /// node's session is open under a live owner, which `onevcs` keeps its branch
+    /// for on that alone, so
+    /// `retirement::an_idle_pass_keeps_the_branch_a_running_nodes_session_is_on`
+    /// shows the branch survives and this holds that the engine names it.
+    #[test]
+    fn a_running_node_names_its_open_sessions_branch() {
+        let (mut state, statuses) = named_by(&[("running", NodeStatus::Running)]);
+        let node = state.graph.get_mut("running").expect("the node");
+        node.branch = None;
+        node.resume = None;
+        let named = live_branches(&state, &statuses);
+        assert!(
+            named.contains(&Named {
+                repo: Some("service".to_owned()),
+                branch: "running/session".to_owned(),
+            }),
+            "{named:?}"
+        );
+        assert!(
+            !named
+                .iter()
+                .any(|one| one.branch.starts_with("running/") && one.branch != "running/session"),
+            "{named:?}"
+        );
     }
 
     /// An identity's pass is told the branches named against it and the ones
