@@ -60,6 +60,7 @@ mod checkpoint;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod concurrency;
 mod criteria;
+mod criteria_rule;
 mod crossdag;
 // llmlint: ignore[expensive_tests_stay_behind_their_own_edge] these journeys drive the compiled
 // binary over the real store and exercise `writeback`, `engine`, `graph`, `taskgraph` and

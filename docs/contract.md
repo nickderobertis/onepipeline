@@ -76,6 +76,38 @@ Where a plan lives: a run is launched by naming a **qualified onetaskgraph proje
 
 Every validation a plan document crossed is applied at the point a project is read, before any provider time is spent: the shape rules, the reference rules, acyclicity, the required title on a lifecycle node, a key no plan field answers to, and the named refusal for each retired field.
 
+**C6b — every dispatched task states its acceptance criteria.** *Recorded as an amendment on the user's ruling, relayed by the manager of run `task-templates` as its contract C6b, with the approved text above unedited; it is a **breaking** change, entry 91 of `docs/contract-divergences.md`.* A task body is refused unless it holds **exactly one** line reading `## Acceptance criteria` and, before the next line opening a level-2 heading (`## `) or the end of the body, at least one list item (`- ` or `* ` or `N. `) whose text is not blank. The heading line may carry trailing whitespace and a list item may be indented; nothing else is loosened, so a deeper heading (`### Acceptance criteria`), a `+ ` or `N) ` item, and prose with no item do not count. It is checked at plan load — `start`, `plan check`, and `adopt`, before anything is written, attached or `--detach` — on every agent node's task and on the task of every agent step inside `onepipeline.steps`, an `expects_no_diff` node or step included; a `kind: human` node, and a `kind: human` step, is exempt, because nothing is dispatched for it and no judge reads a bar off it. `adopt` checks the run's plan of record and skips a node settled `done`, which is never dispatched again, so refusing the run over one would strand finished work and protect nothing; every other node, a `failed` or `cancelled` one included, can still be dispatched with its stored task and is held to it. It is checked, too, on the task text an `add`, `retry` or `requeue` states — the node an `add` or `retry` carries, and the node a `requeue` produces when its `amend` states `task`, `steps` or `kind` — refused before anything is applied, so the run's graph is unchanged by it; an edit that states no task text re-checks nothing. A refusal names the node, the step where there is one, and exactly one rule, checked in this order and spelled exactly: `no criteria section`, `criteria section repeated`, `no criteria listed` — rendered `node '<id>': <rule>`, or `node '<id>': step '<step>': <rule>`. Nothing is silently repaired: the rendering that places an amendment into a task's criteria section keeps its placement logic, and a task reaching it has already passed. The check is public, as `onepipeline::plan::check_criteria(task: &str) -> Result<(), CriteriaRule>`, whose `CriteriaRule` — `NoSection`, `Repeated`, `NoneListed` — spells each rule through `as_str` and `Display`, so a host applying the same rule to a task it renders, `template check` among them, reaches this one rather than restating it.
+
+The C6b rule, as `check_criteria` answers it:
+
+```json
+{
+  "criteria_rule": {
+    "heading": "## Acceptance criteria",
+    "section_ends_at": "## ",
+    "list_markers": ["- ", "* ", "N. "],
+    "rules": {
+      "NoSection": "no criteria section",
+      "Repeated": "criteria section repeated",
+      "NoneListed": "no criteria listed"
+    },
+    "exempt_kind": "human",
+    "adopt_skips_status": "done",
+    "checked_at": ["start", "plan check", "adopt", "add", "retry", "requeue"],
+    "refusal": "node '<id>': <rule>",
+    "step_refusal": "node '<id>': step '<step>': <rule>",
+    "examples": [
+      {"task": "## What\nBuild it.\n\n## Acceptance criteria\n- It builds.\n\n## Additional info\nRun the gate.", "rule": null},
+      {"task": "## What\nBuild it.\n\n## Acceptance criteria\n1. It builds.", "rule": null},
+      {"task": "## Acceptance criteria  \n  * It builds.", "rule": null},
+      {"task": "## What\nBuild it.", "rule": "NoSection"},
+      {"task": "## Acceptance criteria\n- It builds.\n\n## Acceptance criteria\n- It ships.", "rule": "Repeated"},
+      {"task": "## Acceptance criteria\n-   \n\n## Additional info\n- a note, not a criterion", "rule": "NoneListed"}
+    ]
+  }
+}
+```
+
 **onepipeline drives the binary, it does not link the crate.** That is onetaskgraph's own recorded decision for both of its SDKs, and it is what keeps a crates.io release ordering out of every onepipeline release. onepipeline resolves the binary from `ONETASKGRAPH_BIN` when that names an executable and from `onetaskgraph` on PATH otherwise. At launch, before anything is dispatched, it compares the binary's reported version against the minimum this build requires and refuses — naming the path it resolved, the version it found, the minimum it needs, and how to install one. An absent binary is refused the same way, and neither refusal creates a run root or dispatches a node.
 
 **Status writes back; the journal does not move.** As a node's state changes, onepipeline writes that state onto its task's status category: `queued` while a driver drives the run and the node waits, `in-progress` while it is dispatched, `done` when it settles done, and `cancelled` when it is parked or dropped. Before its first dispatch, every driver — the one a launch starts and the one an adoption starts — waits for one attempt at projecting the whole plan, bounded by the store's command deadline, so every task the run has claimed reads `queued` before any of that work starts; an attempt that fails or times out is reported, and the dispatch goes ahead. At closeout, whether the run settled or was stopped, a node that never started is written `todo`, which releases the claim. Each node's `delivers` is written onto its task, and the tickets those tasks deliver move by the store's own relation between the two: onepipeline writes no ticket itself. The settlement detail goes to reserved metadata. The run journal and the run ledger stay onepipeline's, and the plan of record is still the graph the run is executing, projected from that journal under this run's ownership lock rather than re-read from the store.

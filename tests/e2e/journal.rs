@@ -193,7 +193,7 @@ fn the_graph_of_record_is_the_one_the_loop_executed_not_the_launch_file() {
                 "commands": [{
                     "op": "retry",
                     "id": "flaky",
-                    "node": {"id": "flaky-2", "persona": "engineer", "task": "## What\nagain"},
+                    "node": {"id": "flaky-2", "persona": "engineer", "task": "## What\nagain\n\n## Acceptance criteria\n- It is done."},
                 }],
             })
             .to_string(),

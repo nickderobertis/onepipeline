@@ -389,8 +389,8 @@ fn a_plan_may_state_an_amendment_and_every_step_of_an_amended_node_is_handed_it(
         "amendment": RULING,
         "steps": [
             {"id": "implement", "persona": "engineer",
-             "task": "## What\nimplement\n\n## Additional info\n\nrun the gate.\n"},
-            {"id": "review", "persona": "reviewer", "task": "## What\nreview",
+             "task": "## What\nimplement\n\n## Acceptance criteria\n- It is done.\n\n## Additional info\n\nrun the gate.\n"},
+            {"id": "review", "persona": "reviewer", "task": "## What\nreview\n\n## Acceptance criteria\n- It is done.",
              "deps": ["implement"]},
         ],
     });

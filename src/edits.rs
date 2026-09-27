@@ -1438,12 +1438,19 @@ fn refuse_stated_task_record(op: &str, node: &Node) -> Result<()> {
     Ok(())
 }
 
+/// Refuse a node an edit states whose task text breaks C6b, naming the node, the
+/// step where there is one, and the rule — before anything is applied.
+fn refuse_without_criteria(node: &Node) -> Result<()> {
+    graph::check_criteria(node).map_err(|refusal| refuse(Error::from(refusal).to_string()))
+}
+
 fn compile_add(graph: &mut Graph, node: &Node) -> Result<Vec<Operation>> {
     if graph.contains(&node.id) {
         return Err(refuse(format!("add: node '{}' already exists", node.id)));
     }
     refuse_stated_task_record("add", node)?;
     graph::validate_node(node).map_err(|e| refuse(e.to_string()))?;
+    refuse_without_criteria(node)?;
     let mut operations = vec![Operation::NodeAdded {
         node: Box::new(node.clone()),
         retry_of: None,
@@ -1607,6 +1614,7 @@ fn compile_retry(
         &target,
     ));
     graph::validate_node(&replacement).map_err(|e| refuse(e.to_string()))?;
+    refuse_without_criteria(&replacement)?;
 
     let mut replacement = replacement;
     if replacement.deps.is_empty() {
@@ -1895,6 +1903,15 @@ fn compile_requeue(
     let amended: Node = serde_json::from_value(merged)
         .map_err(|e| refuse(format!("requeue: amended node '{id}' is invalid: {e}")))?;
     graph::validate_node(&amended).map_err(|e| refuse(e.to_string()))?;
+    // What the requeue states, and only that: a node left as it was launched is
+    // the run's graph, which was held to C6b where it was loaded.
+    if amend.is_some_and(|amend| {
+        ["task", "steps", "kind"]
+            .iter()
+            .any(|key| amend.contains_key(*key))
+    }) {
+        refuse_without_criteria(&amended)?;
+    }
     graph.insert(amended);
 
     Ok(vec![Operation::NodeRequeued {
@@ -2573,7 +2590,7 @@ mod tests {
         Node {
             id: id.into(),
             persona: Some("engineer".into()),
-            task: Some("## What\ndo it".into()),
+            task: Some("## What\ndo it\n\n## Acceptance criteria\n- it is done.".into()),
             deps: deps.iter().map(|d| (*d).to_string()).collect(),
             ..Node::default()
         }
@@ -4279,7 +4296,7 @@ mod tests {
             Command::Requeue {
                 id: "docs".into(),
                 amend: Some(
-                    serde_json::json!({"task": "## What\nsomething else"})
+                    serde_json::json!({"task": "## What\nsomething else\n\n## Acceptance criteria\n- it is done."})
                         .as_object()
                         .expect("an object")
                         .clone(),

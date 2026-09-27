@@ -328,7 +328,7 @@ fn a_run_whose_nodes_all_settle_done_fires_the_success_hook_once_with_what_the_c
     drafted["draft"] = json!(true);
     let handoff = json!({
         "id": "handoff",
-        "task": "## What\nRecord that nothing changes.",
+        "task": "## What\nRecord that nothing changes.\n\n## Acceptance criteria\n- It is done.",
         "expects_no_diff": true,
     });
     let run = "allgood";

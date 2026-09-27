@@ -92,7 +92,7 @@ fn recorded_run(world: &World, name: &str) -> String {
             &["reply", name],
             &json!({"version": 2, "commands": [
                 {"op": "add", "node": {"id": "extra", "persona": "engineer",
-                                       "task": "## What\nextra", "deps": ["slow"]}},
+                                       "task": "## What\nextra\n\n## Acceptance criteria\n- It is done.", "deps": ["slow"]}},
                 {"op": "amend", "id": "after", "text": "## What\nthe corrected criterion"},
             ]})
             .to_string(),

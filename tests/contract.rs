@@ -2464,6 +2464,100 @@ fn the_pool_maintenance_schedule_is_what_the_divergence_record_names() {
     }
 }
 
+/// C6b, as the amended contract states it, is what the public check answers.
+///
+/// Each example in the block is driven through `onepipeline::plan::check_criteria`
+/// and answers the rule the block names, spelled as the block spells it; the
+/// three rule words are the whole of `CriteriaRule`. `tests/e2e/criteria_rule.rs`
+/// drives every load path and every edit the block names through the binary.
+#[test]
+fn c6b_is_what_the_contract_names() {
+    use onepipeline::plan::{check_criteria, CriteriaRule};
+    let block: Value = serde_json::from_str(&fenced_block_naming("json", "\"criteria_rule\": {"))
+        .expect("the C6b block is JSON");
+    let block = &block["criteria_rule"];
+    let rules = block["rules"].as_object().expect("the rules are a mapping");
+    let every = [
+        ("NoSection", CriteriaRule::NoSection),
+        ("Repeated", CriteriaRule::Repeated),
+        ("NoneListed", CriteriaRule::NoneListed),
+    ];
+    assert_eq!(rules.len(), every.len(), "{rules:?}");
+    let rule_named = |name: &str| {
+        every
+            .iter()
+            .find(|(named, _)| *named == name)
+            .unwrap_or_else(|| panic!("the block names a rule `{name}` the type does not carry"))
+            .1
+    };
+    for (name, rule) in every {
+        assert_eq!(rules[name].as_str(), Some(rule.as_str()), "{name}");
+        assert_eq!(rule.to_string(), rule.as_str());
+        assert!(
+            backticked().contains(rule.as_str()),
+            "the contract's prose no longer spells `{rule}`"
+        );
+    }
+    let examples = block["examples"]
+        .as_array()
+        .expect("the examples are a list");
+    for name in rules.keys() {
+        assert!(
+            examples
+                .iter()
+                .any(|example| example["rule"].as_str() == Some(name)),
+            "no example is refused as {name}"
+        );
+    }
+    assert!(examples.iter().any(|example| example["rule"].is_null()));
+    for example in examples {
+        let task = example["task"]
+            .as_str()
+            .expect("an example states its task");
+        let expected = example["rule"].as_str().map(rule_named);
+        assert_eq!(check_criteria(task).err(), expected, "{task:?}");
+    }
+    for (key, token) in [
+        ("heading", "## Acceptance criteria"),
+        ("section_ends_at", "## "),
+        ("exempt_kind", "kind: human"),
+        ("adopt_skips_status", "done"),
+    ] {
+        let stated = block[key].as_str().expect("a string");
+        assert!(token.contains(stated), "{key}: {stated}");
+        assert!(
+            backticked().contains(token),
+            "the prose no longer names `{token}`"
+        );
+    }
+    for marker in block["list_markers"].as_array().expect("a list") {
+        let marker = marker.as_str().expect("a marker");
+        assert!(
+            backticked().contains(marker),
+            "the prose no longer names `{marker}`"
+        );
+    }
+    for op in block["checked_at"].as_array().expect("a list") {
+        let op = op.as_str().expect("a word");
+        assert!(
+            backticked().contains(op),
+            "the prose no longer names `{op}`"
+        );
+    }
+    for key in ["refusal", "step_refusal"] {
+        let shape = block[key].as_str().expect("a string");
+        assert!(
+            backticked().contains(shape),
+            "the prose no longer states `{shape}`"
+        );
+    }
+    assert!(
+        backticked()
+            .contains("onepipeline::plan::check_criteria(task: &str) -> Result<(), CriteriaRule>"),
+        "the prose no longer names the public check"
+    );
+}
+
 /// The branch-name template this build takes is exactly what the amended contract
 /// names.
 ///
@@ -6474,6 +6568,10 @@ const RULINGS: &[(&str, &str)] = &[
     (
         "90.",
         "`branch_template` is a key of launch-config `schema_version: 11`",
+    ),
+    (
+        "91.",
+        "onepipeline::plan::check_criteria(task: &str) -> Result<(), CriteriaRule>",
     ),
 ];
 
