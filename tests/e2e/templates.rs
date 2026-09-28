@@ -91,12 +91,10 @@ fn task_template(marker: &str) -> String {
     )
 }
 
-/// A role-`document` template extending nothing.
 fn document_template(marker: &str) -> String {
     format!("# Design\n\n{marker}\n")
 }
 
-/// The template a name of `role` is written with here.
 fn template_for(name: &str, marker: &str) -> String {
     if name == "design-doc" {
         document_template(marker)
@@ -105,7 +103,6 @@ fn template_for(name: &str, marker: &str) -> String {
     }
 }
 
-/// `onepipeline template ...`, run from `dir` with `root` as the host root.
 fn verb(world: &World, dir: &Path, root: &Path, args: &[&str]) -> Run {
     let mut all = vec!["template"];
     all.extend_from_slice(args);
@@ -144,7 +141,6 @@ fn project(world: &World, name: &str) -> (String, String) {
     (id, native)
 }
 
-/// Answers for a task template written by [`task_template`].
 fn answers(what: &str, criteria: &[&str]) -> String {
     serde_norway::to_string(&json!({"what": what, "acceptance_criteria": criteria}))
         .expect("answers serialise")
