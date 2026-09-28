@@ -261,13 +261,13 @@ fn source_refused(message: &str) -> Value {
     json!({"kind": "refused", "message": message})
 }
 
-/// A run's first projection carries its claim by member — every lineage, since the baseline the
-/// launch seeded records no word — and reads no page of tasks; a later transition of one node
-/// carries that node alone. The named node reaches the board as ever, a label a person put on
-/// it included; the node the copy did not name keeps its item byte for byte as a person edited
-/// it, a declared field included; and the commands the worker handed the store for that
-/// projection read the project item and the named member only — no page of tasks, and no read
-/// of the unnamed member. A driver an adoption starts carries only what differs from the file
+/// A run's first projection carries its claim as one targeted update per lineage — every
+/// lineage, since the baseline the launch seeded records no word — and reads nothing: no
+/// project, no page of tasks, no item; a later transition of one node is one update of that node
+/// alone. The updated node reaches the board as ever, a label a person put on it included; the
+/// node no update named keeps its item byte for byte as a person edited it, a declared field
+/// included; and the only thing the worker handed the store for that projection is the update of
+/// the named member — no read at all, and no copy. A driver an adoption starts carries only what differs from the file
 /// the driver before it left: not the node that finished, whose item already says so.
 #[test]
 fn a_runs_first_projection_carries_its_claim_by_member_and_a_later_transition_that_node_alone() {
@@ -295,13 +295,19 @@ fn a_runs_first_projection_carries_its_claim_by_member_and_a_later_transition_th
     assert_eq!(first["outcome"], "projected", "{first}");
     assert_eq!(
         first["calls"],
-        json!({"project-show": 1, "task-show": 2, "project-copy": 1}),
-        "the first projection read other than the project and the two items it carried: {first}"
+        json!({"task-update": 2}),
+        "the first projection was other than one targeted update per item it carried: {first}"
+    );
+    // The claim is the word, and the head each item names; the untitled nodes are titled by id.
+    assert_eq!(
+        first["updated_fields"],
+        json!({"metadata": 2, "status": 2, "title": 2}),
+        "{first}"
     );
     assert_eq!(first["project"], project.as_str(), "{first}");
     assert_eq!(first["items"], json!(["aside", "work"]), "{first}");
     assert!(first["actions"].is_object(), "{first}");
-    // A local Markdown destination meters nothing, so the report carries no `spent`.
+    // A local Markdown destination meters nothing, so no update reports a `spent`.
     assert_eq!(first["spent"], Value::Null, "{first}");
     let at = first["at"]
         .as_str()
@@ -315,7 +321,7 @@ fn a_runs_first_projection_carries_its_claim_by_member_and_a_later_transition_th
         assert_eq!(first[absent], Value::Null, "{first}");
     }
 
-    // A person edits the board: a declared field of the node the next copy will not name, and
+    // A person edits the board: a declared field of the node the next update will not name, and
     // a label on the one it will.
     // llmlint: ignore-block[tests_mirror_real_usage] a `local-md` destination *is* its folder of
     // Markdown, so a person editing the board edits that file; `onetaskgraph` has no verb that
@@ -375,12 +381,13 @@ fn a_runs_first_projection_carries_its_claim_by_member_and_a_later_transition_th
         assert_eq!(record["items"], json!(["work"]), "{record}");
         assert_eq!(record["outcome"], "projected", "{record}");
         assert!(record["actions"].is_object(), "{record}");
+        assert_eq!(record["calls"], json!({"task-update": 1}), "{record}");
     }
 
     assert_eq!(
         std::fs::read(&aside_file).expect("the unnamed item reads"),
         edited,
-        "a member projection rewrote an item it did not name"
+        "a projection rewrote an item it did not name"
     );
     let tasks = world.store_tasks(&project);
     let work = board_task(&tasks, "work");
@@ -394,36 +401,29 @@ fn a_runs_first_projection_carries_its_claim_by_member_and_a_later_transition_th
         "the named node's label did not survive its projection"
     );
 
-    // What the member projection asked the store for: the project item, the named member's own
-    // item, and the writes of the copy — never a page of tasks, and never the unnamed member.
+    // What the projection asked the store for: one targeted update of the named member — never
+    // the project, a page of tasks, a read of any item, a copy, or the unnamed member.
     let calls = store_calls(&world);
     let member_calls = &calls[asked_before..];
     assert!(
-        member_calls.iter().any(|call| is_call(call, "write_task")),
-        "no copy wrote the transition: {member_calls:?}"
+        member_calls.iter().any(|call| is_call(call, "update_task")),
+        "no targeted update wrote the transition: {member_calls:?}"
     );
     for call in member_calls {
         let named = call.get(1).map(String::as_str).unwrap_or_default();
         match call[0].as_str() {
-            "initialize"
-            | "get_project"
-            | "write_project"
-            | "task_dependencies"
-            | "metering"
-            | "project_dependencies"
-            | "health" => {}
-            "get_task" | "write_task" => assert_eq!(
+            "initialize" | "metering" | "health" => {}
+            "update_task" => assert_eq!(
                 named,
                 native(&work_origin),
-                "a member projection read or wrote an item other than the member it names: \
-                 {call:?}"
+                "a projection updated an item other than the member it names: {call:?}"
             ),
-            _ => panic!("a member projection asked the store for something else: {call:?}"),
+            _ => panic!("a projection asked the store for something besides the update: {call:?}"),
         }
         assert_ne!(
             named,
             native(&aside_origin),
-            "a member projection read the member it does not name: {call:?}"
+            "a projection touched the member it does not name: {call:?}"
         );
     }
 
@@ -506,8 +506,9 @@ fn keys(value: &Value) -> std::collections::BTreeSet<String> {
 /// file is there, every item's word still unknown, while that projection's copy is held — and
 /// holds exactly entry 93's version-1 shape: only engine-owned `onepipeline.*` keys, and none
 /// of a person's label, a key of their own on the task, or the project's title and
-/// description, though the board holds all four. A copy that lands advances it; a refused one
-/// advances nothing; and the attempt after the refusal lands the change it lost.
+/// description, though the board holds all four — and each of those four stands on the board
+/// through every write. An update that lands advances it; a refused one advances nothing; and
+/// the attempt after the refusal lands the change it lost.
 #[test]
 fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
     let run = "projections-landed";
@@ -556,12 +557,12 @@ fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
     let world = world
         .through_scripted_source()
         .with_env(RENDEZVOUS_SECONDS_ENV, "600");
-    let copies = world.store_holds("write_task");
+    let updates = world.store_holds("update_task");
     world.run(&["start", &project, "--detach"]).exited(0);
 
-    // The first projection's copy is held at its first write: nothing has landed, and the file
-    // is already there, seeded from the launch's read.
-    let held = copies.arrived();
+    // The first projection's first update is held: nothing has landed, and the file is already
+    // there, seeded from the launch's read.
+    let held = updates.arrived();
     let seeded = landed(&world, run);
     let block = landed_block();
     assert_eq!(keys(&seeded), keys(&block["example"]), "{seeded}");
@@ -613,9 +614,9 @@ fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
         );
     }
 
-    world.store_stops_holding("write_task");
+    world.store_stops_holding("update_task");
     held.release();
-    drop(copies);
+    drop(updates);
     projected_until(
         &world,
         run,
@@ -640,12 +641,25 @@ fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
         "{advanced}"
     );
 
-    // A refused copy lands nothing, and the file says so.
+    // What no plan models stood through every write: the person's label and key on the item, and
+    // the project's title and key, read back unchanged off the board's own files.
+    let work_file = std::fs::read_to_string(tasks_dir.join("000-work.md")).expect("the item reads");
+    assert!(
+        work_file.contains("needs-review") && work_file.contains("a person's own key"),
+        "a targeted update took a label or a key no plan models off the item:\n{work_file}"
+    );
+    let board = std::fs::read_to_string(&project_file).expect("the project reads");
+    assert!(
+        board.contains("A board a person titled") && board.contains("a person's own project key"),
+        "the write-back rewrote the project's title or a key it does not own:\n{board}"
+    );
+
+    // A refused update lands nothing, and the file says so.
     let path = world.run_file(run, &in_run_dir(&block["file"]));
     let before = std::fs::read(&path).expect("the baseline reads");
     let mark = records(&world, run).len();
     world.store_refuses(
-        "write_task",
+        "update_task",
         &source_refused("the destination declined the write"),
     );
     noted(&world, run, "later", "not landed yet");
@@ -656,9 +670,9 @@ fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
     assert_eq!(
         std::fs::read(&path).expect("the baseline reads"),
         before,
-        "a refused copy advanced the landed baseline"
+        "a refused update advanced the landed baseline"
     );
-    world.store_stops_refusing("write_task");
+    world.store_stops_refusing("update_task");
     noted(&world, run, "work", "lands with it");
     world.until_store("the lost change to reach the board", |world| {
         world.store_tasks(&project).iter().any(|task| {
@@ -702,19 +716,16 @@ fn a_landed_baseline_the_driver_cannot_read_is_said_and_each_item_read_by_its_id
     // nothing this build writes, so the file is edited the way a hand or another tool would.
     unreadable["items"]["work"]["metadata"]["authored.note"] = json!("not the engine's");
     std::fs::write(&path, unreadable.to_string()).expect("the baseline is rewritten");
-    // And the shadow document the previous driver left for `later`, which names where its item
-    // is, made unreadable too: said, and the lineage read at the task it was launched from.
+    // And a shadow document for `later` an older build left — one naming where its item is, which
+    // this build no longer writes for an item that exists — that cannot be read: said, and the
+    // lineage read at the task it was launched from.
     let later_shadow = world
         .run_file(run, "writeback")
         .join("tasks")
         .join(hex(&project))
         .join(format!("{}.md", hex("later")));
-    assert!(
-        later_shadow.is_file(),
-        "no shadow document at {}",
-        later_shadow.display()
-    );
-    std::fs::write(&later_shadow, "not a shadow document").expect("the document is rewritten");
+    std::fs::create_dir_all(later_shadow.parent().expect("a folder")).expect("the shadow folder");
+    std::fs::write(&later_shadow, "not a shadow document").expect("the document is written");
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     let mark = records(&world, run).len();
@@ -738,10 +749,12 @@ fn a_landed_baseline_the_driver_cannot_read_is_said_and_each_item_read_by_its_id
     );
     let first = records(&world, run)[mark].clone();
     assert_eq!(first["scope"], "members", "{first}");
-    // Both lineages read once by their own id, and none read again to be carried.
+    // Both lineages read once by their own id, none read again to be carried, and no project
+    // read or copy: each carried lineage is a targeted update of the item the read found.
     assert_eq!(first["calls"]["task-show"], 2, "{first}");
-    assert_eq!(first["calls"]["project-show"], 1, "{first}");
-    assert!(first["calls"].get("task-list").is_none(), "{first}");
+    for absent in ["project-show", "project-copy", "task-list"] {
+        assert!(first["calls"].get(absent).is_none(), "{first}");
+    }
     let rewritten = landed(&world, run);
     assert!(
         rewritten["items"]["work"]["metadata"]
@@ -905,9 +918,9 @@ fn a_lineage_read_cold_with_edges_is_carried_and_its_edges_put_right() {
 }
 
 /// The attempt after a failed one carries exactly the lineages whose change had not landed —
-/// never the whole project — whatever failed: the store refusing the copy, each recorded failed
-/// with the store's class and kind and the reason, carrying no report, and the planner told the
-/// items the copy carried. The change the refused attempt lost and one made while it was
+/// never the whole project — whatever failed: the store refusing the targeted update, each
+/// recorded failed with the store's class and kind and the reason, carrying no report, and the
+/// planner told the items the attempt carried. The change the refused attempt lost and one made while it was
 /// refused both reach the board on the attempt that recovers, and that attempt carries those
 /// two lineages and nothing else. A failure a wait can change is retried on the schedule, and
 /// the retry carries the unlanded lineage alone. Across it all, no attempt reads a page of
@@ -950,10 +963,10 @@ fn a_projection_after_a_failed_attempt_carries_what_had_not_landed() {
     };
 
     world.store_refuses(
-        "write_task",
-        &source_refused("the item that copy would update is one the destination no longer holds"),
+        "update_task",
+        &source_refused("the item that update names is one the destination no longer holds"),
     );
-    noted(&world, run, "later", "refused at the copy");
+    noted(&world, run, "later", "refused at the update");
     let member = recorded(1)[mark].clone();
     assert_eq!(member["scope"], "members", "{member}");
     assert_eq!(member["items"], json!(["later"]), "{member}");
@@ -993,9 +1006,9 @@ fn a_projection_after_a_failed_attempt_carries_what_had_not_landed() {
             .lines()
             .find_map(|line| line.strip_prefix("items: ")),
         Some("later"),
-        "the surface names other items than the copy carried: {surface}"
+        "the surface names other items than the attempt carried: {surface}"
     );
-    world.store_stops_refusing("write_task");
+    world.store_stops_refusing("update_task");
 
     // The graph changes again, on another lineage: the attempt carries that change and the one
     // the refusal lost, and not `aside`, which changed nowhere.
@@ -1008,7 +1021,7 @@ fn a_projection_after_a_failed_attempt_carries_what_had_not_landed() {
     world.until_store(
         "every change the refusal lost to reach the board",
         |world| {
-            noted_on(world, "later", "refused at the copy")
+            noted_on(world, "later", "refused at the update")
                 && noted_on(world, "work", "changed after the refusal")
         },
     );
@@ -1020,10 +1033,10 @@ fn a_projection_after_a_failed_attempt_carries_what_had_not_landed() {
     assert_eq!(again["outcome"], "projected", "{again}");
 
     // A failure a wait can change is retried on the schedule, and the retry carries what had
-    // not landed: the read of the named member failing is recorded failed and `transient`, and
+    // not landed: the update of the named member failing is recorded failed and `transient`, and
     // the attempt the schedule makes next carries that member again, alone, and lands.
     world.store_refuses_once(
-        "get_task",
+        "update_task",
         &json!({"kind": "unavailable", "message": "the connection was reset"}),
     );
     noted(&world, run, "later", "retried by member");
@@ -1036,7 +1049,7 @@ fn a_projection_after_a_failed_attempt_carries_what_had_not_landed() {
     assert_eq!(unread["kind"], "unavailable", "{unread}");
     assert!(
         unread["reason"].as_str().is_some_and(
-            |reason| reason.contains("task-show") && reason.contains("connection was reset")
+            |reason| reason.contains("task-update") && reason.contains("connection was reset")
         ),
         "{unread}"
     );
@@ -1048,8 +1061,8 @@ fn a_projection_after_a_failed_attempt_carries_what_had_not_landed() {
         noted_on(world, "later", "retried by member")
     });
     assert!(
-        !world.fakes.join("store.get_task.refuse.once").exists(),
-        "the member read was never asked, so nothing failed it"
+        !world.fakes.join("store.update_task.refuse.once").exists(),
+        "the member's update was never sent, so nothing failed it"
     );
     assert_eq!(
         world.store_asked("query_tasks"),
@@ -1060,12 +1073,12 @@ fn a_projection_after_a_failed_attempt_carries_what_had_not_landed() {
     world.release("aside.go");
 }
 
-/// The record carries exactly what the copy said it did and spent: its `spent` object as the
-/// store reported it, and its per-item actions counted. The destination here meters its own
-/// requests, as a hosted source does — each request it serves spends one request and three
-/// points — so the store reports a `spent` for the copy, and a worker recording it as anything
-/// but what the store said fails here, as does one miscounting what the copy did. The copy
-/// after the meter is taken away reports what a source that meters nothing reports.
+/// The record carries exactly what the targeted update said it did and spent: its `spent` object
+/// as the store reported it, the fields it wrote, and the item counted. The destination here
+/// meters its own requests, as a hosted source does — each request it serves spends one request
+/// and three points — so the store reports a `spent` for the update, and a worker recording it
+/// as anything but what the store said fails here, as does one miscounting what it wrote. The
+/// update after the meter is taken away reports what a source that meters nothing reports.
 #[test]
 fn the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent() {
     let run = "projections-report";
@@ -1094,20 +1107,22 @@ fn the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent() {
     let mark = records(&world, run).len();
     let asked_before = store_calls(&world).len();
     noted(&world, run, "later", "counted");
-    world.until("the metered copy to be recorded", |world| {
+    world.until("the metered update to be recorded", |world| {
         records(world, run).len() > mark
     });
 
     let counted = records(&world, run)[mark].clone();
     assert_eq!(counted["outcome"], "projected", "{counted}");
     assert_eq!(counted["scope"], "members", "{counted}");
+    assert_eq!(counted["calls"], json!({"task-update": 1}), "{counted}");
+    // A note is the one engine-owned key it moves.
     assert_eq!(
-        counted["calls"],
-        json!({"project-show": 1, "task-show": 1, "project-copy": 1}),
+        counted["updated_fields"],
+        json!({"metadata": 1}),
         "{counted}"
     );
-    // What the metered source served for that copy: every request between the two readings
-    // the store takes of its meter, one before the copy and one after, read off the source's
+    // What the metered source served for that update: every request between the two readings
+    // the store takes of its meter, one before the update and one after, read off the source's
     // own record of calls.
     let calls = store_calls(&world)[asked_before..].to_vec();
     let readings: Vec<usize> = calls
@@ -1123,7 +1138,7 @@ fn the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent() {
     let served = (readings[1] - readings[0] - 1) as u64;
     assert!(
         served > 0,
-        "the metered copy asked the source nothing: {calls:?}"
+        "the metered update asked the source nothing: {calls:?}"
     );
     assert_eq!(
         counted["spent"],
@@ -1132,13 +1147,13 @@ fn the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent() {
         ]}),
         "{counted}"
     );
-    // The project item already read as the source did; the named member was rewritten.
+    // The one item the update wrote on.
     assert_eq!(
         counted["actions"],
-        json!({"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0, "reopened": 0}),
+        json!({"created": 0, "updated": 1, "unchanged": 0, "orphaned": 0, "reopened": 0}),
         "{counted}"
     );
-    world.until_store("the metered copy to land", |world| {
+    world.until_store("the metered update to land", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
                 && task["item"]["metadata"]["onepipeline.context"] == "counted"
@@ -1154,7 +1169,7 @@ fn the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent() {
     assert_eq!(real["spent"], Value::Null, "{real}");
     assert_eq!(
         real["actions"],
-        json!({"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0, "reopened": 0}),
+        json!({"created": 0, "updated": 1, "unchanged": 0, "orphaned": 0, "reopened": 0}),
         "{real}"
     );
 }
@@ -1239,14 +1254,16 @@ fn a_run_directory_holding_an_older_engines_store_record_adopts_and_projects_by_
 
 /// A running node that is cancelled settles `cancelled` and reads `parked` on the board — the
 /// park outranks the settlement, and it is an open word — so within one build nothing closes
-/// its item and nothing has to reopen it. What does read closed is an item a board an older
-/// build wrote, or a person, closed: `cancelled` on the destination. A retry or a requeue of
-/// such a node writes `queued` onto **that same item**, which the store reopens: the attempt
-/// that projects the retry carries the lineage root alone, reports `created: 0` and
-/// `reopened: 1`, and the board holds one item for the lineage at the id it had before, naming
-/// the replacement under `onepipeline.node`; the requeue likewise lands `queued` on its one item
-/// with `reopened: 1`; and a cancelled node nobody retries or requeues keeps its one item under
-/// the word it had. A held node keeps the run alive through three parks, and under a
+/// its item and nothing has to reopen it. What does read closed is an item a person closed:
+/// `cancelled` on the destination. A retry or a requeue of such a node writes `queued` onto
+/// **that same item**, which the store reopens: the attempt that projects the retry carries the
+/// lineage root alone as one targeted update, reports `created: 0`, and the board holds one item
+/// for the lineage at the id it had before, naming the replacement under `onepipeline.node`; the
+/// requeue likewise lands `queued` on its one item. `reopened` counts off the word the run knew
+/// the item by, since no attempt reads an item the landed baseline holds: `0` for those two,
+/// whose close the run never saw, and `1` for a card a person closed that a driver adopting the
+/// run with no baseline reads by its id and writes back open. A cancelled node nobody retries
+/// or requeues keeps its one item under the word it had. A held node keeps the run alive through three parks, and under a
 /// concurrency of two — that node in one slot, a second held node added into the other — each
 /// reopened node is read at `queued` rather than the word its dispatch would move it to.
 #[test]
@@ -1368,8 +1385,8 @@ fn a_retry_or_requeue_of_a_cancelled_node_reopens_its_one_item() {
     let retried = records(&world, run)[mark..].to_vec();
     assert_eq!(
         reopens(&retried, "retried"),
-        1,
-        "the retry's projection did not count exactly one reopen: {retried:?}"
+        0,
+        "the retry of a card only a person closed counted a close the run never saw: {retried:?}"
     );
     let tasks = world.store_tasks(&project);
     let lineage: Vec<&Value> = tasks
@@ -1423,8 +1440,9 @@ fn a_retry_or_requeue_of_a_cancelled_node_reopens_its_one_item() {
     let requeued = records(&world, run)[mark..].to_vec();
     assert_eq!(
         reopens(&requeued, "requeued"),
-        1,
-        "the requeue's projection did not count exactly one reopen: {requeued:?}"
+        0,
+        "the requeue of a card only a person closed counted a close the run never saw: \
+         {requeued:?}"
     );
     let tasks = world.store_tasks(&project);
     assert_eq!(
@@ -1440,6 +1458,43 @@ fn a_retry_or_requeue_of_a_cancelled_node_reopens_its_one_item() {
     assert_eq!(
         board_task(&tasks, "left")["item"]["status"]["name"],
         "parked"
+    );
+    // A close the run reads is a close it counts. A person closes the one nobody came back to,
+    // and a driver adopting the run with no landed baseline — as a run an older build started
+    // has none — reads that item by its id, finds it `cancelled`, and writes it back open.
+    // llmlint: ignore-block[tests_mirror_real_usage] closing an item on a `local-md` board is
+    // writing its file, and a run directory with no landed baseline is one an older build left;
+    // no invocation of this build produces either.
+    amend(
+        &item_file(&world, board_task(&tasks, "left")),
+        "status",
+        json!("cancelled"),
+    );
+    world.run(&["stop", run]).exited(0);
+    std::fs::remove_file(world.run_file(run, &in_run_dir(&landed_block()["file"])))
+        .expect("this build seeded a landed baseline");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let mark = records(&world, run).len();
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    projected_until(
+        &world,
+        run,
+        &project,
+        "the adopting driver to write the closed card open",
+        |tasks| board_task(tasks, "left")["item"]["status"]["name"] == "parked",
+    );
+    let adopted = records(&world, run)[mark..].to_vec();
+    assert_eq!(
+        adopted
+            .iter()
+            .map(|record| record["actions"]["reopened"].as_u64().unwrap_or_default())
+            .sum::<u64>(),
+        1,
+        "the card read closed and written open was not counted exactly once: {adopted:?}"
+    );
+    assert_eq!(
+        board_task(&world.store_tasks(&project), "left")["id"],
+        held_before("left")
     );
     // Every landed attempt at the current version names the count.
     for record in records(&world, run) {
@@ -1535,20 +1590,13 @@ fn an_adoption_of_a_run_an_older_build_started_reads_the_furthest_along_item_by_
     // And what that build left in the run's own directory, which outlives its driver: no landed
     // baseline, which that build never wrote, and a shadow task for the attempt, keyed by the
     // attempt's id and naming the item the attempt landed on — which is how the adopting driver
-    // finds that item without reading the board's page of tasks. A copy carrying a document the
-    // shadow store holds that this build did not write would reach the board as an item of its
-    // own, so it has to be taken out.
+    // finds that item without reading the board's page of tasks. This build writes a shadow task
+    // only for an item it creates, so the older build's is written here as that build wrote it.
     let shadow_tasks = world
         .run_file(run, "writeback")
         .join("tasks")
         .join(hex(&project));
-    let root_shadow = shadow_tasks.join(format!("{}.md", hex("flaky")));
     let stale_shadow = shadow_tasks.join(format!("{}.md", hex("flaky-2")));
-    assert!(
-        root_shadow.is_file(),
-        "the run keeps its shadow store elsewhere than {}",
-        root_shadow.display()
-    );
     let seeded = world.store_tasks(&project);
     assert_eq!(
         seeded
@@ -1600,15 +1648,21 @@ fn an_adoption_of_a_run_an_older_build_started_reads_the_furthest_along_item_by_
             // holds no landed baseline, and no invocation of this build produces one without it:
             // every launch seeds the file. Removing it is exactly that directory.
             std::fs::remove_file(&landed_file).expect("this build seeded a landed baseline");
-            // Written once the driver has stopped, because a driver still projecting takes a
-            // shadow document it did not write out of the store.
-            rewritten(&root_shadow, &stale_shadow, |front| {
-                let metadata = front["metadata"].as_object_mut().expect("metadata");
-                metadata.insert("onepipeline.id".to_owned(), json!("flaky-2"));
-                metadata.remove("onepipeline.node");
-                metadata.remove("onepipeline.supersedes");
-                metadata.insert("onetaskgraph.origin".to_owned(), attempt_id.clone());
-            });
+            // Written once the driver has stopped, as the older build's driver left it.
+            std::fs::create_dir_all(&shadow_tasks).expect("the shadow folder");
+            std::fs::write(
+                &stale_shadow,
+                format!(
+                    "---\n{}---\n## What\nAgain.\n",
+                    serde_norway::to_string(&json!({
+                        "title": "flaky-2",
+                        "status": "in progress",
+                        "metadata": {"onepipeline.id": "flaky-2", "onetaskgraph.origin": attempt_id},
+                    }))
+                    .expect("the front matter renders")
+                ),
+            )
+            .expect("the older build's shadow task is written");
             // llmlint: ignore-end[tests_mirror_real_usage]
         }
         let mark = records(world, run).len();
@@ -1626,17 +1680,16 @@ fn an_adoption_of_a_run_an_older_build_started_reads_the_furthest_along_item_by_
             "the projection carried other than one item per lineage: {first}"
         );
         if cold {
-            // Each lineage read once, by its own id, and neither read again to be carried.
+            // Each lineage read once, by its own id, then one targeted update of each item the
+            // reads found — no project read and no copy.
             assert_eq!(
                 first["calls"],
-                json!({"project-show": 1, "task-show": 2, "project-copy": 1}),
+                json!({"task-show": 2, "task-update": 2}),
                 "{first}"
             );
         }
         assert_eq!(first["actions"]["created"], 0, "{first}");
-        // The reused item may still carry the older build's origin when the copy rewrites it,
-        // so the store can report it once as the lineage it updated and again as an orphan of
-        // that origin: it is one item, rewritten, and counts under `updated` alone.
+        // The reused item is updated in place, never counted as an orphan of the older origin.
         assert_eq!(first["actions"]["orphaned"], 0, "{first}");
         assert!(
             first["actions"]["updated"].as_u64() >= Some(1),
@@ -1688,11 +1741,6 @@ fn an_adoption_of_a_run_an_older_build_started_reads_the_furthest_along_item_by_
                 .any(|task| task["item"]["metadata"]["onepipeline.id"] == "flaky-2"),
             "an item still says it is the attempt's own: {tasks:?}"
         );
-        assert!(
-            !stale_shadow.exists(),
-            "the shadow task an older build left for the attempt was carried: {}",
-            stale_shadow.display()
-        );
     };
     reused_by_a_member_projection(&world, "the adopted driver's first projection", true);
     assert!(
@@ -1710,11 +1758,11 @@ fn an_adoption_of_a_run_an_older_build_started_reads_the_furthest_along_item_by_
     no_record_is_whole_or_reads_a_page_of_tasks(&world, run);
 }
 
-/// How many nodes each run of the concurrency journey below carries.
+/// How many nodes each run of the concurrency journey below adds, one at a time.
 ///
-/// A full phase replaces this many tasks and the project item. The readiness wait
-/// uses the count to ensure both stores have projected before reading them.
-const CONCURRENT_NODES: usize = 12;
+/// A creation is the one write the shadow store takes, so each add is one rewrite of the
+/// project's shadow document and the added node's for the reader to race.
+const CONCURRENT_ADDS: usize = 6;
 
 /// The body each run's project carries in the concurrency journey below, which its
 /// projected project document has to restate whole.
@@ -1841,26 +1889,25 @@ fn shadow_documents(dir: &Path) -> Vec<PathBuf> {
 
 // llmlint: ignore-block[tests_mirror_real_usage] no CLI output reports a torn file, and a
 // window microseconds wide is caught only by reading at rate, as `local-md` itself reads.
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] Measured at 7.5s
-// within this module's 36.2s, this uses the same compiled binary and store fixture as
-// its six peer write-back journeys. The only separate test edge is for conversational
-// note journeys; moving this filesystem race there loses this module's crateSource
-// coverage when the projection code changes.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this uses the same compiled
+// binary and store fixture as its peer write-back journeys. The only separate test edge is for
+// conversational note journeys; moving this filesystem race there loses this module's
+// crateSource coverage when the projection code changes.
+/// Two runs each `add` nodes one at a time — every creation rewriting its run's shadow project
+/// document and writing the added node's, and taking the previous one out — while a reader lists
+/// and parses both shadow stores at rate, as the `local-md` source a copy reads them through
+/// does: no document it reads is ever torn.
 #[test]
 fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
     let world = World::new("writeback-concurrent-shadow").through_scripted_source();
-    // Each run's first copy, held at its first write: the store is started once per attempt, so
-    // this holds the two runs' first attempts and no later one.
-    let copies = world.store_holds("write_task");
     let runs = ["left", "right"];
     let shadows: Vec<PathBuf> = runs
         .iter()
         .map(|run| {
             let store = world.store_apart(run);
-            let nodes = (0..CONCURRENT_NODES)
-                .map(|n| agent(&format!("{run}{n}"), &[]))
-                .collect();
-            let project = world.plan_in(&store, run, &plan_of(run, nodes));
+            let hold = format!("{run}-hold");
+            world.script(&format!("{hold}.wait"), "hold");
+            let project = world.plan_in(&store, run, &plan_of(run, vec![agent(&hold, &[])]));
             let fixture = store
                 .join("projects")
                 .join(format!("{}.md", project_id(run)));
@@ -1874,77 +1921,81 @@ fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
         })
         .collect();
 
-    let left_copy = copies.arrived();
-    let right_copy = copies.arrived();
-    assert_ne!(left_copy.pid, right_copy.pid, "the same copy arrived twice");
-    world.store_stops_holding("write_task");
-    left_copy.release();
-    right_copy.release();
-
-    // Cache the paths after the first projection so each pass spends its time
-    // reading documents during the remaining write-back phases.
-    world.until("both runs to project a shadow store", |_| {
-        shadows
-            .iter()
-            .all(|shadow| shadow_documents(shadow).len() > CONCURRENT_NODES)
-    });
-    let watched: Vec<Vec<PathBuf>> = shadows
-        .iter()
-        .map(|shadow| shadow_documents(shadow))
-        .collect();
-
     let mut passes = 0_usize;
     let mut observed_changes = 0_usize;
     let mut last: Vec<Vec<Value>> = vec![Vec::new(); runs.len()];
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        passes += 1;
-        for (nth, documents) in watched.iter().enumerate() {
-            let mut seen = Vec::with_capacity(documents.len());
-            for document in documents {
-                match shadow_document(document) {
-                    Ok(read) => seen.push(read),
-                    Err(torn) => panic!(
-                        "a reader caught a shadow document half-written, {passes} passes and \
-                         {observed_changes} changes in: {torn}"
-                    ),
+    let mut read_until = |what: &str, done: &dyn Fn() -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            passes += 1;
+            for (nth, shadow) in shadows.iter().enumerate() {
+                let mut seen = Vec::new();
+                for document in shadow_documents(shadow) {
+                    match shadow_document(&document) {
+                        Ok(read) => seen.push(read),
+                        Err(torn) => panic!(
+                            "a reader caught a shadow document half-written, {passes} passes \
+                             and {observed_changes} changes in: {torn}"
+                        ),
+                    }
+                }
+                if seen != last[nth] {
+                    observed_changes += 1;
+                    last[nth] = seen;
                 }
             }
-            if seen != last[nth] {
-                observed_changes += 1;
-                last[nth] = seen;
+            // Asked every so often rather than every pass: two stats between two reads of one
+            // document is the same interval spent elsewhere the listing was.
+            if passes.is_multiple_of(50) {
+                if done() {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{what} did not happen; the runs root held:\n{}",
+                    world.dump()
+                );
             }
         }
-        // Asked every so often rather than every pass: two stats between two reads of one
-        // document is the same interval spent elsewhere the listing was.
-        if passes.is_multiple_of(200) {
-            if runs
-                .iter()
-                .all(|run| world.run_file(run, "result.json").is_file())
-            {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the two runs did not settle; the runs root held:\n{}",
-                world.dump()
+    };
+    let created = |run: &str| {
+        records(&world, run)
+            .iter()
+            .filter(|record| record["outcome"] == "projected")
+            .filter_map(|record| record["actions"]["created"].as_u64())
+            .sum::<u64>()
+    };
+    for nth in 0..CONCURRENT_ADDS {
+        for run in runs {
+            edit(
+                &world,
+                run,
+                json!({"op": "add", "node": agent(&format!("{run}{nth}"), &[])}),
             );
         }
+        read_until(&format!("add {nth} to be created on both boards"), &|| {
+            runs.iter().all(|run| created(run) > nth as u64)
+        });
     }
 
     // Both halves, because either alone is passable by a journey that raced nothing: a
     // reader that read across no rewrite saw one settled state, and a run that published
     // nothing gave it none to read.
     assert!(
-        observed_changes >= 10,
+        observed_changes >= 2 * CONCURRENT_ADDS,
         "the reader never overlapped the projections it is about: {observed_changes} changes read \
          across {passes} passes"
     );
     for run in runs {
         assert!(
-            records(&world, run).len() >= 2,
+            records(&world, run)
+                .iter()
+                .filter(|record| record["calls"].get("project-copy").is_some())
+                .count()
+                >= CONCURRENT_ADDS,
             "{run} published no board while the reader was reading it"
         );
+        world.release(&format!("{run}-hold.go"));
     }
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

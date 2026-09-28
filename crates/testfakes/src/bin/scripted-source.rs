@@ -22,7 +22,7 @@
 //!
 //! Scripted from that directory, where `<method>` is the plugin protocol's own method name —
 //! `get_project`, `query_tasks`, `get_task`, `task_dependencies`, `write_project`,
-//! `write_task`, `set_task_status`:
+//! `write_task`, `set_task_status`, `update_task`, `set_project_metadata`:
 //!
 //! * `<key>.<method>.refuse` — every call of that method is answered with the source error
 //!   the file holds, in the store's own shape (`{"kind": "rate-limited", ...}`), for as long

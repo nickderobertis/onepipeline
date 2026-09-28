@@ -24,7 +24,7 @@ use onepipeline::cli::{
     DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_HOOK_TIMEOUT_SECONDS,
     DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_CLASSIFIED_COMMANDS,
     WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_ITEM_BUDGET_ENV, WRITEBACK_MEMBER_READ,
-    WRITEBACK_PROJECTIONS_FILE, WRITEBACK_REFUSED_CLASS,
+    WRITEBACK_PROJECTIONS_FILE, WRITEBACK_REFUSED_CLASS, WRITEBACK_TARGETED_WRITES,
 };
 use onepipeline::controls::NodeControls;
 use onepipeline::error::{
@@ -4233,6 +4233,21 @@ fn the_writeback_refusal_rule_is_what_the_divergence_record_names() {
         "entry 72 names different calls than the worker classifies"
     );
     assert_eq!(
+        rule["targeted_writes"],
+        json!(WRITEBACK_TARGETED_WRITES),
+        "entry 72 names different targeted writes than the worker classifies"
+    );
+    for write in WRITEBACK_TARGETED_WRITES {
+        assert_eq!(
+            serde_json::to_value(write)
+                .ok()
+                .and_then(|word| serde_json::from_value::<StoreCall>(word).ok())
+                .map(|call| serde_json::to_value(call).expect("a call serializes")),
+            Some(json!(write)),
+            "entry 72's targeted write '{write}' is not a store call the record counts"
+        );
+    }
+    assert_eq!(
         rule["classified_by"].as_str(),
         Some("onetaskgraph_core::classify"),
         "entry 72 names a classifier other than the store's own"
@@ -4310,6 +4325,30 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
         json!([serde_json::to_value(StoreCall::TaskList).expect("a call serializes")]),
         "entry 73 no longer says a member projection runs no page of tasks"
     );
+    let call = |named: StoreCall| serde_json::to_value(named).expect("a call serializes");
+    assert_eq!(
+        member["existing_item"]["call"],
+        call(StoreCall::TaskUpdate),
+        "entry 73 names another call for a change to an existing item"
+    );
+    assert_eq!(
+        member["created_item"]["call"],
+        call(StoreCall::ProjectCopy),
+        "entry 73 names another call for creating an item"
+    );
+    assert_eq!(
+        member["project_keys"]["call"],
+        call(StoreCall::ProjectMetadataSet),
+        "entry 73 names another call for an engine-owned project key"
+    );
+    assert_eq!(
+        json!([
+            call(StoreCall::TaskUpdate),
+            call(StoreCall::ProjectMetadataSet)
+        ]),
+        json!(WRITEBACK_TARGETED_WRITES),
+        "the targeted writes the worker classifies are not the calls the record counts"
+    );
     assert!(
         !WRITEBACK_CLASSIFIED_COMMANDS.contains(&"task-list"),
         "the worker still names a page of tasks among the calls an attempt makes"
@@ -4379,8 +4418,8 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
             .expect("a delivered entry is an object")],
             ..record.clone()
         },
-        // A line counting targeted updates, which this build never makes and a later one
-        // writes: `updated_fields` beside a `task-update` call.
+        // A line counting targeted updates beside the copy creating an item:
+        // `updated_fields` beside the `task-update` calls that wrote them.
         ProjectionRecord {
             calls: Some(
                 ProjectionCalls::new(

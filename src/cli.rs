@@ -58,15 +58,22 @@ pub const DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS: NonZeroU64 = NonZeroU64::new(12
 /// that outlasts its deadline is cancelled.
 pub const WRITEBACK_COMMAND_FLOOR_SECONDS: u64 = 60;
 
-/// The store calls one write-back attempt makes, by the name each one's refusals carry:
-/// the project, each item it reads by its own id, and the copy.
+/// The store calls a write-back attempt makes around a copy, by the name each one's refusals
+/// carry: the project, each item it reads by its own id, and the copy — which only an attempt
+/// creating an item makes, and whose project read only that attempt makes.
 ///
 /// Each one's failure is classified by its own type — the store's `EngineError` and
 /// `SourceError`, through the store's own classifier — and any one of them classed
-/// [`WRITEBACK_REFUSED_CLASS`] makes the whole attempt refused, because a projection needs
-/// all three. No attempt reads a page of the project's tasks: the landed baseline answers
-/// where every item it holds is.
+/// [`WRITEBACK_REFUSED_CLASS`] makes the whole attempt refused, as does one of
+/// [`WRITEBACK_TARGETED_WRITES`]. No attempt reads a page of the project's tasks: the landed
+/// baseline answers where every item it holds is.
 pub const WRITEBACK_CLASSIFIED_COMMANDS: [&str; 3] = ["project-show", "task-show", "project-copy"];
+
+/// The store writes a write-back attempt makes to what already exists, by the name each one's
+/// refusals carry: one targeted update per item whose projection changed, naming only the
+/// fields that did, and one write per engine-owned project key whose value changed. Classified
+/// by the same rule as [`WRITEBACK_CLASSIFIED_COMMANDS`]'.
+pub const WRITEBACK_TARGETED_WRITES: [&str; 2] = ["task-update", "project-metadata-set"];
 
 /// The class that stops the write-back's retry timer: a failure asking again cannot change.
 ///
@@ -106,8 +113,7 @@ pub const WRITEBACK_WAIT_FILE: &str = "writeback-wait.json";
 pub const WRITEBACK_WAIT_SCHEMA_VERSION: u32 = 1;
 
 /// The store call a projection reads one destination item with, by its own id and by the
-/// name its refusals carry: each lineage the copy carries, and each the landed baseline does
-/// not hold. No projection reads a page of tasks, and its failures are classified by the same
+/// name its refusals carry: each lineage the landed baseline does not hold. No projection reads a page of tasks, and its failures are classified by the same
 /// rule as [`WRITEBACK_CLASSIFIED_COMMANDS`]'.
 pub const WRITEBACK_MEMBER_READ: &str = "task-show";
 

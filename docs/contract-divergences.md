@@ -5776,10 +5776,11 @@ not run on, a credential it rejected, data it cannot represent, and every failur
 engine decides on its own are `refused`. A failure wrapping another is classed by the one
 it wraps. The worker matches those types exhaustively, so a failure the store adds is a
 compile error here rather than a class guessed at run time, and no message is ever read
-to decide. An attempt is **refused** when any of its three calls — the project read, an
-item read by its own id, or the copy — fails with a refused failure, or answers in part with
-every source it names refused; a copy whose delivered tickets could not be kept in step
-is refused only where every failed ticket's failure is. A `show` answering nothing with
+to decide. An attempt is **refused** when any of its calls — the project read, an item read by
+its own id, or the copy, which only an attempt creating an item makes, and the targeted update
+of an existing item or the write of one project key, which every other write is — fails with a
+refused failure, or answers in part with every source it names refused; a write whose delivered
+tickets could not be kept in step is refused only where every failed ticket's failure is. A `show` answering nothing with
 no failure beside it is an item that is not there, which the store's own CLI decided and
 the worker now decides the same way: refused, kind `no-such-item`. On a refused attempt
 the worker raises the `Unprojected` surface and prints its one stderr line, each carrying
@@ -5820,7 +5821,7 @@ once and attempted again on the next change to the graph rather than asked every
 until it returns, and a terminal projection refused while it is gone is not re-attempted
 inside closeout.
 
-`WRITEBACK_CLASSIFIED_COMMANDS` and `WRITEBACK_REFUSED_CLASS` are published from `cli`
+`WRITEBACK_CLASSIFIED_COMMANDS`, `WRITEBACK_TARGETED_WRITES` and `WRITEBACK_REFUSED_CLASS` are published from `cli`
 beside entry 71's constants, and are part of this proposal for the same reason: a gate
 outside the crate has to be able to reach what it holds. `tests/contract.rs` holds the
 block against them; `writeback::tests` holds it against the classifier the worker reads
@@ -5854,6 +5855,7 @@ closeout over a refusal.
       "unreadable": "no store call until it reads or is repaired"
     },
     "commands": ["project-show", "task-show", "project-copy"],
+    "targeted_writes": ["task-update", "project-metadata-set"],
     "empty_show": {"class": "refused", "kind": "no-such-item"},
     "partial_answer": {
       "member": "errors[].error",
@@ -5871,8 +5873,10 @@ closeout over a refusal.
 
 **Proposal (for the planner who owns the contract): make the settlement write-back
 **incremental**. An attempt carries only the lineages whose projection differs from what the
-run last put on the board — the landed baseline entry 93 states — named as the members of the
-store's project copy, and **never** the whole project: not on a driver's first projection, not
+run last put on the board — the landed baseline entry 93 states — each as one targeted update
+of its item naming only the fields that differ (`onetaskgraph`'s `Engine::update_task`), with a
+member copy used only to create an item that does not exist yet, and **never** the whole
+project: not on a driver's first projection, not
 on one an `adopt` started, and not after an attempt that failed. Every attempt is appended to
 one record in the run's directory, so what a projection carried, which store calls it made,
 how it ended and what it spent is read off the run.** It changes no sentence of the contract's
@@ -5900,6 +5904,13 @@ expensive, against a limiter that was already refusing.
 
 What this crate does now is the block below, and the block is the source.
 
+The user put the last step in their own words: *"what if we made a more general update command
+that could make multiple targeted updates rather than overwriting everything?"* Even a member
+copy of one lineage re-read the item and its edges and rewrote its title, whole body, state,
+origin field, status field and edges — 9 GitHub requests for one changed status on
+`onetaskgraph`'s loopback board (`copy-cost.txt`) — where a targeted update of the same change
+sends what differs.
+
 **Which lineages are carried.** A lineage is carried when its projection, as the worker renders
 it from the snapshot alone, differs from what the landed baseline says landed — its title, the
 digest of its body, its word, its engine-owned metadata, its tickets or its edges. The one
@@ -5909,29 +5920,47 @@ repository moved differs in a field the baseline keeps, whichever driver asks. T
 first projection carries the claim — every lineage, since the seed records no word — and
 nothing it did not change; a driver an `adopt` started compares against the file the driver
 before it left. After a failed attempt the next carries what has still not landed — the union
-of the changes the failure lost — and, after a copy that landed every item but a deliverer
-whose tickets the store could not keep in step, nothing that did land. Project-level metadata
-is carried by the project item, which every copy includes, so a projection whose only change
-is project-level names no task and copies the project without its tasks. An attempt with
-nothing to carry at all — no lineage differs, none is unknown, and no project key the
-destination holds changed — opens no store and asks it nothing: its line names no items,
-`calls` `{}` and `actions` `null`.
+of the changes the failure lost — and, after writes that landed every item but a deliverer
+whose tickets the store could not keep in step, nothing that did land. An attempt with nothing
+to carry at all — no lineage differs, none is unknown, and no engine-owned project key the
+baseline holds changed — opens no store and asks it nothing: its line names no items, `calls`
+`{}` and `actions` `null`.
 
-**What a projection reads.** The project item, and each lineage the copy carries, one read of
-that task by its own id apiece — its labels are the destination's own, and a person may have
-changed them. It never reads a page of tasks, and it never reads a lineage it does not carry:
-where each item is — the destination id a member copy's edges resolve to — is the baseline's.
+**What each carried lineage is sent.** An item that exists is sent one `update_task` naming
+exactly the fields where the lineage's rendering (entry 80's shadow task, `task_document`)
+differs from what landed: `status` — the projected word, with the category a `local-md` store
+reads it as, `unknown` for `failed`, `provider-failed`, `parked` and `skipped` — `metadata_set`
+for each engine-owned key whose value moved, `metadata_remove` for each one no longer projected
+(a retry's new head carries no settlement or landing keys of its own yet), `content` and `title`
+where the text moved, `delivers` where it moved — the store re-evaluates each ticket as `task
+status` does — and `depends_on`, the whole declared set with each far end the item its lineage's
+root keys, where the edges moved. Labels, repositories, project membership and every key the
+engine does not own are never named, so a person's edit to any field stands until the run next
+changes that same field. The baseline advances per item as each update lands, recording the
+fields the store says it wrote. An item that does not exist — an `add`ed node — is created by
+one member copy naming only the lineages being created, over a shadow store holding only their
+documents and the project's; that copy lands the project item beside them, so the attempt reads
+the project once and the shadow restates it exactly, and the copy writes nothing to it: the one
+project read any attempt makes, ruled by the planner because the store's member copy always
+plans the project item. An engine-owned project key (`onepipeline.goal`, `.concurrency`,
+`.name`, `.schema_version`) whose value differs from the baseline is written with
+`set_project_metadata`, one key per call; the project's title, description and labels are never
+written.
+
+**What a projection reads.** Nothing the baseline answers: no page of tasks, no item it holds,
+and no project — except the one project read of an attempt that creates an item. Where each
+item is — the destination id an update is sent to and an edge names — is the baseline's.
 A lineage the baseline does not hold — a run an older build started, whose directory holds no
 baseline — is read once by its own id and compared against that read: the id the previous
 driver's shadow document recorded for the head or the furthest-along attempt before it, else
 the task the root was read out of at launch. One the run knows no id for is created by the
-copy. A read's failure is classified by entry 72's rule. Whatever a copy does not name, it
-neither reads at the destination nor rewrites, so the module's ownership rule is unchanged and
-a person's edit on an item the run did not change since it last landed stands. Entry 71's
-deadline and the `Unprojected` surface's `items` both count the lineages the copy carries.
+copy. A read's failure is classified by entry 72's rule. Entry 71's deadline bounds a copy by
+the items it creates and a targeted update by its one item, and the `Unprojected` surface's
+`items` counts the lineages the attempt carries.
 
-**A stop's release** carries only the unstarted lineages the baseline says are `queued`, writing
-each `todo`, and advances the baseline by what landed; it creates nothing.
+**A stop's release** carries only the unstarted lineages the baseline says are `queued`, sending
+each a status-only update to `todo`, and advances the baseline by what landed; it creates
+nothing.
 
 **The store always offers a member copy**, because it is linked. An engine that drove the
 store's binary decided once per run, off the version the binary reported, whether to copy by
@@ -5951,10 +5980,13 @@ closed set of names, an operation not called left off, so an attempt that called
 writes `{}`. `spent` is the sum of every call's reported spend — requests added, each budget
 added to the one of the same name and unit, `lower_bound` true where any summand's was — and is
 `null` wherever no call reported any, which is every attempt against a destination that meters
-nothing, a local Markdown one included; the copy is the one call that reports today.
+nothing, a local Markdown one included; the copy and each targeted update report one.
 `updated_fields` counts how many items each field was written on by an attempt's targeted
-updates, and is written by exactly the attempts that made one — a `task-update` call names it,
-and it names none without one: this build makes none, so it never writes it. `delivered` is the copy report's own list of what the store did to each ticket a
+updates, as the store's `TaskUpdated::written` says, and is written by exactly the attempts that
+made one — a `task-update` call names it, and it names none without one. `actions` counts, for a
+copy, what its report says it did to each item, the project item included, and for each
+targeted update one item `updated` where the store wrote any field and `unchanged` where it
+wrote none; it is `null` for an attempt that wrote no task. `delivered` is the copy report's own list of what the store did to each ticket a
 carried task delivers, verbatim, on a landed attempt and on a failed one alike, and absent
 wherever the report named no ticket.
 
@@ -5978,13 +6010,14 @@ carried, what is read by its id, and what a release carries — and the furthest
 lineage the baseline does not hold is read at. `tests/e2e/writeback_projections.rs` drives the
 compiled binary against the real store the engine links, served through `crates/testfakes`'
 `scripted-source`, which records every call it is handed: a fresh launch's first projection
-carrying the claim by member and reading nothing the launch read; a later transition of one
-node carried alone, an unnamed node's item left byte for byte as a person edited it; the
+carrying the claim as targeted updates and reading nothing the launch read; a later transition of one
+node carried alone as one update, an unnamed node's item left byte for byte as a person edited it; the
 attempt after a failure and after a refusal carrying what had not landed and every change the
 failure lost reaching the board; an `adopt` carrying only what differs from the file the
 previous driver left; a run directory holding no baseline adopted and projected with each
 lineage read once by its own id; a stop's release; and a copy's own `spent` and action counts
-recorded exactly. No line of any of them is `whole`, and no line's `calls` names `task-list`.
+recorded exactly. No line of any of them is `whole`, no line's `calls` names `task-list`, and
+`project-copy` and `project-show` appear only on an attempt that creates an item.
 The one page read a store is asked during a write-back is the copy's own origin lookup before
 it creates an item, which entry 93 states: once per item created, inside that attempt's
 `project-copy`, and in no attempt that creates nothing.
@@ -6008,11 +6041,11 @@ it creates an item, which entry 93 states: once per item created, inside that at
       "kind": {"type": ["string", "null"], "null_when": "class is null"},
       "reason": {"type": ["string", "null"], "null_when": "outcome is projected"},
       "duration_ms": {"type": "integer", "is": "wall-clock time of the whole attempt, reads included"},
-      "actions": {"type": ["object", "null"], "members": ["created", "updated", "unchanged", "orphaned", "reopened"], "derived": {"reopened": "by this crate, under entry 80's rule; the rest are the copy report's own counts"}, "null_when": "no copy report was read"},
+      "actions": {"type": ["object", "null"], "members": ["created", "updated", "unchanged", "orphaned", "reopened"], "derived": {"reopened": "by this crate, under entry 80's rule; the rest are the copy report's own counts plus, per targeted update, updated where the store wrote a field and unchanged where it wrote none"}, "null_when": "the attempt wrote no task"},
       "spent": {"type": ["object", "null"], "is": "every call's reported spend, summed: requests added, each budget added by name and unit, lower_bound true where any summand's was", "null_when": "no call reported any"},
       "delivered": {"type": "array", "of": "object", "is": "the copy report's delivered entries, verbatim, on a landed or a failed attempt", "omitted_when": "the report named no delivered ticket"},
       "calls": {"type": "object", "keys": ["project-show", "task-list", "task-show", "project-copy", "task-update", "project-metadata-set"], "is": "how many times the attempt called each store operation, the one that failed included; an operation not called is left off", "omitted_when": "the line is one an earlier build wrote, at version 3 or before"},
-      "updated_fields": {"type": "object", "keys": ["title", "content", "status", "priority", "metadata", "delivers", "depends-on"], "is": "how many items each field was written on by the attempt's task-update calls", "omitted_when": "the attempt made no task-update call, which is every attempt this build makes"}
+      "updated_fields": {"type": "object", "keys": ["title", "content", "status", "priority", "metadata", "delivers", "depends-on"], "is": "how many items each field was written on by the attempt's task-update calls, as the store's TaskUpdated::written says", "omitted_when": "the attempt made no task-update call"}
     },
     "whole_because_read_only": {
       "first": "nothing had landed in that driver yet, including a driver an adopt started; written by builds before version 4",
@@ -6023,9 +6056,10 @@ it creates an item, which entry 93 states: once per item created, inside that at
                 "scope": "members", "whole_because": null, "items": ["op-refusal-not-retried"],
                 "outcome": "projected", "class": null, "kind": null, "reason": null,
                 "duration_ms": 1830,
-                "actions": {"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0, "reopened": 0},
-                "spent": {"requests": 7, "budgets": [{"budget": "graphql", "unit": "points", "amount": 12, "lower_bound": false}]},
-                "calls": {"project-copy": 1, "project-show": 1, "task-show": 1}},
+                "actions": {"created": 0, "updated": 1, "unchanged": 0, "orphaned": 0, "reopened": 0},
+                "spent": {"requests": 3, "budgets": [{"budget": "graphql", "unit": "points", "amount": 3, "lower_bound": false}]},
+                "calls": {"task-update": 1},
+                "updated_fields": {"metadata": 1, "status": 1}},
     "example_delivered": {"schema_version": 4, "at": "2026-09-15T12:00:00Z", "project": "plans:delivers-plan",
                           "scope": "members", "whole_because": null, "items": ["build"],
                           "outcome": "projected", "class": null, "kind": null, "reason": null,
@@ -6045,13 +6079,16 @@ it creates an item, which entry 93 states: once per item created, inside that at
   },
   "member_projection": {
     "reads": ["project-show", "task-show"],
-    "task_show_per": ["lineage the copy carries", "lineage the landed baseline does not hold, by the id the run knows for it"],
+    "task_show_per": ["lineage the landed baseline does not hold, by the id the run knows for it"],
+    "project_show_per": "attempt that creates an item, once, so the shadow project restates the destination and the copy writes nothing to it",
     "never_reads": ["task-list"],
     "carries": "the lineages whose projection differs from the landed baseline (entry 93)",
-    "copy_scope": "CopyScope::Members",
-    "naming_none": "CopyScope::Projects { tasks: false }",
+    "existing_item": {"call": "task-update", "names": "only the fields whose projection differs from the baseline", "never_names": ["labels", "repositories", "project membership", "a metadata key the engine does not own"]},
+    "created_item": {"call": "project-copy", "copy_scope": "CopyScope::Members", "names": "only the lineages being created"},
+    "project_keys": {"call": "project-metadata-set", "per": "engine-owned key whose value differs from the baseline"},
+    "never_written": ["the project's title", "the project's description", "the project's labels"],
     "carrying_nothing": "no store call at all: items [], calls {}, actions null",
-    "release_carries": "the unstarted lineages the landed baseline says are queued",
+    "release_carries": "the unstarted lineages the landed baseline says are queued, each a status-only update",
     "creation_lookup": "Engine::copy's origin scan (query_tasks) before it creates an item: at most once per item created, inside project-copy; none in an attempt that creates nothing"
   }
 }
@@ -6426,28 +6463,32 @@ written only where the head is not the root; `onepipeline.<field>` are the head'
 recorded none. A superseded node is projected as **no shadow task of its own**, and a shadow
 task the snapshot did not write is taken out of the shadow store, so a whole copy carries
 nothing an earlier build left there. What diverges beyond entry 50's keys is
-the 2 lineage keys beside `onepipeline.id`. Both are projection-only, exactly as
+the 2 lineage keys beside `onepipeline.id`. The shadow task is the rendering: an item that
+already exists is sent a targeted update of exactly the fields where that rendering differs from
+what landed (entry 73) — on a retry, `onepipeline.node` and `onepipeline.supersedes` set, the
+old head's settlement and landing keys removed, and the title and body only where the head
+restated them — and its edges name each far end by the item that far lineage's root keys; only a
+lineage created by a copy has its shadow task written. Both are projection-only, exactly as
 `onepipeline.settlement` is: the plan reader reads past them, so a project a run wrote onto —
 its own, where the plan's store is the destination — launches again reading the head's
 definition under the root's id rather than refusing a node field named `node`.
 
 **Reading the destination.** No projection reads a page of tasks any more: where each lineage's
-one item is, is the landed baseline's (entry 93), written as each copy lands. A lineage the
+one item is, is the landed baseline's (entry 93), written as each write lands. A lineage the
 baseline does not hold — a run an older build started, whose directory holds none — is read once
 by its own id, and the id is the **furthest-along** one the run knows: the origin the previous
 driver's shadow document recorded for the lineage's head or the latest attempt before it — which
 is where a board an older build wrote keeps one item per attempt — and the task the root was
 read out of at launch only where none is recorded. The other items under that root are left
-exactly as they are, since a copy never deletes and nothing here cleans up. The read by id of
-each carried item reads its status **category**, for the count below. An adoption projects each
-lineage once, onto its one item — never once per superseded id — and a copy names the root's
-member.
+exactly as they are, since nothing here deletes or cleans up. An adoption projects each lineage
+once, onto its one item — never once per superseded id — and an update names the root's item.
 
-**The record.** `items` names lineage roots. `actions` gains `reopened`: the carried items the
-store reported `updated` whose category the attempt's own pre-copy read reported `done` or
-`cancelled`, and whose projected word is neither. It is derived by this crate; the store's
-copy-report vocabulary is not extended, because an action word an older build has not heard of
-makes it drop the whole report and then re-create items. Entry 73's record moves to
+**The record.** `items` names lineage roots. `actions` gains `reopened`: the carried items whose
+targeted update the store says wrote `status`, whose word as the run knew it — the word the
+landed baseline says last landed, or, for a lineage it does not hold, the word the one read by
+id answered — was `done` or `cancelled`, and whose projected word is neither. It is derived by
+this crate; the store's vocabulary is not extended, because an action word an older build has
+not heard of makes it drop the whole report and then re-create items. Entry 73's record moves to
 `schema_version` 3 under its own rule and holds the shape and the golden lines. Reopening the
 issue is the store's paired write on an open word; this crate writes the word and counts the
 reopen.
@@ -6462,13 +6503,13 @@ that is neither retried nor requeued is projected exactly as before. A running n
 cancels settles `cancelled` and its item reads **`parked`** — the park outranks the settlement in
 `graph::derive`, and it is an open word — so within one build a cancel closes nothing and a
 retry or requeue of that node lands `queued` on the same item at the id it held, mints no item,
-and reports `reopened: 0` for it. The reopen count applies to an item whose pre-copy category on
-the destination was `done` or `cancelled`: what an older build wrote for a superseded node, or
-what a person closing the card left.
+and reports `reopened: 0` for it. The reopen count applies to an item the run knew as `done` or
+`cancelled`: what it landed for a superseded node, what an older build wrote there, or what a
+person closing the card left on an item the run read cold.
 
 `writeback::tests` holds one shadow task per lineage with the head's fields and the three keys,
 the root member carried on a retry, the furthest-along id a lineage the landed baseline does not
-hold is read at, and `reopened` counted off the pre-copy category and the projected word. `tests/contract.rs` holds the record's `reopened`, its version and entry 73's golden lines.
+hold is read at, and the targeted update a retry sends the root's item. `tests/contract.rs` holds the record's `reopened`, its version and entry 73's golden lines.
 `live_edit::retry_cancel_requeue_and_drop_are_projected_after_their_rulings`,
 `writeback_projections::a_retry_or_requeue_of_a_cancelled_node_reopens_its_one_item`,
 `writeback_projections::an_adoption_of_a_run_an_older_build_started_reads_the_furthest_along_item_by_its_id`
@@ -6489,7 +6530,7 @@ a project the retry was written onto.
     "file_and_member": "root",
     "renders": "head",
     "title_when_head_has_none": "root id",
-    "deps": "each mapped to the shadow task of its own lineage's root",
+    "deps": "each far end the item its own lineage's root keys, or that root's shadow task where the copy creates it",
     "keys": {
       "onepipeline.id": "root",
       "onepipeline.node": "head",
@@ -6497,16 +6538,17 @@ a project the retry was written onto.
     },
     "superseded_node": "no shadow task of its own",
     "stale_shadow_task": "removed before the copy",
+    "existing_item": "one targeted update of the fields the rendering differs from what landed",
     "read_on_relaunch": "the plan reader reads past both keys, as it does onepipeline.settlement"
   },
   "destination": {
     "item_of_a_lineage": "the landed baseline's destination (entry 93)",
     "a_lineage_the_baseline_does_not_hold": "read once by the furthest-along id the run knows: the previous driver's shadow document for the head or the latest attempt before it, else the root's launch task",
     "several_under_one_root": "the rest left as they are",
-    "category_read_by": {"members": "task-show"}
+    "word_known_by": {"held": "the landed baseline (entry 93)", "not_held": "task-show"}
   },
   "reopened": {
-    "counted_when": ["the copy report says updated", "the pre-copy read reported done or cancelled", "the projected word is neither done nor cancelled"],
+    "counted_when": ["the targeted update wrote status", "the word the run knew was done or cancelled", "the projected word is neither done nor cancelled"],
     "derived_by": "this crate",
     "store_vocabulary_extended": false,
     "record": {"key": "actions.reopened", "from_schema_version": 3, "stated_in": "entry 73"}
@@ -7703,15 +7745,24 @@ on the driver's standard error — and then proceeds as if there were none.
 
 **Seeded, advanced, read.** `onepipeline start` seeds it from the plan read it launched from:
 every task's destination id, title, content, engine-owned keys, `delivers` and edges, as the
-store answered them. Each copy that lands advances every item it carried to what it wrote —
+store answered them. Each write that lands — a targeted update of one item, or the copy creating
+one, which records the item it created — advances that item to what it wrote, the moment it
+lands, so an attempt that fails part-way leaves only what did not land for the next —
 except a deliverer whose tickets the store could not keep in step, which stays unlanded so the
 next attempt carries it again. A lineage it does not hold — every lineage of a run an older build
 started, whose directory holds no file — is read once by its own id and compared against that
 read; an item that says what the run would write is recorded as read and not carried. A read of
-one task does not answer its edges, so a lineage that has any is carried all the same — the copy
-writes its edges, sending only their difference — and its baseline entry is what that copy
+one task does not answer its edges, so a lineage that has any is carried all the same — its
+update names its edges, and the store sends only their difference — and its baseline entry is what that update
 landed. A stop's
 release reads it in the stopping process and advances it by what the release wrote.
+
+**The project is read once by an attempt that creates an item, and by no other.** The member
+copy that creates it always lands the project item beside it, so the shadow project restates
+the destination's own title, description, labels and metadata, read for that attempt, and the
+copy writes nothing to it; the planner ruled that read in over rewriting the project from a
+shadow built with none. An engine-owned project key whose value moved is written by itself
+(`set_project_metadata`), and `project_metadata` advances as each lands.
 
 **One page read remains, and it is the copy's own.** When a copy *creates* an item — the one an
 `add`ed node needs — `onetaskgraph`'s `Engine::copy` first looks for an item already recording

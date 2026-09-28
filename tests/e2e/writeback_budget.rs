@@ -1,6 +1,8 @@
-//! The deadline the settlement write-back's copy runs under, driven end to end
-//! against the compiled binary, the real store it links, and a copy the scripted
-//! source holds.
+//! The deadlines the settlement write-back's writes run under, driven end to end
+//! against the compiled binary, the real store it links, and a write the scripted
+//! source holds: a targeted update of one item, allowed the floor and one item's
+//! budget, and the copy that creates added items, allowed the floor and one
+//! item's budget per item it creates.
 //!
 //! The write-back is what keeps the board in step with a run, and the backstop
 //! that cancels an unreachable store's call is what stopped it: a fixed minute,
@@ -69,12 +71,15 @@ fn number(named: &str) -> u64 {
         .unwrap_or_else(|| panic!("entry 71 no longer states the budget's {named}"))
 }
 
-/// The call the scripted source holds a copy at: its first task write, once per
-/// attempt.
+/// The call the scripted source holds a creation copy at: its first task write, once per
+/// attempt. No other write the write-back makes writes a whole task.
 const COPY: &str = "write_task";
 
+/// The call the scripted source holds a targeted update at: the first, once per attempt.
+const UPDATE: &str = "update_task";
+
 /// A detached run of `items` nodes projecting through the scripted source in front
-/// of the real store, whose copy meets this test at its first write.
+/// of the real store, whose first targeted update meets this test.
 ///
 /// One node is held open and any others depend on it, so the run is live for as
 /// long as the journey needs and every snapshot it projects carries all `items`
@@ -93,10 +98,10 @@ fn a_run_whose_copy_is_held(
         nodes.push(agent(&format!("later{behind}"), &["work"]));
     }
     let project = world.plan(run, &plan_of(run, nodes));
-    let meeting = world.store_holds(COPY);
+    let meeting = world.store_holds(UPDATE);
     let world = world
         .through_scripted_source()
-        // The held node has to outlast the copy this journey is measuring, and what
+        // The held node has to outlast the write this journey is measuring, and what
         // it measures is a minute and more: the same setting `store.rs`'s schedule
         // journeys run under, for the same reason.
         .with_env(RENDEZVOUS_SECONDS_ENV, "600");
@@ -131,77 +136,66 @@ fn board_status(world: &World, project: &str, node: &str) -> Option<String> {
 // cannot be observed in less than one — and the edge they need is the crate under test:
 // they drive the compiled `onepipeline` binary against its own write-back worker, exactly
 // as the minute-long schedule journeys in `store.rs` do and for the reason given there.
-/// The journey the setting exists for: a copy that outlasts the sixty-second
-/// floor still lands, because the plan carries enough items to lift its deadline
-/// above the floor.
+/// A targeted update that outlasts the sixty-second floor still lands, because its deadline
+/// is the floor plus one item's budget — and the driver whose claim it is dispatches nothing
+/// meanwhile, because the wait before its first dispatch is bounded by the budget of every item
+/// that claim carries, not by the floor.
 ///
-/// Under the fixed minute this run's settlement never reached the board. Under
-/// the shipped budget the same copy is allowed the floor and `items × 12` seconds
-/// besides, so a hold
-/// past the floor ends with the real store holding what the run recorded, and
-/// the driver having reported nothing — which is what an operator reads.
+/// Under the fixed minute this run's claim never reached the board. Under the shipped budget
+/// the update is allowed the floor and 12 seconds besides, so a hold past the floor ends with the
+/// real store holding what the run recorded, and the driver having reported nothing — which is
+/// what an operator reads.
 #[test]
-fn a_copy_held_past_the_floor_still_lands_when_the_item_count_lifts_its_deadline() {
+fn a_targeted_update_held_past_the_floor_still_lands_inside_its_item_budget() {
     let floor = number("floor_seconds");
     let per_item = number("default_seconds");
-    // Enough items that the shipped budget lifts the deadline well past the floor,
-    // and past the hold below with room for the real copy to land after it.
-    let items = usize::try_from(2 * floor / per_item).expect("a count");
+    let held_past = 5;
     assert!(
-        per_item * items as u64 >= floor + 30,
-        "{items} items × {per_item} seconds does not lift the deadline past the hold"
+        per_item > held_past + 2,
+        "one item's budget of {per_item} seconds leaves no room past a {held_past} second hold"
     );
+    // Enough items that the wait before the first dispatch outlasts the hold by far.
+    let items = usize::try_from(2 * floor / per_item).expect("a count");
     let run = "budgetlifts";
     let (world, meeting, project) =
         a_run_whose_copy_is_held("writeback-budget-lifts", run, items, &[]);
 
-    // The first copy is inside its hold: nothing has reached the board, and nothing
-    // has been reported, because the copy has not failed — it is still running.
+    // The claim's first update is inside its hold: nothing has been reported, because the
+    // update has not failed — it is still running.
     let held = meeting.arrived();
     let started = Instant::now();
-    assert_ne!(
-        board_status(&world, &project, "work").as_deref(),
-        Some("in-progress"),
-        "the board moved before the held copy could have written it"
-    );
 
-    // Held past the floor. Slept rather than polled: there is nothing to observe
-    // until the hold ends, and the whole point is that the copy is still alive at
-    // the end of it. The five seconds past the floor are for a worker whose clock
-    // started before this test's did.
-    let past_the_floor = Duration::from_secs(floor + 5);
+    // Held past the floor. Slept rather than polled: there is nothing to observe until the
+    // hold ends, and the whole point is that the update is still alive at the end of it.
+    let past_the_floor = Duration::from_secs(floor + held_past);
     std::thread::sleep(past_the_floor.saturating_sub(started.elapsed()));
     assert!(
         !a_projection_failed(&world, run),
-        "the copy was cancelled inside {} seconds under a budget of {items} × {per_item}:\n{}",
-        floor + 5,
+        "the update was cancelled inside {} seconds under a budget of {per_item}:\n{}",
+        floor + held_past,
         std::fs::read_to_string(world.run_file(run, "driver.log")).unwrap_or_default()
     );
-    // And nothing was dispatched: this copy is the launching driver's claim, and the wait before
-    // its first dispatch is bounded by the same lifted deadline the copy runs under — not by the
-    // floor, which this hold has already outlasted.
     assert_eq!(
         world.events_of(run, "node-dispatched").len(),
         0,
-        "the driver dispatched while its claim was still inside a deadline of {items} × \
-         {per_item} seconds"
+        "the driver dispatched while its claim of {items} items was still inside its deadline"
     );
 
-    // Let the held copy answer. Later copies are not held: the deadline is the
-    // subject, and one copy past it is the evidence.
-    world.store_stops_holding(COPY);
+    // Let the held update answer. Later ones are not held: the deadline is the subject, and one
+    // write past the floor is the evidence.
+    world.store_stops_holding(UPDATE);
     held.release();
     drop(meeting);
-    world.until_store("the held copy to reach the board", |world| {
+    world.until_store("the held claim to reach the board", |world| {
         board_status(world, &project, "work").is_some_and(|word| word == "in-progress")
     });
     assert!(
         started.elapsed() > Duration::from_secs(floor),
-        "the copy landed inside the floor, so this journey held nothing past it"
+        "the update landed inside the floor, so this journey held nothing past it"
     );
     assert!(
         !a_projection_failed(&world, run),
-        "a copy that landed was reported as failed:\n{}",
+        "an update that landed was reported as failed:\n{}",
         std::fs::read_to_string(world.run_file(run, "driver.log")).unwrap_or_default()
     );
 
@@ -218,10 +212,10 @@ fn a_copy_held_past_the_floor_still_lands_when_the_item_count_lifts_its_deadline
 
 /// The copy #521 measured: seven items onto the `plans` board at about 10.2 seconds apiece,
 /// 71 to 72 seconds in all, against the 70 the larger of the floor and ten seconds per item
-/// allowed it. Here the same seven-item copy is held for eleven seconds per item — slower
-/// than the board measured — and lands under the shipped budget, because the deadline is the
-/// floor **plus** the budget per item it carries: the driver reports nothing, and the board
-/// holds what the run recorded.
+/// allowed it. A copy now only creates, so here the same seven items are `add`ed in one reply
+/// and the copy creating them is held for eleven seconds per item — slower than the board
+/// measured — and lands under the shipped budget, because the deadline is the floor **plus**
+/// the budget per item it creates: the driver reports nothing, and the board holds all seven.
 #[test]
 fn a_seven_item_copy_held_at_eleven_seconds_per_item_lands_inside_its_deadline() {
     let floor = number("floor_seconds");
@@ -233,16 +227,30 @@ fn a_seven_item_copy_held_at_eleven_seconds_per_item_lands_inside_its_deadline()
         "the shipped deadline leaves no room for the real copy after an eleven-second-per-item \
          hold"
     );
+    let world = World::new("writeback-budget-seven");
+    world.script("work.wait", "hold");
     let run = "budgetseven";
-    let (world, meeting, project) = a_run_whose_copy_is_held(
-        "writeback-budget-seven",
-        run,
-        usize::try_from(items).expect("a count"),
-        &[],
-    );
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    let world = world
+        .through_scripted_source()
+        .with_env(RENDEZVOUS_SECONDS_ENV, "600");
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until_store("the running node to reach the board", |world| {
+        board_status(world, &project, "work").is_some_and(|word| word == "in-progress")
+    });
 
-    // The driver's first projection is the claim of all seven: held at its first write for
-    // as long as seven eleven-second items take, and then let go.
+    // Seven nodes added in one reply, behind the held one: one copy creates all seven, held at
+    // its first write for as long as seven eleven-second items take, and then let go.
+    let meeting = world.store_holds(COPY);
+    let added: Vec<Value> = (1..=items)
+        .map(|nth| serde_json::json!({"op": "add", "node": agent(&format!("added{nth}"), &["work"])}))
+        .collect();
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &serde_json::json!({"version": 2, "commands": added}).to_string(),
+        )
+        .exited(0);
     let held = meeting.arrived();
     let started = Instant::now();
     std::thread::sleep(held_for);
@@ -254,14 +262,14 @@ fn a_seven_item_copy_held_at_eleven_seconds_per_item_lands_inside_its_deadline()
     world.store_stops_holding(COPY);
     held.release();
     drop(meeting);
-    world.until_store("the held claim to reach the board", |world| {
-        (1..items).all(|behind| {
-            board_status(world, &project, &format!("later{behind}")).as_deref() == Some("queued")
+    world.until_store("the seven created items to reach the board", |world| {
+        (1..=items).all(|nth| {
+            board_status(world, &project, &format!("added{nth}")).as_deref() == Some("queued")
         })
     });
     assert!(
         started.elapsed() >= held_for,
-        "the claim landed before the hold ended, so this journey held nothing"
+        "the copy landed before the hold ended, so this journey held nothing"
     );
     assert!(
         !a_projection_failed(&world, run),
@@ -274,10 +282,10 @@ fn a_seven_item_copy_held_at_eleven_seconds_per_item_lands_inside_its_deadline()
     });
 }
 
-/// A copy held past what a deliberately tiny budget allows is cancelled, and the
+/// A targeted update held past what a deliberately tiny budget allows is cancelled, and the
 /// refusal names what the deadline was computed from — the floor, and the one
 /// second one item at one second adds to it — and the
-/// driver whose copy it cancels is one an **adopt** started, under the budget the
+/// driver whose update it cancels is one an **adopt** started, under the budget the
 /// launch chose rather than the one the adopting shell's environment names.
 ///
 /// The line is read where it lands: on the driver's stderr, and on the planner
@@ -296,7 +304,7 @@ fn a_copy_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithme
     let (world, meeting, project) =
         a_run_whose_copy_is_held("writeback-budget-floor", run, items, &[flag.as_str(), "1"]);
 
-    // The launching driver's copies are let go at once, so they land and the run is
+    // The launching driver's updates are let go at once, so they land and the run is
     // quiet: nothing has failed yet, and the driver is one an adoption may end. There
     // are two of them — the claim a driver projects before its first dispatch, which
     // writes the held node `queued`, and the projection of that node running.
@@ -330,12 +338,12 @@ fn a_copy_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithme
         "the adoption re-resolved the budget"
     );
 
-    // Something for the adopted driver to write: its copy is held at that write, and this
-    // test does not let it go until the deadline has ended it.
+    // Something for the adopted driver to write: its update is held, and this test does not let
+    // it go until the deadline has ended it.
     noted(&world, run, "work", "held past the deadline");
     let held = meeting.arrived();
     let expected = format!(
-        "project-copy exceeded {} seconds (the {floor} second floor + {items} item × 1 \
+        "task-update exceeded {} seconds (the {floor} second floor + {items} item × 1 \
          second per item)",
         floor + 1
     );
@@ -346,26 +354,26 @@ fn a_copy_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithme
         "the refusal is not the line an operator reads:\n{log}"
     );
 
-    // Nothing the cancelled copy was holding lands after the record says it was refused: the
+    // Nothing the cancelled update was holding lands after the record says it was refused: the
     // write it was held at is let go, and the board goes on holding what it held — without the
-    // change that write carried. A copy the deadline had not really ended would write it now.
+    // change that write carried. An update the deadline had not really ended would write it now.
     let board = world.store_tasks(&project);
     held.release();
     std::thread::sleep(Duration::from_secs(3));
     assert_eq!(
         world.store_tasks(&project),
         board,
-        "a write from the cancelled copy landed after its refusal was recorded"
+        "a write from the cancelled update landed after its refusal was recorded"
     );
     assert!(
         board.iter().all(|task| {
             task["item"]["metadata"]["onepipeline.context"] != "held past the deadline"
         }),
-        "the cancelled copy's write reached the board"
+        "the cancelled update's write reached the board"
     );
 
     // The same sentence reaches the planner, on the surface that names the items
-    // the copy was carrying — the list the deadline was multiplied by.
+    // the attempt was carrying.
     world.until("the failed projection to reach the planner", |world| {
         !world.events_of(run, "planner-surface-queued").is_empty()
     });
@@ -396,8 +404,8 @@ fn a_copy_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithme
 }
 
 /// A run whose launch record an older build wrote — no budget field on it — is
-/// adopted, and the driver the adoption starts bounds its copy by the shipped
-/// default: the refusal its copy is cancelled with names that figure, not one the
+/// adopted, and the driver the adoption starts bounds its update by the shipped
+/// default: the refusal its update is cancelled with names that figure, not one the
 /// adopting shell's environment offered and not a zero read off the record.
 ///
 /// The record is the one file a run *is* to an adoption, and a build before this
@@ -414,7 +422,7 @@ fn a_record_an_older_build_wrote_is_adopted_and_its_copy_runs_under_the_shipped_
     let (world, meeting, project) =
         a_run_whose_copy_is_held("writeback-budget-older-record", run, items, &[]);
 
-    // The launching driver's copies are let go at once — its claim before the first
+    // The launching driver's updates are let go at once — its claim before the first
     // dispatch, and the projection of the held node running — so the run is quiet and
     // an adoption may end its driver.
     meeting.arrived().release();
@@ -459,13 +467,12 @@ fn a_record_an_older_build_wrote_is_adopted_and_its_copy_runs_under_the_shipped_
         "the adoption invented a budget the launch never recorded"
     );
 
-    // Something for the adopted driver to write; its copy is held at that write and never
-    // let go: the deadline ends it, and the refusal says which budget that deadline was
-    // computed from.
+    // Something for the adopted driver to write; its update is held and never let go: the
+    // deadline ends it, and the refusal says which budget that deadline was computed from.
     noted(&world, run, "work", "held past the shipped default");
     let _held = meeting.arrived();
     let expected = format!(
-        "project-copy exceeded {} seconds (the {floor} second floor + {items} item × \
+        "task-update exceeded {} seconds (the {floor} second floor + {items} item × \
          {per_item} seconds per item)",
         floor + per_item
     );
@@ -490,7 +497,7 @@ fn a_hold_the_scripted_source_cannot_read_fails_the_copy_by_the_scripts_name() {
     let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
     // A directory where the address should be: present, and not a file this source
     // can read.
-    let hold = format!("{SCRIPTED_KEY}.{COPY}.first.rendezvous");
+    let hold = format!("{SCRIPTED_KEY}.{UPDATE}.first.rendezvous");
     std::fs::create_dir(world.fakes.join(&hold)).expect("the unreadable hold is in place");
     let world = world.through_scripted_source();
     // What the real store answers for the authored board, read before the run
@@ -885,10 +892,10 @@ fn a_store_that_does_not_open_within_the_floor_is_refused_retried_and_recovers()
 // in less than one — and the edge it needs is the crate under test: it drives the compiled
 // `onepipeline` binary against its own write-back worker, as the journeys above do and for the
 // reason they record.
-/// The two reads an attempt makes before it copies — the destination project, and the item of
-/// each member a member copy names — are each held to the floor: a read held past it is
-/// cancelled and reported by the name and the seconds of the deadline it outlasted, retried on
-/// the schedule, and the projection recovers once the store answers.
+/// The project read an attempt creating an item makes before its copy is held to the floor: a
+/// read held past it is cancelled and reported by the name and the seconds of the deadline it
+/// outlasted, retried on the schedule, and the projection recovers — the item created — once the
+/// store answers.
 #[test]
 fn a_destination_read_held_past_the_floor_is_cancelled_retried_and_recovers() {
     let floor = number("floor_seconds");
@@ -909,11 +916,20 @@ fn a_destination_read_held_past_the_floor_is_cancelled_retried_and_recovers() {
         std::fs::read_to_string(world.run_file(run, "driver.log")).unwrap_or_default()
     };
 
-    for (method, read) in [("get_project", "project-show"), ("get_task", "task-show")] {
-        // Held from the next attempt on: its first call of the read, which is the read itself.
+    for (method, read) in [("get_project", "project-show")] {
+        // Held from the next attempt on: its first call of the read, which is the read itself —
+        // made by the attempt that creates the added node, and by no other.
         let holding = world.store_holds(method);
         let recovered = log(&world).matches("write-back recovered").count();
-        noted(&world, run, "later", &format!("held at {read}"));
+        world
+            .run_with_stdin(
+                &["reply", run],
+                &serde_json::json!({"version": 2, "commands": [
+                    {"op": "add", "node": agent("added", &["work"])}
+                ]})
+                .to_string(),
+            )
+            .exited(0);
         let held = holding.arrived();
         let expected = format!("{read} exceeded {floor} seconds");
         world.until_run_file_holds(run, "driver.log", &expected);
@@ -934,12 +950,8 @@ fn a_destination_read_held_past_the_floor_is_cancelled_retried_and_recovers() {
             &format!("the projection to recover after {read}"),
             |world| log(world).matches("write-back recovered").count() > recovered,
         );
-        let context = format!("held at {read}");
-        world.until_store("the held change to reach the board", |world| {
-            world.store_tasks(&project).iter().any(|task| {
-                task["item"]["metadata"]["onepipeline.id"] == "later"
-                    && task["item"]["metadata"]["onepipeline.context"] == context.as_str()
-            })
+        world.until_store("the added node's item to be created", |world| {
+            board_status(world, &project, "added").as_deref() == Some("queued")
         });
     }
     world.release("work.go");
