@@ -9,41 +9,42 @@
 //!
 //! # Ownership: the write-back owns exactly what the plan document declares
 //!
-//! A projection is a *total replacement* of the destination item, so every field it does
-//! not restate is a field it deletes. One rule decides each of them, and it is the plan
-//! document: what a plan declares, this worker owns and overwrites; what a plan does not
-//! model, it reads off the destination and writes back unchanged. The consequences are
-//! enumerated here rather than rediscovered per field, so the next field a destination item
-//! grows is decided by the rule instead of by whichever neighbour it was copied from.
+//! One rule decides every field of a destination item, and it is the plan document: what a
+//! plan declares, this worker owns and writes; what a plan does not model, it never sends. A
+//! change to an item that already exists is one targeted update naming only the owned fields
+//! whose projection differs from what the run last landed, so a field it does not name is
+//! neither read nor rewritten; an item that does not exist yet is created by a copy, which
+//! writes it whole and so starts it with nothing the plan does not declare. The consequences
+//! are enumerated here rather than rediscovered per field, so the next field a destination
+//! item grows is decided by the rule instead of by whichever neighbour it was copied from.
 //!
-//! * **A task's title, body, status, dependency edges and engine metadata are declared** —
-//!   by the node the plan holds and the graph the run folded — so the projection replaces
-//!   them. That is the whole point of the projection. A node carrying no title is written
-//!   under its **id**: a destination that requires one refuses an item with none, and the
-//!   copy is a whole-project write, so one untitled node stops every item of the run
-//!   reaching the board. Untitled nodes are ordinary — see
-//!   `graph::check_declared_version` for why an edited graph carries them.
+//! * **A task's title, body, status, `delivers`, dependency edges and engine metadata are
+//!   declared** — by the node the plan holds and the graph the run folded — so the projection
+//!   writes them. That is the whole point of the projection. A node carrying no title is
+//!   written under its **id**: a destination that requires one refuses an item with none.
+//!   Untitled nodes are ordinary — see `graph::check_declared_version` for why an edited graph
+//!   carries them.
 //! * **A task's identity is its lineage root's, not the node's.** A `retry`'s replacement
 //!   is projected onto the item the superseded node already holds, keyed by the lineage
 //!   root and saying what the lineage head says. Entry 80 of `docs/contract-divergences.md`
 //!   is the rule; [`Lineages`] computes it, [`task_document`] renders it, and `taskgraph`'s
 //!   reader reads past the two lineage keys the way it reads past the settlement.
-//! * **A project's title is not declared.** A plan's `name` is reserved project metadata,
-//!   never the board's own heading, so the destination's title is read and written back. In
-//!   particular it is *not* the project's native identifier: on a store where those two
-//!   coincide the difference is invisible, and on one where they do not, writing the
-//!   identifier renames a person's board to a machine id.
-//! * **A project's description is not declared**, so the destination's `content` is read and
-//!   written back.
-//! * **Labels are not modelled by a plan at all** — neither a project's nor a task's — so
-//!   both are read off the destination and written back. A destination may refuse a write
-//!   whose labels differ from the ones it holds, so a projection that dropped them would
-//!   stop reaching the board the moment anybody labelled one of its items.
-//! * **Metadata a plan does not name is not declared**, so the destination's own keys
-//!   survive and only the reserved `onepipeline.*` keys this worker owns are rewritten.
+//! * **A project's title and description are not declared.** A plan's `name` is reserved
+//!   project metadata, never the board's own heading, so neither is ever sent. The one copy
+//!   the write-back makes — a creation — lands the project item beside what it creates, so the
+//!   shadow project restates the destination's own, read for that attempt alone, and the copy
+//!   finds nothing to write.
+//! * **Labels, repositories and project membership are not modelled for an existing item** —
+//!   a targeted update cannot name them — so a person's labels stand, and an item is never
+//!   moved.
+//! * **Metadata a plan does not name is not declared**, so the destination's own keys are never
+//!   sent; only the reserved `onepipeline.*` keys this worker owns are set or removed, one key
+//!   at a time for the project and all of one item's in one update.
 //!
 //! What the destination alone owns — its native id, URL and timestamps — is never written
-//! by anybody, so it is neither replaced nor carried.
+//! by anybody. And because an update names only what moved since the run last landed it, a
+//! person's edit to any field — an owned one included — stands until the run next changes
+//! that same field.
 //!
 //! # The status a node is projected under is the settlement's own word
 //!
@@ -61,30 +62,29 @@
 //!
 //! # A projection carries what changed since it landed
 //!
-//! Against a hosted destination every item a copy reads or writes spends the same allowance
-//! every other reader of the token needs, so an attempt carries only the lineages whose
-//! projection differs from what the run last put on the board, named as the copy's members —
-//! and never the whole project. What landed is the run's **landed baseline**
-//! ([`LandedBaseline`], `writeback-landed.json` beside the record): seeded from the launch's own
-//! read before the first projection, advanced per item only as a write lands, and read by every
-//! later driver, an adopting one included. It also says where each lineage's item is, so no
-//! attempt reads the project's page of tasks; a lineage it does not hold — a run an older build
-//! started — is read once by its own id. After a failure the next attempt carries what has still
-//! not landed and nothing more. What a member copy does not name it neither reads nor rewrites,
-//! so the ownership rule above still decides every field of every item a projection writes, and
-//! a person's edit on an item the run did not change since it last landed stands. Every attempt
-//! is appended to the run's projection record; see [`ProjectionRecord`].
+//! Against a hosted destination every read and write spends the same allowance every other
+//! reader of the token needs, so an attempt carries only the lineages whose projection differs
+//! from what the run last put on the board, each as one targeted update of its item naming only
+//! the fields that differ — never a copy of an item that exists, and never the whole project.
+//! What landed is the run's **landed baseline** ([`LandedBaseline`], `writeback-landed.json`
+//! beside the record): seeded from the launch's own read before the first projection, advanced
+//! per item as each write lands, and read by every later driver, an adopting one included. It
+//! also says where each lineage's item is, so no attempt reads the project or its page of tasks;
+//! a lineage it does not hold — a run an older build started — is read once by its own id. An
+//! engine-owned project key whose value moved is written by itself. After a failure the next
+//! attempt carries what has still not landed and nothing more. Every attempt is appended to the
+//! run's projection record; see [`ProjectionRecord`].
 //!
 //! # The store is linked, and built afresh for every attempt
 //!
-//! Every read and the copy go through `onetaskgraph-core`'s own [`Engine`], in process, and
-//! every answer is that library's own value — a [`CopyReport`], a [`SourceFailure`], an
-//! [`EngineError`] — so what a failure *is* is matched on its type and never read off a
-//! message or an exit status. Each attempt builds its engine from the configuration the
-//! launch record's directory discovers, with the shadow source declared beside it, and
-//! drops it when the attempt ends: a hosted source keeps its whole-board read for as long as
-//! it lives, so an engine that outlived one attempt would answer the next from the board as
-//! it was.
+//! Every read and write goes through `onetaskgraph-core`'s own [`Engine`], in process, and
+//! every answer is that library's own value — a `TaskUpdated`, a [`CopyReport`], a
+//! [`SourceFailure`], an [`EngineError`] — so what a failure *is* is matched on its type and
+//! never read off a message or an exit status. Each attempt builds its engine from the
+//! configuration the launch record's directory discovers, with the shadow source a creation
+//! copies from declared beside it, and drops it when the attempt ends: a hosted source keeps
+//! its whole-board read for as long as it lives, so an engine that outlived one attempt would
+//! answer the next from the board as it was.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -100,7 +100,8 @@ use onetaskgraph_core::{
     SourceFailure,
 };
 use onetaskgraph_plugin_api::{
-    Label, NativeId, Project, SourceError, SourceName, StatusCategory, Task,
+    DependencyEdge, DependencyEndpoint, DependencyKind, ItemKind, MetadataKey, NativeId, Project,
+    SourceError, SourceName, Status, StatusCategory, Task, TaskRef, TaskUpdate,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -109,7 +110,8 @@ use crate::cli::{
     DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_CLASSIFIED_COMMANDS,
     WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_LANDED_FILE, WRITEBACK_LANDED_SCHEMA_VERSION,
     WRITEBACK_MEMBER_READ, WRITEBACK_PROJECTIONS_FILE, WRITEBACK_PROJECTIONS_SCHEMA_VERSION,
-    WRITEBACK_REFUSED_CLASS, WRITEBACK_WAIT_FILE, WRITEBACK_WAIT_SCHEMA_VERSION,
+    WRITEBACK_REFUSED_CLASS, WRITEBACK_TARGETED_WRITES, WRITEBACK_WAIT_FILE,
+    WRITEBACK_WAIT_SCHEMA_VERSION,
 };
 use crate::edits::Operation;
 use crate::event::Source;
@@ -165,11 +167,13 @@ const RETRY_CEILING: Duration = Duration::from_secs(60);
 // Closeout never inherits the duration of a store call. A slow store may keep working in
 // the worker, but it still cannot turn a completed graph into run settlement.
 const CLOSEOUT_WAIT: Duration = Duration::from_millis(2_250);
-// The three store calls one attempt makes, by the name each one's refusals carry. Each
-// one's failure is classified by its own type.
+// The store calls an attempt makes, by the name each one's refusals carry. Each one's failure
+// is classified by its own type.
 const PROJECT_SHOW: &str = WRITEBACK_CLASSIFIED_COMMANDS[0];
 const PROJECT_COPY: &str = WRITEBACK_CLASSIFIED_COMMANDS[2];
-// What a member projection reads each named member with, in place of the page of tasks.
+const TASK_UPDATE: &str = WRITEBACK_TARGETED_WRITES[0];
+const PROJECT_METADATA_SET: &str = WRITEBACK_TARGETED_WRITES[1];
+// What a projection reads an item the landed baseline does not hold with, by its own id.
 const TASK_SHOW: &str = WRITEBACK_MEMBER_READ;
 // What building an attempt's store is called where it outlasts the floor.
 const STORE_OPEN: &str = "store-open";
@@ -181,19 +185,21 @@ const STORE_OPEN: &str = "store-open";
 /// the attempt is recorded, so nothing the cancelled call started lands after the record says
 /// it was refused.
 ///
-/// The reads are the same size whatever the plan, so [`COMMAND_FLOOR`] alone bounds them.
-/// The copy writes one item per lineage it carries, so its deadline is the floor **plus** the
-/// launch's per-item budget multiplied by those items — the list an [`Unprojected`] surface
-/// names. Added rather than the larger of the two, because every copy also spends the fixed
-/// round trips a read does: a seven-item copy onto the `plans` board measured 71 to 72 seconds
-/// against the 70 the larger of the two allowed it (#521). The account is derived from the
-/// figure rather than stored beside it.
+/// The reads and a project key's write are the same size whatever the plan, so
+/// [`COMMAND_FLOOR`] alone bounds them. A copy writes one item per lineage it creates, so its
+/// deadline is the floor **plus** the launch's per-item budget multiplied by those items; a
+/// targeted update writes one item, so its deadline is the floor plus one item's budget. Added
+/// rather than the larger of the two, because every write also spends the fixed round trips a
+/// read does: a seven-item copy onto the `plans` board measured 71 to 72 seconds against the 70
+/// the larger of the two allowed it (#521). The account is derived from the figure rather than
+/// stored beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Deadline {
     /// The fixed floor, which is the whole deadline for a read.
     Floor,
-    /// The copy's: `floor + per_item × items`, with the budget in seconds.
-    Copy { per_item: NonZeroU64, items: usize },
+    /// A write's: `floor + per_item × items`, with the budget in seconds — the items a copy
+    /// creates, or the one item a targeted update writes.
+    Write { per_item: NonZeroU64, items: usize },
 }
 
 impl Deadline {
@@ -216,7 +222,7 @@ impl Deadline {
     fn within(self) -> Duration {
         match self {
             Self::Floor => COMMAND_FLOOR,
-            Self::Copy { per_item, items } => {
+            Self::Write { per_item, items } => {
                 COMMAND_FLOOR.saturating_add(Self::product(per_item, items))
             }
         }
@@ -227,7 +233,7 @@ impl Deadline {
         let seconds = self.within().as_secs();
         match self {
             Self::Floor => format!("{name} exceeded {seconds} seconds"),
-            Self::Copy { per_item, items } => format!(
+            Self::Write { per_item, items } => format!(
                 "{name} exceeded {seconds} seconds (the {} second floor + {items} {} × {} {} \
                  per item)",
                 COMMAND_FLOOR.as_secs(),
@@ -599,6 +605,7 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         | EngineError::MetadataNotWritable { .. }
         | EngineError::PriorityNotWritable { .. }
         | EngineError::ContentNotWritable { .. }
+        | EngineError::UpdateNotWritable { .. }
         | EngineError::NotCreatable { .. }
         | EngineError::RenderingNotWritable { .. } => decided("not-writable"),
         EngineError::MissingAnswers { .. } => decided("template-missing-required"),
@@ -691,7 +698,7 @@ impl Failed {
     }
 
     /// One store call answered in part, naming every source that could not contribute.
-    // llmlint: ignore[changed_behavior_has_e2e] every read that reaches this is addressed to one source — `shown`'s `show` of a qualified id, and `destination_origins`' page under a `Qualified` selector once that project's own `show` has answered — so a write-back answer carries at most one source's failure and no journey can mix a refused source with a transient one here. Each single-source class is driven end to end (`store::a_refusal_of_the_member_read_the_copy_or_the_project_read_stops_the_retry_timer`, `store::a_failure_the_store_does_not_refuse_is_retried_on_the_schedule`), the every-or-transient rule `Classified::of_all` applies is driven mixed by `delivers::a_partial_copy_mixing_refused_and_transient_tickets_is_classed_transient`, and the mixed source case is held by `the_divergence_records_refusal_rule_is_the_one_the_worker_classifies_by`.
+    // llmlint: ignore[changed_behavior_has_e2e] every read that reaches this is addressed to one source — `shown`'s `show` of a qualified id — so a write-back answer carries at most one source's failure and no journey can mix a refused source with a transient one here. Each single-source class is driven end to end (`store::a_refusal_of_any_call_an_attempt_makes_stops_the_retry_timer`, `store::a_failure_the_store_does_not_refuse_is_retried_on_the_schedule`), the every-or-transient rule `Classified::of_all` applies is driven mixed by `delivers::a_partial_write_mixing_refused_and_transient_tickets_is_classed_transient`, and the mixed source case is held by `the_divergence_records_refusal_rule_is_the_one_the_worker_classifies_by`.
     fn partial(call: &str, errors: &[SourceFailure]) -> Self {
         let named: Vec<String> = errors
             .iter()
@@ -1079,7 +1086,7 @@ fn launch_dir(launch: &LaunchRecord) -> PathBuf {
 /// the count would be zero and the wait the floor, dispatching inside the deadline a large plan's
 /// copy still runs under.
 fn launch_wait(per_item: NonZeroU64, pending: &Pending) -> Duration {
-    Deadline::Copy {
+    Deadline::Write {
         per_item,
         items: pending.queued_items,
     }
@@ -1128,7 +1135,7 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
         return;
     }
     if let Kept::Left(left) = kept {
-        let bound = Deadline::Copy {
+        let bound = Deadline::Write {
             per_item: per_item_budget(launch),
             items: snapshot.lineages().len(),
         }
@@ -1155,7 +1162,7 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     // `delivers::a_stop_whose_release_the_store_refuses_still_stops_and_says_so`, which asserts
     // the stop's answer, its stderr and the failed record line. The one timeout-specific branch
     // is the deadline's cancellation, driven by
-    // `writeback_budget::a_copy_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithmetic`
+    // `writeback_budget::an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithmetic`
     // and `delivers::a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch`.
     // A journey holding a `stop` past the sixty-second floor would spend that minute on no line
     // those three do not already reach.
@@ -1570,8 +1577,8 @@ fn should_retry_after(pending: &(Mutex<Pending>, Condvar), interval: Interval) -
     }
 }
 
-/// One attempt that landed: what the copy said it did and spent — no report at all for an
-/// attempt that had nothing to carry, and so asked the store nothing.
+/// One attempt that landed: what its writes said they did and spent — no counts at all for an
+/// attempt that wrote no task, and so had nothing to count.
 struct Landed {
     actions: Option<ProjectionActions>,
     spent: Option<Map<String, Value>>,
@@ -1581,22 +1588,26 @@ struct Landed {
 /// One attempt, landed or not: the lineages it carried, the store calls it made, and how it
 /// ended — everything its record line says.
 struct Attempted {
-    /// The lineage roots the copy carried, which the record and a surface name.
+    /// The lineage roots the attempt carried, which the record and a surface name.
     // llmlint: ignore[invalid_states_unrepresentable] node ids, the plain `String` the
     // snapshot's own maps key by, for the reason `Snapshot::superseded` records.
     items: Vec<String>,
     /// How many times each store operation was called, the one that failed included.
     calls: BTreeMap<StoreCall, u64>,
+    /// How many items each field was written on by the attempt's targeted updates.
+    written: BTreeMap<UpdatedField, u64>,
     result: Result<Landed, Failed>,
 }
 
 /// One attempt's store: the engine its configuration describes, with the shadow source
-/// declared beside the operator's own, the runtime its calls are driven on, and the count of
-/// the calls made through it. Built for the attempt and dropped with it.
+/// declared beside the operator's own, the runtime its calls are driven on, the count of the
+/// calls made through it, and the fields its targeted updates wrote. Built for the attempt and
+/// dropped with it.
 struct Attempt {
     runtime: tokio::runtime::Runtime,
     engine: Engine,
     calls: std::cell::RefCell<BTreeMap<StoreCall, u64>>,
+    written: std::cell::RefCell<BTreeMap<UpdatedField, u64>>,
 }
 
 impl Attempt {
@@ -1645,6 +1656,7 @@ impl Attempt {
                 .map_err(|error| format!("the store cannot be called: {error}"))?,
             engine: built.engine,
             calls: std::cell::RefCell::default(),
+            written: std::cell::RefCell::default(),
         })
     }
 
@@ -1662,6 +1674,14 @@ impl Attempt {
         self.runtime
             .block_on(async { tokio::time::timeout(deadline.within(), future).await })
             .map_err(|_| Failed::from(deadline.refusal(call.as_str())))
+    }
+
+    /// Count the fields one targeted update says it wrote, one item apiece.
+    fn wrote(&self, fields: &BTreeSet<onetaskgraph_plugin_api::UpdatedField>) {
+        let mut written = self.written.borrow_mut();
+        for field in fields {
+            *written.entry(UpdatedField::from(*field)).or_default() += 1;
+        }
     }
 
     /// Read one destination task by its own id: the one read an attempt makes of an item.
@@ -1725,11 +1745,10 @@ enum Scope {
 /// baseline says landed, and advance the baseline by every item that landed.
 ///
 /// Nothing is read that the baseline already answers: the destination id of every lineage it
-/// holds is its own, so no attempt reads the project's page of tasks. A lineage it does not
-/// hold — a run an older build started, whose directory holds no baseline — is read once by
-/// its own id and compared against that read. Each lineage the copy carries is read once by
-/// its own id, for the labels a person may have put on it since, which the copy restates. The
-/// project item is read, because every copy carries it.
+/// holds is its own, so no attempt reads the project's page of tasks, nor any item it holds. A
+/// lineage it does not hold — a run an older build started, whose directory holds no baseline —
+/// is read once by its own id and compared against that read. The project is read by an
+/// attempt creating an item, and by no other: see [`carry_the_difference`].
 fn project(
     store: &Store,
     per_item: NonZeroU64,
@@ -1757,6 +1776,7 @@ fn project(
         return Attempted {
             items,
             calls: BTreeMap::new(),
+            written: BTreeMap::new(),
             result: Ok(Landed {
                 actions: None,
                 spent: None,
@@ -1774,8 +1794,8 @@ fn project(
             .cloned()
             .collect::<BTreeSet<_>>(),
     );
-    let (result, calls) = match Attempt::open(store, snapshot) {
-        Err(failed) => (Err(failed), BTreeMap::new()),
+    let (result, calls, written) = match Attempt::open(store, snapshot) {
+        Err(failed) => (Err(failed), BTreeMap::new(), BTreeMap::new()),
         Ok(attempt) => {
             let result = carry_the_difference(
                 &attempt,
@@ -1785,16 +1805,27 @@ fn project(
                 baseline,
                 &mut items,
             );
-            (result, attempt.calls.take())
+            (result, attempt.calls.take(), attempt.written.take())
         }
     };
     Attempted {
         items,
         calls,
+        written,
         result,
     }
 }
 
+/// Carry what one attempt decided: create the lineages the board holds no item for, send each
+/// existing item one targeted update naming exactly the fields whose projection differs from
+/// what landed, and write each engine-owned project key whose value moved — advancing the
+/// baseline by every write as it lands, so a failure part-way leaves only what did not land for
+/// the next attempt to carry.
+///
+/// Creation is the one thing a copy is used for, and the one attempt that reads the project:
+/// a member copy lands the project item beside the member it creates, so the shadow project
+/// restates the destination's own exactly — read once, for that — and the copy writes nothing
+/// to it. Every other attempt reads no project at all.
 fn carry_the_difference(
     attempt: &Attempt,
     per_item: NonZeroU64,
@@ -1804,11 +1835,25 @@ fn carry_the_difference(
     items: &mut Vec<String>,
 ) -> Result<Landed, Failed> {
     let scope = decided.scope;
-    // What the run knows of every lineage the baseline holds: where its item is. The labels are
-    // read for the lineages the copy carries, below; an unnamed one is neither read nor written.
-    let mut origins = baseline.origins();
+    // Where each lineage's item is and what it says as far as the run knows: the baseline's
+    // entry, or — for a lineage it does not hold — one read of the item by its own id.
+    let mut held: BTreeMap<String, Held> = decided
+        .carried
+        .iter()
+        .filter_map(|root| {
+            let item = baseline.landed.items.get(root)?;
+            let id = item.destination.parse::<GlobalId>().ok()?;
+            Some((
+                root.clone(),
+                Held {
+                    id,
+                    item: item.clone(),
+                    edges: Edges::Landed,
+                },
+            ))
+        })
+        .collect();
     let mut carried = decided.carried;
-    let mut read: BTreeSet<String> = BTreeSet::new();
     let mut seeded = false;
     for (root, id) in &decided.unread {
         let task = attempt.task(id)?;
@@ -1816,22 +1861,28 @@ fn carry_the_difference(
             .get(root)
             .map(|now| now.item.depends_on.clone())
             .unwrap_or_default();
-        let held = LandedItem::read(&task, depends_on);
-        origins.insert(root.clone(), Origin::of(task));
-        read.insert(root.clone());
+        let read = LandedItem::read(&task, depends_on);
         // A read of one task does not answer its edges, so a lineage that has any is carried —
-        // the copy writes them, sending only their difference — rather than trusted to hold
-        // them; one with none is compared on everything the read did answer.
+        // its update names them, and the store sends only their difference — rather than
+        // trusted to hold them; one with none is compared on everything the read did answer.
         let differs = match scope {
             Scope::Driven => !renderings
                 .get(root)
-                .is_some_and(|now| now.item.depends_on.is_empty() && held.says_what(&now.item)),
-            Scope::Release => held.status == Some(ProjectedStatus::Queued),
+                .is_some_and(|now| now.item.depends_on.is_empty() && read.says_what(&now.item)),
+            Scope::Release => read.status == Some(ProjectedStatus::Queued),
         };
         if differs {
             carried.insert(root.clone());
+            held.insert(
+                root.clone(),
+                Held {
+                    id: task.id,
+                    item: read,
+                    edges: Edges::Unread,
+                },
+            );
         } else {
-            baseline.landed.items.insert(root.clone(), held);
+            baseline.landed.items.insert(root.clone(), read);
             seeded = true;
         }
     }
@@ -1839,150 +1890,425 @@ fn carry_the_difference(
         baseline.save();
     }
     *items = carried.iter().cloned().collect();
-    // Every lineage the run did not know already says what the run would write, and no project
-    // key moved: the reads were the whole attempt, and there is nothing to copy.
-    if carried.is_empty() && !baseline.project_differs(snapshot) {
-        return Ok(Landed {
-            actions: None,
-            spent: None,
-            delivered: Vec::new(),
-        });
-    }
-    let destination_project = destination_project(attempt, snapshot)?;
+    let mut carrying = Carrying::default();
+    // Where each lineage's item is, for the edges an update or a creation names.
+    let mut ends: BTreeMap<String, GlobalId> = baseline
+        .landed
+        .items
+        .iter()
+        .filter_map(|(root, item)| {
+            item.destination
+                .parse::<GlobalId>()
+                .ok()
+                .map(|id| (root.clone(), id))
+        })
+        .collect();
+    ends.extend(
+        held.iter()
+            .map(|(root, held)| (root.clone(), held.id.clone())),
+    );
+    // A lineage that does not render is carried, so the attempt fails saying why.
     for root in &carried {
-        if read.contains(root) {
-            continue;
+        if !renderings.contains_key(root) {
+            let lineages = snapshot.lineages();
+            let why = Rendering::of(snapshot, &lineages, root)
+                .err()
+                .unwrap_or_else(|| format!("the lineage rooted at '{root}' does not render"));
+            return Err(Failed::from(why));
         }
-        let Some(origin) = origins.get_mut(root) else {
-            continue;
-        };
-        *origin = Origin::of(attempt.task(&origin.id.clone())?);
     }
+    let created: BTreeSet<String> = carried
+        .iter()
+        .filter(|root| !held.contains_key(*root))
+        .cloned()
+        .collect();
+    if !created.is_empty() {
+        create(
+            attempt,
+            per_item,
+            snapshot,
+            (renderings, &created),
+            baseline,
+            &mut ends,
+            &mut carrying,
+        )?;
+    }
+    for (root, held) in &held {
+        let now = &renderings[root];
+        update(
+            attempt,
+            per_item,
+            (root, held, now),
+            &ends,
+            baseline,
+            &mut carrying,
+        )?;
+    }
+    let project = snapshot.project.global();
+    // llmlint: ignore-block[changed_behavior_has_e2e] no verb a CLI accepts changes an
+    // engine-owned project key mid-run, and the baseline is seeded from the very read the plan
+    // was loaded from — whose reader refuses a key spelled otherwise than the projection restates
+    // it — so no run a journey can launch reaches a key that moved. `writeback::tests::only_an_engine_owned_project_key_that_moved_is_written`
+    // holds which keys are written; the write itself is the store's `set_project_metadata`, under
+    // the same deadline, record and classification every other call here is driven end to end
+    // through.
+    for (key, value) in moved_project_keys(snapshot, &baseline.landed) {
+        let named = MetadataKey::new(key.clone())
+            .map_err(|why| carrying.failed(format!("project key '{key}': {why}").into()))?;
+        attempt
+            .call(
+                StoreCall::ProjectMetadataSet,
+                Deadline::Floor,
+                attempt.engine.set_project_metadata(&project, &named, value),
+            )
+            .map_err(|failed| carrying.failed(failed))?
+            .map_err(|error| carrying.failed(Failed::engine(PROJECT_METADATA_SET, &error)))?;
+        baseline
+            .landed
+            .project_metadata
+            .insert(key.clone(), value.clone());
+        baseline.save();
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    carrying.finish()
+}
+
+/// The engine-owned project keys the snapshot restates with another value than the one last
+/// landed, each with the value to write. A key the baseline does not hold — one the destination
+/// never held — is never written.
+fn moved_project_keys<'a>(
+    snapshot: &'a Snapshot,
+    landed: &LandedBaseline,
+) -> Vec<(&'a String, &'a Value)> {
+    snapshot
+        .project_metadata
+        .iter()
+        .filter(|(key, value)| {
+            landed
+                .project_metadata
+                .get(*key)
+                .is_some_and(|held| held != *value)
+        })
+        .collect()
+}
+
+/// One lineage an attempt sends a targeted update to: its item, and what that item says as far
+/// as the run knows.
+struct Held {
+    id: GlobalId,
+    item: LandedItem,
+    edges: Edges,
+}
+
+/// Where what the run knows of one item's dependency edges came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Edges {
+    /// The baseline's: what the run itself last landed, so an update names them only where they
+    /// moved.
+    Landed,
+    /// None: the item was read by its own id, and a read of one task does not answer its edges,
+    /// so an update names every edge the lineage declares and the store sends the difference.
+    Unread,
+}
+
+/// What an attempt's writes have come to so far: the counts, the spend and the tickets each
+/// write reported, and the tickets it could not keep in step.
+#[derive(Default)]
+struct Carrying {
+    actions: Option<ProjectionActions>,
+    spent: Vec<onetaskgraph_core::Spent>,
+    delivered: Vec<Delivered>,
+}
+
+impl Carrying {
+    fn actions(&mut self) -> &mut ProjectionActions {
+        self.actions.get_or_insert_with(ProjectionActions::default)
+    }
+
+    /// A failure part-way, carrying every ticket the writes before it reported.
+    fn failed(&self, mut failed: Failed) -> Failed {
+        let mut delivered: Vec<Map<String, Value>> = self.delivered.iter().map(verbatim).collect();
+        delivered.append(&mut failed.delivered);
+        failed.delivered = delivered;
+        failed
+    }
+
+    /// The attempt as it ended once every write landed: refused or retried where a ticket could
+    /// not be kept in step — its deliverer stays unlanded, so the next attempt carries it again —
+    /// and otherwise landed.
+    fn finish(self) -> Result<Landed, Failed> {
+        let delivered: Vec<Map<String, Value>> = self.delivered.iter().map(verbatim).collect();
+        if let Some(tickets) = failed_deliveries(&self.delivered) {
+            let mut failed = Failed::from(format!(
+                "the write landed, but the store could not keep every delivered ticket in step: \
+                 {tickets}"
+            ));
+            let failures = || {
+                self.delivered
+                    .iter()
+                    .filter_map(|entry| match &entry.outcome {
+                        DeliveryOutcome::Failed { failure, .. } => Some(failure),
+                        DeliveryOutcome::Written { .. }
+                        | DeliveryOutcome::Unchanged { .. }
+                        | DeliveryOutcome::Left { .. } => None,
+                    })
+            };
+            failed.classified = Classified::of_all(failures().map(Classified::of_delivery));
+            failed.wait = failures()
+                .filter_map(Failure::retry_after_seconds)
+                .max()
+                .map(Duration::from_secs);
+            failed.delivered = delivered;
+            return Err(failed);
+        }
+        Ok(Landed {
+            actions: self.actions,
+            spent: summed(self.spent.iter()),
+            delivered,
+        })
+    }
+}
+
+/// Whether any ticket a write reported could not be kept in step with its deliverer.
+fn any_failed(delivered: &[Delivered]) -> bool {
+    delivered.iter().any(|entry| match &entry.outcome {
+        DeliveryOutcome::Failed { .. } => true,
+        DeliveryOutcome::Written { .. }
+        | DeliveryOutcome::Unchanged { .. }
+        | DeliveryOutcome::Left { .. } => false,
+    })
+}
+
+/// Create the lineages the board holds no item for: one member copy naming exactly them, over
+/// a shadow store holding their documents alone and the project's, restated from its one read.
+/// The baseline records where each landed.
+fn create(
+    attempt: &Attempt,
+    per_item: NonZeroU64,
+    snapshot: &Snapshot,
+    (renderings, created): (&BTreeMap<String, Rendering>, &BTreeSet<String>),
+    baseline: &mut Baseline,
+    ends: &mut BTreeMap<String, GlobalId>,
+    carrying: &mut Carrying,
+) -> Result<(), Failed> {
+    let destination_project =
+        destination_project(attempt, snapshot).map_err(|failed| carrying.failed(failed))?;
     // A shadow store this worker cannot write is its own failure, classed by nobody and so
     // retried: `store::an_unwritable_shadow_store_is_reported_retried_and_recovered`.
-    write_shadow(snapshot, &origins, &destination_project)?;
-    let shadow_project = shadow_id(&project_file(&snapshot.project));
-    // A member copy names exactly the lineages that changed. Naming none is not a copy of
-    // everything: the project item alone carries what changed at the project's level.
-    let scope = match CopyItems::new(
-        carried
+    write_shadow(snapshot, created, ends, &destination_project)
+        .map_err(|why| carrying.failed(why.into()))?;
+    let members = CopyItems::new(
+        created
             .iter()
             .map(|root| member_id(snapshot, root))
             .collect(),
-    ) {
-        Some(members) => CopyScope::Members(members),
-        // llmlint: ignore-block[changed_behavior_has_e2e] a copy naming no lineage is reached
-        // only when a project key the destination holds changed and no lineage did — every
-        // other attempt carrying nothing asks the store nothing — and no edit a CLI accepts
-        // changes only the project's metadata. `writeback::tests` holds the decision that names
-        // none; a project copy without its tasks is the store's own scope for copying the
-        // project item alone.
-        None => CopyScope::Projects { tasks: false },
-        // llmlint: ignore-end[changed_behavior_has_e2e]
-    };
+    )
+    .expect("a creation names at least one lineage");
     let request = CopyRequest {
-        items: CopyItems::new(vec![shadow_project]).expect("one item is not none"),
-        scope,
+        items: CopyItems::new(vec![shadow_id(&project_file(&snapshot.project))])
+            .expect("one item is not none"),
+        scope: CopyScope::Members(members),
         destination: snapshot.project.global().source,
         match_by: None,
         recreate: false,
         dry_run: false,
     };
     // The one call that is linear in what it carries, so the one whose deadline is.
-    let deadline = Deadline::Copy {
+    let deadline = Deadline::Write {
         per_item,
-        items: carried.len(),
+        items: created.len(),
     };
     let report = attempt
         .call(
             StoreCall::ProjectCopy,
             deadline,
             attempt.engine.copy(&request),
-        )?
-        .map_err(|error| Failed::engine(PROJECT_COPY, &error))?;
-    let delivered: Vec<Map<String, Value>> = report.delivered.iter().map(verbatim).collect();
-    // Counted off the origins as the pre-copy read left them, before the report teaches the
-    // run where anything moved: a reopen is decided by what the item read as before the copy
-    // and what the copy wrote onto it.
-    let actions = actions(&report, snapshot, &origins);
-    learn(&report, &mut origins, snapshot);
-    // A copy whose delivered tickets the store could not keep in step landed every item but
-    // those deliverers': their tickets are behind the run, so their lineages stay unlanded and
-    // the next attempt carries them again — and nothing that did land.
+        )
+        .map_err(|failed| carrying.failed(failed))?
+        .map_err(|error| carrying.failed(Failed::engine(PROJECT_COPY, &error)))?;
+    let counted = actions(&report);
+    let into = carrying.actions();
+    into.created = into.created.saturating_add(counted.created);
+    into.updated = into.updated.saturating_add(counted.updated);
+    into.unchanged = into.unchanged.saturating_add(counted.unchanged);
+    into.orphaned = into.orphaned.saturating_add(counted.orphaned);
+    // A deliverer whose tickets the store could not keep in step stays unlanded, so the next
+    // attempt carries it again.
     let behind: std::collections::HashSet<&GlobalId> = report
         .delivered
         .iter()
-        .filter_map(|entry| match &entry.outcome {
-            DeliveryOutcome::Failed { .. } => Some(&entry.deliverer),
-            DeliveryOutcome::Written { .. }
-            | DeliveryOutcome::Unchanged { .. }
-            | DeliveryOutcome::Left { .. } => None,
-        })
+        .filter(|entry| any_failed(std::slice::from_ref(*entry)))
+        .map(|entry| &entry.deliverer)
         .collect();
-    for root in &carried {
-        let (Some(origin), Some(now)) = (origins.get(root), renderings.get(root)) else {
-            continue;
-        };
-        if behind.contains(&origin.id) {
+    let landed = learn(&report, snapshot, created);
+    for (root, destination) in &landed {
+        ends.insert(root.clone(), destination.clone());
+        if behind.contains(destination) {
             continue;
         }
+        if let Some(now) = renderings.get(root) {
+            baseline
+                .landed
+                .items
+                .insert(root.clone(), now.item.landed_at(destination));
+        }
+    }
+    baseline.save();
+    carrying.spent.extend(report.spent.iter().cloned());
+    carrying.delivered.extend(report.delivered.iter().cloned());
+    Ok(())
+}
+
+/// Send one existing item the targeted update that makes it say what its lineage now renders:
+/// every field that differs from what the run knows it holds, and nothing else. The baseline
+/// advances the moment it lands.
+fn update(
+    attempt: &Attempt,
+    per_item: NonZeroU64,
+    (root, held, now): (&str, &Held, &Rendering),
+    ends: &BTreeMap<String, GlobalId>,
+    baseline: &mut Baseline,
+    carrying: &mut Carrying,
+) -> Result<(), Failed> {
+    let update = difference(held, now, ends).map_err(|why| carrying.failed(Failed::from(why)))?;
+    if update.is_empty() {
+        // The run knew the item to say what it renders in every field it writes; only where the
+        // item is had to be learned.
         baseline
             .landed
             .items
-            .insert(root.clone(), now.item.landed_at(&origin.id));
+            .insert(root.to_owned(), now.item.landed_at(&held.id));
+        baseline.save();
+        return Ok(());
     }
-    baseline.landed.project_metadata =
-        owned(&projected_project_metadata(snapshot, &destination_project));
-    baseline.save();
-    if let Some(tickets) = failed_deliveries(&report.delivered) {
-        let mut failed = Failed::from(format!(
-            "the copy landed, but the store could not keep every delivered ticket in step: \
-             {tickets}"
-        ));
-        failed.classified =
-            Classified::of_all(
-                report
-                    .delivered
-                    .iter()
-                    .filter_map(|entry| match &entry.outcome {
-                        DeliveryOutcome::Failed { failure, .. } => {
-                            Some(Classified::of_delivery(failure))
-                        }
-                        DeliveryOutcome::Written { .. }
-                        | DeliveryOutcome::Unchanged { .. }
-                        | DeliveryOutcome::Left { .. } => None,
-                    }),
-            );
-        failed.delivered = delivered;
-        failed.wait = report
-            .delivered
-            .iter()
-            .filter_map(|entry| match &entry.outcome {
-                DeliveryOutcome::Failed { failure, .. } => failure.retry_after_seconds(),
-                DeliveryOutcome::Written { .. }
-                | DeliveryOutcome::Unchanged { .. }
-                | DeliveryOutcome::Left { .. } => None,
-            })
-            .max()
-            .map(Duration::from_secs);
-        return Err(failed);
+    let answer = attempt
+        .call(
+            StoreCall::TaskUpdate,
+            Deadline::Write { per_item, items: 1 },
+            attempt.engine.update_task(&held.id, &update),
+        )
+        .map_err(|failed| carrying.failed(failed))?
+        .map_err(|error| carrying.failed(Failed::engine(TASK_UPDATE, &error)))?;
+    attempt.wrote(&answer.written);
+    let counted = carrying.actions();
+    if answer.written.is_empty() {
+        counted.unchanged = counted.unchanged.saturating_add(1);
+    } else {
+        counted.updated = counted.updated.saturating_add(1);
     }
-    Ok(Landed {
-        actions: Some(actions),
-        spent: summed(report.spent.iter()),
-        delivered,
-    })
+    // A reopen is the word moving off a closed one the item held — the run's own landing, or
+    // what a cold adoption read off the item by its id — onto an open one: a retry or a requeue
+    // of a cancelled node, which the store pairs with reopening the item.
+    let closed = |word: Option<ProjectedStatus>| {
+        matches!(
+            word,
+            Some(ProjectedStatus::Done | ProjectedStatus::Cancelled)
+        )
+    };
+    if answer
+        .written
+        .contains(&onetaskgraph_plugin_api::UpdatedField::Status)
+        && closed(held.item.status)
+        && !closed(now.item.status)
+    {
+        counted.reopened = counted.reopened.saturating_add(1);
+    }
+    carrying.spent.extend(answer.spent.iter().cloned());
+    let behind = any_failed(&answer.delivered);
+    carrying.delivered.extend(answer.delivered);
+    if !behind {
+        baseline
+            .landed
+            .items
+            .insert(root.to_owned(), now.item.landed_at(&held.id));
+        baseline.save();
+    }
+    Ok(())
+}
+
+/// The targeted update that makes an item holding `held` say what `now` renders: each field that
+/// differs, and nothing else. `task_document`'s rendering is what `now` is, so this is a
+/// difference of one rendering against what landed, never a second rendering beside it.
+fn difference(
+    held: &Held,
+    now: &Rendering,
+    ends: &BTreeMap<String, GlobalId>,
+) -> Result<TaskUpdate, String> {
+    let (was, is) = (&held.item, &now.item);
+    let mut update = TaskUpdate::default();
+    if was.title != is.title {
+        update.title = Some(is.title.clone());
+    }
+    if was.content_sha256 != is.content_sha256 {
+        update.content = Some(now.content.clone());
+    }
+    if was.status != is.status {
+        update.status = is.status.map(ProjectedStatus::status);
+    }
+    for (key, value) in &is.metadata {
+        if was.metadata.get(key) != Some(value) {
+            let named =
+                MetadataKey::new(key.clone()).map_err(|why| format!("key '{key}': {why}"))?;
+            update.metadata_set.insert(named, value.clone());
+        }
+    }
+    for key in was.metadata.keys() {
+        if !is.metadata.contains_key(key) {
+            let named =
+                MetadataKey::new(key.clone()).map_err(|why| format!("key '{key}': {why}"))?;
+            update.metadata_remove.insert(named);
+        }
+    }
+    if was.delivers != is.delivers {
+        update.delivers = Some(
+            is.delivers
+                .iter()
+                .map(|ticket| {
+                    TaskRef::new(ticket.clone()).map_err(|why| format!("ticket '{ticket}': {why}"))
+                })
+                .collect::<Result<_, _>>()?,
+        );
+    }
+    let edges_moved = match held.edges {
+        Edges::Landed => was.depends_on != is.depends_on,
+        Edges::Unread => !is.depends_on.is_empty(),
+    };
+    if edges_moved {
+        update.depends_on = Some(
+            is.depends_on
+                .iter()
+                .map(|far| {
+                    let end = ends.get(far).ok_or_else(|| {
+                        format!(
+                            "the edge onto '{far}' names a lineage with no item on the board yet"
+                        )
+                    })?;
+                    Ok(DependencyEdge {
+                        from: DependencyEndpoint::from_native(
+                            held.id.native.clone(),
+                            ItemKind::Task,
+                        ),
+                        to: DependencyEndpoint::new(end.to_string(), ItemKind::Task)?,
+                        kind: DependencyKind::Blocks,
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+        );
+    }
+    Ok(update)
 }
 
 /// Every call's reported spend, summed into the one object the record carries: requests
 /// added, and each budget added to the one of the same name and unit, a lower bound wherever
 /// any summand was. `None` where no call reported any.
-// llmlint: ignore[changed_behavior_has_e2e] the copy is the one call of this build that reports
-// a spend, so an attempt sums one summand, which every metered journey drives end to end
-// (`writeback_projections::the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent`
-// and the comparable plan's `writeback_cost`); the targeted updates that add further summands
-// arrive with the next build, and `writeback::tests::spent_is_summed_across_every_call_that_reports_one`
-// holds the sum of several meanwhile.
+// llmlint: ignore[changed_behavior_has_e2e] every metered journey drives this end to end — one
+// update's spend recorded exactly by
+// `writeback_projections::the_record_carries_exactly_what_the_update_said_it_wrote_and_spent`,
+// and attempts of several updates by the comparable plan's `writeback_cost` — but no journey
+// reads a record summing several against the meter's own figures, which the source can only
+// report as its running total;
+// `writeback::tests::spent_is_summed_across_every_call_that_reports_one` holds that sum, budget
+// by budget.
 fn summed<'a>(
     spends: impl Iterator<Item = &'a onetaskgraph_core::Spent>,
 ) -> Option<Map<String, Value>> {
@@ -2163,15 +2489,17 @@ fn shadow_origin(path: &Path) -> Option<GlobalId> {
 }
 
 /// One lineage as the snapshot alone renders it: the half of its shadow task the landed
-/// baseline keeps.
+/// baseline keeps, and the body a targeted update sends where its digest moved.
 struct Rendering {
     /// What the baseline would record were this to land, its destination not yet known.
     item: LandedItem,
+    /// The body, which the baseline keeps only as a digest.
+    content: String,
 }
 
 impl Rendering {
     fn of(snapshot: &Snapshot, lineages: &Lineages, root: &str) -> Result<Self, String> {
-        let (front, content) = task_document(snapshot, lineages, root, None)?;
+        let (front, content) = task_document(snapshot, lineages, root, &BTreeMap::new())?;
         let head = lineages
             .chain(root)
             .and_then(<[String]>::last)
@@ -2201,7 +2529,7 @@ impl Rendering {
                 .map(|dep| lineages.root_of(dep).to_owned())
                 .collect(),
         };
-        Ok(Self { item })
+        Ok(Self { item, content })
     }
 }
 
@@ -2223,25 +2551,6 @@ fn owned(metadata: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
 }
 
 const OWNED_PREFIX: &str = "onepipeline.";
-
-/// The project metadata a copy writes: the destination's own, with each engine-owned key it
-/// already holds restated from the snapshot.
-fn projected_project_metadata(
-    snapshot: &Snapshot,
-    destination_project: &Project,
-) -> BTreeMap<String, Value> {
-    let mut metadata: BTreeMap<String, Value> = destination_project
-        .metadata
-        .iter()
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    for (key, value) in &snapshot.project_metadata {
-        if metadata.contains_key(key) {
-            metadata.insert(key.clone(), value.clone());
-        }
-    }
-    metadata
-}
 
 /// What this run has put on the board: the landed baseline, and the file it is kept in.
 struct Baseline {
@@ -2299,26 +2608,6 @@ impl Baseline {
                 .get(key)
                 .is_some_and(|held| held != value)
         })
-    }
-
-    /// Where the run knows each lineage's item to be: the baseline's own destination ids.
-    fn origins(&self) -> BTreeMap<String, Origin> {
-        self.landed
-            .items
-            .iter()
-            .filter_map(|(root, item)| {
-                item.destination.parse::<GlobalId>().ok().map(|id| {
-                    (
-                        root.clone(),
-                        Origin {
-                            id,
-                            labels: Vec::new(),
-                            category: None,
-                        },
-                    )
-                })
-            })
-            .collect()
     }
 
     /// Rewrite the file atomically. Best effort, like the projection it records: a file that
@@ -2643,48 +2932,18 @@ fn destination_project(attempt: &Attempt, snapshot: &Snapshot) -> Result<Project
     Ok(shown(PROJECT_SHOW, &id, answer)?.item)
 }
 
-/// What the destination already holds for one lineage, keyed by the lineage's root.
+/// Build the shadow project the copy creating `created` projects onto the destination: the
+/// project's document, restating the destination's own exactly so the copy lands it unchanged,
+/// and one task document per lineage created — and no other. Every edge onto a lineage whose
+/// item exists names that item, so the copy resolves it without the far end's document.
 ///
-/// The id is what a projection writes back onto; the labels are what it carries forward
-/// unchanged, because no plan models them; the category is what the item read as *before*
-/// the copy, which is the half of a reopen the copy report cannot say. Each is the store's
-/// own type, exactly as the store answered it.
-#[derive(Clone)]
-struct Origin {
-    id: GlobalId,
-    labels: Vec<Label>,
-    /// The item's normalised status category as the attempt's own pre-copy read reported
-    /// it, or `None` where the run learned the item from a copy report rather than a read.
-    category: Option<StatusCategory>,
-}
-
-impl Origin {
-    /// Whether the item read as closed — `done` or `cancelled` — before the copy, so a copy
-    /// that rewrote it onto an open word reopened it.
-    fn closed(&self) -> bool {
-        self.category.is_some_and(|category| {
-            matches!(category, StatusCategory::Done | StatusCategory::Cancelled)
-        })
-    }
-
-    /// What one destination task says about itself.
-    fn of(task: Qualified<Task>) -> Self {
-        Self {
-            id: task.id,
-            labels: task.item.labels,
-            category: Some(task.item.status.category),
-        }
-    }
-}
-
-/// Build the shadow project a `project copy` then projects onto the destination.
-///
-/// Every field written here is decided by the module's ownership rule: a plan-declared
-/// field is restated from the snapshot, and a field no plan models is carried over from
-/// the destination item this was read against.
+/// Every field of a created document is decided by the module's ownership rule: the plan's own
+/// fields are restated from the snapshot, and an item nobody has seen yet has no labels, no
+/// repository but the plan's and no metadata but the engine's.
 fn write_shadow(
     snapshot: &Snapshot,
-    origins: &BTreeMap<String, Origin>,
+    created: &BTreeSet<String>,
+    ends: &BTreeMap<String, GlobalId>,
     destination_project: &Project,
 ) -> Result<(), String> {
     let projects = snapshot.dir.join("projects");
@@ -2695,38 +2954,35 @@ fn write_shadow(
     std::fs::create_dir_all(&projects).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&tasks).map_err(|e| e.to_string())?;
     let mut project_metadata = destination_project.metadata.clone();
-    for (key, value) in &snapshot.project_metadata {
-        if project_metadata.contains_key(key) {
-            project_metadata.insert(key.clone(), value.clone());
-        }
-    }
     project_metadata.insert(
-        "onetaskgraph.origin".into(),
+        GlobalId::ORIGIN_KEY.into(),
         json!(snapshot.project.as_str()),
     );
+    let mut front = json!({
+        "title": destination_project.title,
+        "labels": destination_project.labels,
+        "metadata": project_metadata
+    });
+    if !destination_project.repositories.is_empty() {
+        front["repositories"] = json!(destination_project.repositories);
+    }
     document(
         &projects.join(format!("{}.md", project_file(&snapshot.project))),
-        &json!({
-            "title": destination_project.title,
-            "labels": destination_project.labels,
-            "metadata": project_metadata
-        }),
+        &front,
         destination_project.content.as_deref().unwrap_or_default(),
     )?;
     let lineages = snapshot.lineages();
     let mut written: BTreeSet<PathBuf> = BTreeSet::new();
-    for root in lineages.roots() {
-        let (front, content) = task_document(snapshot, &lineages, root, origins.get(root))?;
+    for root in created {
+        let (front, content) = task_document(snapshot, &lineages, root, ends)?;
         let path = tasks.join(format!("{}.md", task_file(root)));
         document(&path, &front, &content)?;
         written.insert(path);
     }
-    // A superseded node has no shadow task of its own, and neither has anything an earlier
-    // build left here. A member copy writes only the members it names, but it first lists the
-    // shadow project's tasks to tell those from the rest, and a listed task naming no
-    // destination item is one an edge of a named member may not point at — so a document this
-    // snapshot did not write, keyed by no lineage (and read by `known_id` before this runs), is
-    // taken out rather than left to stand as a task the run knows nothing of.
+    // Only what this copy creates is a member: a document anything earlier left here — an
+    // earlier creation, a superseded attempt, an older build's whole shadow, each read by
+    // `known_id` before this runs — is taken out rather than left to stand as a task the copy
+    // lists beside its members.
     for entry in std::fs::read_dir(&tasks).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
         if !written.contains(&path) {
@@ -2737,18 +2993,20 @@ fn write_shadow(
 }
 
 /// One lineage's shadow task document — its front matter and its body — as the snapshot
-/// renders it against what the destination holds for that lineage.
+/// renders it: the one statement of what each field of a lineage's projection is.
 ///
 /// Keyed by the lineage's `root` and saying what its head says: the head's title (the root
 /// id where it carries none), word, body, edges, `delivers` and fields, with `onepipeline.id`
-/// the root's, `onepipeline.node` the head's and `onepipeline.supersedes` the ids between.
-/// Rendered with no origin, it is the half the run alone decides, which is what tells a
-/// lineage whose projection changed from what landed from one whose did not: see [`decide`].
+/// the root's, `onepipeline.node` the head's and `onepipeline.supersedes` the ids between. It
+/// is the half the run alone decides, which is what tells a lineage whose projection changed
+/// from what landed from one whose did not — see [`decide`] — and what a targeted update is the
+/// difference of: see [`difference`]. An edge onto a lineage `ends` names an item for is
+/// written as that item's id; any other names the far lineage's shadow task.
 fn task_document(
     snapshot: &Snapshot,
     lineages: &Lineages,
     root: &str,
-    origin: Option<&Origin>,
+    ends: &BTreeMap<String, GlobalId>,
 ) -> Result<(Value, String), String> {
     let chain = lineages
         .chain(root)
@@ -2796,9 +3054,6 @@ fn task_document(
     metadata.insert(NODE_KEY.into(), json!(head));
     if !superseded.is_empty() {
         metadata.insert(SUPERSEDES_KEY.into(), json!(superseded));
-    }
-    if let Some(origin) = origin {
-        metadata.insert(GlobalId::ORIGIN_KEY.into(), json!(origin.id.to_string()));
     }
     for (key, value) in wire {
         metadata.insert(format!("onepipeline.{key}"), value);
@@ -2849,16 +3104,18 @@ fn task_document(
     // destination naming the run's scratch store — and a plan whose edges name a
     // source the store does not contain cannot be read back at all. Each far end
     // is the shadow task of *its* lineage's root: a dependency may itself have
-    // been retried, and its item is the one its root keys.
+    // been retried, and its item is the one its root keys. A far end whose item already exists
+    // is named by that item's own id, which the copy writes unqualified at the destination
+    // without needing the far end among its members.
     let local_deps: Vec<String> = deps
         .iter()
         .filter_map(Value::as_str)
         .filter(|dep| !crate::graph::is_cross_dag(dep))
         .map(|dep| {
-            format!(
-                "{}/{}",
-                project_file(&snapshot.project),
-                task_file(lineages.root_of(dep))
+            let far = lineages.root_of(dep);
+            ends.get(far).map_or_else(
+                || format!("{}/{}", project_file(&snapshot.project), task_file(far)),
+                ToString::to_string,
             )
         })
         .collect();
@@ -2882,12 +3139,9 @@ fn task_document(
     if !delivers.is_empty() {
         front.insert(DELIVERS_FIELD.into(), json!(delivers));
     }
-    // A node the plan has just added has no destination item yet, so there is nothing
-    // to preserve and the created task starts with none.
-    front.insert(
-        "labels".into(),
-        json!(origin.map(|origin| origin.labels.as_slice()).unwrap_or(&[])),
-    );
+    // Labels are no plan's: a created item starts with none, and a targeted update never
+    // names them.
+    front.insert("labels".into(), json!([]));
     front.insert("depends_on".into(), json!(local_deps));
     front.insert("metadata".into(), Value::Object(metadata));
     if let Some(repo) = repo {
@@ -2940,6 +3194,44 @@ pub(crate) enum ProjectedStatus {
     Todo,
     #[serde(rename = "queued")]
     Queued,
+}
+
+impl ProjectedStatus {
+    /// The word itself, as the record and the board spell it.
+    fn word(self) -> &'static str {
+        match self {
+            Self::InProgress => "in progress",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::ProviderFailed => "provider-failed",
+            Self::Cancelled => "cancelled",
+            Self::Parked => "parked",
+            Self::Skipped => "skipped",
+            Self::Todo => "todo",
+            Self::Queued => "queued",
+        }
+    }
+
+    /// The status a targeted update writes the word as: the word itself, with the category a
+    /// `local-md` store reads it as by default — which is the one the shadow store gave it when
+    /// a copy wrote it — so four of these are their category's own word and the four settlement
+    /// words that have none are `unknown`, reaching a destination that keeps names by name.
+    fn status(self) -> Status {
+        let category = match self {
+            Self::InProgress => StatusCategory::InProgress,
+            Self::Done => StatusCategory::Done,
+            Self::Cancelled => StatusCategory::Cancelled,
+            Self::Todo => StatusCategory::Todo,
+            Self::Queued => StatusCategory::Queued,
+            Self::Failed | Self::ProviderFailed | Self::Parked | Self::Skipped => {
+                StatusCategory::Unknown
+            }
+        };
+        Status {
+            category,
+            name: self.word().to_owned(),
+        }
+    }
 }
 
 /// Mirror one node's settlement onto the word its destination item reads under.
@@ -3049,27 +3341,15 @@ fn shadow_id(native: &str) -> GlobalId {
     )
 }
 
-/// How many items a copy report says the copy did each thing to, the project item included —
-/// and, derived here rather than reported by the store, how many it reopened.
-///
-/// An item was reopened when the store says it `updated` it, the attempt's own pre-copy read
-/// (`before`, off the page of tasks for a whole copy and each member's own read for a member
-/// copy) reported its category `done` or `cancelled`, and the word this snapshot projects its
-/// lineage under is neither. The store's copy-report vocabulary is not extended for it: the
-/// store's report says what it wrote, and a reopen is a fact about the run.
+/// How many items a copy report says the copy did each thing to, the project item included.
 ///
 /// A destination the copy `updated` is never also counted `orphaned`. An item an older build
 /// wrote can still carry that build's origin after an adoption reuses it for a lineage, so the
 /// store reports it once as the lineage it rewrote and again as a counterpart the source no
 /// longer holds — one item, and the second report is not true of it: it was rewritten, not
-/// left as it was.
-fn actions(
-    report: &CopyReport,
-    snapshot: &Snapshot,
-    before: &BTreeMap<String, Origin>,
-) -> ProjectionActions {
-    let lineages = snapshot.lineages();
-    let members = shadow_members(snapshot, &lineages);
+/// left as it was. A copy only creates, so it reopens nothing: `reopened` is the targeted
+/// updates' to count.
+fn actions(report: &CopyReport) -> ProjectionActions {
     let rewritten: std::collections::HashSet<&GlobalId> = report
         .items
         .iter()
@@ -3090,74 +3370,34 @@ fn actions(
             CopyAction::Orphaned { .. } => &mut actions.orphaned,
         };
         *count = count.saturating_add(1);
-        if !matches!(item.action, CopyAction::Updated { .. }) {
-            continue;
-        }
-        let reopened = members.get(&item.source).is_some_and(|root| {
-            before.get(*root).is_some_and(Origin::closed)
-                && lineages
-                    .chain(root)
-                    .and_then(<[String]>::last)
-                    .is_some_and(|head| {
-                        !matches!(
-                            snapshot.word_of(head),
-                            ProjectedStatus::Done | ProjectedStatus::Cancelled
-                        )
-                    })
-        });
-        if reopened {
-            actions.reopened = actions.reopened.saturating_add(1);
-        }
     }
     actions
 }
 
-/// Fold where the copy says each carried lineage landed into what the run knows.
-///
-/// A lineage the copy created has a destination item nobody has read yet, and without this
-/// the next member copy naming it would carry no origin and create it a second time. An item
-/// that is not one of this snapshot's shadow tasks says nothing about a lineage.
-fn learn(report: &CopyReport, origins: &mut BTreeMap<String, Origin>, snapshot: &Snapshot) {
-    let lineages = snapshot.lineages();
-    let members = shadow_members(snapshot, &lineages);
-    for item in &report.items {
-        let destination = match &item.action {
-            CopyAction::Orphaned { .. } => continue,
-            action => action.destination(),
-        };
-        let (Some(node), Some(destination)) = (members.get(&item.source), destination) else {
-            continue;
-        };
-        match origins.get_mut(*node) {
-            Some(origin) if origin.id == *destination => {}
-            Some(origin) => {
-                origin.id = destination.clone();
-                origin.labels = Vec::new();
-                origin.category = None;
-            }
-            None => {
-                origins.insert(
-                    (*node).clone(),
-                    Origin {
-                        id: destination.clone(),
-                        labels: Vec::new(),
-                        category: None,
-                    },
-                );
-            }
-        }
-    }
-}
-
-/// Each lineage's shadow member id, mapped back to its root: what a copy report's `source`
-/// names.
-fn shadow_members<'a>(
+/// Where the copy says each lineage it created landed, by root: what the baseline records it
+/// under, without which the next attempt would create it again. An item that is no created
+/// lineage's shadow task says nothing about one.
+fn learn(
+    report: &CopyReport,
     snapshot: &Snapshot,
-    lineages: &'a Lineages,
-) -> std::collections::HashMap<GlobalId, &'a String> {
-    lineages
-        .roots()
+    created: &BTreeSet<String>,
+) -> BTreeMap<String, GlobalId> {
+    let members: std::collections::HashMap<GlobalId, &String> = created
+        .iter()
         .map(|root| (member_id(snapshot, root), root))
+        .collect();
+    report
+        .items
+        .iter()
+        .filter_map(|item| {
+            let destination = match &item.action {
+                CopyAction::Orphaned { .. } => None,
+                action => action.destination(),
+            }?;
+            members
+                .get(&item.source)
+                .map(|root| ((*root).clone(), destination.clone()))
+        })
         .collect()
 }
 
@@ -3298,18 +3538,19 @@ impl ProjectionCalls {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StoreCall {
-    /// Reading the destination project.
+    /// Reading the destination project, which only an attempt creating an item makes: its copy
+    /// lands the project item, and restating it exactly is what leaves it unwritten.
     ProjectShow,
     /// Reading a page of the destination project's tasks. **Read, never written**: a line an
     /// earlier build wrote may count it, and no attempt this build makes calls it.
     TaskList,
-    /// Reading one destination task by its own id.
+    /// Reading one destination task the landed baseline does not hold, by its own id.
     TaskShow,
-    /// The copy.
+    /// The copy, which only an attempt creating an item makes.
     ProjectCopy,
-    /// A targeted update of one task. Named for the record's reader; this build calls none.
+    /// A targeted update of one existing task, naming only the fields that changed.
     TaskUpdate,
-    /// Setting one project metadata key. Named for the record's reader; this build calls none.
+    /// Setting one engine-owned project metadata key whose value changed.
     ProjectMetadataSet,
 }
 
@@ -3321,14 +3562,15 @@ impl StoreCall {
             Self::TaskList => "task-list",
             Self::TaskShow => TASK_SHOW,
             Self::ProjectCopy => PROJECT_COPY,
-            Self::TaskUpdate => "task-update",
-            Self::ProjectMetadataSet => "project-metadata-set",
+            Self::TaskUpdate => TASK_UPDATE,
+            Self::ProjectMetadataSet => PROJECT_METADATA_SET,
         }
     }
 }
 
-/// One field a targeted update writes, as the record's `updated_fields` keys it. Defined by
-/// version 4 of the record; this build writes no targeted update, so it never writes one.
+/// One field a targeted update writes, as the record's `updated_fields` keys it: the store's own
+/// [`onetaskgraph_plugin_api::UpdatedField`], converted by an exhaustive match so a field the
+/// store adds is a compile error here rather than a key this build writes and cannot read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UpdatedField {
@@ -3346,6 +3588,21 @@ pub enum UpdatedField {
     Delivers,
     /// The task's forward dependency edges.
     DependsOn,
+}
+
+impl From<onetaskgraph_plugin_api::UpdatedField> for UpdatedField {
+    fn from(field: onetaskgraph_plugin_api::UpdatedField) -> Self {
+        use onetaskgraph_plugin_api::UpdatedField as Store;
+        match field {
+            Store::Title => Self::Title,
+            Store::Content => Self::Content,
+            Store::Status => Self::Status,
+            Store::Priority => Self::Priority,
+            Store::Metadata => Self::Metadata,
+            Store::Delivers => Self::Delivers,
+            Store::DependsOn => Self::DependsOn,
+        }
+    }
 }
 
 /// What one projection attempt carried.
@@ -3466,7 +3723,21 @@ impl ProjectionRecord {
                     .iter()
                     .filter_map(|(call, count)| NonZeroU64::new(*count).map(|count| (*call, count)))
                     .collect(),
-                updated_fields: None,
+                // Named by exactly the attempts that made a targeted update, each field counted
+                // once per item the store says it wrote it on.
+                updated_fields: attempted
+                    .calls
+                    .get(&StoreCall::TaskUpdate)
+                    .is_some_and(|count| *count > 0)
+                    .then(|| {
+                        attempted
+                            .written
+                            .iter()
+                            .filter_map(|(field, count)| {
+                                NonZeroU64::new(*count).map(|count| (*field, count))
+                            })
+                            .collect()
+                    }),
             }),
         }
     }
@@ -3783,9 +4054,9 @@ impl From<ProjectionRecord> for ProjectionWire {
 mod tests {
     use super::{
         per_item_budget, projected, write_shadow, Claim, Classified, Deadline, FailureClass,
-        Landing, Origin, Pending, ProjectedStatus, Snapshot, WorkerState, Writeback,
-        CHANGE_URL_KEY, COMMAND_FLOOR, DELIVERS_FIELD, ID_KEY, LANDING_COMMIT_KEY,
-        LANDING_EVIDENCE_KEY, LANDING_KEY, NODE_KEY, SUPERSEDES_KEY,
+        Landing, Pending, ProjectedStatus, Snapshot, WorkerState, Writeback, CHANGE_URL_KEY,
+        COMMAND_FLOOR, DELIVERS_FIELD, ID_KEY, LANDING_COMMIT_KEY, LANDING_EVIDENCE_KEY,
+        LANDING_KEY, NODE_KEY, SUPERSEDES_KEY,
     };
     use crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS;
     use crate::graph::NodeStatus;
@@ -3793,7 +4064,7 @@ mod tests {
     use crate::plan::Node;
     use crate::projection::RunState;
     use onetaskgraph_core::{EngineError, GlobalId};
-    use onetaskgraph_plugin_api::{Label, Project, SourceError, StatusCategory};
+    use onetaskgraph_plugin_api::{Project, SourceError, StatusCategory};
     use serde_json::{json, Map, Value};
     use std::collections::BTreeMap;
     use std::num::NonZeroU64;
@@ -3819,7 +4090,7 @@ mod tests {
     #[test]
     fn the_copy_deadline_is_the_floor_plus_the_budget_times_the_items() {
         let shipped = DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS;
-        let copy = |items: usize| Deadline::Copy {
+        let copy = |items: usize| Deadline::Write {
             per_item: shipped,
             items,
         };
@@ -3850,7 +4121,7 @@ mod tests {
         );
 
         // One of each, in the singular, so the line reads as a sentence.
-        let one = Deadline::Copy {
+        let one = Deadline::Write {
             per_item: NonZeroU64::MIN,
             items: 1,
         };
@@ -3875,7 +4146,7 @@ mod tests {
         // the four billion a narrower multiplication would have capped at — and saturates
         // to `u64::MAX` seconds beyond that, rather than wrapping to a figure the floor
         // would then govern alone.
-        let vast = Deadline::Copy {
+        let vast = Deadline::Write {
             per_item: NonZeroU64::MIN,
             items: usize::MAX / 2,
         };
@@ -3883,7 +4154,7 @@ mod tests {
             vast.within(),
             Duration::from_secs(usize::MAX as u64 / 2 + COMMAND_FLOOR.as_secs())
         );
-        let saturated = Deadline::Copy {
+        let saturated = Deadline::Write {
             per_item: NonZeroU64::MAX,
             items: 2,
         };
@@ -3944,7 +4215,7 @@ mod tests {
                 .expect("a count");
             let per_item = NonZeroU64::new(example["budget_seconds"].as_u64().expect("a budget"))
                 .expect("entry 71 works an example under a budget of zero");
-            let copy = Deadline::Copy { per_item, items };
+            let copy = Deadline::Write { per_item, items };
             assert_eq!(
                 copy.within(),
                 Duration::from_secs(example["deadline_seconds"].as_u64().expect("a deadline")),
@@ -4784,8 +5055,9 @@ mod tests {
                     .expect("the fixture holds the node")
                     .delivers = vec!["tickets:t-1".to_owned()];
             });
-            let (front, _) = super::task_document(&snapshot, &snapshot.lineages(), "design", None)
-                .expect("the shadow task renders");
+            let (front, _) =
+                super::task_document(&snapshot, &snapshot.lineages(), "design", &BTreeMap::new())
+                    .expect("the shadow task renders");
             assert_eq!(front["status"], word, "{claim:?}");
             assert_eq!(front.get("delivers").cloned(), Some(json!(["tickets:t-1"])));
             assert!(
@@ -5157,7 +5429,8 @@ mod tests {
         name: &'static str,
         dir: Scratch,
         snapshot: Snapshot,
-        origins: BTreeMap<String, Origin>,
+        /// Where the destination already holds an item, by lineage root.
+        ends: BTreeMap<String, GlobalId>,
         destination: Project,
     }
 
@@ -5204,15 +5477,11 @@ mod tests {
                     claim: Claim::Held,
                 },
                 // Only `build`. A node the plan has just added has no destination
-                // task at all, and holding both kinds in one fixture is what makes
-                // "carried through" and "invented none" separable answers.
-                origins: BTreeMap::from([(
+                // task at all, and holding both kinds in one fixture is what makes an edge
+                // onto an existing item and one onto a created one separable answers.
+                ends: BTreeMap::from([(
                     "build".to_owned(),
-                    Origin {
-                        id: "plans:board/002-build".parse().expect("a qualified task"),
-                        labels: labels(&[("needs-review", Some("d73a4a"))]),
-                        category: Some(StatusCategory::Done),
-                    },
+                    "plans:board/002-build".parse().expect("a qualified task"),
                 )]),
                 destination: destination("A person's own board", &["planning", "q3"]),
                 dir,
@@ -5225,15 +5494,20 @@ mod tests {
             self.snapshot.clone()
         }
 
-        /// Project it, refusing a fixture that could not tell a right answer from
-        /// a wrong one.
+        /// Write the shadow a creation of every lineage would, refusing a fixture that could
+        /// not tell a right answer from a wrong one.
         fn project(&self) {
+            self.create(&self.snapshot.lineages().roots().cloned().collect());
+        }
+
+        /// Write the shadow a creation of `created` alone writes.
+        fn create(&self, created: &std::collections::BTreeSet<String>) {
             if let Some(missing) =
-                undiscriminating(self.name, &self.destination, &self.snapshot, &self.origins)
+                undiscriminating(self.name, &self.destination, &self.snapshot, &self.ends)
             {
                 panic!("{missing}");
             }
-            write_shadow(&self.snapshot, &self.origins, &self.destination)
+            write_shadow(&self.snapshot, created, &self.ends, &self.destination)
                 .expect("the shadow project is written");
         }
 
@@ -5270,7 +5544,7 @@ mod tests {
         fixture: &str,
         destination: &Project,
         snapshot: &Snapshot,
-        origins: &BTreeMap<String, Origin>,
+        ends: &BTreeMap<String, GlobalId>,
     ) -> Option<String> {
         let missing = if snapshot.project.native() == destination.title {
             "its destination project's identifier is its own title, so writing the \
@@ -5278,8 +5552,8 @@ mod tests {
         } else if snapshot.nodes.len() < 2 {
             "it holds one node, so a projection that wrote the wrong one is \
              indistinguishable from one that wrote the right one"
-        } else if !snapshot.nodes.keys().any(|id| origins.contains_key(id))
-            || !snapshot.nodes.keys().any(|id| !origins.contains_key(id))
+        } else if !snapshot.nodes.keys().any(|id| ends.contains_key(id))
+            || !snapshot.nodes.keys().any(|id| !ends.contains_key(id))
         {
             "every node has a destination task or none does, so a projection that \
              ignored what the destination already holds cannot be told from one that \
@@ -5299,12 +5573,7 @@ mod tests {
     fn a_fixture_that_could_not_tell_a_right_answer_from_a_wrong_one_is_refused() {
         let sound = Fixture::new("discrimination");
         assert_eq!(
-            undiscriminating(
-                sound.name,
-                &sound.destination,
-                &sound.snapshot,
-                &sound.origins
-            ),
+            undiscriminating(sound.name, &sound.destination, &sound.snapshot, &sound.ends),
             None,
             "the fixture every test here is built from does not meet its own rule"
         );
@@ -5329,7 +5598,7 @@ mod tests {
                 "degenerate",
                 &destination("board", &[]),
                 &sound.snapshot,
-                &sound.origins,
+                &sound.ends,
             ),
             "identifier is its own title",
         );
@@ -5338,7 +5607,7 @@ mod tests {
             snapshot.nodes.retain(|id, _| id == "build");
         });
         named(
-            undiscriminating("degenerate", &sound.destination, &one, &sound.origins),
+            undiscriminating("degenerate", &sound.destination, &one, &sound.ends),
             "holds one node",
         );
         // Every node already known to the destination, so a projection that never
@@ -5374,14 +5643,6 @@ mod tests {
             "repositories": [],
         }))
         .expect("the store's own project")
-    }
-
-    fn labels(named: &[(&str, Option<&str>)]) -> Vec<Label> {
-        serde_json::from_value(json!(named
-            .iter()
-            .map(|(name, color)| json!({"id": name, "name": name, "color": color}))
-            .collect::<Vec<_>>()))
-        .expect("the store's own labels")
     }
 
     /// The rule's first consequence: everything a plan declares is replaced,
@@ -5518,24 +5779,16 @@ mod tests {
         );
     }
 
-    /// The same consequence for a task: labels are read off the destination task
-    /// the node projects onto, and a node the destination has no task for gets
-    /// none invented for it.
+    /// A created item invents no labels and claims no destination item of its own, and an edge
+    /// onto a lineage whose item already exists names that item — so the copy creating it needs
+    /// no document of the far end — while one onto a lineage created beside it names that
+    /// lineage's shadow task. Only what is created is written: a document of any other lineage
+    /// is taken out.
     #[test]
-    fn a_projection_carries_a_destination_tasks_labels_through_and_invents_none() {
-        let fixture = Fixture::new("task-labels");
-        fixture.project();
-
-        let (build, _) = fixture.task_document("build");
-        assert_eq!(
-            build["labels"],
-            json!([{"id": "needs-review", "name": "needs-review", "color": "d73a4a"}]),
-            "the projection dropped the destination task's labels"
-        );
-        assert_eq!(
-            build["metadata"]["onetaskgraph.origin"], "plans:board/002-build",
-            "the projection lost the destination task it writes onto"
-        );
+    fn a_created_item_invents_no_labels_and_names_an_existing_far_end_by_its_item() {
+        let mut fixture = Fixture::new("created");
+        retried(&mut fixture, false);
+        fixture.create(&["design".to_owned(), "ship".to_owned()].into());
 
         let (design, _) = fixture.task_document("design");
         assert_eq!(
@@ -5547,6 +5800,35 @@ mod tests {
             design["metadata"].get("onetaskgraph.origin"),
             None,
             "the projection claimed a destination task for a node the destination has none for"
+        );
+        let (ship, _) = fixture.task_document("ship");
+        assert_eq!(
+            ship["depends_on"],
+            json!(["plans:board/002-build"]),
+            "an edge onto a lineage whose item exists does not name that item"
+        );
+        let mut both = fixture.snapshot.clone();
+        both.nodes.get_mut("ship").expect("a node").deps = vec!["design".to_owned()];
+        let (front, _) = super::task_document(&both, &both.lineages(), "ship", &fixture.ends)
+            .expect("the shadow task renders");
+        assert_eq!(
+            front["depends_on"],
+            json!([format!(
+                "{}/{}",
+                super::project_file(&both.project),
+                super::task_file("design")
+            )]),
+            "an edge onto a lineage created beside it does not name its shadow task"
+        );
+        let folder = fixture
+            .dir
+            .join("tasks")
+            .join(super::project_file(&fixture.snapshot.project));
+        assert!(
+            !folder
+                .join(format!("{}.md", super::task_file("build")))
+                .exists(),
+            "a lineage the copy does not create was written into its shadow"
         );
     }
 
@@ -5724,6 +6006,7 @@ mod tests {
         decide, member_id, Baseline, LandedBaseline, ProjectionActions, Rendering, Scope,
         WholeBecause,
     };
+    use onetaskgraph_plugin_api::{MetadataKey, TaskRef, TaskUpdate};
 
     /// A baseline saying every lineage of `snapshot` landed as it renders, each on an item of
     /// its own.
@@ -6069,26 +6352,6 @@ mod tests {
         });
     }
 
-    /// What a copy report counts against what the attempt read before it, as the worker
-    /// counts it.
-    trait ActionsAgainst {
-        fn actions_against(
-            &self,
-            snapshot: &Snapshot,
-            before: &BTreeMap<String, Origin>,
-        ) -> ProjectionActions;
-    }
-
-    impl ActionsAgainst for onetaskgraph_core::CopyReport {
-        fn actions_against(
-            &self,
-            snapshot: &Snapshot,
-            before: &BTreeMap<String, Origin>,
-        ) -> ProjectionActions {
-            super::actions(self, snapshot, before)
-        }
-    }
-
     /// The reason an engine that drove the store's binary gave for a store older than the
     /// member copy is one this build reads and never gives, and entry 73 says every reason is
     /// read-only now.
@@ -6127,8 +6390,8 @@ mod tests {
     }
 
     /// A copy report is counted item by item, the project item included, and teaches the run
-    /// where a node the copy created landed — without which the next member copy naming it would
-    /// create it again. An item that is no shadow task of this snapshot teaches nothing.
+    /// where each lineage it created landed — without which the next attempt would create it
+    /// again. An item that is no created lineage's shadow task teaches nothing.
     #[test]
     fn a_copy_report_is_counted_and_teaches_the_run_where_a_created_node_landed() {
         let fixture = Fixture::new("report");
@@ -6148,14 +6411,12 @@ mod tests {
         }))
         .expect("the store's own report reads");
         assert_eq!(
-            super::actions(&report, snapshot, &fixture.origins),
+            super::actions(&report),
             ProjectionActions {
                 created: 1,
                 updated: 1,
                 unchanged: 1,
                 orphaned: 1,
-                // `build` read `done` before the copy and is projected `done`: rewritten,
-                // not reopened.
                 reopened: 0,
             }
         );
@@ -6170,20 +6431,14 @@ mod tests {
             "the record's `spent` is not the store's own, verbatim"
         );
 
-        let mut origins = fixture.origins.clone();
-        super::learn(&report, &mut origins, snapshot);
+        let learned = super::learn(&report, snapshot, &["design".to_owned()].into());
         assert_eq!(
-            origins.len(),
-            2,
-            "an item that is no node's shadow task taught a node"
-        );
-        assert_eq!(origins["design"].id.to_string(), "plans:board/003-design");
-        assert!(origins["design"].labels.is_empty());
-        assert_eq!(origins["build"].id.to_string(), "plans:board/002-build");
-        assert_eq!(
-            origins["build"].labels.len(),
-            1,
-            "an updated node the run already knew lost the labels it was read with"
+            learned
+                .iter()
+                .map(|(root, id)| (root.as_str(), id.to_string()))
+                .collect::<Vec<_>>(),
+            [("design", "plans:board/003-design".to_owned())],
+            "a lineage the copy did not create, or an item that is no lineage's, taught the run"
         );
     }
 
@@ -6208,7 +6463,7 @@ mod tests {
         }))
         .expect("the store's own report reads");
         assert_eq!(
-            super::actions(&report, snapshot, &fixture.origins),
+            super::actions(&report),
             ProjectionActions {
                 created: 0,
                 updated: 1,
@@ -6276,10 +6531,9 @@ mod tests {
     /// its title, body, word, fields, `delivers` and edges, with `onepipeline.id` the root,
     /// `onepipeline.node` the head and `onepipeline.supersedes` every id between, root first.
     /// The superseded attempts have no shadow task of their own — a stale one left in the
-    /// shadow store is taken away — an edge onto the head names the root's file, the root's
-    /// destination item is the one written onto, and a head with no title is written under the
-    /// root's id. The settlement keys are the head's own, so a superseded attempt's cancellation
-    /// does not reach the item.
+    /// shadow store is taken away — an edge onto the head names the item the root keys, and a
+    /// head with no title is written under the root's id. The settlement keys are the head's
+    /// own, so a superseded attempt's cancellation does not reach the item.
     #[test]
     fn one_shadow_task_per_lineage_is_keyed_by_the_root_and_says_what_the_head_says() {
         let mut fixture = Fixture::new("lineage");
@@ -6315,14 +6569,7 @@ mod tests {
             None,
             "a superseded attempt's settlement reached the lineage's item"
         );
-        assert_eq!(
-            build["metadata"]["onetaskgraph.origin"], "plans:board/002-build",
-            "the lineage was not written onto the item its root already holds"
-        );
-        assert_eq!(
-            build["labels"],
-            json!([{"id": "needs-review", "name": "needs-review", "color": "d73a4a"}]),
-        );
+        assert_eq!(build["labels"], json!([]), "a shadow task invented labels");
         assert_eq!(
             build["depends_on"],
             json!([format!(
@@ -6347,16 +6594,12 @@ mod tests {
             "a shadow task this snapshot did not write was left behind"
         );
 
-        // An edge onto the head names the root's shadow task.
+        // An edge onto the head names the item the root keys.
         let (ship, _) = fixture.task_document("ship");
         assert_eq!(
             ship["depends_on"],
-            json!([format!(
-                "{}/{}",
-                super::project_file(&fixture.snapshot.project),
-                super::task_file("build")
-            )]),
-            "an edge onto a retried node names something other than its lineage's root"
+            json!(["plans:board/002-build"]),
+            "an edge onto a retried node names something other than its lineage's root's item"
         );
         assert_eq!(ship["metadata"][NODE_KEY], "ship");
         assert_eq!(
@@ -6435,8 +6678,8 @@ mod tests {
         );
         assert_eq!(block["lineage"]["shadow_tasks_per_lineage"], 1);
         assert_eq!(
-            block["destination"]["category_read_by"],
-            json!({"members": super::TASK_SHOW})
+            block["destination"]["word_known_by"]["not_held"],
+            json!(super::TASK_SHOW)
         );
         assert_eq!(block["reopened"]["store_vocabulary_extended"], false);
         assert_eq!(
@@ -6453,97 +6696,186 @@ mod tests {
         );
     }
 
-    /// `reopened` is derived from the pre-copy category and the projected word, item by item:
-    /// an item the store `updated` that read `cancelled` or `done` before the copy and is
-    /// projected under a word that is neither is one reopen. An item rewritten from `done` to
-    /// `done`, one created, one whose category the read did not answer, and one that is no
-    /// shadow task of this snapshot count nothing. A report naming a reopen an older build never
-    /// counted still reads.
+    /// The update one item is sent, against what the baseline says landed for it.
+    fn update_of(last: &Snapshot, now: &Snapshot, root: &str) -> TaskUpdate {
+        let held = landed_as(last).landed.items[root].clone();
+        let id: GlobalId = held.destination.parse().expect("an id");
+        let ends = landed_as(now)
+            .landed
+            .items
+            .iter()
+            .map(|(root, item)| (root.clone(), item.destination.parse().expect("an id")))
+            .collect();
+        super::difference(
+            &super::Held {
+                id,
+                item: held,
+                edges: super::Edges::Landed,
+            },
+            &renderings(now)[root],
+            &ends,
+        )
+        .expect("the difference is one an update can say")
+    }
+
+    fn keys(names: &[&str]) -> std::collections::BTreeSet<MetadataKey> {
+        names
+            .iter()
+            .map(|name| MetadataKey::new(*name).expect("a key"))
+            .collect()
+    }
+
+    /// A targeted update names exactly the fields whose projection differs from what landed, and
+    /// nothing else: a status move is the status alone; a settlement adds the settlement and the
+    /// landing keys it observed; a retry sets the lineage keys, removes the old head's settlement
+    /// and moves the text; a rewritten body is the body; a reparent is the whole declared edge
+    /// set, each far end the item its lineage's root keys; a word with no category of its own is
+    /// written by name under `unknown`; and a lineage whose projection did not move is no update.
     #[test]
-    fn reopened_is_counted_off_the_pre_copy_category_and_the_projected_word() {
-        let mut fixture = Fixture::new("reopened");
-        retried(&mut fixture, false);
-        // `design` is done on both sides; `build`'s lineage is projected `queued`; `ship` has
-        // no item yet and is created.
-        let snapshot = &fixture.snapshot;
-        let before = BTreeMap::from([
-            (
-                "build".to_owned(),
-                Origin {
-                    id: "plans:board/002-build".parse().expect("a qualified task"),
-                    labels: Vec::new(),
-                    category: Some(StatusCategory::Cancelled),
-                },
-            ),
-            (
-                "design".to_owned(),
-                Origin {
-                    id: "plans:board/003-design".parse().expect("a qualified task"),
-                    labels: Vec::new(),
-                    category: Some(StatusCategory::Done),
-                },
-            ),
-        ]);
-        let item = |root: &str, action: &str| {
-            json!({"source": member_id(snapshot, root), "action": action,
-                   "destination": format!("plans:board/00x-{root}")})
-        };
-        let report = |items: Vec<Value>| -> onetaskgraph_core::CopyReport {
-            serde_json::from_value(json!({"items": items})).expect("the store's report reads")
-        };
-        let counted = report(vec![
-            item("build", "updated"),
-            item("design", "updated"),
-            item("ship", "created"),
-            json!({"source": "elsewhere:board/gone", "action": "updated",
-                   "destination": "plans:board/009-gone"}),
-        ])
-        .actions_against(snapshot, &before);
+    fn a_targeted_update_names_exactly_the_fields_that_differ_from_what_landed() {
+        let fixture = Fixture::new("difference");
+        let last = fixture.snapshot.clone();
+        assert!(update_of(&last, &last, "build").is_empty());
+
+        let mut moved = last.clone();
+        moved
+            .statuses
+            .insert("build".to_owned(), NodeStatus::Running);
         assert_eq!(
-            counted,
-            ProjectionActions {
-                created: 1,
-                updated: 3,
-                unchanged: 0,
-                orphaned: 0,
-                reopened: 1,
+            update_of(&last, &moved, "build"),
+            TaskUpdate {
+                status: Some(onetaskgraph_plugin_api::Status {
+                    category: StatusCategory::InProgress,
+                    name: "in progress".to_owned(),
+                }),
+                ..TaskUpdate::default()
             }
         );
 
-        // The same copy, where the pre-copy read answered no category for the reopened item.
-        let mut unknown = before.clone();
-        unknown
-            .get_mut("build")
-            .expect("the lineage's origin")
-            .category = None;
-        assert_eq!(
-            report(vec![item("build", "updated")])
-                .actions_against(snapshot, &unknown)
-                .reopened,
-            0,
-            "an item whose category nobody read was counted reopened"
-        );
-        // And where the lineage is projected under a closed word: a drop after the retry.
-        let mut dropped = fixture.snapshot.clone();
-        dropped
+        let mut settled = moved.clone();
+        settled
             .statuses
-            .insert("build-2".to_owned(), NodeStatus::Cancelled);
+            .insert("build".to_owned(), NodeStatus::Failed);
+        settled
+            .settlements
+            .insert("build".to_owned(), json!({"status": "failed"}));
+        settled
+            .landings
+            .insert("build".to_owned(), Landing::Unlanded);
+        let update = update_of(&moved, &settled, "build");
         assert_eq!(
-            report(vec![item("build", "updated")])
-                .actions_against(&dropped, &before)
-                .reopened,
-            0,
-            "a cancelled item rewritten cancelled was counted reopened"
+            update
+                .status
+                .as_ref()
+                .map(|status| (status.category, status.name.as_str())),
+            Some((StatusCategory::Unknown, "failed"))
         );
-        // A closeout's `todo`, the word a released claim is written under, is open too.
-        let mut released = fixture.snapshot.clone();
-        released.claim = Claim::Released;
         assert_eq!(
-            report(vec![item("build", "updated")])
-                .actions_against(&released, &before)
-                .reopened,
-            1
+            update
+                .metadata_set
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            keys(&[crate::taskgraph::SETTLEMENT_KEY, LANDING_KEY])
         );
+        assert!(update.metadata_remove.is_empty() && update.title.is_none());
+        assert!(update.content.is_none() && update.depends_on.is_none());
+
+        let mut fixture = Fixture::new("difference-retry");
+        fixture
+            .snapshot
+            .settlements
+            .insert("build".to_owned(), json!({"status": "done"}));
+        let closed = fixture.snapshot.clone();
+        retried(&mut fixture, false);
+        let update = update_of(&closed, &fixture.snapshot, "build");
+        assert_eq!(
+            update
+                .metadata_set
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            keys(&[
+                NODE_KEY,
+                SUPERSEDES_KEY,
+                "onepipeline.branch",
+                "onepipeline.persona"
+            ]),
+            "a retry set other than the lineage keys and the fields the head restated"
+        );
+        assert_eq!(
+            update.metadata_remove,
+            keys(&[crate::taskgraph::SETTLEMENT_KEY]),
+            "the old head's settlement was not removed from the root's item"
+        );
+        assert_eq!(update.title.as_deref(), Some("feat: build-2 it again"));
+        assert_eq!(
+            update.content.as_deref(),
+            Some("## What\nbuild-2 it, again.")
+        );
+        assert_eq!(
+            update
+                .delivers
+                .as_ref()
+                .map(|refs| refs.iter().map(TaskRef::as_str).collect::<Vec<_>>()),
+            Some(vec!["tickets:board/build"])
+        );
+        assert!(update.depends_on.is_none(), "an unmoved edge was named");
+
+        let mut amended = last.clone();
+        amended.nodes.get_mut("design").expect("a node").task =
+            Some("## What\nAmended.".to_owned());
+        assert_eq!(
+            update_of(&last, &amended, "design"),
+            TaskUpdate {
+                content: Some("## What\nAmended.".to_owned()),
+                ..TaskUpdate::default()
+            }
+        );
+
+        let mut reparented = last.clone();
+        reparented.nodes.get_mut("design").expect("a node").deps = vec!["build".to_owned()];
+        reparented.nodes.get_mut("build").expect("a node").deps = Vec::new();
+        let update = update_of(&last, &reparented, "design");
+        assert_eq!(
+            update.depends_on.as_ref().map(|edges| edges
+                .iter()
+                .map(|edge| edge.to.id().to_owned())
+                .collect::<Vec<_>>()),
+            Some(vec!["plans:board/build".to_owned()]),
+            "a reparent did not name the whole declared set by each far end's item"
+        );
+        assert_eq!(
+            update_of(&last, &reparented, "build").depends_on,
+            Some(Vec::new()),
+            "an edge set emptied was not named, so the store could not take the edge away"
+        );
+    }
+
+    /// Only an engine-owned project key the snapshot restates with another value than the one
+    /// last landed is written, with that value: one that did not move sends nothing, and one the
+    /// baseline does not hold — the destination never held it — is never written.
+    #[test]
+    fn only_an_engine_owned_project_key_that_moved_is_written() {
+        let mut snapshot = Fixture::new("project-keys").snapshot;
+        snapshot.project_metadata = BTreeMap::from([
+            ("onepipeline.concurrency".to_owned(), json!(4)),
+            ("onepipeline.goal".to_owned(), json!({"text": "ship it"})),
+            ("onepipeline.name".to_owned(), json!("board")),
+        ]);
+        let mut landed = LandedBaseline::empty(&snapshot.project);
+        landed.project_metadata = BTreeMap::from([
+            ("onepipeline.concurrency".to_owned(), json!(2)),
+            ("onepipeline.goal".to_owned(), json!({"text": "ship it"})),
+        ]);
+        assert_eq!(
+            super::moved_project_keys(&snapshot, &landed),
+            [(&"onepipeline.concurrency".to_owned(), &json!(4))]
+        );
+        landed
+            .project_metadata
+            .insert("onepipeline.concurrency".to_owned(), json!(4));
+        assert!(super::moved_project_keys(&snapshot, &landed).is_empty());
     }
 
     /// A shadow store whose path is not UTF-8 is refused by name before the store is opened,

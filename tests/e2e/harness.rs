@@ -2427,17 +2427,20 @@ impl World {
 
     /// One Markdown document of the store: YAML front matter, then the body.
     ///
-    /// Every front-matter value is written as compact JSON, which is YAML flow
-    /// style — so a value reaches the store with the JSON type the journey wrote
-    /// it at, and the writer needs no YAML emitter of its own.
+    /// Every front-matter field is written in YAML block style, one key at a time
+    /// in the order given, as the store itself and a person following its format
+    /// write one — so a value reaches the store with the JSON type the journey
+    /// wrote it at, and a targeted update, which edits a document's metadata in
+    /// place and refuses a one-line flow mapping it cannot edit so, finds the
+    /// shape a real board has.
     fn write_item(&self, path: &Path, front: &[(&str, Value)], body: &str) {
         std::fs::create_dir_all(path.parent().expect("a directory")).expect("a store directory");
         let mut document = String::from("---\n");
         for (key, value) in front {
-            document.push_str(&format!(
-                "{key}: {}\n",
-                serde_json::to_string(value).expect("a front-matter value serialises")
-            ));
+            document.push_str(
+                &serde_norway::to_string(&json!({ *key: value }))
+                    .expect("a front-matter field serialises"),
+            );
         }
         document.push_str("---\n\n");
         document.push_str(body);

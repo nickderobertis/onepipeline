@@ -82,6 +82,9 @@ struct HandshakeParams {
     engine: Value,
     source_name: String,
     config: Settings,
+    /// The status categories the engine knows (§3.5), relayed to the hosted plugin verbatim.
+    #[serde(default)]
+    statuses: Option<Value>,
 }
 
 /// This source's own `config:` block: the folder the hosted plugin serves.
@@ -235,6 +238,7 @@ fn main() -> ExitCode {
         handshake.params.engine,
         &handshake.params.source_name,
         &handshake.params.config.root,
+        handshake.params.statuses,
     ) {
         Ok(answered) => println!("{answered}"),
         Err(why) => return stop(&why),

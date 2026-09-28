@@ -131,7 +131,10 @@ impl Host {
     /// `root` names, answered on the engine's own id.
     ///
     /// What it reports is the real `local-md` source's capabilities rather than a second
-    /// opinion about them. The kind is that plugin's own `KIND` rather than a string spelled
+    /// opinion about them. `statuses` is the engine's own list of the status categories it
+    /// knows (§3.5), forwarded verbatim: left off, the hosted plugin would answer every
+    /// category added after the first vocabulary — `queued` among them — as `unknown`, which
+    /// the engine behind this double never asked for. The kind is that plugin's own `KIND` rather than a string spelled
     /// here: a registry name copied into a fixture is one that goes on naming a plugin after
     /// the release renamed it.
     pub fn initialize(
@@ -141,8 +144,9 @@ impl Host {
         engine: Value,
         source_name: &str,
         root: &std::path::Path,
+        statuses: Option<Value>,
     ) -> Result<Value, String> {
-        let hosted = serde_json::json!({
+        let mut hosted = serde_json::json!({
             "id": "hosted-initialize",
             "method": "initialize",
             "params": {
@@ -156,6 +160,9 @@ impl Host {
                 "secrets": {},
             },
         });
+        if let Some(statuses) = statuses {
+            hosted["params"]["statuses"] = statuses;
+        }
         let mut answered = self.ask(&hosted)?;
         answered.insert("id".to_owned(), Value::String(id));
         Ok(Value::Object(answered))

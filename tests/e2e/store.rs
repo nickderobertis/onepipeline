@@ -460,25 +460,22 @@ fn settlement_preserves_everything_the_plan_does_not_declare() {
             .store()
             .join("projects")
             .join(format!("{identifier}.md"));
-        let original = std::fs::read_to_string(&path)
-            .expect("the authored project document")
-            .replacen(
-                &format!("title: {}", json!(name)),
-                &format!("title: {}", json!(titled)),
-                1,
-            )
-            .replacen(
-                "metadata: {",
-                &format!(
-                    "labels: {}\nmetadata: {{\"authored.note\":\"keep this value\",",
-                    json!(["planning", "q3"])
-                ),
-                1,
-            );
-        let (front, _) = original
-            .split_once("---\n\n")
-            .expect("the fixture's front matter delimiter");
-        std::fs::write(&path, format!("{front}---\n{body}")).expect("the project body is authored");
+        amend(&path, |front| {
+            front.insert("title".to_owned(), json!(titled));
+            front.insert("labels".to_owned(), json!(["planning", "q3"]));
+            front
+                .get_mut("metadata")
+                .and_then(Value::as_object_mut)
+                .expect("the fixture's project metadata")
+                .insert("authored.note".to_owned(), json!("keep this value"));
+        });
+        let written = std::fs::read_to_string(&path).expect("the authored project document");
+        let (front, _) = written
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("---\n"))
+            .expect("the fixture's front matter delimiters");
+        std::fs::write(&path, format!("---\n{front}---\n{body}"))
+            .expect("the project body is authored");
         let authored_document = std::fs::read_to_string(&path).expect("the authored document");
         // And a label on the plan's own task, which is the label an operator adds to one
         // issue and which a projection that wrote none would silently delete.
@@ -487,14 +484,9 @@ fn settlement_preserves_everything_the_plan_does_not_declare() {
             .join("tasks")
             .join(&identifier)
             .join("000-work.md");
-        let authored_task = std::fs::read_to_string(&task)
-            .expect("the authored task document")
-            .replacen(
-                "metadata: {",
-                &format!("labels: {}\nmetadata: {{", json!(["needs-review"])),
-                1,
-            );
-        std::fs::write(&task, &authored_task).expect("the task label is authored");
+        amend(&task, |front| {
+            front.insert("labels".to_owned(), json!(["needs-review"]));
+        });
 
         let before = world.store_project(&project)["items"][0]["item"].clone();
         let labels_before = world.store_task_labels(&project);
@@ -1101,12 +1093,11 @@ fn an_unreachable_store_is_reported_and_attempted_again_on_the_next_change_while
     );
 }
 
-/// A copy the destination could not take happens after the destination's task list was read
-/// successfully. The write-back worker reports that failure — a source that could not be
-/// reached, which a wait can change — retries it, and publishes the snapshot when the store
-/// accepts the next copy.
+/// A targeted update the destination could not take is reported — a source that could not be
+/// reached, which a wait can change — retried, and the snapshot published when the store
+/// accepts the next update.
 #[test]
-fn a_project_copy_refusal_is_reported_retried_and_recovers() {
+fn a_targeted_update_refusal_is_reported_retried_and_recovers() {
     let world = World::new("store-writeback-copy-retry");
     world.script("work.wait", "hold");
     let project = world.plan(
@@ -1117,8 +1108,8 @@ fn a_project_copy_refusal_is_reported_retried_and_recovers() {
         ),
     );
     world.store_refuses_once(
-        "write_task",
-        &json!({"kind": "unavailable", "message": "the destination refused this copy once"}),
+        "update_task",
+        &json!({"kind": "unavailable", "message": "the destination refused this update once"}),
     );
     let world = world.through_scripted_source();
 
@@ -1126,7 +1117,7 @@ fn a_project_copy_refusal_is_reported_retried_and_recovers() {
     world.until("the copy refusal and recovery to be reported", |world| {
         std::fs::read_to_string(world.run_file("writeback-copy-retry", "driver.log")).is_ok_and(
             |log| {
-                log.contains("the destination refused this copy once")
+                log.contains("the destination refused this update once")
                     && log.contains("onetaskgraph write-back recovered")
             },
         )
@@ -1230,11 +1221,11 @@ fn surfaces_raised(world: &World, run: &str) -> Vec<String> {
 /// so across this window it would have asked three more times.
 const REFUSAL_WINDOW: Duration = Duration::from_secs(8);
 
-/// Nothing asks the store again for `run` across `window`, read off the project read every
-/// attempt opens with. `midway` runs halfway through, for a journey that puts the store right
+/// Nothing asks the store again for `run` across `window`, read off the connection every
+/// attempt opens. `midway` runs halfway through, for a journey that puts the store right
 /// while it watches.
 fn asked_nothing_more(world: &World, run: &str, window: Duration, midway: impl FnOnce()) {
-    let asked = project_reads(world);
+    let asked = attempts_opened(world);
     let watched = Instant::now();
     let mut midway = Some(midway);
     while watched.elapsed() < window {
@@ -1244,7 +1235,7 @@ fn asked_nothing_more(world: &World, run: &str, window: Duration, midway: impl F
             }
         }
         assert_eq!(
-            project_reads(world),
+            attempts_opened(world),
             asked,
             "the store was asked again {:?} after it refused {run}'s projection",
             watched.elapsed()
@@ -1273,7 +1264,7 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
     let (world, project) =
         a_run_whose_destination_can_start_refusing("store-writeback-refused", run);
 
-    world.script("store.get_project.absent", "");
+    world.script("store.update_task.absent", "");
     noted(
         &world,
         run,
@@ -1287,7 +1278,7 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
     let said = the_line_reported(&world, run);
     for expected in [
         project.as_str(),
-        "it is not in the configured sources",
+        "no task with the id",
         "class: refused, kind: no-such-item",
         "attempted again when the run's graph next changes",
     ] {
@@ -1363,40 +1354,43 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
     );
 }
 
-/// A member attempt is refused whichever of the calls it makes the store refuses: the read of
-/// a member the copy names — refused, or answered with nothing because the item is gone — the
-/// copy, or the project read answered as a partial response every source of which refused.
-/// Each is reported once under the store's own kind, and none is asked again on a timer. The
-/// graph change each scenario makes is a member projection, which reads a named member rather
-/// than a page of the project's tasks — which no projection reads.
+/// An attempt is refused whichever of the calls it makes the store refuses: the targeted update
+/// of an item that exists — refused, or answered with nothing because the item is gone — and,
+/// for an attempt creating an added node, the copy, or the project read answered as a partial
+/// response every source of which refused. Each is reported once under the store's own kind,
+/// and none is asked again on a timer. No projection reads a page of the project's tasks.
 #[test]
-fn a_refusal_of_the_member_read_the_copy_or_the_project_read_stops_the_retry_timer() {
-    for (scenario, method, error, kind) in [
+fn a_refusal_of_any_call_an_attempt_makes_stops_the_retry_timer() {
+    for (scenario, method, error, kind, adds) in [
         (
-            "task-show",
-            "get_task",
+            "task-update",
+            "update_task",
             Some(source_refused()),
             "class: refused, kind: refused",
+            false,
         ),
-        // The member's own item is not there any more: the read answers nothing, with no
-        // failure beside it, which is the store's own reading of an item that is gone.
+        // The item is not there any more: the update answers nothing, with no failure beside
+        // it, which is the store's own reading of an item that is gone.
         (
-            "member-gone",
-            "get_task",
+            "item-gone",
+            "update_task",
             None,
             "class: refused, kind: no-such-item",
+            false,
         ),
         (
             "project-copy",
             "write_task",
             Some(source_refused()),
             "class: refused, kind: refused",
+            true,
         ),
         (
             "partial",
             "get_project",
             Some(source_misconfigured()),
             "class: refused, kind: config",
+            true,
         ),
     ] {
         let run = format!("writeback-refused-{scenario}");
@@ -1408,7 +1402,19 @@ fn a_refusal_of_the_member_read_the_copy_or_the_project_read_stops_the_retry_tim
             Some(error) => world.store_refuses(method, error),
             None => world.script(&format!("store.{method}.absent"), ""),
         }
-        noted(&world, &run, "later", &format!("refuse this at {scenario}"));
+        if adds {
+            world
+                .run_with_stdin(
+                    &["reply", &run],
+                    &json!({"version": 2, "commands": [
+                        {"op": "add", "node": agent("extra", &["work"])}
+                    ]})
+                    .to_string(),
+                )
+                .exited(0);
+        } else {
+            noted(&world, &run, "later", &format!("refuse this at {scenario}"));
+        }
         world.until(&format!("the {scenario} refusal to be reported"), |world| {
             streaks_reported(world, &run) >= 1
         });
@@ -1508,7 +1514,7 @@ fn a_rate_limit_naming_a_wait_is_waited_out_with_no_store_call_inside_it() {
     });
 
     let before = streaks_reported(&world, run);
-    world.store_refuses_once("get_project", &rate_limited_for(wait.as_secs()));
+    world.store_refuses_once("update_task", &rate_limited_for(wait.as_secs()));
     noted(&world, run, "later", "projected once the limiter lets go");
     world.until("the rate-limited attempt to be reported", |world| {
         streaks_reported(world, run) > before
@@ -1613,7 +1619,7 @@ fn a_closeout_inside_a_rate_limit_wait_asks_the_store_nothing() {
             && !world.store_calls().is_empty()
     });
     let before = streaks_reported(&world, run);
-    world.store_refuses_once("get_project", &rate_limited_for(wait.as_secs()));
+    world.store_refuses_once("update_task", &rate_limited_for(wait.as_secs()));
     noted(&world, run, "later", "limited before the run ends");
     world.until("the rate-limited attempt to be reported", |world| {
         streaks_reported(world, run) > before
@@ -1676,7 +1682,7 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
                 && !world.store_calls().is_empty()
         });
         let before = streaks_reported(&world, &run);
-        world.store_refuses_once("get_project", &rate_limited_for(wait.as_secs()));
+        world.store_refuses_once("update_task", &rate_limited_for(wait.as_secs()));
         noted(&world, &run, "later", "limited before the stop");
         world.until("the rate-limited attempt to be reported", |world| {
             streaks_reported(world, &run) > before
@@ -1830,8 +1836,8 @@ fn a_run_whose_store_is_rate_limited_throughout_settles_as_it_does_against_a_hea
             &plan_of(name, vec![agent("work", &[]), agent("later", &["work"])]),
         );
         if limited {
-            // Every write the copy makes is refused for a rate limit asking for a minute.
-            world.store_refuses("write_task", &rate_limited_for(60));
+            // Every targeted update is refused for a rate limit asking for a minute.
+            world.store_refuses("update_task", &rate_limited_for(60));
         }
         let world = world
             .through_scripted_source()
@@ -1890,7 +1896,7 @@ fn closeout_attempts_what_changed_after_a_refusal_and_never_a_refused_snapshot_a
     let run = "writeback-refused-then-put-right";
     let (world, project) =
         a_run_whose_destination_can_start_refusing("store-writeback-refused-then-put-right", run);
-    world.script("store.get_project.absent", "");
+    world.script("store.update_task.absent", "");
     noted(&world, run, "later", "refused before the run ends");
     world.until("the refusal to be reported", |world| {
         streaks_reported(world, run) >= 1
@@ -1915,8 +1921,8 @@ fn closeout_attempts_what_changed_after_a_refusal_and_never_a_refused_snapshot_a
     let run = "writeback-refused-to-the-end";
     let (world, _project) =
         a_run_whose_destination_can_start_refusing("store-writeback-refused-to-the-end", run);
-    let asked_before = project_reads(&world);
-    world.script("store.get_project.absent", "");
+    let asked_before = attempts_opened(&world);
+    world.script("store.update_task.absent", "");
     noted(&world, run, "later", "refused until the run ends");
     world.until("the refusal to be reported", |world| {
         streaks_reported(world, run) >= 1
@@ -1941,7 +1947,7 @@ fn closeout_attempts_what_changed_after_a_refusal_and_never_a_refused_snapshot_a
     // Every attempt since the store began refusing was a snapshot of its own, reported once:
     // one asked again — on a timer, or inside closeout, where the old schedule asked as fast as
     // the store refused — is an attempt with no line of its own.
-    let attempts = project_reads(&world) - asked_before;
+    let attempts = attempts_opened(&world) - asked_before;
     let reported = streaks_reported(&world, run);
     assert!(
         attempts <= reported,
@@ -1950,10 +1956,10 @@ fn closeout_attempts_what_changed_after_a_refusal_and_never_a_refused_snapshot_a
     );
 }
 
-/// The same refusal, answered by the real store with nothing in front of it: the project the
-/// run projects onto is taken out of the store, so the project read every attempt opens with
-/// answers nothing — which the store's own reading of an empty `show`, and so this engine's,
-/// classes `refused` under `no-such-item`.
+/// The same refusal, answered by the real store with nothing in front of it: the item the run
+/// projects a change onto is taken out of the store, so the targeted update of it answers that
+/// there is no such task — which the store's own reading, and so this engine's, classes
+/// `refused` under `no-such-item`.
 #[test]
 fn a_projection_the_real_store_refuses_is_not_asked_again_until_the_graph_changes() {
     let run = "writeback-refused-real";
@@ -1978,13 +1984,14 @@ fn a_projection_the_real_store_refuses_is_not_asked_again_until_the_graph_change
     // file) and takes stores away the same way; the refusal that results is the real binary's.
     let board = world
         .store()
-        .join("projects")
-        .join(format!("{}.md", project_id(run)));
-    let aside = world.root.join("refused-board.md");
+        .join("tasks")
+        .join(project_id(run))
+        .join("001-later.md");
+    let aside = world.root.join("refused-item.md");
     renamed(
         &board,
         &aside,
-        "the destination project is taken out of the store",
+        "the item the run projects onto is taken out of the store",
     );
     // llmlint: ignore-end[tests_mirror_real_usage]
     noted(
@@ -2023,7 +2030,7 @@ fn a_projection_the_real_store_refuses_is_not_asked_again_until_the_graph_change
         if !put_back && watched.elapsed() >= REFUSAL_WINDOW / 2 {
             // llmlint: ignore[tests_mirror_real_usage] putting the project back is the same
             // authoring of a `local-md` source's Markdown the block above records the reason for.
-            renamed(&aside, &board, "the destination project is put back");
+            renamed(&aside, &board, "the item is put back");
             put_back = true;
         }
         let log = std::fs::read_to_string(world.run_file(run, "driver.log"))
@@ -2036,7 +2043,7 @@ fn a_projection_the_real_store_refuses_is_not_asked_again_until_the_graph_change
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(put_back, "the destination project was never put back");
+    assert!(put_back, "the item was never put back");
 
     let raised = surfaces_raised(&world, run);
     assert_eq!(
@@ -2122,11 +2129,11 @@ fn a_run_whose_destination_can_start_refusing(world: &str, run: &str) -> (World,
     (world, project)
 }
 
-/// How many times the store has been asked for a project: the read every write-back attempt
-/// opens with, and the launch's own plan read. Every journey here reads a difference taken
+/// How many connections the store has been opened with: one per write-back attempt that asks it
+/// anything, and one for the launch's own plan read. Every journey here reads a difference taken
 /// after its launch, so what the difference counts is attempts.
-fn project_reads(world: &World) -> usize {
-    world.store_asked("get_project")
+fn attempts_opened(world: &World) -> usize {
+    world.store_asked("initialize")
 }
 
 /// Which of the plan's nodes have run, in the order they first were dispatched.
@@ -2172,7 +2179,7 @@ impl Outage {
     }
 }
 
-/// The destination starts refusing every read for a rate limit, the way a hosted store does
+/// The destination starts refusing every targeted update for a rate limit, the way a hosted store does
 /// when a limiter takes against it, and the run is given something to project.
 ///
 /// The reply is launched rather than waited for. It is what publishes the snapshot the
@@ -2186,7 +2193,7 @@ fn starts_refusing(world: &World, run: &str, note: &str) -> Outage {
 /// The same, refusing with `error`.
 fn starts_refusing_with(world: &World, run: &str, note: &str, error: &Value) -> Outage {
     let streaks_before = streaks_reported(world, run);
-    world.store_refuses("get_project", error);
+    world.store_refuses("update_task", error);
     let mut reply = world
         .cmd(&["reply", run])
         .stdin(std::process::Stdio::piped())
@@ -2209,11 +2216,11 @@ fn starts_refusing_with(world: &World, run: &str, note: &str, error: &Value) -> 
     }
 }
 
-/// The destination answers again: whatever [`starts_refusing`] or an absent board scripted
-/// on the project read every attempt opens with is taken away.
+/// The destination answers again: whatever [`starts_refusing`] or an absent item scripted on
+/// the targeted update every changed item is sent is taken away.
 fn stops_refusing(world: &World) {
     let mut stopped = false;
-    for script in ["store.get_project.refuse", "store.get_project.absent"] {
+    for script in ["store.update_task.refuse", "store.update_task.absent"] {
         if world.fakes.join(script).is_file() {
             world.unscript(script);
             stopped = true;
@@ -2247,8 +2254,7 @@ fn streaks_reported(world: &World, run: &str) -> usize {
 /// Both ends of every interval are read off something the destination or its operator can
 /// see, rather than off the shape of the code: the streak's start is the moment the driver
 /// printed the line an operator reads, and each retry is the destination's own record of
-/// being asked again — the project read every attempt opens with, and the only call a
-/// refusing destination ever gets that far.
+/// being asked again — the connection every attempt opens before it asks anything.
 fn retry_intervals(
     world: &World,
     run: &str,
@@ -2268,7 +2274,7 @@ fn retry_intervals(
     at.push(Instant::now());
     // Seeded at the failure rather than before it, so whatever the attempt that failed had
     // already asked for is behind us and the next thing counted is the retry.
-    let mut asked = project_reads(world);
+    let mut asked = attempts_opened(world);
     while at.len() <= count {
         assert!(
             Instant::now() < deadline,
@@ -2277,7 +2283,7 @@ fn retry_intervals(
             at.len() - 1
         );
         std::thread::sleep(Duration::from_millis(10));
-        let now = project_reads(world);
+        let now = attempts_opened(world);
         if now > asked {
             assert_eq!(
                 now,
@@ -2648,12 +2654,12 @@ fn a_stop_during_a_long_retry_interval_is_not_made_to_wait_it_out() {
 
     // A worker woken out of a wait by the stop leaves rather than taking its turn at the
     // destination: the run that was asking is over, so nothing more is asked for it.
-    let asked_by_the_stopped_run = project_reads(&world);
+    let asked_by_the_stopped_run = attempts_opened(&world);
     let watched = Instant::now();
     while watched.elapsed() < Duration::from_secs(3) {
         std::thread::sleep(Duration::from_millis(20));
         assert_eq!(
-            project_reads(&world),
+            attempts_opened(&world),
             asked_by_the_stopped_run,
             "the destination was asked again {:?} after the run was stopped",
             watched.elapsed()
@@ -2667,10 +2673,9 @@ fn a_stop_during_a_long_retry_interval_is_not_made_to_wait_it_out() {
 /// losing the destination: the committed graph keeps running, and the projection catches up
 /// after the filesystem recovers.
 ///
-/// The shadow store is the folder under the run the worker writes a snapshot into before the
-/// store copies it onto the board; a file standing where its projects folder belongs is a
-/// path no platform will write a document beneath, and a failure no store classed, so it is
-/// retried on the schedule.
+/// The shadow store is the folder under the run every attempt opens a source over, and writes
+/// the items a copy creates into; a file standing where it belongs is a path no platform will
+/// make a folder of, and a failure no store classed, so it is retried on the schedule.
 #[test]
 fn an_unwritable_shadow_store_is_reported_retried_and_recovered() {
     let world = World::new("store-writeback-capture-retry");
@@ -2697,11 +2702,9 @@ fn an_unwritable_shadow_store_is_reported_retried_and_recovered() {
     // a state a host produces on its own — a full disk, a permission change — and not one any
     // verb of this CLI can be asked to make; the journey's subject is what the run does when
     // its own local writes fail, and every claim afterwards is read off the CLI and the board.
-    // The folder every attempt, whole or members, writes the shadow project into.
-    let shadow = world
-        .run_file("writeback-capture-retry", "writeback")
-        .join("projects");
-    std::fs::remove_dir_all(&shadow).expect("the shadow projects folder is taken away");
+    // The folder every attempt opens its store's shadow source over.
+    let shadow = world.run_file("writeback-capture-retry", "writeback");
+    std::fs::remove_dir_all(&shadow).expect("the shadow store is taken away");
     std::fs::write(&shadow, "not a folder").expect("a file makes the shadow store unwritable");
     // llmlint: ignore-end[tests_mirror_real_usage]
     world
@@ -3252,8 +3255,8 @@ fn a_project_reads_as_the_plan_document_of_the_same_content() {
     let task = world.store().join("tasks/mapping-board/000-publish.md");
     let held = std::fs::read_to_string(&task).expect("the task document");
     let held = held.replacen(
-        r#"repositories: ["github.com/owner/service"]"#,
-        r#"repositories: ["github.com/owner/service","github.com/owner/ignored"]"#,
+        "- github.com/owner/service\n",
+        "- github.com/owner/service\n- github.com/owner/ignored\n",
         1,
     );
     assert!(
@@ -3984,7 +3987,7 @@ fn a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchange
         "a multi-line refusal was carried onto the surface as it was spelled: {message}"
     );
     assert!(
-        reason.contains("could not answer") && reason.contains("cannot canonicalize root"),
+        reason.contains("task-update failed") && reason.contains("cannot canonicalize root"),
         "the surface dropped what the store said rather than carrying it on one line: {reason}"
     );
     assert!(

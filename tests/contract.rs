@@ -24,7 +24,7 @@ use onepipeline::cli::{
     DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_HOOK_TIMEOUT_SECONDS,
     DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_CLASSIFIED_COMMANDS,
     WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_ITEM_BUDGET_ENV, WRITEBACK_MEMBER_READ,
-    WRITEBACK_PROJECTIONS_FILE, WRITEBACK_REFUSED_CLASS,
+    WRITEBACK_PROJECTIONS_FILE, WRITEBACK_REFUSED_CLASS, WRITEBACK_TARGETED_WRITES,
 };
 use onepipeline::controls::NodeControls;
 use onepipeline::error::{
@@ -3525,8 +3525,8 @@ fn the_writeback_budget_surface_is_what_the_divergence_record_names() {
          {precedence:?} at {found:?}"
     );
     for promise in [
-        "the sixty-second floor every other store call is bounded by plus that budget \
-         multiplied by the number of items the copy carries",
+        "allowed the sixty-second floor every other store call is bounded by plus that budget",
+        "allowed the floor plus that budget multiplied by the number of items it creates",
         "zero is refused",
         "naming none takes twelve seconds per item",
     ] {
@@ -4233,6 +4233,21 @@ fn the_writeback_refusal_rule_is_what_the_divergence_record_names() {
         "entry 72 names different calls than the worker classifies"
     );
     assert_eq!(
+        rule["targeted_writes"],
+        json!(WRITEBACK_TARGETED_WRITES),
+        "entry 72 names different targeted writes than the worker classifies"
+    );
+    for write in WRITEBACK_TARGETED_WRITES {
+        assert_eq!(
+            serde_json::to_value(write)
+                .ok()
+                .and_then(|word| serde_json::from_value::<StoreCall>(word).ok())
+                .map(|call| serde_json::to_value(call).expect("a call serializes")),
+            Some(json!(write)),
+            "entry 72's targeted write '{write}' is not a store call the record counts"
+        );
+    }
+    assert_eq!(
         rule["classified_by"].as_str(),
         Some("onetaskgraph_core::classify"),
         "entry 72 names a classifier other than the store's own"
@@ -4310,6 +4325,30 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
         json!([serde_json::to_value(StoreCall::TaskList).expect("a call serializes")]),
         "entry 73 no longer says a member projection runs no page of tasks"
     );
+    let call = |named: StoreCall| serde_json::to_value(named).expect("a call serializes");
+    assert_eq!(
+        member["existing_item"]["call"],
+        call(StoreCall::TaskUpdate),
+        "entry 73 names another call for a change to an existing item"
+    );
+    assert_eq!(
+        member["created_item"]["call"],
+        call(StoreCall::ProjectCopy),
+        "entry 73 names another call for creating an item"
+    );
+    assert_eq!(
+        member["project_keys"]["call"],
+        call(StoreCall::ProjectMetadataSet),
+        "entry 73 names another call for an engine-owned project key"
+    );
+    assert_eq!(
+        json!([
+            call(StoreCall::TaskUpdate),
+            call(StoreCall::ProjectMetadataSet)
+        ]),
+        json!(WRITEBACK_TARGETED_WRITES),
+        "the targeted writes the worker classifies are not the calls the record counts"
+    );
     assert!(
         !WRITEBACK_CLASSIFIED_COMMANDS.contains(&"task-list"),
         "the worker still names a page of tasks among the calls an attempt makes"
@@ -4379,8 +4418,8 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
             .expect("a delivered entry is an object")],
             ..record.clone()
         },
-        // A line counting targeted updates, which this build never makes and a later one
-        // writes: `updated_fields` beside a `task-update` call.
+        // A line counting targeted updates beside the copy creating an item:
+        // `updated_fields` beside the `task-update` calls that wrote them.
         ProjectionRecord {
             calls: Some(
                 ProjectionCalls::new(
@@ -4708,9 +4747,9 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
         .remove("reopened");
     let without_calls = |line: &Value| {
         let mut line = line.clone();
-        line.as_object_mut()
-            .expect("a line is an object")
-            .remove("calls");
+        let object = line.as_object_mut().expect("a line is an object");
+        object.remove("calls");
+        object.remove("updated_fields");
         line
     };
     let mut unversioned = without_calls(example);
@@ -4730,7 +4769,11 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
     );
     let mut second = without_calls(delivered_example);
     second["schema_version"] = json!(2);
-    second["actions"] = older_actions.clone();
+    second["actions"] = delivered_example["actions"].clone();
+    second["actions"]
+        .as_object_mut()
+        .expect("actions is an object")
+        .remove("reopened");
     let second: ProjectionRecord = serde_json::from_value(second)
         .unwrap_or_else(|error| panic!("a version 2 line did not read: {error}"));
     let mut expected = without_calls(delivered_example);
@@ -4823,8 +4866,10 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
         ("version 0", json!({"schema_version": 0})),
     ] {
         // A `calls` patched to `null` is a line that leaves the key off; every other key is
-        // written as the patch says.
-        let mut line = example.clone();
+        // written as the patch says. Each is patched onto a line that made no targeted update,
+        // so a patch naming `updated_fields` is the only place it comes from.
+        let mut line = without_calls(example);
+        line["calls"] = json!({"project-copy": 1});
         for (key, value) in patch.as_object().expect("a patch") {
             if key == "calls" && value.is_null() {
                 line.as_object_mut()
