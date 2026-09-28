@@ -380,6 +380,8 @@ fn the_host_root_is_the_flag_then_the_variable_then_the_schema_12_key_and_adopt_
         std::fs::create_dir_all(&root).expect("a root");
         root
     });
+    // Outside the launch directory, deliberately: the key's relative root resolves against
+    // the launch directory, so `config-root` beside the file would not exist.
     let config = world.root.join("launch.yaml");
     write(
         &config,
@@ -2085,17 +2087,42 @@ fn a_stored_document_is_checked_against_its_host_registered_document_template() 
 
 #[test]
 fn nothing_in_this_repository_ships_a_template_but_the_plan_task_base() {
-    let listed = std::process::Command::new("git")
-        .args(["ls-files", "*.j2", "**/*.j2"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("git lists the tree");
-    let files: std::collections::BTreeSet<String> = String::from_utf8_lossy(&listed.stdout)
-        .lines()
-        .map(str::to_owned)
-        .collect();
+    // The tree, and what `cargo package` publishes from it — the crate every other
+    // distribution builds its binary from, and so embeds from.
+    let listed = |program: &str, args: &[&str]| {
+        let output = std::process::Command::new(program)
+            .args(args)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .unwrap_or_else(|error| panic!("`{program}` lists the files: {error}"));
+        assert!(
+            output.status.success(),
+            "`{program} {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|line| line.replace('\\', "/"))
+            .filter(|line| line.ends_with(".j2"))
+            .collect::<std::collections::BTreeSet<String>>()
+    };
+    let only_the_base =
+        std::collections::BTreeSet::from(["src/templates/onepipeline/plan-task.md.j2".to_owned()]);
+    assert_eq!(listed("git", &["ls-files"]), only_the_base, "the tree");
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     assert_eq!(
-        files,
-        std::collections::BTreeSet::from(["src/templates/onepipeline/plan-task.md.j2".to_owned()])
+        listed(
+            &cargo,
+            &[
+                "package",
+                "--list",
+                "--locked",
+                "--offline",
+                "--allow-dirty"
+            ]
+        ),
+        only_the_base,
+        "the published crate"
     );
 }
