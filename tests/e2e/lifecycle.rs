@@ -1977,6 +1977,86 @@ fn a_push_the_merge_path_refuses_is_redispatched_carrying_what_the_remote_wrote(
     );
 }
 
+/// The incident this diagnosis exists for: a branch already on its remote, a
+/// refused push after it, and a third attempt told the commit the remote still
+/// holds rather than the one the refused push never delivered.
+///
+/// The first attempt's push lands and its check is red, so its commit is on the
+/// remote. The origin then refuses every push after that one — as it refused an
+/// amended branch as non-fast-forward — so the second attempt's commit never
+/// reaches it, and the attempt after that is owed the first commit and the rule
+/// that keeps its own push a fast-forward of it.
+#[test]
+fn a_redispatch_after_a_refused_push_is_told_the_commit_the_remote_still_holds() {
+    let world =
+        World::new("lifecycle-stillpublished").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "3");
+    let repo = world.repository("change-auto", &[]);
+    world.script("service.work-anew", "the worker wrote this\n");
+    world.script("gh.checks", RED);
+    accept_one_push_then_refuse(&repo);
+
+    let run = settle(&world, "stillpublished", vec![lifecycle("service", &[])]);
+    let result = world.run_json(&run, "result.json");
+    let node = result["nodes"][0].clone();
+    assert_eq!(
+        node["outcome"],
+        "push-rejected",
+        "{result}\n{}",
+        why(&world, &run)
+    );
+    let reasons: Vec<String> = dispatches_of(&world, &run, "service")
+        .iter()
+        .filter_map(|event| event["payload"]["reason"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        reasons.len() == 2
+            && reasons[0].starts_with("checks-failed:")
+            && reasons[1].starts_with("push-rejected:"),
+        "the attempts did not end checks-failed, then push-rejected: {reasons:?}\n{}",
+        why(&world, &run)
+    );
+
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    let left: Vec<String> = world
+        .events_of(&run, "commit-preserved")
+        .into_iter()
+        .filter(|event| event["payload"]["branch"] == branch)
+        .filter_map(|event| event["payload"]["sha"].as_str().map(str::to_string))
+        .collect();
+    assert!(left.len() >= 2, "{left:?}\n{}", why(&world, &run));
+    let (pushed, refused) = (&left[0], &left[1]);
+    assert_ne!(
+        pushed, refused,
+        "the second attempt added nothing: {left:?}"
+    );
+
+    let third = &tasks_dispatched_to(&world, &run, "service")[2];
+    assert!(
+        third.contains(&format!(
+            "This branch is published on its remote at `{pushed}`. The repair goes on as new \
+             commits on top of `{pushed}` — never as an amend, a rebase, a squash or a \
+             force-push of commits already on the remote"
+        )),
+        "the third attempt was not told the commit the remote still holds:\n{third}"
+    );
+    assert!(
+        !third.contains(refused.as_str()),
+        "the third attempt was told a commit the refused push never delivered:\n{third}"
+    );
+}
+
+/// An origin that takes the first push it is sent and refuses every one after.
+fn accept_one_push_then_refuse(repo: &Repository) {
+    let hook = repo.origin.join("hooks").join("pre-receive");
+    std::fs::create_dir_all(hook.parent().expect("hooks has a directory"))
+        .expect("the hooks directory");
+    onepipeline_testfakes::executable(
+        &hook,
+        "#!/bin/sh\nif [ -f \"$0.took-one\" ]; then\n  echo \"this origin took its one push\" >&2\n  \
+         exit 1\nfi\ntouch \"$0.took-one\"\n",
+    );
+}
+
 /// A publishing push the merge path refuses because **the host** is missing a
 /// tool a hook needs is not the tree being rejected, and is not re-dispatched.
 ///
@@ -4344,6 +4424,22 @@ fn a_change_the_host_never_lands_is_redispatched_on_the_branch_it_preserved() {
     // One branch, continued: the second attempt met the change the host was
     // already holding rather than a fresh one cut beside it.
     let branch = node["branch"].as_str().expect("the node names its branch");
+    // And the push that opened that change is where it was told the branch
+    // stands on its remote.
+    let pushed = world
+        .events_of(&run, "commit-preserved")
+        .into_iter()
+        .find(|event| event["payload"]["branch"] == branch)
+        .and_then(|event| event["payload"]["sha"].as_str().map(str::to_string))
+        .unwrap_or_else(|| panic!("onevcs recorded no commit\n{}", why(&world, &run)));
+    let second = &tasks_dispatched_to(&world, &run, "service")[1];
+    assert!(
+        second.contains(&format!(
+            "This branch is published on its remote at `{pushed}`. The repair goes on as new \
+             commits on top of `{pushed}`"
+        )),
+        "the re-dispatch was not told the commit its branch is published at:\n{second}"
+    );
     let branches: Vec<String> = world
         .journal(&run)
         .iter()

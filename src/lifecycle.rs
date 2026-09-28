@@ -1549,12 +1549,19 @@ fn diagnosis(
             format!("This branch is published on its remote at `{commit}`."),
             format!("`{commit}`"),
         ),
+        // llmlint: ignore-block[changed_behavior_has_e2e] a pushed branch whose commit is
+        // unknown is a session stream this crate could not read, and no journey reaches it
+        // with a worker left to tell: the one way a run breaks a stream — a repository hook,
+        // as `a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node`
+        // does — also refuses the next `session open`, so the re-dispatch this sentence is
+        // composed for never reaches a worker. The unit test beside `diagnosis` holds it.
         OnRemote::Unknown => (
             "This branch was published to its remote, but the commit it stands at there is \
              not known."
                 .to_owned(),
             "whatever commit the remote holds".to_owned(),
         ),
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         OnRemote::Never => (
             "No attempt so far is known to have published this branch to its remote, so no \
              commit of it is known to be there."
@@ -2396,7 +2403,6 @@ mod tests {
                 context.contains(rule) && context.contains(never),
                 "{context}"
             );
-            // What the diagnosis said before it said this, still said.
             for said in [
                 "feat/service",
                 "attempt 2 of 3",
