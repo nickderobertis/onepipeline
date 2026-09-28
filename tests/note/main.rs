@@ -807,7 +807,9 @@ fn notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_c
 /// sibling's own bound, and carried to the node's next dispatch — while the
 /// orphaned turn is still held, so the reply's wait was never the turn's.
 ///
-/// And the run is the fresh driver's to take once the reply returns.
+/// A driver that tries to take the run while the reply waits is refused with the
+/// reply named as the run's writer, and the run is the fresh driver's to take
+/// once the reply returns.
 ///
 /// `#[cfg(unix)]` because it ends the run's driver by pid, as the adoption
 /// journeys do.
@@ -830,11 +832,41 @@ fn a_note_submitted_with_nothing_driving_waits_on_no_turn_and_leaves_the_run_ado
 
     // The worker's turn is never released before the reply returns: whatever the
     // reply waited on, it was not that turn ending.
-    let replied = world.run_with_stdin_on(
-        world.agentgraph_cmd(&["reply", run]),
+    let began = Instant::now();
+    let reply = submitted(
+        &world,
+        run,
         &envelope(note_op("build", "worker", NOTE, None)),
     );
-    replied.exited(0).out_has("\"state\":\"applied\"");
+    let writer = reply.id();
+    world.until("the note to wait in the conversation's inbox", |world| {
+        awaiting_an_answer(world) == 1
+    });
+
+    // While it waits, the reply is the run's writer, and a driver that tries to
+    // take the run is told who has it.
+    world
+        .run_on(
+            world.agentgraph_cmd(&["adopt", run, "--detach"]),
+            "adopt --detach",
+        )
+        .exited(REFUSED)
+        .err_has(&format!("run '{run}' is being written by pid {writer}"))
+        .err_has("reply");
+
+    assert!(
+        answered(reply).contains("\"state\":\"applied\""),
+        "the note's envelope was not applied"
+    );
+    // The sibling's own withdrawal bound, and slack for two process starts and a
+    // journal write around it: a reply that outlasted this waited on something
+    // other than the note's offer.
+    let bound = onemessagebus::SPOOL_WAIT + Duration::from_secs(15);
+    assert!(
+        began.elapsed() < bound,
+        "the reply took {:?}, past the note's withdrawal bound",
+        began.elapsed()
+    );
     assert!(
         !world.fakes.join("turn.go").exists(),
         "the held turn was released before the reply returned"
