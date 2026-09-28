@@ -339,6 +339,21 @@ fn a_runs_first_projection_carries_its_claim_by_member_and_a_later_transition_th
         "labels",
         json!(["needs-review"]),
     );
+    // And a key the engine owns on the one it will name, which that update does not change.
+    rewritten(
+        &tasks_dir.join("000-work.md"),
+        &tasks_dir.join("000-work.md"),
+        |front| {
+            front
+                .get_mut("metadata")
+                .and_then(Value::as_object_mut)
+                .expect("metadata")
+                .insert(
+                    "onepipeline.persona".to_owned(),
+                    json!("a person's own word"),
+                );
+        },
+    );
     // llmlint: ignore-end[tests_mirror_real_usage]
     let edited = std::fs::read(&aside_file).expect("the edited item reads");
     let tasks = world.store_tasks(&project);
@@ -382,6 +397,12 @@ fn a_runs_first_projection_carries_its_claim_by_member_and_a_later_transition_th
         assert_eq!(record["outcome"], "projected", "{record}");
         assert!(record["actions"].is_object(), "{record}");
         assert_eq!(record["calls"], json!({"task-update": 1}), "{record}");
+        // A settlement is its word and the engine-owned keys it moved, and nothing else.
+        assert_eq!(
+            record["updated_fields"],
+            json!({"metadata": 1, "status": 1}),
+            "{record}"
+        );
     }
 
     assert_eq!(
@@ -399,6 +420,12 @@ fn a_runs_first_projection_carries_its_claim_by_member_and_a_later_transition_th
         work["item"]["labels"],
         json!([{"id": "needs-review", "name": "needs-review", "color": null}]),
         "the named node's label did not survive its projection"
+    );
+    // The person's edit to an engine-owned key stands: the settlement's update named the keys
+    // the run changed, and this was not one of them.
+    assert_eq!(
+        work["item"]["metadata"]["onepipeline.persona"], "a person's own word",
+        "an update rewrote an engine-owned key the run had not changed: {work}"
     );
 
     // What the projection asked the store for: one targeted update of the named member — never
