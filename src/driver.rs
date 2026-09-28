@@ -762,8 +762,9 @@ fn start(args: &StartArgs) -> Result<i32> {
     // Parsed once, here: a bare id names nothing a store can answer for, and
     // this is where a person typed it.
     let project: crate::taskgraph::QualifiedId = args.project.parse()?;
-    // Read with each task's own record beside the plan, which the rendered-only
-    // check below reads once the launch config says whether it is on.
+    // Read whole, keeping each task as the store answered it beside the plan: the rendered-only
+    // check below reads each task's own record, and the write-back's landed baseline is seeded
+    // from this one read, so its first projection reads nothing the launch has just read.
     let read = store.read_plan(&project).map_err(Error::from)?;
     graph::validate(&read.plan)?;
     let launch_dir = launch_dir()?;
@@ -945,7 +946,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         )?,
     };
     crate::templates::check_plan(&templates, &read, &launch_dir)?;
-    let mut plan = read.plan;
+    let mut plan = read.plan.clone();
 
     // The write-back's per-item budget, by the same three rungs. Every rung is *read*
     // rather than merely present: zero is no budget at all, and each rung refuses it by
@@ -1058,6 +1059,8 @@ fn start(args: &StartArgs) -> Result<i32> {
     let paths = RunPaths::under(&root, &run);
     paths.create()?;
     ledger::write_json(&paths.plan(), &plan)?;
+    // Before anything could project: the first projection carries the difference from this.
+    crate::writeback::seed_landed(&paths.dir, &project, &read);
 
     let mut record = LaunchRecord {
         run_id: run.clone(),

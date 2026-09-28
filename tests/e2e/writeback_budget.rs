@@ -11,7 +11,7 @@
 //! says how the hold is scripted, and why it is the only honest way to make a
 //! store slow rather than wrong.
 //!
-//! The three journeys about the deadline wait past the sixty-second floor **by
+//! The four journeys about the deadline wait past the sixty-second floor **by
 //! construction**: a copy that outlasts a minute cannot be observed in less than
 //! one. `tests/e2e/store.rs` is where the other minute-long write-back journeys
 //! live, and these take their rendezvous settings from it.
@@ -126,7 +126,7 @@ fn board_status(world: &World, project: &str, node: &str) -> Option<String> {
     })
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the three journeys
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the four journeys
 // below wait past the sixty-second floor by construction — a copy that outlasts a minute
 // cannot be observed in less than one — and the edge they need is the crate under test:
 // they drive the compiled `onepipeline` binary against its own write-back worker, exactly
@@ -136,7 +136,8 @@ fn board_status(world: &World, project: &str, node: &str) -> Option<String> {
 /// above the floor.
 ///
 /// Under the fixed minute this run's settlement never reached the board. Under
-/// the shipped budget the same copy is allowed `items × 10` seconds, so a hold
+/// the shipped budget the same copy is allowed the floor and `items × 12` seconds
+/// besides, so a hold
 /// past the floor ends with the real store holding what the run recorded, and
 /// the driver having reported nothing — which is what an operator reads.
 #[test]
@@ -215,9 +216,67 @@ fn a_copy_held_past_the_floor_still_lands_when_the_item_count_lifts_its_deadline
     assert!(!a_projection_failed(&world, run));
 }
 
+/// The copy #521 measured: seven items onto the `plans` board at about 10.2 seconds apiece,
+/// 71 to 72 seconds in all, against the 70 the larger of the floor and ten seconds per item
+/// allowed it. Here the same seven-item copy is held for eleven seconds per item — slower
+/// than the board measured — and lands under the shipped budget, because the deadline is the
+/// floor **plus** the budget per item it carries: the driver reports nothing, and the board
+/// holds what the run recorded.
+#[test]
+fn a_seven_item_copy_held_at_eleven_seconds_per_item_lands_inside_its_deadline() {
+    let floor = number("floor_seconds");
+    let per_item = number("default_seconds");
+    let items: u64 = 7;
+    let held_for = Duration::from_secs(11 * items);
+    assert!(
+        floor + per_item * items > held_for.as_secs() + 30,
+        "the shipped deadline leaves no room for the real copy after an eleven-second-per-item \
+         hold"
+    );
+    let run = "budgetseven";
+    let (world, meeting, project) = a_run_whose_copy_is_held(
+        "writeback-budget-seven",
+        run,
+        usize::try_from(items).expect("a count"),
+        &[],
+    );
+
+    // The driver's first projection is the claim of all seven: held at its first write for
+    // as long as seven eleven-second items take, and then let go.
+    let held = meeting.arrived();
+    let started = Instant::now();
+    std::thread::sleep(held_for);
+    assert!(
+        !a_projection_failed(&world, run),
+        "the seven-item copy was cancelled inside {held_for:?}:\n{}",
+        std::fs::read_to_string(world.run_file(run, "driver.log")).unwrap_or_default()
+    );
+    world.store_stops_holding(COPY);
+    held.release();
+    drop(meeting);
+    world.until_store("the held claim to reach the board", |world| {
+        (1..items).all(|behind| {
+            board_status(world, &project, &format!("later{behind}")).as_deref() == Some("queued")
+        })
+    });
+    assert!(
+        started.elapsed() >= held_for,
+        "the claim landed before the hold ended, so this journey held nothing"
+    );
+    assert!(
+        !a_projection_failed(&world, run),
+        "a seven-item copy held at eleven seconds per item was reported as failed:\n{}",
+        std::fs::read_to_string(world.run_file(run, "driver.log")).unwrap_or_default()
+    );
+    world.release("work.go");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+}
+
 /// A copy held past what a deliberately tiny budget allows is cancelled, and the
-/// refusal names what the deadline was computed from — including that the
-/// floor governed, since one item at one second is less than a minute — and the
+/// refusal names what the deadline was computed from — the floor, and the one
+/// second one item at one second adds to it — and the
 /// driver whose copy it cancels is one an **adopt** started, under the budget the
 /// launch chose rather than the one the adopting shell's environment names.
 ///
@@ -276,8 +335,9 @@ fn a_copy_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithme
     noted(&world, run, "work", "held past the deadline");
     let held = meeting.arrived();
     let expected = format!(
-        "project-copy exceeded {floor} seconds (the {floor} second floor; {items} item × 1 \
-         second per item is less)"
+        "project-copy exceeded {} seconds (the {floor} second floor + {items} item × 1 \
+         second per item)",
+        floor + 1
     );
     world.until_run_file_holds(run, "driver.log", &expected);
     let log = std::fs::read_to_string(world.run_file(run, "driver.log")).expect("the log");
@@ -405,8 +465,9 @@ fn a_record_an_older_build_wrote_is_adopted_and_its_copy_runs_under_the_shipped_
     noted(&world, run, "work", "held past the shipped default");
     let _held = meeting.arrived();
     let expected = format!(
-        "project-copy exceeded {floor} seconds (the {floor} second floor; {items} item × \
-         {per_item} seconds per item is less)"
+        "project-copy exceeded {} seconds (the {floor} second floor + {items} item × \
+         {per_item} seconds per item)",
+        floor + per_item
     );
     world.until_run_file_holds(run, "driver.log", &expected);
 }
@@ -753,7 +814,7 @@ fn a_config_naming_the_key_at_a_version_that_never_had_it_is_refused_by_that_nam
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey waits past
 // the sixty-second floor by construction — a store that has not opened within a minute cannot
 // be observed in less than one — and the edge it needs is the crate under test: it drives the
-// compiled `onepipeline` binary against its own write-back worker, as the three journeys above
+// compiled `onepipeline` binary against its own write-back worker, as the four journeys above
 // do and for the reason they record.
 /// A store slow to start — a source whose handshake has not been answered — is held to the
 /// floor every read is held to: an attempt whose store has not opened inside it is refused by
@@ -792,6 +853,14 @@ fn a_store_that_does_not_open_within_the_floor_is_refused_retried_and_recovers()
             && log.contains("retrying"),
         "a store that did not open was not reported as a failure to retry:\n{log}"
     );
+    // Its record names what the attempt set out to carry, though the store never opened.
+    let recorded = std::fs::read_to_string(world.run_file(run, "writeback-projections.jsonl"))
+        .expect("the failed attempt was recorded");
+    let first: Value =
+        serde_json::from_str(recorded.lines().next().expect("a line")).expect("a record line");
+    assert_eq!(first["outcome"], "failed", "{first}");
+    assert_eq!(first["items"], serde_json::json!(["work"]), "{first}");
+    assert_eq!(first["calls"], serde_json::json!({}), "{first}");
 
     // The store answers: nothing is held from here, and the retry lands.
     world.unscript(&format!("{SCRIPTED_KEY}.initialize.rendezvous"));

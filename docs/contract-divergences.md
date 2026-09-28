@@ -6,19 +6,19 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91 and 93** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91 and 94** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88 and 92 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92 and 93 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80, 84 to 88 and 92 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80, 84 to 88, 92 and 93 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -5617,12 +5617,12 @@ and neither given a judge's receipt when the dispatch is reaped before one.
 ## 71. The write-back's copy is bounded by a fixed minute, which a plan outgrows — OPEN
 
 **Proposal (for the planner who owns the contract): bound the settlement
-write-back's `project copy` by a **per-item budget multiplied by the number of
-items it projects**, never below the sixty-second floor every other store command
-keeps, and make the per-item figure a launch-level setting named by
+write-back's `project copy` by the sixty-second floor every other store command
+keeps **plus a per-item budget multiplied by the number of items it projects**,
+and make the per-item figure a launch-level setting named by
 `--writeback-item-budget`, `ONEPIPELINE_WRITEBACK_ITEM_BUDGET`, and a
 `writeback_item_budget` key at launch-config schema 5, with the shipped default
-of ten seconds per item beneath all three.**
+of twelve seconds per item beneath all three.**
 
 The contract's write-back is best-effort and off the reconcile loop, so a run
 settles identically whether or not its projection landed, and what keeps the
@@ -5644,19 +5644,25 @@ proves nothing about the board, and a fixed minute is the mechanism that makes
 that true more often as plans grow.
 
 What this crate does today is the block below, and the block is the source. The
-copy's deadline is `max(floor, budget × items)`, where the item count is the
-number of nodes in the snapshot being projected — the same list the
-`Unprojected` surface names as `items:` when the copy fails. The floor stays
-sixty seconds, stays the whole deadline for the project read and each page of its
-tasks, and stays what it was: a liveness backstop rather than a latency target. The
+copy's deadline is `floor + budget × items`, where the item count is the number
+of lineages the copy carries — the same list the `Unprojected` surface names as
+`items:` when the copy fails. It was `max(floor, budget × items)` until a
+seven-item copy onto the `plans` board measured 71 to 72 seconds against the 70
+that allowed it (#521): every copy also spends the fixed round trips a read does,
+so the floor is added under the per-item figure rather than traded against it,
+and the shipped default moved from ten seconds per item to **twelve**, which lands
+a copy at the measured 10.2 seconds per item with at least a sixth to spare at any
+size. The floor stays sixty seconds, stays the whole deadline for the project read
+and each item read, and stays what it was: a liveness backstop rather than a
+latency target. The
 store is linked, so a call that outlasts its deadline is **cancelled** rather than a
 child killed: its future is dropped where it waits, and the engine that drove it —
 with any plugin process it started — is dropped before the attempt is recorded, so
 no write the cancelled copy started lands after the record says it was refused. The
-refusal names the seconds the copy was allowed, the item count and the per-item
-budget it was computed from, and — where the floor governed — says so, so the
-line on the driver's stderr and the surface built from it read as the arithmetic
-they are. Nothing else about how the failure is reported changes.
+refusal names the seconds the copy was allowed, the floor, the item count and the
+per-item budget it was computed from, so the line on the driver's stderr and the
+surface built from it read as the arithmetic they are. Nothing else about how the
+failure is reported changes.
 
 The budget is nameable three ways, in the order entry 41 states and for the same
 reason: the flag, then the environment variable, then the launch config field,
@@ -5688,9 +5694,10 @@ resolves, and the default and the floor must be the constants the code carries.
 and drives them against the compiled binary and a real store served through
 `crates/testfakes`' `scripted-source`, which holds the copy's writes: a copy held
 past the floor that still lands because the item count lifted its deadline above
-it, a copy held past what a deliberately tiny budget allows — which the floor then
-governs — cancelled and reported with the computed budget, the item count and the
-floor in the refusal, and nothing it held landing on the board afterwards, and the
+it, a seven-item copy held at eleven seconds per item that lands inside the floor
+plus seven items of the shipped budget, a copy held past what a deliberately tiny
+budget allows — which adds one second to the floor — cancelled and reported with
+the computed budget, the item count and the floor in the refusal, and nothing it held landing on the board afterwards, and the
 precedence between the three spellings observable on the launch record an `adopt`
 replays.
 
@@ -5702,21 +5709,27 @@ replays.
     "config_key": "writeback_item_budget",
     "config_schema_version": 5,
     "precedence": ["flag", "environment", "config_key"],
-    "default_seconds": 10,
+    "default_seconds": 12,
     "floor_seconds": 60,
-    "deadline": "max(floor_seconds, budget × items)",
+    "deadline": "floor_seconds + budget × items",
     "examples": [
       {
-        "items": 34,
-        "budget_seconds": 10,
-        "deadline_seconds": 340,
-        "refusal": "project-copy exceeded 340 seconds (34 items × 10 seconds per item)"
+        "items": 7,
+        "budget_seconds": 12,
+        "deadline_seconds": 144,
+        "refusal": "project-copy exceeded 144 seconds (the 60 second floor + 7 items × 12 seconds per item)"
       },
       {
-        "items": 2,
-        "budget_seconds": 10,
-        "deadline_seconds": 60,
-        "refusal": "project-copy exceeded 60 seconds (the 60 second floor; 2 items × 10 seconds per item is less)"
+        "items": 34,
+        "budget_seconds": 12,
+        "deadline_seconds": 468,
+        "refusal": "project-copy exceeded 468 seconds (the 60 second floor + 34 items × 12 seconds per item)"
+      },
+      {
+        "items": 1,
+        "budget_seconds": 1,
+        "deadline_seconds": 61,
+        "refusal": "project-copy exceeded 61 seconds (the 60 second floor + 1 item × 1 second per item)"
       }
     ]
   }
@@ -5763,8 +5776,8 @@ not run on, a credential it rejected, data it cannot represent, and every failur
 engine decides on its own are `refused`. A failure wrapping another is classed by the one
 it wraps. The worker matches those types exhaustively, so a failure the store adds is a
 compile error here rather than a class guessed at run time, and no message is ever read
-to decide. An attempt is **refused** when any of its three calls — the project read, a
-page of its tasks, or the copy — fails with a refused failure, or answers in part with
+to decide. An attempt is **refused** when any of its three calls — the project read, an
+item read by its own id, or the copy — fails with a refused failure, or answers in part with
 every source it names refused; a copy whose delivered tickets could not be kept in step
 is refused only where every failed ticket's failure is. A `show` answering nothing with
 no failure beside it is an item that is not there, which the store's own CLI decided and
@@ -5777,7 +5790,25 @@ the refused snapshot, so that publishing the same one again attempts nothing.
 Everything else is retried exactly as before: a `transient` failure — a rate limit
 included — a partial answer with any source that is not refused, and every failure that
 carries no class at all: a call cancelled at its deadline, or a shadow store this worker
-could not write. Closeout attempts a terminal snapshot published after a refusal, because
+could not write. **A rate limit that names its wait is waited out in full.** The store's
+`SourceError::RateLimited` carries the `retry_after_seconds` its source gave — read off the
+typed value, and off `Failure::retry_after_seconds` for a delivered ticket — and until that
+wait has passed the worker hands the store no call of any kind: not on the schedule, not for
+a snapshot published meanwhile, and not at closeout, which otherwise suspends the schedule.
+Where a partial answer names several waits, the longest is taken. A rate limit naming none is
+asked again on the schedule. The wait binds every process that projects the run, not only the
+driver that met it: it is kept in `<run dir>/writeback-wait.json` — `{"schema_version": 1,
+"not_before_unix_ms": <instant>}`, written atomically by whichever process met the wait — and
+a stop's release, in the stopping process, asks the store nothing before that instant: it waits
+the rest out where that ends inside the release's own deadline, and otherwise leaves the claim
+standing and says so on standard error. The driver an adoption starts serves what is left of the
+wait before its first projection. A file there that cannot be read as a wait — unreadable,
+malformed, or of a version this build does not read — may still hold one that has not passed,
+so it is never read as no wait: a stop's release says why, names the file, and leaves the claim
+standing; a driver says so once on standard error and asks the store nothing, looking again
+until the file reads or is repaired. The file is neither the landed baseline (entry 93) nor the
+projection record (entry 73), and changes neither. The attempt after the wait carries what has still not landed,
+and nothing more. Closeout attempts a terminal snapshot published after a refusal, because
 it is a different snapshot, and does not re-attempt the refused one; stopping stays
 prompt; no store read feeds back into scheduling, and no store call delays closeout, a
 settlement, or an edit ruling.
@@ -5812,7 +5843,17 @@ closeout over a refusal.
     "matched_on": ["EngineError", "SourceError", "SourceFailure", "Delivered"],
     "stops_the_timer": "refused",
     "transient": ["rate-limited", "unavailable"],
-    "commands": ["project-show", "task-list", "project-copy"],
+    "rate_limit_wait": {
+      "read_off": ["SourceError::RateLimited.retry_after_seconds", "Failure::retry_after_seconds"],
+      "no_call_before_it_passes": ["the retry schedule", "a snapshot published meanwhile", "closeout"],
+      "several": "the longest",
+      "none_named": "the retry schedule",
+      "kept_in": "<run dir>/writeback-wait.json",
+      "honoured_by": ["the driver that met it", "a stop's release", "the driver an adoption starts"],
+      "release_past_its_deadline": "the claim is left standing and said",
+      "unreadable": "no store call until it reads or is repaired"
+    },
+    "commands": ["project-show", "task-show", "project-copy"],
     "empty_show": {"class": "refused", "kind": "no-such-item"},
     "partial_answer": {
       "member": "errors[].error",
@@ -5829,14 +5870,15 @@ closeout over a refusal.
 ## 73. A write-back copies every node of the plan to change one — OPEN
 
 **Proposal (for the planner who owns the contract): make the settlement write-back
-**incremental**. An attempt carries only the nodes whose projection changed since the last
-attempt that landed, named as the members of the store's project copy, and carries the whole
-project only where it has to — the first projection of a driver, and the attempt after one
-that failed. Every attempt is appended to one record in
-the run's directory, so what a projection carried, how it ended and what it spent is read
-off the run.** It changes no sentence of the contract's *Live edits write through*: "Every
-accepted graph edit updates the onetaskgraph project's tasks" stays true of every task the
-edit changed, and the proposal is that a task the edit did not change is not one it writes.
+**incremental**. An attempt carries only the lineages whose projection differs from what the
+run last put on the board — the landed baseline entry 93 states — named as the members of the
+store's project copy, and **never** the whole project: not on a driver's first projection, not
+on one an `adopt` started, and not after an attempt that failed. Every attempt is appended to
+one record in the run's directory, so what a projection carried, which store calls it made,
+how it ended and what it spent is read off the run.** It changes no sentence of the contract's
+*Live edits write through*: "Every accepted graph edit updates the onetaskgraph project's
+tasks" stays true of every task the edit changed, and the proposal is that a task the edit did
+not change is not one it writes.
 
 What the worker did: every change the reconcile loop folds hands it a new snapshot, so a node
 going ready, running and done fires three projections. Each ran `project show`, walked the
@@ -5848,69 +5890,104 @@ so a twenty-node plan spent about 10,000 against an hourly allowance of 5,000, a
 `just plans`, `just check-plan` and `just copy-plan`, and a second run on the same token, were
 left nothing. Nothing in the run said so: the only account of the spend was an agent's guess.
 
+The first cut of this entry still copied the whole project where nothing had landed in the
+driver and after a failed attempt. This host's records show what that cost: one run
+(`human-readable-branches`) made 63 attempts, 45 of them whole — 18 because a driver started or
+was adopted, 27 because the attempt before had failed — and 35 failed, 20 on a rate limit and
+15 whole copies killed at their deadline, each followed by another whole one. A whole attempt
+reported 48–58 points and a member attempt 14–21: a failure made the next attempt more
+expensive, against a limiter that was already refusing.
+
 What this crate does now is the block below, and the block is the source.
 
-**Which nodes are carried.** A node changed when its shadow task, as the worker renders it from
-the snapshot alone, differs from the one the last successful projection rendered, or when that
-success did not hold the node. Project-level metadata is carried by the project item, which
-every copy includes, so a projection whose only change is project-level names no task and
-copies the project without its tasks. An attempt is whole, as before, for one of the two
-reasons the block names, taken in its precedence order.
+**Which lineages are carried.** A lineage is carried when its projection, as the worker renders
+it from the snapshot alone, differs from what the landed baseline says landed — its title, the
+digest of its body, its word, its engine-owned metadata, its tickets or its edges. The one
+field a copy writes that the baseline does not keep is a node's GitHub repository, and no edit
+changes that alone — a `retry` moves the head and a `requeue` the word — so a lineage whose
+repository moved differs in a field the baseline keeps, whichever driver asks. The baseline is seeded from the launch's own read before the first projection, so a fresh launch's
+first projection carries the claim — every lineage, since the seed records no word — and
+nothing it did not change; a driver an `adopt` started compares against the file the driver
+before it left. After a failed attempt the next carries what has still not landed — the union
+of the changes the failure lost — and, after a copy that landed every item but a deliverer
+whose tickets the store could not keep in step, nothing that did land. Project-level metadata
+is carried by the project item, which every copy includes, so a projection whose only change
+is project-level names no task and copies the project without its tasks. An attempt with
+nothing to carry at all — no lineage differs, none is unknown, and no project key the
+destination holds changed — opens no store and asks it nothing: its line names no items,
+`calls` `{}` and `actions` `null`.
 
-**What a member projection reads.** The project item, and each named member the run holds a
-destination item for, one read of that task apiece — its labels are the destination's own, and
-a person may have changed them. It never reads a page of tasks, and it never reads an unnamed
-member. What a member copy needs of an unnamed member — the destination item its edges resolve
-to — is carried on the run from the last whole projection's page of tasks, updated by what each
-copy since reported creating. A member read's failure is classified by entry 72's rule, like the
-three calls that entry names. Whatever a member copy does not name, it neither reads at the
-destination nor rewrites, so the module's ownership rule is unchanged and a person's edit on an
-unnamed item stands until that node next changes. Entry 71's deadline and the `Unprojected`
-surface's `items` both count the nodes the copy carries — every node, for a whole copy.
+**What a projection reads.** The project item, and each lineage the copy carries, one read of
+that task by its own id apiece — its labels are the destination's own, and a person may have
+changed them. It never reads a page of tasks, and it never reads a lineage it does not carry:
+where each item is — the destination id a member copy's edges resolve to — is the baseline's.
+A lineage the baseline does not hold — a run an older build started, whose directory holds no
+baseline — is read once by its own id and compared against that read: the id the previous
+driver's shadow document recorded for the head or the furthest-along attempt before it, else
+the task the root was read out of at launch. One the run knows no id for is created by the
+copy. A read's failure is classified by entry 72's rule. Whatever a copy does not name, it
+neither reads at the destination nor rewrites, so the module's ownership rule is unchanged and
+a person's edit on an item the run did not change since it last landed stands. Entry 71's
+deadline and the `Unprojected` surface's `items` both count the lineages the copy carries.
 
-**The store always offers a member copy**, because it is linked: the release the engine
-builds against is the one that answers, and `CopyScope::Members` is part of it. An engine that
-drove the store's binary could not know that, so it decided once per run, off the version the
-binary reported, whether to copy by member, and wrote the answer to
-`<run dir>/writeback-store.json`; a store it read as older was projected whole, recorded
-`store-lacks-members`. This build neither decides it nor writes that file. A run directory an
-older engine left it in is adopted as any other — the file is not read — and a line that older
-engine wrote giving `store-lacks-members` still reads; the reason is one this build never gives.
+**A stop's release** carries only the unstarted lineages the baseline says are `queued`, writing
+each `todo`, and advances the baseline by what landed; it creates nothing.
+
+**The store always offers a member copy**, because it is linked. An engine that drove the
+store's binary decided once per run, off the version the binary reported, whether to copy by
+member, and wrote the answer to `<run dir>/writeback-store.json`; a store it read as older was
+projected whole, recorded `store-lacks-members`. This build neither decides it nor writes that
+file. A run directory an older engine left it in is adopted as any other — the file is not
+read — and a line that older engine wrote giving `store-lacks-members` still reads.
 
 **The record** is one JSON object per attempt, landed or failed, appended to
 `<run dir>/writeback-projections.jsonl` and never rewritten; `example` is one line of it. Its
 type is `views::ProjectionRecord`, re-exported beside the other stored shapes a reader names, and
 its flat line admits no contradiction: a member copy names no `whole_because`, a failed attempt
-carries no `actions` or `spent`, and `class` and `kind` come together. `spent` is the copy
-report's own object, verbatim, and is `null` wherever the report carried none — which is every
-copy into a destination that meters nothing, a local Markdown one included. `delivered` is the
-copy report's own list of what the store did to each ticket a carried task delivers, verbatim,
-on a landed attempt and on a failed one alike, and it is the one key a line leaves off: absent
-wherever the report named no ticket, so a line that reached none reads as it did before entry 50
-gave tasks a `delivers`.
+carries no `actions` or `spent`, and `class` and `kind` come together. Every line this build
+writes is `scope: members`, `items` naming the lineage roots it carried. `calls` counts how
+many times the attempt called each store operation — the one that failed included — keyed by a
+closed set of names, an operation not called left off, so an attempt that called nothing
+writes `{}`. `spent` is the sum of every call's reported spend — requests added, each budget
+added to the one of the same name and unit, `lower_bound` true where any summand's was — and is
+`null` wherever no call reported any, which is every attempt against a destination that meters
+nothing, a local Markdown one included; the copy is the one call that reports today.
+`updated_fields` counts how many items each field was written on by an attempt's targeted
+updates, and is written by exactly the attempts that made one — a `task-update` call names it,
+and it names none without one: this build makes none, so it never writes it. `delivered` is the copy report's own list of what the store did to each ticket a
+carried task delivers, verbatim, on a landed attempt and on a failed one alike, and absent
+wherever the report named no ticket.
 
 **The record is versioned.** Every line names its `schema_version`, and `schema.current` is
-`WRITEBACK_PROJECTIONS_SCHEMA_VERSION`: version 3. Version 2 added `delivered`; version 3 added
-`actions.reopened`, the count entry 80 derives, which every landed attempt at that version
-names. A line naming no version is version 1, the shape before either, and still reads, as does
-a version 2 line — each is written back at the current version, with `reopened` read as zero;
-a version 1 line naming `delivered`, a version 1 or 2 line naming `actions.reopened` — by the
-key's own name, zero included — a version 3 line naming `actions` without `reopened`, and a
-version this build has never written, are refused. `example_delivered` is the golden line
-carrying a report's `delivered` entries, one member this build never names included, and a
-reopen — the retried deliverer's ticket claimed again — and it writes back as itself.
+`WRITEBACK_PROJECTIONS_SCHEMA_VERSION`: version 4. Version 2 added `delivered`; version 3 added
+`actions.reopened`, the count entry 80 derives; version 4 added `calls`, which every line at it
+names, and defined `updated_fields`. A line naming no version is version 1 and still reads, as
+do versions 2 and 3 — `whole` and every `whole_because` included — and each is written back at
+version 3, the last version that counted no calls, with `reopened` read as zero. A line naming a
+key a later version added — by the key's own name, zero or empty included — a version 3 or 4
+line naming `actions` without `reopened`, a version 4 line naming no `calls`, one naming
+`updated_fields` without a `task-update` call or a `task-update` call without `updated_fields`,
+a count of zero, and a version this build has never written, are refused. `example_delivered`
+is the golden line carrying a report's `delivered` entries, one member this build never names
+included, and a reopen, and it writes back as itself.
 
 `tests/contract.rs` holds this block against the published constants and the record type: the
-record's path, the member reads, every field and its admitted values, and the example line read
-and written back byte-equal. `writeback::tests` holds the precedence and the rule for a changed
-node against the worker's own decision. `tests/e2e/writeback_projections.rs` drives the compiled
-binary against the real store the engine links, served through `crates/testfakes`'
-`scripted-source`, which records every call it is handed: a run's first projection whole and
-`first`; a later transition of one node carried alone, its destination item projected, an
-unnamed node's item left byte for byte as a person edited it, and no page of tasks and no read
-of the unnamed member in the source's log; a projection after a failed attempt whole and
-`after-failure`; a run directory holding an older engine's `writeback-store.json` adopted and
-projected by member; and a copy's own `spent` and action counts recorded exactly.
+record's path, the reads, every field and its admitted values, and the example lines read and
+written back byte-equal. `writeback::tests` holds the decision against a baseline — what is
+carried, what is read by its id, and what a release carries — and the furthest-along id a
+lineage the baseline does not hold is read at. `tests/e2e/writeback_projections.rs` drives the
+compiled binary against the real store the engine links, served through `crates/testfakes`'
+`scripted-source`, which records every call it is handed: a fresh launch's first projection
+carrying the claim by member and reading nothing the launch read; a later transition of one
+node carried alone, an unnamed node's item left byte for byte as a person edited it; the
+attempt after a failure and after a refusal carrying what had not landed and every change the
+failure lost reaching the board; an `adopt` carrying only what differs from the file the
+previous driver left; a run directory holding no baseline adopted and projected with each
+lineage read once by its own id; a stop's release; and a copy's own `spent` and action counts
+recorded exactly. No line of any of them is `whole`, and no line's `calls` names `task-list`.
+The one page read a store is asked during a write-back is the copy's own origin lookup before
+it creates an item, which entry 93 states: once per item created, inside that attempt's
+`project-copy`, and in no attempt that creates nothing.
 
 ```json
 {
@@ -5918,46 +5995,47 @@ projected by member; and a copy's own `spent` and action counts recorded exactly
     "record": "<run dir>/writeback-projections.jsonl",
     "one_line_per": "attempt",
     "rewritten": false,
-    "schema": {"current": 3, "read": [1, 2, 3], "absent_means": 1, "added_at_2": ["delivered"], "added_at_3": ["actions.reopened"]},
+    "schema": {"current": 4, "read": [1, 2, 3, 4], "absent_means": 1, "added_at_2": ["delivered"], "added_at_3": ["actions.reopened"], "added_at_4": ["calls", "updated_fields"], "earlier_written_back_at": 3},
     "fields": {
       "schema_version": {"type": "integer", "is": "the schema version the line is written at"},
       "at": {"type": "string", "format": "RFC 3339, UTC", "is": "when the attempt started"},
       "project": {"type": "string", "is": "the qualified project id"},
-      "scope": {"type": "string", "values": ["whole", "members"]},
-      "whole_because": {"type": ["string", "null"], "values": ["first", "after-failure", "store-lacks-members"], "written": ["first", "after-failure"], "null_when": "scope is members"},
-      "items": {"type": "array", "of": "string", "is": "the plan node ids the copy carried"},
+      "scope": {"type": "string", "values": ["whole", "members"], "written": ["members"]},
+      "whole_because": {"type": ["string", "null"], "values": ["first", "after-failure", "store-lacks-members"], "written": [], "null_when": "scope is members"},
+      "items": {"type": "array", "of": "string", "is": "the lineage roots the copy carried"},
       "outcome": {"type": "string", "values": ["projected", "failed"]},
       "class": {"type": ["string", "null"], "values": ["refused", "transient"], "null_when": "the attempt did not fail with the store's failure document"},
       "kind": {"type": ["string", "null"], "null_when": "class is null"},
       "reason": {"type": ["string", "null"], "null_when": "outcome is projected"},
       "duration_ms": {"type": "integer", "is": "wall-clock time of the whole attempt, reads included"},
       "actions": {"type": ["object", "null"], "members": ["created", "updated", "unchanged", "orphaned", "reopened"], "derived": {"reopened": "by this crate, under entry 80's rule; the rest are the copy report's own counts"}, "null_when": "no copy report was read"},
-      "spent": {"type": ["object", "null"], "is": "the copy report's spent object, verbatim", "null_when": "the report carried none"},
-      "delivered": {"type": "array", "of": "object", "is": "the copy report's delivered entries, verbatim, on a landed or a failed attempt", "omitted_when": "the report named no delivered ticket"}
+      "spent": {"type": ["object", "null"], "is": "every call's reported spend, summed: requests added, each budget added by name and unit, lower_bound true where any summand's was", "null_when": "no call reported any"},
+      "delivered": {"type": "array", "of": "object", "is": "the copy report's delivered entries, verbatim, on a landed or a failed attempt", "omitted_when": "the report named no delivered ticket"},
+      "calls": {"type": "object", "keys": ["project-show", "task-list", "task-show", "project-copy", "task-update", "project-metadata-set"], "is": "how many times the attempt called each store operation, the one that failed included; an operation not called is left off", "omitted_when": "the line is one an earlier build wrote, at version 3 or before"},
+      "updated_fields": {"type": "object", "keys": ["title", "content", "status", "priority", "metadata", "delivers", "depends-on"], "is": "how many items each field was written on by the attempt's task-update calls", "omitted_when": "the attempt made no task-update call, which is every attempt this build makes"}
     },
-    "whole_because": {
-      "after-failure": "the attempt before this one failed",
-      "first": "nothing has landed in this driver yet, including a driver an adopt started"
-    },
-    "whole_because_precedence": ["after-failure", "first"],
     "whole_because_read_only": {
-      "store-lacks-members": "written by an engine that drove the store's binary, for a store reporting a version older than 0.2.30; read, never written"
+      "first": "nothing had landed in that driver yet, including a driver an adopt started; written by builds before version 4",
+      "after-failure": "the attempt before that one failed; written by builds before version 4",
+      "store-lacks-members": "written by an engine that drove the store's binary, for a store reporting a version older than 0.2.30"
     },
-    "example": {"schema_version": 3, "at": "2026-09-13T12:00:00Z", "project": "plans:writeback-quota-plan",
+    "example": {"schema_version": 4, "at": "2026-09-13T12:00:00Z", "project": "plans:writeback-quota-plan",
                 "scope": "members", "whole_because": null, "items": ["op-refusal-not-retried"],
                 "outcome": "projected", "class": null, "kind": null, "reason": null,
                 "duration_ms": 1830,
                 "actions": {"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0, "reopened": 0},
-                "spent": {"requests": 7, "budgets": [{"budget": "graphql", "unit": "points", "amount": 12, "lower_bound": false}]}},
-    "example_delivered": {"schema_version": 3, "at": "2026-09-15T12:00:00Z", "project": "plans:delivers-plan",
-                          "scope": "whole", "whole_because": "first", "items": ["build"],
+                "spent": {"requests": 7, "budgets": [{"budget": "graphql", "unit": "points", "amount": 12, "lower_bound": false}]},
+                "calls": {"project-copy": 1, "project-show": 1, "task-show": 1}},
+    "example_delivered": {"schema_version": 4, "at": "2026-09-15T12:00:00Z", "project": "plans:delivers-plan",
+                          "scope": "members", "whole_because": null, "items": ["build"],
                           "outcome": "projected", "class": null, "kind": null, "reason": null,
                           "duration_ms": 412,
                           "actions": {"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0, "reopened": 1},
                           "spent": null,
                           "delivered": [{"ticket": "tickets:board/build", "deliverer": "plans:delivers-plan/build",
                                          "outcome": "written", "from": "todo", "to": "queued",
-                                         "pruned": ["plans:delivers-plan/gone"]}]}
+                                         "pruned": ["plans:delivers-plan/gone"]}],
+                          "calls": {"project-copy": 1, "project-show": 1, "task-show": 1}}
   },
   "retired": {
     "record": "<run dir>/writeback-store.json",
@@ -5967,10 +6045,14 @@ projected by member; and a copy's own `spent` and action counts recorded exactly
   },
   "member_projection": {
     "reads": ["project-show", "task-show"],
-    "task_show_per": "named member the run holds a destination item for",
+    "task_show_per": ["lineage the copy carries", "lineage the landed baseline does not hold, by the id the run knows for it"],
     "never_reads": ["task-list"],
+    "carries": "the lineages whose projection differs from the landed baseline (entry 93)",
     "copy_scope": "CopyScope::Members",
-    "naming_none": "CopyScope::Projects { tasks: false }"
+    "naming_none": "CopyScope::Projects { tasks: false }",
+    "carrying_nothing": "no store call at all: items [], calls {}, actions null",
+    "release_carries": "the unstarted lineages the landed baseline says are queued",
+    "creation_lookup": "Engine::copy's origin scan (query_tasks) before it creates an item: at most once per item created, inside project-copy; none in an attempt that creates nothing"
   }
 }
 ```
@@ -6349,17 +6431,17 @@ the 2 lineage keys beside `onepipeline.id`. Both are projection-only, exactly as
 its own, where the plan's store is the destination — launches again reading the head's
 definition under the root's id rather than refusing a node field named `node`.
 
-**Reading the destination.** Each item is placed in the lineage its `onepipeline.id` belongs to,
-at the position of its `onepipeline.node` where the item names one and of its `onepipeline.id`
-otherwise — which is every item an older build wrote, and every item of a node nothing retried.
-Several items under one root — what a board an older build wrote holds after an `--adopt`, and,
-once this build has projected over it, that board with the older item still plain at the root
-beside the rewritten head — resolve to the item at the **furthest-along** position; the rest
-are left exactly as they are, since a copy never deletes and nothing here cleans up. Two items
-at one position stay a refusal naming the node. Both the whole copy's `task list` and the member
-copy's `task show` also read each item's status **category**, for the count below. The whole
-re-projection after `--adopt` projects each lineage once, onto its one item — never once per
-superseded id — and a member copy names the root's member.
+**Reading the destination.** No projection reads a page of tasks any more: where each lineage's
+one item is, is the landed baseline's (entry 93), written as each copy lands. A lineage the
+baseline does not hold — a run an older build started, whose directory holds none — is read once
+by its own id, and the id is the **furthest-along** one the run knows: the origin the previous
+driver's shadow document recorded for the lineage's head or the latest attempt before it — which
+is where a board an older build wrote keeps one item per attempt — and the task the root was
+read out of at launch only where none is recorded. The other items under that root are left
+exactly as they are, since a copy never deletes and nothing here cleans up. The read by id of
+each carried item reads its status **category**, for the count below. An adoption projects each
+lineage once, onto its one item — never once per superseded id — and a copy names the root's
+member.
 
 **The record.** `items` names lineage roots. `actions` gains `reopened`: the carried items the
 store reported `updated` whose category the attempt's own pre-copy read reported `done` or
@@ -6385,12 +6467,11 @@ the destination was `done` or `cancelled`: what an older build wrote for a super
 what a person closing the card left.
 
 `writeback::tests` holds one shadow task per lineage with the head's fields and the three keys,
-the root member carried on a retry, the furthest-along resolution over an older board and over
-one this build wrote back, and `reopened` counted off the pre-copy category and the projected
-word. `tests/contract.rs` holds the record's `reopened`, its version and entry 73's golden lines.
+the root member carried on a retry, the furthest-along id a lineage the landed baseline does not
+hold is read at, and `reopened` counted off the pre-copy category and the projected word. `tests/contract.rs` holds the record's `reopened`, its version and entry 73's golden lines.
 `live_edit::retry_cancel_requeue_and_drop_are_projected_after_their_rulings`,
 `writeback_projections::a_retry_or_requeue_of_a_cancelled_node_reopens_its_one_item`,
-`writeback_projections::an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item`
+`writeback_projections::an_adoption_of_a_run_an_older_build_started_reads_the_furthest_along_item_by_its_id`
 and `delivers::a_retried_deliverer_keeps_its_ticket_claimed_across_the_retry` drive the compiled
 binary against the real `onetaskgraph` store it links, served through this suite's
 `scripted-source`;
@@ -6419,11 +6500,10 @@ a project the retry was written onto.
     "read_on_relaunch": "the plan reader reads past both keys, as it does onepipeline.settlement"
   },
   "destination": {
-    "lineage_of_an_item": "onepipeline.id",
-    "position_of_an_item": "onepipeline.node where named, else onepipeline.id",
-    "several_under_one_root": "the item at the furthest-along position; the rest left as they are",
-    "same_position": "refused, naming the node",
-    "category_read_by": {"whole": "task-list", "members": "task-show"}
+    "item_of_a_lineage": "the landed baseline's destination (entry 93)",
+    "a_lineage_the_baseline_does_not_hold": "read once by the furthest-along id the run knows: the previous driver's shadow document for the head or the latest attempt before it, else the root's launch task",
+    "several_under_one_root": "the rest left as they are",
+    "category_read_by": {"members": "task-show"}
   },
   "reopened": {
     "counted_when": ["the copy report says updated", "the pre-copy read reported done or cancelled", "the projected word is neither done nor cancelled"],
@@ -7587,7 +7667,113 @@ exclusion is built from.
 }
 ```
 
-## 93. Task templates are registered, layered and checked here, and three rulings moved what C4 and C7 stated — RESOLVED
+## 93. The write-back keeps a record of what it put on the board, beside the run — OPEN
+
+**Proposal (for the planner who owns the contract): the settlement write-back keeps a
+**landed baseline** in the run's directory, `writeback-landed.json` — per lineage, what this run
+last put on the board — seeded from the launch's own read before the first projection,
+advanced per item only by writes that landed, and read by every later driver, a driver of a
+later build adopting the run included. Every projection carries the difference from it
+(entry 73), so no attempt copies the whole project and none reads the project's page of
+tasks.** It changes no sentence of the contract: the contract names no state the write-back
+keeps, and this is the engine's own run state — what its own writes and its own launch read
+put on the board — never a cache of the store, and it **never feeds scheduling**. It does not
+break `onetaskgraph`'s no-persistence invariant, which binds that library, not a consumer's
+record of its own writes.
+
+Why: a driver that knew nothing of what had landed could only copy everything — on every
+fresh launch, every `adopt`, and after every failed attempt — and that is where a run's
+GraphQL allowance went (entry 73 has the figures). The launch had already read every item the
+first projection re-read; the previous driver had already written what the adopting one
+re-copied; and the attempt after a failure needs only what that failure lost.
+
+What this crate does now is the block below, and the block is the source.
+
+**The shape.** Version 1, JSON, rewritten atomically. `project` is the qualified project id the
+run projects onto; `project_metadata` holds the engine-owned project keys as last projected;
+`items` is keyed by **lineage root** (entry 80), each naming its destination item's qualified
+id, its title, the lowercase hex SHA-256 of its body's UTF-8 bytes, the word last landed —
+`null` for an item seeded from a read, the one case the engine did not itself write the word —
+its engine-owned metadata, the qualified tickets it delivers, and the lineage roots it depends
+on. **Only engine-owned `onepipeline.*` keys are kept**, under the ownership rule in
+`src/writeback.rs`: no labels, no foreign metadata, and no project title or description. A read
+refuses a file of another version, of another project, naming a destination that is not a
+qualified id or a digest that is not one, or holding a key the engine does not own — each said
+on the driver's standard error — and then proceeds as if there were none.
+
+**Seeded, advanced, read.** `onepipeline start` seeds it from the plan read it launched from:
+every task's destination id, title, content, engine-owned keys, `delivers` and edges, as the
+store answered them. Each copy that lands advances every item it carried to what it wrote —
+except a deliverer whose tickets the store could not keep in step, which stays unlanded so the
+next attempt carries it again. A lineage it does not hold — every lineage of a run an older build
+started, whose directory holds no file — is read once by its own id and compared against that
+read; an item that says what the run would write is recorded as read and not carried. A read of
+one task does not answer its edges, so a lineage that has any is carried all the same — the copy
+writes its edges, sending only their difference — and its baseline entry is what that copy
+landed. A stop's
+release reads it in the stopping process and advances it by what the release wrote.
+
+**One page read remains, and it is the copy's own.** When a copy *creates* an item — the one an
+`add`ed node needs — `onetaskgraph`'s `Engine::copy` first looks for an item already recording
+that origin (`engine/copy.rs`, `target`, rule 2: `scan` over `query_tasks`), so a retried
+creation never mints a second item. No `CopyRequest` field skips it, and `copy` is the only
+creation path the engine offers, so onepipeline cannot remove it without re-implementing the
+copy; the planner ruled it stays, and the creation path that skips the scan is a follow-up for
+`onetaskgraph`. It appears only in an attempt that creates an item, at most once per item
+created, inside that attempt's `project-copy` call; an attempt that creates nothing reads no
+page of tasks, and no line's `calls` names `task-list`.
+
+`writeback::tests` deserializes `example` through `LandedBaseline`, the type that writes the
+file, and serializes it back byte-equal, and holds each refusal. `tests/e2e/writeback_projections.rs`
+drives the compiled binary: the file seeded at launch before the first projection and holding
+exactly this shape, advanced only by what landed, read on an `adopt`, and absent on a run an
+older build started.
+
+```json
+{
+  "landed": {
+    "file": "<run dir>/writeback-landed.json",
+    "schema_version": 1,
+    "written": "atomically, rewritten whole",
+    "seeded_from": "the launch's own plan read, before the first projection",
+    "advanced": "per item, by a write that landed, never before",
+    "read_by": ["every driver of the run, an adopting one included", "a stop's release"],
+    "feeds_scheduling": false,
+    "missing_or_unreadable": "each lineage it would have named is read once by its own id",
+    "keeps": {
+      "metadata": "engine-owned onepipeline.* keys only",
+      "never": ["labels", "foreign metadata", "the project's title", "the project's description"]
+    },
+    "example": {
+      "schema_version": 1,
+      "project": "plans:writeback-quota-plan",
+      "project_metadata": {"onepipeline.concurrency": 2, "onepipeline.schema_version": 3},
+      "items": {
+        "build": {
+          "destination": "plans:writeback-quota-plan/002-build",
+          "title": "Build the thing",
+          "content_sha256": "8a5edab282632443219e051e4ade2d1d5bbc671c781051bf1437897cbdfea0f1",
+          "status": "done",
+          "metadata": {"onepipeline.id": "build", "onepipeline.node": "build-2", "onepipeline.supersedes": ["build"], "onepipeline.persona": "engineer"},
+          "delivers": ["tickets:board/build"],
+          "depends_on": ["design"]
+        },
+        "design": {
+          "destination": "plans:writeback-quota-plan/001-design",
+          "title": "Design it",
+          "content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "status": null,
+          "metadata": {"onepipeline.id": "design"},
+          "delivers": [],
+          "depends_on": []
+        }
+      }
+    }
+  }
+}
+```
+
+## 94. Task templates are registered, layered and checked here, and three rulings moved what C4 and C7 stated — RESOLVED
 
 **Ruling: C4, C6a, C7 and C8 are part of the contract, on the user's ruling relayed by the
 manager of run `task-templates`, and `docs/contract.md` states them beside C6b.** A task's

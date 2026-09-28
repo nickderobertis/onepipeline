@@ -12,7 +12,7 @@
 // node is placed on is `scripted-source`, the real `local-md` plugin served over the
 // store's own subprocess plugin protocol — standing in for a hosted board that keeps no
 // answers, which the manager ruled in place of a GitHub Projects loopback this repository
-// does not have (`docs/contract-divergences.md` entry 93).
+// does not have (`docs/contract-divergences.md` entry 94).
 
 // llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
 // assumed: these journeys take about a minute on the wall under the suite's parallelism,
@@ -1823,7 +1823,7 @@ fn a_rendered_node_on_a_board_that_keeps_no_answers_loads_under_the_check_until_
     // protocol, the way a hosted board that keeps no answers is reached.
     // llmlint: ignore-block[tests_mirror_real_usage] the item is placed on the board by writing
     // the board's own file rather than by `onetaskgraph project copy`, on the manager's ruling
-    // (`docs/contract-divergences.md` entry 93): that verb in onetaskgraph 0.2.47 writes a
+    // (`docs/contract-divergences.md` entry 94): that verb in onetaskgraph 0.2.47 writes a
     // copied item's content trimmed, which is a store defect an onetaskgraph node is fixing,
     // and what this journey proves is C7 over a board that keeps no answers, which needs the
     // item's bytes there exactly as rendered. Every read and the edit below go through the

@@ -4,7 +4,8 @@
 //! snapshots to this worker, and the worker only projects them. Store reads never feed back
 //! into scheduling, and a failed or slow write is reported and retried off the engine thread
 //! — unless the store *refused* it, which no retry changes: that is reported once and
-//! attempted again only when the run's graph does. See [`FailureClass`].
+//! attempted again only when the run's graph does. See [`FailureClass`]. A rate limit that
+//! names how long to wait is waited out in full, with no call of any kind before it passes.
 //!
 //! # Ownership: the write-back owns exactly what the plan document declares
 //!
@@ -58,16 +59,21 @@
 //! and a reader closing work on the status would close it on a change that reached nobody.
 //! Both are absent for a node with no change of its own, which is most of them.
 //!
-//! # A projection carries what changed
+//! # A projection carries what changed since it landed
 //!
 //! Against a hosted destination every item a copy reads or writes spends the same allowance
-//! every other reader of the token needs, so an attempt carries only the nodes whose shadow
-//! task changed since the last attempt that landed, named as the copy's members. It carries
-//! the whole project where it has to: when nothing has landed in this worker yet, and after
-//! an attempt that failed. What a member copy does not name it neither reads nor rewrites, so
-//! the ownership rule above still decides every field of every item a projection writes, and
-//! a person's edit on an item the copy did not name stands until that node next changes.
-//! Every attempt is appended to the run's projection record; see [`ProjectionRecord`].
+//! every other reader of the token needs, so an attempt carries only the lineages whose
+//! projection differs from what the run last put on the board, named as the copy's members —
+//! and never the whole project. What landed is the run's **landed baseline**
+//! ([`LandedBaseline`], `writeback-landed.json` beside the record): seeded from the launch's own
+//! read before the first projection, advanced per item only as a write lands, and read by every
+//! later driver, an adopting one included. It also says where each lineage's item is, so no
+//! attempt reads the project's page of tasks; a lineage it does not hold — a run an older build
+//! started — is read once by its own id. After a failure the next attempt carries what has still
+//! not landed and nothing more. What a member copy does not name it neither reads nor rewrites,
+//! so the ownership rule above still decides every field of every item a projection writes, and
+//! a person's edit on an item the run did not change since it last landed stands. Every attempt
+//! is appended to the run's projection record; see [`ProjectionRecord`].
 //!
 //! # The store is linked, and built afresh for every attempt
 //!
@@ -90,8 +96,8 @@ use std::time::{Duration, Instant};
 use onetaskgraph_core::config::{Layer, Origin as SettingOrigin, Setting, SettingPath};
 use onetaskgraph_core::{
     classify, ConfigError, CopyAction, CopyItems, CopyReport, CopyRequest, CopyScope, Delivered,
-    DeliveryOutcome, Engine, EngineError, Failure, Filters, GlobalId, PageToken, Paging,
-    ProjectSelector, Qualified, QueryResponse, SourceFailure, TaskRequest,
+    DeliveryOutcome, Engine, EngineError, Failure, GlobalId, Qualified, QueryResponse,
+    SourceFailure,
 };
 use onetaskgraph_plugin_api::{
     Label, NativeId, Project, SourceError, SourceName, StatusCategory, Task,
@@ -101,8 +107,9 @@ use serde_json::{json, Map, Value};
 
 use crate::cli::{
     DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_CLASSIFIED_COMMANDS,
-    WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_MEMBER_READ, WRITEBACK_PROJECTIONS_FILE,
-    WRITEBACK_PROJECTIONS_SCHEMA_VERSION, WRITEBACK_REFUSED_CLASS,
+    WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_LANDED_FILE, WRITEBACK_LANDED_SCHEMA_VERSION,
+    WRITEBACK_MEMBER_READ, WRITEBACK_PROJECTIONS_FILE, WRITEBACK_PROJECTIONS_SCHEMA_VERSION,
+    WRITEBACK_REFUSED_CLASS, WRITEBACK_WAIT_FILE, WRITEBACK_WAIT_SCHEMA_VERSION,
 };
 use crate::edits::Operation;
 use crate::event::Source;
@@ -161,7 +168,6 @@ const CLOSEOUT_WAIT: Duration = Duration::from_millis(2_250);
 // The three store calls one attempt makes, by the name each one's refusals carry. Each
 // one's failure is classified by its own type.
 const PROJECT_SHOW: &str = WRITEBACK_CLASSIFIED_COMMANDS[0];
-const TASK_LIST: &str = WRITEBACK_CLASSIFIED_COMMANDS[1];
 const PROJECT_COPY: &str = WRITEBACK_CLASSIFIED_COMMANDS[2];
 // What a member projection reads each named member with, in place of the page of tasks.
 const TASK_SHOW: &str = WRITEBACK_MEMBER_READ;
@@ -176,26 +182,27 @@ const STORE_OPEN: &str = "store-open";
 /// it was refused.
 ///
 /// The reads are the same size whatever the plan, so [`COMMAND_FLOOR`] alone bounds them.
-/// The copy writes one item per node it carries, so its deadline is the launch's per-item
-/// budget multiplied by those nodes — every node for a whole copy, the named ones for a
-/// member copy, and the list an [`Unprojected`] surface names either way — with the floor
-/// governing until a copy is large enough to lift it. The account is derived from the
+/// The copy writes one item per lineage it carries, so its deadline is the floor **plus** the
+/// launch's per-item budget multiplied by those items — the list an [`Unprojected`] surface
+/// names. Added rather than the larger of the two, because every copy also spends the fixed
+/// round trips a read does: a seven-item copy onto the `plans` board measured 71 to 72 seconds
+/// against the 70 the larger of the two allowed it (#521). The account is derived from the
 /// figure rather than stored beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Deadline {
     /// The fixed floor, which is the whole deadline for a read.
     Floor,
-    /// The copy's: `max(floor, per_item × items)`, with the budget in seconds.
+    /// The copy's: `floor + per_item × items`, with the budget in seconds.
     Copy { per_item: NonZeroU64, items: usize },
 }
 
 impl Deadline {
-    /// The budget multiplied through, in seconds, before the floor is applied.
+    /// The budget multiplied through, in seconds, before the floor is added.
     ///
     /// Exact for every product that fits in a `u64` of seconds, and `u64::MAX` seconds for
     /// one that does not — saturating rather than wrapping, because a product that wrapped
-    /// to nothing would leave the floor governing exactly the plan the budget exists to
-    /// accommodate.
+    /// to nothing would leave the floor alone governing exactly the plan the budget exists
+    /// to accommodate.
     fn product(per_item: NonZeroU64, items: usize) -> Duration {
         // llmlint: ignore[changed_behavior_has_e2e] a product past `u64::MAX` seconds is
         // more items than any store holds and more seconds than any host runs, so no
@@ -209,7 +216,9 @@ impl Deadline {
     fn within(self) -> Duration {
         match self {
             Self::Floor => COMMAND_FLOOR,
-            Self::Copy { per_item, items } => Self::product(per_item, items).max(COMMAND_FLOOR),
+            Self::Copy { per_item, items } => {
+                COMMAND_FLOOR.saturating_add(Self::product(per_item, items))
+            }
         }
     }
 
@@ -218,27 +227,18 @@ impl Deadline {
         let seconds = self.within().as_secs();
         match self {
             Self::Floor => format!("{name} exceeded {seconds} seconds"),
-            Self::Copy { per_item, items } => {
-                let arithmetic = format!(
-                    "{items} {} × {} {} per item",
-                    if items == 1 { "item" } else { "items" },
-                    per_item,
-                    if per_item.get() == 1 {
-                        "second"
-                    } else {
-                        "seconds"
-                    }
-                );
-                if Self::product(per_item, items) < COMMAND_FLOOR {
-                    format!(
-                        "{name} exceeded {seconds} seconds (the {} second floor; {arithmetic} \
-                         is less)",
-                        COMMAND_FLOOR.as_secs()
-                    )
+            Self::Copy { per_item, items } => format!(
+                "{name} exceeded {seconds} seconds (the {} second floor + {items} {} × {} {} \
+                 per item)",
+                COMMAND_FLOOR.as_secs(),
+                if items == 1 { "item" } else { "items" },
+                per_item,
+                if per_item.get() == 1 {
+                    "second"
                 } else {
-                    format!("{name} exceeded {seconds} seconds ({arithmetic})")
+                    "seconds"
                 }
-            }
+            ),
         }
     }
 }
@@ -646,6 +646,26 @@ struct Failed {
     classified: Option<Classified>,
     /// The copy report's `delivered` entries, where a copy that landed in part wrote one.
     delivered: Vec<Map<String, Value>>,
+    /// How long the store asked to be left alone: the `retry_after_seconds` a rate-limited
+    /// failure carried, read off the store's own typed value. `None` where it gave none, and
+    /// then the retry schedule decides.
+    wait: Option<Duration>,
+}
+
+/// How long one source error asked the caller to wait before asking again: the rate limit's
+/// own `retry_after_seconds`, where it gave one, and nothing for every other failure.
+fn asked_to_wait(error: &SourceError) -> Option<Duration> {
+    match error {
+        SourceError::RateLimited {
+            retry_after_seconds,
+            ..
+        } => retry_after_seconds.map(Duration::from_secs),
+        SourceError::Config { .. }
+        | SourceError::Auth { .. }
+        | SourceError::Refused { .. }
+        | SourceError::Unavailable { .. }
+        | SourceError::Malformed { .. } => None,
+    }
 }
 
 impl Failed {
@@ -655,15 +675,19 @@ impl Failed {
             reason,
             classified: Some(classified),
             delivered: Vec::new(),
+            wait: None,
         }
     }
 
-    /// One store call the engine refused to run.
+    /// One store call the engine refused to run, with the wait its source asked for.
     fn engine(call: &str, error: &EngineError) -> Self {
-        Self::classed(
-            format!("{call} failed: {error}"),
-            Classified::of_engine(error),
-        )
+        Self {
+            wait: cause_of(error).1.and_then(asked_to_wait),
+            ..Self::classed(
+                format!("{call} failed: {error}"),
+                Classified::of_engine(error),
+            )
+        }
     }
 
     /// One store call answered in part, naming every source that could not contribute.
@@ -686,6 +710,16 @@ impl Failed {
                     .map(|failure| Classified::of_source(&failure.error)),
             ),
             delivered: Vec::new(),
+            // The longest any of them asked for: asking sooner asks one that said not yet.
+            // llmlint: ignore[changed_behavior_has_e2e] every read that reaches `partial` is
+            // addressed to one source, for the reason recorded on this function, so the longest
+            // of its waits is that source's own — the wait `store::a_rate_limit_naming_a_wait_is_waited_out_with_no_store_call_inside_it`
+            // drives end to end; `writeback::tests::a_rate_limited_failure_carries_the_wait_its_source_asked_for`
+            // holds the longest of several.
+            wait: errors
+                .iter()
+                .filter_map(|failure| asked_to_wait(&failure.error))
+                .max(),
         }
     }
 
@@ -719,6 +753,7 @@ impl From<String> for Failed {
             reason,
             classified: None,
             delivered: Vec::new(),
+            wait: None,
         }
     }
 }
@@ -1051,8 +1086,9 @@ fn launch_wait(per_item: NonZeroU64, pending: &Pending) -> Duration {
     .within()
 }
 
-/// Release what a run a `stop` ended had claimed and never started: one whole projection, in
-/// the stopping process, writing every node the run had not started `todo`.
+/// Release what a run a `stop` ended had claimed and never started: one projection, in the
+/// stopping process, carrying exactly the unstarted nodes the landed baseline says are
+/// `queued` and writing each of them `todo`.
 ///
 /// A stopped driver takes no closeout of its own — the stop's signal ends it where it stands —
 /// so this is the closeout's release, made by the verb that ended it. Best effort like every
@@ -1070,8 +1106,46 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     let Some(snapshot) = snapshot_of(paths, launch, &state, &statuses, Claim::Released) else {
         return;
     };
-    let carry = Carry::Whole(WholeBecause::First);
-    let items = carry.items(&snapshot);
+    let mut baseline = Baseline::load(&paths.dir, &snapshot.project);
+    // A rate limit the driver was waiting out binds this process too: the release asks the store
+    // nothing before the wait the store named has passed. It waits that out where the wait ends
+    // inside the release's own deadline, and otherwise leaves the claim standing and says so,
+    // rather than holding a stop for as long as a limiter likes.
+    // llmlint: ignore-block[changed_behavior_has_e2e] both sides of the bound are driven end to
+    // end by `store::a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed` —
+    // a wait served and then released, and one past the bound left standing. The bound decides
+    // only whether the rest of the wait is served before the release; the release after it is
+    // the attempt the block below covers, under its own copy deadline, so a wait that fits and a
+    // release that then runs long take no line those journeys and that block do not reach.
+    let kept = AskedWait::kept(&paths.dir);
+    if let Kept::Unreadable(why) = &kept {
+        eprintln!(
+            "onetaskgraph write-back did not release the nodes this stopped run never started \
+             for '{}': {why}; it may hold a wait the store asked for that has not passed, so no \
+             store call is made until it can be read or is repaired",
+            snapshot.project
+        );
+        return;
+    }
+    if let Kept::Left(left) = kept {
+        let bound = Deadline::Copy {
+            per_item: per_item_budget(launch),
+            items: snapshot.lineages().len(),
+        }
+        .within();
+        if left > bound {
+            eprintln!(
+                "onetaskgraph write-back did not release the nodes this stopped run never started \
+                 for '{}': the store asked to be left alone for {} seconds more, longer than the \
+                 release may wait; a driver that adopts the run projects them",
+                snapshot.project,
+                left.as_secs()
+            );
+            return;
+        }
+        std::thread::sleep(left);
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     let at = crate::sys::now_rfc3339();
     let started = Instant::now();
     // llmlint: ignore-block[changed_behavior_has_e2e] a stop whose release outlasts its deadline
@@ -1085,25 +1159,21 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     // and `delivers::a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch`.
     // A journey holding a `stop` past the sixty-second floor would spend that minute on no line
     // those three do not already reach.
-    let attempt = project(
+    let attempted = project(
         &store,
         per_item_budget(launch),
         &snapshot,
-        &carry,
-        &BTreeMap::new(),
+        &mut baseline,
+        Scope::Release,
     );
     append_record(
         &paths.dir,
-        &ProjectionRecord::of(
-            at,
-            &snapshot.project,
-            &carry,
-            items,
-            started.elapsed(),
-            &attempt,
-        ),
+        &ProjectionRecord::of(at, &snapshot.project, started.elapsed(), &attempted),
     );
-    if let Err(failed) = attempt {
+    if let Err(failed) = attempted.result {
+        if let Some(wait) = failed.wait {
+            AskedWait::record(&paths.dir, wait);
+        }
         eprintln!(
             "onetaskgraph write-back could not release the nodes this stopped run never started \
              for '{}': {}",
@@ -1135,7 +1205,9 @@ fn worker(
     pending: Arc<(Mutex<Pending>, Condvar)>,
 ) {
     let mut standing = Standing::Landing;
-    let mut carried = Carried::default();
+    // What this run has already put on the board, which every attempt carries the difference
+    // from — read once, off the file the launch seeded or the driver before this one left.
+    let mut baseline: Option<Baseline> = None;
     loop {
         let snapshot = {
             let (lock, ready) = &*pending;
@@ -1159,26 +1231,45 @@ fn worker(
                 .take()
                 .expect("the worker was woken by a snapshot")
         };
-        let carry = Carry::decide(
-            standing != Standing::Landing,
-            carried.last.as_ref(),
-            &snapshot,
-        );
-        let items = carry.items(&snapshot);
+        // Every attempt honours a wait the run's directory keeps — one an earlier process
+        // recorded, the driver an adoption displaced or a stop's release, as well as its own —
+        // and asks the store nothing on a kept wait it cannot read, which may be one that has
+        // not passed: it says so once, and looks again until the file reads or is repaired.
+        let mut said_unreadable = false;
+        loop {
+            let interval = match AskedWait::kept(&run_dir) {
+                Kept::Nothing => break,
+                Kept::Left(left) => left,
+                Kept::Unreadable(why) => {
+                    if !said_unreadable {
+                        eprintln!(
+                            "onetaskgraph write-back for '{}': {why}; it may hold a wait the \
+                             store asked for that has not passed, so no store call is made \
+                             until it can be read or is repaired",
+                            snapshot.project
+                        );
+                        said_unreadable = true;
+                    }
+                    UNREADABLE_WAIT_RECHECK
+                }
+            };
+            if !should_retry_after(&pending, Interval::Asked(interval)) {
+                return;
+            }
+        }
+        let baseline = baseline.get_or_insert_with(|| Baseline::load(&run_dir, &snapshot.project));
         let at = crate::sys::now_rfc3339();
         let started = Instant::now();
-        let attempt = project(&store, per_item, &snapshot, &carry, &carried.origins);
+        let attempted = project(&store, per_item, &snapshot, baseline, Scope::Driven);
         append_record(
             &run_dir,
-            &ProjectionRecord::of(
-                at,
-                &snapshot.project,
-                &carry,
-                items.clone(),
-                started.elapsed(),
-                &attempt,
-            ),
+            &ProjectionRecord::of(at, &snapshot.project, started.elapsed(), &attempted),
         );
+        let Attempted {
+            items,
+            result: attempt,
+            ..
+        } = attempted;
         {
             let (lock, ready) = &*pending;
             if let Ok(mut state) = lock.lock() {
@@ -1187,7 +1278,7 @@ fn worker(
             }
         }
         match attempt {
-            Ok(landed) => {
+            Ok(_) => {
                 if standing != Standing::Landing {
                     eprintln!(
                         "onetaskgraph write-back recovered for '{}'",
@@ -1195,10 +1286,6 @@ fn worker(
                     );
                 }
                 standing = Standing::Landing;
-                carried = Carried {
-                    last: Some(snapshot.clone()),
-                    origins: landed.origins,
-                };
                 let (lock, _) = &*pending;
                 if let Ok(mut state) = lock.lock() {
                     state.last_success = Some(snapshot.clone());
@@ -1245,17 +1332,37 @@ fn worker(
                 };
                 let first = failures == NonZeroU32::MIN;
                 standing = Standing::Failing(failures);
+                // A store that said how long to leave it alone is left alone that long: no
+                // call of any kind reaches it before then — not on the schedule, not for a
+                // snapshot published meanwhile, and not at closeout. One that said nothing is
+                // asked again on the schedule.
+                let asked = failed.wait;
+                if let Some(wait) = asked {
+                    AskedWait::record(&run_dir, wait);
+                }
                 if first {
                     // The one line on the driver's stderr that ever says a projection is in
                     // trouble, so it says what an operator's next question is: whether to
                     // expect another attempt in a moment or in a minute.
-                    eprintln!(
-                        "onetaskgraph write-back failed for '{}': {}; retrying, spacing \
-                         further attempts out to {} seconds apart while it keeps failing",
-                        snapshot.project,
-                        failed.said(),
-                        RETRY_CEILING.as_secs()
-                    );
+                    match asked {
+                        Some(wait) => eprintln!(
+                            "onetaskgraph write-back failed for '{}': {}; the store asked to \
+                             be left alone for {} seconds, so nothing is asked of it before \
+                             then, and further attempts are spaced out to {} seconds apart \
+                             while it keeps failing",
+                            snapshot.project,
+                            failed.said(),
+                            wait.as_secs(),
+                            RETRY_CEILING.as_secs()
+                        ),
+                        None => eprintln!(
+                            "onetaskgraph write-back failed for '{}': {}; retrying, spacing \
+                             further attempts out to {} seconds apart while it keeps failing",
+                            snapshot.project,
+                            failed.said(),
+                            RETRY_CEILING.as_secs()
+                        ),
+                    }
                 }
                 // How soon the planner hears of it, which is this sum and no deadline: the
                 // surface is recorded one [`FIRST_RETRY_AFTER`] after the call that failed, and
@@ -1264,7 +1371,11 @@ fn worker(
                 // root that is gone, and answers so in milliseconds — so [`COMMAND_FLOOR`] is
                 // no part of it: that is spent only by a call that has not returned, which is a
                 // store answering slowly.
-                if !should_retry_after(&pending, retry_after(failures.get())) {
+                let interval = match asked {
+                    Some(wait) => Interval::Asked(wait),
+                    None => Interval::Scheduled(retry_after(failures.get())),
+                };
+                if !should_retry_after(&pending, interval) {
                     return;
                 }
                 let (lock, ready) = &*pending;
@@ -1305,28 +1416,151 @@ fn retry_after(failures: u32) -> Duration {
         .min(RETRY_CEILING)
 }
 
+/// A wait the store asked for, kept in the run's directory so every process that projects the
+/// run honours it: the driver that met it, a stop's release in the stopping process, and the
+/// driver an adoption starts. `writeback-wait.json` — entry 72 states it — holds the instant,
+/// as Unix milliseconds, before which the store is asked nothing. It is neither the landed
+/// baseline nor the projection record, and changes neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AskedWait {
+    schema_version: u32,
+    not_before_unix_ms: u64,
+}
+
+impl AskedWait {
+    fn now_unix_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            })
+    }
+
+    /// Record that the store is to be asked nothing for `wait` from now. Best effort: a file
+    /// that cannot be written is said, and the process that met the wait still serves it.
+    fn record(run_dir: &Path, wait: Duration) {
+        let not_before_unix_ms =
+            Self::now_unix_ms().saturating_add(u64::try_from(wait.as_millis()).unwrap_or(u64::MAX));
+        let path = run_dir.join(WRITEBACK_WAIT_FILE);
+        // llmlint: ignore-block[changed_behavior_has_e2e] writing a file in the run's own
+        // directory fails only on a host whose run directory has been made unwritable, which no
+        // CLI journey arranges; every journey about a wait drives the write that lands.
+        let written = serde_json::to_vec(&Self {
+            schema_version: WRITEBACK_WAIT_SCHEMA_VERSION,
+            not_before_unix_ms,
+        })
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| {
+            crate::ledger::write_atomic(&path, &bytes, crate::ledger::Durability::Record)
+                .map_err(|error| error.to_string())
+        });
+        if let Err(error) = written {
+            eprintln!(
+                "onetaskgraph write-back could not record the store's wait at {}: {error}",
+                path.display()
+            );
+        }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+    }
+
+    /// What the run's directory says about a wait the store asked for. A file this build cannot
+    /// read is **not** read as no wait — it may hold one that has not passed — so it is answered
+    /// as [`Kept::Unreadable`], and every caller asks the store nothing on it.
+    fn kept(run_dir: &Path) -> Kept {
+        let path = run_dir.join(WRITEBACK_WAIT_FILE);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Kept::Nothing,
+            Err(error) => {
+                return Kept::Unreadable(format!("cannot read {}: {error}", path.display()))
+            }
+        };
+        let wait = serde_json::from_str::<Self>(&text)
+            .map_err(|error| error.to_string())
+            .and_then(|wait| {
+                (wait.schema_version == WRITEBACK_WAIT_SCHEMA_VERSION)
+                    .then_some(wait)
+                    .ok_or_else(|| {
+                        format!(
+                            "`schema_version` {} is not one this build reads \
+                             ({WRITEBACK_WAIT_SCHEMA_VERSION})",
+                            wait.schema_version
+                        )
+                    })
+            });
+        match wait {
+            Ok(wait) => {
+                let left = wait.not_before_unix_ms.saturating_sub(Self::now_unix_ms());
+                if left > 0 {
+                    Kept::Left(Duration::from_millis(left))
+                } else {
+                    Kept::Nothing
+                }
+            }
+            Err(why) => Kept::Unreadable(format!("cannot read {}: {why}", path.display())),
+        }
+    }
+}
+
+/// What a run's directory says about a wait the store asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Kept {
+    /// None is recorded, or the one recorded has passed.
+    Nothing,
+    /// A wait is recorded, and this much of it is left.
+    Left(Duration),
+    /// A file is there that cannot be read as a wait — it may hold one that has not passed —
+    /// with why, naming the file.
+    Unreadable(String),
+}
+
+/// How often a driver looks again at a kept wait it could not read, while it asks the store
+/// nothing on it: soon enough that repairing the file puts the board back in step promptly.
+const UNREADABLE_WAIT_RECHECK: Duration = Duration::from_secs(2);
+
+/// How long one failure is waited out before the projection is attempted again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Interval {
+    /// The retry schedule's own, which a closeout suspends.
+    Scheduled(Duration),
+    /// What the store asked for, which nothing shortens: asking a limiter inside the window
+    /// it named is asking one that has already said no.
+    Asked(Duration),
+}
+
 /// Wait out at most one retry interval, answering whether to attempt again at all.
 ///
 /// `false` is [`RunPhase::Stopping`] and the caller returns on it; `true` is the wait
-/// having been served, or [`RunPhase::ClosingOut`]. Both phases are read on entry as well
-/// as on every wake, so one the run reached while this worker was projecting is honoured
-/// rather than missed. A snapshot published meanwhile deliberately does *not* shorten the
-/// wait: what the interval spaces is the destination's refusal, and a run that keeps
-/// folding new graph state would otherwise retry as fast as it publishes.
-fn should_retry_after(pending: &(Mutex<Pending>, Condvar), interval: Duration) -> bool {
+/// having been served, or — for a scheduled interval alone — [`RunPhase::ClosingOut`]. Both
+/// phases are read on entry as well as on every wake, so one the run reached while this
+/// worker was projecting is honoured rather than missed. A snapshot published meanwhile
+/// deliberately does *not* shorten the wait: what the interval spaces is the destination's
+/// refusal, and a run that keeps folding new graph state would otherwise retry as fast as it
+/// publishes. An interval the store asked for is not shortened by a closeout either, so a
+/// closeout inside it projects nothing and ends when its own bounded window does.
+fn should_retry_after(pending: &(Mutex<Pending>, Condvar), interval: Interval) -> bool {
     let (lock, ready) = pending;
     let Ok(mut state) = lock.lock() else {
         return false;
     };
-    let due = Instant::now() + interval;
+    let (wait, binding) = match interval {
+        Interval::Scheduled(wait) => (wait, false),
+        Interval::Asked(wait) => (wait, true),
+    };
+    // A wait past what the clock can name is waited out until the run stops: a store asking
+    // for longer than a host runs is not asked again, rather than the sum overflowing.
+    let due = Instant::now().checked_add(wait);
     loop {
         match state.phase {
             RunPhase::Stopping => return false,
-            RunPhase::ClosingOut => return true,
-            RunPhase::Running => {}
+            RunPhase::ClosingOut if !binding => return true,
+            RunPhase::ClosingOut | RunPhase::Running => {}
         }
-        let left = due.saturating_duration_since(Instant::now());
-        if left.is_zero() {
+        let left = due.map_or(RETRY_CEILING, |due| {
+            due.saturating_duration_since(Instant::now())
+        });
+        if due.is_some() && left.is_zero() {
             return true;
         }
         let Ok((next, _)) = ready.wait_timeout(state, left) else {
@@ -1336,26 +1570,33 @@ fn should_retry_after(pending: &(Mutex<Pending>, Condvar), interval: Duration) -
     }
 }
 
-/// One attempt that landed: where each node's destination item now is, and what the copy
-/// said it did and spent.
+/// One attempt that landed: what the copy said it did and spent — no report at all for an
+/// attempt that had nothing to carry, and so asked the store nothing.
 struct Landed {
-    origins: BTreeMap<String, Origin>,
-    actions: ProjectionActions,
+    actions: Option<ProjectionActions>,
     spent: Option<Map<String, Value>>,
     delivered: Vec<Map<String, Value>>,
 }
 
-/// The largest page one destination read asks for, so an ordinary plan's project is read in
-/// one request against a hosted destination's allowance; a source may answer with less, and
-/// the walk below follows its pages to the end.
-const TASK_PAGE: NonZeroU32 = NonZeroU32::new(10_000).expect("ten thousand is not zero");
+/// One attempt, landed or not: the lineages it carried, the store calls it made, and how it
+/// ended — everything its record line says.
+struct Attempted {
+    /// The lineage roots the copy carried, which the record and a surface name.
+    // llmlint: ignore[invalid_states_unrepresentable] node ids, the plain `String` the
+    // snapshot's own maps key by, for the reason `Snapshot::superseded` records.
+    items: Vec<String>,
+    /// How many times each store operation was called, the one that failed included.
+    calls: BTreeMap<StoreCall, u64>,
+    result: Result<Landed, Failed>,
+}
 
 /// One attempt's store: the engine its configuration describes, with the shadow source
-/// declared beside the operator's own, and the runtime its calls are driven on. Built for
-/// the attempt and dropped with it.
+/// declared beside the operator's own, the runtime its calls are driven on, and the count of
+/// the calls made through it. Built for the attempt and dropped with it.
 struct Attempt {
     runtime: tokio::runtime::Runtime,
     engine: Engine,
+    calls: std::cell::RefCell<BTreeMap<StoreCall, u64>>,
 }
 
 impl Attempt {
@@ -1403,6 +1644,7 @@ impl Attempt {
             runtime: crate::taskgraph::runtime()
                 .map_err(|error| format!("the store cannot be called: {error}"))?,
             engine: built.engine,
+            calls: std::cell::RefCell::default(),
         })
     }
 
@@ -1412,13 +1654,22 @@ impl Attempt {
     /// when the attempt does, before the attempt is recorded.
     fn call<T>(
         &self,
-        name: &str,
+        call: StoreCall,
         deadline: Deadline,
         future: impl Future<Output = T>,
     ) -> Result<T, Failed> {
+        *self.calls.borrow_mut().entry(call).or_default() += 1;
         self.runtime
             .block_on(async { tokio::time::timeout(deadline.within(), future).await })
-            .map_err(|_| Failed::from(deadline.refusal(name)))
+            .map_err(|_| Failed::from(deadline.refusal(call.as_str())))
+    }
+
+    /// Read one destination task by its own id: the one read an attempt makes of an item.
+    fn task(&self, id: &GlobalId) -> Result<Qualified<Task>, Failed> {
+        let answer = self
+            .call(StoreCall::TaskShow, Deadline::Floor, self.engine.task(id))?
+            .map_err(|error| Failed::engine(TASK_SHOW, &error))?;
+        shown(TASK_SHOW, id, answer)
     }
 }
 
@@ -1462,41 +1713,172 @@ fn opened_by<T>(arrived: &std::sync::mpsc::Receiver<T>, deadline: Deadline) -> R
         })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scope {
+    /// A driver's: every lineage whose projection differs from what landed.
+    Driven,
+    /// A stop's release: only the unstarted lineages the baseline says are `queued`.
+    Release,
+}
+
+/// Project one snapshot, carrying exactly the lineages whose projection differs from what the
+/// baseline says landed, and advance the baseline by every item that landed.
+///
+/// Nothing is read that the baseline already answers: the destination id of every lineage it
+/// holds is its own, so no attempt reads the project's page of tasks. A lineage it does not
+/// hold — a run an older build started, whose directory holds no baseline — is read once by
+/// its own id and compared against that read. Each lineage the copy carries is read once by
+/// its own id, for the labels a person may have put on it since, which the copy restates. The
+/// project item is read, because every copy carries it.
 fn project(
     store: &Store,
     per_item: NonZeroU64,
     snapshot: &Snapshot,
-    carry: &Carry,
-    known: &BTreeMap<String, Origin>,
-) -> Result<Landed, Failed> {
-    let attempt = Attempt::open(store, snapshot)?;
-    let destination_project = destination_project(&attempt, snapshot)?;
-    let mut origins = match carry {
-        Carry::Whole(_) => destination_origins(&attempt, snapshot)?,
-        Carry::Members(named) => member_origins(&attempt, named, known)?,
+    baseline: &mut Baseline,
+    scope: Scope,
+) -> Attempted {
+    let mut items = Vec::new();
+    let lineages = snapshot.lineages();
+    let renderings: BTreeMap<String, Rendering> = lineages
+        .roots()
+        .filter_map(|root| {
+            Rendering::of(snapshot, &lineages, root)
+                .ok()
+                .map(|rendering| (root.clone(), rendering))
+        })
+        .collect();
+    let decided = decide(snapshot, &lineages, &renderings, baseline, scope);
+    // Nothing differs from what landed and nothing is unknown: the board already says all of
+    // it, so the store is not opened, let alone asked.
+    if decided.carried.is_empty()
+        && decided.unread.is_empty()
+        && !baseline.project_differs(snapshot)
+    {
+        return Attempted {
+            items,
+            calls: BTreeMap::new(),
+            result: Ok(Landed {
+                actions: None,
+                spent: None,
+                delivered: Vec::new(),
+            }),
+        };
+    }
+    // Named before the store is opened, so an attempt whose store never opens still names what
+    // it set out to carry; the reads below settle which of the unknown ones it does.
+    items.extend(
+        decided
+            .carried
+            .iter()
+            .chain(decided.unread.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+    );
+    let (result, calls) = match Attempt::open(store, snapshot) {
+        Err(failed) => (Err(failed), BTreeMap::new()),
+        Ok(attempt) => {
+            let result = carry_the_difference(
+                &attempt,
+                per_item,
+                snapshot,
+                (&renderings, decided),
+                baseline,
+                &mut items,
+            );
+            (result, attempt.calls.take())
+        }
     };
+    Attempted {
+        items,
+        calls,
+        result,
+    }
+}
+
+fn carry_the_difference(
+    attempt: &Attempt,
+    per_item: NonZeroU64,
+    snapshot: &Snapshot,
+    (renderings, decided): (&BTreeMap<String, Rendering>, Decided),
+    baseline: &mut Baseline,
+    items: &mut Vec<String>,
+) -> Result<Landed, Failed> {
+    let scope = decided.scope;
+    // What the run knows of every lineage the baseline holds: where its item is. The labels are
+    // read for the lineages the copy carries, below; an unnamed one is neither read nor written.
+    let mut origins = baseline.origins();
+    let mut carried = decided.carried;
+    let mut read: BTreeSet<String> = BTreeSet::new();
+    let mut seeded = false;
+    for (root, id) in &decided.unread {
+        let task = attempt.task(id)?;
+        let depends_on = renderings
+            .get(root)
+            .map(|now| now.item.depends_on.clone())
+            .unwrap_or_default();
+        let held = LandedItem::read(&task, depends_on);
+        origins.insert(root.clone(), Origin::of(task));
+        read.insert(root.clone());
+        // A read of one task does not answer its edges, so a lineage that has any is carried —
+        // the copy writes them, sending only their difference — rather than trusted to hold
+        // them; one with none is compared on everything the read did answer.
+        let differs = match scope {
+            Scope::Driven => !renderings
+                .get(root)
+                .is_some_and(|now| now.item.depends_on.is_empty() && held.says_what(&now.item)),
+            Scope::Release => held.status == Some(ProjectedStatus::Queued),
+        };
+        if differs {
+            carried.insert(root.clone());
+        } else {
+            baseline.landed.items.insert(root.clone(), held);
+            seeded = true;
+        }
+    }
+    if seeded {
+        baseline.save();
+    }
+    *items = carried.iter().cloned().collect();
+    // Every lineage the run did not know already says what the run would write, and no project
+    // key moved: the reads were the whole attempt, and there is nothing to copy.
+    if carried.is_empty() && !baseline.project_differs(snapshot) {
+        return Ok(Landed {
+            actions: None,
+            spent: None,
+            delivered: Vec::new(),
+        });
+    }
+    let destination_project = destination_project(attempt, snapshot)?;
+    for root in &carried {
+        if read.contains(root) {
+            continue;
+        }
+        let Some(origin) = origins.get_mut(root) else {
+            continue;
+        };
+        *origin = Origin::of(attempt.task(&origin.id.clone())?);
+    }
     // A shadow store this worker cannot write is its own failure, classed by nobody and so
     // retried: `store::an_unwritable_shadow_store_is_reported_retried_and_recovered`.
     write_shadow(snapshot, &origins, &destination_project)?;
     let shadow_project = shadow_id(&project_file(&snapshot.project));
-    // A member copy names exactly the nodes that changed. Naming none is not a copy of
+    // A member copy names exactly the lineages that changed. Naming none is not a copy of
     // everything: the project item alone carries what changed at the project's level.
-    let scope = match carry {
-        Carry::Whole(_) => CopyScope::Projects { tasks: true },
-        Carry::Members(named) => {
-            match CopyItems::new(named.iter().map(|node| member_id(snapshot, node)).collect()) {
-                Some(members) => CopyScope::Members(members),
-                // llmlint: ignore-block[changed_behavior_has_e2e] a member projection naming no
-                // node is reached only by a snapshot that moves no node's shadow task — a status
-                // moving inside one board word, pending to ready — because no edit a CLI accepts
-                // changes only the project's metadata, and the run passes through such a move
-                // inside a pass no input holds open. `writeback::tests` holds the decision that
-                // names none; a project copy without its tasks is the store's own scope for
-                // copying the project item alone.
-                None => CopyScope::Projects { tasks: false },
-                // llmlint: ignore-end[changed_behavior_has_e2e]
-            }
-        }
+    let scope = match CopyItems::new(
+        carried
+            .iter()
+            .map(|root| member_id(snapshot, root))
+            .collect(),
+    ) {
+        Some(members) => CopyScope::Members(members),
+        // llmlint: ignore-block[changed_behavior_has_e2e] a copy naming no lineage is reached
+        // only when a project key the destination holds changed and no lineage did — every
+        // other attempt carrying nothing asks the store nothing — and no edit a CLI accepts
+        // changes only the project's metadata. `writeback::tests` holds the decision that names
+        // none; a project copy without its tasks is the store's own scope for copying the
+        // project item alone.
+        None => CopyScope::Projects { tasks: false },
+        // llmlint: ignore-end[changed_behavior_has_e2e]
     };
     let request = CopyRequest {
         items: CopyItems::new(vec![shadow_project]).expect("one item is not none"),
@@ -1509,16 +1891,49 @@ fn project(
     // The one call that is linear in what it carries, so the one whose deadline is.
     let deadline = Deadline::Copy {
         per_item,
-        items: carry.items(snapshot).len(),
+        items: carried.len(),
     };
     let report = attempt
-        .call(PROJECT_COPY, deadline, attempt.engine.copy(&request))?
+        .call(
+            StoreCall::ProjectCopy,
+            deadline,
+            attempt.engine.copy(&request),
+        )?
         .map_err(|error| Failed::engine(PROJECT_COPY, &error))?;
     let delivered: Vec<Map<String, Value>> = report.delivered.iter().map(verbatim).collect();
-    // A copy whose own writes landed and whose delivered tickets the store could not keep in
-    // step is a projection that did not fully land: the tickets are behind the run. So it is
-    // failed, surfaced and retried whole exactly as any partial projection is, with the
-    // tickets and what the store said of each as the reason.
+    // Counted off the origins as the pre-copy read left them, before the report teaches the
+    // run where anything moved: a reopen is decided by what the item read as before the copy
+    // and what the copy wrote onto it.
+    let actions = actions(&report, snapshot, &origins);
+    learn(&report, &mut origins, snapshot);
+    // A copy whose delivered tickets the store could not keep in step landed every item but
+    // those deliverers': their tickets are behind the run, so their lineages stay unlanded and
+    // the next attempt carries them again — and nothing that did land.
+    let behind: std::collections::HashSet<&GlobalId> = report
+        .delivered
+        .iter()
+        .filter_map(|entry| match &entry.outcome {
+            DeliveryOutcome::Failed { .. } => Some(&entry.deliverer),
+            DeliveryOutcome::Written { .. }
+            | DeliveryOutcome::Unchanged { .. }
+            | DeliveryOutcome::Left { .. } => None,
+        })
+        .collect();
+    for root in &carried {
+        let (Some(origin), Some(now)) = (origins.get(root), renderings.get(root)) else {
+            continue;
+        };
+        if behind.contains(&origin.id) {
+            continue;
+        }
+        baseline
+            .landed
+            .items
+            .insert(root.clone(), now.item.landed_at(&origin.id));
+    }
+    baseline.landed.project_metadata =
+        owned(&projected_project_metadata(snapshot, &destination_project));
+    baseline.save();
     if let Some(tickets) = failed_deliveries(&report.delivered) {
         let mut failed = Failed::from(format!(
             "the copy landed, but the store could not keep every delivered ticket in step: \
@@ -1539,19 +1954,610 @@ fn project(
                     }),
             );
         failed.delivered = delivered;
+        failed.wait = report
+            .delivered
+            .iter()
+            .filter_map(|entry| match &entry.outcome {
+                DeliveryOutcome::Failed { failure, .. } => failure.retry_after_seconds(),
+                DeliveryOutcome::Written { .. }
+                | DeliveryOutcome::Unchanged { .. }
+                | DeliveryOutcome::Left { .. } => None,
+            })
+            .max()
+            .map(Duration::from_secs);
         return Err(failed);
     }
-    // Counted off the origins as the pre-copy read left them, before the report teaches the
-    // run where anything moved: a reopen is decided by what the item read as before the copy
-    // and what the copy wrote onto it.
-    let actions = actions(&report, snapshot, &origins);
-    learn(&report, &mut origins, snapshot);
     Ok(Landed {
-        origins,
-        actions,
-        spent: report.spent.as_ref().map(verbatim),
+        actions: Some(actions),
+        spent: summed(report.spent.iter()),
         delivered,
     })
+}
+
+/// Every call's reported spend, summed into the one object the record carries: requests
+/// added, and each budget added to the one of the same name and unit, a lower bound wherever
+/// any summand was. `None` where no call reported any.
+// llmlint: ignore[changed_behavior_has_e2e] the copy is the one call of this build that reports
+// a spend, so an attempt sums one summand, which every metered journey drives end to end
+// (`writeback_projections::the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent`
+// and the comparable plan's `writeback_cost`); the targeted updates that add further summands
+// arrive with the next build, and `writeback::tests::spent_is_summed_across_every_call_that_reports_one`
+// holds the sum of several meanwhile.
+fn summed<'a>(
+    spends: impl Iterator<Item = &'a onetaskgraph_core::Spent>,
+) -> Option<Map<String, Value>> {
+    let mut total: Option<onetaskgraph_core::Spent> = None;
+    for spent in spends {
+        let Some(sum) = total.as_mut() else {
+            total = Some(spent.clone());
+            continue;
+        };
+        sum.requests = sum.requests.saturating_add(spent.requests);
+        for budget in &spent.budgets {
+            match sum
+                .budgets
+                .iter_mut()
+                .find(|held| held.budget == budget.budget && held.unit == budget.unit)
+            {
+                Some(held) => {
+                    held.amount = held.amount.saturating_add(budget.amount);
+                    held.lower_bound |= budget.lower_bound;
+                }
+                None => sum.budgets.push(budget.clone()),
+            }
+        }
+        sum.budgets
+            .sort_by(|left, right| (&left.budget, &left.unit).cmp(&(&right.budget, &right.unit)));
+    }
+    total.as_ref().map(verbatim)
+}
+
+/// Which lineages one attempt carries, decided off the baseline before anything is read.
+struct Decided {
+    /// What the decision was made for.
+    scope: Scope,
+    /// Roots whose projection differs from what the baseline says landed: the copy's members.
+    carried: BTreeSet<String>,
+    /// Roots the baseline does not hold whose item the run knows an id for: each read once by
+    /// that id, and carried only where the read differs.
+    unread: BTreeMap<String, GlobalId>,
+}
+
+/// Decide what one attempt carries.
+///
+/// A lineage the baseline holds is carried when its projection, rendered from the snapshot
+/// alone, differs from what the baseline says landed. The one field a copy writes that the
+/// baseline does not keep is a node's GitHub repository, and no edit changes that alone: a
+/// `retry` moves the lineage's head, so `onepipeline.node` differs, and a `requeue` moves its
+/// word — so a lineage whose repository moved differs from the baseline in a field it does
+/// keep, whichever driver asks. A lineage the baseline does not hold is read by the id the run
+/// knows for it, or, where it knows none, carried: the copy creates it. A stop's release
+/// carries only the unstarted lineages the baseline says are `queued`, and creates nothing.
+fn decide(
+    snapshot: &Snapshot,
+    lineages: &Lineages,
+    renderings: &BTreeMap<String, Rendering>,
+    baseline: &Baseline,
+    scope: Scope,
+) -> Decided {
+    let mut decided = Decided {
+        scope,
+        carried: BTreeSet::new(),
+        unread: BTreeMap::new(),
+    };
+    for root in lineages.roots() {
+        let held = baseline.landed.items.get(root);
+        let Some(now) = renderings.get(root) else {
+            // A lineage that does not render is carried, so the attempt fails saying why.
+            if scope == Scope::Driven {
+                decided.carried.insert(root.clone());
+            }
+            continue;
+        };
+        match scope {
+            Scope::Driven => match held {
+                Some(held) => {
+                    if !held.says_what(&now.item) {
+                        decided.carried.insert(root.clone());
+                    }
+                }
+                None => match known_id(snapshot, lineages, root) {
+                    Some(id) => {
+                        decided.unread.insert(root.clone(), id);
+                    }
+                    None => {
+                        decided.carried.insert(root.clone());
+                    }
+                },
+            },
+            Scope::Release => {
+                if now.item.status != Some(ProjectedStatus::Todo) {
+                    continue;
+                }
+                match held {
+                    Some(held) => {
+                        if held.status == Some(ProjectedStatus::Queued) {
+                            decided.carried.insert(root.clone());
+                        }
+                    }
+                    None => {
+                        if let Some(id) = known_id(snapshot, lineages, root) {
+                            decided.unread.insert(root.clone(), id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    decided
+}
+
+/// The destination id the run knows for a lineage the baseline does not hold, furthest along
+/// first: the origin the previous driver's shadow document recorded for the head or any
+/// attempt before it — which is where a board an older build wrote keeps one item per attempt
+/// — and otherwise the task the root was read out of at launch.
+fn known_id(snapshot: &Snapshot, lineages: &Lineages, root: &str) -> Option<GlobalId> {
+    let destination = snapshot.project.global().source;
+    let folder = snapshot
+        .dir
+        .join("tasks")
+        .join(project_file(&snapshot.project));
+    let recorded = lineages.chain(root).and_then(|chain| {
+        chain.iter().rev().find_map(|node| {
+            shadow_origin(&folder.join(format!("{}.md", task_file(node))))
+                .filter(|id| id.source == destination)
+        })
+    });
+    recorded.or_else(|| {
+        snapshot
+            .nodes
+            .get(root)
+            .and_then(|node| node.task_record.as_ref())
+            .map(|record| GlobalId::new(destination, NativeId::from(record.id.as_str())))
+    })
+}
+
+/// The destination item a shadow document names as its origin: `None` where there is no such
+/// document or it names none, and — said on standard error, naming the document and why —
+/// where it cannot be read as one, so the id the run falls back to is never chosen silently.
+fn shadow_origin(path: &Path) -> Option<GlobalId> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        // llmlint: ignore-block[changed_behavior_has_e2e] a shadow document that is there and
+        // cannot be read is a run directory whose permissions were taken away underneath the
+        // run, which no CLI journey arranges; it is said and passed over exactly as a malformed
+        // one is below.
+        Err(error) => {
+            eprintln!(
+                "onetaskgraph write-back cannot read {}: {error}; the item it names is not \
+                 taken as the lineage's",
+                path.display()
+            );
+            return None;
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
+    };
+    let origin = text
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---\n"))
+        .ok_or_else(|| "it opens and closes no front matter".to_owned())
+        .and_then(|(front, _)| {
+            serde_norway::from_str::<Value>(front).map_err(|error| error.to_string())
+        })
+        .and_then(|front| match &front["metadata"][GlobalId::ORIGIN_KEY] {
+            Value::Null => Ok(None),
+            Value::String(origin) => origin
+                .parse::<GlobalId>()
+                .map(Some)
+                .map_err(|why| format!("its origin '{origin}' {why}")),
+            other => Err(format!("its origin is {other}, not an id")),
+        });
+    origin.unwrap_or_else(|why| {
+        eprintln!(
+            "onetaskgraph write-back cannot read {} as a shadow document: {why}; the item it \
+             names is not taken as the lineage's",
+            path.display()
+        );
+        None
+    })
+}
+
+/// One lineage as the snapshot alone renders it: the half of its shadow task the landed
+/// baseline keeps.
+struct Rendering {
+    /// What the baseline would record were this to land, its destination not yet known.
+    item: LandedItem,
+}
+
+impl Rendering {
+    fn of(snapshot: &Snapshot, lineages: &Lineages, root: &str) -> Result<Self, String> {
+        let (front, content) = task_document(snapshot, lineages, root, None)?;
+        let head = lineages
+            .chain(root)
+            .and_then(<[String]>::last)
+            .ok_or_else(|| format!("no lineage is rooted at '{root}'"))?;
+        let node = snapshot
+            .nodes
+            .get(head)
+            .ok_or_else(|| format!("the snapshot holds no node '{head}'"))?;
+        let item = LandedItem {
+            destination: String::new(),
+            title: front["title"].as_str().unwrap_or_default().to_owned(),
+            content_sha256: sha256(&content),
+            status: Some(snapshot.word_of(head)),
+            metadata: owned(
+                &front["metadata"]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
+            ),
+            delivers: node.delivers.clone(),
+            depends_on: node
+                .deps
+                .iter()
+                .filter(|dep| !crate::graph::is_cross_dag(dep))
+                .map(|dep| lineages.root_of(dep).to_owned())
+                .collect(),
+        };
+        Ok(Self { item })
+    }
+}
+
+fn sha256(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The keys of a metadata map this engine owns — `onepipeline.*` — and no other.
+fn owned(metadata: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+    metadata
+        .iter()
+        .filter(|(key, _)| key.starts_with(OWNED_PREFIX))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+const OWNED_PREFIX: &str = "onepipeline.";
+
+/// The project metadata a copy writes: the destination's own, with each engine-owned key it
+/// already holds restated from the snapshot.
+fn projected_project_metadata(
+    snapshot: &Snapshot,
+    destination_project: &Project,
+) -> BTreeMap<String, Value> {
+    let mut metadata: BTreeMap<String, Value> = destination_project
+        .metadata
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    for (key, value) in &snapshot.project_metadata {
+        if metadata.contains_key(key) {
+            metadata.insert(key.clone(), value.clone());
+        }
+    }
+    metadata
+}
+
+/// What this run has put on the board: the landed baseline, and the file it is kept in.
+struct Baseline {
+    path: PathBuf,
+    landed: LandedBaseline,
+}
+
+impl Baseline {
+    /// The run's baseline, or an empty one where its directory holds none — a run an older
+    /// build started — or holds one this build cannot read, which is said on standard error:
+    /// either way every lineage is then read once by its own id rather than trusted.
+    fn load(run_dir: &Path, project: &QualifiedId) -> Self {
+        let path = run_dir.join(WRITEBACK_LANDED_FILE);
+        let landed = match std::fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str::<LandedBaseline>(&text)
+                .map_err(|error| error.to_string())
+                .and_then(|landed| landed.checked(project).map(|()| landed))
+            {
+                Ok(landed) => landed,
+                Err(why) => {
+                    eprintln!(
+                        "onetaskgraph write-back cannot read {}: {why}; each item it would have \
+                         named is read from the store once instead",
+                        path.display()
+                    );
+                    LandedBaseline::empty(project)
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                LandedBaseline::empty(project)
+            }
+            // llmlint: ignore-block[changed_behavior_has_e2e] a baseline file that is there and
+            // cannot be read is a run directory whose permissions were taken away underneath
+            // the run, which no CLI journey arranges; it takes the same empty baseline a
+            // missing file does, which `writeback_projections` drives end to end.
+            Err(error) => {
+                eprintln!(
+                    "onetaskgraph write-back cannot read {}: {error}; each item it would have \
+                     named is read from the store once instead",
+                    path.display()
+                );
+                LandedBaseline::empty(project)
+            } // llmlint: ignore-end[changed_behavior_has_e2e]
+        };
+        Self { path, landed }
+    }
+
+    /// Whether the snapshot restates a project key the destination holds with another value
+    /// than the one last projected — the one project-level change a copy carries. A key the
+    /// destination does not hold is never written, so it is no change.
+    fn project_differs(&self, snapshot: &Snapshot) -> bool {
+        snapshot.project_metadata.iter().any(|(key, value)| {
+            self.landed
+                .project_metadata
+                .get(key)
+                .is_some_and(|held| held != value)
+        })
+    }
+
+    /// Where the run knows each lineage's item to be: the baseline's own destination ids.
+    fn origins(&self) -> BTreeMap<String, Origin> {
+        self.landed
+            .items
+            .iter()
+            .filter_map(|(root, item)| {
+                item.destination.parse::<GlobalId>().ok().map(|id| {
+                    (
+                        root.clone(),
+                        Origin {
+                            id,
+                            labels: Vec::new(),
+                            category: None,
+                        },
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Rewrite the file atomically. Best effort, like the projection it records: a file that
+    /// cannot be written is said on standard error, and the next driver reads each item once.
+    fn save(&self) {
+        // llmlint: ignore-block[changed_behavior_has_e2e] writing a file in the run's own
+        // directory fails only on a host whose run directory has been made unwritable, which
+        // no CLI journey arranges; every journey reading the baseline drives the write that
+        // lands.
+        let written = serde_json::to_vec_pretty(&self.landed)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                crate::ledger::write_atomic(&self.path, &bytes, crate::ledger::Durability::Record)
+                    .map_err(|error| error.to_string())
+            });
+        if let Err(error) = written {
+            eprintln!(
+                "onetaskgraph write-back could not record what landed at {}: {error}",
+                self.path.display()
+            );
+        }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+    }
+}
+
+/// Seed the run's landed baseline from the launch's own read of its project, before the
+/// first projection: every task's destination id, title, content, engine-owned metadata,
+/// `delivers` and edges, as the store answered them, and no status — the one thing this
+/// engine did not write itself.
+pub(crate) fn seed_landed(run_dir: &Path, project: &QualifiedId, read: &crate::taskgraph::Read) {
+    let mut landed = LandedBaseline::empty(project);
+    landed.project_metadata = owned(&read.project_metadata);
+    for node in &read.plan.tasks {
+        let Some(task) = read.tasks.get(&node.id) else {
+            continue;
+        };
+        let depends_on = node
+            .deps
+            .iter()
+            .filter(|dep| !crate::graph::is_cross_dag(dep))
+            .cloned()
+            .collect();
+        let mut item = LandedItem::read(task, depends_on);
+        item.status = None;
+        landed.items.insert(node.id.clone(), item);
+    }
+    Baseline {
+        path: run_dir.join(WRITEBACK_LANDED_FILE),
+        landed,
+    }
+    .save();
+}
+
+/// The write-back's landed baseline, `writeback-landed.json` in the run's directory: what
+/// this run last put on the board, per lineage — the engine's own run state, written from its
+/// own writes and the launch's own read, and never a cache of the store. It never feeds
+/// scheduling. Entry 93 of `docs/contract-divergences.md` states the shape and is the one
+/// source for it; only engine-owned `onepipeline.*` keys are kept, and no labels, no foreign
+/// metadata and no project title or description.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LandedBaseline {
+    pub schema_version: u32,
+    // llmlint: ignore-block[invalid_states_unrepresentable] the stored shape is JSON strings
+    // by contract — a qualified project id, and node ids keying the items — each checked where
+    // the file is read by `LandedBaseline::checked`, which refuses a project other than the
+    // run's and an item naming no node.
+    pub project: String,
+    pub project_metadata: BTreeMap<String, Value>,
+    pub items: BTreeMap<String, LandedItem>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+}
+
+/// One lineage as it last landed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LandedItem {
+    // llmlint: ignore-block[invalid_states_unrepresentable] the stored shape is JSON strings by
+    // contract; `LandedBaseline::checked` refuses a destination that is not a qualified id and
+    // a digest that is not lowercase SHA-256 hex, and node ids are the plain string every
+    // identifier in this crate is.
+    /// The qualified id of the destination item.
+    pub destination: String,
+    pub title: String,
+    /// The lowercase hex SHA-256 of the content's UTF-8 bytes.
+    pub content_sha256: String,
+    /// The word last landed, or `None` for an item seeded from a read.
+    pub status: Option<ProjectedStatus>,
+    /// Engine-owned keys only.
+    pub metadata: BTreeMap<String, Value>,
+    /// The qualified tickets the item delivers.
+    pub delivers: Vec<String>,
+    /// The lineage roots the item depends on.
+    pub depends_on: Vec<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+}
+
+impl LandedBaseline {
+    fn empty(project: &QualifiedId) -> Self {
+        Self {
+            schema_version: WRITEBACK_LANDED_SCHEMA_VERSION,
+            project: project.as_str().to_owned(),
+            project_metadata: BTreeMap::new(),
+            items: BTreeMap::new(),
+        }
+    }
+
+    /// Refuse a file this build did not write for this run: another version, another project,
+    /// a destination that is not a qualified id, a digest that is not one, or a key the engine
+    /// does not own.
+    // llmlint: ignore-block[changed_behavior_has_e2e] every refusal below is one arm of this one
+    // function, and they share one consequence, which is the only behaviour a driver shows: the
+    // file is said on standard error with the arm's reason and the baseline is taken as empty,
+    // each lineage then read once by its own id. That consequence is driven end to end by
+    // `writeback_projections::a_landed_baseline_the_driver_cannot_read_is_said_and_each_item_read_by_its_id`
+    // through the foreign-key arm, and
+    // `writeback::tests::entry_93s_example_is_the_landed_baseline_the_worker_writes_and_reads`
+    // holds every arm's refusal against the entry's own example. A journey per arm would drive
+    // the same lines with a different sentence in the log.
+    fn checked(&self, project: &QualifiedId) -> Result<(), String> {
+        if self.schema_version != WRITEBACK_LANDED_SCHEMA_VERSION {
+            return Err(format!(
+                "`schema_version` {} is not one this build reads \
+                 ({WRITEBACK_LANDED_SCHEMA_VERSION})",
+                self.schema_version
+            ));
+        }
+        if self.project != project.as_str() {
+            return Err(format!(
+                "it records project '{}', and this run projects onto '{project}'",
+                self.project
+            ));
+        }
+        let foreign = |metadata: &BTreeMap<String, Value>| {
+            metadata
+                .keys()
+                .find(|key| !key.starts_with(OWNED_PREFIX))
+                .cloned()
+        };
+        if let Some(key) = foreign(&self.project_metadata) {
+            return Err(format!(
+                "`project_metadata` holds `{key}`, which is not the engine's"
+            ));
+        }
+        for (root, item) in &self.items {
+            if root.is_empty() {
+                return Err("`items` holds an item under no node id".to_owned());
+            }
+            let destination = item
+                .destination
+                .parse::<GlobalId>()
+                .map_err(|why| format!("item '{root}': `destination` {why}"))?;
+            // llmlint: ignore[boundary_inputs_validated] the destination's source is what an id's
+            // spelling decides on every store and is refused here; its project is not — a GitHub
+            // issue's id names no project, and a `local-md` one is a file path — so no check of
+            // the file alone could hold that line without refusing every hosted board's
+            // baseline. The file is this engine's own record of its own writes, written only by
+            // `Baseline::save`, and everything its spelling can refuse is refused in this function.
+            if destination.source != project.global().source {
+                return Err(format!(
+                    "item '{root}': `destination` '{}' is not an item of this run's destination \
+                     '{}'",
+                    item.destination,
+                    project.global().source
+                ));
+            }
+            let digest = &item.content_sha256;
+            if digest.len() != 64
+                || !digest
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+            {
+                return Err(format!(
+                    "item '{root}': `content_sha256` is not lowercase SHA-256 hex"
+                ));
+            }
+            if let Some(key) = foreign(&item.metadata) {
+                return Err(format!(
+                    "item '{root}': `metadata` holds `{key}`, which is not the engine's"
+                ));
+            }
+            for ticket in &item.delivers {
+                ticket.parse::<GlobalId>().map_err(|why| {
+                    format!("item '{root}': `delivers` names '{ticket}', which {why}")
+                })?;
+            }
+            if item.depends_on.iter().any(String::is_empty) {
+                return Err(format!(
+                    "item '{root}': `depends_on` names an empty node id"
+                ));
+            }
+        }
+        Ok(())
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+}
+
+impl LandedItem {
+    /// One destination task as the store answered it: its content trimmed as the plan reader
+    /// trims a body, its engine-owned keys, its tickets qualified in its own source, and the
+    /// word it holds where it is one this engine writes. The edges are the caller's, because a
+    /// read of one task does not answer them.
+    fn read(task: &Qualified<Task>, depends_on: Vec<String>) -> Self {
+        Self {
+            destination: task.id.to_string(),
+            title: task.item.title.clone(),
+            content_sha256: sha256(task.item.content.as_deref().unwrap_or_default().trim()),
+            // A word this engine never writes — a person's own, or a board's mapped option — is
+            // no word it landed, so it reads as not known, which differs from every word a
+            // rendering has and so is carried rather than trusted.
+            status: serde_json::from_value(json!(task.item.status.name)).ok(),
+            metadata: owned(&task.item.metadata.clone().into_iter().collect()),
+            delivers: task
+                .item
+                .delivers
+                .iter()
+                .map(|entry| entry.in_source(&task.id.source).to_string())
+                .collect(),
+            depends_on,
+        }
+    }
+
+    /// Whether this says on the board what `other` would: every field but where it is.
+    fn says_what(&self, other: &Self) -> bool {
+        self.title == other.title
+            && self.content_sha256 == other.content_sha256
+            && self.status == other.status
+            && self.metadata == other.metadata
+            && self.delivers == other.delivers
+            && self.depends_on == other.depends_on
+    }
+
+    /// This rendering, landed on the item at `destination`.
+    fn landed_at(&self, destination: &GlobalId) -> Self {
+        Self {
+            destination: destination.to_string(),
+            ..self.clone()
+        }
+    }
 }
 
 /// One of the store's values, as the object the projection record carries it as: the
@@ -1628,7 +2634,11 @@ fn shown<T>(
 fn destination_project(attempt: &Attempt, snapshot: &Snapshot) -> Result<Project, Failed> {
     let id = snapshot.project.global();
     let answer = attempt
-        .call(PROJECT_SHOW, Deadline::Floor, attempt.engine.project(&id))?
+        .call(
+            StoreCall::ProjectShow,
+            Deadline::Floor,
+            attempt.engine.project(&id),
+        )?
         .map_err(|error| Failed::engine(PROJECT_SHOW, &error))?;
     Ok(shown(PROJECT_SHOW, &id, answer)?.item)
 }
@@ -1665,139 +2675,6 @@ impl Origin {
             category: Some(task.item.status.category),
         }
     }
-}
-
-fn destination_origins(
-    attempt: &Attempt,
-    snapshot: &Snapshot,
-) -> Result<BTreeMap<String, Origin>, Failed> {
-    // Each item placed in its lineage as the page is read, and folded onto lineage roots
-    // once the whole page has been.
-    let lineages = snapshot.lineages();
-    let mut placed: Vec<Placed> = Vec::new();
-    let mut token: Option<PageToken> = None;
-    let mut cursors = std::collections::HashSet::new();
-    let project = snapshot.project.global();
-    let selector = if attempt.engine.has(&project.source) {
-        ProjectSelector::Qualified(project)
-    } else {
-        ProjectSelector::Native(NativeId::from(snapshot.project.as_str()))
-    };
-    loop {
-        let request = TaskRequest {
-            sources: Vec::new(),
-            filters: Filters::default(),
-            priorities: Vec::new(),
-            project: selector.clone(),
-            paging: Paging {
-                limit: TASK_PAGE,
-                token: token.clone(),
-            },
-        };
-        // llmlint: ignore-block[changed_behavior_has_e2e] The real unavailable-store
-        // journey proves this asynchronous read cannot affect or delay reconciliation, and the
-        // floor that bounds it is the one
-        // `writeback_budget::a_destination_read_held_past_the_floor_is_cancelled_retried_and_recovers`
-        // drives against the project read and the member read an attempt makes beside it.
-        let answer = attempt
-            .call(TASK_LIST, Deadline::Floor, attempt.engine.tasks(&request))?
-            .map_err(|error| Failed::engine(TASK_LIST, &error))?;
-        // llmlint: ignore-end[changed_behavior_has_e2e]
-        if !answer.errors.is_empty() {
-            return Err(Failed::partial(TASK_LIST, &answer.errors));
-        }
-        for task in answer.items {
-            placed.push(Placed::of(&lineages, task)?);
-        }
-        let Some(next) = answer.next else { break };
-        // llmlint: ignore-block[changed_behavior_has_e2e] The linked store issues a token
-        // that advances by construction; this refuses one that does not rather than walking
-        // the same page for ever.
-        if !cursors.insert(next.clone()) {
-            return Err("task list repeated a next-page cursor".to_owned().into());
-        }
-        // llmlint: ignore-end[changed_behavior_has_e2e]
-        token = Some(next);
-    }
-    Ok(furthest_along(placed)?)
-}
-
-/// One destination item, placed in its lineage by the attempt it names.
-///
-/// The lineage is the one its `onepipeline.id` belongs to. Its position in that lineage is
-/// its `onepipeline.node` where the item names one — the head this build wrote onto it — and
-/// its `onepipeline.id` otherwise, which is every item an older build wrote and every item
-/// nothing retried; an attempt the lineage does not hold places at the root.
-struct Placed {
-    // llmlint: ignore-block[invalid_states_unrepresentable] node ids off the item's own
-    // reserved keys, the plain `String` the snapshot keys by; the position is an index into
-    // the lineage's chain, and the origin is the typed half.
-    root: String,
-    position: usize,
-    attempt: String,
-    // llmlint: ignore-end[invalid_states_unrepresentable]
-    origin: Origin,
-}
-
-impl Placed {
-    fn of(lineages: &Lineages, task: Qualified<Task>) -> Result<Self, String> {
-        // A reserved key the item carries is a node id, and a node id is a non-empty
-        // string: one present as anything else is the destination's answer being wrong,
-        // which is refused by name rather than read as the key being absent.
-        let named = |key: &str| -> Result<Option<String>, String> {
-            match task.item.metadata.get(key) {
-                None => Ok(None),
-                Some(Value::String(id)) if !id.is_empty() => Ok(Some(id.clone())),
-                Some(other) => Err(format!(
-                    "task '{}' carries {key} as {other}, and a node id is a non-empty string",
-                    task.id
-                )),
-            }
-        };
-        let node = named(ID_KEY)?.ok_or_else(|| format!("task '{}' has no {ID_KEY}", task.id))?;
-        let attempt = named(NODE_KEY)?.unwrap_or_else(|| node.clone());
-        let root = lineages.root_of(&node).to_owned();
-        let position = lineages
-            .chain(&root)
-            .and_then(|chain| chain.iter().position(|id| *id == attempt))
-            .unwrap_or(0);
-        Ok(Self {
-            root,
-            position,
-            attempt,
-            origin: Origin::of(task),
-        })
-    }
-}
-
-/// Fold what the destination holds onto lineage roots.
-///
-/// Several items under one root are what a board an older build wrote holds after an
-/// `--adopt` — one item per attempt — and, after this build's first projection over it, that
-/// board holding the older item at the root beside the rewritten head. The lineage is
-/// projected onto the item at the furthest-along position, and the rest are left exactly as
-/// they are: a copy never deletes, and nothing here cleans up. Two items at one position are
-/// two items for one attempt, and stay the refusal they always were. An item whose node no
-/// lineage holds is its own root, as it was.
-fn furthest_along(placed: Vec<Placed>) -> Result<BTreeMap<String, Origin>, String> {
-    let mut by_position: BTreeMap<(String, usize), Placed> = BTreeMap::new();
-    for item in placed {
-        let key = (item.root.clone(), item.position);
-        if by_position.contains_key(&key) {
-            return Err(format!(
-                "project has more than one task for node '{}'",
-                item.attempt
-            ));
-        }
-        by_position.insert(key, item);
-    }
-    // Ascending by root and then by position, so the last item under each root is its
-    // furthest along.
-    let mut by_root: BTreeMap<String, Origin> = BTreeMap::new();
-    for ((root, _), item) in by_position {
-        by_root.insert(root, item.origin);
-    }
-    Ok(by_root)
 }
 
 /// Build the shadow project a `project copy` then projects onto the destination.
@@ -1845,8 +2722,11 @@ fn write_shadow(
         written.insert(path);
     }
     // A superseded node has no shadow task of its own, and neither has anything an earlier
-    // build left here: a whole copy carries every task the shadow store holds, so a document
-    // this snapshot did not write would reach the board as an item of its own.
+    // build left here. A member copy writes only the members it names, but it first lists the
+    // shadow project's tasks to tell those from the rest, and a listed task naming no
+    // destination item is one an edge of a named member may not point at — so a document this
+    // snapshot did not write, keyed by no lineage (and read by `known_id` before this runs), is
+    // taken out rather than left to stand as a task the run knows nothing of.
     for entry in std::fs::read_dir(&tasks).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
         if !written.contains(&path) {
@@ -1863,7 +2743,7 @@ fn write_shadow(
 /// id where it carries none), word, body, edges, `delivers` and fields, with `onepipeline.id`
 /// the root's, `onepipeline.node` the head's and `onepipeline.supersedes` the ids between.
 /// Rendered with no origin, it is the half the run alone decides, which is what tells a
-/// lineage whose projection changed from one whose did not: see [`Carry::decide`].
+/// lineage whose projection changed from what landed from one whose did not: see [`decide`].
 fn task_document(
     snapshot: &Snapshot,
     lineages: &Lineages,
@@ -2040,8 +2920,8 @@ fn document(path: &Path, front: &Value, body: &str) -> Result<(), String> {
 /// the name — four of these are a category's own word and the rest are words that
 /// vocabulary has none of. `docs/contract-divergences.md` records what that costs
 /// and why it is the cheaper of the two.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
-enum ProjectedStatus {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ProjectedStatus {
     #[serde(rename = "in progress")]
     InProgress,
     #[serde(rename = "done")]
@@ -2167,95 +3047,6 @@ fn shadow_id(native: &str) -> GlobalId {
         SourceName::new(SHADOW_SOURCE).expect("the shadow source's name is a source name"),
         NativeId::from(native),
     )
-}
-
-/// What one attempt carries, decided before it reads anything.
-enum Carry {
-    /// Every node, as a copy naming no member carries them.
-    Whole(WholeBecause),
-    /// The nodes whose shadow task changed since the last attempt that landed — possibly none,
-    /// which is a copy of the project item alone.
-    Members(BTreeSet<String>),
-}
-
-impl Carry {
-    /// Whole where it has to be, and otherwise exactly the lineages that changed.
-    ///
-    /// Whole when the attempt before this one failed — what the destination holds is then not
-    /// known to be the last success — and when nothing has landed in this worker yet, in that
-    /// order of precedence. A lineage changed when its
-    /// shadow task, rendered from the snapshot alone, differs from the one the last success
-    /// rendered under the same root, or when that success rendered none. Project-level
-    /// metadata is not a node: the project item every copy includes carries it. A node never
-    /// leaves a snapshot — every node the plan or an edit ever held is in one — so there is no
-    /// item to carry away: a dropped node changes by its word turning `cancelled`, and a retry
-    /// changes its lineage's one task by giving it a new head, each carried like any other
-    /// change under the root's member, which
-    /// `live_edit::retry_cancel_requeue_and_drop_are_projected_after_their_rulings` drives to
-    /// the board.
-    fn decide(after_failure: bool, last: Option<&Snapshot>, snapshot: &Snapshot) -> Self {
-        if after_failure {
-            return Self::Whole(WholeBecause::AfterFailure);
-        }
-        let Some(last) = last else {
-            return Self::Whole(WholeBecause::First);
-        };
-        let (now, before) = (snapshot.lineages(), last.lineages());
-        Self::Members(
-            now.roots()
-                .filter(|root| {
-                    task_document(last, &before, root, None).ok()
-                        != task_document(snapshot, &now, root, None).ok()
-                })
-                .cloned()
-                .collect(),
-        )
-    }
-
-    /// The lineage roots the copy carries: every one, for a whole copy.
-    fn items(&self, snapshot: &Snapshot) -> Vec<String> {
-        match self {
-            Self::Whole(_) => snapshot.lineages().roots().cloned().collect(),
-            Self::Members(named) => named.iter().cloned().collect(),
-        }
-    }
-}
-
-/// What the worker carries from one attempt that landed to the next.
-#[derive(Default)]
-struct Carried {
-    /// The snapshot that attempt projected, which the next one is compared against.
-    last: Option<Snapshot>,
-    /// Each lineage's destination item as that attempt left it: read by the last whole
-    /// projection's page of tasks, re-read for every member named since, and updated by what
-    /// each copy reported creating. A member copy's unnamed members are written into the shadow
-    /// from here rather than read again.
-    origins: BTreeMap<String, Origin>,
-}
-
-/// What the destination holds for the nodes a member copy names, read one named member at a
-/// time and nothing else.
-///
-/// Every unnamed member's origin comes from what the run already carries, so it is never read.
-/// A named member is read again, because its labels are the destination's own and a person may
-/// have changed them since. A named node the destination holds no item for is created by the
-/// copy, so there is nothing to read.
-fn member_origins(
-    attempt: &Attempt,
-    named: &BTreeSet<String>,
-    known: &BTreeMap<String, Origin>,
-) -> Result<BTreeMap<String, Origin>, Failed> {
-    let mut origins = known.clone();
-    for node in named {
-        let Some(origin) = origins.get_mut(node) else {
-            continue;
-        };
-        let answer = attempt
-            .call(TASK_SHOW, Deadline::Floor, attempt.engine.task(&origin.id))?
-            .map_err(|error| Failed::engine(TASK_SHOW, &error))?;
-        *origin = Origin::of(shown(TASK_SHOW, &origin.id, answer)?);
-    }
-    Ok(origins)
 }
 
 /// How many items a copy report says the copy did each thing to, the project item included —
@@ -2403,13 +3194,13 @@ fn append_record(run_dir: &Path, record: &ProjectionRecord) {
 /// [`WRITEBACK_PROJECTIONS_FILE`](crate::cli::WRITEBACK_PROJECTIONS_FILE) holds it: one JSON
 /// object per line, appended as the attempt ends and never rewritten.
 ///
-/// What a projection's cost is read off: what it carried and why, how it ended, how long it
-/// took, and what the store said it spent. Entry 73 of `docs/contract-divergences.md` states
-/// the shape and is the one source for it. The wire form is flat — every key written, `null`
-/// where it says nothing — and this is the shape of it that cannot say a contradiction: a
-/// member copy has no reason to be whole, and a failed attempt names neither `actions` nor
-/// `spent`, the halves of a copy report only a landed one has. `delivered` is the half a
-/// partial copy reports as it fails, so it is kept either way.
+/// What a projection's cost is read off: what it carried, how it ended, how long it took,
+/// which store calls it made, and what the store said it spent. Entry 73 of
+/// `docs/contract-divergences.md` states the shape and is the one source for it. The wire form
+/// is flat — every key written, `null` where it says nothing — and this is the shape of it that
+/// cannot say a contradiction: a member copy has no reason to be whole, and a failed attempt
+/// names neither `actions` nor `spent`, the halves of a copy report only a landed one has.
+/// `delivered` is the half a partial copy reports as it fails, so it is kept either way.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "ProjectionWire", into = "ProjectionWire")]
 pub struct ProjectionRecord {
@@ -2435,25 +3226,150 @@ pub struct ProjectionRecord {
     /// carried task delivers, whether the attempt landed or not. Empty where the report carried
     /// none, and then left off the line.
     pub delivered: Vec<Map<String, Value>>,
+    /// Which store operations the attempt called, and how many items its targeted updates
+    /// wrote each field on. `None` only on a line an earlier build wrote, which named none;
+    /// version 4 added it, and every line this build writes names it.
+    pub calls: Option<ProjectionCalls>,
+}
+
+/// How many times one projection attempt called each store operation — the one that failed
+/// included, an operation not called left off — and, for an attempt that made targeted
+/// updates, how many items each field was written on.
+///
+/// One value, so a record cannot name field updates without the `task-update` calls that wrote
+/// them: [`ProjectionCalls::new`] refuses that, and is the only way to build one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectionCalls {
+    counts: BTreeMap<StoreCall, NonZeroU64>,
+    updated_fields: Option<BTreeMap<UpdatedField, NonZeroU64>>,
+}
+
+impl ProjectionCalls {
+    /// The calls one attempt made, and what its targeted updates wrote where it made any.
+    ///
+    /// # Errors
+    ///
+    /// Refuses `updated_fields` beside no `task-update` call — fields no update wrote — and a
+    /// `task-update` call beside no `updated_fields`, which every attempt that made one names.
+    pub fn new(
+        counts: BTreeMap<StoreCall, NonZeroU64>,
+        updated_fields: Option<BTreeMap<UpdatedField, NonZeroU64>>,
+    ) -> Result<Self, String> {
+        match (
+            updated_fields.is_some(),
+            counts.contains_key(&StoreCall::TaskUpdate),
+        ) {
+            (true, false) => {
+                return Err(
+                    "`updated_fields` is named without a `task-update` call to have written them"
+                        .to_owned(),
+                )
+            }
+            (false, true) => {
+                return Err(
+                    "`task-update` was called and no `updated_fields` says what it wrote"
+                        .to_owned(),
+                )
+            }
+            (true, true) | (false, false) => {}
+        }
+        Ok(Self {
+            counts,
+            updated_fields,
+        })
+    }
+
+    /// How many times each store operation was called; one not called is not named.
+    #[must_use]
+    pub fn counts(&self) -> &BTreeMap<StoreCall, NonZeroU64> {
+        &self.counts
+    }
+
+    /// How many items each field was written on, where the attempt made a targeted update.
+    #[must_use]
+    pub fn updated_fields(&self) -> Option<&BTreeMap<UpdatedField, NonZeroU64>> {
+        self.updated_fields.as_ref()
+    }
+}
+
+/// One store operation a projection attempt can call, by the name the record and its
+/// refusals spell it with. A closed set, so a call this build does not name is a compile error
+/// rather than a word a reader has never seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StoreCall {
+    /// Reading the destination project.
+    ProjectShow,
+    /// Reading a page of the destination project's tasks. **Read, never written**: a line an
+    /// earlier build wrote may count it, and no attempt this build makes calls it.
+    TaskList,
+    /// Reading one destination task by its own id.
+    TaskShow,
+    /// The copy.
+    ProjectCopy,
+    /// A targeted update of one task. Named for the record's reader; this build calls none.
+    TaskUpdate,
+    /// Setting one project metadata key. Named for the record's reader; this build calls none.
+    ProjectMetadataSet,
+}
+
+impl StoreCall {
+    /// The name a refusal of this call carries, which is its word in the record.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ProjectShow => PROJECT_SHOW,
+            Self::TaskList => "task-list",
+            Self::TaskShow => TASK_SHOW,
+            Self::ProjectCopy => PROJECT_COPY,
+            Self::TaskUpdate => "task-update",
+            Self::ProjectMetadataSet => "project-metadata-set",
+        }
+    }
+}
+
+/// One field a targeted update writes, as the record's `updated_fields` keys it. Defined by
+/// version 4 of the record; this build writes no targeted update, so it never writes one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpdatedField {
+    /// The task's title.
+    Title,
+    /// The task's body.
+    Content,
+    /// The task's status.
+    Status,
+    /// The task's priority.
+    Priority,
+    /// The task's metadata.
+    Metadata,
+    /// The tickets the task delivers.
+    Delivers,
+    /// The task's forward dependency edges.
+    DependsOn,
 }
 
 /// What one projection attempt carried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectionScope {
-    /// Every node of the plan, for the reason given.
+    /// Every node of the plan, for the reason given — read off a line an earlier build wrote.
     Whole(WholeBecause),
-    /// Only the nodes whose projection changed since the last attempt that landed.
+    /// Only the lineages whose projection differs from what landed: every attempt this build
+    /// makes.
     Members,
 }
 
 /// Why a projection attempt carried the whole project.
+///
+/// **Read, never written**: every attempt this build makes carries the lineages whose
+/// projection differs from what landed, so a line naming one of these is a line an earlier
+/// build wrote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WholeBecause {
-    /// Nothing has landed in this driver yet: its first projection, including one an `adopt`
+    /// Nothing had landed in that driver yet: its first projection, including one an `adopt`
     /// started.
     First,
-    /// The attempt before this one failed.
+    /// The attempt before that one failed.
     AfterFailure,
     /// The store reported a version older than the first release offering a member copy.
     ///
@@ -2517,26 +3433,16 @@ pub struct ProjectionActions {
 }
 
 impl ProjectionRecord {
-    fn of(
-        at: String,
-        project: &QualifiedId,
-        carry: &Carry,
-        items: Vec<String>,
-        took: Duration,
-        attempt: &Result<Landed, Failed>,
-    ) -> Self {
+    fn of(at: String, project: &QualifiedId, took: Duration, attempted: &Attempted) -> Self {
         Self {
             at,
             project: project.as_str().to_owned(),
-            scope: match carry {
-                Carry::Whole(because) => ProjectionScope::Whole(*because),
-                Carry::Members(_) => ProjectionScope::Members,
-            },
-            items,
+            scope: ProjectionScope::Members,
+            items: attempted.items.clone(),
             duration_ms: u64::try_from(took.as_millis()).unwrap_or(u64::MAX),
-            ended: match attempt {
+            ended: match &attempted.result {
                 Ok(landed) => ProjectionEnded::Projected {
-                    actions: Some(landed.actions),
+                    actions: landed.actions,
                     spent: landed.spent.clone(),
                 },
                 Err(failed) => ProjectionEnded::Failed {
@@ -2550,10 +3456,18 @@ impl ProjectionRecord {
                     reason: failed.reason.clone(),
                 },
             },
-            delivered: match attempt {
+            delivered: match &attempted.result {
                 Ok(landed) => landed.delivered.clone(),
                 Err(failed) => failed.delivered.clone(),
             },
+            calls: Some(ProjectionCalls {
+                counts: attempted
+                    .calls
+                    .iter()
+                    .filter_map(|(call, count)| NonZeroU64::new(*count).map(|count| (*call, count)))
+                    .collect(),
+                updated_fields: None,
+            }),
         }
     }
 }
@@ -2585,6 +3499,32 @@ struct ProjectionWire {
     /// empty list, has to be told apart from one that leaves it off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     delivered: Option<Vec<Map<String, Value>>>,
+    /// Every version 4 line names it; an earlier one names none, and is refused naming it.
+    /// Held twice optional, so a line naming it as `null` is told apart from one leaving it off
+    /// and refused by the key's own name rather than read as never having named it.
+    #[serde(
+        default,
+        deserialize_with = "named",
+        skip_serializing_if = "Option::is_none"
+    )]
+    calls: Option<Option<BTreeMap<StoreCall, NonZeroU64>>>,
+    /// Only a version 4 line that made a targeted update names it; held as `calls` is.
+    #[serde(
+        default,
+        deserialize_with = "named",
+        skip_serializing_if = "Option::is_none"
+    )]
+    updated_fields: Option<Option<BTreeMap<UpdatedField, NonZeroU64>>>,
+}
+
+/// A key that is on the line, whatever it holds — `null` included — as `Some`; the key left
+/// off stays `None` through `#[serde(default)]`.
+fn named<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 /// The version of a projection line that names none: the shape before `delivered` existed.
@@ -2594,6 +3534,10 @@ fn unversioned_projection_line() -> u32 {
 
 /// The version that added `delivered`, and the last that named no `actions.reopened`.
 const PROJECTION_LINE_WITH_DELIVERED: u32 = 2;
+
+/// The version that added `actions.reopened`, and the last that named no `calls` — which is
+/// the version a line an earlier build wrote is written back at, since it counts no calls.
+const PROJECTION_LINE_WITH_REOPENED: u32 = 3;
 
 /// [`ProjectionActions`] as a line carries it. `reopened` is held as an `Option` for the
 /// reason `delivered` is: a version 1 or 2 line is refused by the key's own name, so a line
@@ -2655,15 +3599,35 @@ impl TryFrom<ProjectionWire> for ProjectionRecord {
             .actions
             .as_ref()
             .is_some_and(|actions| actions.reopened.is_some());
+        let names_calls = wire.calls.is_some() || wire.updated_fields.is_some();
         match wire.schema_version {
+            WRITEBACK_PROJECTIONS_SCHEMA_VERSION | PROJECTION_LINE_WITH_REOPENED
+                if wire.actions.is_some() && !names_reopened =>
+            {
+                return Err(format!(
+                    "a version {} line names `actions` without `actions.reopened`, which every \
+                     landed attempt at that version names",
+                    wire.schema_version
+                ));
+            }
             WRITEBACK_PROJECTIONS_SCHEMA_VERSION => {
-                if wire.actions.is_some() && !names_reopened {
+                let Some(Some(calls)) = &wire.calls else {
                     return Err(format!(
-                        "a version {WRITEBACK_PROJECTIONS_SCHEMA_VERSION} line names `actions` \
-                         without `actions.reopened`, which every landed attempt at that version \
-                         names"
+                        "a version {WRITEBACK_PROJECTIONS_SCHEMA_VERSION} line names no `calls` \
+                         object, which every line at that version names"
                     ));
+                };
+                if matches!(wire.updated_fields, Some(None)) {
+                    return Err("a line names `updated_fields` as null".to_owned());
                 }
+                ProjectionCalls::new(calls.clone(), wire.updated_fields.clone().flatten())?;
+            }
+            1 | PROJECTION_LINE_WITH_DELIVERED | PROJECTION_LINE_WITH_REOPENED if names_calls => {
+                return Err(format!(
+                    "a version {} line names `calls` or `updated_fields`, which version \
+                     {WRITEBACK_PROJECTIONS_SCHEMA_VERSION} added",
+                    wire.schema_version
+                ))
             }
             1 if wire.delivered.is_some() => {
                 return Err(format!(
@@ -2674,15 +3638,16 @@ impl TryFrom<ProjectionWire> for ProjectionRecord {
             1 | PROJECTION_LINE_WITH_DELIVERED if names_reopened => {
                 return Err(format!(
                     "a version {} line names `actions.reopened`, which version \
-                     {WRITEBACK_PROJECTIONS_SCHEMA_VERSION} added",
+                     {PROJECTION_LINE_WITH_REOPENED} added",
                     wire.schema_version
                 ))
             }
-            1 | PROJECTION_LINE_WITH_DELIVERED => {}
+            1 | PROJECTION_LINE_WITH_DELIVERED | PROJECTION_LINE_WITH_REOPENED => {}
             other => {
                 return Err(format!(
                     "`schema_version` {other} is not one this build reads (1, \
-                     {PROJECTION_LINE_WITH_DELIVERED}, {WRITEBACK_PROJECTIONS_SCHEMA_VERSION})"
+                     {PROJECTION_LINE_WITH_DELIVERED}, {PROJECTION_LINE_WITH_REOPENED}, \
+                     {WRITEBACK_PROJECTIONS_SCHEMA_VERSION})"
                 ))
             }
         }
@@ -2750,6 +3715,10 @@ impl TryFrom<ProjectionWire> for ProjectionRecord {
             duration_ms: wire.duration_ms,
             ended,
             delivered: wire.delivered.unwrap_or_default(),
+            calls: match wire.calls.flatten() {
+                Some(counts) => Some(ProjectionCalls::new(counts, wire.updated_fields.flatten())?),
+                None => None,
+            },
         })
     }
 }
@@ -2777,7 +3746,14 @@ impl From<ProjectionRecord> for ProjectionWire {
             }
         };
         Self {
-            schema_version: WRITEBACK_PROJECTIONS_SCHEMA_VERSION,
+            // A record that counts its calls is written at the version that added them; one an
+            // earlier build wrote counts none, and is written back at the last version that
+            // named none rather than as a version 4 line missing a key every one names.
+            schema_version: if record.calls.is_some() {
+                WRITEBACK_PROJECTIONS_SCHEMA_VERSION
+            } else {
+                PROJECTION_LINE_WITH_REOPENED
+            },
             at: record.at,
             project: record.project,
             scope,
@@ -2791,6 +3767,14 @@ impl From<ProjectionRecord> for ProjectionWire {
             actions,
             spent,
             delivered: (!record.delivered.is_empty()).then_some(record.delivered),
+            calls: record
+                .calls
+                .as_ref()
+                .map(|calls| Some(calls.counts.clone())),
+            updated_fields: record
+                .calls
+                .and_then(|calls| calls.updated_fields)
+                .map(Some),
         }
     }
 }
@@ -2826,38 +3810,43 @@ mod tests {
         })
     }
 
-    /// The copy's deadline is the per-item budget multiplied by the item count, and never
-    /// below the floor; the refusal says which governed and what it was computed from.
+    /// The copy's deadline is the floor plus the per-item budget multiplied by the item count;
+    /// the refusal says what it was computed from.
     ///
-    /// The incident: 34 items under the fixed sixty seconds. Under the shipped budget that
-    /// run is allowed 340, and the line an operator reads says so — and a plan the floor
-    /// still governs says that instead, rather than a figure that was never the deadline.
+    /// The incident: a seven-item copy onto the `plans` board measured 71 to 72 seconds, and
+    /// the larger of the floor and ten seconds per item allowed it 70 (#521). Under the
+    /// shipped budget that copy is allowed the floor and seven twelve-second items besides.
     #[test]
-    fn the_copy_deadline_is_the_budget_times_the_items_and_never_below_the_floor() {
+    fn the_copy_deadline_is_the_floor_plus_the_budget_times_the_items() {
         let shipped = DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS;
         let copy = |items: usize| Deadline::Copy {
             per_item: shipped,
             items,
         };
-        assert_eq!(copy(34).within(), Duration::from_secs(340));
+        assert_eq!(copy(7).within(), Duration::from_secs(144));
         assert_eq!(
-            copy(34).refusal("project-copy"),
-            "project-copy exceeded 340 seconds (34 items × 10 seconds per item)"
+            copy(7).refusal("project-copy"),
+            "project-copy exceeded 144 seconds (the 60 second floor + 7 items × 12 seconds \
+             per item)"
         );
+        // Seven items at eleven seconds apiece — slower than the board measured — land.
+        assert!(copy(7).within() > Duration::from_secs(7 * 11));
+        // And a copy at the measured 10.2 seconds per item lands with a sixth to spare
+        // however many items it carries, which the floor alone could never promise.
+        for items in [1_usize, 7, 34, 1_000] {
+            let measured = Duration::from_millis(10_200 * items as u64);
+            assert!(
+                copy(items).within() > measured + measured / 6,
+                "{items} items at the measured pace outrun their deadline"
+            );
+        }
 
-        assert_eq!(copy(2).within(), COMMAND_FLOOR);
+        // No items is the floor alone, and said as the arithmetic it is.
+        assert_eq!(copy(0).within(), COMMAND_FLOOR);
         assert_eq!(
-            copy(2).refusal("project-copy"),
-            "project-copy exceeded 60 seconds (the 60 second floor; 2 items × 10 seconds \
-             per item is less)"
-        );
-
-        // Exactly the floor is the product, and said as the product: the floor did not
-        // lift anything.
-        assert_eq!(copy(6).within(), COMMAND_FLOOR);
-        assert_eq!(
-            copy(6).refusal("project-copy"),
-            "project-copy exceeded 60 seconds (6 items × 10 seconds per item)"
+            copy(0).refusal("project-copy"),
+            "project-copy exceeded 60 seconds (the 60 second floor + 0 items × 12 seconds \
+             per item)"
         );
 
         // One of each, in the singular, so the line reads as a sentence.
@@ -2867,8 +3856,8 @@ mod tests {
         };
         assert_eq!(
             one.refusal("project-copy"),
-            "project-copy exceeded 60 seconds (the 60 second floor; 1 item × 1 second per \
-             item is less)"
+            "project-copy exceeded 61 seconds (the 60 second floor + 1 item × 1 second per \
+             item)"
         );
 
         // The reads are the floor alone, and their refusal is the line it always was.
@@ -2878,28 +3867,32 @@ mod tests {
             "project-show exceeded 60 seconds"
         );
         assert_eq!(
-            Deadline::Floor.refusal("task-list"),
-            "task-list exceeded 60 seconds"
+            Deadline::Floor.refusal("task-show"),
+            "task-show exceeded 60 seconds"
         );
 
         // The product is exact for every count a `u64` of seconds can carry — well past
         // the four billion a narrower multiplication would have capped at — and saturates
         // to `u64::MAX` seconds beyond that, rather than wrapping to a figure the floor
-        // would then govern.
+        // would then govern alone.
         let vast = Deadline::Copy {
             per_item: NonZeroU64::MIN,
             items: usize::MAX / 2,
         };
-        assert_eq!(vast.within(), Duration::from_secs(usize::MAX as u64 / 2));
+        assert_eq!(
+            vast.within(),
+            Duration::from_secs(usize::MAX as u64 / 2 + COMMAND_FLOOR.as_secs())
+        );
         let saturated = Deadline::Copy {
             per_item: NonZeroU64::MAX,
             items: 2,
         };
-        assert_eq!(saturated.within(), Duration::from_secs(u64::MAX));
+        assert_eq!(saturated.within(), Duration::MAX);
         assert_eq!(
             saturated.refusal("project-copy"),
             format!(
-                "project-copy exceeded {} seconds (2 items × {} seconds per item)",
+                "project-copy exceeded {} seconds (the 60 second floor + 2 items × {} seconds \
+                 per item)",
                 u64::MAX,
                 u64::MAX
             )
@@ -2939,7 +3932,7 @@ mod tests {
         );
         assert_eq!(
             budget["deadline"].as_str(),
-            Some("max(floor_seconds, budget × items)"),
+            Some("floor_seconds + budget × items"),
             "entry 71 states a deadline formula other than the one `Deadline::within` computes"
         );
         let examples = budget["examples"]
@@ -2962,6 +3955,178 @@ mod tests {
                 example["refusal"].as_str(),
                 "entry 71's example is not the refusal the copy is killed with: {example}"
             );
+        }
+    }
+
+    /// A rate-limited failure carries the wait its source asked for, read off the store's own
+    /// typed value wherever the failure arrives — a call the engine failed, wrapped once more
+    /// in a copy it could not undo, or one source of a partial answer, where the longest wait
+    /// any of them asked for is the one taken — and every other failure, a rate limit naming
+    /// no wait included, carries none, so the schedule decides.
+    #[test]
+    fn a_rate_limited_failure_carries_the_wait_its_source_asked_for() {
+        use super::Failed;
+        let limited = |seconds: Option<u64>| SourceError::RateLimited {
+            retry_after_seconds: seconds,
+            message: None,
+        };
+        let failed = |error: SourceError| EngineError::SourceFailed {
+            name: "plans".to_owned(),
+            error,
+        };
+        assert_eq!(
+            Failed::engine("project-show", &failed(limited(Some(7)))).wait,
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(
+            Failed::engine("project-show", &failed(limited(None))).wait,
+            None
+        );
+        let unreachable = SourceError::Unavailable {
+            message: "gone".to_owned(),
+        };
+        assert_eq!(
+            Failed::engine("project-show", &failed(unreachable.clone())).wait,
+            None
+        );
+        let undone = EngineError::CopyNotUndone {
+            error: Box::new(failed(limited(Some(30)))),
+            left_behind: onetaskgraph_core::LeftBehind::new(
+                "plans:board/1".parse::<GlobalId>().expect("an id"),
+            ),
+            refusal: SourceError::Refused {
+                message: "no".to_owned(),
+            },
+        };
+        assert_eq!(
+            Failed::engine("project-copy", &undone).wait,
+            Some(Duration::from_secs(30))
+        );
+        let source = |error: SourceError| onetaskgraph_core::SourceFailure {
+            source: onetaskgraph_plugin_api::SourceName::new("plans").expect("a source name"),
+            error,
+        };
+        assert_eq!(
+            Failed::partial(
+                "task-show",
+                &[
+                    source(limited(Some(4))),
+                    source(unreachable),
+                    source(limited(Some(9)))
+                ]
+            )
+            .wait,
+            Some(Duration::from_secs(9))
+        );
+        assert_eq!(Failed::from("cancelled".to_owned()).wait, None);
+    }
+
+    /// Spent is summed across every call that reports one: requests added, each budget added
+    /// to the one of the same name and unit — a lower bound wherever any summand was — and a
+    /// budget only one call reported carried through; nothing at all where no call reported.
+    #[test]
+    fn spent_is_summed_across_every_call_that_reports_one() {
+        let spent = |value: Value| -> onetaskgraph_core::Spent {
+            serde_json::from_value(value).expect("a spend")
+        };
+        let copy = spent(json!({"requests": 7, "budgets": [
+            {"budget": "graphql", "unit": "points", "amount": 12, "lower_bound": false}
+        ]}));
+        let update = spent(json!({"requests": 3, "budgets": [
+            {"budget": "graphql", "unit": "points", "amount": 4, "lower_bound": true},
+            {"budget": "rest", "unit": "requests", "amount": 1, "lower_bound": false}
+        ]}));
+        assert_eq!(
+            Value::Object(super::summed([&copy, &update].into_iter()).expect("a sum")),
+            json!({"requests": 10, "budgets": [
+                {"budget": "graphql", "unit": "points", "amount": 16, "lower_bound": true},
+                {"budget": "rest", "unit": "requests", "amount": 1, "lower_bound": false}
+            ]})
+        );
+        assert_eq!(
+            Value::Object(super::summed([&copy].into_iter()).expect("one")),
+            serde_json::to_value(&copy).expect("serializes")
+        );
+        assert_eq!(super::summed(std::iter::empty()), None);
+    }
+
+    /// The name a refusal gives each store call is the word the record serializes it as, and
+    /// the three an attempt makes are the calls `cli` publishes, so the record and a refusal
+    /// cannot name one call two ways.
+    #[test]
+    fn every_store_call_is_named_as_the_record_writes_it() {
+        use super::StoreCall;
+        for call in [
+            StoreCall::ProjectShow,
+            StoreCall::TaskList,
+            StoreCall::TaskShow,
+            StoreCall::ProjectCopy,
+            StoreCall::TaskUpdate,
+            StoreCall::ProjectMetadataSet,
+        ] {
+            assert_eq!(
+                json!(call.as_str()),
+                serde_json::to_value(call).expect("a call serializes"),
+                "{call:?}"
+            );
+        }
+        assert_eq!(
+            crate::cli::WRITEBACK_CLASSIFIED_COMMANDS,
+            [
+                StoreCall::ProjectShow.as_str(),
+                StoreCall::TaskShow.as_str(),
+                StoreCall::ProjectCopy.as_str()
+            ]
+        );
+    }
+
+    /// A wait the store asked for is kept where entry 72 says, and read back by any process as
+    /// what is left of it: nothing once it has passed, and — from a file of another version or
+    /// none this build can read — not "no wait" but unreadable, naming the file and why, since it
+    /// may hold one that has not passed.
+    #[test]
+    fn a_recorded_wait_is_read_back_as_what_is_left_of_it() {
+        use super::{AskedWait, Kept};
+        let block = divergence_block("72.");
+        assert_eq!(
+            block["failure"]["rate_limit_wait"]["kept_in"].as_str(),
+            Some(format!("<run dir>/{}", crate::cli::WRITEBACK_WAIT_FILE).as_str())
+        );
+        assert_eq!(
+            block["failure"]["rate_limit_wait"]["unreadable"].as_str(),
+            Some("no store call until it reads or is repaired")
+        );
+        let dir = scratch("asked-wait");
+        assert_eq!(
+            AskedWait::kept(&dir),
+            Kept::Nothing,
+            "a wait nobody recorded was read"
+        );
+        AskedWait::record(&dir, Duration::from_secs(30));
+        let Kept::Left(left) = AskedWait::kept(&dir) else {
+            panic!("the wait is still running");
+        };
+        assert!(
+            left > Duration::from_secs(25) && left <= Duration::from_secs(30),
+            "{left:?}"
+        );
+        AskedWait::record(&dir, Duration::ZERO);
+        assert_eq!(
+            AskedWait::kept(&dir),
+            Kept::Nothing,
+            "a wait that has passed still binds"
+        );
+        let path = dir.join(crate::cli::WRITEBACK_WAIT_FILE);
+        for unreadable in [
+            json!({"schema_version": 2, "not_before_unix_ms": 1}),
+            json!({"schema_version": 1, "not_before_unix_ms": 1, "extra": 1}),
+            json!("not a wait"),
+        ] {
+            std::fs::write(&path, unreadable.to_string()).expect("the file is written");
+            let Kept::Unreadable(why) = AskedWait::kept(&dir) else {
+                panic!("{unreadable} was read as no wait, or as a wait");
+            };
+            assert!(why.contains(&path.display().to_string()), "{why}");
         }
     }
 
@@ -3058,7 +4223,7 @@ mod tests {
         let rule = &block["failure"];
         assert_eq!(
             rule["commands"],
-            json!([super::PROJECT_SHOW, super::TASK_LIST, super::PROJECT_COPY]),
+            json!([super::PROJECT_SHOW, super::TASK_SHOW, super::PROJECT_COPY]),
             "entry 72 names other calls than the three an attempt makes"
         );
         assert_eq!(
@@ -3472,7 +4637,21 @@ mod tests {
         };
         let launch = a_launch(&paths);
         let writeback = Writeback::start(&paths, &launch).expect("a write-back worker");
-        writeback.publish(&paths, &launch, &RunState::default(), &BTreeMap::new());
+        // One node, so there is something to carry: a run with nothing to project asks the
+        // store nothing at all.
+        let plan = crate::plan::Plan {
+            schema_version: crate::plan::PLAN_SCHEMA_VERSION,
+            goal: None,
+            name: Some("stop-mid-wait".into()),
+            concurrency: 1,
+            tasks: vec![serde_json::from_value(json!({"id": "node"})).expect("a node")],
+        };
+        let state = RunState {
+            graph: crate::graph::Graph::from_plan(&plan),
+            plan: Some(plan),
+            ..RunState::default()
+        };
+        writeback.publish(&paths, &launch, &state, &BTreeMap::new());
 
         // Four attempts in, the interval the worker is now waiting out is longer than every
         // one before it — so the last one this test actually watched is a lower bound on
@@ -3582,8 +4761,9 @@ mod tests {
         assert!(pending.latest.take().is_some());
         assert_eq!(
             super::launch_wait(per_item, &pending),
-            Duration::from_secs(120),
-            "the launch wait did not follow the 12 × 10 second deadline of the queued copy"
+            Duration::from_secs(60 + 120),
+            "the launch wait did not follow the floor + 12 × 10 second deadline of the queued \
+             copy"
         );
     }
 
@@ -4540,7 +5720,354 @@ mod tests {
         assert_eq!(build["metadata"]["onepipeline.landing"], "unlanded");
     }
 
-    use super::{member_id, Carry, ProjectionActions, WholeBecause};
+    use super::{
+        decide, member_id, Baseline, LandedBaseline, ProjectionActions, Rendering, Scope,
+        WholeBecause,
+    };
+
+    /// A baseline saying every lineage of `snapshot` landed as it renders, each on an item of
+    /// its own.
+    fn landed_as(snapshot: &Snapshot) -> Baseline {
+        let lineages = snapshot.lineages();
+        let mut landed = LandedBaseline::empty(&snapshot.project);
+        for root in lineages.roots() {
+            let rendering = Rendering::of(snapshot, &lineages, root).expect("a lineage renders");
+            let destination: GlobalId = format!("plans:board/{root}").parse().expect("an id");
+            landed
+                .items
+                .insert(root.clone(), rendering.item.landed_at(&destination));
+        }
+        Baseline {
+            path: snapshot.dir.join(crate::cli::WRITEBACK_LANDED_FILE),
+            landed,
+        }
+    }
+
+    /// What a driver carries of `now` against a baseline that says `last` landed, refusing a
+    /// lineage it would read.
+    fn carried(last: &Snapshot, now: &Snapshot) -> Vec<String> {
+        let renderings = renderings(now);
+        let decided = decide(
+            now,
+            &now.lineages(),
+            &renderings,
+            &landed_as(last),
+            Scope::Driven,
+        );
+        assert!(decided.unread.is_empty(), "{:?}", decided.unread);
+        decided.carried.into_iter().collect()
+    }
+
+    fn renderings(snapshot: &Snapshot) -> BTreeMap<String, Rendering> {
+        let lineages = snapshot.lineages();
+        lineages
+            .roots()
+            .map(|root| {
+                (
+                    root.clone(),
+                    Rendering::of(snapshot, &lineages, root).expect("a lineage renders"),
+                )
+            })
+            .collect()
+    }
+
+    /// A projection carries exactly the lineages whose projection differs from what the
+    /// baseline says landed: a node whose word on the board moved, a node the baseline does not
+    /// hold, and nothing for a change that renders no differently or that only the project item
+    /// carries.
+    #[test]
+    fn a_projection_carries_exactly_the_lineages_that_differ_from_the_baseline() {
+        let fixture = Fixture::new("carry");
+        let last = fixture.snapshot.clone();
+
+        assert_eq!(
+            carried(&last, &last),
+            Vec::<String>::new(),
+            "a snapshot the baseline already holds carried a node"
+        );
+
+        let mut one = last.clone();
+        one.statuses.insert("build".to_owned(), NodeStatus::Running);
+        assert_eq!(carried(&last, &one), ["build"]);
+
+        let mut both = one.clone();
+        both.settlements
+            .insert("design".to_owned(), json!({"status": "done"}));
+        assert_eq!(carried(&last, &both), ["build", "design"]);
+
+        // Pending and ready are both `queued` on the board, so moving between them is no change
+        // to what a copy would write.
+        let mut pending = last.clone();
+        pending
+            .statuses
+            .insert("design".to_owned(), NodeStatus::Pending);
+        let mut ready = last.clone();
+        ready
+            .statuses
+            .insert("design".to_owned(), NodeStatus::Ready);
+        assert_eq!(carried(&pending, &ready), Vec::<String>::new());
+
+        let mut added = last.clone();
+        let mut verify = added.nodes["design"].clone();
+        verify.id = "verify".to_owned();
+        verify.task_record = None;
+        added.nodes.insert("verify".to_owned(), verify);
+        assert_eq!(carried(&last, &added), ["verify"]);
+
+        let mut project_level = last.clone();
+        project_level
+            .project_metadata
+            .insert("onepipeline.goal".to_owned(), json!("a goal restated"));
+        assert_eq!(
+            carried(&last, &project_level),
+            Vec::<String>::new(),
+            "a change only the project item carries named a task"
+        );
+
+        // A repository is the one field a copy writes that the baseline does not keep, and the
+        // edits that change one move the lineage's word too — a requeue of a parked node — so
+        // the lineage is carried on a field the baseline keeps.
+        let mut parked = last.clone();
+        parked
+            .statuses
+            .insert("build".to_owned(), NodeStatus::Parked);
+        let mut requeued = parked.clone();
+        requeued
+            .statuses
+            .insert("build".to_owned(), NodeStatus::Ready);
+        requeued.nodes.get_mut("build").expect("a node").repo =
+            Some("github.com/owner/elsewhere".to_owned());
+        assert_eq!(
+            carried(&parked, &requeued),
+            ["build"],
+            "a requeue that moved the repository was not carried"
+        );
+    }
+
+    /// No attempt is whole. A driver's first decision against the baseline the launch seeded
+    /// carries the lineages whose projection differs from it — every one, for a fresh launch,
+    /// since the seed records no word — and a lineage the baseline does not hold is read by the
+    /// id the run knows for it rather than carried blind. A stop's release carries only the
+    /// unstarted lineages the baseline says are `queued`, and reads rather than creates one it
+    /// does not hold.
+    #[test]
+    fn no_attempt_is_whole_and_a_lineage_the_baseline_does_not_hold_is_read_by_its_id() {
+        let fixture = Fixture::new("baseline-decide");
+        let snapshot = fixture.snapshot.clone();
+        let lineages = snapshot.lineages();
+        let now = renderings(&snapshot);
+
+        // Seeded: every item's word unknown, so the claim carries every lineage.
+        let mut seeded = landed_as(&snapshot);
+        for item in seeded.landed.items.values_mut() {
+            item.status = None;
+        }
+        let decided = decide(&snapshot, &lineages, &now, &seeded, Scope::Driven);
+        assert_eq!(
+            decided.carried.iter().cloned().collect::<Vec<_>>(),
+            lineages.roots().cloned().collect::<Vec<_>>()
+        );
+
+        // A baseline holding nothing reads each lineage the run knows an id for, by that id.
+        let mut known = snapshot.clone();
+        known.nodes.get_mut("build").expect("a node").task_record = Some(crate::plan::TaskRecord {
+            id: "board/002-build".to_owned(),
+            key: None,
+            title: "Build".to_owned(),
+        });
+        let empty = Baseline {
+            path: known.dir.join(crate::cli::WRITEBACK_LANDED_FILE),
+            landed: LandedBaseline::empty(&known.project),
+        };
+        let decided = decide(
+            &known,
+            &known.lineages(),
+            &renderings(&known),
+            &empty,
+            Scope::Driven,
+        );
+        assert_eq!(
+            decided
+                .unread
+                .get("build")
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("plans:board/002-build")
+        );
+        assert!(!decided.carried.contains("build"));
+
+        // The release: only a lineage whose word is `todo` now and `queued` in the baseline.
+        let mut released = snapshot.clone();
+        released.claim = Claim::Released;
+        for status in released.statuses.values_mut() {
+            *status = NodeStatus::Ready;
+        }
+        released
+            .statuses
+            .insert("build".to_owned(), NodeStatus::Running);
+        let mut claimed = landed_as(&snapshot);
+        for (root, item) in &mut claimed.landed.items {
+            item.status = Some(if root == "design" {
+                ProjectedStatus::Queued
+            } else {
+                ProjectedStatus::Todo
+            });
+        }
+        let decided = decide(
+            &released,
+            &released.lineages(),
+            &renderings(&released),
+            &claimed,
+            Scope::Release,
+        );
+        assert_eq!(
+            decided.carried.into_iter().collect::<Vec<_>>(),
+            ["design"],
+            "the release carried other than the unstarted lineage the baseline says is queued"
+        );
+        assert!(decided.unread.is_empty());
+    }
+
+    /// Entry 93's example is the landed baseline's shape exactly: it deserializes through the
+    /// type that writes the file, is a file this build reads for its project, and serializes
+    /// back as itself — so the entry and the type cannot part. Every refusal the entry names is
+    /// one the read makes, and the file's name and version are the constants the worker uses.
+    #[test]
+    fn entry_93s_example_is_the_landed_baseline_the_worker_writes_and_reads() {
+        let block = divergence_block("93.");
+        let landed = &block["landed"];
+        assert_eq!(
+            landed["file"].as_str(),
+            Some(format!("<run dir>/{}", crate::cli::WRITEBACK_LANDED_FILE).as_str())
+        );
+        assert_eq!(
+            landed["schema_version"].as_u64(),
+            Some(u64::from(crate::cli::WRITEBACK_LANDED_SCHEMA_VERSION))
+        );
+        assert_eq!(landed["feeds_scheduling"], json!(false));
+        let example = &landed["example"];
+        let read: LandedBaseline = serde_json::from_value(example.clone())
+            .unwrap_or_else(|error| panic!("entry 93's example is not a baseline: {error}"));
+        assert_eq!(
+            serde_json::to_value(&read).expect("a baseline serializes"),
+            *example,
+            "entry 93's example does not write back as itself"
+        );
+        let project: crate::taskgraph::QualifiedId = example["project"]
+            .as_str()
+            .expect("a project")
+            .parse()
+            .expect("a qualified project");
+        read.checked(&project)
+            .unwrap_or_else(|why| panic!("entry 93's example is refused: {why}"));
+        assert!(
+            read.items.values().any(|item| item.status.is_none())
+                && read.items.values().any(|item| item.status.is_some()),
+            "the example shows no seeded item beside a landed one"
+        );
+
+        let other: crate::taskgraph::QualifiedId = "plans:another".parse().expect("a project");
+        assert!(read.checked(&other).is_err(), "another run's file was read");
+        for (refused, patch) in [
+            ("another version", json!({"schema_version": 2})),
+            (
+                "a foreign project key",
+                json!({"project_metadata": {"team": "x"}}),
+            ),
+            ("a key the entry does not name", json!({"labels": []})),
+        ] {
+            let mut file = example.clone();
+            for (key, value) in patch.as_object().expect("a patch") {
+                file[key] = value.clone();
+            }
+            let accepted = serde_json::from_value::<LandedBaseline>(file.clone())
+                .map_err(|error| error.to_string())
+                .and_then(|landed| landed.checked(&project));
+            assert!(accepted.is_err(), "{refused} was read: {file}");
+        }
+        for (refused, key, value) in [
+            (
+                "a foreign item key",
+                "metadata",
+                json!({"authored.note": "x"}),
+            ),
+            (
+                "a destination that is not a qualified id",
+                "destination",
+                json!("bare"),
+            ),
+            (
+                "a destination in another source",
+                "destination",
+                json!("elsewhere:writeback-quota-plan/002-build"),
+            ),
+            ("a digest that is not one", "content_sha256", json!("ABC")),
+            ("a word the engine never writes", "status", json!("blocked")),
+            (
+                "a ticket that is not a qualified id",
+                "delivers",
+                json!(["bare"]),
+            ),
+            ("an edge naming no node", "depends_on", json!([""])),
+            ("labels", "labels", json!([])),
+        ] {
+            let mut file = example.clone();
+            file["items"]["build"][key] = value;
+            let accepted = serde_json::from_value::<LandedBaseline>(file.clone())
+                .map_err(|error| error.to_string())
+                .and_then(|landed| landed.checked(&project));
+            assert!(accepted.is_err(), "{refused} was read: {file}");
+        }
+    }
+
+    /// A lineage the baseline does not hold on a board an older build wrote — one item per
+    /// attempt — is read at the furthest-along attempt the previous driver's shadow documents
+    /// recorded an item for, and at the root's own task only where they record none.
+    #[test]
+    fn a_lineage_the_baseline_does_not_hold_is_read_at_its_furthest_along_recorded_item() {
+        let mut fixture = Fixture::new("baseline-known-id");
+        retried(&mut fixture, true);
+        let snapshot = fixture.snapshot.clone();
+        let lineages = snapshot.lineages();
+        let chain = lineages.chain("build").expect("the lineage").to_vec();
+        assert!(chain.len() >= 3, "{chain:?}");
+        snapshot_task_record(&mut fixture.snapshot, "build", "board/000-root");
+        let snapshot = fixture.snapshot.clone();
+        let folder = snapshot
+            .dir
+            .join("tasks")
+            .join(super::project_file(&snapshot.project));
+        std::fs::create_dir_all(&folder).expect("the shadow folder");
+        assert_eq!(
+            super::known_id(&snapshot, &lineages, "build").map(|id| id.to_string()),
+            Some("plans:board/000-root".to_owned()),
+            "with no shadow document the root's own task is not the one read"
+        );
+        let write = |node: &str, origin: &str| {
+            super::document(
+                &folder.join(format!("{}.md", super::task_file(node))),
+                &json!({"title": node, "metadata": {"onetaskgraph.origin": origin}}),
+                "",
+            )
+            .expect("a shadow document");
+        };
+        write(&chain[0], "plans:board/000-root");
+        write(&chain[1], "plans:board/older-attempt");
+        // A document naming an item in another source names nothing on this destination.
+        write(&chain[2], "elsewhere:board/stray");
+        assert_eq!(
+            super::known_id(&snapshot, &lineages, "build").map(|id| id.to_string()),
+            Some("plans:board/older-attempt".to_owned())
+        );
+    }
+
+    fn snapshot_task_record(snapshot: &mut Snapshot, node: &str, id: &str) {
+        snapshot.nodes.get_mut(node).expect("a node").task_record = Some(crate::plan::TaskRecord {
+            id: id.to_owned(),
+            key: None,
+            title: node.to_owned(),
+        });
+    }
 
     /// What a copy report counts against what the attempt read before it, as the worker
     /// counts it.
@@ -4562,136 +6089,40 @@ mod tests {
         }
     }
 
-    /// The node ids a decision carries as members, refusing a whole one.
-    fn named(carry: &Carry) -> Vec<String> {
-        match carry {
-            Carry::Members(named) => named.iter().cloned().collect(),
-            Carry::Whole(because) => panic!("a member projection was decided whole: {because:?}"),
-        }
-    }
-
-    /// After a success, a projection carries exactly the nodes whose shadow task changed: a
-    /// node whose word on the board moved, a node the success did not hold, and nothing for a
-    /// change that renders no differently or that only the project item carries.
+    /// The reason an engine that drove the store's binary gave for a store older than the
+    /// member copy is one this build reads and never gives, and entry 73 says every reason is
+    /// read-only now.
     #[test]
-    fn a_member_projection_carries_exactly_the_nodes_whose_shadow_task_changed() {
-        let fixture = Fixture::new("carry");
-        let last = fixture.snapshot.clone();
-
-        assert_eq!(
-            named(&Carry::decide(false, Some(&last), &last)),
-            Vec::<String>::new(),
-            "a snapshot the last success already projected carried a node"
-        );
-
-        let mut one = last.clone();
-        one.statuses.insert("build".to_owned(), NodeStatus::Running);
-        assert_eq!(named(&Carry::decide(false, Some(&last), &one)), ["build"]);
-
-        let mut both = one.clone();
-        both.settlements
-            .insert("design".to_owned(), json!({"status": "done"}));
-        assert_eq!(
-            named(&Carry::decide(false, Some(&last), &both)),
-            ["build", "design"]
-        );
-
-        // Pending and ready are both `todo` on the board, so moving between them is no change
-        // to what a copy would write.
-        let mut pending = last.clone();
-        pending
-            .statuses
-            .insert("design".to_owned(), NodeStatus::Pending);
-        let mut ready = last.clone();
-        ready
-            .statuses
-            .insert("design".to_owned(), NodeStatus::Ready);
-        assert_eq!(
-            named(&Carry::decide(false, Some(&pending), &ready)),
-            Vec::<String>::new()
-        );
-
-        let mut added = last.clone();
-        let mut verify = added.nodes["design"].clone();
-        verify.id = "verify".to_owned();
-        added.nodes.insert("verify".to_owned(), verify);
-        assert_eq!(
-            named(&Carry::decide(false, Some(&last), &added)),
-            ["verify"]
-        );
-
-        let mut project_level = last.clone();
-        project_level
-            .project_metadata
-            .insert("onepipeline.goal".to_owned(), json!("a goal restated"));
-        assert_eq!(
-            named(&Carry::decide(false, Some(&last), &project_level)),
-            Vec::<String>::new(),
-            "a change only the project item carries named a task"
-        );
-    }
-
-    /// Whole where it has to be, and the reason recorded is the first of entry 73's precedence
-    /// that applies — for every combination of the three, so a block that reordered them and a
-    /// worker that decided in another order cannot both pass.
-    #[test]
-    fn a_projection_is_whole_for_the_first_reason_entry_73_ranks_that_applies() {
+    fn every_reason_a_projection_was_whole_is_read_and_never_written() {
         let block = divergence_block("73.");
-        let precedence: Vec<String> =
-            serde_json::from_value(block["projection"]["whole_because_precedence"].clone())
-                .expect("entry 73 ranks the reasons a projection is whole");
-        let reasons: std::collections::BTreeSet<String> = block["projection"]["whole_because"]
-            .as_object()
-            .expect("entry 73 names each reason")
-            .keys()
-            .cloned()
-            .collect();
-        assert_eq!(
-            precedence
-                .iter()
-                .cloned()
-                .collect::<std::collections::BTreeSet<_>>(),
-            reasons,
-            "entry 73 ranks other reasons than it names"
-        );
-        let snapshot = Fixture::new("whole").snapshot.clone();
-        for after_failure in [true, false] {
-            for landed in [true, false] {
-                let applies = |reason: &str| match reason {
-                    "after-failure" => after_failure,
-                    "first" => !landed,
-                    other => panic!("entry 73 names a reason the worker never decides: {other}"),
-                };
-                let expected = precedence.iter().find(|reason| applies(reason));
-                let decided = Carry::decide(after_failure, landed.then_some(&snapshot), &snapshot);
-                match (expected, decided) {
-                    (Some(reason), Carry::Whole(because)) => assert_eq!(
-                        serde_json::to_value(because).expect("a reason serializes"),
-                        json!(reason),
-                        "after a failure {after_failure}, landed {landed}"
-                    ),
-                    (None, Carry::Members(_)) => {}
-                    (expected, Carry::Whole(because)) => {
-                        panic!("decided whole ({because:?}) where entry 73 expects {expected:?}")
-                    }
-                    (expected, Carry::Members(_)) => {
-                        panic!("decided members where entry 73 expects {expected:?}")
-                    }
-                }
-            }
-        }
-        // The reason an engine that drove the store's binary gave for a store older than
-        // the member copy is one this build reads and never gives.
         let read_only = block["projection"]["whole_because_read_only"]
             .as_object()
-            .expect("entry 73 names the reason it reads and never writes");
-        assert_eq!(
-            read_only.keys().collect::<Vec<_>>(),
-            vec![&serde_json::to_value(WholeBecause::StoreLacksMembers)
+            .expect("entry 73 names the reasons it reads and never writes");
+        let every: std::collections::BTreeSet<String> = [
+            WholeBecause::First,
+            WholeBecause::AfterFailure,
+            WholeBecause::StoreLacksMembers,
+        ]
+        .into_iter()
+        .map(|reason| {
+            serde_json::to_value(reason)
                 .expect("serializes")
                 .as_str()
                 .expect("a word")
-                .to_owned()]
+                .to_owned()
+        })
+        .collect();
+        assert_eq!(
+            read_only
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            every
+        );
+        assert_eq!(
+            block["projection"]["fields"]["whole_because"]["written"],
+            json!([]),
+            "entry 73 says a reason to be whole is still written"
         );
     }
 
@@ -4945,9 +6376,14 @@ mod tests {
         let (untitled, _) = fixture.task_document("build");
         assert_eq!(untitled["title"], "build");
 
-        // Every lineage root, in order, is what a whole copy carries and the record names.
+        // One lineage per root, in order: what a copy names and the record carries.
         assert_eq!(
-            Carry::Whole(WholeBecause::First).items(&fixture.snapshot),
+            fixture
+                .snapshot
+                .lineages()
+                .roots()
+                .cloned()
+                .collect::<Vec<_>>(),
             ["build", "design", "ship"]
         );
     }
@@ -4962,7 +6398,7 @@ mod tests {
         retried(&mut fixture, false);
         let once = fixture.snapshot.clone();
         assert_eq!(
-            named(&Carry::decide(false, Some(&last), &once)),
+            carried(&last, &once),
             ["build", "ship"],
             "a retry named the replacement as a member of its own, or missed the root"
         );
@@ -4971,171 +6407,11 @@ mod tests {
         retried(&mut fixture, true);
         let twice = fixture.snapshot.clone();
         assert_eq!(
-            named(&Carry::decide(false, Some(&once), &twice)),
+            carried(&once, &twice),
             ["build"],
             "a second retry of one lineage named something other than its root"
         );
-        assert_eq!(
-            named(&Carry::decide(false, Some(&twice), &twice)),
-            Vec::<String>::new()
-        );
-    }
-
-    /// What the destination holds is folded onto lineage roots, and several items under one
-    /// root — what a board an older build wrote holds — resolve to the one at the
-    /// furthest-along position: its `onepipeline.node` where it names one, its
-    /// `onepipeline.id` otherwise. So the same board after this build has rewritten the head
-    /// — an older item still plain at the root beside the head naming `onepipeline.node` —
-    /// resolves the same way on every later whole read, rather than refusing two items for
-    /// one `onepipeline.id`. Two items at one position stay a refusal naming the attempt. The
-    /// rest are not carried, an item of a node no lineage holds stays under its own id, and a
-    /// lineage nothing on the board holds has no origin.
-    #[test]
-    fn several_items_under_one_root_resolve_to_the_furthest_along_attempt() {
-        let mut fixture = Fixture::new("furthest-along");
-        retried(&mut fixture, true);
-        let lineages = fixture.snapshot.lineages();
-        let item = |file: &str, id: &str, node: Option<&str>, category: &str| {
-            let mut metadata = json!({ID_KEY: id});
-            if let Some(node) = node {
-                metadata[NODE_KEY] = json!(node);
-            }
-            serde_json::from_value::<onetaskgraph_core::Qualified<onetaskgraph_plugin_api::Task>>(
-                json!({
-                    "id": format!("plans:board/{file}"),
-                    "item": {"id": format!("board/{file}"), "title": file, "content": null,
-                             "labels": [], "project": "board", "url": null,
-                             "created_at": null, "updated_at": null, "metadata": metadata,
-                             "status": {"category": category, "name": category}},
-                }),
-            )
-            .expect("the store's own task")
-        };
-        let place = |items: Vec<onetaskgraph_core::Qualified<onetaskgraph_plugin_api::Task>>| {
-            super::furthest_along(
-                items
-                    .into_iter()
-                    .map(|task| super::Placed::of(&lineages, task).expect("an item places"))
-                    .collect(),
-            )
-        };
-
-        // What an older build wrote: one item per attempt, each plain at its own id.
-        let older = || {
-            vec![
-                item("001-build", "build", None, "cancelled"),
-                item("004-build-2", "build-2", None, "cancelled"),
-                item("002-design", "design", None, "done"),
-                item("009-elsewhere", "elsewhere", None, "todo"),
-            ]
-        };
-        let origins = place(older()).expect("an older board resolves");
-        assert_eq!(
-            origins.keys().cloned().collect::<Vec<_>>(),
-            ["build", "design", "elsewhere"],
-            "the fold keyed something other than lineage roots and strays"
-        );
-        assert_eq!(
-            origins["build"].id.to_string(),
-            "plans:board/004-build-2",
-            "the lineage was not resolved to its furthest-along item"
-        );
-        assert_eq!(origins["design"].id.to_string(), "plans:board/002-design");
-        assert!(
-            !origins.contains_key("ship"),
-            "a lineage the board holds nothing for was given an origin"
-        );
-        let mut reversed = older();
-        reversed.reverse();
-        assert_eq!(
-            place(reversed).expect("resolves")["build"].id.to_string(),
-            "plans:board/004-build-2",
-            "the order the page answered in decided the fold"
-        );
-
-        // The same board once this build has projected over it: the head rewritten to the
-        // root's id, naming its attempt, beside the older item still plain at the root.
-        let rewritten = vec![
-            item("001-build", "build", None, "cancelled"),
-            item("004-build-2", "build", Some("build-3"), "queued"),
-        ];
-        let origins = place(rewritten).expect("a board this build wrote over resolves again");
-        assert_eq!(
-            origins["build"].id.to_string(),
-            "plans:board/004-build-2",
-            "the rewritten head lost to the older item at the root"
-        );
-
-        // Two items at one position are two items for one attempt.
-        for (said, twice) in [
-            (
-                "build-2",
-                vec![
-                    item("004-build-2", "build-2", None, "cancelled"),
-                    item("005-build-2", "build", Some("build-2"), "cancelled"),
-                ],
-            ),
-            (
-                "build",
-                vec![
-                    item("001-build", "build", None, "cancelled"),
-                    item("003-build", "build", None, "cancelled"),
-                ],
-            ),
-        ] {
-            let refused = match place(twice) {
-                Err(refused) => refused,
-                Ok(resolved) => panic!(
-                    "two items at one position resolved to {:?}",
-                    resolved.keys().collect::<Vec<_>>()
-                ),
-            };
-            assert_eq!(
-                refused,
-                format!("project has more than one task for node '{said}'")
-            );
-        }
-
-        // An item naming an attempt its lineage does not hold places at the root.
-        let stray = place(vec![
-            item("001-build", "build", Some("nobody"), "cancelled"),
-            item("004-build-2", "build-2", None, "cancelled"),
-        ])
-        .expect("resolves");
-        assert_eq!(stray["build"].id.to_string(), "plans:board/004-build-2");
-
-        // A reserved key present as other than a non-empty string is the destination's
-        // answer being wrong, refused by the task and key rather than read as absent.
-        for (key, wrong) in [
-            (NODE_KEY, json!(7)),
-            (NODE_KEY, json!("")),
-            (ID_KEY, json!(["build"])),
-        ] {
-            let mut malformed = item("001-build", "build", None, "cancelled");
-            malformed
-                .item
-                .metadata
-                .insert(key.to_owned(), wrong.clone());
-            let refused = super::Placed::of(&lineages, malformed)
-                .err()
-                .unwrap_or_else(|| panic!("{key} present as {wrong} was read as absent"));
-            assert_eq!(
-                refused,
-                format!(
-                    "task 'plans:board/001-build' carries {key} as {wrong}, and a node id is \
-                     a non-empty string"
-                )
-            );
-        }
-
-        // With the fold, the shadow task is written onto the furthest-along item.
-        fixture.origins = place(older()).expect("resolves");
-        fixture.project();
-        let (build, _) = fixture.task_document("build");
-        assert_eq!(
-            build["metadata"]["onetaskgraph.origin"], "plans:board/004-build-2",
-            "the lineage was projected onto an item other than the furthest-along one"
-        );
+        assert_eq!(carried(&twice, &twice), Vec::<String>::new());
     }
 
     /// Entry 80's block names exactly the keys a lineage's shadow task is written under, the
@@ -5160,12 +6436,12 @@ mod tests {
         assert_eq!(block["lineage"]["shadow_tasks_per_lineage"], 1);
         assert_eq!(
             block["destination"]["category_read_by"],
-            json!({"whole": super::TASK_LIST, "members": super::TASK_SHOW})
+            json!({"members": super::TASK_SHOW})
         );
         assert_eq!(block["reopened"]["store_vocabulary_extended"], false);
         assert_eq!(
             block["reopened"]["record"]["from_schema_version"].as_u64(),
-            Some(u64::from(crate::cli::WRITEBACK_PROJECTIONS_SCHEMA_VERSION))
+            Some(u64::from(super::PROJECTION_LINE_WITH_REOPENED))
         );
         assert_eq!(block["reopened"]["record"]["key"], "actions.reopened");
         assert!(
@@ -5282,13 +6558,16 @@ mod tests {
             .dir
             .join(std::ffi::OsStr::from_bytes(b"shadow-\xff"));
         let store = crate::taskgraph::Store::at(fixture.dir.to_path_buf());
-        let failed = match super::project(
+        let mut baseline = super::Baseline::load(&fixture.dir, &snapshot.project);
+        let attempted = super::project(
             &store,
             DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
             &snapshot,
-            &super::Carry::Whole(super::WholeBecause::First),
-            &BTreeMap::new(),
-        ) {
+            &mut baseline,
+            super::Scope::Driven,
+        );
+        assert!(attempted.calls.is_empty(), "{:?}", attempted.calls);
+        let failed = match attempted.result {
             Ok(_) => panic!("a shadow store no setting can name was projected through"),
             Err(failed) => failed,
         };

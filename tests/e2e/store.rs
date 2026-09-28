@@ -1163,9 +1163,15 @@ fn source_misconfigured() -> Value {
            No such file or directory (os error 2)"})
 }
 
-/// A source that rate-limited the request, in GitHub's own words.
+/// A source that rate-limited the request, in GitHub's own words, naming no wait: GitHub's
+/// secondary limiter is reported by nothing a caller can poll, so the schedule decides.
 fn rate_limited() -> Value {
-    json!({"kind": "rate-limited", "retry_after_seconds": 60, "message": RATE_LIMITED})
+    json!({"kind": "rate-limited", "retry_after_seconds": null, "message": RATE_LIMITED})
+}
+
+/// The same, naming how long the source asked to be left alone.
+fn rate_limited_for(seconds: u64) -> Value {
+    json!({"kind": "rate-limited", "retry_after_seconds": seconds, "message": RATE_LIMITED})
 }
 
 /// A source that could not be reached at all.
@@ -1247,15 +1253,15 @@ fn asked_nothing_more(world: &World, run: &str, window: Duration, midway: impl F
     }
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these five wait on
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these nine wait on
 // is the schedule and its absence — a refused projection not being asked again across a window
-// the old schedule retried in, a transient one being asked at intervals that grow, and a run
-// settling over refusals — which cannot be observed in less time than the schedule takes. The
-// edge they need is the crate under test: they drive the compiled `onepipeline` binary against
-// its own write-back worker and the real store, four of them through the store double, exactly
-// as the six schedule journeys below do, so a project of their own would declare the same
-// dependency and skip nothing. The reason those six record for staying in this binary is these
-// five's too.
+// the old schedule retried in, a transient one being asked at intervals that grow, a rate
+// limit's own wait being served in full, and a run settling over refusals — which cannot be
+// observed in less time than the schedule takes. The edge they need is the crate under test:
+// they drive the compiled `onepipeline` binary against its own write-back worker and the real
+// store, eight of them through the store double, exactly as the six schedule journeys below do,
+// so a project of their own would declare the same dependency and skip nothing. The reason
+// those six record for staying in this binary is these nine's too.
 /// A projection the store **refuses** is reported once and is not asked again on a timer: the
 /// store would refuse the same projection the same way, and against a hosted destination every
 /// attempt spends its allowance for nothing. It is attempted again when the run's graph next
@@ -1362,8 +1368,7 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
 /// copy, or the project read answered as a partial response every source of which refused.
 /// Each is reported once under the store's own kind, and none is asked again on a timer. The
 /// graph change each scenario makes is a member projection, which reads a named member rather
-/// than a page of the project's tasks; a whole projection's page of tasks refused
-/// is `writeback_projections::a_projection_after_a_failed_attempt_is_whole`'s.
+/// than a page of the project's tasks — which no projection reads.
 #[test]
 fn a_refusal_of_the_member_read_the_copy_or_the_project_read_stops_the_retry_timer() {
     for (scenario, method, error, kind) in [
@@ -1484,6 +1489,397 @@ fn a_failure_the_store_does_not_refuse_is_retried_on_the_schedule() {
             "{scenario}: one streak raised other than one surface"
         );
     }
+}
+
+/// A rate limit that names a wait is waited out in full: from the attempt it failed until that
+/// wait has passed the store is handed no call of any kind — not on the schedule, whose first
+/// retry is a quarter of a second in, and not for the graph changing inside the wait — and then
+/// the projection is attempted again and lands, carrying what changed while it waited. The line
+/// an operator reads says how long the store asked for.
+#[test]
+fn a_rate_limit_naming_a_wait_is_waited_out_with_no_store_call_inside_it() {
+    let wait = Duration::from_secs(6);
+    let run = "writeback-rate-limit-wait";
+    let (world, project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-rate-limit-wait", run);
+    world.until("every attempt so far to be recorded", |world| {
+        world.run_file(run, "writeback-projections.jsonl").is_file()
+            && !world.store_calls().is_empty()
+    });
+
+    let before = streaks_reported(&world, run);
+    world.store_refuses_once("get_project", &rate_limited_for(wait.as_secs()));
+    noted(&world, run, "later", "projected once the limiter lets go");
+    world.until("the rate-limited attempt to be reported", |world| {
+        streaks_reported(world, run) > before
+    });
+    let failed_at = Instant::now();
+    let calls = world.store_calls().len();
+    let line = the_line_reported(&world, run);
+    assert!(
+        line.contains(&format!(
+            "the store asked to be left alone for {} seconds",
+            wait.as_secs()
+        )) && line.contains("kind: rate-limited"),
+        "the line does not say how long the store asked for: {line}"
+    );
+
+    // The graph changes inside the wait, which publishes a snapshot the worker does not take.
+    noted(
+        &world,
+        run,
+        "work",
+        "changed while the limiter was refusing",
+    );
+    while failed_at.elapsed() + Duration::from_millis(500) < wait {
+        assert_eq!(
+            world.store_calls().len(),
+            calls,
+            "the store was handed a call {:?} into a {wait:?} wait it asked for: {:?}",
+            failed_at.elapsed(),
+            &world.store_calls()[calls..]
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    world.until_store("both changes to reach the board", |world| {
+        let tasks = world.store_tasks(&project);
+        let noted_on = |node: &str, text: &str| {
+            tasks.iter().any(|task| {
+                task["item"]["metadata"]["onepipeline.id"] == node
+                    && task["item"]["metadata"]["onepipeline.context"]
+                        .as_str()
+                        .is_some_and(|said| said.contains(text))
+            })
+        };
+        noted_on("later", "projected once the limiter lets go")
+            && noted_on("work", "changed while the limiter was refusing")
+    });
+    assert!(
+        failed_at.elapsed() >= wait - Duration::from_millis(500),
+        "the projection landed {:?} after a failure that asked for {wait:?}",
+        failed_at.elapsed()
+    );
+    // The attempt after the wait carried what had not landed — the change the limited attempt
+    // lost and the one made while it waited — and nothing more. Its line is appended once the
+    // copy has landed, so it is waited for rather than read the moment the board moves.
+    let recorded = |world: &World| -> Vec<Value> {
+        std::fs::read_to_string(world.run_file(run, "writeback-projections.jsonl"))
+            .expect("the projection record reads")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("a record line"))
+            .collect()
+    };
+    world.until("the attempt after the wait to be recorded", |world| {
+        let lines = recorded(world);
+        lines
+            .iter()
+            .rposition(|line| line["kind"] == "rate-limited")
+            .is_some_and(|limited| lines.len() > limited + 1)
+    });
+    let lines = recorded(&world);
+    let limited = lines
+        .iter()
+        .rposition(|line| line["kind"] == "rate-limited")
+        .expect("the limited attempt was recorded");
+    assert_eq!(
+        lines[limited]["items"],
+        json!(["later"]),
+        "{}",
+        lines[limited]
+    );
+    let after = &lines[limited + 1];
+    assert_eq!(after["outcome"], "projected", "{after}");
+    assert_eq!(after["scope"], "members", "{after}");
+    assert_eq!(after["items"], json!(["later", "work"]), "{after}");
+    assert_eq!(
+        dispatched(&world, run),
+        ["work"],
+        "the rate limit changed what executed"
+    );
+}
+
+/// A closeout that falls inside a wait the store asked for asks the store nothing: the run
+/// settles on time, and the terminal projection is not attempted inside the window the
+/// limiter named, which a closeout suspending the retry schedule would otherwise do.
+#[test]
+fn a_closeout_inside_a_rate_limit_wait_asks_the_store_nothing() {
+    let wait = Duration::from_secs(30);
+    let run = "writeback-rate-limit-closeout";
+    let (world, _project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-rate-limit-closeout", run);
+    world.until("every attempt so far to be recorded", |world| {
+        world.run_file(run, "writeback-projections.jsonl").is_file()
+            && !world.store_calls().is_empty()
+    });
+    let before = streaks_reported(&world, run);
+    world.store_refuses_once("get_project", &rate_limited_for(wait.as_secs()));
+    noted(&world, run, "later", "limited before the run ends");
+    world.until("the rate-limited attempt to be reported", |world| {
+        streaks_reported(world, run) > before
+    });
+    let failed_at = Instant::now();
+    let calls = world.store_calls().len();
+
+    world.release("work.go");
+    world.until("the run to write its result", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert!(
+        failed_at.elapsed() < wait,
+        "the run took {:?} to settle, outlasting the {wait:?} it was meant to settle inside",
+        failed_at.elapsed()
+    );
+    let result = world.run_json(run, "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+    // The driver has ended by now, closeout included; a little longer still asks nothing.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        world.store_calls().len(),
+        calls,
+        "the store was handed a call inside the {wait:?} it asked for: {:?}",
+        &world.store_calls()[calls..]
+    );
+    assert_eq!(
+        dispatched(&world, run),
+        ["work", "later"],
+        "the rate limit changed what executed"
+    );
+}
+
+/// A `stop` that lands inside a rate limit's wait the driver was serving honours it from the
+/// stopping process: the stop's release asks the store nothing until the wait the store named
+/// has passed — the wait is kept in the run's directory, since the stopping process cannot see
+/// the driver's memory — and then releases what the run never started. A wait longer than the
+/// release may hold a stop leaves the claim standing, says so, and asks the store nothing; and
+/// the driver an adoption then starts asks it nothing either while the wait lasts. A kept wait
+/// that cannot be read may still be a wait that has not passed, so both fail closed on it: the
+/// stop says why and leaves the claim standing, the adopted driver says why and asks the store
+/// nothing, and only once the file is repaired does the adopted driver reach the store.
+#[test]
+fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
+    for (scenario, wait, released) in [
+        ("inside", Duration::from_secs(6), true),
+        ("past-the-release", Duration::from_secs(600), false),
+        // A kept wait this build cannot read is said, and no store call is made on it.
+        ("unreadable", Duration::from_secs(600), false),
+    ] {
+        let run = format!("writeback-stop-limited-{scenario}");
+        let (world, project) = a_run_whose_destination_can_start_refusing(
+            &format!("store-writeback-stop-limited-{scenario}"),
+            &run,
+        );
+        world.until("every attempt so far to be recorded", |world| {
+            world
+                .run_file(&run, "writeback-projections.jsonl")
+                .is_file()
+                && !world.store_calls().is_empty()
+        });
+        let before = streaks_reported(&world, &run);
+        world.store_refuses_once("get_project", &rate_limited_for(wait.as_secs()));
+        noted(&world, &run, "later", "limited before the stop");
+        world.until("the rate-limited attempt to be reported", |world| {
+            streaks_reported(world, &run) > before
+        });
+        let failed_at = Instant::now();
+        let calls = world.store_calls().len();
+        assert!(
+            world.run_file(&run, "writeback-wait.json").is_file(),
+            "{scenario}: the wait was not kept where another process can read it"
+        );
+        let unreadable = scenario == "unreadable";
+        if unreadable {
+            // llmlint: ignore-block[tests_mirror_real_usage] a kept wait this build cannot read
+            // is one nothing this build writes, so the file is edited as a hand or another tool
+            // would.
+            std::fs::write(world.run_file(&run, "writeback-wait.json"), "not a wait")
+                .expect("the kept wait is overwritten");
+            // llmlint: ignore-end[tests_mirror_real_usage]
+        }
+
+        let stop = world
+            .cmd(&["stop", &run])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the stop starts");
+        if released && !unreadable {
+            while failed_at.elapsed() + Duration::from_millis(500) < wait {
+                assert_eq!(
+                    world.store_calls().len(),
+                    calls,
+                    "{scenario}: the store was handed a call {:?} into a {wait:?} wait: {:?}",
+                    failed_at.elapsed(),
+                    &world.store_calls()[calls..]
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        let stopped = stop.wait_with_output().expect("the stop ends");
+        assert!(stopped.status.success(), "{scenario}: {stopped:?}");
+        let said = String::from_utf8_lossy(&stopped.stderr).into_owned();
+        let later_word = || {
+            world.store_tasks(&project).iter().find_map(|task| {
+                (task["item"]["metadata"]["onepipeline.id"] == "later")
+                    .then(|| task["item"]["status"]["name"].clone())
+            })
+        };
+        if unreadable {
+            let path = world.run_file(&run, "writeback-wait.json");
+            assert!(
+                said.contains("did not release")
+                    && said.contains(&format!("cannot read {}", path.display()))
+                    && said.contains("repaired"),
+                "{scenario}: the stop did not say it could not read the kept wait: {said}"
+            );
+            assert_eq!(
+                world.store_calls().len(),
+                calls,
+                "{scenario}: the stop called the store on a wait it could not read: {:?}",
+                &world.store_calls()[calls..]
+            );
+            assert_eq!(later_word(), Some(json!("queued")), "{scenario}");
+            // The driver an adoption starts fails closed on it too.
+            world.run(&["adopt", &run, "--detach"]).exited(0);
+            let adopted = Instant::now();
+            while adopted.elapsed() < Duration::from_secs(5) {
+                assert_eq!(
+                    world.store_calls().len(),
+                    calls,
+                    "{scenario}: the adopted driver called the store {:?} after adopting, on a \
+                     wait it could not read: {:?}",
+                    adopted.elapsed(),
+                    &world.store_calls()[calls..]
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            world.until_run_file_holds(
+                &run,
+                "driver.log",
+                &format!("cannot read {}", path.display()),
+            );
+            // Repaired — here, taken away, which is what an operator clearing it does — the
+            // adopted driver reaches the store.
+            // llmlint: ignore-block[tests_mirror_real_usage] the operator's repair of a file
+            // this build cannot read is removing it; no verb of this build does that.
+            std::fs::remove_file(&path).expect("the kept wait is removed");
+            // llmlint: ignore-end[tests_mirror_real_usage]
+            world.until(
+                "the adopted driver to reach the store once repaired",
+                |world| world.store_calls().len() > calls,
+            );
+        } else if released {
+            assert!(
+                failed_at.elapsed() >= wait - Duration::from_millis(500),
+                "{scenario}: the stop released {:?} after a failure asking for {wait:?}",
+                failed_at.elapsed()
+            );
+            assert!(
+                world.store_calls().len() > calls,
+                "{scenario}: the stop released nothing once the wait had passed"
+            );
+            assert_eq!(later_word(), Some(json!("todo")), "{scenario}");
+        } else {
+            assert!(
+                said.contains("did not release") && said.contains("left alone"),
+                "{scenario}: the stop did not say it left the claim standing: {said}"
+            );
+            assert!(
+                failed_at.elapsed() < Duration::from_secs(60),
+                "{scenario}: the stop was held {:?} by a wait it could not serve",
+                failed_at.elapsed()
+            );
+            assert_eq!(
+                world.store_calls().len(),
+                calls,
+                "{scenario}: the store was handed a call inside a {wait:?} wait: {:?}",
+                &world.store_calls()[calls..]
+            );
+            assert_eq!(later_word(), Some(json!("queued")), "{scenario}");
+            // And the driver an adoption starts honours the same wait: its first projection
+            // asks the store nothing while the wait lasts.
+            world.run(&["adopt", &run, "--detach"]).exited(0);
+            let adopted = Instant::now();
+            while adopted.elapsed() < Duration::from_secs(5) {
+                assert_eq!(
+                    world.store_calls().len(),
+                    calls,
+                    "{scenario}: the adopted driver asked the store {:?} into a {wait:?} wait: \
+                     {:?}",
+                    adopted.elapsed(),
+                    &world.store_calls()[calls..]
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+/// A store that is rate-limited for the whole run, asking each time to be left alone for longer
+/// than the run lasts, changes nothing about the run: it dispatches, settles and closes out on
+/// time, and every settlement is the one the same plan settles with against a healthy store.
+/// The write-back stays best effort and off the reconcile loop, and the wait it honours is its
+/// own.
+#[test]
+fn a_run_whose_store_is_rate_limited_throughout_settles_as_it_does_against_a_healthy_one() {
+    let settle = |name: &str, limited: bool| -> (Value, Duration) {
+        let world = World::new(&format!("store-writeback-{name}"));
+        world.script("work.wait", "hold");
+        let project = world.plan(
+            name,
+            &plan_of(name, vec![agent("work", &[]), agent("later", &["work"])]),
+        );
+        if limited {
+            // Every write the copy makes is refused for a rate limit asking for a minute.
+            world.store_refuses("write_task", &rate_limited_for(60));
+        }
+        let world = world
+            .through_scripted_source()
+            .with_env(RENDEZVOUS_SECONDS_ENV, "600");
+        let started = Instant::now();
+        world.run(&["start", &project, "--detach"]).exited(0);
+        world.until("the held node to be dispatched", |world| {
+            dispatched(world, name) == ["work"]
+        });
+        world.release("work.go");
+        world.until("the run to write its result", |world| {
+            world.run_file(name, "result.json").is_file()
+        });
+        let took = started.elapsed();
+        if limited {
+            let log = std::fs::read_to_string(world.run_file(name, "driver.log"))
+                .expect("the driver log is readable");
+            assert!(
+                log.contains("kind: rate-limited"),
+                "the store was never rate-limited, so this proves nothing:\n{log}"
+            );
+        }
+        assert_eq!(dispatched(&world, name), ["work", "later"]);
+        let result = world.run_json(name, "result.json");
+        let settled: BTreeMap<String, Value> = result["nodes"]
+            .as_array()
+            .expect("result nodes")
+            .iter()
+            .map(|node| {
+                (
+                    node["id"].as_str().expect("a node id").to_owned(),
+                    json!({"status": node["status"], "outcome": node["outcome"]}),
+                )
+            })
+            .collect();
+        (json!({"state": result["state"], "nodes": settled}), took)
+    };
+    let (healthy, _) = settle("writeback-healthy-throughout", false);
+    let (limited, took) = settle("writeback-limited-throughout", true);
+    assert_eq!(healthy["state"], "complete", "{healthy}");
+    assert_eq!(
+        limited, healthy,
+        "a rate-limited store changed how the run settled"
+    );
+    assert!(
+        took < Duration::from_secs(60),
+        "the run took {took:?}, which is the store's wait rather than the run's own time"
+    );
 }
 
 /// Closeout attempts a terminal snapshot published after a refusal, because it is a different

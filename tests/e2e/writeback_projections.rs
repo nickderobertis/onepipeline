@@ -85,17 +85,26 @@ fn native(id: &str) -> &str {
 /// Counted, not timed: each command that reaches the store opens a connection of its own to
 /// the scripted source, whose handshake is the first thing it records. One of those was the
 /// plan read the launch made; each of the rest is an attempt, which is in flight from its
-/// handshake until the worker appends its record.
+/// handshake until the worker appends its record. An attempt with nothing to carry opens no
+/// connection, and its record says it called nothing.
 fn every_attempt_landed(world: &World, run: &str) -> bool {
     let opened = store_calls(world)
         .iter()
         .filter(|call| is_call(call, "initialize"))
         .count();
     let records = records(world, run);
-    records.len() + 1 == opened
+    opened_the_store(&records) + 1 == opened
         && records
             .iter()
             .all(|record| record["outcome"] == "projected")
+}
+
+/// How many recorded attempts opened the store: every one but those that called nothing.
+fn opened_the_store(records: &[Value]) -> usize {
+    records
+        .iter()
+        .filter(|record| record["calls"] != json!({}))
+        .count()
 }
 
 fn board_word(tasks: &[Value], node: &str) -> Option<String> {
@@ -252,15 +261,16 @@ fn source_refused(message: &str) -> Value {
     json!({"kind": "refused", "message": message})
 }
 
-/// A run's first projection carries the whole project and is recorded `whole` / `first`; a
-/// later transition of one node carries that node alone. The named node reaches the board as
-/// ever, a label a person put on it included; the node the copy did not name keeps its item
-/// byte for byte as a person edited it, a declared field included; and the commands the worker
-/// handed the store for that projection read the project item and the named member only — no
-/// page of tasks, and no read of the unnamed member. A driver an adoption starts projects whole
-/// again, as its own first.
+/// A run's first projection carries its claim by member — every lineage, since the baseline the
+/// launch seeded records no word — and reads no page of tasks; a later transition of one node
+/// carries that node alone. The named node reaches the board as ever, a label a person put on
+/// it included; the node the copy did not name keeps its item byte for byte as a person edited
+/// it, a declared field included; and the commands the worker handed the store for that
+/// projection read the project item and the named member only — no page of tasks, and no read
+/// of the unnamed member. A driver an adoption starts carries only what differs from the file
+/// the driver before it left: not the node that finished, whose item already says so.
 #[test]
-fn a_runs_first_projection_is_whole_and_a_later_transition_carries_that_node_alone() {
+fn a_runs_first_projection_carries_its_claim_by_member_and_a_later_transition_that_node_alone() {
     let run = "projections-members";
     let (world, project) = a_run_projecting_through_a_recording_store(
         "writeback-projections-members",
@@ -280,9 +290,14 @@ fn a_runs_first_projection_is_whole_and_a_later_transition_carries_that_node_alo
     );
 
     let first = &records(&world, run)[0];
-    assert_eq!(first["scope"], "whole", "{first}");
-    assert_eq!(first["whole_because"], "first", "{first}");
+    assert_eq!(first["scope"], "members", "{first}");
+    assert_eq!(first["whole_because"], Value::Null, "{first}");
     assert_eq!(first["outcome"], "projected", "{first}");
+    assert_eq!(
+        first["calls"],
+        json!({"project-show": 1, "task-show": 2, "project-copy": 1}),
+        "the first projection read other than the project and the two items it carried: {first}"
+    );
     assert_eq!(first["project"], project.as_str(), "{first}");
     assert_eq!(first["items"], json!(["aside", "work"]), "{first}");
     assert!(first["actions"].is_object(), "{first}");
@@ -350,9 +365,9 @@ fn a_runs_first_projection_is_whole_and_a_later_transition_carries_that_node_alo
         .filter(|call| is_call(call, "initialize"))
         .count();
     assert!(
-        opened >= later.len(),
+        opened >= opened_the_store(&later),
         "{} attempts were made over {opened} stores, so one answered from another's reads",
-        later.len()
+        opened_the_store(&later)
     );
     for record in &later {
         assert_eq!(record["scope"], "members", "{record}");
@@ -412,27 +427,263 @@ fn a_runs_first_projection_is_whole_and_a_later_transition_carries_that_node_alo
         );
     }
 
-    // A second driver has landed nothing yet, so its first projection is whole again.
+    // A second driver compares against the file the first one left, so `work`, whose item
+    // already says it is done, is not carried again.
     let recorded_before = records(&world, run).len();
     adopted(&world, run);
     world.until("the adopted driver's first projection", |world| {
         records(world, run).len() > recorded_before
     });
     let adopted_first = &records(&world, run)[recorded_before];
-    assert_eq!(adopted_first["scope"], "whole", "{adopted_first}");
-    assert_eq!(adopted_first["whole_because"], "first", "{adopted_first}");
+    assert_eq!(adopted_first["scope"], "members", "{adopted_first}");
+    assert_eq!(
+        adopted_first["whole_because"],
+        Value::Null,
+        "{adopted_first}"
+    );
+    assert!(
+        adopted_first["items"]
+            .as_array()
+            .is_some_and(|items| !items.contains(&json!("work"))),
+        "the adopted driver carried a lineage the previous driver had landed: {adopted_first}"
+    );
+    no_record_is_whole_or_reads_a_page_of_tasks(&world, run);
 }
 
-/// The attempt after a failed one is whole and recorded `after-failure`, whatever failed: the
-/// store refusing a member copy, and then a whole projection's own page of tasks, each recorded
-/// failed with the store's class and kind and the reason, carrying no report. The planner is told
-/// the items the copy carried — the one node, for the member copy. Once a whole projection lands,
-/// the next change is carried as members again.
+/// Every line the run recorded is a member projection whose calls name no page of tasks.
+fn no_record_is_whole_or_reads_a_page_of_tasks(world: &World, run: &str) {
+    let recorded = records(world, run);
+    assert!(!recorded.is_empty(), "the run recorded no projection");
+    for record in recorded {
+        assert_eq!(record["scope"], "members", "{record}");
+        assert!(record["calls"].is_object(), "{record}");
+        assert!(
+            record["calls"].get("task-list").is_none(),
+            "an attempt read the project's page of tasks: {record}"
+        );
+    }
+}
+
+/// Entry 93's block, which is where the landed baseline's file and shape are written down.
+fn landed_block() -> Value {
+    let record = std::fs::read_to_string(crate::harness::repo_file("docs/contract-divergences.md"))
+        .expect("the divergence record ships");
+    let entry = record
+        .split("\n## ")
+        .find(|entry| entry.starts_with("93."))
+        .expect("the record still carries entry 93");
+    let block = entry
+        .split("```json")
+        .nth(1)
+        .and_then(|rest| rest.split("```").next())
+        .expect("entry 93 carries its json block");
+    serde_json::from_str::<Value>(block).expect("entry 93's block is JSON")["landed"].clone()
+}
+
+/// The run's landed baseline, as the file holds it.
+fn landed(world: &World, run: &str) -> Value {
+    let path = world.run_file(run, &in_run_dir(&landed_block()["file"]));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "{} is not there: {error}; the runs root held:\n{}",
+            path.display(),
+            world.dump()
+        )
+    });
+    serde_json::from_str(&text).expect("the landed baseline is JSON")
+}
+
+fn keys(value: &Value) -> std::collections::BTreeSet<String> {
+    value
+        .as_object()
+        .unwrap_or_else(|| panic!("not an object: {value}"))
+        .keys()
+        .cloned()
+        .collect()
+}
+
+/// The landed baseline is seeded from the launch's own read before the first projection — the
+/// file is there, every item's word still unknown, while that projection's copy is held — and
+/// holds exactly entry 93's version-1 shape: only engine-owned `onepipeline.*` keys, and none
+/// of a person's label, a key of their own on the task, or the project's title and
+/// description, though the board holds all four. A copy that lands advances it; a refused one
+/// advances nothing; and the attempt after the refusal lands the change it lost.
 #[test]
-fn a_projection_after_a_failed_attempt_is_whole() {
-    let run = "projections-after-failure";
+fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
+    let run = "projections-landed";
+    let world = World::new("writeback-projections-landed");
+    world.script("work.wait", "hold");
+    let project = world.plan(
+        run,
+        &plan_of(run, vec![agent("work", &[]), agent("later", &["work"])]),
+    );
+    // What a person put on the board that no plan models.
+    // llmlint: ignore-block[tests_mirror_real_usage] a `local-md` destination *is* its folder of
+    // Markdown, so a person editing the board edits those files; `onetaskgraph` has no verb that
+    // labels an item or retitles a project in place, and `store.rs` authors them the same way.
+    let identifier = project_id(run);
+    let tasks_dir = world.store().join("tasks").join(&identifier);
+    rewritten(
+        &tasks_dir.join("000-work.md"),
+        &tasks_dir.join("000-work.md"),
+        |front| {
+            front.insert("labels".to_owned(), json!(["needs-review"]));
+            front
+                .get_mut("metadata")
+                .and_then(Value::as_object_mut)
+                .expect("metadata")
+                .insert("authored.note".to_owned(), json!("a person's own key"));
+        },
+    );
+    let project_file = world
+        .store()
+        .join("projects")
+        .join(format!("{identifier}.md"));
+    rewritten(&project_file, &project_file, |front| {
+        front.insert("title".to_owned(), json!("A board a person titled"));
+        let metadata = front
+            .get_mut("metadata")
+            .and_then(Value::as_object_mut)
+            .expect("metadata");
+        metadata.insert(
+            "authored.owner".to_owned(),
+            json!("a person's own project key"),
+        );
+        // The plan's own name, so the run is still named after it rather than the new title.
+        metadata.insert("onepipeline.name".to_owned(), json!(run));
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let world = world
+        .through_scripted_source()
+        .with_env(RENDEZVOUS_SECONDS_ENV, "600");
+    let copies = world.store_holds("write_task");
+    world.run(&["start", &project, "--detach"]).exited(0);
+
+    // The first projection's copy is held at its first write: nothing has landed, and the file
+    // is already there, seeded from the launch's read.
+    let held = copies.arrived();
+    let seeded = landed(&world, run);
+    let block = landed_block();
+    assert_eq!(keys(&seeded), keys(&block["example"]), "{seeded}");
+    assert_eq!(
+        seeded["schema_version"], block["schema_version"],
+        "{seeded}"
+    );
+    assert_eq!(seeded["project"], project.as_str(), "{seeded}");
+    let item_keys = keys(&block["example"]["items"]["build"]);
+    let tasks = world.store_tasks(&project);
+    for node in ["work", "later"] {
+        let item = &seeded["items"][node];
+        assert_eq!(keys(item), item_keys, "{node}: {item}");
+        assert_eq!(
+            item["status"],
+            Value::Null,
+            "a seeded item names a word: {item}"
+        );
+        assert_eq!(
+            item["destination"],
+            board_task(&tasks, node)["id"],
+            "{item}"
+        );
+        let digest = item["content_sha256"].as_str().expect("a digest");
+        assert!(
+            digest.len() == 64 && digest.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+            "{item}"
+        );
+    }
+    assert_eq!(seeded["items"]["later"]["depends_on"], json!(["work"]));
+    assert_eq!(
+        keys(&seeded["items"]),
+        ["later", "work"].map(String::from).into()
+    );
+    for (key, _) in seeded["project_metadata"].as_object().expect("an object") {
+        assert!(key.starts_with("onepipeline."), "{seeded}");
+    }
+    let text = serde_json::to_string(&seeded).expect("serializes");
+    for foreign in [
+        "needs-review",
+        "authored.note",
+        "authored.owner",
+        "A board a person titled",
+        "labels",
+    ] {
+        assert!(
+            !text.contains(foreign),
+            "the landed baseline holds `{foreign}`, which the engine does not own: {text}"
+        );
+    }
+
+    world.store_stops_holding("write_task");
+    held.release();
+    drop(copies);
+    projected_until(
+        &world,
+        run,
+        &project,
+        "the running node to reach the board",
+        |tasks| board_word(tasks, "work").as_deref() == Some("in-progress"),
+    );
+    let advanced = landed(&world, run);
+    assert_eq!(
+        advanced["items"]["work"]["status"], "in progress",
+        "{advanced}"
+    );
+    assert_eq!(advanced["items"]["later"]["status"], "queued", "{advanced}");
+    assert_eq!(
+        advanced["items"]["work"]["metadata"]["onepipeline.node"], "work",
+        "{advanced}"
+    );
+    assert!(
+        !serde_json::to_string(&advanced)
+            .expect("serializes")
+            .contains("needs-review"),
+        "{advanced}"
+    );
+
+    // A refused copy lands nothing, and the file says so.
+    let path = world.run_file(run, &in_run_dir(&block["file"]));
+    let before = std::fs::read(&path).expect("the baseline reads");
+    let mark = records(&world, run).len();
+    world.store_refuses(
+        "write_task",
+        &source_refused("the destination declined the write"),
+    );
+    noted(&world, run, "later", "not landed yet");
+    world.until("the refused attempt to be recorded", |world| {
+        records(world, run).len() > mark
+    });
+    assert_eq!(records(&world, run)[mark]["outcome"], "failed");
+    assert_eq!(
+        std::fs::read(&path).expect("the baseline reads"),
+        before,
+        "a refused copy advanced the landed baseline"
+    );
+    world.store_stops_refusing("write_task");
+    noted(&world, run, "work", "lands with it");
+    world.until_store("the lost change to reach the board", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "later"
+                && task["item"]["metadata"]["onepipeline.context"] == "not landed yet"
+        })
+    });
+    world.until("the baseline to record the lost change", |world| {
+        landed(world, run)["items"]["later"]["metadata"]["onepipeline.context"] == "not landed yet"
+    });
+    no_record_is_whole_or_reads_a_page_of_tasks(&world, run);
+    world.release("work.go");
+}
+
+/// A landed baseline the adopting driver cannot read — here, one holding a key the engine does
+/// not own, which only a hand or another tool could have put there — is said on the driver's
+/// standard error, naming the file and why, and treated as absent: each lineage is read once by
+/// its own id — a lineage whose shadow document cannot be read either, said too, at the task it
+/// was launched from — nothing is copied whole, no page of tasks is read, and the file is written again
+/// in the shape this build reads once the projection lands.
+#[test]
+fn a_landed_baseline_the_driver_cannot_read_is_said_and_each_item_read_by_its_id() {
+    let run = "projections-unreadable-baseline";
     let (world, project) = a_run_projecting_through_a_recording_store(
-        "writeback-projections-after-failure",
+        "writeback-projections-unreadable-baseline",
         run,
         vec![agent("work", &[]), agent("later", &["work"])],
         &["work"],
@@ -444,12 +695,258 @@ fn a_projection_after_a_failed_attempt_is_whole() {
         "the running node to reach the board",
         |tasks| board_word(tasks, "work").as_deref() == Some("in-progress"),
     );
+    world.run(&["stop", run]).exited(0);
+    let path = world.run_file(run, &in_run_dir(&landed_block()["file"]));
+    let mut unreadable = landed(&world, run);
+    // llmlint: ignore-block[tests_mirror_real_usage] a baseline this build refuses is one
+    // nothing this build writes, so the file is edited the way a hand or another tool would.
+    unreadable["items"]["work"]["metadata"]["authored.note"] = json!("not the engine's");
+    std::fs::write(&path, unreadable.to_string()).expect("the baseline is rewritten");
+    // And the shadow document the previous driver left for `later`, which names where its item
+    // is, made unreadable too: said, and the lineage read at the task it was launched from.
+    let later_shadow = world
+        .run_file(run, "writeback")
+        .join("tasks")
+        .join(hex(&project))
+        .join(format!("{}.md", hex("later")));
+    assert!(
+        later_shadow.is_file(),
+        "no shadow document at {}",
+        later_shadow.display()
+    );
+    std::fs::write(&later_shadow, "not a shadow document").expect("the document is rewritten");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let mark = records(&world, run).len();
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    world.until("the adopted driver's first projection", |world| {
+        records(world, run).len() > mark && every_attempt_landed(world, run)
+    });
+    let log = std::fs::read_to_string(world.run_file(run, "driver.log")).expect("the log");
+    assert!(
+        log.contains(&format!("cannot read {}", path.display()))
+            && log.contains("authored.note")
+            && log.contains("read from the store once instead"),
+        "the driver did not say it could not read the baseline, and why:\n{log}"
+    );
+    assert!(
+        log.contains(&format!(
+            "cannot read {} as a shadow document",
+            later_shadow.display()
+        )),
+        "the driver did not say it could not read the shadow document:\n{log}"
+    );
+    let first = records(&world, run)[mark].clone();
+    assert_eq!(first["scope"], "members", "{first}");
+    // Both lineages read once by their own id, and none read again to be carried.
+    assert_eq!(first["calls"]["task-show"], 2, "{first}");
+    assert_eq!(first["calls"]["project-show"], 1, "{first}");
+    assert!(first["calls"].get("task-list").is_none(), "{first}");
+    let rewritten = landed(&world, run);
+    assert!(
+        rewritten["items"]["work"]["metadata"]
+            .get("authored.note")
+            .is_none(),
+        "the unreadable baseline was kept: {rewritten}"
+    );
+    assert_eq!(
+        rewritten["items"]["later"]["destination"],
+        board_task(&world.store_tasks(&project), "later")["id"],
+        "{rewritten}"
+    );
+    no_record_is_whole_or_reads_a_page_of_tasks(&world, run);
+    world.release("work.go");
+}
+
+/// A run an older build started whose board already says everything the adopting driver would
+/// write — one node done, one parked, nothing left to start — is adopted with each lineage read
+/// once by its own id and nothing more: no project read, no copy, and a line naming no items.
+/// What the reads found is recorded as landed.
+#[test]
+fn an_adoption_whose_every_read_matches_reads_each_item_once_and_copies_nothing() {
+    let run = "projections-cold-match";
+    let world = World::new("writeback-projections-cold-match");
+    for node in ["done", "parked"] {
+        world.script(&format!("{node}.wait"), "hold");
+    }
+    // A worker that takes the cancel's ask, so the cancel settles it rather than waiting it out.
+    world.script("parked.stops-when-interrupted", "");
+    let project = world.plan(
+        run,
+        &plan_of(run, vec![agent("done", &[]), agent("parked", &[])]),
+    );
+    let world = world
+        .through_scripted_source()
+        .with_env(RENDEZVOUS_SECONDS_ENV, "600")
+        .with_env(CANCEL_GRACE_ENV, "1");
+    world.run(&["start", &project, "--detach"]).exited(0);
+    projected_until(&world, run, &project, "both nodes running", |tasks| {
+        board_word(tasks, "done").as_deref() == Some("in-progress")
+            && board_word(tasks, "parked").as_deref() == Some("in-progress")
+    });
+    world.release("done.go");
+    cancelled(&world, run, "parked");
+    projected_until(&world, run, &project, "the board to say it all", |tasks| {
+        board_word(tasks, "done").as_deref() == Some("done")
+            && board_task(tasks, "parked")["item"]["status"]["name"] == "parked"
+    });
+    world.run(&["stop", run]).exited(0);
+    let path = world.run_file(run, &in_run_dir(&landed_block()["file"]));
+    // llmlint: ignore-block[tests_mirror_real_usage] a run directory an older build left holds
+    // no landed baseline, and every launch of this build seeds one; removing it is exactly that
+    // directory.
+    std::fs::remove_file(&path).expect("this build seeded a landed baseline");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let mark = records(&world, run).len();
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    world.until("the adopted driver's first projection", |world| {
+        records(world, run).len() > mark
+    });
+    let first = records(&world, run)[mark].clone();
+    assert_eq!(first["outcome"], "projected", "{first}");
+    assert_eq!(first["items"], json!([]), "{first}");
+    assert_eq!(
+        first["calls"],
+        json!({"task-show": 2}),
+        "the adopted driver did more than read each item once: {first}"
+    );
+    assert_eq!(first["actions"], Value::Null, "{first}");
+    let recorded = landed(&world, run);
+    assert_eq!(
+        keys(&recorded["items"]),
+        ["done", "parked"].map(String::from).into(),
+        "{recorded}"
+    );
+    assert_eq!(recorded["items"]["done"]["status"], "done", "{recorded}");
+    assert_eq!(
+        recorded["items"]["parked"]["status"], "parked",
+        "{recorded}"
+    );
+    no_record_is_whole_or_reads_a_page_of_tasks(&world, run);
+}
+
+/// A read of one task does not answer its edges, so a lineage a cold adoption reads by its own
+/// id that has any is carried even where everything the read did answer matches — and the copy
+/// puts back an edge a person took off the board meanwhile — while one without edges that
+/// matches is not.
+#[test]
+fn a_lineage_read_cold_with_edges_is_carried_and_its_edges_put_right() {
+    let run = "projections-cold-edges";
+    let world = World::new("writeback-projections-cold-edges");
+    for node in ["first", "second"] {
+        world.script(&format!("{node}.wait"), "hold");
+    }
+    world.script("second.stops-when-interrupted", "");
+    let project = world.plan(
+        run,
+        &plan_of(run, vec![agent("first", &[]), agent("second", &["first"])]),
+    );
+    let world = world
+        .through_scripted_source()
+        .with_env(RENDEZVOUS_SECONDS_ENV, "600")
+        .with_env(CANCEL_GRACE_ENV, "1");
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the first node to be dispatched", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+    world.release("first.go");
+    world.until("the second node to be dispatched", |world| {
+        world.events_of(run, "node-dispatched").len() >= 2
+    });
+    cancelled(&world, run, "second");
+    projected_until(&world, run, &project, "the board to say it all", |tasks| {
+        board_word(tasks, "first").as_deref() == Some("done")
+            && board_task(tasks, "second")["item"]["status"]["name"] == "parked"
+    });
+    world.run(&["stop", run]).exited(0);
+
+    let second = board_task(&world.store_tasks(&project), "second").clone();
+    let second_id = second["id"].as_str().expect("an id").to_owned();
+    assert!(
+        !world.store_deps(&second_id).is_empty(),
+        "the fixture drew no edge"
+    );
+    // llmlint: ignore-block[tests_mirror_real_usage] a run directory an older build left holds
+    // no landed baseline, and a person taking an edge off a `local-md` board edits its file;
+    // no invocation of this build produces either.
+    std::fs::remove_file(world.run_file(run, &in_run_dir(&landed_block()["file"])))
+        .expect("this build seeded a landed baseline");
+    rewritten(
+        &item_file(&world, &second),
+        &item_file(&world, &second),
+        |front| {
+            front.remove("depends_on");
+        },
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    assert!(
+        world.store_deps(&second_id).is_empty(),
+        "the edge was not taken off the board"
+    );
+
+    let mark = records(&world, run).len();
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    world.until("the adopted driver's first projection", |world| {
+        records(world, run).len() > mark && every_attempt_landed(world, run)
+    });
+    let first = records(&world, run)[mark].clone();
+    assert_eq!(
+        first["items"],
+        json!(["second"]),
+        "a lineage with edges read cold was not carried, or one without was: {first}"
+    );
+    assert_eq!(first["calls"]["task-show"], 2, "{first}");
+    assert!(
+        !world.store_deps(&second_id).is_empty(),
+        "the copy did not put the edge back"
+    );
+    no_record_is_whole_or_reads_a_page_of_tasks(&world, run);
+}
+
+/// The attempt after a failed one carries exactly the lineages whose change had not landed —
+/// never the whole project — whatever failed: the store refusing the copy, each recorded failed
+/// with the store's class and kind and the reason, carrying no report, and the planner told the
+/// items the copy carried. The change the refused attempt lost and one made while it was
+/// refused both reach the board on the attempt that recovers, and that attempt carries those
+/// two lineages and nothing else. A failure a wait can change is retried on the schedule, and
+/// the retry carries the unlanded lineage alone. Across it all, no attempt reads a page of
+/// tasks.
+#[test]
+fn a_projection_after_a_failed_attempt_carries_what_had_not_landed() {
+    let run = "projections-after-failure";
+    let (world, project) = a_run_projecting_through_a_recording_store(
+        "writeback-projections-after-failure",
+        run,
+        vec![
+            agent("work", &[]),
+            agent("later", &["work"]),
+            agent("aside", &[]),
+        ],
+        &["work", "aside"],
+    );
+    projected_until(
+        &world,
+        run,
+        &project,
+        "the running nodes to reach the board",
+        |tasks| {
+            board_word(tasks, "work").as_deref() == Some("in-progress")
+                && board_word(tasks, "aside").as_deref() == Some("in-progress")
+        },
+    );
     let mark = records(&world, run).len();
     let recorded = |count: usize| {
         world.until(&format!("{count} more attempts to be recorded"), |world| {
             records(world, run).len() >= mark + count
         });
         records(&world, run)
+    };
+    let noted_on = |world: &World, node: &str, text: &str| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == node
+                && task["item"]["metadata"]["onepipeline.context"] == text
+        })
     };
 
     world.store_refuses(
@@ -500,64 +997,38 @@ fn a_projection_after_a_failed_attempt_is_whole() {
     );
     world.store_stops_refusing("write_task");
 
-    world.store_refuses(
-        "query_tasks",
-        &source_refused("source plans refused the request"),
+    // The graph changes again, on another lineage: the attempt carries that change and the one
+    // the refusal lost, and not `aside`, which changed nowhere.
+    noted(&world, run, "work", "changed after the refusal");
+    let recovered = recorded(2)[mark + 1].clone();
+    assert_eq!(recovered["scope"], "members", "{recovered}");
+    assert_eq!(recovered["whole_because"], Value::Null, "{recovered}");
+    assert_eq!(recovered["items"], json!(["later", "work"]), "{recovered}");
+    assert_eq!(recovered["outcome"], "projected", "{recovered}");
+    world.until_store(
+        "every change the refusal lost to reach the board",
+        |world| {
+            noted_on(world, "later", "refused at the copy")
+                && noted_on(world, "work", "changed after the refusal")
+        },
     );
-    let asked_before = store_calls(&world).len();
-    let board_before = world.store_tasks(&project);
-    noted(&world, run, "later", "refused at the page of tasks");
-    let whole = recorded(2)[mark + 1].clone();
-    assert_eq!(whole["scope"], "whole", "{whole}");
-    assert_eq!(whole["whole_because"], "after-failure", "{whole}");
-    assert_eq!(whole["items"], json!(["later", "work"]), "{whole}");
-    assert_eq!(whole["outcome"], "failed", "{whole}");
-    assert_eq!(whole["class"], "refused", "{whole}");
-    assert_eq!(whole["kind"], "refused", "{whole}");
-    // A destination read that answered in part ends the projection there: nothing was
-    // written, and the board holds what it held before.
-    let asked = store_calls(&world)[asked_before..].to_vec();
-    assert!(
-        asked
-            .iter()
-            .all(|call| !call[0].starts_with("write_") && !call[0].starts_with("set_")),
-        "a projection whose page of tasks answered in part wrote to the board: {asked:?}"
-    );
-    assert_eq!(
-        world.store_tasks(&project),
-        board_before,
-        "a projection whose page of tasks answered in part changed the board"
-    );
-    world.store_stops_refusing("query_tasks");
-
-    noted(&world, run, "later", "projected whole");
-    let landed = recorded(3)[mark + 2].clone();
-    assert_eq!(landed["scope"], "whole", "{landed}");
-    assert_eq!(landed["whole_because"], "after-failure", "{landed}");
-    assert_eq!(landed["outcome"], "projected", "{landed}");
-    world.until_store("the whole projection to reach the board", |world| {
-        world.store_tasks(&project).iter().any(|task| {
-            task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"] == "projected whole"
-        })
-    });
 
     noted(&world, run, "later", "members again");
-    let again = recorded(4)[mark + 3].clone();
+    let again = recorded(3)[mark + 2].clone();
     assert_eq!(again["scope"], "members", "{again}");
     assert_eq!(again["items"], json!(["later"]), "{again}");
     assert_eq!(again["outcome"], "projected", "{again}");
 
-    // A failure a wait can change is retried on the schedule, and the retry is whole: the read
-    // of the named member failing is recorded failed and `transient`, and the attempt the
-    // schedule makes next reads the page of tasks rather than that member, and lands.
+    // A failure a wait can change is retried on the schedule, and the retry carries what had
+    // not landed: the read of the named member failing is recorded failed and `transient`, and
+    // the attempt the schedule makes next carries that member again, alone, and lands.
     world.store_refuses_once(
         "get_task",
         &json!({"kind": "unavailable", "message": "the connection was reset"}),
     );
-    noted(&world, run, "later", "retried whole");
-    let retried = recorded(6);
-    let unread = &retried[mark + 4];
+    noted(&world, run, "later", "retried by member");
+    let retried = recorded(5);
+    let unread = &retried[mark + 3];
     assert_eq!(unread["scope"], "members", "{unread}");
     assert_eq!(unread["items"], json!(["later"]), "{unread}");
     assert_eq!(unread["outcome"], "failed", "{unread}");
@@ -569,20 +1040,24 @@ fn a_projection_after_a_failed_attempt_is_whole() {
         ),
         "{unread}"
     );
-    let recovered = &retried[mark + 5];
-    assert_eq!(recovered["scope"], "whole", "{recovered}");
-    assert_eq!(recovered["whole_because"], "after-failure", "{recovered}");
-    assert_eq!(recovered["outcome"], "projected", "{recovered}");
+    let landed = &retried[mark + 4];
+    assert_eq!(landed["scope"], "members", "{landed}");
+    assert_eq!(landed["items"], json!(["later"]), "{landed}");
+    assert_eq!(landed["outcome"], "projected", "{landed}");
     world.until_store("the retried projection to reach the board", |world| {
-        world.store_tasks(&project).iter().any(|task| {
-            task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"] == "retried whole"
-        })
+        noted_on(world, "later", "retried by member")
     });
     assert!(
         !world.fakes.join("store.get_task.refuse.once").exists(),
         "the member read was never asked, so nothing failed it"
     );
+    assert_eq!(
+        world.store_asked("query_tasks"),
+        1,
+        "something beside the launch's own plan read asked for a page of tasks"
+    );
+    no_record_is_whole_or_reads_a_page_of_tasks(&world, run);
+    world.release("aside.go");
 }
 
 /// The record carries exactly what the copy said it did and spent: its `spent` object as the
@@ -626,6 +1101,11 @@ fn the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent() {
     let counted = records(&world, run)[mark].clone();
     assert_eq!(counted["outcome"], "projected", "{counted}");
     assert_eq!(counted["scope"], "members", "{counted}");
+    assert_eq!(
+        counted["calls"],
+        json!({"project-show": 1, "task-show": 1, "project-copy": 1}),
+        "{counted}"
+    );
     // What the metered source served for that copy: every request between the two readings
     // the store takes of its meter, one before the copy and one after, read off the source's
     // own record of calls.
@@ -682,9 +1162,9 @@ fn the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent() {
 /// A run directory an engine that drove the store's binary left behind holds that engine's
 /// record of whether its store offered a member copy, `writeback-store.json`, answering that it
 /// did not. This build neither reads nor writes that record: the run adopts, the adopted
-/// driver's first projection is whole and `first` as every driver's is, and the change after it
-/// is carried as members — never whole for `store-lacks-members`, which this build reads on an
-/// older line and never gives.
+/// driver's first projection carries its members as every driver's does, and the change after
+/// it is carried as members — never whole for `store-lacks-members`, which this build reads on
+/// an older line and never gives.
 #[test]
 fn a_run_directory_holding_an_older_engines_store_record_adopts_and_projects_by_member() {
     let run = "projections-older-record";
@@ -718,8 +1198,8 @@ fn a_run_directory_holding_an_older_engines_store_record_adopts_and_projects_by_
         records(world, run).len() > recorded_before
     });
     let first = records(&world, run)[recorded_before].clone();
-    assert_eq!(first["scope"], "whole", "{first}");
-    assert_eq!(first["whole_because"], "first", "{first}");
+    assert_eq!(first["scope"], "members", "{first}");
+    assert_eq!(first["whole_because"], Value::Null, "{first}");
 
     let before = records(&world, run).len();
     noted(&world, run, "later", "a change for the adopted driver");
@@ -978,14 +1458,15 @@ fn a_retry_or_requeue_of_a_cancelled_node_reopens_its_one_item() {
     world.release("filler.go");
 }
 
-/// A board an older build wrote holds one item per attempt: after `--adopt`, the whole
-/// projection carries the lineage once, onto the item of the furthest-along attempt, and leaves
-/// the root's older item byte for byte. Once this build has written the head onto that item —
-/// `onepipeline.id` the root, `onepipeline.node` the attempt — a second whole projection over
-/// the same board resolves it the same way and lands, rather than refusing two items for one
-/// `onepipeline.id`.
+/// A run an older build started holds no landed baseline, and its board one item per attempt:
+/// after `--adopt`, each lineage is read once by its own id — the furthest-along attempt's item
+/// the previous driver's shadow documents recorded — and the projection carries the lineage
+/// once, by member, onto that item, and leaves the root's older item byte for byte. No attempt
+/// is whole and none reads a page of tasks. Once this build has written the head onto that item
+/// and recorded where it landed, a second adoption carries the difference from that record and
+/// lands onto the same item, rather than refusing two items for one `onepipeline.id`.
 #[test]
-fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item() {
+fn an_adoption_of_a_run_an_older_build_started_reads_the_furthest_along_item_by_its_id() {
     let run = "projections-older-board";
     let (world, project) = a_run_projecting_through_a_recording_store(
         "writeback-projections-older-board",
@@ -1051,10 +1532,12 @@ fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item(
     });
     // llmlint: ignore-end[tests_mirror_real_usage]
     let older_root = std::fs::read(&root_file).expect("the seeded root item reads");
-    // And what that build left in the run's own shadow store, which outlives its driver: a
-    // shadow task for the attempt, keyed by the attempt's id. A whole copy carries every
-    // document the shadow store holds, so one this build did not write would reach the
-    // board as an item of its own.
+    // And what that build left in the run's own directory, which outlives its driver: no landed
+    // baseline, which that build never wrote, and a shadow task for the attempt, keyed by the
+    // attempt's id and naming the item the attempt landed on — which is how the adopting driver
+    // finds that item without reading the board's page of tasks. A copy carrying a document the
+    // shadow store holds that this build did not write would reach the board as an item of its
+    // own, so it has to be taken out.
     let shadow_tasks = world
         .run_file(run, "writeback")
         .join("tasks")
@@ -1066,13 +1549,6 @@ fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item(
         "the run keeps its shadow store elsewhere than {}",
         root_shadow.display()
     );
-    rewritten(&root_shadow, &stale_shadow, |front| {
-        let metadata = front["metadata"].as_object_mut().expect("metadata");
-        metadata.insert("onepipeline.id".to_owned(), json!("flaky-2"));
-        metadata.remove("onepipeline.node");
-        metadata.remove("onepipeline.supersedes");
-        metadata.remove("onetaskgraph.origin");
-    });
     let seeded = world.store_tasks(&project);
     assert_eq!(
         seeded
@@ -1087,18 +1563,19 @@ fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item(
         .find(|task| task["item"]["metadata"]["onepipeline.id"] == "flaky-2")
         .map(|task| task["id"].clone())
         .expect("the seeded attempt item");
+    let landed_file = world.run_file(run, "writeback-landed.json");
 
     // Stopped and then adopted, rather than adopted out from under a live driver: a driver
     // that already knows the lineage's item projects a member copy onto it as it is displaced,
     // and what this journey is about is a driver reading the board cold.
-    let reused_by_a_whole_projection = |world: &World, what: &str| {
+    let reused_by_a_member_projection = |world: &World, what: &str, cold: bool| {
         // Stopped only once it is quiet. An adopted driver dispatches the head and `hold`
-        // again as soon as its whole projection lands, and that dispatch is projected by a
-        // member copy of its own; a stop takes no closeout — its signal ends the driver where
-        // it stands — so a stop during that copy leaves the double's record of it with no
-        // attempt beside it, and nothing after can read every attempt as landed. The
-        // adoption's whole projection writes the re-readied nodes `queued`, so `in-progress`
-        // on both items is that member copy having landed.
+        // again as soon as its first projection lands, and that dispatch is projected by a
+        // copy of its own; a stop takes no closeout — its signal ends the driver where it
+        // stands — so a stop during that copy leaves the double's record of it with no attempt
+        // beside it, and nothing after can read every attempt as landed. The adoption's first
+        // projection writes the re-readied nodes `queued`, so `in-progress` on both items is
+        // the copy after it having landed.
         projected_until(
             world,
             run,
@@ -1118,28 +1595,52 @@ fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item(
             "the stop would end the driver before its dispatch was projected: {last}"
         );
         world.run(&["stop", run]).exited(0);
+        if cold {
+            // llmlint: ignore-block[tests_mirror_real_usage] a run directory an older build left
+            // holds no landed baseline, and no invocation of this build produces one without it:
+            // every launch seeds the file. Removing it is exactly that directory.
+            std::fs::remove_file(&landed_file).expect("this build seeded a landed baseline");
+            // Written once the driver has stopped, because a driver still projecting takes a
+            // shadow document it did not write out of the store.
+            rewritten(&root_shadow, &stale_shadow, |front| {
+                let metadata = front["metadata"].as_object_mut().expect("metadata");
+                metadata.insert("onepipeline.id".to_owned(), json!("flaky-2"));
+                metadata.remove("onepipeline.node");
+                metadata.remove("onepipeline.supersedes");
+                metadata.insert("onetaskgraph.origin".to_owned(), attempt_id.clone());
+            });
+            // llmlint: ignore-end[tests_mirror_real_usage]
+        }
         let mark = records(world, run).len();
         world.run(&["adopt", run, "--detach"]).exited(0);
         world.until(&format!("{what} to be recorded"), |world| {
             records(world, run).len() > mark && every_attempt_landed(world, run)
         });
-        let whole = records(world, run)[mark].clone();
-        assert_eq!(whole["scope"], "whole", "{whole}");
-        assert_eq!(whole["whole_because"], "first", "{whole}");
-        assert_eq!(whole["outcome"], "projected", "{whole}");
+        let first = records(world, run)[mark].clone();
+        assert_eq!(first["scope"], "members", "{first}");
+        assert_eq!(first["whole_because"], Value::Null, "{first}");
+        assert_eq!(first["outcome"], "projected", "{first}");
         assert_eq!(
-            whole["items"],
+            first["items"],
             json!(["flaky", "hold"]),
-            "the whole projection carried other than one item per lineage: {whole}"
+            "the projection carried other than one item per lineage: {first}"
         );
-        assert_eq!(whole["actions"]["created"], 0, "{whole}");
+        if cold {
+            // Each lineage read once, by its own id, and neither read again to be carried.
+            assert_eq!(
+                first["calls"],
+                json!({"project-show": 1, "task-show": 2, "project-copy": 1}),
+                "{first}"
+            );
+        }
+        assert_eq!(first["actions"]["created"], 0, "{first}");
         // The reused item may still carry the older build's origin when the copy rewrites it,
         // so the store can report it once as the lineage it updated and again as an orphan of
         // that origin: it is one item, rewritten, and counts under `updated` alone.
-        assert_eq!(whole["actions"]["orphaned"], 0, "{whole}");
+        assert_eq!(first["actions"]["orphaned"], 0, "{first}");
         assert!(
-            whole["actions"]["updated"].as_u64() >= Some(1),
-            "the reused item was not counted as rewritten: {whole}"
+            first["actions"]["updated"].as_u64() >= Some(1),
+            "the reused item was not counted as rewritten: {first}"
         );
         assert_eq!(
             std::fs::read(&root_file).expect("the root item reads"),
@@ -1193,8 +1694,20 @@ fn an_adoption_over_a_board_an_older_build_wrote_reuses_the_furthest_along_item(
             stale_shadow.display()
         );
     };
-    reused_by_a_whole_projection(&world, "the adopted driver's whole projection");
-    reused_by_a_whole_projection(&world, "a second whole projection over the rewritten board");
+    reused_by_a_member_projection(&world, "the adopted driver's first projection", true);
+    assert!(
+        landed_file.is_file(),
+        "the adopted driver recorded nothing of what it landed"
+    );
+    let recorded: Value =
+        serde_json::from_str(&std::fs::read_to_string(&landed_file).expect("the baseline reads"))
+            .expect("the baseline is JSON");
+    assert_eq!(
+        recorded["items"]["flaky"]["destination"], attempt_id,
+        "the baseline does not record the furthest-along item as the lineage's: {recorded}"
+    );
+    reused_by_a_member_projection(&world, "a second adoption over the rewritten board", false);
+    no_record_is_whole_or_reads_a_page_of_tasks(&world, run);
 }
 
 /// How many nodes each run of the concurrency journey below carries.
