@@ -1731,11 +1731,33 @@ fn a_publication_its_checks_reject_is_redispatched_on_the_branch_it_preserved() 
         "the re-dispatch names no artifact the publication recorded; it recorded \
          {recorded:?}:\n{second}"
     );
+    // And where the branch it continues stands on its remote — the commit the
+    // first attempt's publication pushed, as `onevcs` recorded it — with the rule
+    // that keeps the repair's push a fast-forward of it.
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    let pushed = world
+        .events_of(&run, "commit-preserved")
+        .into_iter()
+        .find(|event| event["payload"]["branch"] == branch)
+        .and_then(|event| event["payload"]["sha"].as_str().map(str::to_string))
+        .unwrap_or_else(|| {
+            panic!(
+                "onevcs recorded no commit on {branch}\n{}",
+                why(&world, &run)
+            )
+        });
+    assert!(
+        second.contains(&format!(
+            "This branch is published on its remote at `{pushed}`. The repair goes on as new \
+             commits on top of `{pushed}` — never as an amend, a rebase, a squash or a \
+             force-push of commits already on the remote"
+        )),
+        "the re-dispatch was not told the commit its branch is published at:\n{second}"
+    );
 
     // One branch, continued. Every session this node opened worked on it, so the
     // attempt that recovered met the tree the host had rejected rather than a
     // fresh one cut beside it.
-    let branch = node["branch"].as_str().expect("the node names its branch");
     let branches: Vec<String> = world
         .journal(&run)
         .iter()
@@ -1923,6 +1945,27 @@ fn a_push_the_merge_path_refuses_is_redispatched_carrying_what_the_remote_wrote(
     assert!(
         second.contains("pre-receive hook declined"),
         "the re-dispatch was not told what git said about the ref:\n{second}"
+    );
+    // The refused push delivered nothing, so no commit is named as published —
+    // the one the attempt left is exactly what the remote never received — and
+    // the rule that keeps the next push a fast-forward is stated all the same.
+    assert!(
+        second.contains(
+            "No attempt so far is known to have published this branch to its remote, so no \
+             commit of it is known to be there. The repair goes on as new commits on top of \
+             whatever commit of it the remote may already hold — never as an amend"
+        ),
+        "the re-dispatch was not told its branch never reached the remote:\n{second}"
+    );
+    let left = world
+        .events_of(&run, "commit-preserved")
+        .into_iter()
+        .find(|event| event["payload"]["branch"] == node["branch"])
+        .and_then(|event| event["payload"]["sha"].as_str().map(str::to_string))
+        .unwrap_or_else(|| panic!("onevcs recorded no commit\n{}", why(&world, &run)));
+    assert!(
+        !second.contains(&left),
+        "the re-dispatch named a commit the refused push never delivered:\n{second}"
     );
 
     // And the work survived the refusal: the branch is in the checkout, which is
