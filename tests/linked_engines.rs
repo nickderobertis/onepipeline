@@ -2572,9 +2572,13 @@ fn a_split_family_and_an_install_are_each_read_as_the_releases_they_name() {
 /// link quietly dropped would leave this passing over an empty set, which is the
 /// one answer it must not give.
 ///
-/// Nothing installs the binary today — the store is linked — so the install half
-/// holds that every recipe, workflow and script this repository runs names no
-/// other release, and fails the day one is added at another.
+/// The store is linked, and the binary is installed for one thing only: the
+/// template journeys drive the released `onetaskgraph` at the seam `template
+/// resolve --json` feeds. So the install half holds that the justfile's
+/// `onetaskgraph-version` — which its install recipe names as
+/// `{{onetaskgraph-version}}` — is this release, that the justfile does install
+/// it, and that every recipe, workflow and script this repository runs names no
+/// other release.
 #[test]
 fn every_onetaskgraph_crate_in_the_lock_is_the_one_release_the_manifest_names() {
     let direct = [
@@ -2618,10 +2622,29 @@ fn every_onetaskgraph_crate_in_the_lock_is_the_one_release_the_manifest_names() 
             }
         }
     }
+    let justfile = fs::read_to_string(repo_root().join("justfile")).expect("the justfile");
+    let pinned_for_journeys = justfile
+        .lines()
+        .find_map(|line| line.strip_prefix("onetaskgraph-version := "))
+        .map(|value| value.trim().trim_matches('"').to_owned())
+        .expect("the justfile names the onetaskgraph release its journeys install");
+    assert_eq!(
+        pinned_for_journeys, release,
+        "the justfile installs onetaskgraph {pinned_for_journeys} for the journeys, and the \
+         engine links {release}"
+    );
+    assert!(
+        onetaskgraph_installs(&justfile.replace("{{onetaskgraph-version}}", release))
+            .contains(&Some(release.to_owned())),
+        "the justfile names `onetaskgraph-version` and installs nothing at it"
+    );
     for path in automation {
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
+        // A recipe names the release through the justfile's own variable, which is
+        // held to the linked release above.
+        let text = text.replace("{{onetaskgraph-version}}", &pinned_for_journeys);
         for install in onetaskgraph_installs(&text) {
             assert_eq!(
                 install.as_deref(),

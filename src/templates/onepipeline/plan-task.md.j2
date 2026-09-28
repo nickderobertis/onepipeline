@@ -1,0 +1,18 @@
+---
+onetaskgraph_template: 1
+description: The task onepipeline dispatches, ending in the acceptance criteria its worker and its judge are held to.
+variables:
+  acceptance_criteria:
+    description: What must be true when this task is done; each entry is one criterion.
+    type: list
+    items: string
+    required: true
+---
+{% block before_criteria %}{% endblock %}
+## Acceptance criteria
+
+{% for criterion in acceptance_criteria %}
+- {{ criterion | replace("\n", "\n  ") }}
+{% endfor %}
+{% block more_criteria %}{% endblock %}
+{% block after_criteria %}{% endblock %}

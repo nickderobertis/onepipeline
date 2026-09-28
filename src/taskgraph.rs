@@ -214,6 +214,41 @@ impl Store {
         self.load(project)
     }
 
+    /// One task or one document, read by its qualified id.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sibling`] for a configuration that does not load or a store that
+    /// cannot answer, and for an id naming nothing.
+    pub(crate) fn item(&self, id: &QualifiedId, kind: StoredKind) -> Result<StoredItem> {
+        let built = self
+            .engine(&Layer::default())
+            .map_err(|error| Error::Sibling {
+                tool: STORE,
+                message: format!(
+                    "the configuration discovered from {} cannot be read: {error}",
+                    self.dir.display()
+                ),
+            })?;
+        let reader = Reader::over(built)?;
+        let global = id.global();
+        if kind == StoredKind::Document {
+            let read = reader
+                .call(reader.engine.document(&global))
+                .map_err(|error| failed("document show", id.as_str(), &error))?;
+            let found = one(&global, "document show", read)?;
+            return Ok(StoredItem {
+                content: found.item.content.unwrap_or_default(),
+                metadata: found.item.metadata.into_iter().collect(),
+            });
+        }
+        let found = reader.show(&global)?;
+        Ok(StoredItem {
+            content: found.item.content.unwrap_or_default(),
+            metadata: found.item.metadata.into_iter().collect(),
+        })
+    }
+
     fn load(&self, project: &QualifiedId) -> std::result::Result<Read, Load> {
         let built = self
             .engine(&Layer::default())
@@ -419,6 +454,15 @@ impl Reader {
                     .map(|task| task.item.metadata.clone().into_iter().collect()),
             )
             .collect();
+        let stored = plan
+            .tasks
+            .iter()
+            .map(|node| node.id.clone())
+            .zip(tasks.iter().map(|task| StoredTask {
+                qualified: QualifiedId::from(&task.id),
+                content: task.item.content.clone().unwrap_or_default(),
+            }))
+            .collect();
         let tasks = plan
             .tasks
             .iter()
@@ -429,6 +473,7 @@ impl Reader {
         Ok(Read {
             plan,
             metadata,
+            stored,
             tasks,
             project_metadata,
         })
@@ -857,6 +902,26 @@ pub(crate) struct Read {
     pub tasks: BTreeMap<String, Qualified<Task>>,
     /// The project's own metadata, verbatim.
     pub project_metadata: BTreeMap<String, Value>,
+    /// Each task's qualified id and its content exactly as stored, by node id: what a
+    /// rendered-only check digests, before the mapping trims it into a node's `task`.
+    pub stored: BTreeMap<String, StoredTask>,
+}
+
+pub(crate) struct StoredTask {
+    pub qualified: QualifiedId,
+    /// Byte for byte; empty where the task has none.
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoredKind {
+    Task,
+    Document,
+}
+
+pub(crate) struct StoredItem {
+    pub content: String,
+    pub metadata: BTreeMap<String, Value>,
 }
 
 /// Why a project did not become a plan.
@@ -936,6 +1001,18 @@ impl QualifiedId {
                 .expect("a qualified id's source is a source name the store accepts"),
             NativeId::from(self.native()),
         )
+    }
+}
+
+impl From<&GlobalId> for QualifiedId {
+    /// An id the store answered with, which that library has already qualified: its
+    /// source name holds no colon, so the first one is where the two halves meet.
+    fn from(id: &GlobalId) -> Self {
+        let whole = id.to_string();
+        let colon = whole
+            .find(':')
+            .expect("a store id is written `<source>:<native>`");
+        Self { whole, colon }
     }
 }
 

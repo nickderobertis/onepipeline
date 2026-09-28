@@ -849,6 +849,8 @@ mod tests {
             bus_config: Default::default(),
             maintenance_config: None,
             branch_template: String::new(),
+            template_root: String::new(),
+            require_rendered: false,
             oneharness_sessions: None,
             envelope_reviewer_bar: Default::default(),
         };

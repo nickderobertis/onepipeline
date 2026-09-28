@@ -173,6 +173,13 @@ mod stop_guard;
 mod store;
 mod summary;
 mod surface;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] C4, C6a and C7 are
+// checked in `templates`, `taskgraph`, `plancheck`, `driver` and `filter` at once, and the
+// seam journeys drive the released `onetaskgraph` against the same store the engine links,
+// so the crate is the narrowest edge they can honestly sit behind; same grounds as
+// `mod criteria_rule` above.
+mod templates;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod turns;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys reach
 // every caller of the workspace-listing operations across `src/`, so the crate's edge is

@@ -131,15 +131,20 @@ fn a_verb_that_names_a_run_nobody_recorded_refuses_and_says_where_it_looked() {
 #[test]
 fn every_optional_form_the_contract_names_reaches_the_binary() {
     let world = World::new("surface-optional");
-    let plan = world.plan(
-        "one",
-        &crate::harness::plan_of("one", vec![crate::harness::agent("build", &[])]),
-    );
-
-    for args in [
-        vec!["start", &plan, "--detach", "--dag-graph", "off"],
-        vec!["start", &plan, "--detach", "--heartbeat-interval", "1800"],
+    // A project per launch. The first run's write-back rewrites its own task in the
+    // store while the second launch reads, and `local-md` rewrites a task in place
+    // and skips a file it catches empty — so a second launch of the *same* project
+    // could read it with no node at all. Another project's file is outside that read.
+    for (name, form) in [
+        ("one", ["--dag-graph", "off"]),
+        ("two", ["--heartbeat-interval", "1800"]),
     ] {
+        let plan = world.plan(
+            name,
+            &crate::harness::plan_of(name, vec![crate::harness::agent("build", &[])]),
+        );
+        let mut args = vec!["start", &plan, "--detach"];
+        args.extend(form);
         world.run(&args).exited(0);
     }
     for args in [

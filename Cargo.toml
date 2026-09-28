@@ -761,9 +761,9 @@ onevcs-testing = "0.8.5"
 # `every_onetaskgraph_crate_in_the_lock_is_the_one_release_the_manifest_names` holds the
 # lock's whole family to this one release, and fails as well if anything this
 # repository installs as an `onetaskgraph` binary names another.
-onetaskgraph-core = "=0.2.46"
-onetaskgraph-plugin-api = "=0.2.46"
-onetaskgraph-local-md = "=0.2.46"
+onetaskgraph-core = "=0.2.47"
+onetaskgraph-plugin-api = "=0.2.47"
+onetaskgraph-local-md = "=0.2.47"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
@@ -789,6 +789,11 @@ categories = ["command-line-utilities", "development-tools"]
 # packaging scaffolding.
 include = [
   "src/**/*.rs",
+  # The one template this crate embeds, `plan-task`'s base, which `src/templates.rs`
+  # reads at compile time: without it the packaged **library** does not build.
+  # `tests/package_bundle.rs` holds the packaged copy to the embedded one.
+  # llmlint: ignore[new_command_or_client_gets_its_own_project] a data file the library compiles in, not a command or client; the `template` verbs that read it are a verb group of the one existing binary, suppressed at their own site in `src/cli.rs`.
+  "src/templates/onepipeline/plan-task.md.j2",
   "tests/**/*.rs",
   # The per-platform scripts the lifecycle journeys write into their own scratch:
   # the `pre-push` hook a repository's merge path runs, and the release probe a

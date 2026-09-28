@@ -43,4 +43,25 @@ fn the_packaged_crate_carries_the_committed_events_bundle() {
         String::from_utf8_lossy(&carried.stderr)
     );
     assert_eq!(carried.stdout, include_bytes!("../schemas/events.json"));
+
+    // And the one template the library embeds, which it reads at compile time: a crate
+    // without it does not build.
+    let base = Command::new("tar")
+        .args(["-xOzf"])
+        .arg(&archive)
+        .arg(format!(
+            "onepipeline-{version}/src/templates/onepipeline/plan-task.md.j2"
+        ))
+        .output()
+        .expect("the crate archive is readable");
+    assert!(
+        base.status.success(),
+        "the crate omitted plan-task's base: {}",
+        String::from_utf8_lossy(&base.stderr)
+    );
+    assert_eq!(
+        base.stdout,
+        onepipeline::templates::BASE_SOURCE.as_bytes(),
+        "the packaged base is not the one the library embeds"
+    );
 }
