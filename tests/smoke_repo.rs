@@ -42,10 +42,19 @@ mod unix {
     }
 
     /// Where the stand-in records what it was asked, and how it answers the
-    /// probe: read from the environment `ensure_repo` hands every `gh`, so the
-    /// script is one fixed program and no path is ever spliced into shell source.
+    /// probe and the readme wait: read from the environment `ensure_repo` hands
+    /// every `gh`, so the script is one fixed program and no path is ever
+    /// spliced into shell source.
     const RECORD_ENV: &str = "ONEPIPELINE_SMOKE_GH_RECORD";
     const PROBE_ENV: &str = "ONEPIPELINE_SMOKE_GH_PROBE";
+    const PROBE_STDERR_ENV: &str = "ONEPIPELINE_SMOKE_GH_PROBE_STDERR";
+    /// How many readme-wait calls fail, and with what; every later one succeeds.
+    const API_FAILURES_ENV: &str = "ONEPIPELINE_SMOKE_GH_API_FAILURES";
+    const API_EXIT_ENV: &str = "ONEPIPELINE_SMOKE_GH_API_EXIT";
+    const API_STDERR_ENV: &str = "ONEPIPELINE_SMOKE_GH_API_STDERR";
+
+    /// What `gh repo view` prints for a repository that does not exist.
+    const NOT_FOUND: &str = "GraphQL: Could not resolve to a Repository";
 
     /// What separates one argument from the next in the record: the unit
     /// separator, which no argument here carries, so a description with spaces
@@ -53,7 +62,7 @@ mod unix {
     /// escape `printf` reads, spelled from this one value.
     const SEPARATOR: char = '\u{1f}';
 
-    /// The `gh` stand-in: one fixed program, reading the two variables above,
+    /// The `gh` stand-in: one fixed program, reading the variables above,
     /// recording one invocation per line.
     fn stand_in_program() -> String {
         let separator = format!("\\{:03o}", SEPARATOR as u32);
@@ -62,8 +71,12 @@ mod unix {
              printf '%s{separator}' \"$@\" >> \"${RECORD_ENV}\"\n\
              printf '\\n' >> \"${RECORD_ENV}\"\n\
              case \"$1 $2\" in\n  \
-               'repo view') echo 'GraphQL: Could not resolve to a Repository' >&2; \
+               'repo view') printf '%s\\n' \"${PROBE_STDERR_ENV}\" >&2; \
              exit \"${PROBE_ENV}\" ;;\n  \
+               'api '*) calls=$(grep -c '^api' \"${RECORD_ENV}\"); \
+             if [ \"$calls\" -le \"${{{API_FAILURES_ENV}:-0}}\" ]; then \
+             printf '%s\\n' \"${API_STDERR_ENV}\" >&2; exit \"${API_EXIT_ENV}\"; fi; \
+             exit 0 ;;\n  \
                *) exit 0 ;;\n\
              esac\n"
         )
@@ -74,12 +87,29 @@ mod unix {
     /// as done. Put first on `PATH`, so `ensure_repo`'s own `Command::new("gh")`
     /// resolves to it and nothing here can reach GitHub.
     fn stand_in(root: &Path, name: &str, present: bool) -> PathBuf {
+        let probe = if present { (0, "") } else { (1, NOT_FOUND) };
+        stand_in_answering(root, name, probe, (0, 0, ""))
+    }
+
+    /// A `gh` that answers the probe with `probe` (exit status, stderr) and the
+    /// first `api.0` readme-wait calls with `api.1` and `api.2` (exit status,
+    /// stderr), every later one as done.
+    fn stand_in_answering(
+        root: &Path,
+        name: &str,
+        probe: (i32, &str),
+        api: (u32, i32, &str),
+    ) -> PathBuf {
         let bin = root.join(name);
         fs::create_dir(&bin).expect("the stand-in has a bin directory");
         onepipeline_testfakes::executable(&bin.join("gh"), stand_in_program());
         let record = bin.join("record");
         std::env::set_var(RECORD_ENV, &record);
-        std::env::set_var(PROBE_ENV, if present { "0" } else { "1" });
+        std::env::set_var(PROBE_ENV, probe.0.to_string());
+        std::env::set_var(PROBE_STDERR_ENV, probe.1);
+        std::env::set_var(API_FAILURES_ENV, api.0.to_string());
+        std::env::set_var(API_EXIT_ENV, api.1.to_string());
+        std::env::set_var(API_STDERR_ENV, api.2);
         let host_path = std::env::var_os("PATH").expect("the host has a PATH");
         let mut paths = vec![bin];
         paths.extend(std::env::split_paths(&host_path));
@@ -178,5 +208,131 @@ mod unix {
             panic!("an existing repository is probed and reused, never recreated: {invocations:?}")
         };
         assert_eq!(argv(probe), ["repo", "view", THROWAWAY, "--json", "name"]);
+    }
+
+    /// What `ensure_repo` panicked with, or a failure naming that it returned.
+    fn refusal_of(slug: &str) -> String {
+        let panic = std::panic::catch_unwind(|| repo::ensure_repo(slug))
+            .expect_err("a refusal from `gh` fails the smoke rather than being read as an answer");
+        match panic.downcast::<String>() {
+            Ok(message) => *message,
+            Err(panic) => (*panic.downcast::<&str>().expect("a panic message")).to_owned(),
+        }
+    }
+
+    /// Only GitHub's explicit "not found" leads to a create. A rate limit, a
+    /// rejected credential, a network failure or anything unrecognised fails the
+    /// smoke carrying `gh`'s own exit status and stderr, and nothing is created
+    /// — the create would only meet the existing repository and report its 422.
+    /// The readme wait reads its refusals the same way: an empty or not yet
+    /// visible repository is waited through, anything else is the answer.
+    ///
+    /// A test of its own beside the one above: `PATH` is process-global, and
+    /// every recipe here runs this binary under nextest, which gives each test
+    /// its own process. Within this test the cases run one after another.
+    #[test]
+    fn only_a_not_found_probe_creates_and_every_other_refusal_fails_carrying_it() {
+        let scratch = scratch();
+        let probe = ["repo", "view", THROWAWAY, "--json", "name"];
+
+        for (name, status, stderr, names) in [
+            (
+                "rate-limited",
+                1,
+                "GraphQL: API rate limit already exceeded for user ID 1234.",
+                "rate limit",
+            ),
+            (
+                "unauthenticated",
+                4,
+                "To get started with GitHub CLI, please run:  gh auth login",
+                "authentication",
+            ),
+            (
+                "bad-credentials",
+                1,
+                "HTTP 401: Bad credentials (https://api.github.com/graphql)",
+                "authentication",
+            ),
+            (
+                "offline",
+                1,
+                "Post \"https://api.github.com/graphql\": dial tcp: lookup api.github.com: \
+                 no such host",
+                "transport",
+            ),
+            (
+                "unrecognised",
+                1,
+                "HTTP 502: Bad Gateway (https://api.github.com/graphql)",
+                "does not recognise",
+            ),
+        ] {
+            let record = stand_in_answering(&scratch.0, name, (status, stderr), (0, 0, ""));
+            let refusal = refusal_of(THROWAWAY);
+            for carried in [names, stderr, &format!("exited {status}")] {
+                assert!(
+                    refusal.contains(carried),
+                    "a {name} probe fails carrying {carried:?}: {refusal}"
+                );
+            }
+            let invocations = recorded(&record);
+            let [only] = &invocations[..] else {
+                panic!("a {name} probe is never followed by a create: {invocations:?}")
+            };
+            assert_eq!(argv(only), probe);
+        }
+
+        // A repository that is not there yet, then empty, is waited through.
+        let record = stand_in_answering(
+            &scratch.0,
+            "not-yet",
+            (1, NOT_FOUND),
+            (2, 1, "gh: Git Repository is empty. (HTTP 409)"),
+        );
+        repo::ensure_repo(THROWAWAY);
+        let calls: Vec<_> = recorded(&record)
+            .into_iter()
+            .map(|call| call[0].clone())
+            .collect();
+        assert_eq!(
+            calls,
+            ["repo", "repo", "api", "api", "api"],
+            "an empty repository is probed again until its first commit lands"
+        );
+
+        // Any other refusal ends the wait at once, carrying what `gh` said —
+        // answered that way for longer than the whole wait, so a wait that
+        // went on would fail on its own deadline rather than on the refusal.
+        let limited = "gh: API rate limit exceeded for user ID 1234. (HTTP 403)";
+        let record =
+            stand_in_answering(&scratch.0, "wait-limited", (1, NOT_FOUND), (99, 1, limited));
+        let started = std::time::Instant::now();
+        let refusal = refusal_of(THROWAWAY);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "a refused readme wait fails promptly, not after {:?}",
+            started.elapsed()
+        );
+        for carried in [
+            "waiting for its first commit",
+            "rate limit",
+            limited,
+            "exited 1",
+        ] {
+            assert!(
+                refusal.contains(carried),
+                "a refused readme wait fails carrying {carried:?}: {refusal}"
+            );
+        }
+        let calls: Vec<_> = recorded(&record)
+            .into_iter()
+            .map(|call| call[0].clone())
+            .collect();
+        assert_eq!(
+            calls,
+            ["repo", "repo", "api"],
+            "the refusal is not waited through"
+        );
     }
 }
