@@ -499,6 +499,279 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
     );
 }
 
+/// How long a held conversation's member lets its supervision go unconfirmed, in
+/// seconds: short, so it publishes `member-heartbeat` every couple of seconds and
+/// a journey can watch the run keep recording one while a note waits.
+const HEARTBEAT_BOUND_SECONDS: &str = "8";
+
+/// [`held_conversation`], with the member heartbeating on a clock a journey can
+/// watch.
+fn held_heartbeating_conversation(world: &World, run: &str, nodes: Vec<Value>) {
+    world.script("turn.hold", "hold");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    let path = world.plan(run, &plan_of(run, nodes));
+    let mut start = world.agentgraph_cmd(&["start", &path, "--detach"]);
+    start.env("ONEAGENTGRAPH_HEARTBEAT_TIMEOUT", HEARTBEAT_BOUND_SECONDS);
+    world.run_on(start, "start --detach").exited(0);
+    world.until("the worker's turn to open", |world| {
+        !world.events_of(run, "turn-started").is_empty()
+    });
+}
+
+/// Submit one envelope with `reply` and leave it waiting on its answer.
+///
+/// `reply` waits for the reconciler to answer the envelope, and the answer to a
+/// note is owed only once its conversation has taken it — which these journeys
+/// hold back on purpose — so the submitter runs beside the journey rather than in
+/// front of it. The wait is long enough to outlast the hold.
+fn submitted(world: &World, run: &str, envelope: &str) -> std::process::Child {
+    use std::io::Write;
+    let mut reply = world.agentgraph_cmd(&["reply", run]);
+    reply
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "300")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = reply.spawn().expect("the binary starts");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(envelope.as_bytes())
+        .expect("the envelope is written");
+    child
+}
+
+/// What a submitter was answered, once it has been.
+fn answered(child: std::process::Child) -> String {
+    let output = child.wait_with_output().expect("the binary runs");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        output.status.success(),
+        "reply exited {:?}:\n{stdout}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    stdout
+}
+
+/// The notes a conversation's inbox holds and has not answered yet.
+///
+/// Read off the member's note spool itself, which is where `oneagentgraph` puts a
+/// note it has been handed: `<id>.offer.json` until the conversation's courier
+/// takes it, `<id>.taken.json` from then, and `<id>.answer.json` beside it once
+/// the conversation has said what became of it. A note counted here is one the
+/// run has **offered** and is waiting on — the exact window the writer used to
+/// spend doing nothing else.
+fn awaiting_an_answer(world: &World) -> usize {
+    fn walk(dir: &Path, found: &mut usize) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, found);
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(id) = name
+                .strip_suffix(".taken.json")
+                .or_else(|| name.strip_suffix(".offer.json"))
+            else {
+                continue;
+            };
+            if dir.ends_with("notes") && !dir.join(format!("{id}.answer.json")).exists() {
+                *found += 1;
+            }
+        }
+    }
+    let mut found = 0;
+    walk(&world.graph_state(), &mut found);
+    found
+}
+
+/// Where in the run's journal the first record of `kind` for `node` sits.
+fn position_of(journal: &[Value], kind: &str, node: Option<&str>) -> Option<usize> {
+    journal.iter().position(|event| {
+        event["kind"] == kind && node.is_none_or(|node| event["labels"]["node"] == node)
+    })
+}
+
+/// A note waiting on a turn that takes it only as it ends leaves the run
+/// recording everything else.
+///
+/// The defect this stands against froze a run for forty-two minutes: the run's
+/// single writer offered a manager's note to a conversation whose harness takes a
+/// live note only when its current turn ends, and waited for the answer itself —
+/// so nothing the dispatch did, not its turns and not its heartbeat, reached the
+/// journal until that turn was over, and a healthy run read as abandoned to
+/// everything supervising it.
+///
+/// So the note is held in the conversation's inbox, unanswered, across a stretch
+/// of the turn in which the dispatch reports work and its member keeps
+/// heartbeating — and both have to reach the journal while it waits. Then the
+/// turn ends, the conversation takes the note, and the run records the delivery
+/// and then its presentation, in that order, exactly as it always has.
+#[test]
+fn a_note_waiting_on_a_held_turn_leaves_the_run_journalling_its_dispatch() {
+    let world = World::new("note-unfrozen");
+    let run = "unfrozen";
+    held_heartbeating_conversation(&world, run, vec![agent("build", &[])]);
+
+    let reply = submitted(
+        &world,
+        run,
+        &envelope(note_op("build", "worker", NOTE, None)),
+    );
+    world.until("the note to wait in the conversation's inbox", |world| {
+        awaiting_an_answer(world) == 1
+    });
+    let activity = world.events_of(run, "turn-activity").len();
+    let beats = world.events_of(run, "member-heartbeat").len();
+
+    // The held turn goes on working — it reports its next tool call and stays
+    // open — and the member goes on heartbeating, while the note is still
+    // waiting on the turn to end.
+    release(&world.fakes, "turn.go");
+    world.until("the turn's further work to reach the journal", |world| {
+        world.events_of(run, "turn-activity").len() > activity
+    });
+    world.until(
+        "the member's heartbeat to keep reaching the journal",
+        |world| world.events_of(run, "member-heartbeat").len() >= beats + 2,
+    );
+    assert_eq!(
+        awaiting_an_answer(&world),
+        1,
+        "the conversation answered the note before its turn ended, so nothing above was \
+         recorded while one was waiting"
+    );
+    assert!(
+        world
+            .events_of(run, "edit-committed")
+            .iter()
+            .all(|event| event["payload"]["command"]["op"] != "note"),
+        "the note was recorded before its conversation answered it"
+    );
+
+    // The turn ends, the conversation takes the note, and the record is the one
+    // a delivery has always left: the delivery, and then its presentation.
+    release(&world.fakes, "turn.settle");
+    assert!(
+        answered(reply).contains("\"state\":\"applied\""),
+        "the note's envelope was not applied"
+    );
+    world.until("the note's presentation to be recorded", |world| {
+        !presentations_of(world, run, "build").is_empty()
+    });
+    let operation = recorded(&world, run);
+    assert_eq!(operation["kind"], json!("note-delivered"), "{operation}");
+    assert_eq!(operation["reached"], json!("worker"), "{operation}");
+    assert_eq!(operation["text"], json!(NOTE), "{operation}");
+    let journal = world.journal(run);
+    let delivered = position_of(&journal, "edit-committed", None).expect("the note was recorded");
+    let shown = position_of(&journal, "note-shown", Some("build")).expect("its presentation");
+    assert!(
+        delivered < shown,
+        "the note's presentation was recorded before its delivery"
+    );
+    assert_eq!(
+        journal[shown]["payload"]["party"],
+        json!("worker"),
+        "{}",
+        journal[shown]
+    );
+
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+}
+
+/// Two notes to one conversation reach it, and the run's record, in the order
+/// the channel claimed them — and the second is not offered while the first is
+/// still waiting.
+///
+/// The writer no longer waits on a conversation, so the second envelope is
+/// claimed while the first is still being delivered. Offering it then would put
+/// two notes in one inbox in whatever order the conversation's courier happened
+/// to take them; judging it then would judge it against a record the first had
+/// not committed to yet.
+#[test]
+fn notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_claimed() {
+    let world = World::new("note-ordered");
+    let run = "ordered";
+    // Every worker turn holds, and consumes its gates as it ends, so the turn the
+    // first note opens is held open for the second exactly as the first was.
+    world.script("turn.hold-each", "");
+    held_heartbeating_conversation(&world, run, vec![agent("build", &[])]);
+
+    let first = submitted(
+        &world,
+        run,
+        &envelope(note_op("build", "worker", NOTE, None)),
+    );
+    world.until(
+        "the first note to wait in the conversation's inbox",
+        |world| awaiting_an_answer(world) == 1,
+    );
+    let second = submitted(
+        &world,
+        run,
+        &envelope(note_op("build", "worker", PLANNER_CONTEXT, None)),
+    );
+    let queue = world.run_file(run, "channel/commands.jsonl");
+    world.until("the second note to be queued", |_| {
+        std::fs::read_to_string(&queue).is_ok_and(|text| text.contains(PLANNER_CONTEXT))
+    });
+    // The loop claims it on its next pass, and holds it there: the pass is the one
+    // step with nothing durable to watch for, so the journey watches the run keep
+    // recording its dispatch across several of them instead.
+    let beats = world.events_of(run, "member-heartbeat").len();
+    world.until("the run to go on recording its dispatch", |world| {
+        world.events_of(run, "member-heartbeat").len() >= beats + 2
+    });
+    assert_eq!(
+        awaiting_an_answer(&world),
+        1,
+        "the second note was offered while the first was still waiting on its conversation"
+    );
+
+    // The first turn ends and the conversation takes the first note; only then is
+    // the second offered, into the turn that opened on the first — held too, so it
+    // is still there to take it.
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    answered(first);
+    world.until(
+        "the second note to wait in the conversation's inbox",
+        |world| awaiting_an_answer(world) == 1,
+    );
+    // No turn after this one is held, so the conversation runs to its end.
+    std::fs::remove_file(world.fakes.join("turn.hold")).expect("the hold is lifted");
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    answered(second);
+    let texts: Vec<Value> = world
+        .events_of(run, "edit-committed")
+        .into_iter()
+        .filter(|event| event["payload"]["command"]["op"] == "note")
+        .map(|event| event["payload"]["operations"][0]["text"].clone())
+        .collect();
+    assert_eq!(
+        texts,
+        vec![json!(NOTE), json!(PLANNER_CONTEXT)],
+        "the notes were not recorded in the order the channel claimed them"
+    );
+
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+}
+
 /// A note is **not** offered to a conversation on behalf of an envelope the run
 /// is going to refuse.
 ///
