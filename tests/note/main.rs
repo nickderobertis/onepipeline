@@ -714,21 +714,23 @@ fn a_note_waiting_on_a_held_turn_leaves_the_run_journalling_its_dispatch() {
     });
 }
 
-/// Two notes to one conversation reach it, and the run's record, in the order
-/// the channel claimed them — and the second is not offered while the first is
-/// still waiting.
+/// A later note to one conversation never overtakes an earlier one: each reaches
+/// it, and the run's record, in the order the channel claimed them, and none is
+/// offered while another is still waiting.
 ///
-/// The writer no longer waits on a conversation, so the second envelope is
-/// claimed while the first is still being delivered. Offering it then would put
-/// two notes in one inbox in whatever order the conversation's courier happened
-/// to take them; judging it then would judge it against a record the first had
-/// not committed to yet.
+/// The writer no longer waits on a conversation, so envelopes arrive while a note
+/// is still being delivered. Offering one then would put two notes in one inbox
+/// in whatever order the conversation's courier happened to take them; judging it
+/// then would judge it against a record the first had not committed to yet. Both
+/// places the loop keeps them are driven: the queue it leaves unclaimed while a
+/// note is outstanding, and the envelopes it claims together once that note is
+/// answered and holds behind the first of them it hands on.
 #[test]
 fn notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_claimed() {
     let world = World::new("note-ordered");
     let run = "ordered";
-    // Every worker turn holds, and consumes its gates as it ends, so the turn the
-    // first note opens is held open for the second exactly as the first was.
+    // Every worker turn holds, and consumes its gates as it ends, so each turn a
+    // note opens is held open for the next note exactly as the first turn was.
     world.script("turn.hold-each", "");
     held_heartbeating_conversation(&world, run, vec![agent("build", &[])]);
 
@@ -741,6 +743,8 @@ fn notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_c
         "the first note to wait in the conversation's inbox",
         |world| awaiting_an_answer(world) == 1,
     );
+    // Two more, both queued while the first is outstanding, so the pass after its
+    // answer claims them together.
     let second = submitted(
         &world,
         run,
@@ -750,9 +754,16 @@ fn notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_c
     world.until("the second note to be queued", |_| {
         std::fs::read_to_string(&queue).is_ok_and(|text| text.contains(PLANNER_CONTEXT))
     });
-    // The loop claims it on its next pass, and holds it there: the pass is the one
-    // step with nothing durable to watch for, so the journey watches the run keep
-    // recording its dispatch across several of them instead.
+    let third = submitted(
+        &world,
+        run,
+        &envelope(note_op("build", "worker", FINDING, None)),
+    );
+    world.until("the third note to be queued", |_| {
+        std::fs::read_to_string(&queue).is_ok_and(|text| text.contains(FINDING))
+    });
+    // A pass is the one step with nothing durable to watch for, so the journey
+    // watches the run keep recording its dispatch across several of them.
     let beats = world.events_of(run, "member-heartbeat").len();
     world.until("the run to go on recording its dispatch", |world| {
         world.events_of(run, "member-heartbeat").len() >= beats + 2
@@ -760,12 +771,12 @@ fn notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_c
     assert_eq!(
         awaiting_an_answer(&world),
         1,
-        "the second note was offered while the first was still waiting on its conversation"
+        "a later note was offered while the first was still waiting on its conversation"
     );
 
     // The first turn ends and the conversation takes the first note; only then is
     // the second offered, into the turn that opened on the first — held too, so it
-    // is still there to take it.
+    // is still there to take it — and the third, claimed with it, is held behind.
     release(&world.fakes, "turn.go");
     release(&world.fakes, "turn.settle");
     answered(first);
@@ -773,11 +784,29 @@ fn notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_c
         "the second note to wait in the conversation's inbox",
         |world| awaiting_an_answer(world) == 1,
     );
+    let beats = world.events_of(run, "member-heartbeat").len();
+    world.until("the run to go on recording its dispatch", |world| {
+        world.events_of(run, "member-heartbeat").len() >= beats + 2
+    });
+    assert_eq!(
+        awaiting_an_answer(&world),
+        1,
+        "the note claimed behind the second was offered while the second was still waiting"
+    );
+
+    // The second note's turn ends; the third is offered into the turn it opened.
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    answered(second);
+    world.until(
+        "the third note to wait in the conversation's inbox",
+        |world| awaiting_an_answer(world) == 1,
+    );
     // No turn after this one is held, so the conversation runs to its end.
     std::fs::remove_file(world.fakes.join("turn.hold")).expect("the hold is lifted");
     release(&world.fakes, "turn.go");
     release(&world.fakes, "turn.settle");
-    answered(second);
+    answered(third);
     let texts: Vec<Value> = world
         .events_of(run, "edit-committed")
         .into_iter()
@@ -786,12 +815,88 @@ fn notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_c
         .collect();
     assert_eq!(
         texts,
-        vec![json!(NOTE), json!(PLANNER_CONTEXT)],
+        vec![json!(NOTE), json!(PLANNER_CONTEXT), json!(FINDING)],
         "the notes were not recorded in the order the channel claimed them"
     );
 
     world.until("the run to settle", |world| {
         !world.events_of(run, "node-settled").is_empty()
+    });
+}
+
+/// A note the conversation refuses while the run is still being driven is
+/// journalled and surfaced exactly as a refusal answered inline is.
+///
+/// `build` has settled `done` while `after`, which depends on it, is held mid-turn
+/// and keeps the driver alive, so the note to `build` is offered on the delivery
+/// thread and its refusal comes back to the writer as that thread's answer. Its
+/// member has settled, and the node will never be dispatched again for `persist` to
+/// carry it to, so it reached nobody.
+#[test]
+fn a_note_refused_while_the_run_is_driven_is_recorded_and_surfaced() {
+    let world = World::new("note-driven-refusal");
+    let run = "drivenrefusal";
+    world.script("turn.hold-each", "");
+    held_heartbeating_conversation(
+        &world,
+        run,
+        vec![agent("build", &[]), agent("after", &["build"])],
+    );
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until(
+        "the dependent's turn to open while build is settled",
+        |world| {
+            world
+                .events_of(run, "turn-started")
+                .iter()
+                .any(|event| event["labels"]["node"] == "after")
+        },
+    );
+
+    let refused = world.run_with_stdin_on(
+        world.agentgraph_cmd(&["reply", run]),
+        &envelope(note_op("build", "worker", NOTE, None)),
+    );
+    refused
+        .exited(2)
+        .err_has("was not delivered")
+        .err_has("build")
+        .err_has("no dispatch of it will take the note either");
+    assert!(
+        world.run_file(run, "owner.lock").exists(),
+        "the run's driver was gone, so the refusal was not the driven one"
+    );
+    let rejected: Vec<Value> = world
+        .events_of(run, "edit-rejected")
+        .into_iter()
+        .filter(|event| event["payload"]["command"]["op"] == "note")
+        .collect();
+    let [recorded] = &rejected[..] else {
+        panic!(
+            "the run recorded {} rejected notes, not one",
+            rejected.len()
+        );
+    };
+    assert!(
+        recorded["payload"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("was not delivered")),
+        "the record does not say the note was undelivered: {recorded}"
+    );
+    assert!(
+        world
+            .events_of(run, "edit-committed")
+            .iter()
+            .all(|event| event["payload"]["command"]["op"] != "note"),
+        "an undelivered note was committed as though it had landed"
+    );
+
+    std::fs::remove_file(world.fakes.join("turn.hold")).expect("the hold is lifted");
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() >= 2
     });
 }
 
