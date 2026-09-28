@@ -222,9 +222,12 @@ write is reported and retried — unless the store refused it, which is reported
 once and attempted again when the run's graph next changes; it never changes
 execution or an edit ruling.
 
-A task's shape is a template its host owns. How a host registers templates, how
-each name is layered, what is checked, and the `template` verbs are C4 to C8 of
-`docs/contract.md`. None of the verbs writes anything; the rendering is
+A task's shape is a template its host owns. A host registers names in
+`<root>/templates.yaml` under `--template-root DIR`; `plan-task` is always
+registered. A name resolves at the first of `--template FILE`, the repository's
+`.onepipeline/templates/<name>.md.j2`, the host's `<root>/<name>.md.j2`, and, for
+`plan-task` only, the built-in. `template list`, `resolve` and `check` show
+and validate what resolves. None of them writes anything; the rendering is
 `onetaskgraph`'s:
 
 ```bash

@@ -965,6 +965,25 @@ fn c6a_holds_a_task_template_to_the_base_and_its_criteria_and_a_rendering_to_lis
         "(repository layer, {}): {RULE_NOT_EXTENDED}",
         overridden.display()
     ));
+    // `--template FILE` is checked in place of that override, and refused naming it.
+    let explicit = world.root.join("explicit.md.j2");
+    write(&explicit, "## Acceptance criteria\n\n- fixed\n");
+    let with_explicit = [
+        "check",
+        BUILT_IN,
+        "--repo",
+        &text(&repo),
+        "--template",
+        &text(&explicit),
+    ];
+    verb(&world, &dir, &root, &with_explicit)
+        .exited(REFUSED)
+        .err_has(&format!(
+            "(explicit layer, {}): {RULE_NOT_EXTENDED}",
+            explicit.display()
+        ));
+    write(&explicit, &task_template("explicit"));
+    verb(&world, &dir, &root, &with_explicit).exited(0);
 
     // Extending the base and redeclaring its criteria as one string, or as a list of
     // objects: each is not a list of strings.
@@ -1814,6 +1833,57 @@ fn a_lifecycle_node_resolves_against_its_publication_checkout() {
         .exited(HAS_REFUSALS)
         .out_has("node 'stranded'")
         .out_has("the checkout of nowhere could not be resolved");
+}
+
+#[test]
+fn a_node_s_steps_are_held_to_their_criteria_and_never_to_a_rendering() {
+    let world = World::new("templates-steps");
+    let root = host(&world);
+    let dir = world.project.clone();
+    world.repository("local-direct", &[]);
+    let stepped = |name: &str, task: &str| {
+        world.plan(
+            name,
+            &plan_of(
+                name,
+                vec![json!({
+                    "id": "ship", "repo": "service", "title": "feat: ship it",
+                    "steps": [
+                        {"id": "implement", "persona": "engineer", "task": task},
+                        {"id": "approve", "kind": "human", "task": "Approve the branch.",
+                         "deps": ["implement"]}
+                    ]
+                })],
+            ),
+        )
+    };
+    let check = |plan: &str| {
+        world.run_from(
+            &dir,
+            &[
+                "plan",
+                "check",
+                plan,
+                "--require-rendered",
+                "true",
+                "--template-root",
+                &text(&root),
+            ],
+        )
+    };
+    // Written by hand, never rendered: loads under the check because it states its bar.
+    check(&stepped(
+        "stated",
+        "## What\nShip it.\n\n## Acceptance criteria\n- It ships.",
+    ))
+    .exited(0);
+    check(&stepped(
+        "unstated",
+        "## What\nShip it.\n\n## Acceptance criteria\nIt ships, in prose.",
+    ))
+    .exited(HAS_REFUSALS)
+    .out_has("node 'ship': step 'implement': no criteria listed")
+    .out_lacks(RULE_NO_PROVENANCE);
 }
 
 /// The settings that declare a second source, `board`: `scripted-source`, the real
