@@ -1123,12 +1123,19 @@ fn start(args: &StartArgs) -> Result<i32> {
             .as_ref()
             .map(|template| template.as_str().to_owned())
             .unwrap_or_default(),
+        // llmlint: ignore-block[changed_behavior_has_e2e] both are read by plan load alone,
+        // and a plan is read from the store only here and by `plan check`: `adopt` resumes
+        // from the journal and re-reads no plan, so replaying them *is* the record keeping
+        // the launch's values against the adopting shell's own. The `adopt` step of
+        // `templates::the_host_root_is_the_flag_then_the_variable_then_the_schema_12_key_and_adopt_keeps_it`
+        // holds exactly that, with the adopter's environment naming another root and `false`.
         template_root: templates
             .root
             .as_ref()
             .map(|root| root.display().to_string())
             .unwrap_or_default(),
         require_rendered: templates.require_rendered,
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         oneharness_sessions: Some(sessions_file(&paths)?),
     };
     record.driven_by_this_process();

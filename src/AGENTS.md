@@ -58,10 +58,6 @@ Rules:
   what may run now; `destination.rs` asks each lifecycle node's repository what
   *it* says about the node, which is the part no document can answer. All of "is
   this input acceptable" is there, at the trust boundary a project crosses.
-- `templates.rs` must **never render into a store**: onetaskgraph renders and
-  regenerates, from the loader document this crate states. Embed no template
-  but `templates/onepipeline/plan-task.md.j2`; a name a test needs beside it is
-  registered by that test's own host root.
 - `engine.rs` is the one continuous reconcile loop — the **single writer**,
   holding the run's ownership lock for as long as it drives. There are no
   rounds: a node dispatches on the pass that observed its last dependency
