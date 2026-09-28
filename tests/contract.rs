@@ -3525,8 +3525,8 @@ fn the_writeback_budget_surface_is_what_the_divergence_record_names() {
          {precedence:?} at {found:?}"
     );
     for promise in [
-        "the sixty-second floor every other store call is bounded by plus that budget \
-         multiplied by the number of items the copy carries",
+        "allowed the sixty-second floor every other store call is bounded by plus that budget",
+        "allowed the floor plus that budget multiplied by the number of items it creates",
         "zero is refused",
         "naming none takes twelve seconds per item",
     ] {
