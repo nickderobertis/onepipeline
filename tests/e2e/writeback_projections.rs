@@ -570,6 +570,11 @@ fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
     rewritten(&project_file, &project_file, |front| {
         front.insert("title".to_owned(), json!("A board a person titled"));
         front.insert("labels".to_owned(), json!(["planning"]));
+        // A repository the project names, which the shadow an `add` copies over has to restate.
+        front.insert(
+            "repositories".to_owned(),
+            json!(["github.com/example/board"]),
+        );
         let metadata = front
             .get_mut("metadata")
             .and_then(Value::as_object_mut)
@@ -678,13 +683,16 @@ fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
     );
     let board = std::fs::read_to_string(&project_file).expect("the project reads");
     assert!(
-        board.contains("A board a person titled") && board.contains("a person's own project key"),
+        board.contains("A board a person titled")
+            && board.contains("a person's own project key")
+            && board.contains("github.com/example/board"),
         "the write-back rewrote the project's title or a key it does not own:\n{board}"
     );
 
     // An `add` is the one copy, and it lands the project item beside the node it creates: the
     // project is read once for it, so the copy finds the project as the board holds it and
-    // writes nothing to it — title, description, labels and keys read back byte for byte.
+    // writes nothing to it — title, description, labels, repositories and keys read back byte
+    // for byte.
     let mark = records(&world, run).len();
     edit(
         &world,

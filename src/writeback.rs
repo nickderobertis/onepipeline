@@ -199,7 +199,7 @@ enum Deadline {
     Floor,
     /// A write's: `floor + per_item × items`, with the budget in seconds — the items a copy
     /// creates, or the one item a targeted update writes.
-    Copy { per_item: NonZeroU64, items: usize },
+    Write { per_item: NonZeroU64, items: usize },
 }
 
 impl Deadline {
@@ -222,7 +222,7 @@ impl Deadline {
     fn within(self) -> Duration {
         match self {
             Self::Floor => COMMAND_FLOOR,
-            Self::Copy { per_item, items } => {
+            Self::Write { per_item, items } => {
                 COMMAND_FLOOR.saturating_add(Self::product(per_item, items))
             }
         }
@@ -233,7 +233,7 @@ impl Deadline {
         let seconds = self.within().as_secs();
         match self {
             Self::Floor => format!("{name} exceeded {seconds} seconds"),
-            Self::Copy { per_item, items } => format!(
+            Self::Write { per_item, items } => format!(
                 "{name} exceeded {seconds} seconds (the {} second floor + {items} {} × {} {} \
                  per item)",
                 COMMAND_FLOOR.as_secs(),
@@ -1086,7 +1086,7 @@ fn launch_dir(launch: &LaunchRecord) -> PathBuf {
 /// the count would be zero and the wait the floor, dispatching inside the deadline a large plan's
 /// copy still runs under.
 fn launch_wait(per_item: NonZeroU64, pending: &Pending) -> Duration {
-    Deadline::Copy {
+    Deadline::Write {
         per_item,
         items: pending.queued_items,
     }
@@ -1135,7 +1135,7 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
         return;
     }
     if let Kept::Left(left) = kept {
-        let bound = Deadline::Copy {
+        let bound = Deadline::Write {
             per_item: per_item_budget(launch),
             items: snapshot.lineages().len(),
         }
@@ -2114,7 +2114,7 @@ fn create(
         dry_run: false,
     };
     // The one call that is linear in what it carries, so the one whose deadline is.
-    let deadline = Deadline::Copy {
+    let deadline = Deadline::Write {
         per_item,
         items: created.len(),
     };
@@ -2184,7 +2184,7 @@ fn update(
     let answer = attempt
         .call(
             StoreCall::TaskUpdate,
-            Deadline::Copy { per_item, items: 1 },
+            Deadline::Write { per_item, items: 1 },
             attempt.engine.update_task(&held.id, &update),
         )
         .map_err(|failed| carrying.failed(failed))?
@@ -2196,8 +2196,9 @@ fn update(
     } else {
         counted.updated = counted.updated.saturating_add(1);
     }
-    // A reopen is the word moving off a closed one the run itself landed onto an open one: a
-    // retry or a requeue of a cancelled node, which the store pairs with reopening the item.
+    // A reopen is the word moving off a closed one the item held — the run's own landing, or
+    // what a cold adoption read off the item by its id — onto an open one: a retry or a requeue
+    // of a cancelled node, which the store pairs with reopening the item.
     let closed = |word: Option<ProjectedStatus>| {
         matches!(
             word,
@@ -4089,7 +4090,7 @@ mod tests {
     #[test]
     fn the_copy_deadline_is_the_floor_plus_the_budget_times_the_items() {
         let shipped = DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS;
-        let copy = |items: usize| Deadline::Copy {
+        let copy = |items: usize| Deadline::Write {
             per_item: shipped,
             items,
         };
@@ -4120,7 +4121,7 @@ mod tests {
         );
 
         // One of each, in the singular, so the line reads as a sentence.
-        let one = Deadline::Copy {
+        let one = Deadline::Write {
             per_item: NonZeroU64::MIN,
             items: 1,
         };
@@ -4145,7 +4146,7 @@ mod tests {
         // the four billion a narrower multiplication would have capped at — and saturates
         // to `u64::MAX` seconds beyond that, rather than wrapping to a figure the floor
         // would then govern alone.
-        let vast = Deadline::Copy {
+        let vast = Deadline::Write {
             per_item: NonZeroU64::MIN,
             items: usize::MAX / 2,
         };
@@ -4153,7 +4154,7 @@ mod tests {
             vast.within(),
             Duration::from_secs(usize::MAX as u64 / 2 + COMMAND_FLOOR.as_secs())
         );
-        let saturated = Deadline::Copy {
+        let saturated = Deadline::Write {
             per_item: NonZeroU64::MAX,
             items: 2,
         };
@@ -4214,7 +4215,7 @@ mod tests {
                 .expect("a count");
             let per_item = NonZeroU64::new(example["budget_seconds"].as_u64().expect("a budget"))
                 .expect("entry 71 works an example under a budget of zero");
-            let copy = Deadline::Copy { per_item, items };
+            let copy = Deadline::Write { per_item, items };
             assert_eq!(
                 copy.within(),
                 Duration::from_secs(example["deadline_seconds"].as_u64().expect("a deadline")),

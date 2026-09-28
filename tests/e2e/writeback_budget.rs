@@ -13,7 +13,7 @@
 //! says how the hold is scripted, and why it is the only honest way to make a
 //! store slow rather than wrong.
 //!
-//! The four journeys about the deadline wait past the sixty-second floor **by
+//! The five journeys about the deadline wait past the sixty-second floor **by
 //! construction**: a copy that outlasts a minute cannot be observed in less than
 //! one. `tests/e2e/store.rs` is where the other minute-long write-back journeys
 //! live, and these take their rendezvous settings from it.
@@ -131,7 +131,7 @@ fn board_status(world: &World, project: &str, node: &str) -> Option<String> {
     })
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the four journeys
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the five journeys
 // below wait past the sixty-second floor by construction — a copy that outlasts a minute
 // cannot be observed in less than one — and the edge they need is the crate under test:
 // they drive the compiled `onepipeline` binary against its own write-back worker, exactly
@@ -405,6 +405,78 @@ fn an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arit
         "the surface names a different number of items than the deadline multiplied by: \
          {message}"
     );
+}
+
+/// A creating copy held past what a deliberately tiny budget allows is cancelled, and the
+/// refusal names its arithmetic — the floor, and one second for each of the two items it
+/// creates, which is what makes a copy's deadline differ from an update's. Nothing the
+/// cancelled copy was holding lands after the refusal, and once the store answers again the
+/// next attempt creates both items.
+#[test]
+fn a_creating_copy_held_past_a_tiny_budget_is_cancelled_and_the_next_attempt_creates_it() {
+    let floor = number("floor_seconds");
+    let items: u64 = 2;
+    let flag = spelling("flag");
+    let world = World::new("writeback-budget-copy");
+    world.script("work.wait", "hold");
+    let run = "budgetcopy";
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    let world = world
+        .through_scripted_source()
+        .with_env(RENDEZVOUS_SECONDS_ENV, "600");
+    world
+        .run(&["start", &project, flag.as_str(), "1", "--detach"])
+        .exited(0);
+    world.until_store("the running node to reach the board", |world| {
+        board_status(world, &project, "work").is_some_and(|word| word == "in-progress")
+    });
+
+    // Two nodes added in one reply: one copy creates both, held at its first write until the
+    // deadline has ended it.
+    let meeting = world.store_holds(COPY);
+    let added: Vec<Value> = (1..=items)
+        .map(|nth| serde_json::json!({"op": "add", "node": agent(&format!("added{nth}"), &["work"])}))
+        .collect();
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &serde_json::json!({"version": 2, "commands": added}).to_string(),
+        )
+        .exited(0);
+    let held = meeting.arrived();
+    let expected = format!(
+        "project-copy exceeded {} seconds (the {floor} second floor + {items} items × 1 \
+         second per item)",
+        floor + items
+    );
+    world.until_run_file_holds(run, "driver.log", &expected);
+    let log = std::fs::read_to_string(world.run_file(run, "driver.log")).expect("the log");
+    assert!(
+        log.contains(&format!("write-back failed for '{project}': {expected}")),
+        "the refusal is not the line an operator reads:\n{log}"
+    );
+
+    // The write the cancelled copy was held at is let go, and nothing it carried lands.
+    let board = world.store_tasks(&project);
+    held.release();
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        (1..=items).all(|nth| board_status(&world, &project, &format!("added{nth}")).is_none()),
+        "a write from the cancelled copy landed after its refusal was recorded: {board:?}"
+    );
+
+    // Once the store answers again, the next attempt creates both items.
+    world.store_stops_holding(COPY);
+    drop(meeting);
+    world.until_store("the two created items to reach the board", |world| {
+        (1..=items).all(|nth| {
+            board_status(world, &project, &format!("added{nth}")).as_deref() == Some("queued")
+        })
+    });
+    world.release("work.go");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
 }
 
 /// A run whose launch record an older build wrote — no budget field on it — is
