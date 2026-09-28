@@ -2963,7 +2963,6 @@ pub(crate) struct NoteAnswer {
     delivered: Vec<std::result::Result<Delivery, Error>>,
 }
 
-/// One validated envelope, handed to the delivery thread.
 struct Handed {
     envelope: crate::channel::QueuedCommands,
     staged: Vec<Staged>,
@@ -2986,7 +2985,6 @@ pub(crate) struct NoteDeliveries {
     behind: std::collections::VecDeque<crate::channel::QueuedCommands>,
 }
 
-/// What the writer keeps about the envelope the delivery thread holds.
 struct Outstanding {
     nodes: BTreeSet<String>,
     /// What the stream relayed of those nodes' addressed conversations meanwhile.
