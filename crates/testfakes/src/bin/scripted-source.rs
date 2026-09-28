@@ -36,9 +36,10 @@
 //!   source is handed, which the real store answers. The engine starts a source for each
 //!   command, so under a page size of one this is a read whose first page answered and
 //!   whose next page failed: one answer beside one failure.
-//! * `<key>.get_project.absent` and `<key>.get_task.absent` — the read answers that the
-//!   store holds no such item, with no failure beside it, for as long as the file is there:
-//!   what a hosted destination answers for a board or an issue somebody deleted.
+//! * `<key>.get_project.absent`, `<key>.get_task.absent` and `<key>.update_task.absent` — the
+//!   read or the targeted update answers that the store holds no such item, with no failure
+//!   beside it, for as long as the file is there: what a hosted destination answers for a
+//!   board or an issue somebody deleted.
 //! * `<key>.<method>.rendezvous` — the address this source meets the test at before it
 //!   answers that method, held until the test lets go; written by `World::rendezvous`, read by
 //!   `fake::meet`. The one way to make a store call **slow** rather than wrong.
@@ -121,6 +122,9 @@ struct HandshakeParams {
     /// The credentials the engine resolved for this source, by the variable each is named by.
     #[serde(default)]
     secrets: std::collections::BTreeMap<String, String>,
+    /// The status categories the engine knows (§3.5), relayed to the hosted plugin verbatim.
+    #[serde(default)]
+    statuses: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -242,6 +246,7 @@ fn main() -> ExitCode {
         handshake.params.engine,
         handshake.params.source_name.as_str(),
         &settings.root,
+        handshake.params.statuses,
     ) {
         // A source that meters says so in its handshake (§3.4), or the engine never asks it.
         Ok(mut answered) => {
@@ -312,8 +317,14 @@ impl Scripted {
         if first {
             holds.push(format!("{}.{method}.first", self.key.0));
         }
+        // A hold that cannot be read is answered as the source's own `config` failure naming
+        // the script, rather than by ending the connection: an engine reports a plugin's own
+        // words only for a failed handshake, so a source that stopped here would fail the call
+        // under no name at all.
         for hold in holds {
-            held(&self.script, &hold)?;
+            if let Err(why) = held(&self.script, &hold) {
+                return Ok(json!({"id": request.id, "error": {"kind": "config", "message": why}}));
+            }
         }
         if !first {
             let later = self.scenario(&format!("{method}.refuse.after-first"));
@@ -341,7 +352,9 @@ impl Scripted {
             let held = match method {
                 "get_project" => "project",
                 "get_task" => "task",
-                other => return Err(format!("`{other}` reads no one item that could be absent")),
+                // §4.21: an update of a task the source does not hold answers a `null` outcome.
+                "update_task" => "outcome",
+                other => return Err(format!("`{other}` names no one item that could be absent")),
             };
             return Ok(json!({"id": request.id, "result": {held: null}}));
         }

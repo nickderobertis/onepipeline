@@ -15,7 +15,8 @@
 //! method names, what a hosted source turns into requests — and the meter's summed spend.
 //! `tests/golden/writeback-comparable-plan.json` holds the figures this build produces, which
 //! the journey fails on the moment one moves, beside the same scenario's figures taken on the
-//! engine before the landed baseline (entry 93), which it holds this build to beating.
+//! engine before the targeted update (entry 73) — every change a member copy — which it holds
+//! this build to beating.
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its subprocess
 // boundary and nothing inside the crate under test, which is driven as a real compiled binary.
@@ -183,12 +184,31 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
 
     go("d");
     then_at_rest(&world, "the failure", |world| settled(world, "d", "failed"));
+    let mark = records(&world).len();
     reply(
         &world,
         json!({"op": "retry", "id": "d", "node": node("d-2", &[])}),
     );
     then_at_rest(&world, "the retry", |world| dispatched(world, "d-2") == 1);
+    // A retry is a targeted update of the root's item: the head's word and lineage keys, the
+    // old head's settlement taken off, and the body the replacement restates.
+    let retry = the_update_of(&world, mark, "d");
+    for field in ["content", "metadata", "status"] {
+        assert!(retry["updated_fields"].get(field).is_some(), "{retry}");
+    }
+    let root = board_item(&world, &project, "d");
+    assert_eq!(
+        root["item"]["metadata"]["onepipeline.node"], "d-2",
+        "{root}"
+    );
+    assert!(
+        root["item"]["metadata"]
+            .get("onepipeline.settlement")
+            .is_none(),
+        "the old head's settlement stayed on the root's item: {root}"
+    );
 
+    let mark = records(&world).len();
     reply(
         &world,
         json!({"op": "amend", "id": "c", "text": "## What\nDo c, as amended.\n\n## Why\nSo the run can settle.\n\n## Acceptance criteria\n- c is done."}),
@@ -196,27 +216,59 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
     then_at_rest(&world, "the amend", |world| {
         !world.events_of(RUN, "edit-committed").is_empty()
     });
+    // An amendment is recorded beside the task on its own engine-owned key, so it is that key
+    // alone: the body a retry restates is the one it rewrites.
+    assert_eq!(
+        the_update_of(&world, mark, "c")["updated_fields"],
+        json!({"metadata": 1})
+    );
+    assert!(
+        board_item(&world, &project, "c")["item"]["metadata"]["onepipeline.amendment"]
+            .as_str()
+            .is_some_and(|text| text.contains("as amended")),
+        "the amendment did not reach the item"
+    );
     let edits = world.events_of(RUN, "edit-committed").len();
+    let mark = records(&world).len();
     reply(&world, json!({"op": "add", "node": node("f", &["e"])}));
     then_at_rest(&world, "the add", |world| {
         world.events_of(RUN, "edit-committed").len() > edits
     });
+    // An `add` is the one copy, naming the node it creates alone, beside the one project read
+    // that lets the copy land the project item unwritten.
+    let created: Vec<Value> = records(&world)[mark..]
+        .iter()
+        .filter(|record| record["calls"].get("project-copy").is_some())
+        .cloned()
+        .collect();
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert_eq!(created[0]["items"], json!(["f"]), "{}", created[0]);
+    assert_eq!(created[0]["calls"]["project-show"], 1, "{}", created[0]);
+    assert_eq!(created[0]["actions"]["created"], 1, "{}", created[0]);
     let edits = world.events_of(RUN, "edit-committed").len();
+    let mark = records(&world).len();
     reply(&world, json!({"op": "reparent", "id": "f", "deps": ["b"]}));
     then_at_rest(&world, "the reparent", |world| {
         world.events_of(RUN, "edit-committed").len() > edits
     });
+    // A reparent is the edges alone.
+    assert_eq!(
+        the_update_of(&world, mark, "f")["updated_fields"],
+        json!({"depends-on": 1})
+    );
 
     let failed_before = failures(&world);
+    // Each outage is scripted on the first call an attempt makes: the targeted update of the
+    // item the settlement changes, as the project read was on the engine before this one.
     world.store_refuses(
-        "get_project",
+        "update_task",
         &json!({"kind": "unavailable", "message": "connection reset by the destination"}),
     );
     go("e");
     world.until("three failed attempts", |world| {
         failures(world) >= failed_before + 3
     });
-    world.store_stops_refusing("get_project");
+    world.store_stops_refusing("update_task");
     then_at_rest(&world, "the outage to recover", |world| {
         settled(world, "e", "done")
     });
@@ -227,7 +279,7 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
     );
 
     world.store_refuses_once(
-        "get_project",
+        "update_task",
         &json!({"kind": "rate-limited", "retry_after_seconds": 2,
                 "message": "API rate limit exceeded"}),
     );
@@ -317,6 +369,29 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
     (figures, recorded, connections)
 }
 
+/// The one landed attempt since `mark` that carried `root` alone, as a targeted update.
+fn the_update_of(world: &World, mark: usize, root: &str) -> Value {
+    let carried: Vec<Value> = records(world)[mark..]
+        .iter()
+        .filter(|record| record["items"] == json!([root]) && record["outcome"] == "projected")
+        .cloned()
+        .collect();
+    assert_eq!(carried.len(), 1, "{root}: {carried:?}");
+    let update = carried[0].clone();
+    assert_eq!(update["calls"]["task-update"], 1, "{update}");
+    assert!(update["calls"].get("project-copy").is_none(), "{update}");
+    update
+}
+
+/// The board's item for one lineage, as the real store answers it.
+fn board_item(world: &World, project: &str, root: &str) -> Value {
+    world
+        .store_tasks(project)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == root)
+        .unwrap_or_else(|| panic!("the board holds no item for {root}"))
+}
+
 fn failures(world: &World) -> usize {
     records(world)
         .iter()
@@ -330,8 +405,9 @@ fn failures(world: &World) -> usize {
 // own write-back worker, exactly as `writeback_projections.rs`' journeys do and for the reason
 // recorded where this module is declared.
 /// The comparable plan's figures are the ones the record commits, and fewer store calls and
-/// less metered spend than the same scenario took on the engine before the landed baseline —
-/// with no whole attempt, and no attempt whose calls name the project's page of tasks. (The one
+/// less metered spend than the same scenario took on the engine before the targeted update —
+/// with no whole attempt, no attempt whose calls name the project's page of tasks, and a copy
+/// only for the one `add`. (The one
 /// `query_tasks` the store is asked is inside the copy that creates the `add`ed node: the store
 /// looking for a counterpart before it creates one, which is the copy's own work.)
 #[test]
@@ -355,7 +431,7 @@ fn the_comparable_plan_spends_what_the_committed_record_says() {
     };
     assert!(
         total(&measured) < total(before),
-        "the write-back made {} calls, and the engine before the baseline made {}",
+        "the write-back made {} calls, and the engine before the targeted update made {}",
         total(&measured),
         total(before)
     );
@@ -366,7 +442,7 @@ fn the_comparable_plan_spends_what_the_committed_record_says() {
     };
     assert!(
         points(&measured) < points(before),
-        "the write-back spent {} points, and the engine before the baseline spent {}",
+        "the write-back spent {} points, and the engine before the targeted update spent {}",
         points(&measured),
         points(before)
     );
@@ -439,6 +515,32 @@ fn the_comparable_plan_spends_what_the_committed_record_says() {
             record["calls"].is_object() && record["calls"].get("task-list").is_none(),
             "an attempt read the project's page of tasks: {record}"
         );
+        // A copy is made only to create the `add`ed node, and naming only it; the project is
+        // read only by that attempt, for its copy; and every other write is a targeted update
+        // whose fields the store says it wrote.
+        let calls = &record["calls"];
+        if calls.get("project-copy").is_some() {
+            assert_eq!(record["items"], json!(["f"]), "{record}");
+            assert_eq!(calls["project-copy"], 1, "{record}");
+        }
+        assert!(
+            calls.get("project-show").is_none() || calls.get("project-copy").is_some(),
+            "an attempt that created nothing read the project: {record}"
+        );
+        assert_eq!(
+            calls.get("task-update").is_some(),
+            record.get("updated_fields").is_some(),
+            "{record}"
+        );
     }
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|record| record["calls"].get("project-copy").is_some()
+                && record["outcome"] == "projected")
+            .count(),
+        1,
+        "other than the one `add` was created by a copy"
+    );
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

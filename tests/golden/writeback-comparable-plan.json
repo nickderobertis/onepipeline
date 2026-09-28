@@ -1,44 +1,7 @@
 {
-  "what": "The comparable plan's store calls and metered spend, as tests/e2e/writeback_cost.rs takes them: one launch of a five-node plan (a chain of three and a parallel pair) through the real engine binary and the real linked store over scripted-source; every node dispatched and settled done but one, which fails and is retried to done; one amend, one add, one reparent; a transient store outage of three failures that recovers; one rate-limited refusal carrying a two-second wait; a stop and an adopt; and closeout. calls count the plugin protocol's own methods as the source logged them, split at the launch read's connection; spent is what the source's meter charged, one request and one graphql point per answered request.",
+  "what": "The comparable plan's store calls and metered spend, as tests/e2e/writeback_cost.rs takes them: one launch of a five-node plan (a chain of three and a parallel pair) through the real engine binary and the real linked store over scripted-source; every node dispatched and settled done but one, which fails and is retried to done; one amend, one add, one reparent; a transient store outage of three failures that recovers; one rate-limited refusal carrying a two-second wait; a stop and an adopt; and closeout. Each outage and the rate limit are scripted on the first call an attempt makes: the project read on the engine the before figures were taken on, the targeted update on this one. calls count the plugin protocol's own methods as the source logged them, split at the launch read's connection; spent is what the source's meter charged, one request and one graphql point per answered request (metering, the meter's own reading, charges nothing).",
   "before": {
-    "engine": "onepipeline at cb8228d25a10d59c2d945e8a1583c6abf8337158, this branch's merge base: whole copies on a driver's first projection, after a failure and on a stop's release",
-    "figures": {
-      "launch_read": {
-        "calls": {
-          "get_project": 1,
-          "initialize": 1,
-          "query_tasks": 1,
-          "task_dependencies": 5
-        },
-        "spent": {
-          "requests": 7,
-          "graphql_points": 7
-        }
-      },
-      "writeback": {
-        "calls": {
-          "get_project": 38,
-          "get_task": 59,
-          "initialize": 21,
-          "metering": 34,
-          "project_dependencies": 17,
-          "query_tasks": 11,
-          "task_dependencies": 44,
-          "write_task": 35
-        },
-        "calls_total": 259,
-        "spent": {
-          "requests": 200,
-          "graphql_points": 200
-        },
-        "attempts": 21,
-        "failed_attempts": 4,
-        "whole_attempts": 7
-      }
-    }
-  },
-  "after": {
-    "engine": "this tree: every attempt carries the difference from the landed baseline (entry 93)",
+    "engine": "onepipeline at 55df74af14a8b86d9818e72a30ddb6792232fd5c, this branch's merge base: every attempt carries the difference from the landed baseline (entry 93) as a member copy, reading the project and each carried item first",
     "figures": {
       "launch_read": {
         "calls": {
@@ -74,5 +37,43 @@
       }
     }
   },
-  "creation_lookup": "The one query_tasks in the write-back's calls on this branch is Engine::copy's own origin scan before it creates the add-ed node's item (onetaskgraph-core engine/copy.rs, target rule 2), which no CopyRequest field skips: one per item created, inside that attempt's project-copy. The planner ruled it stays (the onetaskgraph-side skip is their follow-up); the journey holds it to at most one per created item and to no attempt that creates nothing. The merge base's eleven come from its whole copies: each whole attempt's page of tasks, and the copies' own lookups."
+  "after": {
+    "engine": "this tree, linking onetaskgraph 0.2.48: every change to an existing item is one Engine::update_task naming only the fields that differ from the landed baseline; a member copy is made only to create the add-ed node",
+    "figures": {
+      "launch_read": {
+        "calls": {
+          "get_project": 1,
+          "initialize": 1,
+          "query_tasks": 1,
+          "task_dependencies": 5
+        },
+        "spent": {
+          "requests": 7,
+          "graphql_points": 7
+        }
+      },
+      "writeback": {
+        "calls": {
+          "get_project": 2,
+          "initialize": 20,
+          "metering": 64,
+          "project_dependencies": 1,
+          "query_tasks": 1,
+          "update_task": 33,
+          "write_task": 1
+        },
+        "calls_total": 122,
+        "spent": {
+          "requests": 34,
+          "graphql_points": 34
+        },
+        "attempts": 21,
+        "failed_attempts": 4,
+        "whole_attempts": 0
+      }
+    }
+  },
+  "creation_lookup": "The one query_tasks in the write-back's calls on this branch is Engine::copy's own origin scan before it creates the add-ed node's item (onetaskgraph-core engine/copy.rs, target rule 2), which no CopyRequest field skips: one per item created, inside that attempt's project-copy. The planner ruled it stays (the onetaskgraph-side skip is their follow-up); the journey holds it to at most one per created item and to no attempt that creates nothing. The merge base's eleven come from its whole copies: each whole attempt's page of tasks, and the copies' own lookups.",
+  "add_reads_the_project": "The two get_project and the one project_dependencies in the write-back's calls on this branch are the attempt that creates the add-ed node: its own project read, which lets the shadow project restate the destination so the member copy lands the project item unwritten (the planner's ruling: onetaskgraph 0.2.48's member copy always plans the project item), and the copy's own read of that project and its edges. No other attempt reads the project.",
+  "per_github_write": "What each store write sends to GitHub, from onetaskgraph v0.2.48's crates/onetaskgraph-github-projects/tests/fixtures/copy-cost.txt (loopback board): a targeted update of one task naming its status, three metadata keys set and one removed is 3 requests (one issue read, one updateIssue, one board-field write; node count 203), and 1 request when every value it names is already held; a member copy of one task whose status changed is 9 requests (3 issue reads, 3 dependency reads, one updateIssue, 2 board-field writes; node count 1209)."
 }

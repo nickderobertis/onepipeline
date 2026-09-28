@@ -487,11 +487,12 @@ fn a_record_an_older_build_wrote_is_adopted_and_its_copy_runs_under_the_shipped_
 /// journeys above time a store that has not answered yet against it. A source that
 /// read an unreadable address as "no hold" would answer immediately and hand those
 /// journeys a copy that landed well inside any deadline — proving the deadline
-/// nothing. So the source stops, the store reports that as the copy's own failure on
-/// the driver's log, and that is what this asserts: the write-back names the script,
-/// and the board is not written as though the store had answered.
+/// nothing. So the source refuses the call naming the script, the store reports that as
+/// the write's own failure on the driver's log, and that is what this asserts: the
+/// write-back names the script, and the board is not written as though the store had
+/// answered.
 #[test]
-fn a_hold_the_scripted_source_cannot_read_fails_the_copy_by_the_scripts_name() {
+fn a_hold_the_scripted_source_cannot_read_fails_the_write_by_the_scripts_name() {
     let world = World::new("writeback-budget-unreadable-hold");
     let run = "budgetunreadable";
     let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
@@ -916,44 +917,43 @@ fn a_destination_read_held_past_the_floor_is_cancelled_retried_and_recovers() {
         std::fs::read_to_string(world.run_file(run, "driver.log")).unwrap_or_default()
     };
 
-    for (method, read) in [("get_project", "project-show")] {
-        // Held from the next attempt on: its first call of the read, which is the read itself —
-        // made by the attempt that creates the added node, and by no other.
-        let holding = world.store_holds(method);
-        let recovered = log(&world).matches("write-back recovered").count();
-        world
-            .run_with_stdin(
-                &["reply", run],
-                &serde_json::json!({"version": 2, "commands": [
-                    {"op": "add", "node": agent("added", &["work"])}
-                ]})
-                .to_string(),
-            )
-            .exited(0);
-        let held = holding.arrived();
-        let expected = format!("{read} exceeded {floor} seconds");
-        world.until_run_file_holds(run, "driver.log", &expected);
-        assert!(
-            log(&world).lines().any(|line| {
-                line.contains(&format!("write-back failed for '{project}': {expected}"))
-                    && line.contains("retrying")
-            }),
-            "a read held past its deadline was not reported as a failure to retry:\n{}",
-            log(&world)
-        );
+    // Held from the next attempt on: its first call of the read, which is the read itself —
+    // made by the attempt that creates the added node, and by no other.
+    let (method, read) = ("get_project", "project-show");
+    let holding = world.store_holds(method);
+    let recovered = log(&world).matches("write-back recovered").count();
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &serde_json::json!({"version": 2, "commands": [
+                {"op": "add", "node": agent("added", &["work"])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    let held = holding.arrived();
+    let expected = format!("{read} exceeded {floor} seconds");
+    world.until_run_file_holds(run, "driver.log", &expected);
+    assert!(
+        log(&world).lines().any(|line| {
+            line.contains(&format!("write-back failed for '{project}': {expected}"))
+                && line.contains("retrying")
+        }),
+        "a read held past its deadline was not reported as a failure to retry:\n{}",
+        log(&world)
+    );
 
-        // The store answers again, and the retry lands.
-        world.store_stops_holding(method);
-        held.release();
-        drop(holding);
-        world.until(
-            &format!("the projection to recover after {read}"),
-            |world| log(world).matches("write-back recovered").count() > recovered,
-        );
-        world.until_store("the added node's item to be created", |world| {
-            board_status(world, &project, "added").as_deref() == Some("queued")
-        });
-    }
+    // The store answers again, and the retry lands.
+    world.store_stops_holding(method);
+    held.release();
+    drop(holding);
+    world.until(
+        &format!("the projection to recover after {read}"),
+        |world| log(world).matches("write-back recovered").count() > recovered,
+    );
+    world.until_store("the added node's item to be created", |world| {
+        board_status(world, &project, "added").as_deref() == Some("queued")
+    });
     world.release("work.go");
     world.until("the run to settle", |world| {
         world.run_file(run, "result.json").is_file()

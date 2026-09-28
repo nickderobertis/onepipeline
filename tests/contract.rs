@@ -4747,9 +4747,9 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
         .remove("reopened");
     let without_calls = |line: &Value| {
         let mut line = line.clone();
-        line.as_object_mut()
-            .expect("a line is an object")
-            .remove("calls");
+        let object = line.as_object_mut().expect("a line is an object");
+        object.remove("calls");
+        object.remove("updated_fields");
         line
     };
     let mut unversioned = without_calls(example);
@@ -4769,7 +4769,11 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
     );
     let mut second = without_calls(delivered_example);
     second["schema_version"] = json!(2);
-    second["actions"] = older_actions.clone();
+    second["actions"] = delivered_example["actions"].clone();
+    second["actions"]
+        .as_object_mut()
+        .expect("actions is an object")
+        .remove("reopened");
     let second: ProjectionRecord = serde_json::from_value(second)
         .unwrap_or_else(|error| panic!("a version 2 line did not read: {error}"));
     let mut expected = without_calls(delivered_example);
@@ -4862,8 +4866,10 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
         ("version 0", json!({"schema_version": 0})),
     ] {
         // A `calls` patched to `null` is a line that leaves the key off; every other key is
-        // written as the patch says.
-        let mut line = example.clone();
+        // written as the patch says. Each is patched onto a line that made no targeted update,
+        // so a patch naming `updated_fields` is the only place it comes from.
+        let mut line = without_calls(example);
+        line["calls"] = json!({"project-copy": 1});
         for (key, value) in patch.as_object().expect("a patch") {
             if key == "calls" && value.is_null() {
                 line.as_object_mut()

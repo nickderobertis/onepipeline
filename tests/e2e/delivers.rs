@@ -23,9 +23,9 @@ use crate::harness::{agent, double, plan_of, World, REFUSED, RENDEZVOUS_SECONDS_
 
 /// The second source, holding the tickets a plan's tasks deliver.
 const TICKETS: &str = "tickets";
-/// The call a copy writes each task with, which is where the scripted source holds a copy — at
-/// its first task, once per attempt — or refuses one.
-const COPY: &str = "write_task";
+/// The call the write-back changes an existing task with, which is where the scripted source
+/// holds a projection — at its first update, once per attempt — or refuses one.
+const UPDATE: &str = "update_task";
 
 /// A world whose store configures a second `local-md` source of tickets beside the plan's.
 fn a_world_with_tickets(name: &str) -> World {
@@ -207,7 +207,7 @@ fn every_task_and_every_delivered_ticket_reads_queued_at_the_first_dispatch() {
         ),
     );
     let world = world.through_scripted_source();
-    let copies = world.store_holds(COPY);
+    let copies = world.store_holds(UPDATE);
     let build = world.rendezvous("build");
     world.run(&["start", &project, "--detach"]).exited(0);
 
@@ -239,11 +239,13 @@ fn every_task_and_every_delivered_ticket_reads_queued_at_the_first_dispatch() {
         assert_eq!(
             ticket_reads(&world, id),
             "queued",
-            "the ticket {id} was not claimed at the first dispatch"
+            "the ticket {id} was not claimed at the first dispatch; the projections recorded: \
+             {:?}",
+            records(&world, name)
         );
     }
 
-    world.store_stops_holding(COPY);
+    world.store_stops_holding(UPDATE);
     next_copy.release();
     dispatched.release();
     world.until("the run to settle", |world| settled(world, name));
@@ -381,10 +383,10 @@ fn a_stopped_run_releases_its_unstarted_tickets_and_an_adoption_claims_them_agai
     );
 
     let dispatched_before = dispatches(&world, name);
-    let copies = world.store_holds(COPY);
+    let copies = world.store_holds(UPDATE);
     world.run(&["adopt", name, "--detach"]).exited(0);
     let claim = copies.arrived();
-    world.store_stops_holding(COPY);
+    world.store_stops_holding(UPDATE);
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(
         dispatches(&world, name),
@@ -480,7 +482,7 @@ fn a_failed_first_projection_does_not_hold_back_the_first_dispatch() {
         &plan_of(name, vec![delivering(agent("work", &[]), &[&delivered])]),
     );
     let world = world.through_scripted_source();
-    refuse_every_copy(&world);
+    refuse_every_update(&world);
     world.run(&["start", &project, "--detach"]).exited(0);
 
     world.until("the run to settle", |world| settled(world, name));
@@ -521,7 +523,7 @@ fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispat
         &plan_of(name, vec![delivering(agent("work", &[]), &[&delivered])]),
     );
     let world = world.through_scripted_source();
-    let copies = world.store_holds(COPY);
+    let copies = world.store_holds(UPDATE);
     world.run(&["start", &project, "--detach"]).exited(0);
 
     let held = copies.arrived();
@@ -544,14 +546,14 @@ fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispat
     );
 
     // Later copies are not held: the one copy past its deadline is the evidence.
-    world.store_stops_holding(COPY);
+    world.store_stops_holding(UPDATE);
     world.until("the planner to hear the claim did not land", |world| {
         !unprojected_surfaces(world, name).is_empty()
     });
     let message = unprojected_surfaces(&world, name).remove(0);
     assert!(
-        message.contains("project-copy exceeded"),
-        "the surface does not say the copy outlasted its deadline: {message}"
+        message.contains("task-update exceeded"),
+        "the surface does not say the update outlasted its deadline: {message}"
     );
     drop(held);
     world.until("the run to settle", |world| settled(world, name));
@@ -754,11 +756,11 @@ fn a_retried_deliverer_keeps_its_ticket_claimed_across_the_retry() {
     );
 }
 
-/// Have the scripted source refuse every copy it is handed from now on, the way a store refuses
-/// a source it cannot write, while every other call still reaches the real store.
-fn refuse_every_copy(world: &World) {
+/// Have the scripted source refuse every targeted update it is handed from now on, the way a
+/// store refuses a source it cannot write, while every other call still reaches the real store.
+fn refuse_every_update(world: &World) {
     world.store_refuses(
-        COPY,
+        UPDATE,
         &json!({"kind": "refused", "message": "source plans refused the request"}),
     );
 }
@@ -790,7 +792,7 @@ fn a_stop_whose_release_the_store_refuses_still_stops_and_says_so() {
             && ticket_reads(world, &delivered) == "queued"
     });
 
-    refuse_every_copy(&world);
+    refuse_every_update(&world);
     let recorded_before = records(&world, name).len();
     world
         .run(&["stop", name])

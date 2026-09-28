@@ -5660,7 +5660,10 @@ child killed: its future is dropped where it waits, and the engine that drove it
 with any plugin process it started — is dropped before the attempt is recorded, so
 no write the cancelled copy started lands after the record says it was refused. The
 refusal names the seconds the copy was allowed, the floor, the item count and the
-per-item budget it was computed from, so the line on the driver's stderr and the
+per-item budget it was computed from. Since entry 73's targeted update, a copy is made only to
+create added items, and each targeted update of an existing item is bounded the same way as a
+write of one item — `floor + budget × 1`, refused as `task-update exceeded …` in the same
+words — so the line on the driver's stderr and the
 surface built from it read as the arithmetic they are. Nothing else about how the
 failure is reported changes.
 

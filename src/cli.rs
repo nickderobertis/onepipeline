@@ -40,9 +40,9 @@ pub const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 600;
 ///
 /// The bottom rung of four: `--writeback-item-budget` beats
 /// [`WRITEBACK_ITEM_BUDGET_ENV`], which beats the launch config's own
-/// `writeback_item_budget`. Multiplied by the number of items a settlement
-/// projects and added to [`WRITEBACK_COMMAND_FLOOR_SECONDS`] to bound the store's
-/// `project copy`. Twelve, because a copy onto the `plans` board measured about
+/// `writeback_item_budget`. Added to [`WRITEBACK_COMMAND_FLOOR_SECONDS`] to bound
+/// one targeted update, and multiplied by the items a creating `project copy`
+/// writes to bound that copy. Twelve, because a copy onto the `plans` board measured about
 /// 10.2 seconds per item (#521): the floor plus twelve per item lands that copy
 /// with at least a sixth to spare at any size. A [`NonZeroU64`] because zero is
 /// no budget at all, and every rung that names one refuses it.
@@ -425,13 +425,14 @@ pub struct StartArgs {
     /// How often the durable planner-update check-in comes due, in seconds.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_HEARTBEAT_INTERVAL_SECONDS)]
     pub heartbeat_interval: u64,
-    /// How long the settlement write-back allows its store's `project copy` per
-    /// item it writes, in seconds.
+    /// How long the settlement write-back allows its store per item it writes,
+    /// in seconds.
     ///
-    /// The copy's deadline is the sixty-second floor every other store command
-    /// is bounded by plus this multiplied by the number of items the copy
-    /// carries, so the backstop that cancels an unreachable store's copy scales
-    /// with the plan instead of being outgrown by it. A positive whole number:
+    /// A targeted update's deadline is the sixty-second floor every other store
+    /// command is bounded by plus this; the copy creating added items is allowed
+    /// the floor plus this multiplied by the number of items it creates, so the
+    /// backstop that cancels an unreachable store's write scales with what it
+    /// writes instead of being outgrown by it. A positive whole number:
     /// zero is no budget at all and is refused. Given here it beats
     /// `ONEPIPELINE_WRITEBACK_ITEM_BUDGET` and the launch config's own field;
     /// naming none takes the shipped twelve seconds per item.
