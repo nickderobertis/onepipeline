@@ -772,6 +772,86 @@ fn notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_c
     });
 }
 
+/// A note submitted while **nothing** drives the run waits on no turn.
+///
+/// With no driver, `reply` is the run's writer itself and delivers inline, holding
+/// the run's lock while it does — which is only safe because nothing it can reach
+/// is a conversation that answers when a turn ends. Every conversation of a run
+/// lives inside the driver that holds its lock, so with none alive the note's
+/// inbox has nobody behind it. The case that could still look otherwise is a
+/// driver that died mid-turn, leaving that turn's harness orphaned and still
+/// working: the note is offered, withdrawn when nothing takes it within the
+/// sibling's own bound, and carried to the node's next dispatch — while the
+/// orphaned turn is still held, so the reply's wait was never the turn's.
+///
+/// And the run is the fresh driver's to take once the reply returns.
+///
+/// `#[cfg(unix)]` because it ends the run's driver by pid, as the adoption
+/// journeys do.
+#[cfg(unix)]
+#[test]
+fn a_note_submitted_with_nothing_driving_waits_on_no_turn_and_leaves_the_run_adoptable() {
+    let world = World::new("note-undriven");
+    let run = "undriven";
+    held_conversation(&world, run, vec![agent("build", &[])]);
+    let lock = world.run_file(run, "owner.lock");
+    let holder: Value = serde_json::from_str(
+        &std::fs::read_to_string(&lock).expect("the driver holds the run's lock"),
+    )
+    .expect("the lock is a record");
+    let driver = holder["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .unwrap_or_else(|| panic!("the lock names its holder's pid: {holder}"));
+    harness::end_process(driver);
+
+    // The worker's turn is never released before the reply returns: whatever the
+    // reply waited on, it was not that turn ending.
+    let replied = world.run_with_stdin_on(
+        world.agentgraph_cmd(&["reply", run]),
+        &envelope(note_op("build", "worker", NOTE, None)),
+    );
+    replied.exited(0).out_has("\"state\":\"applied\"");
+    assert!(
+        !world.fakes.join("turn.go").exists(),
+        "the held turn was released before the reply returned"
+    );
+    let operation = recorded(&world, run);
+    assert_eq!(
+        operation["reached"],
+        json!("carried"),
+        "a note no conversation could take was not carried to the node's next dispatch: \
+         {operation}"
+    );
+    assert!(
+        !lock.exists(),
+        "the reply kept the run's lock after it answered"
+    );
+
+    // A fresh driver takes the run, and the node's next dispatch is handed the note.
+    world
+        .run_on(
+            world.agentgraph_cmd(&["adopt", run, "--detach"]),
+            "adopt --detach",
+        )
+        .exited(0);
+    world.until("the adopted run to dispatch the node again", |world| {
+        dispatch_records_of(world, run, "build").len() >= 2
+    });
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until("the adopted run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+    let dispatches = dispatches_of(&world, run, "build");
+    assert!(
+        dispatches
+            .last()
+            .is_some_and(|turns| turns.first().is_some_and(|task| task.contains(NOTE))),
+        "the adopted run's dispatch was not handed the carried note:\n{dispatches:#?}"
+    );
+}
+
 /// A note is **not** offered to a conversation on behalf of an envelope the run
 /// is going to refuse.
 ///
