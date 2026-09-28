@@ -499,7 +499,6 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
     );
 }
 
-/// A non-note edit a journey queues behind a note.
 const FINDING: &str = "the fixture this node reads moved";
 
 /// How long a held conversation's member lets its supervision go unconfirmed, in
@@ -546,7 +545,6 @@ fn submitted(world: &World, run: &str, envelope: &str) -> std::process::Child {
     child
 }
 
-/// What a submitter was answered, once it has been.
 fn answered(child: std::process::Child) -> String {
     let output = child.wait_with_output().expect("the binary runs");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -597,7 +595,6 @@ fn awaiting_an_answer(world: &World) -> usize {
     found
 }
 
-/// Where in the run's journal the first record of `kind` for `node` sits.
 fn position_of(journal: &[Value], kind: &str, node: Option<&str>) -> Option<usize> {
     journal.iter().position(|event| {
         event["kind"] == kind && node.is_none_or(|node| event["labels"]["node"] == node)

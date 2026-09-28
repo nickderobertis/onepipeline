@@ -2956,7 +2956,6 @@ impl Delivery {
 /// Built on the delivery thread and carried back to the writer as
 /// [`Message::NoteAnswered`], or built in place where the phase ran inline.
 pub(crate) struct NoteAnswer {
-    /// The envelope, as it was claimed.
     envelope: crate::channel::QueuedCommands,
     /// The instant before its first note was offered — see [`reconcile_edits`].
     offered_at: u64,
@@ -2979,7 +2978,6 @@ struct Handed {
 /// the loop's own channel. Why envelopes behind an outstanding one wait unjudged
 /// is [`reconcile_edits`]'s to say.
 pub(crate) struct NoteDeliveries {
-    /// The thread's inbox.
     handing: Sender<Handed>,
     /// The envelope the thread holds, from the moment it is handed until its
     /// answer is recorded.
@@ -2990,7 +2988,6 @@ pub(crate) struct NoteDeliveries {
 
 /// What the writer keeps about the envelope the delivery thread holds.
 struct Outstanding {
-    /// The nodes its notes were offered into.
     nodes: BTreeSet<String>,
     /// What the stream relayed of those nodes' addressed conversations meanwhile.
     witnessed: Vec<Envelope>,
@@ -3042,7 +3039,6 @@ impl NoteDeliveries {
         })
     }
 
-    /// Whether nothing is being delivered and nothing is waiting behind it.
     fn idle(&self) -> bool {
         self.outstanding.is_none() && self.behind.is_empty()
     }
@@ -3104,7 +3100,6 @@ impl NoteDeliveries {
         }
     }
 
-    /// The outstanding envelope has been answered: what was witnessed meanwhile.
     fn answered(&mut self) -> Vec<Envelope> {
         self.outstanding
             .take()
