@@ -184,9 +184,9 @@ fn unprojected_surfaces(world: &World, run: &str) -> Vec<String> {
         .collect()
 }
 
-/// The claim reaches the store before the work it claims starts. The launch's first copy is
+/// The claim reaches the store before the work it claims starts. The launch's first update is
 /// held at the store double, and while it is held no node is dispatched. Once it lands, the
-/// build node's dispatch and the next copy are both held, so the board is frozen at the moment
+/// build node's dispatch and the next update are both held, so the board is frozen at the moment
 /// of the first dispatch: every task reads `queued`, and so do the two tickets that read `todo`
 /// before the launch.
 #[test]
@@ -207,12 +207,12 @@ fn every_task_and_every_delivered_ticket_reads_queued_at_the_first_dispatch() {
         ),
     );
     let world = world.through_scripted_source();
-    let copies = world.store_holds(UPDATE);
+    let updates = world.store_holds(UPDATE);
     let build = world.rendezvous("build");
     world.run(&["start", &project, "--detach"]).exited(0);
 
-    let claim = copies.arrived();
-    // The copy that claims the plan is still held at the scripted source, so the board is as
+    let claim = updates.arrived();
+    // The claim's first update is still held at the scripted source, so the board is as
     // authored.
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(
@@ -224,7 +224,7 @@ fn every_task_and_every_delivered_ticket_reads_queued_at_the_first_dispatch() {
     claim.release();
 
     let dispatched = build.arrived();
-    let next_copy = copies.arrived();
+    let next_update = updates.arrived();
     // Frozen: the build worker is live and the projection of it running has not reached the
     // store. This is the board that worker reads.
     let board = words(&world, &project);
@@ -246,7 +246,7 @@ fn every_task_and_every_delivered_ticket_reads_queued_at_the_first_dispatch() {
     }
 
     world.store_stops_holding(UPDATE);
-    next_copy.release();
+    next_update.release();
     dispatched.release();
     world.until("the run to settle", |world| settled(world, name));
 }
@@ -344,7 +344,7 @@ fn a_failed_node_reads_failed_and_its_ticket_returns_to_todo() {
 
 /// A stop releases what the run claimed and never started: those tasks and their tickets read
 /// `todo` as soon as the stop has answered. An adoption claims them again before its first
-/// dispatch — its first copy is held, and nothing is dispatched while it is.
+/// dispatch — its first update is held, and nothing is dispatched while it is.
 #[test]
 fn a_stopped_run_releases_its_unstarted_tickets_and_an_adoption_claims_them_again() {
     let world = a_world_with_tickets("delivers-stopped");
@@ -383,9 +383,9 @@ fn a_stopped_run_releases_its_unstarted_tickets_and_an_adoption_claims_them_agai
     );
 
     let dispatched_before = dispatches(&world, name);
-    let copies = world.store_holds(UPDATE);
+    let updates = world.store_holds(UPDATE);
     world.run(&["adopt", name, "--detach"]).exited(0);
-    let claim = copies.arrived();
+    let claim = updates.arrived();
     world.store_stops_holding(UPDATE);
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(
@@ -409,7 +409,7 @@ fn a_ticket_the_store_cannot_write_raises_the_planner_surface_and_settles_the_ru
     let delivered = ticket(&world, "work", "todo");
     // The tickets source cannot write this ticket's status, the way a hosted source that could
     // not be reached cannot: its own error, at the source's own boundary.
-    copies_fail_tickets(&world, &[(&delivered, "unavailable")]);
+    writes_fail_tickets(&world, &[(&delivered, "unavailable")]);
     world.script("work.wait", "hold");
     let name = "refused-ticket";
     let project = world.plan(
@@ -432,7 +432,7 @@ fn a_ticket_the_store_cannot_write_raises_the_planner_surface_and_settles_the_ru
         message.contains(&delivered) && message.contains("the store answered unavailable"),
         "the surface does not name the ticket and what the store said of it: {message}"
     );
-    // Classed off the ticket's own failure in the copy report: a source the store could not
+    // Classed off the ticket's own failure in the update's report: a source the store could not
     // write is one a wait can change.
     assert!(
         message
@@ -443,7 +443,7 @@ fn a_ticket_the_store_cannot_write_raises_the_planner_surface_and_settles_the_ru
     let partial = records(&world, name)
         .into_iter()
         .find(|record| record["outcome"] == "failed")
-        .expect("the partial copy is recorded as an attempt that failed");
+        .expect("the partial write is recorded as an attempt that failed");
     assert_eq!(
         partial["delivered"][0]["ticket"],
         json!(delivered),
@@ -509,9 +509,9 @@ fn a_failed_first_projection_does_not_hold_back_the_first_dispatch() {
 // binary against its own write-back worker, exactly as `writeback_budget.rs`'s minute-long
 // journeys record.
 /// A launch whose first projection the store never answers waits for it only as long as the
-/// store call deadline allows, and then dispatches: nothing is dispatched while the held copy
+/// store call deadline allows, and then dispatches: nothing is dispatched while the held update
 /// is inside its deadline, the ready node is dispatched once it has passed, and the planner hears
-/// the copy was cancelled. The deadline is the store's sixty-second floor plus one item's budget,
+/// the update was cancelled. The deadline is the store's sixty-second floor plus one item's budget,
 /// so this journey takes more than a minute by construction.
 #[test]
 fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch() {
@@ -523,10 +523,10 @@ fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispat
         &plan_of(name, vec![delivering(agent("work", &[]), &[&delivered])]),
     );
     let world = world.through_scripted_source();
-    let copies = world.store_holds(UPDATE);
+    let updates = world.store_holds(UPDATE);
     world.run(&["start", &project, "--detach"]).exited(0);
 
-    let held = copies.arrived();
+    let held = updates.arrived();
     let started = std::time::Instant::now();
     std::thread::sleep(Duration::from_secs(2));
     assert_eq!(
@@ -545,7 +545,7 @@ fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispat
         started.elapsed()
     );
 
-    // Later copies are not held: the one copy past its deadline is the evidence.
+    // Later updates are not held: the one update past its deadline is the evidence.
     world.store_stops_holding(UPDATE);
     world.until("the planner to hear the claim did not land", |world| {
         !unprojected_surfaces(world, name).is_empty()
@@ -923,9 +923,9 @@ fn a_bare_delivers_entry_is_qualified_with_the_tasks_own_source() {
 
 /// Have the tickets source refuse the store's write of each `(ticket, kind)` given, with the
 /// source error of that kind, while every other call — the tickets' reads, and every write of
-/// the plan's own tasks — still reaches the real store. The copy lands, and what it could not
+/// the plan's own tasks — still reaches the real store. The write lands, and what it could not
 /// keep in step is those tickets.
-fn copies_fail_tickets(world: &World, failures: &[(&str, &str)]) {
+fn writes_fail_tickets(world: &World, failures: &[(&str, &str)]) {
     for (ticket, kind) in failures {
         let native = ticket
             .split_once(':')
@@ -942,11 +942,11 @@ fn copies_fail_tickets(world: &World, failures: &[(&str, &str)]) {
     }
 }
 
-/// A partial copy is classed off its own `delivered` failures, by the rule a partial read's
+/// A partial write is classed off its own `delivered` failures, by the rule a partial read's
 /// `errors` are: where the store refused every ticket it failed, the planner hears the class
 /// `refused` with every kind it named, and that the projection is not attempted again on a timer.
 #[test]
-fn a_partial_copy_whose_every_failed_ticket_was_refused_is_classed_refused() {
+fn a_partial_write_whose_every_failed_ticket_was_refused_is_classed_refused() {
     let world = a_world_with_scripted_tickets("delivers-partial-refused");
     let one = ticket(&world, "one", "todo");
     let two = ticket(&world, "two", "todo");
@@ -955,14 +955,14 @@ fn a_partial_copy_whose_every_failed_ticket_was_refused_is_classed_refused() {
         name,
         &plan_of(name, vec![delivering(agent("work", &[]), &[&one, &two])]),
     );
-    copies_fail_tickets(&world, &[(&one, "refused"), (&two, "config")]);
+    writes_fail_tickets(&world, &[(&one, "refused"), (&two, "config")]);
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("the run to settle", |world| settled(world, name));
 
     let message = unprojected_surfaces(&world, name)
         .into_iter()
         .next()
-        .expect("the planner heard the partial copy");
+        .expect("the planner heard the partial write");
     assert!(
         message
             .lines()
@@ -971,7 +971,7 @@ fn a_partial_copy_whose_every_failed_ticket_was_refused_is_classed_refused() {
     );
     assert!(
         message.contains("not attempted again on a timer"),
-        "a refused partial copy was left on the retry timer: {message}"
+        "a refused partial write was left on the retry timer: {message}"
     );
     for ticket in ["tickets:board/one", "tickets:board/two"] {
         assert!(
@@ -981,11 +981,11 @@ fn a_partial_copy_whose_every_failed_ticket_was_refused_is_classed_refused() {
     }
 }
 
-/// A partial copy mixing a refused ticket with one a wait could change is `transient`, exactly as
+/// A partial write mixing a refused ticket with one a wait could change is `transient`, exactly as
 /// a partial read mixing the two is: the planner hears that class with both kinds, and the
 /// projection stays on the retry schedule rather than waiting for the graph to change.
 #[test]
-fn a_partial_copy_mixing_refused_and_transient_tickets_is_classed_transient() {
+fn a_partial_write_mixing_refused_and_transient_tickets_is_classed_transient() {
     let world = a_world_with_scripted_tickets("delivers-partial-mixed");
     let one = ticket(&world, "one", "todo");
     let two = ticket(&world, "two", "todo");
@@ -994,14 +994,14 @@ fn a_partial_copy_mixing_refused_and_transient_tickets_is_classed_transient() {
         name,
         &plan_of(name, vec![delivering(agent("work", &[]), &[&one, &two])]),
     );
-    copies_fail_tickets(&world, &[(&one, "refused"), (&two, "unavailable")]);
+    writes_fail_tickets(&world, &[(&one, "refused"), (&two, "unavailable")]);
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("the run to settle", |world| settled(world, name));
 
     let message = unprojected_surfaces(&world, name)
         .into_iter()
         .next()
-        .expect("the planner heard the partial copy");
+        .expect("the planner heard the partial write");
     assert!(
         message
             .lines()
@@ -1010,7 +1010,7 @@ fn a_partial_copy_mixing_refused_and_transient_tickets_is_classed_transient() {
     );
     assert!(
         !message.contains("not attempted again on a timer"),
-        "a mixed partial copy was taken off the retry timer: {message}"
+        "a mixed partial write was taken off the retry timer: {message}"
     );
 }
 
@@ -1019,7 +1019,7 @@ fn a_partial_copy_mixing_refused_and_transient_tickets_is_classed_transient() {
 // inside a wait cannot be observed in less than the wait — and the edge it needs is the crate
 // under test: the compiled `onepipeline` binary against its own write-back worker, as this
 // module's minute-long first-projection journey records.
-/// A copy whose deliverer's ticket the store refused for a rate limit naming a wait lands every
+/// A write whose deliverer's ticket the store refused for a rate limit naming a wait lands every
 /// item but that deliverer's: the store is handed nothing, the tickets' source included, until
 /// the wait has passed, and the attempt after it carries the deliverer again — though nothing
 /// about it changed since, its ticket is behind — beside what did change, and none of what

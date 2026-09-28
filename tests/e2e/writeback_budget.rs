@@ -82,9 +82,9 @@ const UPDATE: &str = "update_task";
 /// of the real store, whose first targeted update meets this test.
 ///
 /// One node is held open and any others depend on it, so the run is live for as
-/// long as the journey needs and every snapshot it projects carries all `items`
-/// nodes — which is the count the copy's deadline is computed from.
-fn a_run_whose_copy_is_held(
+/// long as the journey needs and its claim carries all `items` nodes — which is the
+/// count the driver's wait before its first dispatch is bounded by.
+fn a_run_whose_first_update_is_held(
     world: &str,
     run: &str,
     items: usize,
@@ -158,7 +158,7 @@ fn a_targeted_update_held_past_the_floor_still_lands_inside_its_item_budget() {
     let items = usize::try_from(2 * floor / per_item).expect("a count");
     let run = "budgetlifts";
     let (world, meeting, project) =
-        a_run_whose_copy_is_held("writeback-budget-lifts", run, items, &[]);
+        a_run_whose_first_update_is_held("writeback-budget-lifts", run, items, &[]);
 
     // The claim's first update is inside its hold: nothing has been reported, because the
     // update has not failed — it is still running.
@@ -296,13 +296,17 @@ fn a_seven_item_copy_held_at_eleven_seconds_per_item_lands_inside_its_deadline()
 /// thousand seconds per item would, re-reading its environment, allow this copy
 /// a thousand seconds and never cancel it inside the wait below.
 #[test]
-fn a_copy_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithmetic() {
+fn an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithmetic() {
     let floor = number("floor_seconds");
     let items = 1;
     let run = "budgetfloor";
     let flag = spelling("flag");
-    let (world, meeting, project) =
-        a_run_whose_copy_is_held("writeback-budget-floor", run, items, &[flag.as_str(), "1"]);
+    let (world, meeting, project) = a_run_whose_first_update_is_held(
+        "writeback-budget-floor",
+        run,
+        items,
+        &[flag.as_str(), "1"],
+    );
 
     // The launching driver's updates are let go at once, so they land and the run is
     // quiet: nothing has failed yet, and the driver is one an adoption may end. There
@@ -414,13 +418,13 @@ fn a_copy_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithme
 /// adopted decide what the launch had. What the worker does with it is only
 /// observable on a copy it actually bounds, so this holds one past the floor.
 #[test]
-fn a_record_an_older_build_wrote_is_adopted_and_its_copy_runs_under_the_shipped_default() {
+fn a_record_an_older_build_wrote_is_adopted_and_its_update_runs_under_the_shipped_default() {
     let floor = number("floor_seconds");
     let per_item = number("default_seconds");
     let items = 1;
     let run = "budgetolder";
     let (world, meeting, project) =
-        a_run_whose_copy_is_held("writeback-budget-older-record", run, items, &[]);
+        a_run_whose_first_update_is_held("writeback-budget-older-record", run, items, &[]);
 
     // The launching driver's updates are let go at once — its claim before the first
     // dispatch, and the projection of the held node running — so the run is quiet and

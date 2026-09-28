@@ -569,6 +569,7 @@ fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
         .join(format!("{identifier}.md"));
     rewritten(&project_file, &project_file, |front| {
         front.insert("title".to_owned(), json!("A board a person titled"));
+        front.insert("labels".to_owned(), json!(["planning"]));
         let metadata = front
             .get_mut("metadata")
             .and_then(Value::as_object_mut)
@@ -679,6 +680,39 @@ fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
     assert!(
         board.contains("A board a person titled") && board.contains("a person's own project key"),
         "the write-back rewrote the project's title or a key it does not own:\n{board}"
+    );
+
+    // An `add` is the one copy, and it lands the project item beside the node it creates: the
+    // project is read once for it, so the copy finds the project as the board holds it and
+    // writes nothing to it — title, description, labels and keys read back byte for byte.
+    let mark = records(&world, run).len();
+    edit(
+        &world,
+        run,
+        json!({"op": "add", "node": agent("extra", &["work"])}),
+    );
+    projected_until(&world, run, &project, "the added node's item", |tasks| {
+        board_word(tasks, "extra").as_deref() == Some("queued")
+    });
+    assert_eq!(
+        std::fs::read_to_string(&project_file).expect("the project reads"),
+        board,
+        "the copy creating the added node wrote the project item"
+    );
+    let created: Vec<Value> = records(&world, run)[mark..]
+        .iter()
+        .filter(|record| record["calls"].get("project-copy").is_some())
+        .cloned()
+        .collect();
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert_eq!(created[0]["items"], json!(["extra"]), "{}", created[0]);
+    assert_eq!(created[0]["calls"]["project-show"], 1, "{}", created[0]);
+    assert_eq!(created[0]["actions"]["created"], 1, "{}", created[0]);
+    assert_eq!(created[0]["actions"]["unchanged"], 1, "{}", created[0]);
+    assert_eq!(
+        landed(&world, run)["items"]["extra"]["destination"],
+        board_task(&world.store_tasks(&project), "extra")["id"],
+        "the baseline does not record the item the copy created"
     );
 
     // A refused update lands nothing, and the file says so.
@@ -1107,7 +1141,7 @@ fn a_projection_after_a_failed_attempt_carries_what_had_not_landed() {
 /// as anything but what the store said fails here, as does one miscounting what it wrote. The
 /// update after the meter is taken away reports what a source that meters nothing reports.
 #[test]
-fn the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent() {
+fn the_record_carries_exactly_what_the_update_said_it_wrote_and_spent() {
     let run = "projections-report";
     let (world, project) = a_run_projecting_through_a_recording_store(
         "writeback-projections-report",
@@ -1174,7 +1208,6 @@ fn the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent() {
         ]}),
         "{counted}"
     );
-    // The one item the update wrote on.
     assert_eq!(
         counted["actions"],
         json!({"created": 0, "updated": 1, "unchanged": 0, "orphaned": 0, "reopened": 0}),
@@ -1198,6 +1231,46 @@ fn the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent() {
         real["actions"],
         json!({"created": 0, "updated": 1, "unchanged": 0, "orphaned": 0, "reopened": 0}),
         "{real}"
+    );
+    world.until_store("the unmetered update to land", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "later"
+                && task["item"]["metadata"]["onepipeline.context"] == "reported as it was"
+        })
+    });
+
+    // A person has already put on the board what the next update names: the store is asked,
+    // writes nothing, and says so — the item counted `unchanged`, and no field written.
+    let later = board_task(&world.store_tasks(&project), "later").clone();
+    // llmlint: ignore-block[tests_mirror_real_usage] a `local-md` destination *is* its folder of
+    // Markdown, so a person editing the board edits that file.
+    rewritten(
+        &item_file(&world, &later),
+        &item_file(&world, &later),
+        |front| {
+            front
+                .get_mut("metadata")
+                .and_then(Value::as_object_mut)
+                .expect("metadata")
+                .insert(
+                    "onepipeline.context".to_owned(),
+                    json!("already on the board"),
+                );
+        },
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    noted(&world, run, "later", "already on the board");
+    world.until(
+        "the update the board already held to be recorded",
+        |world| records(world, run).len() > mark + 2,
+    );
+    let held = records(&world, run)[mark + 2].clone();
+    assert_eq!(held["calls"], json!({"task-update": 1}), "{held}");
+    assert_eq!(held["updated_fields"], json!({}), "{held}");
+    assert_eq!(
+        held["actions"],
+        json!({"created": 0, "updated": 0, "unchanged": 1, "orphaned": 0, "reopened": 0}),
+        "{held}"
     );
 }
 
