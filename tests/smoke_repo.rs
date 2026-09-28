@@ -53,7 +53,9 @@ mod unix {
     const API_EXIT_ENV: &str = "ONEPIPELINE_SMOKE_GH_API_EXIT";
     const API_STDERR_ENV: &str = "ONEPIPELINE_SMOKE_GH_API_STDERR";
 
-    /// What `gh repo view` prints for a repository that does not exist.
+    /// What `gh repo view` prints for a repository that does not exist. A copy
+    /// of `gh`'s wording, reconciled against the real one by the credentialled
+    /// smoke, which probes a name nothing creates and requires it read as this.
     const NOT_FOUND: &str = "GraphQL: Could not resolve to a Repository";
 
     /// What separates one argument from the next in the record: the unit
@@ -269,7 +271,7 @@ mod unix {
         ] {
             let record = stand_in_answering(&scratch.0, name, (status, stderr), (0, 0, ""));
             let refusal = refusal_of(THROWAWAY);
-            for carried in [names, stderr, &format!("exited {status}")] {
+            for carried in [names, stderr, &format!("exit status: {status}")] {
                 assert!(
                     refusal.contains(carried),
                     "a {name} probe fails carrying {carried:?}: {refusal}"
@@ -319,7 +321,7 @@ mod unix {
             "waiting for its first commit",
             "rate limit",
             limited,
-            "exited 1",
+            "exit status: 1",
         ] {
             assert!(
                 refusal.contains(carried),
@@ -335,5 +337,22 @@ mod unix {
             ["repo", "repo", "api"],
             "the refusal is not waited through"
         );
+
+        // A `gh` that cannot be started is a missing tool, told how to fix it,
+        // and never read as an answer about the repository.
+        let empty = scratch.0.join("no-gh");
+        fs::create_dir(&empty).expect("a PATH directory with no `gh` in it");
+        std::env::set_var("PATH", &empty);
+        let refusal = refusal_of(THROWAWAY);
+        for carried in [
+            "`gh` could not be run",
+            "Install `gh`",
+            "could not tell whether",
+        ] {
+            assert!(
+                refusal.contains(carried),
+                "a missing `gh` fails carrying {carried:?}: {refusal}"
+            );
+        }
     }
 }

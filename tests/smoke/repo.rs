@@ -37,12 +37,11 @@ pub fn gh_try(args: &[&str]) -> Result<String, Refusal> {
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
-    let status = output.status.code();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     Err(Refusal {
-        cause: classify(status, &stderr),
+        cause: classify(output.status.code(), &stderr),
         command,
-        status,
+        status: Some(output.status),
         stderr,
     })
 }
@@ -109,7 +108,8 @@ pub fn classify(status: Option<i32>, stderr: &str) -> Cause {
 pub struct Refusal {
     pub cause: Cause,
     command: String,
-    status: Option<i32>,
+    /// `None` only for a `gh` that never started.
+    status: Option<std::process::ExitStatus>,
     stderr: String,
 }
 
@@ -133,13 +133,13 @@ impl std::fmt::Display for Refusal {
             }
             Cause::Unrecognised => "an error this smoke does not recognise",
         };
-        let status = match self.status {
-            Some(code) => format!("exited {code}"),
-            None => "was ended by a signal".to_owned(),
-        };
+        let status = self
+            .status
+            .map(|status| status.to_string())
+            .unwrap_or_default();
         write!(
             f,
-            "gh {} {status} ({reading}): {}",
+            "gh {} failed with {status} ({reading}): {}",
             self.command, self.stderr
         )
     }
