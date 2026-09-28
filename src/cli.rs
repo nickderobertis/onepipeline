@@ -67,10 +67,7 @@ pub const WRITEBACK_COMMAND_FLOOR_SECONDS: u64 = 60;
 /// [`WRITEBACK_REFUSED_CLASS`] makes the whole attempt refused, as does one of
 /// [`WRITEBACK_TARGETED_WRITES`]. No attempt reads a page of the project's tasks: the landed
 /// baseline answers where every item it holds is.
-// llmlint: ignore[names_match_behavior] this name is published on `main` and read by
-// `tests/contract.rs` and gates outside the crate (entry 72 of the divergence record); renaming
-// it would break them, and the targeted writes it does not list are published beside it as
-// `WRITEBACK_TARGETED_WRITES`, whose doc says they are classified by the same rule.
+// llmlint: ignore[names_match_behavior] this name is published on `main` and read by `tests/contract.rs` and gates outside the crate (entry 72 of the divergence record), so renaming it is a contract change rather than this node's; the targeted writes it does not list are published beside it as `WRITEBACK_TARGETED_WRITES`, whose doc says they are classified by the same rule.
 pub const WRITEBACK_CLASSIFIED_COMMANDS: [&str; 3] = ["project-show", "task-show", "project-copy"];
 
 /// The store writes a write-back attempt makes to what already exists, by the name each one's
