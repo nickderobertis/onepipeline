@@ -1885,6 +1885,9 @@ fn artifact_cat(world: &World, id: &str) -> String {
 ///
 /// Two attempts rather than three, because what this proves is the routing and
 /// the evidence rather than the size of the budget.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] two real publications into a real origin;
+// it settles through the publication path over the linked `onevcs`, which any change under
+// `src/` can move, so it stays in the crate's own journeys as the checks-failed one above does.
 #[test]
 fn a_push_the_merge_path_refuses_is_redispatched_carrying_what_the_remote_wrote() {
     let world =
@@ -1976,6 +1979,7 @@ fn a_push_the_merge_path_refuses_is_redispatched_carrying_what_the_remote_wrote(
         "the branch a refused push left behind was not handed back"
     );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The incident this diagnosis exists for: a branch already on its remote, a
 /// refused push after it, and a third attempt told the commit the remote still
@@ -1986,6 +1990,9 @@ fn a_push_the_merge_path_refuses_is_redispatched_carrying_what_the_remote_wrote(
 /// amended branch as non-fast-forward — so the second attempt's commit never
 /// reaches it, and the attempt after that is owed the first commit and the rule
 /// that keeps its own push a fast-forward of it.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] three real publications into a real origin;
+// it settles through the publication path over the linked `onevcs`, which any change under
+// `src/` can move, so it stays in the crate's own journeys as the checks-failed one above does.
 #[test]
 fn a_redispatch_after_a_refused_push_is_told_the_commit_the_remote_still_holds() {
     let world =
@@ -2045,7 +2052,6 @@ fn a_redispatch_after_a_refused_push_is_told_the_commit_the_remote_still_holds()
     );
 }
 
-/// An origin that takes the first push it is sent and refuses every one after.
 fn accept_one_push_then_refuse(repo: &Repository) {
     let hook = repo.origin.join("hooks").join("pre-receive");
     std::fs::create_dir_all(hook.parent().expect("hooks has a directory"))
@@ -2056,6 +2062,7 @@ fn accept_one_push_then_refuse(repo: &Repository) {
          exit 1\nfi\ntouch \"$0.took-one\"\n",
     );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A publishing push the merge path refuses because **the host** is missing a
 /// tool a hook needs is not the tree being rejected, and is not re-dispatched.
@@ -4391,6 +4398,9 @@ fn a_required_check_with_no_verdict_is_read_again_and_settles_checks_unsettled(c
 /// This one gives it two: the host still never lands anything, so the second
 /// attempt meets the same bound — and that it *ran at all*, on the branch the
 /// first attempt handed back, is the whole of what "preserving" means here.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] two real publications against the fake host;
+// it settles through the publication path over the linked `onevcs`, which any change under
+// `src/` can move, so it stays in the crate's own journeys as the checks-failed one above does.
 #[test]
 fn a_change_the_host_never_lands_is_redispatched_on_the_branch_it_preserved() {
     let world =
@@ -4456,6 +4466,7 @@ fn a_change_the_host_never_lands_is_redispatched_on_the_branch_it_preserved() {
         "the branch both attempts were made on was not handed back"
     );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The document a consumer reads carries the landing, at a stated version, and
 /// says nothing where there was nothing to observe.

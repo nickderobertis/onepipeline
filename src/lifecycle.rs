@@ -173,6 +173,12 @@ pub fn execute(
                         attempts,
                         endings,
                         published,
+                        // llmlint: ignore[changed_behavior_has_e2e] carried rather than composed: the
+                        // resumed attempt runs the node composed above, diagnosis and all, which
+                        // `an_exhausted_identity_at_a_publication_redispatch_keeps_the_pin_and_resumes_on_it`
+                        // drives. This is read only by an attempt after the resumed one, so a journey
+                        // needs a full pool and two more failed publications in one run; the value
+                        // crosses by move, exactly as `published` beside it does.
                         on_remote,
                         notes,
                         preserved,
