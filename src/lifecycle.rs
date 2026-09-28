@@ -115,6 +115,8 @@ pub fn execute(
     // a conversation it has not opened yet cannot exist. Every attempt after it
     // is composed with what the attempt before it was — read off the run's
     // record, which is the one place both the delivery and this thread can see.
+    // `on_remote`: where the branch stands on its remote, which the next attempt
+    // is told so that its repair grows that commit rather than rewriting it.
     // `last_preserved`: the failure the attempt before this one preserved, once
     // there is one.
     let (
@@ -123,6 +125,7 @@ pub fn execute(
         mut attempt,
         mut endings,
         mut published,
+        mut on_remote,
         mut notes,
         mut last_preserved,
     ) = match resume {
@@ -132,6 +135,7 @@ pub fn execute(
             std::num::NonZeroU32::MIN,
             Vec::new(),
             None,
+            OnRemote::Never,
             Vec::new(),
             None,
         ),
@@ -141,6 +145,7 @@ pub fn execute(
             continuation.attempt,
             continuation.endings,
             continuation.published,
+            continuation.on_remote,
             continuation.notes,
             Some(continuation.preserved),
         ),
@@ -168,6 +173,13 @@ pub fn execute(
                         attempts,
                         endings,
                         published,
+                        // llmlint: ignore[changed_behavior_has_e2e] carried rather than composed: the
+                        // resumed attempt runs the node composed above, diagnosis and all, which
+                        // `an_exhausted_identity_at_a_publication_redispatch_keeps_the_pin_and_resumes_on_it`
+                        // drives. This is read only by an attempt after the resumed one, so a journey
+                        // needs a full pool and two more failed publications in one run; the value
+                        // crosses by move, exactly as `published` beside it does.
+                        on_remote,
                         notes,
                         preserved,
                     })
@@ -190,6 +202,7 @@ pub fn execute(
             // the next attempt to be compared against.
             crate::vcs::SessionTip::Unknown => None,
         };
+        on_remote = on_remote.after(preserved.outcome, published.as_deref());
         // Two reasons to stop, and one settlement for both: the budget is spent,
         // or the run is being stopped. A cancelled run must not be given another
         // dispatch — the teardown is on its way to reap it, and the node would
@@ -237,8 +250,9 @@ pub fn execute(
             reason: format!("{}: {}", preserved.outcome.outcome(), preserved.reason),
             carried: notes.clone(),
         })));
-        node =
-            std::borrow::Cow::Owned(continued(launched, &preserved, attempt, attempts, &endings));
+        node = std::borrow::Cow::Owned(continued(
+            launched, &preserved, &on_remote, attempt, attempts, &endings,
+        ));
         last_preserved = Some(*preserved);
     }
 }
@@ -269,6 +283,7 @@ pub(crate) struct Continuation {
     pub notes: Vec<crate::note::RecordedNote>,
     endings: Vec<crate::vcs::Preserving>,
     published: Option<String>,
+    on_remote: OnRemote,
     preserved: Preserved,
 }
 
@@ -1218,6 +1233,49 @@ struct Preserved {
     tip: crate::vcs::SessionTip,
 }
 
+/// Where a preserved branch stands on its remote, as far as this node's
+/// publications say.
+///
+/// Apart from the loop's `published`, which is where each attempt *left* the
+/// branch: a push the merge path refused, or a base that would not sync, never
+/// reached the remote, so the commit such an attempt left is not the one the
+/// remote holds. Telling the next worker it was would send its repair on top of
+/// a commit the remote does not carry, and its push would be refused
+/// `non-fast-forward` exactly as an amended one is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OnRemote {
+    /// A publication pushed the branch and it stands at this commit.
+    At(String),
+    /// A publication pushed the branch, and nothing says at which commit.
+    Unknown,
+    /// No publication of this node is known to have pushed the branch.
+    Never,
+}
+
+impl OnRemote {
+    /// Where the branch stands once an attempt ended `outcome`, the branch
+    /// then standing at `published`.
+    fn after(self, outcome: crate::vcs::Preserving, published: Option<&str>) -> Self {
+        match outcome {
+            // The host's checks were read, so the push that opened them landed.
+            crate::vcs::Preserving::ChecksFailed | crate::vcs::Preserving::ChecksUnsettled => {
+                published.map_or(Self::Unknown, |commit| Self::At(commit.to_owned()))
+            }
+            // Refused before anything reached the remote, which still holds
+            // whatever an earlier attempt pushed.
+            //
+            // llmlint: ignore[changed_behavior_has_e2e] `sync-conflict` shares this arm with
+            // `push-rejected`, which
+            // `a_redispatch_after_a_refused_push_is_told_the_commit_the_remote_still_holds`
+            // drives. The one journey that ends a publication `sync-conflict`,
+            // `a_session_open_conflict_raises_a_decision_where_a_publication_conflict_retries`,
+            // cannot show the diagnosis: its re-dispatch meets the same conflict at session
+            // open, so no worker is ever handed the task the diagnosis is composed into.
+            crate::vcs::Preserving::PushRejected | crate::vcs::Preserving::SyncConflict => self,
+        }
+    }
+}
+
 /// Settle or continue one failed publication.
 ///
 /// Preserving is **two** conditions and not one. The failure has to be a kind a
@@ -1446,11 +1504,12 @@ fn stopped_retrying(
 fn continued(
     launched: &Node,
     preserved: &Preserved,
+    on_remote: &OnRemote,
     attempt: std::num::NonZeroU32,
     attempts: std::num::NonZeroU32,
     endings: &[crate::vcs::Preserving],
 ) -> Node {
-    let diagnosis = diagnosis(preserved, attempt, attempts, endings);
+    let diagnosis = diagnosis(preserved, on_remote, attempt, attempts, endings);
     let context = match launched.context.as_deref().map(str::trim) {
         Some(note) if !note.is_empty() => format!("{note}\n\n{diagnosis}"),
         _ => diagnosis,
@@ -1470,8 +1529,14 @@ fn continued(
 /// because the artifact is somebody else's megabytes and what a worker needs is
 /// the fetch that gets it. Named as *observed state* by the section it is
 /// rendered into, so a worker cannot read a failure report as a new bar to clear.
+///
+/// And where the branch stands on its remote, with the one rule that follows from
+/// it: the repair is new commits on top. A worker once fixed both refusals it was
+/// handed by amending the two commits already pushed, and the publishing push was
+/// refused `non-fast-forward` with the correct tree stranded on the host.
 fn diagnosis(
     preserved: &Preserved,
+    on_remote: &OnRemote,
     attempt: std::num::NonZeroU32,
     attempts: std::num::NonZeroU32,
     endings: &[crate::vcs::Preserving],
@@ -1493,6 +1558,36 @@ fn diagnosis(
             each.join(", ")
         ));
     }
+    let (standing, onto) = match on_remote {
+        OnRemote::At(commit) => (
+            format!("This branch is published on its remote at `{commit}`."),
+            format!("`{commit}`"),
+        ),
+        // llmlint: ignore-block[changed_behavior_has_e2e] a pushed branch whose commit is
+        // unknown is a session stream this crate could not read, and no journey reaches it
+        // with a worker left to tell: the one way a run breaks a stream — a repository hook,
+        // as `a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node`
+        // does — also refuses the next `session open`, so the re-dispatch this sentence is
+        // composed for never reaches a worker. The unit test beside `diagnosis` holds it.
+        OnRemote::Unknown => (
+            "This branch was published to its remote, but the commit it stands at there is \
+             not known."
+                .to_owned(),
+            "whatever commit the remote holds".to_owned(),
+        ),
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+        OnRemote::Never => (
+            "No attempt so far is known to have published this branch to its remote, so no \
+             commit of it is known to be there."
+                .to_owned(),
+            "whatever commit of it the remote may already hold".to_owned(),
+        ),
+    };
+    note.push_str(&format!(
+        "\n{standing} The repair goes on as new commits on top of {onto} — never as an \
+         amend, a rebase, a squash or a force-push of commits already on the remote, which \
+         the publishing push refuses as non-fast-forward.\n"
+    ));
     if !preserved.evidence.is_empty() {
         note.push_str(
             "\nThe publication recorded this evidence, each fetched with \
@@ -2197,6 +2292,7 @@ mod tests {
         let second = continued(
             &launched,
             &preserved("llmlint red"),
+            &OnRemote::Unknown,
             two,
             three,
             &endings[..1],
@@ -2218,6 +2314,7 @@ mod tests {
         let third = continued(
             &launched,
             &preserved("llmlint still red"),
+            &OnRemote::Unknown,
             three,
             three,
             &endings,
@@ -2249,6 +2346,7 @@ mod tests {
         let bare = continued(
             &Node::default(),
             &preserved("red"),
+            &OnRemote::Unknown,
             two,
             three,
             &endings[..1],
@@ -2257,6 +2355,110 @@ mod tests {
             .context
             .as_deref()
             .is_some_and(|context| context.starts_with("The previous attempt's publication")));
+    }
+
+    /// A worker is never handed a commit the engine does not know is on the
+    /// remote, and is handed the rule whether or not it knows one.
+    #[test]
+    fn a_diagnosis_names_the_commit_on_the_remote_and_the_rule_that_grows_it() {
+        let preserved = Preserved {
+            branch: "feat/service".into(),
+            outcome: crate::vcs::Preserving::ChecksFailed,
+            reason: "llmlint red".into(),
+            evidence: vec![crate::vcs::Evidence {
+                kind: crate::event::EventKind("change-check".into()),
+                id: crate::event::ArtifactId("sha256-log".into()),
+            }],
+            body_aside: None,
+            tip: crate::vcs::SessionTip::Unknown,
+        };
+        let two = std::num::NonZeroU32::new(2).expect("two");
+        let three = std::num::NonZeroU32::new(3).expect("three");
+        let endings = [
+            crate::vcs::Preserving::PushRejected,
+            crate::vcs::Preserving::ChecksFailed,
+        ];
+        let rule = "The repair goes on as new commits on top of";
+        let never = "never as an amend, a rebase, a squash or a force-push of commits \
+                     already on the remote";
+        let told = |on_remote: &OnRemote| {
+            continued(
+                &Node::default(),
+                &preserved,
+                on_remote,
+                two,
+                three,
+                &endings,
+            )
+            .context
+            .expect("the continuation carries context")
+        };
+
+        let known = told(&OnRemote::At("c0ffee".into()));
+        assert!(
+            known.contains("This branch is published on its remote at `c0ffee`."),
+            "{known}"
+        );
+        assert!(known.contains(&format!("{rule} `c0ffee`")), "{known}");
+        let unknown = told(&OnRemote::Unknown);
+        assert!(
+            unknown.contains("the commit it stands at there is not known"),
+            "{unknown}"
+        );
+        let unpushed = told(&OnRemote::Never);
+        assert!(
+            unpushed.contains("No attempt so far is known to have published this branch"),
+            "{unpushed}"
+        );
+        for context in [&known, &unknown, &unpushed] {
+            assert!(
+                context.contains(rule) && context.contains(never),
+                "{context}"
+            );
+            for said in [
+                "feat/service",
+                "attempt 2 of 3",
+                "`checks-failed`",
+                "llmlint red",
+                "Every attempt so far ended: push-rejected, checks-failed.",
+                "- change-check — sha256-log",
+            ] {
+                assert!(context.contains(said), "{said:?} is gone:\n{context}");
+            }
+        }
+        for context in [&unknown, &unpushed] {
+            assert!(!context.contains("c0ffee"), "{context}");
+        }
+    }
+
+    /// Only a publication whose push landed moves what the remote holds: the
+    /// incident's second attempt amended the commit the first had pushed, was
+    /// refused, and the attempt after it is owed the first's commit — not the
+    /// amended one the refused push never delivered.
+    #[test]
+    fn only_a_push_that_landed_moves_what_the_remote_holds() {
+        let pushed = OnRemote::Never.after(crate::vcs::Preserving::ChecksFailed, Some("c0ffee"));
+        assert_eq!(pushed, OnRemote::At("c0ffee".into()));
+        assert_eq!(
+            pushed
+                .clone()
+                .after(crate::vcs::Preserving::PushRejected, Some("amended")),
+            pushed
+        );
+        assert_eq!(
+            pushed
+                .clone()
+                .after(crate::vcs::Preserving::SyncConflict, Some("amended")),
+            pushed
+        );
+        assert_eq!(
+            OnRemote::Never.after(crate::vcs::Preserving::PushRejected, Some("c0ffee")),
+            OnRemote::Never
+        );
+        assert_eq!(
+            pushed.after(crate::vcs::Preserving::ChecksUnsettled, None),
+            OnRemote::Unknown
+        );
     }
 
     /// The endings this module emits and the endings the contract names are one
