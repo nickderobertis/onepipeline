@@ -499,6 +499,9 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
     );
 }
 
+/// A non-note edit a journey queues behind a note.
+const FINDING: &str = "the fixture this node reads moved";
+
 /// How long a held conversation's member lets its supervision go unconfirmed, in
 /// seconds: short, so it publishes `member-heartbeat` every couple of seconds and
 /// a journey can watch the run keep recording one while a note waits.
@@ -604,18 +607,12 @@ fn position_of(journal: &[Value], kind: &str, node: Option<&str>) -> Option<usiz
 /// A note waiting on a turn that takes it only as it ends leaves the run
 /// recording everything else.
 ///
-/// The defect this stands against froze a run for forty-two minutes: the run's
-/// single writer offered a manager's note to a conversation whose harness takes a
-/// live note only when its current turn ends, and waited for the answer itself —
-/// so nothing the dispatch did, not its turns and not its heartbeat, reached the
-/// journal until that turn was over, and a healthy run read as abandoned to
-/// everything supervising it.
-///
-/// So the note is held in the conversation's inbox, unanswered, across a stretch
-/// of the turn in which the dispatch reports work and its member keeps
-/// heartbeating — and both have to reach the journal while it waits. Then the
-/// turn ends, the conversation takes the note, and the run records the delivery
-/// and then its presentation, in that order, exactly as it always has.
+/// A run's writer used to wait on that answer itself, so nothing the dispatch did
+/// reached the journal until the turn was over. Here the note stays unanswered
+/// while the turn reports work and its member heartbeats, and both must be
+/// recorded meanwhile; an edit queued behind the note waits for it rather than
+/// overtaking it; and once the turn ends the run records the delivery and then
+/// its presentation.
 #[test]
 fn a_note_waiting_on_a_held_turn_leaves_the_run_journalling_its_dispatch() {
     let world = World::new("note-unfrozen");
@@ -629,6 +626,15 @@ fn a_note_waiting_on_a_held_turn_leaves_the_run_journalling_its_dispatch() {
     );
     world.until("the note to wait in the conversation's inbox", |world| {
         awaiting_an_answer(world) == 1
+    });
+    let finding = submitted(
+        &world,
+        run,
+        &envelope(json!({"op": "finding", "id": "build", "message": FINDING})),
+    );
+    let queue = world.run_file(run, "channel/commands.jsonl");
+    world.until("the edit behind the note to be queued", |_| {
+        std::fs::read_to_string(&queue).is_ok_and(|text| text.contains(FINDING))
     });
     let activity = world.events_of(run, "turn-activity").len();
     let beats = world.events_of(run, "member-heartbeat").len();
@@ -657,6 +663,13 @@ fn a_note_waiting_on_a_held_turn_leaves_the_run_journalling_its_dispatch() {
             .all(|event| event["payload"]["command"]["op"] != "note"),
         "the note was recorded before its conversation answered it"
     );
+    assert!(
+        world
+            .journal(run)
+            .iter()
+            .all(|event| event["payload"]["command"]["op"] != "finding"),
+        "the edit queued behind the note was applied ahead of it"
+    );
 
     // The turn ends, the conversation takes the note, and the record is the one
     // a delivery has always left: the delivery, and then its presentation.
@@ -678,6 +691,19 @@ fn a_note_waiting_on_a_held_turn_leaves_the_run_journalling_its_dispatch() {
     assert!(
         delivered < shown,
         "the note's presentation was recorded before its delivery"
+    );
+    assert!(
+        answered(finding).contains("\"state\":\"applied\""),
+        "the edit queued behind the note was not applied"
+    );
+    let journal = world.journal(run);
+    let behind = journal
+        .iter()
+        .position(|event| event["payload"]["command"]["op"] == "finding")
+        .expect("the edit behind the note was recorded");
+    assert!(
+        delivered < behind,
+        "the edit queued behind the note was recorded ahead of it"
     );
     assert_eq!(
         journal[shown]["payload"]["party"],

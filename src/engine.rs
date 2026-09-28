@@ -2973,21 +2973,11 @@ struct Handed {
 
 /// Live note delivery, kept off the run's single writer.
 ///
-/// A conversation answers a note when it gets round to it, and one whose harness
-/// takes a note only as its current turn ends answers when that turn ends — which
-/// can be most of an hour. Asked on the writer's own thread, that whole wait is
-/// time the run journals nothing: no relayed turn, no heartbeat, no settlement,
-/// so a healthy run reads as abandoned to everything supervising it. So an
-/// envelope with a note to offer is handed to **one** thread that does nothing
-/// else, and its answer comes back over the loop's own channel like every other
-/// dispatch thread's word, to be journalled exactly as an inline delivery would
-/// have been.
-///
-/// **One envelope at a time, in the order they were claimed.** While one is
-/// outstanding, the envelopes claimed behind it wait here unjudged: validating
-/// one against a record the outstanding envelope has not committed to yet would
-/// be judging it against a run that is not the one it lands in, and two notes to
-/// the same conversation must reach it in the order the planner sent them.
+/// A harness that takes a note only as its current turn ends answers when that
+/// turn ends, and a writer waiting on it journals nothing meanwhile. So one
+/// thread that does nothing else offers the notes, and its answer returns over
+/// the loop's own channel. Why envelopes behind an outstanding one wait unjudged
+/// is [`reconcile_edits`]'s to say.
 pub(crate) struct NoteDeliveries {
     /// The thread's inbox.
     handing: Sender<Handed>,
@@ -3014,6 +3004,11 @@ impl NoteDeliveries {
     fn start(tx: &Sender<Message>) -> Option<Self> {
         let (handing, handed) = mpsc::channel::<Handed>();
         let tx = tx.clone();
+        // llmlint: ignore-block[changed_behavior_has_e2e] the `None` this answers is a host
+        // refusing this process one thread, which is resource exhaustion no CLI journey can
+        // arrange — `Writeback::start` declines the same proof for the same reason. What
+        // follows it is the inline delivery every writer without a loop still runs, driven
+        // by `tests/note`'s nothing-driving journey.
         std::thread::Builder::new()
             .name("note-delivery".to_string())
             .spawn(move || {
@@ -3039,6 +3034,7 @@ impl NoteDeliveries {
                 }
             })
             .ok()?;
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         Some(Self {
             handing,
             outstanding: None,
@@ -3084,9 +3080,14 @@ impl NoteDeliveries {
                 });
                 Ok(())
             }
+            // llmlint: ignore-block[changed_behavior_has_e2e] the thread returns only once
+            // this inbox or the loop's own channel has gone, and the loop holds both while
+            // it hands, so only a panic inside the sibling's note call reaches this arm. It
+            // delivers inline rather than dropping a claimed envelope.
             Err(mpsc::SendError(Handed {
                 envelope, staged, ..
             })) => Err(Box::new((envelope, staged))),
+            // llmlint: ignore-end[changed_behavior_has_e2e]
         }
     }
 
@@ -9260,5 +9261,85 @@ mod tests {
         assert_eq!(labels.step.as_deref(), Some("implement"));
         assert_eq!(labels.round, None, "a dispatch was stamped with a round");
         assert!(labels.extra.is_empty());
+    }
+
+    /// A turn the stream relayed while its note's answer was on its way is read
+    /// once the answer is recorded — after the delivery, and whether or not the
+    /// dispatch is still in flight by then.
+    ///
+    /// The live half, a turn relayed ahead of the answer and shown after it, is
+    /// what `tests/note`'s held-turn journey records. What no journey can order is
+    /// the dispatch settling in between, because the conversation answers before
+    /// it opens the turn that could end it; so this drives that order through the
+    /// real journal writer, with nothing in flight.
+    #[test]
+    fn a_turn_relayed_before_its_notes_answer_is_shown_after_it_with_the_dispatch_gone() {
+        let root = std::env::temp_dir().join(format!("onepipeline-witnessed-{}", sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let mut journal = Journal::open(&paths);
+        let reached = crate::note::Reached::Worker;
+        let operations = [edits::Operation::NoteDelivered {
+            node: "build".into(),
+            addressee: crate::note::Addressee::Worker,
+            text: "stop".parse().expect("a usable note"),
+            criterion: None,
+            shown_to: reached.shown_at_delivery().to_vec(),
+            routed_to: reached.routed_to().to_vec(),
+            reached,
+        }];
+        let opened = |node: &str, at: u64, turn: u64| Envelope {
+            v: 1,
+            ts: sys::rfc3339_from_millis(at),
+            stream: "node-scope-1".into(),
+            seq: turn,
+            source: crate::event::Source::Agentgraph,
+            kind: crate::event::EventKind(
+                oneagentgraph::event::EventKind::TurnStarted.as_str().into(),
+            ),
+            dimensions: Default::default(),
+            labels: journal::labels("demo", Some(node)),
+            payload: journal::payload(&[
+                ("turn", json!(turn)),
+                ("role", json!("assistant")),
+                ("origin", json!("delivered")),
+                (
+                    "instruction",
+                    json!("## Notes delivered to you during this run\n\n- stop"),
+                ),
+                ("started_at", json!(sys::rfc3339_from_millis(at))),
+            ]),
+            artifacts: Vec::new(),
+        };
+        // A turn from before the note was offered, and one of another node's, are
+        // no presentation of it; the turn that opened on it is.
+        let witnessed = [
+            opened("build", 900, 1),
+            opened("other", 1_100, 2),
+            opened("build", 1_200, 3),
+        ];
+
+        watch_presentations(
+            &paths,
+            &mut journal,
+            &operations,
+            &mut BTreeMap::new(),
+            1_000,
+            &witnessed,
+        )
+        .expect("the presentation is recorded");
+
+        let shown: Vec<Envelope> = journal::read(&paths.journal())
+            .into_iter()
+            .filter(|envelope| envelope.kind.0 == "note-shown")
+            .collect();
+        let [shown] = &shown[..] else {
+            panic!("the run recorded {} presentations, not one", shown.len());
+        };
+        assert_eq!(shown.labels.node.as_deref(), Some("build"));
+        assert_eq!(shown.payload["party"], json!("worker"));
+        assert_eq!(shown.payload["turn"], json!(3));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
