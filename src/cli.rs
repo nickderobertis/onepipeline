@@ -171,6 +171,13 @@ pub enum Command {
     /// Read a plan without launching it.
     #[command(subcommand)]
     Plan(PlanCommand),
+    // llmlint: ignore[new_command_or_client_gets_its_own_project] a verb group of this one
+    // binary rather than a new command or client: it resolves the templates `start` and
+    // `plan check` hold a plan to, through the same private module, and ships in the same
+    // artifact on the same three registries.
+    /// Registered task templates: list them, state one resolved, check one.
+    #[command(subcommand)]
+    Template(TemplateCommand),
     /// Attach a fresh driver to a run whose ledger is intact.
     Adopt(AdoptArgs),
     /// Inspect the channel command group.
@@ -266,6 +273,90 @@ pub enum PlanCommand {
     Check(PlanCheckArgs),
 }
 
+/// What the registered task templates may be asked. None of these writes to a store.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[command(rename_all = "kebab-case")]
+pub enum TemplateCommand {
+    /// Every registered name, with its role, its description, and the layer and file it
+    /// resolves to now.
+    List(TemplateListArgs),
+    /// One name resolved through its layers, stated as the loader document
+    /// `onetaskgraph ... --template-loader -` reads.
+    Resolve(TemplateResolveArgs),
+    /// Validate one resolved template, and optionally a rendering of it or a stored item.
+    Check(TemplateCheckArgs),
+}
+
+/// Where the `template` verbs resolve a name: the repository layer's checkout and the
+/// host root.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct TemplateSearchArgs {
+    /// The checkout whose `.onepipeline/templates/<name>.md.j2` is the repository layer.
+    /// Relative to the working directory.
+    #[arg(long, value_name = "DIR")]
+    pub repo: Option<PathBuf>,
+    /// A repository origin, repeatable. When `--repo` names none and exactly one is given,
+    /// the checkout `onevcs` resolves it to is the repository layer's; otherwise the working
+    /// directory is.
+    #[arg(long = "repository", value_name = "ORIGIN")]
+    pub repositories: Vec<String>,
+    /// The host root: `templates.yaml` registers its names and `<name>.md.j2` supplies the
+    /// host layer. Given here it beats ONEPIPELINE_TEMPLATE_ROOT; relative to the working
+    /// directory.
+    #[arg(long, value_name = "DIR")]
+    pub template_root: Option<PathBuf>,
+}
+
+/// `onepipeline template list`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct TemplateListArgs {
+    /// Where names resolve.
+    #[command(flatten)]
+    pub search: TemplateSearchArgs,
+    /// Print one JSON object rather than a line per name.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `onepipeline template resolve`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct TemplateResolveArgs {
+    /// The registered name.
+    pub name: String,
+    /// Where the name resolves.
+    #[command(flatten)]
+    pub search: TemplateSearchArgs,
+    /// The explicit layer: this file, over every other layer.
+    #[arg(long, value_name = "FILE")]
+    pub template: Option<PathBuf>,
+    /// Print the loader document — `reference`, `entry`, `search_path`, `templates` and
+    /// `digest`, with `name`, `role`, `layer` and `path` beside — for
+    /// `onetaskgraph ... --template-loader -`.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `onepipeline template check`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct TemplateCheckArgs {
+    /// The registered name.
+    pub name: String,
+    /// Where the name resolves.
+    #[command(flatten)]
+    pub search: TemplateSearchArgs,
+    /// The explicit layer: this file, over every other layer.
+    #[arg(long, value_name = "FILE")]
+    pub template: Option<PathBuf>,
+    /// Also hold this rendering to the criteria rule, for a role-`task` template; `-`
+    /// reads standard input.
+    #[arg(long, value_name = "FILE|-", conflicts_with = "item")]
+    pub rendering: Option<String>,
+    /// Also hold this stored item, by its qualified id, to the criteria rule and to being
+    /// the rendering its provenance records.
+    #[arg(long, value_name = "ID")]
+    pub item: Option<String>,
+}
+
 /// The channel has no engine-owned serving verbs; what it has is a read.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 #[command(rename_all = "kebab-case")]
@@ -297,6 +388,23 @@ pub struct PlanCheckArgs {
     /// Print one JSON object rather than a line per refusal.
     #[arg(long)]
     pub json: bool,
+    /// The host's template root: `templates.yaml` registers its names and
+    /// `<name>.md.j2` supplies each one's host layer.
+    ///
+    /// Given here it beats ONEPIPELINE_TEMPLATE_ROOT, which beats the launch
+    /// config's `template_root`; relative to the working directory. A root that
+    /// cannot be read is refused by name.
+    #[arg(long, value_name = "DIR")]
+    pub template_root: Option<PathBuf>,
+    /// Refuse every agent node that is not the rendering its provenance records:
+    /// rendered by `onepipeline template resolve` for a registered role-`task`
+    /// name, from the template that name resolves to now, with its content as
+    /// rendered.
+    ///
+    /// Given here it beats ONEPIPELINE_REQUIRE_RENDERED, which beats the launch
+    /// config's `require_rendered`; `false` where none says.
+    #[arg(long, value_name = "true|false", action = clap::ArgAction::Set)]
+    pub require_rendered: Option<bool>,
 }
 
 /// `onepipeline start`.
@@ -422,6 +530,23 @@ pub struct StartArgs {
     /// that does not render at a node fails that node, and cuts no branch.
     #[arg(long, value_name = "TEMPLATE")]
     pub branch_template: Option<String>,
+    /// The host's template root: `templates.yaml` registers its names and
+    /// `<name>.md.j2` supplies each one's host layer.
+    ///
+    /// Given here it beats ONEPIPELINE_TEMPLATE_ROOT, which beats the launch
+    /// config's `template_root`; relative to the working directory. A root that
+    /// cannot be read is refused by name.
+    #[arg(long, value_name = "DIR")]
+    pub template_root: Option<PathBuf>,
+    /// Refuse every agent node that is not the rendering its provenance records:
+    /// rendered by `onepipeline template resolve` for a registered role-`task`
+    /// name, from the template that name resolves to now, with its content as
+    /// rendered.
+    ///
+    /// Given here it beats ONEPIPELINE_REQUIRE_RENDERED, which beats the launch
+    /// config's `require_rendered`; `false` where none says.
+    #[arg(long, value_name = "true|false", action = clap::ArgAction::Set)]
+    pub require_rendered: Option<bool>,
     /// How often the durable planner-update check-in comes due, in seconds.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_HEARTBEAT_INTERVAL_SECONDS)]
     pub heartbeat_interval: u64,

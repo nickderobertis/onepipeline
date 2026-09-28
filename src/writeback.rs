@@ -4721,6 +4721,48 @@ mod tests {
                 name: "plans".into(),
                 kind: "in-memory".into(),
             },
+            // The template failures 0.2.47 added: no write-back reaches them, since it copies
+            // and never creates or renders, but the classification is total and each is held
+            // to the store's own word for it.
+            EngineError::NotCreatable {
+                name: "plans".into(),
+                kind: "in-memory".into(),
+                record: onetaskgraph_plugin_api::MetadataRecord::Task,
+            },
+            EngineError::RenderingNotWritable {
+                name: "plans".into(),
+                kind: "in-memory".into(),
+                record: onetaskgraph_core::RenderedRecord::Document,
+            },
+            EngineError::MissingAnswers {
+                id: "plans:a".into(),
+                names: vec!["acceptance_criteria".into()],
+                reason: words(),
+            },
+            EngineError::Template {
+                error: onetaskgraph_core::TemplateError::MissingRequired {
+                    names: vec!["acceptance_criteria".into()],
+                },
+            },
+            EngineError::NoStoredAnswers {
+                record: onetaskgraph_core::RenderedRecord::Task,
+                id: "plans:a".into(),
+                reason: words(),
+            },
+            EngineError::NoTemplate {
+                record: onetaskgraph_core::RenderedRecord::Task,
+                id: "plans:a".into(),
+            },
+            EngineError::MalformedProvenance {
+                record: onetaskgraph_core::RenderedRecord::Task,
+                id: "plans:a".into(),
+                problem: words(),
+            },
+            EngineError::TemplateNotAFile {
+                record: onetaskgraph_core::RenderedRecord::Task,
+                id: "plans:a".into(),
+                reference: "onepipeline:plan-task".into(),
+            },
             EngineError::NoPriority {
                 name: "plans".into(),
                 kind: "in-memory".into(),

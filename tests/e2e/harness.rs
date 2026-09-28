@@ -742,6 +742,10 @@ impl World {
             // shipped default means a launch that names none, and one about the
             // variable sets it with `.env` of its own.
             .env_remove(onepipeline::branchname::ENVIRONMENT)
+            // And the template root and the rendered-only check a host may export, for
+            // the same reason: a journey about either sets it with `.env` of its own.
+            .env_remove(onepipeline::templates::ROOT_ENVIRONMENT)
+            .env_remove(onepipeline::templates::REQUIRE_RENDERED_ENVIRONMENT)
             .envs(self.environment.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null());
         command
@@ -4216,6 +4220,46 @@ pub fn onevcs_binary() -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     let held = BUILT.get_or_init(|| build(&["--package", "onevcs", "--bin", "onevcs", "--locked"]));
     held_alias(held, "onevcs")
+}
+
+/// The **released** `onetaskgraph` executable the template journeys pipe this build's
+/// `template resolve --json` into: the one `just bootstrap` installs into this clone's
+/// build directory at the justfile's `onetaskgraph-version`, which
+/// `tests/linked_engines.rs` holds to the release the engine links.
+///
+/// Refused, never skipped, when it is not there or answers as another release: a
+/// journey about the seam between two products proves nothing against a third.
+pub fn onetaskgraph_binary() -> PathBuf {
+    let justfile = std::fs::read_to_string(repo_file("justfile")).expect("the justfile");
+    let version = justfile
+        .lines()
+        .find_map(|line| line.strip_prefix("onetaskgraph-version := "))
+        .map(|value| value.trim().trim_matches('"').to_owned())
+        .expect("the justfile names the onetaskgraph release the journeys install");
+    let bin = repo_file(&format!("target/tools/onetaskgraph-{version}/bin"));
+    let program = ["onetaskgraph", "onetaskgraph.exe"]
+        .iter()
+        .map(|name| bin.join(name))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| {
+            panic!(
+                "onetaskgraph {version} is not installed at {}: run `just bootstrap` (or `just \
+                 _ensure-onetaskgraph`), which installs the release these journeys drive",
+                bin.display()
+            )
+        });
+    let said = Command::new(&program)
+        .arg("--version")
+        .output()
+        .expect("the installed onetaskgraph runs");
+    let said = String::from_utf8_lossy(&said.stdout);
+    assert_eq!(
+        said.trim(),
+        format!("onetaskgraph {version}"),
+        "{} answers as another release",
+        program.display()
+    );
+    program
 }
 
 /// A pid this host can prove is gone: a real process, started and reaped.

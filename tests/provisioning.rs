@@ -226,6 +226,49 @@ esac
         );
     }
 
+    /// The template journeys' preflight refuses where the released `onetaskgraph` is not
+    /// installed at the root the recipes install it under, naming its version and how to
+    /// install it, and passes once it is there.
+    #[test]
+    fn the_onetaskgraph_preflight_names_the_missing_release_and_passes_once_installed() {
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-provisioning-onetaskgraph-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("a fresh provisioning scratch directory");
+        let _scratch = Scratch(root.clone());
+        let preflight = || {
+            Command::new("just")
+                .arg("--set")
+                .arg("onetaskgraph-root")
+                .arg(&root)
+                .arg("_onetaskgraph-preflight")
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .output()
+                .expect("the recipe runs")
+        };
+
+        let refused = preflight();
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(
+            !refused.status.success(),
+            "the preflight passed with no onetaskgraph installed:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("is not installed") && stderr.contains("just bootstrap"),
+            "the preflight refused without naming the release and its install:\n{stderr}"
+        );
+
+        fs::create_dir(root.join("bin")).expect("the install root has a bin directory");
+        onepipeline_testfakes::executable(&root.join("bin/onetaskgraph"), "#!/bin/sh\nexit 0\n");
+        let passed = preflight();
+        assert!(
+            passed.status.success(),
+            "the preflight refused an installed onetaskgraph:\n{}",
+            String::from_utf8_lossy(&passed.stderr)
+        );
+    }
+
     /// The session hook reports a missing tracer beside the rest of the
     /// toolchain, naming the install command, and installs nothing itself.
     #[test]
