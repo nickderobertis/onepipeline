@@ -887,6 +887,47 @@ fn every_name_resolves_at_the_first_layer_that_supplies_it_and_says_which() {
         .err_has("template follow-up is not registered (no template root was named");
 }
 
+/// A layer holding a link whose target is gone is refused where it is, not read as absent:
+/// the host layer under it never wins by an error nobody saw. Only Unix lets a test make a
+/// link without a privilege.
+#[cfg(unix)]
+#[test]
+fn a_dangling_link_at_a_layer_is_refused_rather_than_passed_to_the_layer_under_it() {
+    let world = World::new("templates-dangling");
+    let root = host(&world);
+    let repo = world.root.join("repo");
+    let dir = world.project.clone();
+    for name in [BUILT_IN, "follow-up", "design-doc"] {
+        let file = format!("{name}.md.j2");
+        write(&root.join(&file), &template_for(name, "host"));
+        let overridden = repo.join(".onepipeline").join("templates").join(&file);
+        std::fs::create_dir_all(overridden.parent().unwrap()).expect("a templates directory");
+        std::os::unix::fs::symlink(world.root.join(format!("gone-{file}")), &overridden)
+            .expect("a link to nothing");
+        verb(
+            &world,
+            &dir,
+            &root,
+            &["resolve", name, "--repo", &text(&repo)],
+        )
+        .exited(REFUSED)
+        .err_has(&format!(
+            "{} (repository layer) cannot be read: it links to a file that does not exist",
+            overridden.display()
+        ));
+        // With the link gone the host layer is what answers, as it always was.
+        std::fs::remove_file(&overridden).expect("the link is removed");
+        verb(
+            &world,
+            &dir,
+            &root,
+            &["resolve", name, "--repo", &text(&repo)],
+        )
+        .exited(0)
+        .out_has("host layer");
+    }
+}
+
 #[test]
 fn c6a_holds_a_task_template_to_the_base_and_its_criteria_and_a_rendering_to_listing_one() {
     let world = World::new("templates-c6a");

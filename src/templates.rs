@@ -183,6 +183,7 @@ impl std::fmt::Display for Layer {
 /// Everything the binary reads from its environment arrives here already resolved — the
 /// host root out of its flag or variable, and the working directory — so a caller that is
 /// not the binary is not answered out of the binary's environment.
+// llmlint: ignore[invalid_states_unrepresentable] `Default` is part of this public options type's surface, and `tests/contract.rs` builds it with `..TemplateOptions::default()`; an empty `working_dir` is never taken silently: where it is the checkout, `verb_checkout` refuses it by name, and a relative `repo` or `template` joined onto it resolves against the process's own directory through `std::path::absolute`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TemplateOptions {
     /// `--repo DIR`: the checkout whose repository layer is searched.
@@ -661,12 +662,22 @@ pub(crate) fn locate(name: &str, search: Search<'_>) -> Result<(Layer, Option<Pa
         let candidate = directory.join(&file);
         // Absent is the one answer that passes the name to the next layer: a file that is
         // there and cannot be read, or is not a file, is refused where it is, so a layer
-        // under it never wins by an error nobody saw.
+        // under it never wins by an error nobody saw. A link whose target is gone is there:
+        // following it answers NotFound, so the link itself is asked before passing on.
         match std::fs::metadata(&candidate) {
             Ok(held) if held.is_file() => return Ok((layer, Some(candidate))),
             Ok(_) => {
                 return Err(Error::Invalid(format!(
                     "{} ({layer} layer) is not a template file",
+                    candidate.display()
+                )))
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && std::fs::symlink_metadata(&candidate).is_ok() =>
+            {
+                return Err(Error::Invalid(format!(
+                    "{} ({layer} layer) cannot be read: it links to a file that does not exist",
                     candidate.display()
                 )))
             }
