@@ -210,7 +210,6 @@ mod unix {
         assert_eq!(argv(probe), ["repo", "view", THROWAWAY, "--json", "name"]);
     }
 
-    /// What `ensure_repo` panicked with, or a failure naming that it returned.
     fn refusal_of(slug: &str) -> String {
         let panic = std::panic::catch_unwind(|| repo::ensure_repo(slug))
             .expect_err("a refusal from `gh` fails the smoke rather than being read as an answer");
@@ -283,23 +282,25 @@ mod unix {
             assert_eq!(argv(only), probe);
         }
 
-        // A repository that is not there yet, then empty, is waited through.
-        let record = stand_in_answering(
-            &scratch.0,
-            "not-yet",
-            (1, NOT_FOUND),
-            (2, 1, "gh: Git Repository is empty. (HTTP 409)"),
-        );
-        repo::ensure_repo(THROWAWAY);
-        let calls: Vec<_> = recorded(&record)
-            .into_iter()
-            .map(|call| call[0].clone())
-            .collect();
-        assert_eq!(
-            calls,
-            ["repo", "repo", "api", "api", "api"],
-            "an empty repository is probed again until its first commit lands"
-        );
+        for (name, not_yet) in [
+            ("not-yet-visible", "gh: Not Found (HTTP 404)"),
+            (
+                "not-yet-committed",
+                "gh: Git Repository is empty. (HTTP 409)",
+            ),
+        ] {
+            let record = stand_in_answering(&scratch.0, name, (1, NOT_FOUND), (2, 1, not_yet));
+            repo::ensure_repo(THROWAWAY);
+            let calls: Vec<_> = recorded(&record)
+                .into_iter()
+                .map(|call| call[0].clone())
+                .collect();
+            assert_eq!(
+                calls,
+                ["repo", "repo", "api", "api", "api"],
+                "the readme wait asks again while it is answered {not_yet:?}"
+            );
+        }
 
         // Any other refusal ends the wait at once, carrying what `gh` said —
         // answered that way for longer than the whole wait, so a wait that
