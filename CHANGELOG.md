@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.52.1](https://github.com/nickderobertis/onepipeline/compare/v0.52.0...v0.52.1) - 2026-09-28
+
+### Performance
+
+- *(writeback)* write changes to existing items through targeted updates ([#559](https://github.com/nickderobertis/onepipeline/pull/559))
+
 ## [0.52.0](https://github.com/nickderobertis/onepipeline/compare/v0.51.0...v0.52.0) - 2026-09-28
 
 ### Added
