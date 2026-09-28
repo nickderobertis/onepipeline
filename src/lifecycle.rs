@@ -1263,6 +1263,14 @@ impl OnRemote {
             }
             // Refused before anything reached the remote, which still holds
             // whatever an earlier attempt pushed.
+            //
+            // llmlint: ignore[changed_behavior_has_e2e] `sync-conflict` shares this arm with
+            // `push-rejected`, which
+            // `a_redispatch_after_a_refused_push_is_told_the_commit_the_remote_still_holds`
+            // drives. The one journey that ends a publication `sync-conflict`,
+            // `a_session_open_conflict_raises_a_decision_where_a_publication_conflict_retries`,
+            // cannot show the diagnosis: its re-dispatch meets the same conflict at session
+            // open, so no worker is ever handed the task the diagnosis is composed into.
             crate::vcs::Preserving::PushRejected | crate::vcs::Preserving::SyncConflict => self,
         }
     }
@@ -2349,10 +2357,8 @@ mod tests {
             .is_some_and(|context| context.starts_with("The previous attempt's publication")));
     }
 
-    /// The re-dispatch says where the preserved branch stands on its remote, and
-    /// that the repair grows it: named where a publication pushed a known commit,
-    /// said to be unknown or never pushed otherwise, and the rule stated in all
-    /// three — beside everything the diagnosis already said.
+    /// A worker is never handed a commit the engine does not know is on the
+    /// remote, and is handed the rule whether or not it knows one.
     #[test]
     fn a_diagnosis_names_the_commit_on_the_remote_and_the_rule_that_grows_it() {
         let preserved = Preserved {

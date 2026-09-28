@@ -1985,11 +1985,8 @@ fn a_push_the_merge_path_refuses_is_redispatched_carrying_what_the_remote_wrote(
 /// refused push after it, and a third attempt told the commit the remote still
 /// holds rather than the one the refused push never delivered.
 ///
-/// The first attempt's push lands and its check is red, so its commit is on the
-/// remote. The origin then refuses every push after that one — as it refused an
-/// amended branch as non-fast-forward — so the second attempt's commit never
-/// reaches it, and the attempt after that is owed the first commit and the rule
-/// that keeps its own push a fast-forward of it.
+/// The origin takes one push and refuses the rest, standing in for the
+/// non-fast-forward refusal of an amended branch.
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] three real publications into a real origin;
 // it settles through the publication path over the linked `onevcs`, which any change under
 // `src/` can move, so it stays in the crate's own journeys as the checks-failed one above does.
