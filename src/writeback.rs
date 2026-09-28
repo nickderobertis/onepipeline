@@ -598,7 +598,16 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         | EngineError::StatusNotWritable { .. }
         | EngineError::MetadataNotWritable { .. }
         | EngineError::PriorityNotWritable { .. }
-        | EngineError::ContentNotWritable { .. } => decided("not-writable"),
+        | EngineError::ContentNotWritable { .. }
+        | EngineError::UpdateNotWritable { .. }
+        | EngineError::NotCreatable { .. }
+        | EngineError::RenderingNotWritable { .. } => decided("not-writable"),
+        EngineError::MissingAnswers { .. } => decided("template-missing-required"),
+        EngineError::Template { error } => decided(error.kind()),
+        EngineError::NoStoredAnswers { .. } => decided("no-stored-answers"),
+        EngineError::NoTemplate { .. } => decided("no-template"),
+        EngineError::TemplateNotAFile { .. } => decided("template-not-a-file"),
+        EngineError::MalformedProvenance { .. } => decided("malformed-provenance"),
         EngineError::NoDocuments { .. } => decided("no-documents"),
         EngineError::NoPriority { .. } => decided("no-priority"),
         EngineError::NoComments { .. } => decided("no-comments"),
