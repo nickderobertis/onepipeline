@@ -907,22 +907,18 @@ pub(crate) struct Read {
     pub stored: BTreeMap<String, StoredTask>,
 }
 
-/// One task as the store holds it.
 pub(crate) struct StoredTask {
-    /// Its qualified id, as the store answered with it.
     pub qualified: QualifiedId,
-    /// Its content, byte for byte; empty where it has none.
+    /// Byte for byte; empty where the task has none.
     pub content: String,
 }
 
-/// Which kind of item [`Store::item`] reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StoredKind {
     Task,
     Document,
 }
 
-/// One stored item read by its qualified id: its content as stored, and its metadata.
 pub(crate) struct StoredItem {
     pub content: String,
     pub metadata: BTreeMap<String, Value>,

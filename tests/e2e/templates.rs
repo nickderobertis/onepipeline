@@ -1215,6 +1215,27 @@ fn a_rendered_task_holds_until_its_template_changes(world: &World, name: &str) {
             .unwrap_or_default()
             .contains("second")));
 
+    // The layer it was rendered from is gone. `plan-task` falls through to the built-in,
+    // whose digest is not the recorded one; a host-registered name has nothing under it, and
+    // is refused naming every path searched rather than with a re-render that cannot run.
+    std::fs::remove_file(&hosted).expect("the host template is removed");
+    let refused = check(HAS_REFUSALS);
+    if name == BUILT_IN {
+        assert!(
+            refused.contains(RULE_TEMPLATE_CHANGED) && refused.contains("built-in"),
+            "{refused}"
+        );
+    } else {
+        assert!(
+            refused.contains(&format!("no template for {name}"))
+                && refused.contains(&text(&hosted))
+                && !refused.contains(REMEDY),
+            "{refused}"
+        );
+    }
+    write(&hosted, &task_template("second"));
+    check(0);
+
     // An answer rendering no criterion: refused on the dry run's own output, and — once
     // written — by the plan's own criteria rule, which holds whether or not C7 is on.
     let empty = world.root.join(format!("{name}-empty.yaml"));

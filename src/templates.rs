@@ -326,7 +326,6 @@ struct RegistrationFile {
     templates: BTreeMap<String, Declared>,
 }
 
-/// One registered name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Registered {
     pub name: String,
@@ -877,7 +876,9 @@ pub(crate) struct Stored<'a> {
 ///
 /// # Errors
 ///
-/// The refusal, followed by the remedy that clears it.
+/// Each of the three refusals, followed by the remedy that clears it. A checkout that
+/// cannot be resolved, or a name no layer supplies now, is refused as that, with no
+/// remedy: re-rendering from a template that does not resolve cannot clear it.
 pub(crate) fn check_rendered(
     registry: &Registry,
     explicit: Option<&Path>,
