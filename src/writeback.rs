@@ -188,10 +188,11 @@ const STORE_OPEN: &str = "store-open";
 /// The reads and a project key's write are the same size whatever the plan, so
 /// [`COMMAND_FLOOR`] alone bounds them. A copy writes one item per lineage it creates, so its
 /// deadline is the floor **plus** the launch's per-item budget multiplied by those items; a
-/// targeted update writes one item, so its deadline is the floor plus one item's budget. Added rather than the larger of the two, because every copy also spends the fixed
-/// round trips a read does: a seven-item copy onto the `plans` board measured 71 to 72 seconds
-/// against the 70 the larger of the two allowed it (#521). The account is derived from the
-/// figure rather than stored beside it.
+/// targeted update writes one item, so its deadline is the floor plus one item's budget. Added
+/// rather than the larger of the two, because every write also spends the fixed round trips a
+/// read does: a seven-item copy onto the `plans` board measured 71 to 72 seconds against the 70
+/// the larger of the two allowed it (#521). The account is derived from the figure rather than
+/// stored beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Deadline {
     /// The fixed floor, which is the whole deadline for a read.
@@ -2272,12 +2273,14 @@ fn difference(
 /// Every call's reported spend, summed into the one object the record carries: requests
 /// added, and each budget added to the one of the same name and unit, a lower bound wherever
 /// any summand was. `None` where no call reported any.
-// llmlint: ignore[changed_behavior_has_e2e] the copy is the one call of this build that reports
-// a spend, so an attempt sums one summand, which every metered journey drives end to end
-// (`writeback_projections::the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent`
-// and the comparable plan's `writeback_cost`); the targeted updates that add further summands
-// arrive with the next build, and `writeback::tests::spent_is_summed_across_every_call_that_reports_one`
-// holds the sum of several meanwhile.
+// llmlint: ignore[changed_behavior_has_e2e] every metered journey drives this end to end — one
+// update's spend recorded exactly by
+// `writeback_projections::the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent`,
+// and attempts of several updates by the comparable plan's `writeback_cost` — but no journey
+// reads a record summing several against the meter's own figures, which the source can only
+// report as its running total;
+// `writeback::tests::spent_is_summed_across_every_call_that_reports_one` holds that sum, budget
+// by budget.
 fn summed<'a>(
     spends: impl Iterator<Item = &'a onetaskgraph_core::Spent>,
 ) -> Option<Map<String, Value>> {
@@ -6459,8 +6462,8 @@ mod tests {
     /// `onepipeline.node` the head and `onepipeline.supersedes` every id between, root first.
     /// The superseded attempts have no shadow task of their own — a stale one left in the
     /// shadow store is taken away — an edge onto the head names the item the root keys, and a
-    /// head with no title is written under the root's id. The settlement keys are the head's own, so a superseded attempt's cancellation
-    /// does not reach the item.
+    /// head with no title is written under the root's id. The settlement keys are the head's
+    /// own, so a superseded attempt's cancellation does not reach the item.
     #[test]
     fn one_shadow_task_per_lineage_is_keyed_by_the_root_and_says_what_the_head_says() {
         let mut fixture = Fixture::new("lineage");
@@ -6655,9 +6658,9 @@ mod tests {
     /// A targeted update names exactly the fields whose projection differs from what landed, and
     /// nothing else: a status move is the status alone; a settlement adds the settlement and the
     /// landing keys it observed; a retry sets the lineage keys, removes the old head's settlement
-    /// and moves the text; an amend is the body; a reparent is the whole declared edge set, each
-    /// far end the item its lineage's root keys; a word with no category of its own is written by
-    /// name under `unknown`; and a lineage whose projection did not move is no update at all.
+    /// and moves the text; a rewritten body is the body; a reparent is the whole declared edge
+    /// set, each far end the item its lineage's root keys; a word with no category of its own is
+    /// written by name under `unknown`; and a lineage whose projection did not move is no update.
     #[test]
     fn a_targeted_update_names_exactly_the_fields_that_differ_from_what_landed() {
         let fixture = Fixture::new("difference");
