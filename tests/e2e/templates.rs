@@ -1951,13 +1951,10 @@ fn a_rendered_node_on_a_board_that_keeps_no_answers_loads_under_the_check_until_
     // The board holds the item's content and its metadata — provenance included — and no
     // answers: `scripted-source` serves this folder through the store's own subprocess plugin
     // protocol, the way a hosted board that keeps no answers is reached.
-    // llmlint: ignore-block[tests_mirror_real_usage] the item is placed on the board by writing
-    // the board's own file rather than by `onetaskgraph project copy`, on the manager's ruling
-    // (`docs/contract-divergences.md` entry 94): that verb in onetaskgraph 0.2.47 writes a
-    // copied item's content trimmed, which is a store defect an onetaskgraph node is fixing,
-    // and what this journey proves is C7 over a board that keeps no answers, which needs the
-    // item's bytes there exactly as rendered. Every read and the edit below go through the
-    // store's own verbs.
+    // llmlint: ignore-block[tests_mirror_real_usage] the board's file is written directly
+    // because `onetaskgraph project copy` in 0.2.47 trims a copied item's content, and C7
+    // needs the bytes exactly as rendered (entry 94 of `docs/contract-divergences.md`). Every
+    // read and the edit below go through the store's own verbs.
     let board_root = world.root.join("board");
     write(
         &board_root.join("projects").join(format!("{native}.md")),
