@@ -698,7 +698,7 @@ impl Failed {
     }
 
     /// One store call answered in part, naming every source that could not contribute.
-    // llmlint: ignore[changed_behavior_has_e2e] every read that reaches this is addressed to one source — `shown`'s `show` of a qualified id — so a write-back answer carries at most one source's failure and no journey can mix a refused source with a transient one here. Each single-source class is driven end to end (`store::a_refusal_of_any_call_an_attempt_makes_stops_the_retry_timer`, `store::a_failure_the_store_does_not_refuse_is_retried_on_the_schedule`), the every-or-transient rule `Classified::of_all` applies is driven mixed by `delivers::a_partial_copy_mixing_refused_and_transient_tickets_is_classed_transient`, and the mixed source case is held by `the_divergence_records_refusal_rule_is_the_one_the_worker_classifies_by`.
+    // llmlint: ignore[changed_behavior_has_e2e] every read that reaches this is addressed to one source — `shown`'s `show` of a qualified id — so a write-back answer carries at most one source's failure and no journey can mix a refused source with a transient one here. Each single-source class is driven end to end (`store::a_refusal_of_any_call_an_attempt_makes_stops_the_retry_timer`, `store::a_failure_the_store_does_not_refuse_is_retried_on_the_schedule`), the every-or-transient rule `Classified::of_all` applies is driven mixed by `delivers::a_partial_write_mixing_refused_and_transient_tickets_is_classed_transient`, and the mixed source case is held by `the_divergence_records_refusal_rule_is_the_one_the_worker_classifies_by`.
     fn partial(call: &str, errors: &[SourceFailure]) -> Self {
         let named: Vec<String> = errors
             .iter()
@@ -1162,7 +1162,7 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     // `delivers::a_stop_whose_release_the_store_refuses_still_stops_and_says_so`, which asserts
     // the stop's answer, its stderr and the failed record line. The one timeout-specific branch
     // is the deadline's cancellation, driven by
-    // `writeback_budget::a_copy_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithmetic`
+    // `writeback_budget::an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithmetic`
     // and `delivers::a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch`.
     // A journey holding a `stop` past the sixty-second floor would spend that minute on no line
     // those three do not already reach.
@@ -1848,7 +1848,7 @@ fn carry_the_difference(
                 Held {
                     id,
                     item: item.clone(),
-                    edges_known: true,
+                    edges: Edges::Landed,
                 },
             ))
         })
@@ -1878,7 +1878,7 @@ fn carry_the_difference(
                 Held {
                     id: task.id,
                     item: read,
-                    edges_known: false,
+                    edges: Edges::Unread,
                 },
             );
         } else {
@@ -1945,15 +1945,14 @@ fn carry_the_difference(
         )?;
     }
     let project = snapshot.project.global();
-    for (key, value) in &snapshot.project_metadata {
-        if baseline
-            .landed
-            .project_metadata
-            .get(key)
-            .is_none_or(|held| held == value)
-        {
-            continue;
-        }
+    // llmlint: ignore-block[changed_behavior_has_e2e] no verb a CLI accepts changes an
+    // engine-owned project key mid-run, and the baseline is seeded from the very read the plan
+    // was loaded from — whose reader refuses a key spelled otherwise than the projection restates
+    // it — so no run a journey can launch reaches a key that moved. `writeback::tests::only_an_engine_owned_project_key_that_moved_is_written`
+    // holds which keys are written; the write itself is the store's `set_project_metadata`, under
+    // the same deadline, record and classification every other call here is driven end to end
+    // through.
+    for (key, value) in moved_project_keys(snapshot, &baseline.landed) {
         let named = MetadataKey::new(key.clone())
             .map_err(|why| carrying.failed(format!("project key '{key}': {why}").into()))?;
         attempt
@@ -1970,7 +1969,27 @@ fn carry_the_difference(
             .insert(key.clone(), value.clone());
         baseline.save();
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     carrying.finish()
+}
+
+/// The engine-owned project keys the snapshot restates with another value than the one last
+/// landed, each with the value to write. A key the baseline does not hold — one the destination
+/// never held — is never written.
+fn moved_project_keys<'a>(
+    snapshot: &'a Snapshot,
+    landed: &LandedBaseline,
+) -> Vec<(&'a String, &'a Value)> {
+    snapshot
+        .project_metadata
+        .iter()
+        .filter(|(key, value)| {
+            landed
+                .project_metadata
+                .get(*key)
+                .is_some_and(|held| held != *value)
+        })
+        .collect()
 }
 
 /// One lineage an attempt sends a targeted update to: its item, and what that item says as far
@@ -1978,9 +1997,18 @@ fn carry_the_difference(
 struct Held {
     id: GlobalId,
     item: LandedItem,
-    /// Whether `item`'s edges are what the board holds: the baseline's are, and a read's are not
-    /// — a read of one task does not answer them.
-    edges_known: bool,
+    edges: Edges,
+}
+
+/// Where what the run knows of one item's dependency edges came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Edges {
+    /// The baseline's: what the run itself last landed, so an update names them only where they
+    /// moved.
+    Landed,
+    /// None: the item was read by its own id, and a read of one task does not answer its edges,
+    /// so an update names every edge the lineage declares and the store sends the difference.
+    Unread,
 }
 
 /// What an attempt's writes have come to so far: the counts, the spend and the tickets each
@@ -2240,10 +2268,9 @@ fn difference(
                 .collect::<Result<_, _>>()?,
         );
     }
-    let edges_moved = if held.edges_known {
-        was.depends_on != is.depends_on
-    } else {
-        !is.depends_on.is_empty()
+    let edges_moved = match held.edges {
+        Edges::Landed => was.depends_on != is.depends_on,
+        Edges::Unread => !is.depends_on.is_empty(),
     };
     if edges_moved {
         update.depends_on = Some(
@@ -2275,7 +2302,7 @@ fn difference(
 /// any summand was. `None` where no call reported any.
 // llmlint: ignore[changed_behavior_has_e2e] every metered journey drives this end to end — one
 // update's spend recorded exactly by
-// `writeback_projections::the_record_carries_exactly_what_the_copy_report_said_it_did_and_spent`,
+// `writeback_projections::the_record_carries_exactly_what_the_update_said_it_wrote_and_spent`,
 // and attempts of several updates by the comparable plan's `writeback_cost` — but no journey
 // reads a record summing several against the meter's own figures, which the source can only
 // report as its running total;
@@ -6640,7 +6667,7 @@ mod tests {
             &super::Held {
                 id,
                 item: held,
-                edges_known: true,
+                edges: super::Edges::Landed,
             },
             &renderings(now)[root],
             &ends,
@@ -6780,6 +6807,32 @@ mod tests {
             Some(Vec::new()),
             "an edge set emptied was not named, so the store could not take the edge away"
         );
+    }
+
+    /// Only an engine-owned project key the snapshot restates with another value than the one
+    /// last landed is written, with that value: one that did not move sends nothing, and one the
+    /// baseline does not hold — the destination never held it — is never written.
+    #[test]
+    fn only_an_engine_owned_project_key_that_moved_is_written() {
+        let mut snapshot = Fixture::new("project-keys").snapshot;
+        snapshot.project_metadata = BTreeMap::from([
+            ("onepipeline.concurrency".to_owned(), json!(4)),
+            ("onepipeline.goal".to_owned(), json!({"text": "ship it"})),
+            ("onepipeline.name".to_owned(), json!("board")),
+        ]);
+        let mut landed = LandedBaseline::empty(&snapshot.project);
+        landed.project_metadata = BTreeMap::from([
+            ("onepipeline.concurrency".to_owned(), json!(2)),
+            ("onepipeline.goal".to_owned(), json!({"text": "ship it"})),
+        ]);
+        assert_eq!(
+            super::moved_project_keys(&snapshot, &landed),
+            [(&"onepipeline.concurrency".to_owned(), &json!(4))]
+        );
+        landed
+            .project_metadata
+            .insert("onepipeline.concurrency".to_owned(), json!(4));
+        assert!(super::moved_project_keys(&snapshot, &landed).is_empty());
     }
 
     /// A shadow store whose path is not UTF-8 is refused by name before the store is opened,
