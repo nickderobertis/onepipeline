@@ -761,9 +761,14 @@ onevcs-testing = "0.8.5"
 # `every_onetaskgraph_crate_in_the_lock_is_the_one_release_the_manifest_names` holds the
 # lock's whole family to this one release, and fails as well if anything this
 # repository installs as an `onetaskgraph` binary names another.
-onetaskgraph-core = "=0.2.50"
-onetaskgraph-plugin-api = "=0.2.50"
-onetaskgraph-local-md = "=0.2.50"
+#
+# This release is the one where a project copied between sources gives each copied
+# task an id scoped to its destination. Below it, a plan copied to a successor project
+# filed its tasks under the source project's path, so the next consumer refused the
+# plan; the host's own store pin moves only with the family this engine links.
+onetaskgraph-core = "=0.2.51"
+onetaskgraph-plugin-api = "=0.2.51"
+onetaskgraph-local-md = "=0.2.51"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
