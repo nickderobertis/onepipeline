@@ -1662,7 +1662,10 @@ mod tests {
 
     /// The run's fingerprint moves with each thing a pass of the watch decides
     /// from — the files, and the driver's two answers no file carries — and the
-    /// transport it is written as reads and writes no records.
+    /// transport it is written as reads and writes no records. Its files half,
+    /// which a watch armed on a run nothing drives ends `run-changed` on, moves
+    /// with each file — the journal, the launch record, a surface and a reply —
+    /// and with neither of the driver's answers.
     #[test]
     fn a_runs_fingerprint_moves_with_everything_a_pass_reads_and_it_writes_nothing() {
         let root =
@@ -1676,7 +1679,11 @@ mod tests {
         let changes = RunChanges::of(&paths);
         let queue = RunChanges::queue();
         let mut seen = changes.fingerprint(&queue).expect("a fingerprint");
-        let mut moved = |what: &str| {
+        let mut files = changes.files().expect("the files fingerprint");
+        // `file` says whether the move is one of the run's own files, which is
+        // what a watch armed on an undriven run ends `run-changed` on; the
+        // driver's two answers move the whole fingerprint and not that one.
+        let mut moved = |what: &str, file: bool| {
             let now = changes.fingerprint(&queue).expect("a fingerprint");
             assert_ne!(now, seen, "{what} did not move the run's fingerprint");
             assert_eq!(
@@ -1685,12 +1692,20 @@ mod tests {
                 "{what}"
             );
             seen = now;
+            let now = changes.files().expect("the files fingerprint");
+            assert_eq!(
+                now != files,
+                file,
+                "{what} moved the run's files fingerprint: {}",
+                now != files
+            );
+            files = now;
         };
 
         std::fs::write(paths.journal(), "{}\n").expect("written");
-        moved("the journal growing");
+        moved("the journal growing", true);
         std::fs::write(paths.launch(), "{}").expect("written");
-        moved("the launch record being written");
+        moved("the launch record being written", true);
         assert!(
             !paths.channel_dir().exists(),
             "a fingerprint made a channel"
@@ -1709,16 +1724,22 @@ mod tests {
                 correlation: None,
             })
             .expect("the surface is queued");
-        moved("a surface being queued");
+        moved("a surface being queued", true);
+        let reply: crate::channel::Reply =
+            serde_json::from_str(r#"{"message":"carry on"}"#).expect("a verdict");
+        crate::channel::ChannelState::new(&paths)
+            .answer(&reply)
+            .expect("the verdict is queued");
+        moved("a verdict landing in the reply queue", true);
         *changes.observed.lock().expect("unpoisoned") = Observed {
             host: Some(crate::sys::hostname()),
             pid: NonZeroU32::new(3_999_999),
             started: Some("not a process".to_owned()),
             last_write_at: None,
         };
-        moved("the recorded driver being over");
+        moved("the recorded driver being over", false);
         changes.observed.lock().expect("unpoisoned").last_write_at = Some(0);
-        moved("the run falling quiet past the parked bound");
+        moved("the run falling quiet past the parked bound", false);
 
         let other = QueueName::try_from("surfaces").expect("a queue name");
         let consumer = ConsumerName::try_from("watch").expect("a consumer name");

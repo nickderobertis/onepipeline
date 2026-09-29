@@ -3107,11 +3107,24 @@ fn drained(world: &World, run: &str) -> Vec<String> {
 
 /// A watch spawned to wait, and the moment it armed on the run.
 fn armed_watch(world: &World, run: &str, args: &[&str]) -> std::process::Child {
+    armed_watch_with(world, run, args, &[])
+}
+
+/// [`armed_watch`], with `env` set on the watch's own process.
+fn armed_watch_with(
+    world: &World,
+    run: &str,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> std::process::Child {
     let before = armed(world, run);
     let mut argv = vec!["watch", run];
     argv.extend_from_slice(args);
-    let child = world
-        .cmd(&argv)
+    let mut command = world.cmd(&argv);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let child = command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -3457,4 +3470,117 @@ fn an_explicit_condition_replaces_the_default_set() {
         .out_has("Given none, the wait returns on `surface` and `node-settled`");
 
     world.release("keep.go");
+}
+
+/// A run nothing is driving, as the failing lone node leaves one.
+fn undriven(world: &World, run: &str) {
+    world.script("build.fail", "1");
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the run to stop being driven", |world| {
+        world.run(&["status", run]).stdout.contains("DRIVER DEAD")
+    });
+}
+
+/// The length of one of the run's own files, or nothing for one not there.
+fn length(world: &World, run: &str, file: &str) -> u64 {
+    std::fs::metadata(world.run_file(run, file)).map_or(0, |meta| meta.len())
+}
+
+/// A watch armed on a run nothing is driving waits for somebody to act on it,
+/// and ends `run-changed` when the run moves with nothing else firing: a reply
+/// landing in its channel's reply queue, a planner edit appended to its journal,
+/// and its launch record being rewritten, as `adopt` rewrites it. Each of the
+/// three is also held, one file at a time, by the fingerprint's own unit test in
+/// `src/watch.rs`, since no verb writes one of them and nothing else. A queued surface is
+/// answered as the surface it is. A run whose graph is complete still ends
+/// `settled` at once.
+#[test]
+fn a_watch_armed_on_a_run_nothing_is_driving_ends_when_the_run_moves() {
+    let world = World::new("watch-wake-undriven");
+    let default = ["--timeout", "120", "--tick-interval", "0"];
+
+    // Parked: a live driver holding a dispatch open that has written nothing
+    // for longer than the bound the watch reads it by, which is a run nothing
+    // is driving. A verdict for the next listener lands in the channel's reply
+    // queue — a record that is not a surface — and the run journals that it
+    // was replied to.
+    let parked_after = [("ONEPIPELINE_PARKED_AFTER_SECONDS", "1")];
+    world.script("hold.wait", "hold");
+    let quiet = running(&world, "watchwakeparked", vec![agent("hold", &[])]);
+    world.until("the run to read as parked", |world| {
+        let mut status = world.cmd(&["status", &quiet]);
+        status.env(parked_after[0].0, parked_after[0].1);
+        let out = status.output().expect("the binary runs");
+        String::from_utf8_lossy(&out.stdout).contains("PARKED")
+    });
+    let replies = length(&world, &quiet, "channel/replies.jsonl");
+    let watching = armed_watch_with(&world, &quiet, &default, &parked_after);
+    world
+        .run_with_stdin(
+            &["reply", &quiet],
+            r#"{"message": "carry on when you can"}"#,
+        )
+        .exited(0);
+    let (code, last, said) = finished(watching);
+    assert_eq!(code, RUN_CHANGED, "{last}\n{said}");
+    assert_eq!(last["condition"], json!("run-changed"), "{last}");
+    assert!(last.get("summary").is_none(), "{last}");
+    assert!(said.contains("run-changed"), "{said}");
+    assert!(
+        length(&world, &quiet, "channel/replies.jsonl") > replies,
+        "the reply queue did not move, so this was not the move under test"
+    );
+    world.release("hold.go");
+
+    // A driver that failed its one node and exited.
+    let run = "watchwakeundriven";
+    undriven(&world, run);
+
+    // A planner edit applied locally: a record appended to the journal.
+    let journal = length(&world, run, "events.jsonl");
+    let watching = armed_watch(&world, run, &default);
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "add", "node": {"id": "extra", "persona": "engineer",
+                                       "task": "## What\nsweep\n\n## Acceptance criteria\n- It is done."}}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    let (code, last, said) = finished(watching);
+    assert_eq!(code, RUN_CHANGED, "{last}\n{said}");
+    assert!(length(&world, run, "events.jsonl") > journal);
+
+    // A surface is answered as a surface, not as the run changing.
+    let watching = armed_watch(&world, run, &default);
+    surfaced(&world, run, "finding", "raised on a run nobody drives");
+    let (code, last, said) = finished(watching);
+    assert_eq!(code, SURFACE_WAITING, "{last}\n{said}");
+    assert_eq!(drained(&world, run), vec!["raised on a run nobody drives"]);
+
+    // Adoption rewrites the launch record, and ends the wait the same way.
+    let launch = std::fs::read_to_string(world.run_file(run, "launch.json"))
+        .expect("the launch record reads");
+    let watching = armed_watch(&world, run, &default);
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    let (code, last, said) = finished(watching);
+    assert_eq!(code, RUN_CHANGED, "{last}\n{said}");
+    assert_ne!(
+        std::fs::read_to_string(world.run_file(run, "launch.json")).expect("it reads"),
+        launch,
+        "adoption did not rewrite the launch record"
+    );
+
+    // Complete, a run nothing drives any more ends a watch at once.
+    let finished_run = running(&world, "watchwakecomplete", vec![agent("done", &[])]);
+    world.until("the run to settle", |world| {
+        world.run_file(&finished_run, "result.json").is_file()
+    });
+    let began = std::time::Instant::now();
+    let settled = world.run(&["watch", &finished_run, "--timeout", "120"]);
+    agreed(&settled, "settled", 0);
+    assert!(began.elapsed() < std::time::Duration::from_secs(60));
 }
