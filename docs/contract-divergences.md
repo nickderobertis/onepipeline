@@ -7981,8 +7981,10 @@ file in that directory closed. Beside it the watch writes
 - `until`: the conditions the watch resolved, spelled as `--until` takes them
   (`surface`, `node-settled`, `node=<ID>`, …), always including `settled` and
   `nothing-driving`; a word `--until` does not take is refused;
-- `session`: the non-blank `ONEPIPELINE_LAUNCHER_SESSION` the watch was armed
-  under, else `null`; a blank one is refused.
+- `session`: the `ONEPIPELINE_LAUNCHER_SESSION` the watch was armed under, or
+  `null` where that variable was unset or blank — a watch is never refused for
+  it, since the ruling records it `null`; a **record** carrying a blank string
+  here is refused on reading, as one this build did not write.
 
 It is written before the lease and removed after it, so no reader meets this
 build's lease without its terms; a lease that could not be written takes its terms

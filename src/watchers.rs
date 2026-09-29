@@ -947,6 +947,9 @@ fn terms_of(
             crate::cli::WatchTimeout::Unbounded => None,
         },
         until,
+        // Unset and blank are one answer, `null`, by the ruling entry 96 records:
+        // a watch is armed whatever session it runs under, and a blank one names
+        // nobody, so it is recorded as naming nobody rather than refused.
         session: std::env::var(sys::LAUNCHER_SESSION_ENV)
             .ok()
             .filter(|session| !session.trim().is_empty()),
