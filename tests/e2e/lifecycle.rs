@@ -3571,14 +3571,21 @@ fn a_finding_nobody_read_is_answered_by_the_retry_the_reconciler_commits() {
         "the verdict naming the answered finding was not recorded against it: {answers:#?}"
     );
 
-    // And it stops being a decision without ever having been read off the queue.
-    world
-        .run(&["watch", &run, "--until", "surface", "--timeout", "0"])
-        .exited(WATCH_ELAPSED);
+    // And it stops being a decision without ever having been read off the
+    // queue. Unread, it is still a planner surface a watch reports — an
+    // answered one, which no longer ends a watch once `next` has consumed it
+    // (divergence entry 97).
     world
         .run(&["status", &run])
         .exited(0)
         .out_lacks("waiting for planner decision");
+    world
+        .run(&["watch", &run, "--until", "surface", "--timeout", "0"])
+        .exited(SURFACE_WAITING);
+    read_everything(&world, &run);
+    world
+        .run(&["watch", &run, "--until", "surface", "--timeout", "0"])
+        .exited(WATCH_ELAPSED);
 
     // And the exception is the *answering* reply's alone. A later envelope naming
     // the answered finding is refused whatever it carries — the same `retry`

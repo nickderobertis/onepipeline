@@ -4198,15 +4198,22 @@ fn a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit() {
     // Neither the question nor the finding holds the run any more: the finding
     // `status` named is still shown, as one nobody is waiting on.
     world
-        .run(&["watch", &run, "--until", "surface", "--timeout", "0"])
-        .exited(WATCH_ELAPSED);
-    world
         .run(&["status", &run])
         .exited(0)
         .out_lacks("waiting for planner decision")
         .out_has(&format!(
             "a planner update nobody is waiting on any more: finding — {finding}"
         ));
+    // A discharged surface ends a watch only while `next` has not consumed it
+    // (divergence entry 97): unread, the answered question still does; read, it
+    // no longer does.
+    world
+        .run(&["watch", &run, "--until", "surface", "--timeout", "0"])
+        .exited(SURFACE_WAITING);
+    read_everything(&world, &run);
+    world
+        .run(&["watch", &run, "--until", "surface", "--timeout", "0"])
+        .exited(WATCH_ELAPSED);
 
     // A `drop` discharges the same way, and only the decisions about the node it
     // removed: the question and the finding about `kept`, still in the graph,
@@ -4458,3 +4465,15 @@ fn a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit() {
     }
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// Read every surface the run has waiting, as a supervisor does between looks.
+fn read_everything(world: &World, run: &str) {
+    for _ in 0..64 {
+        let read = world.run(&["next", run]);
+        read.exited(0);
+        if read.json()["status"] != json!("surface") {
+            return;
+        }
+    }
+    panic!("`next` never ran out of surfaces on {run}");
+}

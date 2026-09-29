@@ -12,9 +12,7 @@
 // `dispatch.rs` is where the real binary is driven instead. `harness.rs` carries the same
 // suppression and the full rationale.
 
-use crate::harness::{
-    agent, human, plan_of, reaped_pid, rows, Run, World, NOTHING_DRIVING, WATCH_ELAPSED,
-};
+use crate::harness::{agent, human, plan_of, reaped_pid, rows, Run, World, WATCH_ELAPSED};
 
 use crate::harness::lifecycle;
 use onepipeline::event::{Envelope, Source};
@@ -2670,7 +2668,9 @@ fn status_and_watch_judge_a_stopped_run_by_the_driver_that_adopted_it() {
     // llmlint: ignore-end[tests_mirror_real_usage]
     world.run(&["stop", "readopted"]).exited(0);
 
-    // Stopped and not adopted: the stop is what the run is, and both verbs say so.
+    // Stopped and not adopted: the stop is what the run is. `status` says so,
+    // and a watch armed on it waits for somebody to act rather than returning
+    // at once — divergence entry 97 — so a short one runs to its deadline.
     world
         .run(&["status", "readopted"])
         .exited(0)
@@ -2679,14 +2679,14 @@ fn status_and_watch_judge_a_stopped_run_by_the_driver_that_adopted_it() {
         "watch",
         "readopted",
         "--timeout",
-        "30",
+        "1",
         "--tick-interval",
         "0",
     ]);
-    watched.exited(NOTHING_DRIVING);
+    watched.exited(WATCH_ELAPSED);
     assert!(
-        watched.stderr.contains("nothing-driving"),
-        "a stopped, unadopted run's watch did not return nothing-driving:\n{}",
+        !watched.stderr.contains("nothing-driving"),
+        "a watch armed on a stopped run returned at once rather than waiting:\n{}",
         watched.stderr
     );
 
@@ -2748,6 +2748,8 @@ fn status_and_watch_judge_a_stopped_run_by_the_driver_that_adopted_it() {
     let settled = world.run(&[
         "watch",
         "readopted",
+        "--until",
+        "settled",
         "--timeout",
         "60",
         "--tick-interval",
