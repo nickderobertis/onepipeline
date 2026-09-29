@@ -27,6 +27,15 @@ if not "%~1"=="" (
 )
 
 :write
+if not defined ONEPIPELINE_E2E_MAINTAIN_SLEEP goto mark
+set /a "slept=%ONEPIPELINE_E2E_MAINTAIN_SLEEP%"
+:sleeploop
+if !slept! LEQ 0 goto mark
+set /a "slept=slept-1"
+ping -n 2 -w 1000 127.0.0.1 >nul 2>&1
+goto sleeploop
+
+:mark
 echo maintained in %CD%>>maintained.log
 if errorlevel 1 (
   echo maintain: cannot write maintained.log in %CD%; this runs in the slot's worktree, which onevcs cut under ONEVCS_HOME, so check that state root is on a writable mount and that nothing holds the worktree read-only 1>&2

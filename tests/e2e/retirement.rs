@@ -2388,6 +2388,18 @@ fn a_node_pinned_to_a_retired_branch_is_cut_fresh_from_the_base() {
 /// the host's names it, so this is one a pass retires by pushing a deletion.
 #[cfg(unix)]
 fn published_and_superseded(world: &World, repo: &Repository, branch: &str, file: &str) {
+    published_and_superseded_in(world, repo, "service", branch, file);
+}
+
+/// [`published_and_superseded`], in the repository registered as `alias`.
+#[cfg(unix)]
+fn published_and_superseded_in(
+    world: &World,
+    repo: &Repository,
+    alias: &str,
+    branch: &str,
+    file: &str,
+) {
     lossless(world, repo, branch, file);
     git(world, &repo.checkout, &["push", "origin", branch]);
     let base = git(world, &repo.origin, &["rev-parse", "main"])
@@ -2400,7 +2412,7 @@ fn published_and_superseded(world: &World, repo: &Repository, branch: &str, file
                 "supersede",
                 branch,
                 "--repo",
-                "service",
+                alias,
                 "--by",
                 "main",
                 "--landing",
@@ -2613,11 +2625,13 @@ fn a_sweep_records_its_maintenance_before_its_retirement_pass_ends() {
 }
 
 /// A run whose last node settles while its sweep is still maintaining waits for
-/// the sweep's retirement pass too, and journals both of the sweep's records —
-/// maintenance first — before its result.
+/// the identity in progress and begins no retirement pass, and journals both of
+/// the sweep's records — maintenance first — before its result: the retirement
+/// pass it never began names every identity unreached, and the branch it would
+/// have retired is left for the next pass.
 #[cfg(unix)]
 #[test]
-fn a_run_settling_mid_sweep_journals_its_maintenance_and_retirement_before_its_result() {
+fn a_run_settling_mid_sweep_journals_its_maintenance_and_the_retirement_it_never_began() {
     let world = sweeping_world("retirement-closeout-sweep");
     let repo = world.repository("local-direct", &[]);
     let maintaining = world.root.join("maintain.go");
@@ -2640,19 +2654,19 @@ fn a_run_settling_mid_sweep_journals_its_maintenance_and_retirement_before_its_r
         !world.events_of("closing", "node-settled").is_empty()
     });
 
-    std::fs::write(&maintaining, "go").expect("the maintenance is released");
-    world.until("the retirement pass to reach the origin", |_| {
-        entered.is_file()
-    });
     assert!(
         !world.run_file("closing", "result.json").is_file(),
-        "the run settled while its sweep's retirement pass was held"
+        "the run settled while its sweep's maintenance was held"
     );
 
-    std::fs::write(&go, "go").expect("the origin is released");
+    std::fs::write(&maintaining, "go").expect("the maintenance is released");
     world.until("the run to settle", |world| {
         world.run_file("closing", "result.json").is_file()
     });
+    assert!(
+        !entered.is_file(),
+        "a closing driver began a retirement pass"
+    );
     let kinds: Vec<Value> = world
         .journal("closing")
         .into_iter()
@@ -2665,8 +2679,148 @@ fn a_run_settling_mid_sweep_journals_its_maintenance_and_retirement_before_its_r
         "{}",
         world.dump()
     );
-    assert!(retired(&world, "closing")
-        .iter()
-        .any(|entry| entry["branch"] == "done/published"));
+    let maintained = &crate::maintenance::records(&world, "closing")[0]["payload"];
+    assert_eq!(
+        maintained["identities"][0]["identity"], SERVICE_IDENTITY,
+        "{maintained}"
+    );
+    assert!(
+        maintained.get("cut_short").is_none(),
+        "the identity in progress was listed unreached: {maintained}"
+    );
+    assert_eq!(
+        world.events_of("closing", "branches-retired")[0]["payload"],
+        json!({
+            "retired": [],
+            "failed": [],
+            "cut_short": {"reason": "driver-closing", "unreached": [SERVICE_IDENTITY]},
+        })
+    );
+    assert!(holds(&world, &repo.origin, "done/published"));
+    // Nothing waits on the origin now; letting it go leaves no hook spinning.
+    std::fs::write(&go, "go").expect("the origin is released");
+}
+
+/// How long each later identity's retirement takes in the closing journey, in
+/// whole seconds: its origin sleeps this long on every push it receives.
+#[cfg(unix)]
+const SLOW_RETIREMENT_SECONDS: u64 = 20;
+
+/// How far past the identity in progress a closing driver may run before its
+/// result is late — the close-out and the result's write on a loaded host — and
+/// well below [`SLOW_RETIREMENT_SECONDS`], so a driver that began one more
+/// identity's retirement cannot come in under it.
+#[cfg(unix)]
+const CLOSE_OUT_MARGIN_SECONDS: u64 = 8;
+
+/// A driver closing out finishes the retirement in progress in full and begins
+/// no other.
+///
+/// Three identities, each holding a published branch that provably holds no
+/// work, so each identity's pass pushes a deletion to its own real origin: the
+/// origins of `tail` and `uplink` take [`SLOW_RETIREMENT_SECONDS`] over every push,
+/// and `service`'s — first in visiting order — holds the pass inside it until the
+/// journey lets it go. The run's one node settles while that hold stands, and
+/// the run does not settle past it; once it is let go, the result comes within
+/// [`CLOSE_OUT_MARGIN_SECONDS`], where beginning `tail` would cost a whole
+/// [`SLOW_RETIREMENT_SECONDS`] more. `service`'s branch is fully retired — gone
+/// from the checkout and the origin, recorded retired by `onevcs` itself, and in
+/// the record's `retired` — while `tail`'s and `uplink`'s are untouched on
+/// every copy, and the record names those two identities unreached.
+#[cfg(unix)]
+#[test]
+fn a_closing_driver_finishes_the_retirement_in_progress_and_begins_no_other() {
+    let world = sweeping_world("retirement-closing");
+    let repo = world.repository("local-direct", &[]);
+    let tail = world.extra_repository("tail");
+    let uplink = world.extra_repository("uplink");
+    published_and_superseded(&world, &repo, "done/published", "published.md");
+    published_and_superseded_in(&world, &tail, "tail", "done/tail", "tail.md");
+    published_and_superseded_in(&world, &uplink, "uplink", "done/uplink", "uplink.md");
+    for (alias, branch) in [
+        ("service", "done/published"),
+        ("tail", "done/tail"),
+        ("uplink", "done/uplink"),
+    ] {
+        let class = classified_in(&world, alias, branch);
+        assert_eq!(class["class"], "retirable", "{alias} {branch}: {class}");
+    }
+    let (entered, go) = origin_held(&world, &repo);
+    for later in [&tail, &uplink] {
+        origin_hook(
+            later,
+            &format!("#!/bin/sh\ncat >/dev/null\nsleep {SLOW_RETIREMENT_SECONDS}\n"),
+        );
+    }
+
+    sweeping(
+        &world,
+        "closing",
+        crate::harness::agent("hold", &[]),
+        Vec::new(),
+    );
+    // Past `until`'s deadline: a driver whose pace came due on a pass that was
+    // not idle asks again only on its recheck, a minute on.
+    world.until_within(
+        std::time::Duration::from_secs(300),
+        "the retirement pass to reach service's origin",
+        |_| entered.is_file(),
+    );
+    world.release("hold.go");
+    world.until("the held node to settle", |world| {
+        !world.events_of("closing", "node-settled").is_empty()
+    });
+    assert!(
+        !world.run_file("closing", "result.json").is_file(),
+        "the run settled while the retirement in progress was held"
+    );
+
+    let released = std::time::Instant::now();
+    std::fs::write(&go, "go").expect("the origin is released");
+    world.until("the run to settle", |world| {
+        world.run_file("closing", "result.json").is_file()
+    });
+    let took = released.elapsed();
+    let bound = std::time::Duration::from_secs(CLOSE_OUT_MARGIN_SECONDS);
+    assert!(
+        took <= bound,
+        "the run's result came {took:?} after the retirement in progress was let go, past the \
+         {bound:?} the close-out takes: the closing driver began another identity's retirement\n{}",
+        world.dump()
+    );
+
+    // The identity in progress was retired in full.
+    assert!(!holds(&world, &repo.checkout, "done/published"));
     assert!(!holds(&world, &repo.origin, "done/published"));
+    assert_eq!(
+        recorded_trigger(&world, &repo, "done/published"),
+        "pass",
+        "onevcs holds no record of the retirement in progress"
+    );
+    let events = world.events_of("closing", "branches-retired");
+    assert_eq!(events.len(), 1, "{}", world.dump());
+    let payload = &events[0]["payload"];
+    let retired_branches: Vec<&str> = payload["retired"]
+        .as_array()
+        .expect("retired")
+        .iter()
+        .map(|entry| entry["branch"].as_str().expect("a branch"))
+        .collect();
+    assert_eq!(retired_branches, ["done/published"], "{payload}");
+    assert_eq!(payload["retired"][0]["identity"], SERVICE_IDENTITY);
+    assert_eq!(payload["failed"], json!([]), "{payload}");
+    assert_eq!(
+        payload["cut_short"],
+        json!({
+            "reason": "driver-closing",
+            "unreached": ["github.com/owner/tail", "github.com/owner/uplink"],
+        }),
+        "{payload}"
+    );
+
+    // The identities after it were never begun.
+    for (later, branch) in [(&tail, "done/tail"), (&uplink, "done/uplink")] {
+        assert!(holds(&world, &later.checkout, branch), "{branch}");
+        assert!(holds(&world, &later.origin, branch), "{branch}");
+    }
 }
