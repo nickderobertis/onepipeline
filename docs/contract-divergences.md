@@ -8057,8 +8057,9 @@ to a settled run with no pending surface — "nothing will ever read a reply to
 it" — so a `complete` verdict there journalled nothing. It now takes the run as
 its single writer where nothing drives it, under the handover gate `reply`
 already takes, journals `planner-replied` and `completion-requested`, and answers
-entry 64's receipt with `state: applied-here`; a settled run a driver still holds
-is refused as before.
+entry 64's receipt as `{"reply":0,"state":"delivered","verdict":"delivered"}` —
+`0` because no queue is behind it; a settled run a driver still holds, and any
+other reply to a settled run, is refused as before.
 
 The rule is read from the run summary, which `unwatched` may read where it may
 not read the journal (entry 68's cost rule). **Schema 8** adds three fields,

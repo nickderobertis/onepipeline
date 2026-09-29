@@ -753,9 +753,11 @@ impl VerdictHalf {
 /// as three fields a caller assembles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplyOutcome {
-    /// A commandless verdict, queued for whichever reader the run owes one.
+    /// A commandless verdict, queued for whichever reader the run owes one —
+    /// or, for a `complete` verdict to a settled run nothing drives, written to
+    /// the run's own record, with no queue behind it and so `reply` `0`.
     Answered {
-        /// Its id in the channel.
+        /// Its id in the channel, or `0` where it was written to the run's record.
         reply: u64,
         /// Whether the envelope carried a verdict at all: an envelope carrying
         /// neither half is answered here too, and names neither.

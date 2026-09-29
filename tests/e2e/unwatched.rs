@@ -66,14 +66,42 @@ fn held(world: &World, name: &str) -> String {
     name.to_string()
 }
 
-/// A run driven to settlement, with its driver gone.
+/// A run driven to settlement and **closed**, with its driver gone.
+///
+/// Closed by the happy path a supervisor takes, a `complete` verdict sent with
+/// `onepipeline reply`: a run this engine drives is owed to its session until it
+/// is closed rather than until it settles (entry 96), so a settled run that
+/// nobody closed is not the excluded run the journeys below are about.
 fn settled(world: &World, name: &str) -> String {
     let path = world.plan(name, &plan_of(name, vec![agent("build", &[])]));
     world.run(&["start", &path, "--attach"]).settled();
     world.until("the run to settle", |world| {
         world.run_file(name, "result.json").is_file()
     });
+    close(world, name);
     name.to_string()
+}
+
+/// Close a settled run nothing is driving, with a `complete` verdict.
+fn close(world: &World, run: &str) {
+    world
+        .run_with_stdin(&["reply", run], r#"{"completion":true,"reason":"done"}"#)
+        .exited(0);
+}
+
+/// Acknowledge a run for its own session, which closes it without a write to its
+/// journal — so an exclusion that follows is decided on the document the run's
+/// driver left, and nothing else.
+fn acknowledge(world: &World, run: &str) {
+    world
+        .run(&[
+            "unwatched",
+            "--acknowledge",
+            run,
+            "--reason",
+            "nothing further is owed",
+        ])
+        .exited(0);
 }
 
 fn paths_of(world: &World, run: &str) -> RunPaths {
@@ -755,6 +783,8 @@ fn a_settled_run_is_excluded_and_a_document_recording_settlement_behind_its_jour
     let mut recording = document(&paths);
     recording["graph_complete"] = json!(false);
     recording["stop_recorded"] = json!(false);
+    // And no completion request, which closes a run this build drove as a stop does.
+    recording["completion_requested"] = json!(false);
     recording["journal_len"] = json!(1);
     std::fs::write(paths.summary(), recording.to_string()).expect("the document");
     // llmlint: ignore-end[tests_mirror_real_usage]
@@ -2313,6 +2343,16 @@ fn a_run_settled_under_an_observer_mid_turn_leaves_a_current_document_and_is_exc
         "the driver left a document behind its journal at handback: {left}"
     );
 
+    // Settled is not closed: the run is owed to its session until it is, and the
+    // line names the two ways to close it.
+    world
+        .run(&["unwatched"])
+        .exited(RUNS_UNWATCHED)
+        .out_has(run)
+        .out_has("--acknowledge");
+    // Acknowledged, which writes beside the run and not to its journal: the
+    // exclusion is then decided on the document the driver left.
+    acknowledge(&world, run);
     let asked = world.run(&["unwatched"]);
     world.release("observer.go");
     asked.exited(SUCCESS);
@@ -2359,6 +2399,7 @@ fn a_detached_driver_that_settles_leaves_a_current_document_and_is_excluded() {
         "the detached driver left a document behind its journal at handback: {left}"
     );
 
+    acknowledge(&world, run);
     let asked = world.run(&["unwatched"]);
     asked.exited(SUCCESS);
     assert!(
@@ -2460,6 +2501,7 @@ fn an_adopted_run_over_a_lifecycle_node_leaves_a_current_document_and_is_exclude
         "the adopted driver left a document behind its journal at handback: {left}"
     );
 
+    acknowledge(&world, run);
     let asked = world.run(&["unwatched"]);
     world.release("observer.go");
     asked.exited(SUCCESS);
@@ -2510,7 +2552,9 @@ fn a_run_the_previous_release_settled_is_refreshed_and_excluded_rather_than_repo
         stamp_of(&paths),
         "the adopted driver left a document behind its journal at handback: {left}"
     );
-    let mut previous = left.clone();
+    // Closed as its session closes it, so what is decided below is the refresh.
+    close(&world, run);
+    let mut previous = document(&paths);
     previous["schema_version"] = json!(SUMMARY_SCHEMA_VERSION - 1);
     std::fs::write(paths.summary(), previous.to_string()).expect("the document");
 

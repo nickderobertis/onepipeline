@@ -1150,10 +1150,12 @@ fn a_settled_run_refuses_a_reply_nothing_will_ever_read() {
         !world.run_file("settled", "owner.lock").exists()
     });
 
+    // A verdict that is not `complete`: that one verdict is still owed to a settled
+    // run nothing drives, and closes it (entry 96, `tests/e2e/wake_budget.rs`).
     world
         .run_with_stdin(
             &["reply", "settled"],
-            r#"{"completion":true,"reason":"done"}"#,
+            r#"{"message":"is there anything else to do?"}"#,
         )
         .exited(REFUSED)
         .err_has("has settled");
@@ -1193,7 +1195,10 @@ fn a_settled_run_refuses_a_reply_however_alive_its_driver_still_looks() {
     world.run(&["status", "afar"]).exited(0).out_has("SETTLED");
 
     world
-        .run_with_stdin(&["reply", "afar"], r#"{"completion":true,"reason":"done"}"#)
+        .run_with_stdin(
+            &["reply", "afar"],
+            r#"{"message":"is there anything else to do?"}"#,
+        )
         .exited(REFUSED)
         .err_has("has settled");
 

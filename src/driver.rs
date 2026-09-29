@@ -3109,9 +3109,10 @@ pub(crate) fn submit_envelope(
                 if let Some(lock) = engine::take_if_undriven(paths)? {
                     journal_verdict(paths, envelope)?;
                     drop(lock);
-                    return Ok(Submitted::AppliedHere {
-                        operations: Vec::new(),
-                    });
+                    // A verdict with no commands, delivered to the run's own record
+                    // rather than to a queue, so there is no id to name: `0`, the
+                    // spelling entry 64 gives a receipt with no queue behind it.
+                    return Ok(Submitted::Answered { reply: 0 });
                 }
             }
             return Err(Error::Refused(format!(
