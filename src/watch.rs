@@ -1190,16 +1190,44 @@ impl Lines {
 ///
 /// [`EXIT_REFUSED`]: crate::error::EXIT_REFUSED
 pub(crate) fn say(lines: &Lines) -> Result<()> {
+    say_to(lines, &mut std::io::stderr(), "standard error")
+}
+
+/// [`say`], with the human line written to `human` — named `called` in a
+/// refusal — rather than to standard error: `watch --log PATH` hands the log
+/// file here. The machine record still goes to standard output, last, for the
+/// reason [`say`] gives, and a human line that cannot be written refuses exactly
+/// as a broken standard error does.
+pub(crate) fn say_to(lines: &Lines, human: &mut dyn Write, called: &str) -> Result<()> {
     let broken = |what: &str, error: std::io::Error| {
         Error::Invalid(format!("the watch could not write to {what}: {error}"))
     };
-    let mut human = std::io::stderr();
     let mut machine = std::io::stdout();
-    writeln!(human, "{}", lines.human).map_err(|e| broken("standard error", e))?;
-    human.flush().map_err(|e| broken("standard error", e))?;
+    writeln!(human, "{}", lines.human).map_err(|e| broken(called, e))?;
+    human.flush().map_err(|e| broken(called, e))?;
     writeln!(machine, "{}", lines.machine).map_err(|e| broken("standard output", e))?;
     machine.flush().map_err(|e| broken("standard output", e))?;
     Ok(())
+}
+
+/// Open `path` for `watch --log`: appended to, created when absent, and never
+/// truncated, so a re-armed watch goes on writing the same log.
+///
+/// # Errors
+///
+/// [`Error::Invalid`] naming the path, when it cannot be opened for appending —
+/// which the binary reports before the wait starts.
+pub(crate) fn open_log(path: &Path) -> Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| {
+            Error::Invalid(format!(
+                "`watch --log` could not open {} for appending: {e}",
+                path.display()
+            ))
+        })
 }
 
 /// How many planner surfaces are unread and of which kinds, as one clause.

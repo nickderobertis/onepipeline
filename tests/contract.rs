@@ -9010,3 +9010,85 @@ fn the_readmes_template_passage_is_a_gated_copy_of_the_contract() {
         "the README's example does not hand the loader document on stdin: {theirs}"
     );
 }
+
+/// The flags a supervisor's two most frequent reads take — `status
+/// --no-providers` and `watch --log PATH` — and the library renderer beside the
+/// first are what divergence entry 95 proposes and what the README states.
+///
+/// Held both ways against clap, because entry 95 is the only place this surface
+/// is written down for the planner who owns the contract, and the README is what
+/// a supervisor writes their allowlist against: a flag either kept past the code
+/// is a command an allowlist approves and the binary refuses. `watch`'s whole
+/// flag set is reconciled against entry 58 and the README's watch passage
+/// elsewhere; what this adds is `status`'s, and entry 95's own statement of both.
+#[test]
+fn the_supervision_flags_are_what_divergence_95_and_the_readme_name() {
+    let longs = |verb: &str| -> BTreeSet<String> {
+        Cli::command()
+            .get_subcommands()
+            .find(|sub| sub.get_name() == verb)
+            .unwrap_or_else(|| panic!("the binary offers `{verb}`"))
+            .get_arguments()
+            .filter_map(|arg| arg.get_long().map(str::to_string))
+            .collect()
+    };
+    let flags_after = |text: &str, opening: &str| -> BTreeSet<String> {
+        text.split_once(opening)
+            .unwrap_or_else(|| panic!("the document states `{opening}`"))
+            .1
+            .split_once('`')
+            .expect("the synopsis is one fenced span")
+            .0
+            .split_whitespace()
+            .filter_map(|word| {
+                word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                    .strip_prefix("--")
+                    .map(str::to_string)
+            })
+            .collect()
+    };
+
+    let block = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergence record ships");
+    let entry = block
+        .split("\n## ")
+        .find(|section| section.starts_with("95."))
+        .expect("the record carries entry 95");
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+
+    let status = longs("status");
+    assert_eq!(
+        flags_after(entry, "the views line reads `status"),
+        status,
+        "entry 95 proposes other `status` flags than this build offers"
+    );
+    assert_eq!(
+        flags_after(&readme, "`status [RUN]"),
+        status,
+        "the README states other `status` flags than this build offers"
+    );
+    assert!(
+        entry.contains("`watch` takes `--log PATH`") && longs("watch").contains("log"),
+        "entry 95 and this build disagree on `watch --log`"
+    );
+
+    // The renderer the entry names, at the signature it is called with.
+    assert!(entry.contains("`Status::render_without_providers`"));
+    let _: fn(&verbs::Status) -> String = verbs::Status::render_without_providers;
+
+    // The statuses the entry says a logged watch keeps, and the one it refuses
+    // with, are the ones this build returns.
+    for code in [
+        EXIT_SUCCESS,
+        EXIT_NOTHING_DRIVING,
+        EXIT_SURFACE_WAITING,
+        EXIT_WATCH_ELAPSED,
+        EXIT_NODE_SETTLED,
+        EXIT_REFUSED,
+    ] {
+        assert!(
+            entry.contains(&format!("`{code}`")),
+            "entry 95 does not state exit `{code}`"
+        );
+    }
+}
