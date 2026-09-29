@@ -1012,6 +1012,40 @@ pub(crate) struct PoolMaintenance {
     /// Why the host's identities could not be enumerated, where they could not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
+    /// Where the pass stopped before reaching every identity; absent for a pass
+    /// that visited them all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cut_short: Option<CutShort>,
+}
+
+/// Why a pass of the sweep stopped before reaching every identity, and which
+/// identities it never began: the `cut_short` of a `pool-maintenance` or
+/// `branches-retired` record.
+///
+/// The identity in progress when the stop arrived is finished and reported as an
+/// ordinary entry of the record, and is never one of `unreached`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct CutShort {
+    /// What stopped it.
+    pub(crate) reason: CutReason,
+    /// Every identity the pass never began, spelled as the record's `identity`
+    /// fields are, in the sorted order the sweep visits them. Never empty: a pass
+    /// that reached every identity carries no `cut_short` at all.
+    #[schemars(length(min = 1))]
+    pub(crate) unreached: Vec<String>,
+}
+
+/// What stopped a pass of the sweep before every identity.
+///
+/// One word, because a sweep stops early for one reason: the driver running it
+/// is closing out, and stops it at the next identity boundary rather than wait
+/// for the rest. What it left due, another driver's idle pass or the host's own
+/// sweep picks up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum CutReason {
+    /// `driver-closing`: the driver running the sweep was closing out.
+    DriverClosing,
 }
 
 /// One identity of a `pool-maintenance` record.
@@ -1089,6 +1123,11 @@ pub(crate) struct BranchesRetired {
     /// Every identity whose pass failed, and every branch a deletion did not
     /// finish.
     pub(crate) failed: Vec<UnretiredIdentity>,
+    /// Where the pass stopped before reaching every identity — or never began,
+    /// its sweep's maintenance having been cut short; absent for a pass that
+    /// visited them all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cut_short: Option<CutShort>,
 }
 
 /// One branch of a `branches-retired` record, in the words `onevcs`'s report
@@ -1402,6 +1441,65 @@ mod tests {
                 other => panic!("{kind} without `{key}` was not refused: {other:?}"),
             }
         }
+    }
+
+    /// `pool-maintenance` and `branches-retired` each declare `cut_short` and
+    /// leave it optional: a record without it — every record written before it
+    /// existed — still validates, one carrying it validates, and the key admits
+    /// only the closed reason and a non-empty `unreached`.
+    #[test]
+    fn a_cut_short_pass_is_an_optional_key_of_both_sweep_documents() {
+        let cut =
+            serde_json::json!({"reason": "driver-closing", "unreached": ["github.com/owner/b"]});
+        for (kind, whole) in [
+            (
+                PipelineKind::PoolMaintenance,
+                serde_json::json!({"started_at": "2026-09-20T00:00:00.000Z", "identities": []}),
+            ),
+            (
+                PipelineKind::BranchesRetired,
+                serde_json::json!({"retired": [], "failed": []}),
+            ),
+        ] {
+            let id = schema_of(kind);
+            let document = registry().schema(&id).expect("registered").clone();
+            assert!(
+                document["properties"].get("cut_short").is_some(),
+                "{id} does not declare cut_short"
+            );
+            assert!(
+                !document["required"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|key| key == "cut_short"),
+                "{id} requires cut_short"
+            );
+            registry()
+                .check(&id, &whole)
+                .unwrap_or_else(|refusal| panic!("{id} without cut_short: {refusal}"));
+            let mut carried = whole.clone();
+            carried["cut_short"] = cut.clone();
+            registry()
+                .check(&id, &carried)
+                .unwrap_or_else(|refusal| panic!("{id} with cut_short: {refusal}"));
+            for wrong in [
+                serde_json::json!({"reason": "driver-closing", "unreached": []}),
+                serde_json::json!({"reason": "bored", "unreached": ["a"]}),
+                serde_json::json!({"unreached": ["a"]}),
+            ] {
+                let mut refused = whole.clone();
+                refused["cut_short"] = wrong.clone();
+                assert!(
+                    registry().check(&id, &refused).is_err(),
+                    "{id} admitted cut_short {wrong}"
+                );
+            }
+        }
+        assert_eq!(
+            serde_json::to_value(CutReason::DriverClosing).expect("a word"),
+            "driver-closing"
+        );
     }
 
     /// Every payload word is spelled exactly as the type that owns its vocabulary
