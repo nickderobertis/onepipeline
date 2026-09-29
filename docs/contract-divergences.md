@@ -7954,7 +7954,9 @@ an answered question is refused as it was.
 beside the finding rule. Nothing published moves: the answer is the `agent.queued-reply@1` a
 verdict is appended as, the mark is the one `agent.planner-surface@1` already declares, and
 neither schema changes. `tests/e2e/live_edit.rs`'s
-`a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit` drives a `retry`, a `drop`,
-a question about a node still in the graph and the bound verdict through the binary, and
+`a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit` drives a `retry` and a
+`drop`, each discharging a question and a blocking `finding` raised under no correlation, beside a
+question and a finding about a node still in the graph that stay standing, and the bound verdict,
+through the binary, and
 `tests/contract.rs`'s `a_decision_about_a_removed_node_is_discharged_by_that_edit` holds the
 contract's sentences and this entry's.

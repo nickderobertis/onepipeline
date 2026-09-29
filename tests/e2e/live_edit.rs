@@ -4093,8 +4093,9 @@ fn answers_to(world: &World, run: &str, key: &str) -> Vec<Value> {
 /// returned on it at once for the rest of the run and `status` kept asking for
 /// it. Both removals are driven, `retry` and `drop`, on the reconcile loop's
 /// commit, with the questions raised through the verb a worker raises them with
-/// and a blocking `finding` beside the first — the one kind of decision raised
-/// under no correlation, which has nothing a reply could be bound to.
+/// and a blocking `finding` beside each — the one kind of decision raised under
+/// no correlation, which has nothing a reply could be bound to and is discharged
+/// by its own id.
 #[test]
 fn a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit() {
     let world = World::new("edit-decision-discharge");
@@ -4111,17 +4112,16 @@ fn a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit() {
         &["build", "other", "kept"],
     );
 
-    // The worker's question about its node, read off the queue so it is the
-    // decision `status` names; and a watcher's blocking finding about the same
-    // node, left unread.
-    let asked = asking_about(&world, &run, "build", "should build keep the old schema?");
-    let key = question_about(&world, &run, "build");
+    // A watcher's blocking finding about the node — raised under no correlation,
+    // so nothing a reply could be bound to — read off the queue so it is the
+    // decision `status` names; and the worker's question about the same node,
+    // left unread.
+    let finding = "build is writing to the wrong table";
     world
         .run_with_stdin(
             &["reply", &run],
             &envelope(json!([{
-                "op": "finding", "blocking": true, "id": "build",
-                "message": "build is writing to the wrong table"
+                "op": "finding", "blocking": true, "id": "build", "message": finding
             }])),
         )
         .exited(0);
@@ -4133,15 +4133,21 @@ fn a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit() {
     let next = world.run(&["next", &run]);
     next.exited(0);
     assert_eq!(
-        next.json()["surface"]["correlation"],
-        json!(key),
+        next.json()["surface"]["message"],
+        json!(finding),
         "{}",
         next.stdout
     );
-    world
-        .run(&["status", &run])
-        .exited(0)
-        .out_has("waiting for planner decision");
+    assert!(
+        next.json()["surface"]["correlation"].is_null(),
+        "{}",
+        next.stdout
+    );
+    let asked = asking_about(&world, &run, "build", "should build keep the old schema?");
+    let key = question_about(&world, &run, "build");
+    world.run(&["status", &run]).exited(0).out_has(&format!(
+        "waiting for planner decision: finding — {finding}"
+    ));
     world
         .run(&["watch", &run, "--until", "surface", "--timeout", "0"])
         .exited(SURFACE_WAITING);
@@ -4189,20 +4195,40 @@ fn a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit() {
     );
     assert!(said.contains("`retry` of 'build'"), "{said}");
 
+    // Neither the question nor the finding holds the run any more: the finding
+    // `status` named is still shown, as one nobody is waiting on.
     world
         .run(&["watch", &run, "--until", "surface", "--timeout", "0"])
         .exited(WATCH_ELAPSED);
     world
         .run(&["status", &run])
         .exited(0)
-        .out_lacks("waiting for planner decision");
+        .out_lacks("waiting for planner decision")
+        .out_has(&format!(
+            "a planner update nobody is waiting on any more: finding — {finding}"
+        ));
 
-    // A `drop` discharges the same way, and only the question about the node it
-    // removed: the one about `kept`, still in the graph, stays standing.
+    // A `drop` discharges the same way, and only the decisions about the node it
+    // removed: the question and the finding about `kept`, still in the graph,
+    // stay standing.
     let dropped = asking_about(&world, &run, "other", "should other ship first?");
     let dropped_key = question_about(&world, &run, "other");
     let standing = asking_about(&world, &run, "kept", "should kept ship first?");
     let standing_key = question_about(&world, &run, "kept");
+    let still = "kept is waiting on a schema nobody has approved";
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{
+                "op": "finding", "blocking": true, "id": "kept", "message": still
+            }])),
+        )
+        .exited(0);
+    world.until("the finding about kept to be raised", |world| {
+        surfaces_on(world, &run)
+            .iter()
+            .any(|surface| surface["message"] == json!(still))
+    });
     world
         .run_with_stdin(
             &["reply", &run],
@@ -4240,9 +4266,16 @@ fn a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit() {
         .exited(0);
     let output = standing.wait_with_output().expect("the question ends");
     assert!(String::from_utf8_lossy(&output.stdout).contains("ship kept first"));
+    // And the finding about the node still in the graph is still a decision the
+    // run is held on: no edit removed its node, so nothing discharged it.
+    let kept = surfaces_on(&world, &run)
+        .into_iter()
+        .find(|surface| surface["message"] == json!(still))
+        .expect("the finding about kept is on the queue");
+    assert_ne!(kept["abandoned"], json!(true), "{kept:#}");
     world
         .run(&["watch", &run, "--until", "surface", "--timeout", "0"])
-        .exited(WATCH_ELAPSED);
+        .exited(SURFACE_WAITING);
 
     world.run(&["stop", &run, "--force"]).exited(0);
     world.until("the stop to be recorded", |world| {
