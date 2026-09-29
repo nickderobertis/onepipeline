@@ -1013,6 +1013,15 @@ impl Presentations {
         });
     }
 
+    /// Take over every presentation another watch still owes, behind this one's.
+    ///
+    /// What a watch built for one note joins the dispatch's own watch with, once
+    /// it has read what the stream relayed while that note's delivery was
+    /// outstanding.
+    pub(crate) fn absorb(&mut self, other: Self) {
+        self.routed.extend(other.routed);
+    }
+
     /// A note composed into the dispatch's own task, which its opening worker
     /// turn carries and every supervisor turn after that reads.
     pub(crate) fn composed_into_the_task(&mut self, note: RecordedNote, at: u64) {

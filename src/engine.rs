@@ -533,6 +533,9 @@ pub(crate) enum Message {
     /// That sweep's retirement pass has finished, which ends the sweep, and
     /// this is what it retired.
     Retired(Box<crate::maintenance::Retirements>),
+    /// The note-delivery thread's answer for the one envelope it was handed:
+    /// what each of its commands' conversations said. See [`NoteDeliveries`].
+    NoteAnswered(Box<NoteAnswer>),
 }
 
 /// A node's settlement, and the thread that is waiting to hear it was recorded.
@@ -801,6 +804,7 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<Driven> {
             &channel,
             &launch,
             &mut BTreeMap::new(),
+            None,
         )? {
             moved = true;
         }
@@ -999,6 +1003,7 @@ pub(crate) fn reconcile_queued(paths: &RunPaths) -> Result<()> {
         &ChannelState::of_run(paths, &launch),
         &launch,
         &mut BTreeMap::new(),
+        None,
     )?;
     // The queue it reconciled may have settled a node at a landing, and no
     // driver is left to see it.
@@ -1024,6 +1029,9 @@ fn converge(
     let channel = ChannelState::of_run(paths, launch);
     let rules = executor_rules()?;
     let (tx, rx): (Sender<Message>, Receiver<Message>) = mpsc::channel();
+    // Where a note waits for its conversation, so this loop does not: see
+    // [`NoteDeliveries`].
+    let mut deliveries = NoteDeliveries::start(&tx);
     let mut in_flight: BTreeMap<String, Dispatch> = BTreeMap::new();
     let stall_after = Duration::from_secs(stall_after_seconds());
     let mut upstreams = crate::crossdag::Observer::of_run(paths, state);
@@ -1130,7 +1138,15 @@ fn converge(
             derived = None;
             unpublished = true;
         }
-        if reconcile_edits(paths, journal, state, &channel, launch, &mut in_flight)? {
+        if reconcile_edits(
+            paths,
+            journal,
+            state,
+            &channel,
+            launch,
+            &mut in_flight,
+            deliveries.as_mut(),
+        )? {
             derived = None;
             unpublished = true;
             moved = true;
@@ -1297,11 +1313,16 @@ fn converge(
             report_unprojected(paths, journal, writeback)?;
         }
 
-        if in_flight.is_empty() && watching_merge_paths.is_empty() {
+        if in_flight.is_empty()
+            && watching_merge_paths.is_empty()
+            && deliveries.as_ref().is_none_or(NoteDeliveries::idle)
+        {
             // Nothing is running and nothing became ready, so no further
             // message can arrive: the graph is as converged as it will get.
             // A merge path still being asked about is the exception the second
-            // clause above carries, because `blocked` is a *settled* status.
+            // clause above carries, because `blocked` is a *settled* status —
+            // and a note still with its conversation is the third, because its
+            // answer is a message and the envelopes behind it are still owed.
             //
             // A node that is neither settled nor startable is gated by
             // something only an edit or an attestation can clear, and both
@@ -1491,6 +1512,9 @@ fn converge(
                                 member_of(&envelope) == Some(address.member())
                             });
                             if addressed {
+                                if let Some(deliveries) = deliveries.as_mut() {
+                                    deliveries.witnessed(&node, &envelope);
+                                }
                                 for shown in dispatch.presentations.observe(&envelope) {
                                     journal.emit(
                                         journal::PipelineKind::NoteShown,
@@ -1648,6 +1672,27 @@ fn converge(
                 Message::Retired(retirements) => {
                     maintenance.retired(paths, journal, &retirements)?;
                 }
+                // The conversation answered, so the envelope is journalled now —
+                // what it records is what an inline delivery would have — and the
+                // envelopes claimed behind it are judged on the next pass.
+                Message::NoteAnswered(answer) => {
+                    let witnessed = deliveries
+                        .as_mut()
+                        .map(NoteDeliveries::answered)
+                        .unwrap_or_default();
+                    if record_delivered(
+                        paths,
+                        journal,
+                        state,
+                        &channel,
+                        *answer,
+                        &mut in_flight,
+                        &witnessed,
+                    )? {
+                        derived = None;
+                        unpublished = true;
+                    }
+                }
                 Message::Settled(settled) => {
                     let settlement = &settled.settlement;
                     in_flight.remove(&settlement.node);
@@ -1755,6 +1800,7 @@ fn close_out_and_drain(
         &ChannelState::of_run(paths, launch),
         launch,
         in_flight,
+        None,
     )? {
         return Ok(LastClaim::FoundNothing);
     }
@@ -2452,6 +2498,18 @@ fn any_node_can_still_move(statuses: &BTreeMap<String, NodeStatus>) -> bool {
 ///
 /// Phase 1 makes every refusal that does not need a conversation asked. The one
 /// that does is named where it lives: [`deliver_envelope`].
+///
+/// # Where phase 2 runs
+///
+/// With `deliveries`, an envelope that offers a note to a conversation is handed
+/// to the delivery thread and this pass stops judging envelopes: the loop goes on
+/// relaying and journalling everything else while the conversation decides, and
+/// phase 3 runs when [`Message::NoteAnswered`] reaches it. Every envelope claimed
+/// behind the handed one is held, in claim order, until that answer is recorded —
+/// so no envelope overtakes another, and each is still validated against the
+/// record every envelope before it committed. Without `deliveries` — a writer
+/// with no dispatch to relay, or a host that refused the thread — the phases run
+/// inline, as they always did.
 fn reconcile_edits(
     paths: &RunPaths,
     journal: &mut Journal,
@@ -2459,9 +2517,24 @@ fn reconcile_edits(
     channel: &ChannelState,
     launch: &LaunchRecord,
     in_flight: &mut BTreeMap<String, Dispatch>,
+    mut deliveries: Option<&mut NoteDeliveries>,
 ) -> Result<bool> {
     let mut changed = false;
-    for envelope in channel.claim_commands()? {
+    if deliveries
+        .as_deref()
+        .is_some_and(|deliveries| deliveries.outstanding.is_some())
+    {
+        return Ok(false);
+    }
+    // Claimed before the held envelopes are taken, so a queue that refuses the
+    // claim leaves them held for the next pass rather than dropped with the error.
+    let fresh = channel.claim_commands()?;
+    let mut claimed = deliveries
+        .as_deref_mut()
+        .map(|deliveries| std::mem::take(&mut deliveries.behind))
+        .unwrap_or_default();
+    claimed.extend(fresh);
+    while let Some(envelope) = claimed.pop_front() {
         let author = envelope.author.clone();
         let commands = &envelope.commands;
 
@@ -2494,49 +2567,109 @@ fn reconcile_edits(
         // the stream is read afterwards: a turn that opened before it cannot be
         // the presentation of a note offered after it.
         let offered_at = sys::now_millis();
-        let delivered = match all_or_each_ruling(deliver_envelope(staged)) {
-            Ok(delivered) => delivered,
-            Err(evaluated) => {
-                for (command, ruling) in commands.iter().zip(&evaluated) {
-                    if let Err(error) = ruling {
-                        record_rejection(paths, journal, author.clone(), command, error)?;
-                    }
+        let (envelope, staged) = match deliveries.as_deref_mut() {
+            Some(deliveries) => match deliveries.hand(envelope, staged, offered_at) {
+                Ok(()) => {
+                    deliveries.behind = claimed;
+                    return Ok(changed);
                 }
-                channel.answer_commands(&refused_envelope(envelope.id, commands, &evaluated))?;
-                continue;
-            }
+                Err(kept) => *kept,
+            },
+            None => (envelope, staged),
         };
-
-        for (command, delivery) in commands.iter().zip(&delivered) {
-            commit_command(
-                paths,
-                journal,
-                state,
-                author.clone(),
-                command,
-                delivery.committed(),
-                in_flight,
+        let delivered = deliver_envelope(staged);
+        changed |= record_delivered(
+            paths,
+            journal,
+            state,
+            channel,
+            NoteAnswer {
+                envelope,
                 offered_at,
-            )?;
-            changed = true;
-        }
-        channel.answer_commands(&CommandOutcome {
-            id: envelope.id,
-            applied: true,
-            reason: None,
-            results: commands
-                .iter()
-                .enumerate()
-                .map(|(index, command)| crate::channel::CommandResult {
-                    index,
-                    op: crate::channel::op_of(command).to_string(),
-                    outcome: crate::channel::CommandVerdict::Applied,
-                    reason: None,
-                })
-                .collect(),
-        })?;
+                delivered,
+            },
+            in_flight,
+            &[],
+        )?;
     }
     Ok(changed)
+}
+
+/// Phase 3 of one envelope: journal what its delivery phase answered, and answer
+/// its submitter.
+///
+/// The same whether the delivery ran inline or on the delivery thread, which is
+/// what keeps the record a note leaves identical however long its conversation
+/// took to answer. `witnessed` is what the stream relayed of the addressed
+/// conversations while the answer was outstanding — see
+/// [`NoteDeliveries::witnessed`] — and is empty for a delivery that ran inline,
+/// where nothing could be relayed in between.
+///
+/// `true` where the envelope was applied, which moves the run.
+fn record_delivered(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    state: &mut Projected,
+    channel: &ChannelState,
+    answer: NoteAnswer,
+    in_flight: &mut BTreeMap<String, Dispatch>,
+    witnessed: &[Envelope],
+) -> Result<bool> {
+    let NoteAnswer {
+        envelope,
+        offered_at,
+        delivered,
+    } = answer;
+    let author = envelope.author.clone();
+    let commands = &envelope.commands;
+    let delivered = match all_or_each_ruling(delivered) {
+        Ok(delivered) => delivered,
+        Err(evaluated) => {
+            for (command, ruling) in commands.iter().zip(&evaluated) {
+                if let Err(error) = ruling {
+                    record_rejection(paths, journal, author.clone(), command, error)?;
+                }
+            }
+            channel.answer_commands(&refused_envelope(envelope.id, commands, &evaluated))?;
+            return Ok(false);
+        }
+    };
+
+    for (command, delivery) in commands.iter().zip(&delivered) {
+        commit_command(
+            paths,
+            journal,
+            state,
+            author.clone(),
+            command,
+            delivery.committed(),
+            in_flight,
+        )?;
+        watch_presentations(
+            paths,
+            journal,
+            delivery.committed(),
+            in_flight,
+            offered_at,
+            witnessed,
+        )?;
+    }
+    channel.answer_commands(&CommandOutcome {
+        id: envelope.id,
+        applied: true,
+        reason: None,
+        results: commands
+            .iter()
+            .enumerate()
+            .map(|(index, command)| crate::channel::CommandResult {
+                index,
+                op: crate::channel::op_of(command).to_string(),
+                outcome: crate::channel::CommandVerdict::Applied,
+                reason: None,
+            })
+            .collect(),
+    })?;
+    Ok(!commands.is_empty())
 }
 
 /// Every command's value where a phase produced one for all of them, or every
@@ -2826,6 +2959,161 @@ impl Delivery {
     }
 }
 
+/// One envelope's delivery phase, answered: what [`record_delivered`] journals.
+///
+/// Built on the delivery thread and carried back to the writer as
+/// [`Message::NoteAnswered`], or built in place where the phase ran inline.
+pub(crate) struct NoteAnswer {
+    envelope: crate::channel::QueuedCommands,
+    /// The instant before its first note was offered — see [`reconcile_edits`].
+    offered_at: u64,
+    /// One ruling per command, as [`deliver_envelope`] answered them.
+    delivered: Vec<std::result::Result<Delivery, Error>>,
+}
+
+struct Handed {
+    envelope: crate::channel::QueuedCommands,
+    staged: Vec<Staged>,
+    offered_at: u64,
+}
+
+/// Live note delivery, kept off the run's single writer.
+///
+/// A harness that takes a note only as its current turn ends answers when that
+/// turn ends, and a writer waiting on it journals nothing meanwhile. So one
+/// thread that does nothing else offers the notes, and its answer returns over
+/// the loop's own channel. Why envelopes behind an outstanding one wait unjudged
+/// is [`reconcile_edits`]'s to say.
+pub(crate) struct NoteDeliveries {
+    handing: Sender<Handed>,
+    /// The envelope the thread holds, from the moment it is handed until its
+    /// answer is recorded.
+    outstanding: Option<Outstanding>,
+    /// Claimed behind the outstanding envelope, and not judged yet.
+    behind: std::collections::VecDeque<crate::channel::QueuedCommands>,
+}
+
+struct Outstanding {
+    nodes: BTreeSet<String>,
+    /// What the stream relayed of those nodes' addressed conversations meanwhile.
+    witnessed: Vec<Envelope>,
+}
+
+impl NoteDeliveries {
+    /// Start the delivery thread, answering on `tx`.
+    ///
+    /// `None` where the host refuses this process a thread, and the loop then
+    /// delivers inline — slower to journal, and recording the same thing.
+    fn start(tx: &Sender<Message>) -> Option<Self> {
+        let (handing, handed) = mpsc::channel::<Handed>();
+        let tx = tx.clone();
+        // llmlint: ignore-block[changed_behavior_has_e2e] the `None` this answers is a host
+        // refusing this process one thread, which is resource exhaustion no CLI journey can
+        // arrange — `Writeback::start` declines the same proof for the same reason. What
+        // follows it is the inline delivery every writer without a loop still runs, driven
+        // by `tests/note`'s nothing-driving journey.
+        std::thread::Builder::new()
+            .name("note-delivery".to_string())
+            .spawn(move || {
+                // Ends when the writer lets go of its inbox, which is when the
+                // loop that owns it has returned.
+                for Handed {
+                    envelope,
+                    staged,
+                    offered_at,
+                } in handed
+                {
+                    let delivered = deliver_envelope(staged);
+                    if tx
+                        .send(Message::NoteAnswered(Box::new(NoteAnswer {
+                            envelope,
+                            offered_at,
+                            delivered,
+                        })))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            })
+            .ok()?;
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+        Some(Self {
+            handing,
+            outstanding: None,
+            behind: std::collections::VecDeque::new(),
+        })
+    }
+
+    fn idle(&self) -> bool {
+        self.outstanding.is_none() && self.behind.is_empty()
+    }
+
+    /// Hand one validated envelope to the thread, where it offers a note.
+    ///
+    /// Handed back where it offers none — compiled commands commit at once, and
+    /// a thread round-trip would buy nothing — or where the thread has gone,
+    /// so the caller delivers it inline rather than losing it.
+    fn hand(
+        &mut self,
+        envelope: crate::channel::QueuedCommands,
+        staged: Vec<Staged>,
+        offered_at: u64,
+    ) -> std::result::Result<(), Box<(crate::channel::QueuedCommands, Vec<Staged>)>> {
+        let nodes: BTreeSet<String> = staged
+            .iter()
+            .filter_map(|step| match step {
+                Staged::Note(note) => Some(note.node.clone()),
+                Staged::Compiled(_) => None,
+            })
+            .collect();
+        if nodes.is_empty() {
+            return Err(Box::new((envelope, staged)));
+        }
+        match self.handing.send(Handed {
+            envelope,
+            staged,
+            offered_at,
+        }) {
+            Ok(()) => {
+                self.outstanding = Some(Outstanding {
+                    nodes,
+                    witnessed: Vec::new(),
+                });
+                Ok(())
+            }
+            // llmlint: ignore-block[changed_behavior_has_e2e] the thread returns only once
+            // this inbox or the loop's own channel has gone, and the loop holds both while
+            // it hands, so only a panic inside the sibling's note call reaches this arm. It
+            // delivers inline rather than dropping a claimed envelope.
+            Err(mpsc::SendError(Handed {
+                envelope, staged, ..
+            })) => Err(Box::new((envelope, staged))),
+            // llmlint: ignore-end[changed_behavior_has_e2e]
+        }
+    }
+
+    /// Keep one relayed envelope of a conversation a note is outstanding for.
+    ///
+    /// Only what could be a presentation of it — the addressed member's own
+    /// stream, of a node the outstanding envelope offered a note into — and only
+    /// until the answer is recorded, when [`watch_presentations`] reads it.
+    fn witnessed(&mut self, node: &str, envelope: &Envelope) {
+        if let Some(outstanding) = &mut self.outstanding {
+            if outstanding.nodes.contains(node) {
+                outstanding.witnessed.push(envelope.clone());
+            }
+        }
+    }
+
+    fn answered(&mut self) -> Vec<Envelope> {
+        self.outstanding
+            .take()
+            .map(|outstanding| outstanding.witnessed)
+            .unwrap_or_default()
+    }
+}
+
 /// What one command that did **not** refuse is reported as, when something else
 /// in its envelope did.
 ///
@@ -2937,12 +3225,6 @@ fn validate_command(
 /// Called only once the whole envelope has compiled, so everything here either
 /// succeeds or is a failure of the run's own journal — which ends the pass
 /// rather than half-applying an envelope.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "one command's commit: the run, its journal and state, who sent it, the command, \
-              what it committed, the dispatches it may stop or route a note through, and \
-              the instant its notes were offered"
-)]
 fn commit_command(
     paths: &RunPaths,
     journal: &mut Journal,
@@ -2950,8 +3232,7 @@ fn commit_command(
     author: crate::channel::Author,
     command: &Command,
     operations: &[edits::Operation],
-    in_flight: &mut BTreeMap<String, Dispatch>,
-    offered_at: u64,
+    in_flight: &BTreeMap<String, Dispatch>,
 ) -> Result<()> {
     // Dropping or retrying a running node raises its cooperative cancellation
     // signal: the dispatch stops and, for a lifecycle node, preserves what it
@@ -2959,21 +3240,6 @@ fn commit_command(
     for target in cancelled_by(command) {
         if let Some(dispatch) = in_flight.get(&target) {
             dispatch.cancel.cancel();
-        }
-    }
-    // A note delivered while the dispatch is live is now owed a presentation
-    // the stream has to show — routed onward by the conversation, or carried
-    // and still readable into a turn by a lever outside the seam: handed to the
-    // dispatch's own watch, which records each as it happens and nothing before.
-    for operation in operations {
-        if let (edits::Operation::NoteDelivered { node, .. }, Some(note)) =
-            (operation, crate::note::RecordedNote::of_delivery(operation))
-        {
-            if let Some(dispatch) = in_flight.get_mut(node) {
-                dispatch
-                    .presentations
-                    .delivered_while_live(note, offered_at);
-            }
         }
     }
     journal.emit(
@@ -2996,6 +3262,58 @@ fn commit_command(
         }
     }
     state.refresh(paths);
+    Ok(())
+}
+
+/// Hand every note one command delivered to the watch of the dispatch it was
+/// delivered into, and record what the stream has already shown of it.
+///
+/// A note delivered while the dispatch is live is owed a presentation the stream
+/// has to show — routed onward by the conversation, or carried and still readable
+/// into a turn by a lever outside the seam — and the dispatch's own watch records
+/// each as it happens and nothing before. Called once the delivery's own record is
+/// written, so a `note-shown` is never ahead of the `note-delivered` it confirms.
+///
+/// `witnessed` is the part of the stream that was relayed while the conversation's
+/// answer was outstanding — a conversation that takes a note as its turn ends can
+/// open the turn carrying it before the answer reaches this writer. It is read
+/// through a watch holding **only** this note, since every other note of the
+/// dispatch has already been shown whatever those envelopes showed it, and what
+/// is still owed afterwards joins the dispatch's watch. Read whether or not the
+/// dispatch is still in flight: a presentation that happened while the answer was
+/// on its way happened while the dispatch was live.
+fn watch_presentations(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    operations: &[edits::Operation],
+    in_flight: &mut BTreeMap<String, Dispatch>,
+    offered_at: u64,
+    witnessed: &[Envelope],
+) -> Result<()> {
+    for operation in operations {
+        let (edits::Operation::NoteDelivered { node, .. }, Some(note)) =
+            (operation, crate::note::RecordedNote::of_delivery(operation))
+        else {
+            continue;
+        };
+        let mut watch = crate::note::Presentations::default();
+        watch.delivered_while_live(note, offered_at);
+        for envelope in witnessed
+            .iter()
+            .filter(|envelope| envelope.labels.node.as_deref() == Some(node.as_str()))
+        {
+            for shown in watch.observe(envelope) {
+                journal.emit(
+                    journal::PipelineKind::NoteShown,
+                    journal::labels(&paths.run, Some(node)),
+                    shown.payload(),
+                )?;
+            }
+        }
+        if let Some(dispatch) = in_flight.get_mut(node) {
+            dispatch.presentations.absorb(watch);
+        }
+    }
     Ok(())
 }
 
@@ -8944,5 +9262,215 @@ mod tests {
         assert_eq!(labels.step.as_deref(), Some("implement"));
         assert_eq!(labels.round, None, "a dispatch was stamped with a round");
         assert!(labels.extra.is_empty());
+    }
+
+    /// A turn the stream relayed while its note's answer was on its way is read
+    /// once the answer is recorded — after the delivery, and whether or not the
+    /// dispatch is still in flight by then.
+    ///
+    /// The live half, a turn relayed ahead of the answer and shown after it, is
+    /// what `tests/note`'s held-turn journey records. What no journey can order is
+    /// the dispatch settling in between, because the conversation answers before
+    /// it opens the turn that could end it; so this drives that order through the
+    /// real journal writer, with nothing in flight.
+    #[test]
+    fn a_turn_relayed_before_its_notes_answer_is_shown_after_it_with_the_dispatch_gone() {
+        let root = std::env::temp_dir().join(format!("onepipeline-witnessed-{}", sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let mut journal = Journal::open(&paths);
+        let reached = crate::note::Reached::Worker;
+        let operations = [edits::Operation::NoteDelivered {
+            node: "build".into(),
+            addressee: crate::note::Addressee::Worker,
+            text: "stop".parse().expect("a usable note"),
+            criterion: None,
+            shown_to: reached.shown_at_delivery().to_vec(),
+            routed_to: reached.routed_to().to_vec(),
+            reached,
+        }];
+        let opened = |node: &str, at: u64, turn: u64| Envelope {
+            v: 1,
+            ts: sys::rfc3339_from_millis(at),
+            stream: "node-scope-1".into(),
+            seq: turn,
+            source: crate::event::Source::Agentgraph,
+            kind: crate::event::EventKind(
+                oneagentgraph::event::EventKind::TurnStarted.as_str().into(),
+            ),
+            dimensions: Default::default(),
+            labels: journal::labels("demo", Some(node)),
+            payload: journal::payload(&[
+                ("turn", json!(turn)),
+                ("role", json!("assistant")),
+                ("origin", json!("delivered")),
+                (
+                    "instruction",
+                    json!("## Notes delivered to you during this run\n\n- stop"),
+                ),
+                ("started_at", json!(sys::rfc3339_from_millis(at))),
+            ]),
+            artifacts: Vec::new(),
+        };
+        // A turn from before the note was offered, and one of another node's, are
+        // no presentation of it; the turn that opened on it is.
+        let witnessed = [
+            opened("build", 900, 1),
+            opened("other", 1_100, 2),
+            opened("build", 1_200, 3),
+        ];
+
+        watch_presentations(
+            &paths,
+            &mut journal,
+            &operations,
+            &mut BTreeMap::new(),
+            1_000,
+            &witnessed,
+        )
+        .expect("the presentation is recorded");
+
+        let shown: Vec<Envelope> = journal::read(&paths.journal())
+            .into_iter()
+            .filter(|envelope| envelope.kind.0 == "note-shown")
+            .collect();
+        let [shown] = &shown[..] else {
+            panic!("the run recorded {} presentations, not one", shown.len());
+        };
+        assert_eq!(shown.labels.node.as_deref(), Some("build"));
+        assert_eq!(shown.payload["party"], json!("worker"));
+        assert_eq!(shown.payload["turn"], json!(3));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Envelopes held behind an outstanding note survive a queue that refuses the
+    /// next claim, and are judged, in order, once the queue answers again.
+    ///
+    /// A queue that refuses a claim is a run store an operator has been in or a
+    /// filesystem that has run out, which no CLI journey can arrange mid-hold; so
+    /// this drives the real queue and the real reconciler with the channel's
+    /// directory taken by a file, and then given back.
+    #[test]
+    fn envelopes_held_behind_a_note_outlast_a_queue_that_refuses_the_claim() {
+        let root = std::env::temp_dir().join(format!("onepipeline-held-{}", sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let launch = LaunchRecord {
+            run_id: "demo".into(),
+            project: "plans:demo".into(),
+            dir: root.clone(),
+            graph: String::new(),
+            graph_run: String::new(),
+            observer_runs: Vec::new(),
+            observer_ending: String::new(),
+            node_graph: String::new(),
+            pr_author_graph: String::new(),
+            node_validator: String::new(),
+            envelope_reviewer: String::new(),
+            launcher: "held-envelopes".into(),
+            session: "a-session".into(),
+            pid: 0,
+            host: String::new(),
+            started: String::new(),
+            started_at: sys::now_rfc3339(),
+            heartbeat_interval: 1_800,
+            writeback_item_budget: 0,
+            success_hook: String::new(),
+            failure_hook: String::new(),
+            hook_timeout: 0,
+            dispatch_env_hook: String::new(),
+            dispatch_env_hook_timeout: 0,
+            dag_sets: Vec::new(),
+            node_sets: Vec::new(),
+            adoptions: 0,
+            filters: crate::filter::Filters::default(),
+            bus_config: Default::default(),
+            maintenance_config: None,
+            branch_template: String::new(),
+            template_root: String::new(),
+            require_rendered: false,
+            oneharness_sessions: None,
+            envelope_reviewer_bar: Default::default(),
+        };
+        let cancel = |id: &str| Command::Cancel {
+            id: id.to_owned(),
+            reason: None,
+        };
+        let channel = ChannelState::new(&paths);
+        let first = channel
+            .submit(crate::channel::Author::planner(), &[cancel("first")])
+            .expect("the first envelope is queued");
+        let second = channel
+            .submit(crate::channel::Author::planner(), &[cancel("second")])
+            .expect("the second envelope is queued");
+        let (handing, _handed) = mpsc::channel();
+        let mut deliveries = NoteDeliveries {
+            handing,
+            outstanding: None,
+            behind: channel
+                .claim_commands()
+                .expect("both envelopes are claimed")
+                .into(),
+        };
+        let mut journal = Journal::open(&paths);
+        let mut state = Projected::open(&paths);
+
+        let aside = root.join("channel-aside");
+        std::fs::rename(paths.channel_dir(), &aside).expect("the channel is moved aside");
+        std::fs::write(paths.channel_dir(), "not a directory").expect("its place is taken");
+        let refused = reconcile_edits(
+            &paths,
+            &mut journal,
+            &mut state,
+            &ChannelState::new(&paths),
+            &launch,
+            &mut BTreeMap::new(),
+            Some(&mut deliveries),
+        );
+        assert!(
+            refused.is_err(),
+            "a queue that cannot be opened was claimed from"
+        );
+        let held: Vec<u64> = deliveries
+            .behind
+            .iter()
+            .map(|envelope| envelope.id)
+            .collect();
+        assert_eq!(
+            held,
+            [first, second],
+            "the envelopes held behind the note were dropped with the refused claim"
+        );
+
+        std::fs::remove_file(paths.channel_dir()).expect("the file is taken away");
+        std::fs::rename(&aside, paths.channel_dir()).expect("the channel is given back");
+        let channel = ChannelState::new(&paths);
+        reconcile_edits(
+            &paths,
+            &mut journal,
+            &mut state,
+            &channel,
+            &launch,
+            &mut BTreeMap::new(),
+            Some(&mut deliveries),
+        )
+        .expect("the queue answers again");
+        assert!(
+            deliveries.idle(),
+            "an envelope is still held after the queue answered"
+        );
+        let answered: Vec<u64> = channel
+            .outcomes()
+            .iter()
+            .map(|outcome| outcome.id)
+            .collect();
+        assert_eq!(
+            answered,
+            [first, second],
+            "the held envelopes were not each answered, in the order they were claimed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
