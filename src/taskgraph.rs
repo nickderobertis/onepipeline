@@ -707,6 +707,7 @@ impl Reader {
                 filters: Filters::default(),
                 priorities: Vec::new(),
                 project: selector.clone(),
+                commented_since: None,
                 paging: Paging {
                     limit: self.page,
                     token,

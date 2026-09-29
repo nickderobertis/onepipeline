@@ -806,6 +806,7 @@ impl World {
                     filters: onetaskgraph_core::Filters::default(),
                     priorities: Vec::new(),
                     project: onetaskgraph_core::ProjectSelector::Qualified(id.clone()),
+                    commented_since: None,
                     paging: onetaskgraph_core::Paging {
                         limit: std::num::NonZeroU32::new(500).expect("not zero"),
                         token,
