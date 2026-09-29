@@ -47,7 +47,7 @@ use std::process::Command;
 use serde_json::{json, Value};
 
 use harness::{plan_of, World};
-use repo::{ensure_repo, gh, gh_try, missing};
+use repo::{ensure_repo, gh, gh_try, missing, Cause};
 
 /// The scratch repository this journey publishes to when nothing names another.
 pub const DEFAULT_SMOKE_REPO: &str = "nickderobertis/onepipeline-smoke";
@@ -336,6 +336,17 @@ fn a_lifecycle_node_opens_a_real_pull_request_merges_it_and_the_base_advances() 
     // Before anything is created, pushed, or merged.
     let slug = scratch_repo();
     let who = authenticated_user();
+    // `ensure_repo` creates only on GitHub's not-found answer, and the offline
+    // tier proves that against a copy of its wording: this is where the copy
+    // meets the real `gh`. Read-only, and a name nothing creates.
+    let absent = format!("{slug}-never-created");
+    match gh_try(&["repo", "view", &absent, "--json", "name"]) {
+        Err(refusal) if refusal.cause == Cause::NotFound => {}
+        Err(refusal) => {
+            panic!("GitHub's not-found answer for {absent} is not read as one: {refusal}")
+        }
+        Ok(_) => panic!("{absent} exists, so it cannot stand for an absent repository"),
+    }
     ensure_repo(&slug);
 
     let world = World::new("smoke-real");
