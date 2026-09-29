@@ -11,14 +11,14 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93 and 95 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95 and 96 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93 and 95 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95 and 96 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -3413,6 +3413,10 @@ contract's vocabulary has nowhere to put one. So this crate now ships:
   row grew `oneharness_sessions` — the run's pointer file, as the launch record
   names it (entry 84) — because a version-6 document carries no answer to where
   the run's sessions are rather than a run nothing wrote a pointer line for.
+  It moved to version 8 when the row grew the closure rule's three facts —
+  `owed_until_closed`, `completion_requested` and `reopened_at` (entry 96) —
+  because a version-7 document carries no answer to whether its run was driven
+  under that rule rather than a run that was not.
 - **`views::{RunTelemetry, Bucket, BucketName, Party, Usage}`**, re-exported
   because `RunSummary::timing` **is** the telemetry document whose shape the
   Views paragraph already fixes — eight buckets that sum exactly, per-party
@@ -3429,7 +3433,7 @@ cannot go on describing a document the build stopped writing:
 
 ```json
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "fields": [
     "schema_version",
     "run_id",
@@ -3452,6 +3456,9 @@ cannot go on describing a document the build stopped writing:
     "host",
     "started",
     "let_go_by",
+    "owed_until_closed",
+    "completion_requested",
+    "reopened_at",
     "timing",
     "parked",
     "judge_rejected",
@@ -4973,6 +4980,13 @@ match — is undecidable, named on standard error and blocking nothing, never
 reported at `6`, because a stale stamp is no proof of what the document says and
 `6` means *proven* unwatched. This is left OPEN, as the entry is.
 
+**Amendment — entry 96.** `--wake-budget`, `--acknowledge` and `--reason` are
+entry 96's, which also replaces this entry's exclusion rule for runs driven by
+its release — owed until closed rather than until settled — and adds a terms
+record beside each lease. The lease itself, its directory and its six conditions
+are unchanged, and so is everything below for a caller that passes neither flag
+and sets no `ONEPIPELINE_WAKE_BUDGET` over runs that release did not drive.
+
 Entry 58 added the verb a supervisor puts in a wake loop. It did not add a way to
 ask whether anybody ran it: `src/watch.rs` said outright that a watch "consumes no
 surface and records nothing", so a watched run and an unwatched one were the same
@@ -5196,7 +5210,7 @@ person.
   "record_name": "<pid>-<nonce>.json",
   "record_directory": "watchers",
   "nonce_hex_at_least": 8,
-  "options": ["session"],
+  "options": ["session", "wake-budget", "acknowledge", "reason"],
   "exit_reported": 6,
   "exit_none_reported": 0,
   "exit_refused": 2
@@ -6966,9 +6980,10 @@ the SDK call, and `agents::tests` holds the merge rule and the reader against th
 
 **Proposal (for the planner who owns the contract): add `onepipeline stop-guard
 [--session <ID>] [--continuation] [--format neutral|claude-code|codex]
-[--source <COMMAND>]... [--source-timeout <SECONDS>]` to the Views line beside
-`unwatched`, as a verb whose contract is one verdict object and exit `0`
-always.**
+[--source <COMMAND>]... [--source-timeout <SECONDS>] [--wake-budget <SECONDS>]`
+to the Views line beside `unwatched`, as a verb whose contract is one verdict
+object and exit `0` always.** `--wake-budget` is entry 96's, and so is the
+`warn` it answers for a run whose watch it cannot judge.
 
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] a register entry states
 the surface it proposes so the planner who owns `docs/contract.md` can rule on it — that is
@@ -7912,3 +7927,225 @@ further record to standard output.
 this entry's flags, renderer and exit statuses, and the README's `status` flags, to the code,
 and `the_divergence_entry_proposes_exactly_the_flags_this_build_offers` in `src/watch.rs` holds
 entry 58's synopsis to `watch`'s.
+
+## 96. A live watch counted as watching whether or not it could wake anybody, and a run nothing drove owed nothing — OPEN
+
+**Proposal (for the planner who owns the contract): `onepipeline unwatched` and
+`onepipeline stop-guard` take `--wake-budget SECONDS`, defaulting to
+`ONEPIPELINE_WAKE_BUDGET`; `unwatched` takes `--acknowledge RUN --reason TEXT`;
+`watch`'s default `--timeout` follows `ONEPIPELINE_WAKE_BUDGET`; every watch
+records its terms beside its lease; and a run is owed until it is closed rather
+than until it settles. The published surface grows `views::{WatchTerms,
+WATCH_TERMS_SCHEMA_VERSION}`, `verbs::{WakeBudget, Acknowledgement,
+ACKNOWLEDGEMENT_SCHEMA_VERSION}`, `Unwatched::within` and
+`Acknowledgement::record`, and `cli::{WAKE_BUDGET_ENV,
+wake_budget_from_environment, default_watch_timeout}`. The run summary moves to
+schema 8 and the checkpoint to schema 8.**
+
+**Rulings this rests on.** The contract below is the manager's, fixed for the
+plan that dispatched it (node `op-guard-wake-budget`, 2026-09-29): the record,
+the budget, the decision under the guard's safety rule, owed-until-closed, the
+migration, and the acknowledgement were each ruled before the node was
+dispatched, and are restated here rather than re-decided. One further ruling was
+asked for and given over the ask seam on 2026-09-29: the closure facts live in
+the run summary, which moves to schema 8, and the one number in
+`docs/contract.md` that states the summary's version (`summary_schema_version`
+in the history block) moves with it — "one derived document that is
+stamp-checked beats two kept in step". It carried one condition, answered under
+*Older engines* below.
+
+**Why.** The user supervises long runs through a manager session and expects an
+update at least every thirty minutes; a silent manager was called out 28 times in
+13 sessions, and every callout since the stop guard (entry 85) was adopted fell
+into one of two gaps. A watch was alive but armed with no deadline and blind to
+non-blocking surfaces, so it could not wake the manager — and the guard counted it,
+because a process existed. Or the session still owed work that nothing was
+driving — a dead driver, a node parked on external CI, a failure hook that ended
+the run with decisions pending — so the guard had nothing to check: one
+transcript shows "no run this session launched is unwatched" printed beside a
+`DRIVER DEAD` run. The question the guard has to answer is whether each run the
+session owes will wake it within its wake budget.
+
+### The watch-terms record
+
+Every watch keeps writing its v1 lease under `runs/<run>/watchers/` **byte for
+byte as before** (entry 68), because an older engine sharing the run reads every
+file in that directory closed. Beside it the watch writes
+`runs/<run>/watch-terms/<the lease's own file name>`, read closed —
+`deny_unknown_fields`, a version the reader refuses, every field required:
+
+- `schema_version`: `1`;
+- `run_id`, `pid` (non-zero), `started`: the lease's own;
+- `deadline`: when the watch gives up on the clock, an RFC 3339 instant, or
+  `null` for `--timeout none`; `--timeout 0` records the arming instant;
+- `until`: the conditions the watch resolved, spelled as `--until` takes them
+  (`surface`, `node-settled`, `node=<ID>`, …), always including `settled` and
+  `nothing-driving`; a word `--until` does not take is refused;
+- `session`: the non-blank `ONEPIPELINE_LAUNCHER_SESSION` the watch was armed
+  under, else `null`; a blank one is refused.
+
+It is written before the lease and removed after it, so no reader meets this
+build's lease without its terms; a lease that could not be written takes its terms
+with it; and the arming sweep removes the terms of every lease it removes.
+`watch()` hands its resolved request to the arming call; which conditions exist is
+entry 58's and node `op-watch-wake`'s, and this record only spells them.
+
+### The wake budget
+
+`unwatched` and `stop-guard` take `--wake-budget SECONDS`, a positive whole number.
+Omitted, it is `ONEPIPELINE_WAKE_BUDGET`, which must be a positive whole number
+of seconds: set to anything else — blank, zero, negative, a fraction, a word — it
+is refused naming the variable (`unwatched` and `watch` exit `2`; `stop-guard`
+keeps entry 85's exit `0` and answers `warn` naming the variable). `watch`'s
+default `--timeout` is `ONEPIPELINE_WAKE_BUDGET` where it is set, and 300 seconds
+where it is not; because `watch` cannot tell a given `--timeout` from its default,
+it refuses a malformed variable whether or not `--timeout` was given.
+
+**With neither the flag nor the variable, "watched" keeps its old meaning — any
+live lease** — so a host that sets nothing sees no change. Under a budget `B`, an
+owed run is watched only by a **live** lease whose terms record matches it
+(`run_id`, `pid`, `started`), names the asking session, records a non-null
+deadline at most now + `B`, and whose `until` contains `surface`.
+
+### Deciding under the guard's safety rule
+
+Entry 85's rule stands: only a positively determined violation blocks, and every
+unknown warns. Per owed run, under a budget:
+
+- **passed** when any live lease meets the predicate, whatever else is live
+  beside it;
+- **reported** (so `stop-guard` blocks) when it has no live lease, or when every
+  live lease has a terms record that **positively fails** — a record that is not
+  this lease's, no deadline, a deadline past the budget, no `surface`, or another
+  session. The line says why in the terms' own words, for example `pid 4242: it
+  has no deadline (`--timeout none`)`;
+- **unknown** when no live lease passes and at least one is a lease with no terms
+  record (an older engine's watch), terms naming no session whose every other
+  conjunct holds, or terms that cannot be read. An unknown is named on standard
+  error, is not reported, changes no exit status, and makes `stop-guard` answer
+  `warn` naming it — never a block, and never silence. A run whose live leases
+  are one unknown and otherwise only positive failures is unknown. Every
+  conjunct is asked, so terms naming no session but recording no deadline fail
+  on the deadline.
+
+**Every reported line names the command that satisfies it.** For a run that can
+still move, `watch it with: onepipeline watch <RUN> --timeout <B>` under a
+`--wake-budget`, and bare `onepipeline watch <RUN>` where the environment sets the
+budget (it is `watch`'s default) or none is set. For a run whose graph has
+settled, the two ways to close it: `close it with a verdict whose `completion` is
+true: onepipeline reply <RUN>, or acknowledge it: onepipeline unwatched
+--acknowledge <RUN> --reason <TEXT>`. The continuation rule and `--source` are
+unchanged. None of this depends on how a run's observer is built or what kinds of
+surface it raises: the predicate reads the terms record and nothing about an
+observer graph.
+
+### Owed until closed
+
+A run the session launched is **owed** until it is **closed**, whatever its
+standing — driven, `DRIVER DEAD`, `PARKED`, `HOST SHUTDOWN`, or converged with
+failed nodes after a failure hook. It is closed when its stop is recorded, when
+its journal holds a `completion-requested` since it last re-opened, or when an
+acknowledgement naming its own session was made since it last re-opened. A later
+`driver-adopted` or `edit-committed` re-opens it; the stop half already cleared
+at adoption. **`graph_complete` alone no longer closes a run**, which is what hid
+a failure-hook ending: failed nodes count as settled there. A run whose success
+hook launched a follow-up is therefore owed until `complete` or an
+acknowledgement.
+
+The happy path needs no acknowledgement. `onepipeline reply` refused every reply
+to a settled run with no pending surface — "nothing will ever read a reply to
+it" — so a `complete` verdict there journalled nothing. It now takes the run as
+its single writer where nothing drives it, under the handover gate `reply`
+already takes, journals `planner-replied` and `completion-requested`, and answers
+entry 64's receipt with `state: applied-here`; a settled run a driver still holds
+is refused as before.
+
+The rule is read from the run summary, which `unwatched` may read where it may
+not read the journal (entry 68's cost rule). **Schema 8** adds three fields,
+omitted when empty: `owed_until_closed`, `completion_requested` (since the last
+re-open) and `reopened_at` (epoch milliseconds of the last `driver-adopted` or
+`edit-committed`, which an acknowledgement's `at` must be later than). The fold
+carries the same three in the checkpoint, which moves to schema 8. Exclusion
+still requires the document's stamp to match the journal; a document recording
+closure while behind its journal is undecidable, as entry 68's clause 3 says of
+settlement.
+
+### Migration
+
+A resumed long-lived session owns dozens of historical runs, and the guard must
+not suddenly owe them all. **The marker is the payload field
+`owed_until_closed: true`**, which this release writes on every `run-started` and
+every `driver-adopted` (`journal::OWED_UNTIL_CLOSED`), and which the fold makes
+sticky. A run none of whose records carry it — every run no driver of this
+release has driven — is decided by the old rule: stopped or `graph_complete`
+excludes it. The same historical run, once adopted by a driver of this release,
+is held to the closure rule from then on.
+
+### The acknowledgement
+
+`onepipeline unwatched --acknowledge <RUN> --reason <TEXT>` — the session from
+`--session` or the environment, as `unwatched` resolves it — writes
+`runs/<run>/acknowledgements/<nonce>.json`, read closed:
+`{schema_version: 1, run_id, session, reason, at}`, `at` an RFC 3339 instant, and
+prints one line naming the run, the session and the reason, exiting `0`. It
+refuses, naming why, and writes nothing — neither a record nor the directory —
+for a blank reason, a run id that is not one, a run root that is not there, or a
+run another session owns. It writes beside the run, never to the journal, so it
+needs no driver and takes no lock. An acknowledgement naming another session
+closes nothing for anybody; one that cannot be read is an unknown unless another
+closes the run anyway.
+
+### Older engines
+
+Asked of this node as the ruling's condition: what does an engine before schema
+8 — 0.53.1 and earlier, several of whose drivers are live on the host this was
+written for — do on a summary this build wrote? It reads it closed, refuses
+`schema_version 8`, and behaves exactly as this build behaves on a version
+**ahead** of it, which is what every earlier bump left too: its `runs` and
+`status` fold the run afresh and rewrite the document at its own schema (7), and
+its `unwatched` and `stop-guard` name the run on standard error as `its
+settlement cannot be decided: its summary document could not be read: summary
+schema_version 8, and this build reads 7`, changing no status and blocking
+nothing. An older driver maintains the document from its own in-memory account
+and never reads it back, so it overwrites it at 7; this build then refreshes a
+schema-7 document once, through the moved-past path of entry 68's clause (1),
+before deciding it — so a run moves between the two schemas without either build
+ever failing to read it. No hard error blocks `status`, `runs` or `unwatched` on
+either side. The same holds for the checkpoint, whose reader refolds a version it
+does not read. Read off the 0.53.1 reader (`src/summary.rs`'s `this_version` and
+`RunSummary::of`, and `src/unwatched.rs`'s `decide`, at `v0.53.1`); an older
+binary is not something the offline tier carries.
+
+```json
+{
+  "terms_schema_version": 1,
+  "terms_directory": "watch-terms",
+  "terms_fields": [
+    "schema_version",
+    "run_id",
+    "pid",
+    "started",
+    "deadline",
+    "until",
+    "session"
+  ],
+  "acknowledgement_schema_version": 1,
+  "acknowledgement_directory": "acknowledgements",
+  "acknowledgement_name": "<nonce>.json",
+  "acknowledgement_fields": [
+    "schema_version",
+    "run_id",
+    "session",
+    "reason",
+    "at"
+  ],
+  "wake_budget_environment": "ONEPIPELINE_WAKE_BUDGET",
+  "migration_field": "owed_until_closed",
+  "summary_fields": ["owed_until_closed", "completion_requested", "reopened_at"]
+}
+```
+
+`src/unwatched.rs`'s tests hold this block to `WatchTerms` and `Acknowledgement`
+both ways, as they hold entry 68's to `WatcherRecord`, and
+`tests/e2e/wake_budget.rs` drives every clause above through the compiled binary
+over real run roots, with real `onepipeline watch` processes holding the leases.

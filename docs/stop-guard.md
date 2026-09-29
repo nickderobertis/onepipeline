@@ -13,7 +13,7 @@ let the turn end.
 ## The contract
 
 ```
-onepipeline stop-guard [--session <ID>] [--continuation] [--format <FORMAT>] [--source <COMMAND>]... [--source-timeout <SECONDS>]
+onepipeline stop-guard [--session <ID>] [--continuation] [--format <FORMAT>] [--source <COMMAND>]... [--source-timeout <SECONDS>] [--wake-budget <SECONDS>]
 ```
 
 **Input** — the session whose stop this is, and whether the stop continues a
@@ -39,7 +39,7 @@ running under. `--session ""` is that same nothing.
 | Verdict | Object | When |
 | --- | --- | --- |
 | block | `{"verdict":"block","reason":"<report>"}` | A run the session owns is **proven** unwatched, or a [declared source](#declared-sources) refuses the stop or could not be consulted. With no source declared, `reason` is `onepipeline unwatched`'s own lines, byte for byte: one per run, naming it, its standing word, why nothing counts as watching it, and the `onepipeline watch <run>` that does. With sources declared it is the [combination](#declared-sources). |
-| warn | `{"verdict":"warn","message":"<one sentence>"}` | Something that is not evidence: the runs root could not be read, the question was refused, the engine answered with an error, or the guard's own memory could not be read, written or removed. The sentence names what could not be answered and the exact command to ask it by hand — `onepipeline unwatched --session <ID>` — and, where runs *are* unwatched over a memory the guard could not keep, names them and the `onepipeline watch <run>` for each. |
+| warn | `{"verdict":"warn","message":"<one sentence>"}` | Something that is not evidence: a run whose watch or closure could not be judged under a [wake budget](#the-wake-budget), a wake budget that could not be read, the runs root could not be read, the question was refused, the engine answered with an error, or the guard's own memory could not be read, written or removed. The sentence names what could not be answered and the exact command to ask it by hand — `onepipeline unwatched --session <ID>` — and, where runs *are* unwatched over a memory the guard could not keep, names them and the `onepipeline watch <run>` for each. |
 | none | `{"verdict":"none"}` | Nothing to say: the session owns nothing unwatched, the input could not be read or named no session, or this stop continues a block on a report that has not changed. |
 
 Nothing else is written on standard output. Standard error carries exactly what
@@ -68,6 +68,39 @@ source](#declared-sources), bounded by `--source-timeout`.
 payload off standard input and render the same verdict in the harness's
 decision shape. They are presentation over the one verdict — the decision path
 is the same — and they are the whole of the harness-specific text in this crate.
+
+## The wake budget
+
+`--wake-budget <SECONDS>` asks a sharper question than whether anything is
+watching: whether each run the session owes will **wake it** within that many
+seconds. Omitted, it is `ONEPIPELINE_WAKE_BUDGET`, a positive whole number of
+seconds; set to anything else it is a `warn` naming the variable, and nothing is
+refused. With neither, any live watch counts, exactly as before, so a host that
+sets nothing is unchanged. `onepipeline unwatched` takes the same flag and
+reads the same variable, so the report the guard blocks on is still that verb's
+own lines.
+
+Under a budget, a run is watched only by a live `onepipeline watch` armed under
+the asking session's `ONEPIPELINE_LAUNCHER_SESSION`, that returns on a surface
+(`--until surface`), and whose `--timeout` ends no later than the budget —
+`--timeout none` never does. Setting `ONEPIPELINE_WAKE_BUDGET` in the session's
+environment makes it `watch`'s default `--timeout` too, so the bare
+`onepipeline watch <RUN>` each blocked line names is the watch that meets it.
+
+- A run nothing watches, or whose every live watch positively fails — no
+  deadline, a deadline past the budget, no `surface`, another session's —
+  **blocks**, and the line says why.
+- A live watch the guard cannot judge — one an older engine armed, which records
+  no terms, one whose terms name no session, or terms it cannot read — makes the
+  run an unknown: a `warn` naming it, never a block and never silence.
+- A run is owed until it is **closed**, not until it settles: a failed or
+  finished graph still blocks until a `complete` verdict is sent with
+  `onepipeline reply`, the run is stopped, or the session acknowledges it with
+  `onepipeline unwatched --acknowledge <RUN> --reason <TEXT>`. A blocked settled
+  run's line names those two commands. Runs no driver of that release drove keep
+  the old rule, so a resumed session does not suddenly owe its history.
+
+Entry 96 of `docs/contract-divergences.md` states the whole rule.
 
 ## Declared sources
 

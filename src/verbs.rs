@@ -65,7 +65,9 @@ pub use crate::shutdown::{
     BranchPreserved, DispatchEnding, DispatchStopped, Preserved, RunShutdown, Shutdown,
     ShutdownRequest, ShutdownScope,
 };
-pub use crate::unwatched::{Unwatched, UnwatchedRun};
+pub use crate::unwatched::{
+    Acknowledgement, Unwatched, UnwatchedRun, WakeBudget, ACKNOWLEDGEMENT_SCHEMA_VERSION,
+};
 pub use crate::watch::{
     Ending as WatchEnding, Frame as WatchFrame, Lines as WatchLines, Monitored,
     Outcome as WatchOutcome, Request as WatchRequest,

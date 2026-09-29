@@ -281,6 +281,10 @@ pub(crate) struct RunStarted {
     pub(crate) dir: String,
     /// The check-in interval, in seconds.
     pub(crate) heartbeat_interval: u64,
+    /// `true` where the launching driver holds the run to the closure rule;
+    /// absent from a record an earlier build wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) owed_until_closed: Option<bool>,
 }
 
 /// `concurrent-acknowledged`: a launch beside live repository holders.
@@ -503,6 +507,10 @@ pub(crate) struct DriverAdopted {
     /// The dispatches the previous driver left running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) abandoned: Option<Vec<Abandoned>>,
+    /// `true` where the adopting driver holds the run to the closure rule;
+    /// absent from a record an earlier build wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) owed_until_closed: Option<bool>,
 }
 
 /// One dispatch a previous driver left behind.

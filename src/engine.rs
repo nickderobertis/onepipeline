@@ -962,6 +962,24 @@ pub(crate) fn accept(
     accepted
 }
 
+/// Take the run when nothing is driving it, or answer that something is.
+///
+/// [`accept`]'s own question with nothing to submit: asked under the same gate,
+/// by taking the same lock, so a caller writing to a run nothing drives is that
+/// run's single writer for as long as it holds what this returns.
+pub(crate) fn take_if_undriven(paths: &RunPaths) -> Result<Option<OwnershipLock>> {
+    let handover = ledger::Handover::hold(paths)?;
+    let taken = match OwnershipLock::acquire(paths, ledger::REPLY_VERB) {
+        Ok(lock) => Ok(Some(lock)),
+        Err(Error::Locked { .. }) => Ok(None),
+        // A lock nobody can be named as holding is still a claim on the run.
+        Err(unreadable) if ledger::is_unreadable_lock(&unreadable) => Ok(None),
+        Err(other) => Err(other),
+    };
+    drop(handover);
+    taken
+}
+
 /// The section itself, for a caller already inside the handover — apart from its
 /// gate for the reason [`letting_go_under_the_handover`] is.
 fn accepting_under_the_handover(

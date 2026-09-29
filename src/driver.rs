@@ -242,7 +242,11 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             // Both refusals are made before anything blocks: a run that is not
             // there, and a profile this run does not have. A watch that waited
             // out its whole timeout to report a mistyped profile name would be
-            // worse than the shell loop it replaces.
+            // worse than the shell loop it replaces. A wake budget the
+            // environment names and cannot be read is refused first: it is what
+            // `--timeout` defaults to, and a watch cannot say which wait it was
+            // given.
+            crate::cli::wake_budget_from_environment().map_err(Error::Invalid)?;
             let paths = resolve(&args.read.run)?;
             let filter = read_filter(&paths, &args.read)?;
             let request = verbs::WatchRequest {
@@ -269,7 +273,18 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         }
         Verb::Unwatched(args) => {
             let session = crate::unwatched::session(&args)?;
-            let unwatched = verbs::unwatched(&ledger::runs_root(), &session)?;
+            if let Some(run) = &args.acknowledge {
+                let acknowledged = verbs::Acknowledgement::record(
+                    &ledger::runs_root(),
+                    run,
+                    &session,
+                    args.reason.as_deref().unwrap_or_default(),
+                )?;
+                print!("{}", acknowledged.line());
+                return Ok(EXIT_SUCCESS);
+            }
+            let budget = verbs::WakeBudget::resolved(args.wake_budget)?;
+            let unwatched = verbs::Unwatched::within(&ledger::runs_root(), &session, budget)?;
             // llmlint: ignore-block[cli_output_contract] both streams are written here rather than
             // returned as one rendering, because the split *is* this verb's answer: the reported
             // runs are what a hook acts on and go on standard output, and everything unresolved is
@@ -295,6 +310,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             let (verdict, unresolved) = crate::stopguard::guard(
                 &ledger::runs_root(),
                 &asked,
+                verbs::WakeBudget::resolved(args.wake_budget).map_err(|error| error.to_string()),
                 &args.sources,
                 std::time::Duration::from_secs(args.source_timeout),
             );
@@ -1212,6 +1228,7 @@ fn start(args: &StartArgs) -> Result<i32> {
             // that happened to launch them.
             ("dir", json!(launch_dir)),
             ("heartbeat_interval", json!(args.heartbeat_interval)),
+            (journal::OWED_UNTIL_CLOSED, json!(true)),
         ]),
     )?;
 
@@ -2290,6 +2307,7 @@ fn report_and_journal_adoption(
     let mut adopted = vec![
         ("adoption", json!(record.adoptions)),
         ("pid", json!(record.pid)),
+        (journal::OWED_UNTIL_CLOSED, json!(true)),
     ];
     if !abandoned.is_empty() {
         adopted.push((
@@ -3080,6 +3098,22 @@ pub(crate) fn submit_envelope(
         // reads as `ACTIVE` until it does — and a run driven from another host
         // reads that way for good.
         if channel.pending().is_none() && crate::views::has_settled(&view) {
+            // Except the one reply a settled run is still owed: a `complete`
+            // verdict closes it for the session that launched it, and that is a
+            // record in the run's own journal rather than a reply anybody reads.
+            // Written by this process as the run's single writer, so only where
+            // nothing drives the run — a driver still closing it out will read
+            // nothing more, and the refusal below says so.
+            if envelope.completion == Some(true) && envelope.reason.is_some() {
+                channel.judge_reply(envelope, None::<edits::EnvelopeReview>)?;
+                if let Some(lock) = engine::take_if_undriven(paths)? {
+                    journal_verdict(paths, envelope)?;
+                    drop(lock);
+                    return Ok(Submitted::AppliedHere {
+                        operations: Vec::new(),
+                    });
+                }
+            }
             return Err(Error::Refused(format!(
                 "run '{}' has settled, so nothing will ever read a reply to it; \
                  no reply was queued",

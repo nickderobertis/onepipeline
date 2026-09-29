@@ -32,8 +32,9 @@ use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::cli::{StopGuardArgs, StopGuardFormat as Format};
+use crate::cli::{StopGuardArgs, StopGuardFormat as Format, WAKE_BUDGET_ENV};
 use crate::error::Error;
+use crate::unwatched::WakeBudget;
 
 /// The directory under the state root the per-session memories are kept in.
 const MEMORY_DIR: &str = "onepipeline/stop-guard";
@@ -222,6 +223,7 @@ fn named(session: String, continuation: bool) -> Option<Asked> {
 pub(crate) fn guard(
     root: &Path,
     asked: &Asked,
+    budget: std::result::Result<Option<WakeBudget>, String>,
     sources: &[String],
     timeout: Duration,
 ) -> (Verdict, Vec<String>) {
@@ -236,7 +238,7 @@ pub(crate) fn guard(
             .iter()
             .map(|&command| scope.spawn(move || consult(command, asked, timeout)))
             .collect();
-        let own = own(root, asked);
+        let own = own(root, asked, budget);
         let answered: Vec<Result<Answer, String>> = consulting
             .into_iter()
             .map(|consulting| {
@@ -259,20 +261,56 @@ pub(crate) fn guard(
 
 /// The verb's own answer: `unwatched` about the session, remembered under the
 /// session's own memory.
-fn own(root: &Path, asked: &Asked) -> (Verdict, Vec<String>) {
+///
+/// Under a wake budget a run can be neither reported nor passed: a live watch
+/// whose terms nothing here can judge is an **unknown**, and a run whose only
+/// verdict is unknown warns — never a block, because nothing positively failed,
+/// and never silence, because nothing positively passed.
+fn own(
+    root: &Path,
+    asked: &Asked,
+    budget: std::result::Result<Option<WakeBudget>, String>,
+) -> (Verdict, Vec<String>) {
     let session = asked.session.as_str();
-    let unwatched = match crate::unwatched::unwatched(root, session) {
-        Ok(unwatched) => unwatched,
+    // Asked before the question, because it is part of the question: a budget
+    // the environment names and this build cannot read leaves nothing to decide
+    // against, and the memory is left as it is, as for any question not asked.
+    let budget = match budget {
+        Ok(budget) => budget,
+        Err(why) => {
+            return (
+                Verdict::Warn(format!(
+                    "stop-guard: this stop is unguarded, because the wake budget could not be \
+                     read ({why}); fix {WAKE_BUDGET_ENV}, or pass `--wake-budget`, and ask it by \
+                     hand with `onepipeline unwatched --session {session}`."
+                )),
+                Vec::new(),
+            )
+        }
+    };
+    let answer = match crate::unwatched::asked(root, session, budget) {
+        Ok(answer) => answer,
         // The memory is left as it is: a question that could not be asked says
         // nothing about whether the condition it records moved, and a kept
         // memory changes no later verdict but an identical continuation's.
-        Err(error) => return (unguarded(session, &error), Vec::new()),
+        Err(error) => return (unguarded(session, budget, &error), Vec::new()),
     };
+    let unwatched = answer.unwatched;
     let name = own_memory(session);
     if unwatched.reported.is_empty() {
+        let unknown =
+            (!answer.unknown.is_empty()).then(|| unjudged(session, budget, &answer.unknown));
         return match forget(&name) {
-            Ok(()) => (Verdict::None, unwatched.unresolved),
-            Err(why) => (unforgotten(session, &why), unwatched.unresolved),
+            Ok(()) => (unknown.unwrap_or(Verdict::None), unwatched.unresolved),
+            Err(why) => (
+                combined(
+                    unknown
+                        .into_iter()
+                        .chain([unforgotten(session, budget, &why)])
+                        .collect(),
+                ),
+                unwatched.unresolved,
+            ),
         };
     }
     // The verb's own lines, byte for byte: they are what name the runs to watch
@@ -287,6 +325,7 @@ fn own(root: &Path, asked: &Asked) -> (Verdict, Vec<String>) {
                 return (
                     stood_aside(
                         session,
+                        budget,
                         &report,
                         &format!("could not read what it last blocked on ({why})"),
                     ),
@@ -309,6 +348,7 @@ fn own(root: &Path, asked: &Asked) -> (Verdict, Vec<String>) {
         return (
             stood_aside(
                 session,
+                budget,
                 &report,
                 &format!("could not record what it would block on ({why})"),
             ),
@@ -667,37 +707,58 @@ fn combined(verdicts: Vec<Verdict>) -> Verdict {
     }
 }
 
+/// The command a person runs to ask the guard's own question by hand.
+fn by_hand(session: &str, budget: Option<WakeBudget>) -> String {
+    format!(
+        "onepipeline unwatched --session {session}{}",
+        WakeBudget::flag(budget)
+    )
+}
+
 /// The warning for a question this guard could not ask.
-fn unguarded(session: &str, error: &Error) -> Verdict {
+fn unguarded(session: &str, budget: Option<WakeBudget>, error: &Error) -> Verdict {
     Verdict::Warn(format!(
         "stop-guard: this stop is unguarded, because whether a run this session owns is \
-         unwatched could not be answered ({error}); ask it by hand with `onepipeline unwatched \
-         --session {session}`."
+         unwatched could not be answered ({error}); ask it by hand with `{}`.",
+        by_hand(session, budget)
+    ))
+}
+
+/// The warning for runs whose watches or closure this guard could not judge:
+/// each, named with why, and nothing refused over them.
+fn unjudged(session: &str, budget: Option<WakeBudget>, unknown: &[String]) -> Verdict {
+    Verdict::Warn(format!(
+        "stop-guard: {} run(s) this session owns could not be judged, so this stop was not \
+         refused over them and is not vouched for either — watch each with a bounded `{ARM_A_WATCH}` \
+         armed under this session, or close it, and ask again with `{}`:\n{}",
+        unknown.len(),
+        by_hand(session, budget),
+        unknown.concat().trim_end()
     ))
 }
 
 /// The warning for runs that *are* unwatched over a memory this guard could
 /// not keep: the runs, and why it refused nothing over them.
-fn stood_aside(session: &str, report: &str, because: &str) -> Verdict {
+fn stood_aside(session: &str, budget: Option<WakeBudget>, report: &str, because: &str) -> Verdict {
     let lines: Vec<&str> = report.lines().collect();
     Verdict::Warn(format!(
         "stop-guard: {} run(s) this session owns are unwatched and this stop was not refused, \
          because whether it had already been refused for the same runs could not be answered \
-         — the guard {because}; ask it by hand with `onepipeline unwatched --session {session}` \
-         and arm `{ARM_A_WATCH} <run>` on each:\n{}",
+         — the guard {because}; ask it by hand with `{}` and do what each line names:\n{}",
         lines.len(),
+        by_hand(session, budget),
         lines.join("\n")
     ))
 }
 
 /// The warning for a session with nothing unwatched whose memory this guard
 /// could not remove: what was answered, what was not, and how to finish it.
-fn unforgotten(session: &str, why: &str) -> Verdict {
+fn unforgotten(session: &str, budget: Option<WakeBudget>, why: &str) -> Verdict {
     Verdict::Warn(format!(
         "stop-guard: nothing this session owns is unwatched, but the guard could not remove \
          what it last blocked on ({why}), so a later continuation over that same report would \
-         be let through unrefused; remove it by hand, and ask again with `onepipeline unwatched \
-         --session {session}`."
+         be let through unrefused; remove it by hand, and ask again with `{}`.",
+        by_hand(session, budget)
     ))
 }
 

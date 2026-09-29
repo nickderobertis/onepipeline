@@ -695,6 +695,22 @@ pub const SETTLED_HEAD: &str = "head";
 /// does not fold it, finds at the moment it happened.
 pub const ADOPTED_ABANDONED: &str = "abandoned";
 
+/// The `run-started` and `driver-adopted` payload field saying the driver that
+/// wrote it holds the run to the closure rule: its launching session owes it
+/// attention until it is **closed**, whatever its standing.
+///
+/// `true` wherever it is written, and absent from every record an earlier build
+/// wrote — which is the whole of its meaning: a run no record of which carries it
+/// was never driven under that rule, and is decided by the rule it was driven
+/// under. Entry 96 of `docs/contract-divergences.md` states both rules.
+pub const OWED_UNTIL_CLOSED: &str = "owed_until_closed";
+
+/// Whether one `run-started` or `driver-adopted` payload carries
+/// [`OWED_UNTIL_CLOSED`].
+pub(crate) fn owed_until_closed(payload: &Map<String, Value>) -> bool {
+    payload.get(OWED_UNTIL_CLOSED).and_then(Value::as_bool) == Some(true)
+}
+
 /// The `outcome` a `node-settled` carries when a `settle` wrote it rather than a
 /// dispatch.
 ///

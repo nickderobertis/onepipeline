@@ -295,6 +295,23 @@ impl RunPaths {
         self.watchers().join(format!("{pid}-{nonce}.json"))
     }
 
+    /// The directory each live watch's **terms** are recorded in, one document
+    /// per lease under the lease's own file name.
+    ///
+    /// Beside `watchers/` rather than inside it, because a build before the terms
+    /// record reads every file in that directory closed as a lease, and a second
+    /// shape there would read to it as a record it cannot parse. Private for the
+    /// reason [`watchers`](Self::watchers) is.
+    pub(crate) fn watch_terms(&self) -> PathBuf {
+        self.dir.join("watch-terms")
+    }
+
+    /// The directory the launching session's acknowledgements of this run are
+    /// kept in, one document each.
+    pub(crate) fn acknowledgements(&self) -> PathBuf {
+        self.dir.join("acknowledgements")
+    }
+
     /// The single-writer ownership lock the engine verbs hold.
     pub fn lock(&self) -> PathBuf {
         self.dir.join("owner.lock")
