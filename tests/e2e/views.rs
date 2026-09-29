@@ -362,6 +362,7 @@ fn status_carries_the_provider_health_block_from_the_sibling() {
 
 /// How many times `onepipeline` has asked the `oneagentgraph` double for the
 /// provider report.
+// llmlint: ignore[tests_mirror_real_usage] the task this journey proves requires showing that `status --no-providers` makes no provider-health call, and that call is a subprocess spawn of the sibling, so the sibling's side of that process boundary is the only place it is observable; the double records each spawn it receives, as `World::was_invoked` reads it for every journey asserting what `oneagentgraph` was asked.
 fn health_asked(world: &World) -> usize {
     world
         .invocations()
@@ -415,6 +416,9 @@ fn status_without_providers_omits_the_report_asks_for_none_and_moves_no_other_li
     for scope in [vec!["status", run.as_str()], vec!["status"]] {
         let reported = world.run(&scope);
         reported.exited(0);
+        // llmlint: ignore-block[tests_mirror_real_usage] the provider-health call is a spawn of
+        // the sibling, observable only at the double that receives it; the full reason is at
+        // `health_asked`.
         let asked = health_asked(&world);
         let omitted = world.run(&[scope.as_slice(), &["--no-providers"]].concat());
         omitted.exited(0);
@@ -424,6 +428,7 @@ fn status_without_providers_omits_the_report_asks_for_none_and_moves_no_other_li
             "`{}` asked oneagentgraph for the provider report",
             omitted.args
         );
+        // llmlint: ignore-end[tests_mirror_real_usage]
         omitted.out_lacks("providers:");
         assert_eq!(omitted.stderr, reported.stderr, "{}", omitted.args);
         // Everything above the report, and nothing below it: the report is the

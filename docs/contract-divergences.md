@@ -7908,3 +7908,7 @@ further record to standard output.
 
 `tests/e2e/views.rs` and `tests/e2e/watch.rs` drive the compiled binary through both, and
 `tests/parity.rs` holds `Status::render_without_providers` to the binary's output.
+`tests/contract.rs`'s `the_supervision_flags_are_what_divergence_95_and_the_readme_name` holds
+this entry's flags, renderer and exit statuses, and the README's `status` flags, to the code,
+and `the_divergence_entry_proposes_exactly_the_flags_this_build_offers` in `src/watch.rs` holds
+entry 58's synopsis to `watch`'s.
