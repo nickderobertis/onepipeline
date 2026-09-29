@@ -293,6 +293,9 @@ pub const WATCH_ELAPSED: i32 = onepipeline::error::EXIT_WATCH_ELAPSED;
 /// A `watch` returning because a node it was told to return on settled.
 pub const NODE_SETTLED: i32 = onepipeline::error::EXIT_NODE_SETTLED;
 
+/// A `watch` armed on a run nothing was driving returning because the run moved.
+pub const RUN_CHANGED: i32 = onepipeline::error::EXIT_RUN_CHANGED;
+
 /// `unwatched` answering that at least one run this session owns has nothing
 /// watching it.
 pub const RUNS_UNWATCHED: i32 = onepipeline::error::EXIT_RUNS_UNWATCHED;
