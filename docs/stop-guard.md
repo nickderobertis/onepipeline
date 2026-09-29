@@ -71,36 +71,18 @@ is the same — and they are the whole of the harness-specific text in this crat
 
 ## The wake budget
 
-`--wake-budget <SECONDS>` asks a sharper question than whether anything is
-watching: whether each run the session owes will **wake it** within that many
-seconds. Omitted, it is `ONEPIPELINE_WAKE_BUDGET`, a positive whole number of
-seconds; set to anything else it is a `warn` naming the variable, and nothing is
-refused. With neither, any live watch counts, exactly as before, so a host that
-sets nothing is unchanged. `onepipeline unwatched` takes the same flag and
-reads the same variable, so the report the guard blocks on is still that verb's
-own lines.
+To have the guard ask whether each run the session owes will **wake it** in
+time, rather than whether anything is watching it, export
+`ONEPIPELINE_WAKE_BUDGET=<SECONDS>` in the environment the session and its hook
+run in, or pass `--wake-budget <SECONDS>` on the hook's command line. Setting the
+variable also makes it `onepipeline watch`'s default `--timeout`, so the bare
+`onepipeline watch <RUN>` a blocked line names, run from that session, is the
+watch that clears it. Leave both unset and nothing changes.
 
-Under a budget, a run is watched only by a live `onepipeline watch` armed under
-the asking session's `ONEPIPELINE_LAUNCHER_SESSION`, that returns on a surface
-(`--until surface`), and whose `--timeout` ends no later than the budget —
-`--timeout none` never does. Setting `ONEPIPELINE_WAKE_BUDGET` in the session's
-environment makes it `watch`'s default `--timeout` too, so the bare
-`onepipeline watch <RUN>` each blocked line names is the watch that meets it.
-
-- A run nothing watches, or whose every live watch positively fails — no
-  deadline, a deadline past the budget, no `surface`, another session's —
-  **blocks**, and the line says why.
-- A live watch the guard cannot judge — one an older engine armed, which records
-  no terms, one whose terms name no session, or terms it cannot read — makes the
-  run an unknown: a `warn` naming it, never a block and never silence.
-- A run is owed until it is **closed**, not until it settles: a failed or
-  finished graph still blocks until a `complete` verdict is sent with
-  `onepipeline reply`, the run is stopped, or the session acknowledges it with
-  `onepipeline unwatched --acknowledge <RUN> --reason <TEXT>`. A blocked settled
-  run's line names those two commands. Runs no driver of that release drove keep
-  the old rule, so a resumed session does not suddenly owe its history.
-
-Entry 96 of `docs/contract-divergences.md` states the whole rule.
+A blocked line names what clears it; a `warn` names a run whose watch or closure
+the guard could not judge. A run that has settled is cleared by closing it —
+`onepipeline reply <RUN>` with a `complete` verdict, or
+`onepipeline unwatched --acknowledge <RUN> --reason <TEXT>`.
 
 ## Declared sources
 

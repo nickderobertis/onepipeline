@@ -72,7 +72,7 @@ fn held(world: &World, name: &str) -> String {
 /// `onepipeline reply`: a run this engine drives is owed to its session until it
 /// is closed rather than until it settles (entry 96), so a settled run that
 /// nobody closed is not the excluded run the journeys below are about.
-fn settled(world: &World, name: &str) -> String {
+fn settled_and_closed(world: &World, name: &str) -> String {
     let path = world.plan(name, &plan_of(name, vec![agent("build", &[])]));
     world.run(&["start", &path, "--attach"]).settled();
     world.until("the run to settle", |world| {
@@ -681,11 +681,11 @@ fn a_settled_run_is_excluded_and_a_document_recording_settlement_behind_its_jour
 {
     let world = World::new("unwatched-settled");
     world.script("build.work", "the worker wrote this\n");
-    let complete = settled(&world, "unwatchedcomplete");
+    let complete = settled_and_closed(&world, "unwatchedcomplete");
     // A run whose graph did not complete, stopped by a planner: the other of the
     // two facts a settled run is excluded on.
     world.script("build.fail", "1");
-    let stopped = settled(&world, "unwatchedstopped");
+    let stopped = settled_and_closed(&world, "unwatchedstopped");
     world.run(&["stop", &stopped, "--force"]).exited(0);
 
     // Both are excluded, and both were excluded on a document whose stamp matches
@@ -838,7 +838,7 @@ const STANDING_WORDS: [&str; 4] = ["ACTIVE", "PARKED", "DRIVER DEAD", "UNDRIVEN"
 fn a_document_at_a_superseded_schema_is_refreshed_and_decided_from_the_run() {
     let world = World::new("unwatched-superseded");
     world.script("build.work", "the worker wrote this\n");
-    let run = settled(&world, "unwatchedsuperseded");
+    let run = settled_and_closed(&world, "unwatchedsuperseded");
     let paths = paths_of(&world, &run);
     let written = document(&paths);
 
@@ -888,7 +888,7 @@ fn a_document_at_a_superseded_schema_is_refreshed_and_decided_from_the_run() {
     // release's document is reported from what its store says, never silenced.
     // The run the mixed-root half below leaves undecidable is settled first, while
     // the worker script still runs to completion.
-    let undecided = settled(&world, "unwatchedalongside");
+    let undecided = settled_and_closed(&world, "unwatchedalongside");
     let undecided_paths = paths_of(&world, &undecided);
     world.script("build.wait", "hold");
     // Beating while held, so the run goes on recording between this build's
@@ -1059,7 +1059,7 @@ const UNDECIDABLE: [Undecidable; 5] = [
 fn the_verb_decides_runs_whose_merged_store_cannot_be_read() {
     let world = World::new("unwatched-unreadablestore");
     world.script("build.work", "the worker wrote this\n");
-    let settled_run = settled(&world, "unwatchedsettledstore");
+    let settled_run = settled_and_closed(&world, "unwatchedsettledstore");
     world.script("build.wait", "hold");
     let reported = held(&world, "unwatchedheldstore");
 
@@ -1153,7 +1153,7 @@ fn store_unreadable(paths: &RunPaths) {
 fn a_run_whose_settlement_cannot_be_decided_is_named_on_standard_error_and_changes_no_status() {
     let world = World::new("unwatched-undecidable");
     world.script("build.work", "the worker wrote this\n");
-    let run = settled(&world, "unwatchedundecided");
+    let run = settled_and_closed(&world, "unwatchedundecided");
     let paths = paths_of(&world, &run);
     let written = document(&paths);
 
@@ -1953,9 +1953,9 @@ fn unwatched_opens_no_run_store_that_is_there() {
     world.script("build.work", "the worker wrote this\n");
     // Three runs this session owns, in the three states this verb's settlement
     // reading meets: a current document, none at all, and one behind its journal.
-    let current = settled(&world, "unwatchedcurrent");
-    let absent = settled(&world, "unwatchedabsent");
-    let stale = settled(&world, "unwatchedstale");
+    let current = settled_and_closed(&world, "unwatchedcurrent");
+    let absent = settled_and_closed(&world, "unwatchedabsent");
+    let stale = settled_and_closed(&world, "unwatchedstale");
     world.script("build.wait", "hold");
     let reported = held(&world, "unwatchedheld");
 

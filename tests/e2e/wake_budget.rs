@@ -551,6 +551,7 @@ fn a_watch_the_budget_cannot_judge_makes_the_guard_warn_and_never_block() {
     let sessionless = world.as_session("unknown-sessionless");
     let garbled = world.as_session("unknown-garbled");
     let mixed = world.as_session("unknown-mixed");
+    let acknowledged = world.as_session("unknown-acknowledged");
     // A watch armed with no session in its environment, of a run `sessionless`
     // owns.
     let nobody = world.as_session("").with_env(SESSION_ENV, "");
@@ -594,10 +595,32 @@ fn a_watch_the_budget_cannot_judge_makes_the_guard_warn_and_never_block() {
     end(failing);
     // llmlint: ignore-end[tests_mirror_real_usage]
 
+    // An acknowledgement that cannot be read may be the word that closes a run,
+    // so the run it sits beside is an unknown too, budget or none.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb writes an acknowledgement it
+    // cannot read back; what this stands in for is a writer killed mid-write or a record a
+    // later build wrote. Every claim afterwards is read off the compiled binary.
+    let run = settled(&acknowledged, "unknownacknowledged", "e", &[]);
+    let dir = acknowledged.run_file(&run, "acknowledgements");
+    std::fs::create_dir_all(&dir).expect("the acknowledgements");
+    std::fs::write(
+        dir.join("0123456789abcdef0000.json"),
+        "{\"schema_version\": 1",
+    )
+    .expect("the acknowledgement");
+    unknown(
+        &acknowledged,
+        &[],
+        &run,
+        "an acknowledgement of it cannot be read",
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
     for node in ["a", "b", "c", "d"] {
         world.release(&format!("{node}.go"));
     }
-    drop((untermed, sessionless, garbled, mixed, nobody));
+    drop((untermed, sessionless, garbled, mixed, nobody, acknowledged));
 }
 
 /// With neither `--wake-budget` nor `ONEPIPELINE_WAKE_BUDGET`, any live lease
@@ -896,6 +919,31 @@ fn a_complete_verdict_closes_a_settled_run_and_a_stop_closes_any() {
         "SETTLED",
         &format!("onepipeline reply {run}, or acknowledge it"),
     );
+    // Where a driver still holds it — here a lock nobody can be named as holding,
+    // which is a claim on the run all the same — the verdict is refused as any
+    // reply to a settled run is, and nothing is written.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb leaves an ownership lock
+    // nobody can read beside a settled run; it stands in for a driver still closing the
+    // run out, a window no journey can hold open without racing it. It is removed again
+    // before the verdict the rest of the journey sends.
+    let lock = completing.run_file(&run, "owner.lock");
+    std::fs::write(&lock, "not a lock this build wrote").expect("the lock");
+    completing
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"completion":true,"reason":"too soon"}"#,
+        )
+        .exited(REFUSED)
+        .err_has("has settled");
+    assert!(
+        completing
+            .events_of(&run, "completion-requested")
+            .is_empty(),
+        "a verdict refused over a held run was journalled"
+    );
+    std::fs::remove_file(&lock).expect("the lock");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let replied = completing.run_with_stdin(
         &["reply", &run],
         r#"{"completion":true,"reason":"the goal is met"}"#,
@@ -1085,4 +1133,47 @@ fn the_verdict_is_the_same_whatever_observes_the_run() {
     world.release("turn.settle");
     world.release("observer.go");
     drop((bare, observed));
+}
+
+/// What `docs/stop-guard.md` tells a host to set is what the binary reads: the
+/// variable is this build's, every flag the section names is one the verbs
+/// offer, and the command it says closes a settled run is the one a blocked
+/// line names for it.
+#[test]
+fn the_stop_guard_page_names_the_budget_the_binary_reads() {
+    let world = World::new("wake-page");
+    let page = std::fs::read_to_string(crate::harness::repo_file("docs/stop-guard.md"))
+        .expect("the page ships");
+    let section = page
+        .split("## The wake budget")
+        .nth(1)
+        .and_then(|rest| rest.split("\n## ").next())
+        .expect("the page has a wake budget section")
+        .to_owned();
+    assert!(
+        section.contains(&format!("`{WAKE_BUDGET_ENV}=<SECONDS>`")),
+        "{section}"
+    );
+    let mut offered = std::collections::BTreeSet::new();
+    for verb in ["stop-guard", "watch", "unwatched"] {
+        let help = world.run(&[verb, "--help"]);
+        help.exited(0);
+        offered.extend(crate::stop_guard::flags_of(&help.stdout));
+    }
+    let named = crate::stop_guard::flags_of(&section);
+    assert!(
+        named.is_subset(&offered),
+        "the page names flags no verb offers: {:?}",
+        named.difference(&offered).collect::<Vec<_>>()
+    );
+
+    // The closing command, as a blocked line spells it for a settled run.
+    let run = settled(&world, "wakepage", "build", &[]);
+    let line = unwatched(&world, &[]).exited(RUNS_UNWATCHED).stdout.clone();
+    let spelled = "onepipeline unwatched --acknowledge <RUN> --reason <TEXT>";
+    assert!(section.contains(spelled), "{section}");
+    assert!(
+        line.contains(&spelled.replace("<RUN>", &run)),
+        "a blocked settled run's line is not the page's command: {line}"
+    );
 }
