@@ -2520,12 +2520,20 @@ fn reconcile_edits(
     mut deliveries: Option<&mut NoteDeliveries>,
 ) -> Result<bool> {
     let mut changed = false;
-    let mut claimed = match deliveries.as_deref_mut() {
-        Some(deliveries) if deliveries.outstanding.is_some() => return Ok(false),
-        Some(deliveries) => std::mem::take(&mut deliveries.behind),
-        None => std::collections::VecDeque::new(),
-    };
-    claimed.extend(channel.claim_commands()?);
+    if deliveries
+        .as_deref()
+        .is_some_and(|deliveries| deliveries.outstanding.is_some())
+    {
+        return Ok(false);
+    }
+    // Claimed before the held envelopes are taken, so a queue that refuses the
+    // claim leaves them held for the next pass rather than dropped with the error.
+    let fresh = channel.claim_commands()?;
+    let mut claimed = deliveries
+        .as_deref_mut()
+        .map(|deliveries| std::mem::take(&mut deliveries.behind))
+        .unwrap_or_default();
+    claimed.extend(fresh);
     while let Some(envelope) = claimed.pop_front() {
         let author = envelope.author.clone();
         let commands = &envelope.commands;
@@ -9333,6 +9341,136 @@ mod tests {
         assert_eq!(shown.labels.node.as_deref(), Some("build"));
         assert_eq!(shown.payload["party"], json!("worker"));
         assert_eq!(shown.payload["turn"], json!(3));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Envelopes held behind an outstanding note survive a queue that refuses the
+    /// next claim, and are judged, in order, once the queue answers again.
+    ///
+    /// A queue that refuses a claim is a run store an operator has been in or a
+    /// filesystem that has run out, which no CLI journey can arrange mid-hold; so
+    /// this drives the real queue and the real reconciler with the channel's
+    /// directory taken by a file, and then given back.
+    #[test]
+    fn envelopes_held_behind_a_note_outlast_a_queue_that_refuses_the_claim() {
+        let root = std::env::temp_dir().join(format!("onepipeline-held-{}", sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let launch = LaunchRecord {
+            run_id: "demo".into(),
+            project: "plans:demo".into(),
+            dir: root.clone(),
+            graph: String::new(),
+            graph_run: String::new(),
+            observer_runs: Vec::new(),
+            observer_ending: String::new(),
+            node_graph: String::new(),
+            pr_author_graph: String::new(),
+            node_validator: String::new(),
+            envelope_reviewer: String::new(),
+            launcher: "held-envelopes".into(),
+            session: "a-session".into(),
+            pid: 0,
+            host: String::new(),
+            started: String::new(),
+            started_at: sys::now_rfc3339(),
+            heartbeat_interval: 1_800,
+            writeback_item_budget: 0,
+            success_hook: String::new(),
+            failure_hook: String::new(),
+            hook_timeout: 0,
+            dispatch_env_hook: String::new(),
+            dispatch_env_hook_timeout: 0,
+            dag_sets: Vec::new(),
+            node_sets: Vec::new(),
+            adoptions: 0,
+            filters: crate::filter::Filters::default(),
+            bus_config: Default::default(),
+            maintenance_config: None,
+            branch_template: String::new(),
+            template_root: String::new(),
+            require_rendered: false,
+            oneharness_sessions: None,
+            envelope_reviewer_bar: Default::default(),
+        };
+        let cancel = |id: &str| Command::Cancel {
+            id: id.to_owned(),
+            reason: None,
+        };
+        let channel = ChannelState::new(&paths);
+        let first = channel
+            .submit(crate::channel::Author::planner(), &[cancel("first")])
+            .expect("the first envelope is queued");
+        let second = channel
+            .submit(crate::channel::Author::planner(), &[cancel("second")])
+            .expect("the second envelope is queued");
+        let (handing, _handed) = mpsc::channel();
+        let mut deliveries = NoteDeliveries {
+            handing,
+            outstanding: None,
+            behind: channel
+                .claim_commands()
+                .expect("both envelopes are claimed")
+                .into(),
+        };
+        let mut journal = Journal::open(&paths);
+        let mut state = Projected::open(&paths);
+
+        let aside = root.join("channel-aside");
+        std::fs::rename(paths.channel_dir(), &aside).expect("the channel is moved aside");
+        std::fs::write(paths.channel_dir(), "not a directory").expect("its place is taken");
+        let refused = reconcile_edits(
+            &paths,
+            &mut journal,
+            &mut state,
+            &ChannelState::new(&paths),
+            &launch,
+            &mut BTreeMap::new(),
+            Some(&mut deliveries),
+        );
+        assert!(
+            refused.is_err(),
+            "a queue that cannot be opened was claimed from"
+        );
+        let held: Vec<u64> = deliveries
+            .behind
+            .iter()
+            .map(|envelope| envelope.id)
+            .collect();
+        assert_eq!(
+            held,
+            [first, second],
+            "the envelopes held behind the note were dropped with the refused claim"
+        );
+
+        std::fs::remove_file(paths.channel_dir()).expect("the file is taken away");
+        std::fs::rename(&aside, paths.channel_dir()).expect("the channel is given back");
+        let channel = ChannelState::new(&paths);
+        reconcile_edits(
+            &paths,
+            &mut journal,
+            &mut state,
+            &channel,
+            &launch,
+            &mut BTreeMap::new(),
+            Some(&mut deliveries),
+        )
+        .expect("the queue answers again");
+        assert!(
+            deliveries.idle(),
+            "an envelope is still held after the queue answered"
+        );
+        let answered: Vec<u64> = channel
+            .outcomes()
+            .iter()
+            .map(|outcome| outcome.id)
+            .collect();
+        assert_eq!(
+            answered,
+            [first, second],
+            "the held envelopes were not each answered, in the order they were claimed"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
