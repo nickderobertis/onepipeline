@@ -642,8 +642,15 @@ fn a_watch_whose_terms_cannot_be_written_is_an_unknown() {
     let run = held(&world, "wakeunwritable", "a");
     // A file where the terms directory goes: the watch's own write of its terms
     // then fails, on every platform, however the process is privileged.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb makes a watch's terms write
+    // fail: what this stands in for is a runs root the watch may not write into (a full
+    // disk, a read-only mount, another user's directory), which no command produces. Only
+    // that one directory is obstructed; the run is started, watched and asked about through
+    // the compiled binary, and every claim afterwards is read off its own streams.
     std::fs::write(world.run_file(&run, "watch-terms"), "not a directory")
         .expect("the obstruction");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let watch = watching(&world, &run, &["--timeout", WITHIN]);
     assert!(
         world.run_file(&run, "watch-terms").is_file(),
