@@ -1063,6 +1063,16 @@ pub(crate) mod tests {
             &|t| t["until"] = serde_json::json!(["surface", "lunch"]),
             "lunch",
         );
+        // And the two every watch returns on, which no record this build writes
+        // leaves out.
+        refused(
+            &|t| t["until"] = serde_json::json!(["surface", "settled"]),
+            "nothing-driving",
+        );
+        refused(
+            &|t| t["until"] = serde_json::json!(["surface", "nothing-driving"]),
+            "settled",
+        );
         refused(&|t| t["session"] = serde_json::json!("  "), "session");
         refused(&|t| t["pid"] = serde_json::json!(0), "");
 

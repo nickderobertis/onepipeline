@@ -203,7 +203,8 @@ fn a_deadline<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Option<Stri
     Ok(found)
 }
 
-/// Read the conditions: each one a word `--until` takes.
+/// Read the conditions: each one a word `--until` takes, and among them the two
+/// every watch returns on, which every record this build writes carries.
 fn conditions<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Vec<String>, D::Error> {
     let found = Vec::<String>::deserialize(reader)?;
     for word in &found {
@@ -213,8 +214,19 @@ fn conditions<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Vec<String>
             ))
         })?;
     }
+    for always in ALWAYS_UNTIL {
+        if !found.iter().any(|word| word == always) {
+            return Err(serde::de::Error::custom(format!(
+                "until does not name '{always}', which every watch returns on"
+            )));
+        }
+    }
     Ok(found)
 }
+
+/// The conditions every watch returns on whatever it was told, as `--until`
+/// spells them.
+const ALWAYS_UNTIL: [&str; 2] = ["settled", "nothing-driving"];
 
 /// Read a session: one that names somebody, or `null`.
 fn a_session<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Option<String>, D::Error> {
@@ -925,7 +937,7 @@ fn terms_of(
     for condition in conditions
         .iter()
         .map(ToString::to_string)
-        .chain(["settled".to_owned(), "nothing-driving".to_owned()])
+        .chain(ALWAYS_UNTIL.map(str::to_owned))
     {
         if !until.contains(&condition) {
             until.push(condition);

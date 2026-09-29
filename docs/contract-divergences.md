@@ -7980,7 +7980,8 @@ file in that directory closed. Beside it the watch writes
   `null` for `--timeout none`; `--timeout 0` records the arming instant;
 - `until`: the conditions the watch resolved, spelled as `--until` takes them
   (`surface`, `node-settled`, `node=<ID>`, …), always including `settled` and
-  `nothing-driving`; a word `--until` does not take is refused;
+  `nothing-driving`; a word `--until` does not take is refused, and so is a
+  record that leaves out either of those two, as one this build did not write;
 - `session`: the `ONEPIPELINE_LAUNCHER_SESSION` the watch was armed under, or
   `null` where that variable was unset or blank — a watch is never refused for
   it, since the ruling records it `null`; a **record** carrying a blank string
