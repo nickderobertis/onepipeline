@@ -2354,22 +2354,21 @@ fn cursor_byte(token: &str) -> u64 {
         .unwrap_or_else(|| panic!("`{token}` is not a cursor"))
 }
 
-/// The events a watch resumed from `cursor` prints of what the run has
-/// journalled since, each with its human line — read once, without the log.
-fn events_since(world: &World, run: &str, cursor: &str) -> Vec<Frame> {
-    let resumed = world.run(&[
-        "watch",
-        run,
-        "--cursor",
-        cursor,
-        "--timeout",
-        "0",
-        "--tick-interval",
-        "0",
-    ]);
+/// The events a watch prints of the run, each with its human line — read once,
+/// without the log, from `cursor` or, with none, from the run's start.
+fn events_since(world: &World, run: &str, cursor: Option<&str>) -> Vec<Frame> {
+    let mut args = vec!["watch", run, "--timeout", "0", "--tick-interval", "0"];
+    args.extend(
+        cursor
+            .map(|cursor| ["--cursor", cursor])
+            .into_iter()
+            .flatten(),
+    );
+    let resumed = world.run(&args);
     assert!(
         resumed.code != REFUSED && resumed.code != USAGE_ERROR,
-        "a watch resumed from `{cursor}` was refused: {}",
+        "`{}` was refused: {}",
+        resumed.args,
         resumed.stderr
     );
     let mut frames = framed(&resumed, &resumed.stderr);
@@ -2382,17 +2381,17 @@ fn events_since(world: &World, run: &str, cursor: &str) -> Vec<Frame> {
 /// standard error, and the human lines appended to the log after whatever it
 /// held already.
 ///
-/// "The same standard output" is read against the run's journal rather than
-/// byte for byte, because the run is live between the two: each watch reads
-/// from wherever the journal stood when it started and returns wherever it
-/// stood when its condition fired, so the second can print an event the first
-/// never reached, and returns at a later cursor. So every event either printed
-/// must be the journal's own envelope, in journal order; where the two read the
-/// same stretch of journal they must print the same events with the same human
-/// lines; what the later one printed past the earlier one's end must be exactly
-/// what a watch resumed from the earlier one's cursor prints; resuming from the
-/// later one's cursor must print none of what it already did; and the return
-/// records must agree in everything but the cursor and the unread age, which
+/// "The same standard output" is read against what the verb itself prints of
+/// the whole run rather than byte for byte, because the run is live between the
+/// two: each watch reads from wherever the run stood when it started and returns
+/// wherever it stood when its condition fired, so the second can print an event
+/// the first never reached, and returns at a later cursor. So the events each
+/// printed must be one unbroken stretch, byte for byte and with the same human
+/// lines, of what a watch reading the run from its start prints afterwards; what
+/// the later one printed past the earlier one's end must be exactly what a watch
+/// resumed from the earlier one's cursor prints; resuming from the later one's
+/// cursor must print none of what it already did; and the return records must
+/// agree byte for byte in everything but the cursor and the unread age, which
 /// are functions of when each one read.
 ///
 /// Answers the watch without the log, so the caller's assertions about the
@@ -2438,60 +2437,31 @@ fn logged_alike(world: &World, args: &[&str], log: &std::path::Path) -> Run {
         .to_string();
     let run = run.as_str();
 
-    // Every event is the journal's own envelope, and each watch prints them in
-    // the order the journal holds them.
-    let journal = world.journal(run);
-    let placed = |frames: &[Frame]| -> Vec<usize> {
-        let at: Vec<usize> = frames
-            .iter()
-            .map(|(line, _)| {
-                let record = parsed(line);
-                assert_eq!(
-                    record["watch"],
-                    json!("event"),
-                    "{}",
-                    differ("a record before the return is not an event")
-                );
-                journal
-                    .iter()
-                    .position(|entry| *entry == record["event"])
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "{}",
-                            differ(&format!("{record} is no envelope the journal holds"))
-                        )
-                    })
-            })
-            .collect();
-        assert!(
-            at.windows(2).all(|pair| pair[0] < pair[1]),
-            "{}",
-            differ("events out of journal order")
-        );
-        at
-    };
-    let plain_at = placed(&plain_frames);
-    let logged_at = placed(&logged_frames);
-
-    // Over the stretch both read, the same events with the same human lines.
-    if let (Some(first), Some(last)) = (
-        plain_at.first().max(logged_at.first()),
-        plain_at.last().min(logged_at.last()),
-    ) {
-        let within = |at: &[usize], frames: &[Frame]| -> Vec<Frame> {
-            at.iter()
-                .zip(frames)
-                .filter(|(index, _)| (first..=last).contains(index))
-                .map(|(_, frame)| frame.clone())
-                .collect()
-        };
+    // Each watch's events are one unbroken stretch of what the verb prints of
+    // the whole run.
+    let whole = events_since(world, run, None);
+    let stretch = |frames: &[Frame]| -> std::ops::Range<usize> {
+        let from = frames.first().map_or(0, |first| {
+            whole
+                .iter()
+                .position(|frame| frame == first)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{}",
+                        differ(&format!("`{}` is no event of the run", first.0))
+                    )
+                })
+        });
         assert_eq!(
-            within(&logged_at, &logged_frames),
-            within(&plain_at, &plain_frames),
+            whole.get(from..from + frames.len()),
+            Some(frames),
             "{}",
-            differ("over the journal both read")
+            differ("its events are not one stretch of what a watch of the whole run prints")
         );
-    }
+        from..from + frames.len()
+    };
+    let plain_at = stretch(&plain_frames);
+    let logged_at = stretch(&logged_frames);
 
     // The return: the same answer, at a cursor each resume confirms.
     let unplaced = |(line, human): &Frame| {
@@ -2519,34 +2489,22 @@ fn logged_alike(world: &World, args: &[&str], log: &std::path::Path) -> Run {
     // resumed from the earlier cursor prints first; and a watch resumed from the
     // later cursor prints what follows that, and none of it again.
     let (earlier, later) = if cursor_byte(&logged_cursor) >= cursor_byte(&plain_cursor) {
-        (
-            (&plain_cursor, &plain_at),
-            (&logged_cursor, &logged_at, &logged_frames),
-        )
+        ((&plain_cursor, plain_at), (&logged_cursor, logged_at))
     } else {
-        (
-            (&logged_cursor, &logged_at),
-            (&plain_cursor, &plain_at, &plain_frames),
-        )
+        ((&logged_cursor, logged_at), (&plain_cursor, plain_at))
     };
-    let past: Vec<Frame> = later
-        .1
-        .iter()
-        .zip(later.2)
-        .filter(|(index, _)| earlier.1.last().is_none_or(|last| *index > last))
-        .map(|(_, frame)| frame.clone())
-        .collect();
-    let since_earlier = events_since(world, run, earlier.0);
+    let past = &whole[earlier.1.end.max(later.1.start)..later.1.end];
+    let since_earlier = events_since(world, run, Some(earlier.0));
     assert_eq!(
         since_earlier.get(..past.len()),
-        Some(&past[..]),
+        Some(past),
         "{}",
         differ(&format!(
             "past `{}`, other than a watch resumed from it prints",
             earlier.0
         ))
     );
-    let since_later = events_since(world, run, later.0);
+    let since_later = events_since(world, run, Some(later.0));
     assert_eq!(
         since_later.get(..since_earlier.len() - past.len()),
         Some(&since_earlier[past.len()..]),
