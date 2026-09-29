@@ -76,6 +76,7 @@ mod concurrency;
 mod criteria;
 mod crossdag;
 mod destination;
+mod discharge;
 mod dispatchenv;
 mod driver;
 mod edits;

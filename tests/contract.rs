@@ -5341,6 +5341,71 @@ fn a_reconciler_finding_that_asks_for_an_edit_is_answered_by_that_edit() {
     );
 }
 
+/// A decision about a node a committed edit took out of the graph is
+/// discharged by that edit.
+///
+/// The Channel paragraph's sentence divergence 96 adopted, and the entry's own
+/// account of the two rulings behind it, held beside the finding rule it
+/// extends. Nothing on the wire moves for it: the answer is a reply bound to the
+/// surface's correlation and the mark is the `abandoned` flag the surface record
+/// already declares, which this round-trips.
+#[test]
+fn a_decision_about_a_removed_node_is_discharged_by_that_edit() {
+    let contract = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
+    for states in [
+        "**A decision about a node a committed edit removed is discharged by that edit.**",
+        "When a committed `retry` supersedes, or a `drop` removes, the node a standing blocking \
+         surface names as its `workstream`, the same commit discharges that surface",
+        "carrying that correlation and a `reason` naming the edit that removed the node",
+        "one raised under no correlation is marked abandoned by its own id",
+        "`status` no longer reports it and `watch --until surface` does not end on it",
+        "a surface about a node still in the graph is never discharged this way",
+        "its verdict is appended beside that answer rather than refused",
+    ] {
+        assert!(
+            contract.contains(states),
+            "the contract no longer states: {states}"
+        );
+    }
+
+    let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergence record ships");
+    let record = record.split_whitespace().collect::<Vec<_>>().join(" ");
+    for states in [
+        "## 96. A decision about a node a committed edit removed stayed pending for the life of \
+         the run — RESOLVED",
+        "**Ruling: when a committed edit drops or supersedes the node a pending decision surface \
+         is about, the engine answers that surface",
+        "**A second ruling, for the surface with no correlation**",
+        "no correlation is minted for blocking findings to get there",
+    ] {
+        assert!(
+            record.contains(states),
+            "the divergence record no longer states: {states}"
+        );
+    }
+
+    // The mark a surface raised under no correlation is discharged with is a
+    // field the published surface record already carries.
+    let marked = json!({
+        "id": 7,
+        "kind": "finding",
+        "message": "build is writing to the wrong table",
+        "source": "proposal",
+        "blocking": true,
+        "queued_at": 1,
+        "workstream": "build",
+        "abandoned": true,
+    });
+    let surface: Surface = serde_json::from_value(marked.clone()).expect("the surface parses");
+    assert!(surface.abandoned && surface.correlation.is_none());
+    assert_eq!(
+        serde_json::to_value(&surface).expect("it serialises"),
+        marked,
+        "a discharged surface did not round-trip unchanged"
+    );
+}
+
 #[test]
 fn the_contract_declares_an_open_surface_kind_vocabulary() {
     let check_in: SurfaceKind = serde_json::from_value(json!("check-in")).expect("parses");
@@ -6916,6 +6981,10 @@ const RULINGS: &[(&str, &str)] = &[
     (
         "94.",
         "`template_root` and `require_rendered` are keys of launch-config `schema_version: 12`",
+    ),
+    (
+        "96.",
+        "A decision about a node a committed edit removed is discharged by that edit.",
     ),
 ];
 

@@ -1644,6 +1644,23 @@ impl ChannelState {
             .collect()
     }
 
+    /// The surface the log queued under `correlation`, answered or not.
+    ///
+    /// Read by [`discharge::answered_alongside`](crate::discharge::answered_alongside),
+    /// which needs the node a question was about after the answer has taken it
+    /// off the queue.
+    pub(crate) fn raised_under(&self, correlation: &Correlation) -> Option<Surface> {
+        self.surfaces()
+            .ok()?
+            .raw()
+            .log(None)
+            .ok()?
+            .into_iter()
+            .filter(|(line, _)| line.get("event").and_then(Value::as_str) == Some("queued"))
+            .filter_map(|(line, _)| serde_json::from_value::<Surface>(line).ok())
+            .find(|surface| surface.correlation.as_ref() == Some(correlation))
+    }
+
     /// Every question still waiting for its answer, oldest first: each surface
     /// the log queued under a correlation no reply on the reply log carries.
     fn outstanding(&self) -> crate::Result<Vec<Surface>> {

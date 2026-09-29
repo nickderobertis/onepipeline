@@ -3018,8 +3018,13 @@ fn deliver_verdict_half(
         // refused — which is right for a verdict naming a question some earlier
         // reply answered, and wrong for this one, since it would report a failure
         // for a reply whose edit has landed. Asked of this envelope's own
-        // commands, so nothing else reaches the append.
-        Some(named) if crate::findings::answered_alongside(paths, named, &envelope.commands) => {
+        // commands, so nothing else reaches the append. The same holds for a
+        // question whose node this envelope's `retry` or `drop` took out of the
+        // graph, which that commit answered.
+        Some(named)
+            if crate::findings::answered_alongside(paths, named, &envelope.commands)
+                || crate::discharge::answered_alongside(paths, named, &envelope.commands) =>
+        {
             channel.answer_if_verdict_alongside(envelope, named)?;
         }
         named => channel.answer_if_verdict_bound(envelope, named)?,
