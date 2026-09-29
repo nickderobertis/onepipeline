@@ -70,16 +70,17 @@ pub(crate) fn answer_removed(paths: &RunPaths, operations: &[edits::Operation]) 
 }
 
 /// Whether the question `correlation` names was answered by the removal of its
-/// node, and `commands` carry the edit that removed it.
+/// node, by the edit `commands` carry.
 ///
 /// The discharge's half of the exception
 /// [`findings::answered_alongside`](crate::findings::answered_alongside) states:
 /// an envelope's commands are committed before its verdict half is delivered, so
 /// a `reply --correlation C` carrying the `retry` or `drop` of C's node finds C
 /// answered by its own edit by the time it is bound, and refusing it would report
-/// a failure for a reply whose edit has landed. Asked of the envelope, so a
-/// verdict carrying no such command still meets the refusal a question an
-/// earlier reply answered always met.
+/// a failure for a reply whose edit has landed. Asked of the envelope **and** of
+/// the answer: C's only answer has to be the one this envelope's own edit
+/// produced, so a question an earlier reply answered is refused as it always
+/// was, whatever the later reply carries.
 pub(crate) fn answered_alongside(
     paths: &RunPaths,
     correlation: &Correlation,
@@ -92,10 +93,24 @@ pub(crate) fn answered_alongside(
     else {
         return false;
     };
-    commands.iter().any(|command| {
-        matches!(command, Command::Retry { .. } | Command::Drop { .. })
-            && crate::channel::target_of(command).as_deref() == Some(node.as_str())
-    }) && channel.answered().contains(correlation)
+    let produced: Vec<Reply> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::Retry { id, node: by } if *id == node => Some(Removal::Superseded {
+                replacement: by.id.clone(),
+            }),
+            Command::Drop { id, .. } if *id == node => Some(Removal::Dropped),
+            _ => None,
+        })
+        .map(|removal| answer(&node, &removal))
+        .collect();
+    let answers: Vec<Reply> = channel
+        .replies()
+        .into_iter()
+        .filter(|queued| queued.correlation.as_ref() == Some(correlation))
+        .map(|queued| queued.reply)
+        .collect();
+    matches!(answers.as_slice(), [only] if produced.contains(only))
 }
 
 /// The edit that took a node out of the graph, as the answer names it.
@@ -310,7 +325,7 @@ mod tests {
         let key: Correlation = "c-gone".parse().expect("a correlation");
         let command = |op: &str, id: &str| {
             serde_json::from_value::<Command>(match op {
-                "retry" => serde_json::json!({"op": "retry", "id": id, "node": {"id": "x"}}),
+                "retry" => serde_json::json!({"op": "retry", "id": id, "node": {"id": format!("{id}-again")}}),
                 _ => serde_json::json!({"op": op, "id": id, "dependents": "detach"}),
             })
             .expect("the command parses")
@@ -328,7 +343,8 @@ mod tests {
             &key,
             &[command("retry", "gone")]
         ));
-        assert!(answered_alongside(
+        // A `drop` of the same node is not the edit whose answer is on the log.
+        assert!(!answered_alongside(
             &scratch.paths,
             &key,
             &[command("drop", "gone")]
@@ -339,6 +355,26 @@ mod tests {
             &[command("retry", "other")]
         ));
         assert!(!answered_alongside(&scratch.paths, &key, &[]));
+
+        // A question an earlier verdict answered took no answer from any
+        // removal, so the same edit arriving later does not reach the exception.
+        scratch.raised("answered", Some("c-answered"), true);
+        let answered: Correlation = "c-answered".parse().expect("a correlation");
+        ChannelState::new(&scratch.paths)
+            .answer_bound(
+                &Reply {
+                    message: Some("keep it".into()),
+                    ..Reply::default()
+                },
+                Some(&answered),
+            )
+            .expect("the question is answered");
+        answer_removed(&scratch.paths, &retried("answered")).expect("the commit is recorded");
+        assert!(!answered_alongside(
+            &scratch.paths,
+            &answered,
+            &[command("retry", "answered")]
+        ));
         let stranger: Correlation = "c-never".parse().expect("a correlation");
         assert!(!answered_alongside(
             &scratch.paths,

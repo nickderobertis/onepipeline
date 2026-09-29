@@ -4330,6 +4330,35 @@ fn a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit() {
         world.release(&format!("{node}.go"));
     }
 
+    // A question an earlier reply answered is refused by a later verdict naming
+    // it even when that verdict carries the retry of its node: the removal is
+    // committed, and answered nothing, because the question already had its
+    // answer.
+    world
+        .run_with_stdin(
+            &["reply", &run, "--correlation", &standing_key],
+            &json!({
+                "version": 2,
+                "message": "and retry it too",
+                "commands": [{
+                    "op": "retry", "id": "kept",
+                    "node": {
+                        "id": "kept-again", "persona": "engineer",
+                        "task": "## What\nDo kept again.\n\n## Why\nIt was stopped.\n\n\
+                                 ## Acceptance criteria\n- kept is done."
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .exited(REFUSED);
+    let answers = answers_to(&world, &run, &standing_key);
+    assert_eq!(
+        answers.len(),
+        1,
+        "a later reply appended to a question an earlier one answered: {answers:#?}"
+    );
+
     // With nothing driving the run, `reply` applies its own edit before it
     // delivers its verdict — so a reply bound to the question by name and
     // carrying the retry of its node finds that question answered by its own
