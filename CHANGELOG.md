@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.53.0](https://github.com/nickderobertis/onepipeline/compare/v0.52.1...v0.53.0) - 2026-09-29
+
+### Added
+
+- *(views)* add `status --no-providers` and `watch --log PATH` ([#574](https://github.com/nickderobertis/onepipeline/pull/574))
+
+### Fixed
+
+- *(engine)* deliver live manager notes off the run's single writer ([#573](https://github.com/nickderobertis/onepipeline/pull/573))
+- *(deps)* link the onetaskgraph release that filters tasks by comment activity ([#575](https://github.com/nickderobertis/onepipeline/pull/575))
+- *(lifecycle)* name the published tip in a re-dispatch and require commits on top of it ([#569](https://github.com/nickderobertis/onepipeline/pull/569))
+
 ## [0.52.1](https://github.com/nickderobertis/onepipeline/compare/v0.52.0...v0.52.1) - 2026-09-28
 
 ### Performance
