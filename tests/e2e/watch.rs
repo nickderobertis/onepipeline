@@ -2311,13 +2311,92 @@ fn every_refusal_a_watch_makes_is_made_before_it_blocks() {
     world.release("build.go");
 }
 
-/// Run one watch twice over the same state — as it always ran, then with
-/// `--log` — and hold the two to one answer: the same exit status and the same
-/// standard output, nothing on standard error, and the human lines the first
-/// wrote to standard error appended to the log after whatever it held already.
+/// One frame a watch wrote: its machine record as the bytes it printed, and
+/// the human line beside it.
+type Frame = (String, String);
+
+/// Pair a watch's machine records with the human lines it wrote beside them,
+/// one for one, as `say` writes them.
+fn framed(watched: &Run, human: &str) -> Vec<Frame> {
+    let records: Vec<String> = watched.stdout.lines().map(str::to_string).collect();
+    let lines: Vec<String> = human.lines().map(str::to_string).collect();
+    assert_eq!(
+        records.len(),
+        lines.len(),
+        "`{}` did not write one human line per machine record:\n--- stdout ---\n{}\n--- human ---\n{human}",
+        watched.args,
+        watched.stdout
+    );
+    records.into_iter().zip(lines).collect()
+}
+
+fn parsed(line: &str) -> Value {
+    serde_json::from_str(line).unwrap_or_else(|e| panic!("not a JSON record ({e}): {line}"))
+}
+
+/// A return record's bytes with the unread age — a function of when it was
+/// read, not of what — written as a placeholder.
+fn ageless(line: &str) -> String {
+    const AGE: &str = "\"oldest_seconds\":";
+    let Some(at) = line.find(AGE).map(|at| at + AGE.len()) else {
+        return line.to_string();
+    };
+    let digits = line[at..].bytes().take_while(u8::is_ascii_digit).count();
+    format!("{}<age>{}", &line[..at], &line[at + digits..])
+}
+
+/// The byte a cursor token names.
+fn cursor_byte(token: &str) -> u64 {
+    token
+        .rsplit(':')
+        .next()
+        .and_then(|at| at.parse().ok())
+        .unwrap_or_else(|| panic!("`{token}` is not a cursor"))
+}
+
+/// The events a watch resumed from `cursor` prints of what the run has
+/// journalled since, each with its human line — read once, without the log.
+fn events_since(world: &World, run: &str, cursor: &str) -> Vec<Frame> {
+    let resumed = world.run(&[
+        "watch",
+        run,
+        "--cursor",
+        cursor,
+        "--timeout",
+        "0",
+        "--tick-interval",
+        "0",
+    ]);
+    assert!(
+        resumed.code != REFUSED && resumed.code != USAGE_ERROR,
+        "a watch resumed from `{cursor}` was refused: {}",
+        resumed.stderr
+    );
+    let mut frames = framed(&resumed, &resumed.stderr);
+    frames.pop();
+    frames
+}
+
+/// Run one watch twice — as it always ran, then with `--log` — and hold the two
+/// to one answer: the same exit status and the same standard output, nothing on
+/// standard error, and the human lines appended to the log after whatever it
+/// held already.
 ///
-/// Answers the watch without the log, whose standard error is what the log was
-/// held to, so the caller's assertions about the human form read the same lines.
+/// "The same standard output" is read against the run's journal rather than
+/// byte for byte, because the run is live between the two: each watch reads
+/// from wherever the journal stood when it started and returns wherever it
+/// stood when its condition fired, so the second can print an event the first
+/// never reached, and returns at a later cursor. So every event either printed
+/// must be the journal's own envelope, in journal order; where the two read the
+/// same stretch of journal they must print the same events with the same human
+/// lines; what the later one printed past the earlier one's end must be exactly
+/// what a watch resumed from the earlier one's cursor prints; resuming from the
+/// later one's cursor must print none of what it already did; and the return
+/// records must agree in everything but the cursor and the unread age, which
+/// are functions of when each one read.
+///
+/// Answers the watch without the log, so the caller's assertions about the
+/// human form read the lines it wrote to standard error.
 fn logged_alike(world: &World, args: &[&str], log: &std::path::Path) -> Run {
     let plain = world.run(&[&["watch"], args].concat());
     let before = std::fs::read_to_string(log).unwrap_or_default();
@@ -2326,11 +2405,6 @@ fn logged_alike(world: &World, args: &[&str], log: &std::path::Path) -> Run {
     assert_eq!(
         logged.code, plain.code,
         "`{}` exited differently from the same watch without the log",
-        logged.args
-    );
-    assert_eq!(
-        logged.stdout, plain.stdout,
-        "`{}` wrote a different machine form from the same watch without the log",
         logged.args
     );
     assert_eq!(
@@ -2345,10 +2419,139 @@ fn logged_alike(world: &World, args: &[&str], log: &std::path::Path) -> Run {
             logged.args
         )
     });
+
+    let differ = |what: &str| {
+        format!(
+            "`{}` wrote a different machine form from the same watch without the log — {what}:\n--- logged ---\n{}\n--- plain ---\n{}",
+            logged.args, logged.stdout, plain.stdout
+        )
+    };
+    let mut plain_frames = framed(&plain, &plain.stderr);
+    let mut logged_frames = framed(&logged, appended);
+    let (plain_end, logged_end) = (
+        plain_frames.pop().expect("a watch ends on a return"),
+        logged_frames.pop().expect("a watch ends on a return"),
+    );
+    let run = parsed(&plain_end.0)["run_id"]
+        .as_str()
+        .expect("a return names its run")
+        .to_string();
+    let run = run.as_str();
+
+    // Every event is the journal's own envelope, and each watch prints them in
+    // the order the journal holds them.
+    let journal = world.journal(run);
+    let placed = |frames: &[Frame]| -> Vec<usize> {
+        let at: Vec<usize> = frames
+            .iter()
+            .map(|(line, _)| {
+                let record = parsed(line);
+                assert_eq!(
+                    record["watch"],
+                    json!("event"),
+                    "{}",
+                    differ("a record before the return is not an event")
+                );
+                journal
+                    .iter()
+                    .position(|entry| *entry == record["event"])
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{}",
+                            differ(&format!("{record} is no envelope the journal holds"))
+                        )
+                    })
+            })
+            .collect();
+        assert!(
+            at.windows(2).all(|pair| pair[0] < pair[1]),
+            "{}",
+            differ("events out of journal order")
+        );
+        at
+    };
+    let plain_at = placed(&plain_frames);
+    let logged_at = placed(&logged_frames);
+
+    // Over the stretch both read, the same events with the same human lines.
+    if let (Some(first), Some(last)) = (
+        plain_at.first().max(logged_at.first()),
+        plain_at.last().min(logged_at.last()),
+    ) {
+        let within = |at: &[usize], frames: &[Frame]| -> Vec<Frame> {
+            at.iter()
+                .zip(frames)
+                .filter(|(index, _)| (first..=last).contains(index))
+                .map(|(_, frame)| frame.clone())
+                .collect()
+        };
+        assert_eq!(
+            within(&logged_at, &logged_frames),
+            within(&plain_at, &plain_frames),
+            "{}",
+            differ("over the journal both read")
+        );
+    }
+
+    // The return: the same answer, at a cursor each resume confirms.
+    let unplaced = |(line, human): &Frame| {
+        let cursor = parsed(line)["cursor"]
+            .as_str()
+            .expect("a return carries a cursor")
+            .to_string();
+        (
+            ageless(&line.replace(&cursor, "<cursor>")),
+            human.replace(&cursor, "<cursor>"),
+            cursor,
+        )
+    };
+    let (plain_return, plain_line, plain_cursor) = unplaced(&plain_end);
+    let (logged_return, logged_line, logged_cursor) = unplaced(&logged_end);
     assert_eq!(
-        appended, plain.stderr,
-        "`{}` logged other lines than the same watch wrote to standard error",
-        logged.args
+        logged_return,
+        plain_return,
+        "{}",
+        differ("the return record")
+    );
+    assert_eq!(logged_line, plain_line, "{}", differ("the ending line"));
+
+    // Past the earlier return, the later watch printed exactly what a watch
+    // resumed from the earlier cursor prints first; and a watch resumed from the
+    // later cursor prints what follows that, and none of it again.
+    let (earlier, later) = if cursor_byte(&logged_cursor) >= cursor_byte(&plain_cursor) {
+        (
+            (&plain_cursor, &plain_at),
+            (&logged_cursor, &logged_at, &logged_frames),
+        )
+    } else {
+        (
+            (&logged_cursor, &logged_at),
+            (&plain_cursor, &plain_at, &plain_frames),
+        )
+    };
+    let past: Vec<Frame> = later
+        .1
+        .iter()
+        .zip(later.2)
+        .filter(|(index, _)| earlier.1.last().is_none_or(|last| *index > last))
+        .map(|(_, frame)| frame.clone())
+        .collect();
+    let since_earlier = events_since(world, run, earlier.0);
+    assert_eq!(
+        since_earlier.get(..past.len()),
+        Some(&past[..]),
+        "{}",
+        differ(&format!(
+            "past `{}`, other than a watch resumed from it prints",
+            earlier.0
+        ))
+    );
+    let since_later = events_since(world, run, later.0);
+    assert_eq!(
+        since_later.get(..since_earlier.len() - past.len()),
+        Some(&since_earlier[past.len()..]),
+        "{}",
+        differ(&format!("`{}` is not where it stopped reading", later.0))
     );
     plain
 }
