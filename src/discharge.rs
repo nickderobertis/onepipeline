@@ -235,10 +235,11 @@ mod tests {
         }]
     }
 
-    /// What the journeys cannot put a run into: surfaces the rule must leave
-    /// alone even though their node left — one raised under no correlation, one
-    /// that holds nothing back, one nobody is waiting on — beside the one it
-    /// answers, which it answers once however often the removal is recorded.
+    /// Every shape a surface about a removed node can take, in one queue: the
+    /// question it answers — once, however often the removal is recorded — the
+    /// decision raised under no correlation it marks abandoned instead, and the
+    /// report that holds nothing back and the question about a node still in the
+    /// graph, both of which it leaves alone.
     #[test]
     fn only_a_standing_decision_about_the_removed_node_is_discharged() {
         let scratch = Scratch::new("scope");

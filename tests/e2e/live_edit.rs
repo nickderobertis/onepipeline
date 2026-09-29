@@ -4213,6 +4213,24 @@ fn a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit() {
     // stay standing.
     let dropped = asking_about(&world, &run, "other", "should other ship first?");
     let dropped_key = question_about(&world, &run, "other");
+    // Read off the queue, so this one is discharged out of the pending slot
+    // rather than out of `waiting`. `next` hands over what is still in `waiting`
+    // oldest first, the question the retry already answered included, so it is
+    // read until this one is the one handed over.
+    let mut handed = Vec::new();
+    while handed.last() != Some(&json!(dropped_key)) {
+        assert!(
+            handed.len() < 4,
+            "`next` never handed over the question: {handed:?}"
+        );
+        let next = world.run(&["next", &run]);
+        next.exited(0);
+        handed.push(next.json()["surface"]["correlation"].clone());
+    }
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision: planner-question — should other ship first?");
     let gone = "other is duplicating kept's work";
     world
         .run_with_stdin(
@@ -4261,6 +4279,10 @@ fn a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit() {
         json!(true),
         "the drop left the finding about its node standing: {other:#}"
     );
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("should other ship first?");
     let answers = answers_to(&world, &run, &dropped_key);
     assert_eq!(answers.len(), 1, "{answers:#?}");
     assert!(
@@ -4314,6 +4336,7 @@ fn a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit() {
     // commit. Its verdict is recorded beside that answer rather than refused.
     let asked = asking_about(&world, &run, "holder", "should holder wait for kept?");
     let key = question_about(&world, &run, "holder");
+    let holder_key = key.clone();
     world
         .run_with_stdin(
             &["reply", &run, "--correlation", &key],
@@ -4382,5 +4405,27 @@ fn a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit() {
         "the verdict beside the drop was not recorded against the question: {answers:#?}"
     );
     let _ = asked.wait_with_output().expect("the question ends");
+
+    // The exception is the answering reply's alone: a later verdict naming a
+    // question a removal already answered is refused, whether it carries no edit
+    // or an edit of some other node, and appends nothing to it.
+    let standing = answers_to(&world, &run, &holder_key).len();
+    for commands in [
+        json!([]),
+        json!([{"op": "amend", "id": "kept", "text": "## What\nstill kept"}]),
+    ] {
+        world
+            .run_with_stdin(
+                &["reply", &run, "--correlation", &holder_key],
+                &json!({"version": 2, "message": "and once more", "commands": commands})
+                    .to_string(),
+            )
+            .exited(REFUSED);
+        assert_eq!(
+            answers_to(&world, &run, &holder_key).len(),
+            standing,
+            "a later reply appended to a question a removal already answered"
+        );
+    }
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
