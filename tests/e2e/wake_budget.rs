@@ -462,22 +462,30 @@ fn under_a_budget(given: Given, name: &str) {
     );
     end(watch);
 
-    // An owed run nothing drives, and nothing watches.
-    let run = held(dead, &format!("{name}dead"), "e");
-    let pid = dead.run_json(&run, "launch.json")["pid"]
-        .as_u64()
-        .expect("the launch record names a pid") as u32;
-    crate::harness::end_process(pid);
-    dead.until("the driver to read as dead", |world| {
-        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
-    });
-    blocked(
-        dead,
-        &args,
-        &run,
-        "nothing has recorded a watch on it",
-        &given.arm(&run),
-    );
+    // An owed run nothing drives, and nothing watches. **Unix** only, because its
+    // driver is ended by pid and `harness::end_process` has no Windows spelling —
+    // the same terms `driver.rs`'s adoption journeys are gated on. Off Unix the
+    // case is deliberately absent rather than skipped.
+    #[cfg(unix)]
+    {
+        let run = held(dead, &format!("{name}dead"), "e");
+        let pid = dead.run_json(&run, "launch.json")["pid"]
+            .as_u64()
+            .expect("the launch record names a pid") as u32;
+        crate::harness::end_process(pid);
+        dead.until("the driver to read as dead", |world| {
+            world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+        });
+        blocked(
+            dead,
+            &args,
+            &run,
+            "nothing has recorded a watch on it",
+            &given.arm(&run),
+        );
+    }
+    #[cfg(not(unix))]
+    let _ = dead;
 
     // A terms record that is not its lease's, on each of the three it must match.
     //
