@@ -855,8 +855,11 @@ impl Armed {
     /// and it removes only what `WatchStanding::proved_gone` admits.
     ///
     /// The terms go down **before** the lease and come away **after** it, so no
-    /// reader finds this lease without its terms: a lease with none is what an
-    /// older engine's watch leaves, and it reads as an unknown.
+    /// reader finds this lease without terms this watch wrote. Where the terms
+    /// cannot be written the lease still is, and reads as a watch whose terms
+    /// cannot be judged — an unknown, which makes the guard warn under a budget
+    /// and counts as watching without one — rather than as no watch at all; `wake_budget::a_watch_whose_terms_cannot_be_written_is_an_unknown`
+    /// drives that through the binary.
     pub(crate) fn arm(paths: &RunPaths, request: &crate::watch::Request) -> Self {
         Self::sweep(paths);
         let pid = sys::pid();

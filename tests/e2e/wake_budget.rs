@@ -565,9 +565,10 @@ fn a_watch_the_budget_cannot_judge_makes_the_guard_warn_and_never_block() {
     let nobody = world.as_session("").with_env(SESSION_ENV, "");
 
     // llmlint: ignore-block[tests_mirror_real_usage] no verb of this build leaves a lease
-    // without its terms, or terms it cannot read: the first is what an older engine's watch
-    // leaves, which predates the record, and the second what a writer killed mid-write
-    // leaves. Each is staged on a live watch's own files by taking its terms away or
+    // without its terms where it can write them, or terms it cannot read: the first is what
+    // an older engine's watch leaves, which predates the record (the journey after this one
+    // drives the one way this build leaves it, through the binary), and the second what a
+    // writer killed mid-write leaves. Each is staged on a live watch's own files by taking its terms away or
     // cutting them short; every claim afterwards is read off the compiled binary.
     let run = held(&untermed, "unknownuntermed", "a");
     let watch = watching(&untermed, &run, &["--timeout", WITHIN]);
@@ -629,6 +630,34 @@ fn a_watch_the_budget_cannot_judge_makes_the_guard_warn_and_never_block() {
         world.release(&format!("{node}.go"));
     }
     drop((untermed, sessionless, garbled, mixed, nobody, acknowledged));
+}
+
+/// A watch that cannot write its terms still writes its lease, so the run is
+/// not read as unwatched: under a budget it is an unknown — `unwatched` names it
+/// on standard error and the guard warns — and without one the lease counts, as
+/// any live lease does.
+#[test]
+fn a_watch_whose_terms_cannot_be_written_is_an_unknown() {
+    let world = World::new("wake-unwritable");
+    let run = held(&world, "wakeunwritable", "a");
+    // A file where the terms directory goes: the watch's own write of its terms
+    // then fails, on every platform, however the process is privileged.
+    std::fs::write(world.run_file(&run, "watch-terms"), "not a directory")
+        .expect("the obstruction");
+    let watch = watching(&world, &run, &["--timeout", WITHIN]);
+    assert!(
+        world.run_file(&run, "watch-terms").is_file(),
+        "the watch wrote terms where it could not"
+    );
+    unknown(
+        &world,
+        &["--wake-budget", BUDGET],
+        &run,
+        "its terms record cannot be read",
+    );
+    passed(&world, &[]);
+    end(watch);
+    world.release("a.go");
 }
 
 /// With neither `--wake-budget` nor `ONEPIPELINE_WAKE_BUDGET`, any live lease
