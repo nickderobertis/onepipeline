@@ -43,7 +43,16 @@ const ARM_A_WATCH: &str = "watch it with: onepipeline watch";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WakeBudget {
     seconds: NonZeroU64,
-    from_environment: bool,
+    said: Said,
+}
+
+/// Where a [`WakeBudget`] was said.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Said {
+    /// As `--wake-budget`, which a watch has to be told as well.
+    Flag,
+    /// As `ONEPIPELINE_WAKE_BUDGET`, which is `watch`'s own default too.
+    Environment,
 }
 
 impl WakeBudget {
@@ -51,7 +60,7 @@ impl WakeBudget {
     pub const fn given(seconds: NonZeroU64) -> Self {
         Self {
             seconds,
-            from_environment: false,
+            said: Said::Flag,
         }
     }
 
@@ -66,7 +75,7 @@ impl WakeBudget {
             .map(|named| {
                 named.map(|seconds| Self {
                     seconds,
-                    from_environment: true,
+                    said: Said::Environment,
                 })
             })
             .map_err(Error::Invalid)
@@ -103,7 +112,7 @@ impl WakeBudget {
     /// leading space included, or nothing where the environment already says it.
     pub(crate) fn flag(budget: Option<Self>) -> String {
         match budget {
-            Some(budget) if !budget.from_environment => {
+            Some(budget) if budget.said == Said::Flag => {
                 format!(" --wake-budget {}", budget.seconds())
             }
             _ => String::new(),
@@ -457,7 +466,7 @@ fn remedy(run: &str, summary: &RunSummary, budget: Option<WakeBudget>) -> String
         );
     }
     match budget {
-        Some(budget) if !budget.from_environment => {
+        Some(budget) if budget.said == Said::Flag => {
             format!("{ARM_A_WATCH} {run} --timeout {}", budget.seconds())
         }
         _ => format!("{ARM_A_WATCH} {run}"),

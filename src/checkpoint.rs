@@ -1469,7 +1469,7 @@ mod tests {
             // here so the names it is written under cannot move without the
             // version.
             closure: crate::projection::Closure {
-                owed_until_closed: true,
+                owed_until_closed: Some(crate::payload::Owed),
                 completion_requested: true,
                 reopened_at: Some(1_785_999_000_000),
             },

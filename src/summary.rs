@@ -639,7 +639,7 @@ impl RunSummary {
             host: launch.recorded_host().map(str::to_string),
             started: launch.driver_stamp().map(str::to_string),
             let_go_by: state.let_go_by.clone(),
-            owed_until_closed: state.closure.owed_until_closed,
+            owed_until_closed: state.closure.owed_until_closed.is_some(),
             completion_requested: state.closure.completion_requested,
             reopened_at: state.closure.reopened_at,
             timing: timing.clone(),

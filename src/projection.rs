@@ -703,10 +703,11 @@ pub(crate) struct Closure {
     /// the run: some `run-started` or `driver-adopted` carried
     /// [`journal::OWED_UNTIL_CLOSED`]. Never cleared, because a run held to the
     /// rule once is held to it for good.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub(crate) owed_until_closed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) owed_until_closed: Option<crate::payload::Owed>,
     /// Whether a `completion-requested` has been recorded since the run last
     /// re-opened.
+    // llmlint: ignore[invalid_states_unrepresentable] a two-state fact with no invalid combination: it is set by a `completion-requested` and cleared by a re-opening, on a run held to the closure rule or not, and it is copied as-is into the public `RunSummary::completion_requested: bool` the run-summary v8 golden pins, so a narrower type here would only be converted back at that one read.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) completion_requested: bool,
     /// When the run last re-opened — its latest `driver-adopted` or
@@ -1022,7 +1023,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
     match journal::PipelineKind::from_wire(&event.kind) {
         Some(journal::PipelineKind::RunStarted) => {
             if journal::owed_until_closed(payload) {
-                state.closure.owed_until_closed = true;
+                state.closure.owed_until_closed = Some(crate::payload::Owed);
             }
             if let Some(plan) = plan_of(payload) {
                 state.graph = Graph::from_plan(&plan);
@@ -1279,7 +1280,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 .closure
                 .reopened(millis_of(&event.ts).or(state.last_write_at));
             if journal::owed_until_closed(payload) {
-                state.closure.owed_until_closed = true;
+                state.closure.owed_until_closed = Some(crate::payload::Owed);
             }
             // A recorded stop is the same kind of claim as a let-go: it is about
             // the driver it ended, and the one adopting the run now is driving

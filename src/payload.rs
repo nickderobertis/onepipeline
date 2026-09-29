@@ -272,7 +272,8 @@ impl From<crate::note::Evidence> for EvidenceWord {
 // rewrite of the emitters across the engine, outside this wire adoption.
 /// The closure rule's marker, `journal::OWED_UNTIL_CLOSED`: `true` where it is
 /// written, and absent — never `false` — where it is not, so a payload has no
-/// third spelling a reader could take for either.
+/// third spelling a reader could take for either. The checkpoint's closure
+/// carries it the same way, once any record of the run has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Owed;
 
