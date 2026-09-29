@@ -4213,6 +4213,20 @@ fn a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit() {
     // stay standing.
     let dropped = asking_about(&world, &run, "other", "should other ship first?");
     let dropped_key = question_about(&world, &run, "other");
+    let gone = "other is duplicating kept's work";
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{
+                "op": "finding", "blocking": true, "id": "other", "message": gone
+            }])),
+        )
+        .exited(0);
+    world.until("the finding about other to be raised", |world| {
+        surfaces_on(world, &run)
+            .iter()
+            .any(|surface| surface["message"] == json!(gone))
+    });
     let standing = asking_about(&world, &run, "kept", "should kept ship first?");
     let standing_key = question_about(&world, &run, "kept");
     let still = "kept is waiting on a schema nobody has approved";
@@ -4238,6 +4252,15 @@ fn a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit() {
     world.until("the drop to be committed", |world| {
         committed(world, &run).iter().any(|op| op == "drop")
     });
+    let other = surfaces_on(&world, &run)
+        .into_iter()
+        .find(|surface| surface["message"] == json!(gone))
+        .expect("the finding about other is on the queue");
+    assert_eq!(
+        other["abandoned"],
+        json!(true),
+        "the drop left the finding about its node standing: {other:#}"
+    );
     let answers = answers_to(&world, &run, &dropped_key);
     assert_eq!(answers.len(), 1, "{answers:#?}");
     assert!(
@@ -4322,6 +4345,41 @@ fn a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit() {
             .iter()
             .any(|reply| reply["reply"]["message"] == json!("no; start it again on its own")),
         "the verdict beside the edit was not recorded against the question: {answers:#?}"
+    );
+    let _ = asked.wait_with_output().expect("the question ends");
+
+    // And the same for a `drop` of the node the question is about.
+    let asked = asking_about(
+        &world,
+        &run,
+        "holder-again",
+        "is holder-again still needed?",
+    );
+    let key = question_about(&world, &run, "holder-again");
+    world
+        .run_with_stdin(
+            &["reply", &run, "--correlation", &key],
+            &json!({
+                "version": 2,
+                "message": "no; drop it",
+                "commands": [{"op": "drop", "id": "holder-again", "dependents": "detach"}]
+            })
+            .to_string(),
+        )
+        .exited(0);
+    let answers = answers_to(&world, &run, &key);
+    assert_eq!(answers.len(), 2, "{answers:#?}");
+    assert!(
+        answers.iter().any(|reply| reply["reply"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("`drop` removed 'holder-again'"))),
+        "the drop did not answer the question: {answers:#?}"
+    );
+    assert!(
+        answers
+            .iter()
+            .any(|reply| reply["reply"]["message"] == json!("no; drop it")),
+        "the verdict beside the drop was not recorded against the question: {answers:#?}"
     );
     let _ = asked.wait_with_output().expect("the question ends");
 }

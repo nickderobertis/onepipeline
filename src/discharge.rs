@@ -1,20 +1,6 @@
 //! What becomes of a decision surface whose node a committed edit took out of
-//! the graph.
-//!
-//! A blocking surface names the node it is about in its `workstream`: a
-//! question `onepipeline ask --about NODE` raised, which the bus stamps with a
-//! correlation, and a reconciler finding raised under a stable one. When a
-//! `retry` supersedes that node, or a `drop` removes it, nothing is left for the
-//! question to decide — and before this, nothing answered it either, so it sat
-//! pending for the life of the run: `status` kept asking for it and
-//! `watch --until surface` returned on it every time it was asked.
-//!
-//! So the commit that removed the node answers it, through the same reply record
-//! a verdict is appended to, carrying the surface's correlation and a reason
-//! naming that edit — and a blocking surface raised under no correlation, such
-//! as a `finding` a watcher raised about the node, is marked by its own id as
-//! one nobody is waiting on. What the rule is and the ruling it rests on are
-//! entry 96 of `docs/contract-divergences.md`; they are not restated here.
+//! the graph. The rule, and the rulings it rests on, are entry 96 of
+//! `docs/contract-divergences.md`.
 
 use std::collections::BTreeMap;
 
