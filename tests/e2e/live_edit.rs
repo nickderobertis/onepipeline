@@ -17,7 +17,7 @@
 // `oneagentgraph` binary is driven instead. `harness.rs` carries the same suppression and
 // the full rationale.
 
-use crate::harness::{agent, human, plan_of, World, REFUSED};
+use crate::harness::{agent, human, plan_of, World, REFUSED, SURFACE_WAITING, WATCH_ELAPSED};
 
 use crate::harness::lifecycle;
 use onevcs::provenance::SUBJECT_LIMIT;
@@ -4022,4 +4022,274 @@ fn a_command_that_changes_no_graph_is_journalled_apart_from_one_that_does() {
     world.release("slow.go");
 }
 
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey lives
+// beside the other live-edit journeys in this file, which is where a reader looks for one
+// and what `just test-e2e` already runs on its own. What it exercises is the reconcile
+// loop's commit of a `retry` and a `drop` together with the channel's answer record and
+// the views `watch` and `status` read — which any change under `src/` can move — so a
+// project edged narrower than the crate could not honestly run it.
+/// A question `onepipeline ask --about NODE` raised, as a worker raises one, and
+/// left waiting on its answer: the process is returned so the journey can read
+/// what it was answered with.
+fn asking_about(world: &World, run: &str, node: &str, question: &str) -> std::process::Child {
+    let mut command = world.cmd(&["ask", "--about", node, "--timeout", "600", question]);
+    command
+        .env("ONEPIPELINE_RUN_ID", run)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    command.spawn().expect("the binary starts")
+}
+
+/// Every surface on the run's channel, as `onepipeline channel queue` reports
+/// them without consuming any.
+fn surfaces_on(world: &World, run: &str) -> Vec<Value> {
+    let queue = world.run(&["channel", "queue", run]);
+    queue.exited(0);
+    queue.json()["surfaces"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The correlation of the question the run raised about `node`, once it has.
+fn question_about(world: &World, run: &str, node: &str) -> String {
+    world.until(
+        &format!("the question about '{node}' to be raised"),
+        |world| {
+            surfaces_on(world, run).iter().any(|surface| {
+                surface["workstream"] == json!(node) && surface["correlation"].is_string()
+            })
+        },
+    );
+    surfaces_on(world, run)
+        .into_iter()
+        .find(|surface| surface["workstream"] == json!(node) && surface["correlation"].is_string())
+        .and_then(|surface| surface["correlation"].as_str().map(str::to_owned))
+        .expect("the question carries its correlation")
+}
+
+/// Every reply on the run's channel bound to the question `key` names.
+fn answers_to(world: &World, run: &str, key: &str) -> Vec<Value> {
+    let queue = world.run(&["channel", "queue", run]);
+    queue.exited(0);
+    queue.json()["replies"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|reply| reply["correlation"] == json!(key))
+        .collect()
+}
+
+/// A decision about a node a committed edit took out of the graph stops being a
+/// decision the run is held on: answered once, by that edit, with a reason
+/// naming it — and a decision about a node still in the graph is left standing.
+///
+/// Issues #510 and #515: a worker asked about its node, the manager answered by
+/// retrying it, and the question stayed pending, so `watch --until surface`
+/// returned on it at once for the rest of the run and `status` kept asking for
+/// it. Both removals are driven, `retry` and `drop`, on the reconcile loop's
+/// commit, with the questions raised through the verb a worker raises them with
+/// and a blocking `finding` beside the first — the one kind of decision raised
+/// under no correlation, which has nothing a reply could be bound to.
+#[test]
+fn a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit() {
+    let world = World::new("edit-decision-discharge");
+    world.script("holder.wait", "hold");
+    let run = live(
+        &world,
+        "decision-discharge",
+        vec![
+            agent("build", &[]),
+            agent("other", &[]),
+            agent("kept", &[]),
+            agent("holder", &[]),
+        ],
+        &["build", "other", "kept"],
+    );
+
+    // The worker's question about its node, read off the queue so it is the
+    // decision `status` names; and a watcher's blocking finding about the same
+    // node, left unread.
+    let asked = asking_about(&world, &run, "build", "should build keep the old schema?");
+    let key = question_about(&world, &run, "build");
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{
+                "op": "finding", "blocking": true, "id": "build",
+                "message": "build is writing to the wrong table"
+            }])),
+        )
+        .exited(0);
+    world.until("the finding to be raised", |world| {
+        surfaces_on(world, &run)
+            .iter()
+            .any(|surface| surface["kind"] == "finding" && surface["blocking"] == json!(true))
+    });
+    let next = world.run(&["next", &run]);
+    next.exited(0);
+    assert_eq!(
+        next.json()["surface"]["correlation"],
+        json!(key),
+        "{}",
+        next.stdout
+    );
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision");
+    world
+        .run(&["watch", &run, "--until", "surface", "--timeout", "0"])
+        .exited(SURFACE_WAITING);
+
+    // The retry that supersedes it, with no verdict and no correlation: a
+    // commands-only envelope answers no question on its own.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{
+                "op": "retry", "id": "build",
+                "node": {
+                    "id": "build-again", "persona": "engineer", "deps": ["holder"],
+                    "task": "## What\nDo build again.\n\n## Why\nThe first took the wrong \
+                             table.\n\n## Acceptance criteria\n- build is done."
+                }
+            }])),
+        )
+        .exited(0);
+    world.until("the retry to be committed", |world| {
+        committed(world, &run).iter().any(|op| op == "retry")
+    });
+
+    let answers = answers_to(&world, &run, &key);
+    assert_eq!(
+        answers.len(),
+        1,
+        "the question was answered {} times: {answers:#?}",
+        answers.len()
+    );
+    let reason = answers[0]["reply"]["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("`retry` of 'build'") && reason.contains("'build-again'"),
+        "the answer does not name the edit that removed the node: {:#}",
+        answers[0]
+    );
+    // The worker that asked reads that answer as its reply.
+    let output = asked.wait_with_output().expect("the question ends");
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{said}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(said.contains("`retry` of 'build'"), "{said}");
+
+    world
+        .run(&["watch", &run, "--until", "surface", "--timeout", "0"])
+        .exited(WATCH_ELAPSED);
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("waiting for planner decision");
+
+    // A `drop` discharges the same way, and only the question about the node it
+    // removed: the one about `kept`, still in the graph, stays standing.
+    let dropped = asking_about(&world, &run, "other", "should other ship first?");
+    let dropped_key = question_about(&world, &run, "other");
+    let standing = asking_about(&world, &run, "kept", "should kept ship first?");
+    let standing_key = question_about(&world, &run, "kept");
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "drop", "id": "other", "dependents": "detach"}])),
+        )
+        .exited(0);
+    world.until("the drop to be committed", |world| {
+        committed(world, &run).iter().any(|op| op == "drop")
+    });
+    let answers = answers_to(&world, &run, &dropped_key);
+    assert_eq!(answers.len(), 1, "{answers:#?}");
+    assert!(
+        answers[0]["reply"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("`drop` removed 'other'")),
+        "the answer does not name the drop: {:#}",
+        answers[0]
+    );
+    let output = dropped.wait_with_output().expect("the question ends");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        answers_to(&world, &run, &standing_key).is_empty(),
+        "a question about a node still in the graph was answered"
+    );
+    world
+        .run(&["watch", &run, "--until", "surface", "--timeout", "0"])
+        .exited(SURFACE_WAITING);
+
+    // Answered by the manager, it releases the run like any question.
+    world
+        .run_with_stdin(
+            &["reply", &run, "--correlation", &standing_key],
+            &json!({"version": 2, "message": "yes, ship kept first"}).to_string(),
+        )
+        .exited(0);
+    let output = standing.wait_with_output().expect("the question ends");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ship kept first"));
+    world
+        .run(&["watch", &run, "--until", "surface", "--timeout", "0"])
+        .exited(WATCH_ELAPSED);
+
+    world.run(&["stop", &run, "--force"]).exited(0);
+    world.until("the stop to be recorded", |world| {
+        !world.events_of(&run, "run-stopped").is_empty()
+    });
+    for node in ["build", "other", "kept", "holder"] {
+        world.release(&format!("{node}.go"));
+    }
+
+    // With nothing driving the run, `reply` applies its own edit before it
+    // delivers its verdict — so a reply bound to the question by name and
+    // carrying the retry of its node finds that question answered by its own
+    // commit. Its verdict is recorded beside that answer rather than refused.
+    let asked = asking_about(&world, &run, "holder", "should holder wait for kept?");
+    let key = question_about(&world, &run, "holder");
+    world
+        .run_with_stdin(
+            &["reply", &run, "--correlation", &key],
+            &json!({
+                "version": 2,
+                "message": "no; start it again on its own",
+                "commands": [{
+                    "op": "retry", "id": "holder",
+                    "node": {
+                        "id": "holder-again", "persona": "engineer",
+                        "task": "## What\nDo holder again.\n\n## Why\nIt was stopped.\n\n\
+                                 ## Acceptance criteria\n- holder is done."
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .exited(0);
+    let answers = answers_to(&world, &run, &key);
+    assert_eq!(answers.len(), 2, "{answers:#?}");
+    assert!(
+        answers.iter().any(|reply| reply["reply"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("`retry` of 'holder'"))),
+        "the commit did not answer the question: {answers:#?}"
+    );
+    assert!(
+        answers
+            .iter()
+            .any(|reply| reply["reply"]["message"] == json!("no; start it again on its own")),
+        "the verdict beside the edit was not recorded against the question: {answers:#?}"
+    );
+    let _ = asked.wait_with_output().expect("the question ends");
+}
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
