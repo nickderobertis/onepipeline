@@ -2216,7 +2216,7 @@ fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> 
         if !(held.host == sys::hostname() && !sys::process_may_be_live(held.pid)) {
             return Err(locked_by(run, &held));
         }
-        match reclaim(path, &held, &body)? {
+        match reclaim(path, &held, &body, verb == DRIVE_VERB)? {
             Reclaimed::Won => return Ok(()),
             Reclaimed::HeldBy(holder) => return Err(locked_by(run, &holder)),
             Reclaimed::Unreadable(at) => return Err(unreadable_lock(&at, run)),
@@ -2305,8 +2305,11 @@ fn read_lock_file(path: &Path) -> Result<LockFile> {
 /// earlier winner is reported rather than overwritten. A loser reads the winner's
 /// record — waiting up to [`RECLAIM_PATIENCE`] for it while the winner's entry
 /// says it is on the way — and reports it as the holder: it never writes. A
-/// winner still short of the lock past that is reported as taking the run over,
-/// never as its holder, because the lock does not name it.
+/// loser that would **drive** the run — a takeover — waits for as long as the
+/// winner lives, because what it exits with names the run's driver and the
+/// lock is what says who that is. Any other loser still short of the lock past
+/// that bound is told the winner is taking the run over, never that it holds
+/// it, because the lock does not name it.
 ///
 /// The entries are numbered, and a number is stepped over only when the process
 /// that created it is one this host can prove is gone with the dead record still
@@ -2324,7 +2327,7 @@ fn read_lock_file(path: &Path) -> Result<LockFile> {
 /// so a reader finds the dead record or the winner's and never part of either.
 /// A rename is not exclusive on any of the three, and needs not be here: only
 /// the process that created the entry makes it.
-fn reclaim(path: &Path, dead: &LockRecord, body: &str) -> Result<Reclaimed> {
+fn reclaim(path: &Path, dead: &LockRecord, body: &str, driving: bool) -> Result<Reclaimed> {
     let key = reclaim_key(dead);
     let mut number = 1u64;
     let patience = std::time::Instant::now() + RECLAIM_PATIENCE;
@@ -2379,9 +2382,16 @@ fn reclaim(path: &Path, dead: &LockRecord, body: &str) -> Result<Reclaimed> {
             LockFile::Record(_) if std::time::Instant::now() < patience => {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
-            // Past it the lock still names the dead holder, so the reclaimer is
-            // not named as driving the run: what is known is only that it is
-            // taking the run over.
+            // A takeover that would drive the run waits it out for as long as
+            // the reclaimer lives: it exits naming whoever drives the run, so it
+            // answers only once the lock names somebody — or takes the run
+            // itself, by the step above, if the reclaimer dies first.
+            LockFile::Record(_) if driving => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            // Any other claim stops waiting there. The lock still names the dead
+            // holder, so the reclaimer is not named as driving the run: what is
+            // known is only that it is taking the run over.
             LockFile::Record(reclaimer) => return Ok(Reclaimed::Unsettled(entry, reclaimer)),
             // Gone since the create was refused: its creator has written the
             // lock and taken the entries away. The next look at the lock
@@ -2400,8 +2410,8 @@ fn reclaim(path: &Path, dead: &LockRecord, body: &str) -> Result<Reclaimed> {
 /// normally a few milliseconds; a loser that answered at once would leave, beside
 /// a refusal naming the winner, a lock still naming the dead driver — and every
 /// view reading it then calls the run undriven. The bound is for a winner stopped
-/// in that window, which is then reported as taking the run over and never as
-/// holding it, because the lock does not name it.
+/// in that window, and is a takeover's only while the winner lives: see
+/// [`reclaim`].
 const RECLAIM_PATIENCE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Create `path` exclusively, **with** `body` already in it.
@@ -4234,6 +4244,115 @@ mod tests {
             taking_over.exists(),
             "the loser took away an entry it did not create"
         );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A takeover that loses to a live reclaimer paused **longer than
+    /// [`RECLAIM_PATIENCE`]** has not answered while the lock still names the
+    /// dead driver, and once the winner's record is the lock it names exactly
+    /// that driver.
+    #[test]
+    fn a_losing_takeover_waits_out_a_paused_winner_and_names_the_driver_the_lock_records() {
+        let root = scratch("reclaim-drive-paused");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let dead = a_dead_holders_lock(&paths);
+
+        let taking_over = reclaim_entry(&paths.lock(), &reclaim_key(&dead), 1);
+        let entry = LockRecord {
+            pid: sys::pid(),
+            host: sys::hostname(),
+            acquired_at: sys::now_rfc3339(),
+            verb: DRIVE_VERB.to_string(),
+            started: String::new(),
+        };
+        write_json(&taking_over, &entry).expect("a paused winner's entry");
+
+        let loser = {
+            let paths = paths.clone();
+            std::thread::spawn(move || OwnershipLock::acquire(&paths, DRIVE_VERB).map(drop))
+        };
+        std::thread::sleep(RECLAIM_PATIENCE + std::time::Duration::from_secs(1));
+        assert!(
+            !loser.is_finished(),
+            "the losing takeover answered while the lock still named the dead driver"
+        );
+        let unchanged: LockRecord = read_json(&paths.lock()).expect("the lock reads back");
+        assert_eq!(unchanged, dead, "the loser wrote the lock");
+
+        // The winner resumes: its record becomes the lock, and its entry goes.
+        let won = LockRecord {
+            acquired_at: sys::now_rfc3339(),
+            ..entry
+        };
+        write_json(&paths.lock(), &won).expect("the winner's record");
+        fs::remove_file(&taking_over).expect("the winner takes its entry away");
+
+        match loser.join().expect("the losing takeover") {
+            Err(Error::Locked {
+                pid, host, verb, ..
+            }) => {
+                assert_eq!(
+                    (pid, host, verb),
+                    (won.pid, won.host.clone(), won.verb.clone())
+                );
+            }
+            other => panic!("the losing takeover did not name the lock's driver: {other:?}"),
+        }
+        let left: LockRecord = read_json(&paths.lock()).expect("the lock reads back");
+        assert_eq!(left, won, "the loser wrote the lock");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A takeover waiting on a paused winner that then dies is not stranded: it
+    /// steps over the dead reclaimer's entry and takes the run itself.
+    ///
+    /// **Unix**, because the reclaimer it waits on is a real process it ends —
+    /// `sleep`, spawned and killed here — and that command has no Windows
+    /// spelling; the stepping over itself is
+    /// `a_dead_reclaimers_entry_is_stepped_over_and_taken_away`, which runs
+    /// everywhere.
+    #[cfg(unix)]
+    #[test]
+    fn a_losing_takeover_recovers_the_run_when_the_paused_winner_dies() {
+        let root = scratch("reclaim-drive-dies");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let dead = a_dead_holders_lock(&paths);
+
+        let mut winner = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("a process to stand for the paused winner");
+        let taking_over = reclaim_entry(&paths.lock(), &reclaim_key(&dead), 1);
+        write_json(
+            &taking_over,
+            &LockRecord {
+                pid: winner.id(),
+                host: sys::hostname(),
+                acquired_at: sys::now_rfc3339(),
+                verb: DRIVE_VERB.to_string(),
+                started: String::new(),
+            },
+        )
+        .expect("a paused winner's entry");
+
+        let loser = {
+            let paths = paths.clone();
+            std::thread::spawn(move || OwnershipLock::acquire(&paths, DRIVE_VERB))
+        };
+        std::thread::sleep(RECLAIM_PATIENCE + std::time::Duration::from_secs(1));
+        winner.kill().expect("the winner ends");
+        winner.wait().expect("the winner is reaped");
+
+        let held = loser
+            .join()
+            .expect("the losing takeover")
+            .expect("a takeover whose winner died takes the run");
+        let record: LockRecord = read_json(&paths.lock()).expect("the lock reads back");
+        assert_eq!((record.pid, record.verb.as_str()), (sys::pid(), DRIVE_VERB));
+        assert_eq!(reclaim_entries_beside(&paths), Vec::<String>::new());
+        held.release();
         fs::remove_dir_all(&root).ok();
     }
 
