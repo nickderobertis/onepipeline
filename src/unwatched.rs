@@ -2,12 +2,14 @@
 //! it.
 //!
 //! What the verb promises, and why it exists at all, is entry 68 of
-//! `docs/contract-divergences.md`: the proposal it waits on. It is not restated
+//! `docs/contract-divergences.md`: the proposal it waits on. The wake budget,
+//! the closure rule and the acknowledgement are entry 96's. Neither is restated
 //! here, on the terms [`crate::watch`] keeps beside its own entry.
 //!
 //! The one thing worth saying beside the code is the cost, because it is a
-//! property of *this* module rather than of the contract: everything here
-//! **reads**, and it reads no run's merged event store — including for a run
+//! property of *this* module rather than of the contract: the question
+//! **reads** — `--acknowledge` is the one write, beside the run and never to
+//! its journal — and it reads no run's merged event store — including for a run
 //! whose summary document is absent or stale, which is where a reader is tempted
 //! to fold — with one exception, stated at [`decide`]: a document the previous
 //! release wrote is folded once to bring it to this build's schema, and the
@@ -74,11 +76,20 @@ impl WakeBudget {
     ///
     /// # Errors
     ///
-    /// See [`from_environment`](Self::from_environment), which is asked only
-    /// where no flag was given.
+    /// A flag of `0`, which the binary's parser already refuses; otherwise see
+    /// [`from_environment`](Self::from_environment), which is asked only where
+    /// no flag was given.
     pub fn resolved(flag: Option<u64>) -> Result<Option<Self>> {
-        match flag.and_then(NonZeroU64::new) {
-            Some(seconds) => Ok(Some(Self::given(seconds))),
+        match flag {
+            Some(seconds) => NonZeroU64::new(seconds)
+                .map(|seconds| Some(Self::given(seconds)))
+                .ok_or_else(|| {
+                    Error::Invalid(
+                        "a wake budget of 0 seconds wakes nobody: `--wake-budget` is a positive \
+                         whole number of seconds"
+                            .to_owned(),
+                    )
+                }),
             None => Self::from_environment(),
         }
     }
@@ -365,7 +376,7 @@ pub(crate) fn asked(root: &Path, session: &str, budget: Option<WakeBudget>) -> R
             None => watchers.why_not_watched(),
             Some(budget) => {
                 let wakes = leases.wakes(session, i128::from(budget.seconds()) * 1_000, now);
-                if wakes.iter().any(|wake| *wake == Wake::Within) {
+                if wakes.contains(&Wake::Within) {
                     continue;
                 }
                 let words = |pick: fn(&Wake) -> Option<&String>| -> Vec<String> {
@@ -1076,6 +1087,20 @@ pub(crate) mod tests {
             serde_json::from_value::<Acknowledgement>(document)
                 .expect_err("an acknowledgement this build did not write is refused");
         }
+    }
+
+    /// A budget of no seconds is refused rather than read as none, and a given
+    /// one is spelled back on the command a person asks it by hand with.
+    #[test]
+    fn a_wake_budget_of_nothing_is_refused_and_a_given_one_is_spelled_back() {
+        let refused = WakeBudget::resolved(Some(0)).expect_err("0 seconds wakes nobody");
+        assert!(refused.to_string().contains("--wake-budget"), "{refused}");
+        let given = WakeBudget::resolved(Some(1_800))
+            .expect("a positive budget")
+            .expect("a given budget is one");
+        assert_eq!(given.seconds(), 1_800);
+        assert_eq!(WakeBudget::flag(Some(given)), " --wake-budget 1800");
+        assert_eq!(WakeBudget::flag(None), "");
     }
 
     /// Every standing this build reads a record as, exhaustively.

@@ -8147,6 +8147,11 @@ binary is not something the offline tier carries.
 ```
 
 `src/unwatched.rs`'s tests hold this block to `WatchTerms` and `Acknowledgement`
-both ways, as they hold entry 68's to `WatcherRecord`, and
-`tests/e2e/wake_budget.rs` drives every clause above through the compiled binary
-over real run roots, with real `onepipeline watch` processes holding the leases.
+both ways, as they hold entry 68's to `WatcherRecord`; `src/summary.rs` and
+`src/checkpoint.rs` pin the two schema-8 documents to their goldens; and
+`tests/e2e/wake_budget.rs` drives the record, the budget, each positive failure
+and each unknown, the closure rule in every standing, the re-openings, the
+`complete` verdict, the migration and the acknowledgement's refusals through the
+compiled binary over real run roots, with real `onepipeline watch` processes
+holding the leases. What an older engine does is read off its code, as stated
+under *Older engines*, and is not driven.

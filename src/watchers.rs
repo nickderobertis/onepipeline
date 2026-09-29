@@ -1,7 +1,8 @@
 //! The **watcher record**: the evidence that a run is being watched.
 //!
 //! What the record is and what it promises is entry 68 of
-//! `docs/contract-divergences.md`, and is not restated here. What is worth saying
+//! `docs/contract-divergences.md`, and what the terms record beside it adds —
+//! and the wake budget decided from it — is entry 96; neither is restated here. What is worth saying
 //! beside the code is the two rules a maintainer has to keep apart, because
 //! nothing in the types enforces them:
 //!
@@ -866,7 +867,11 @@ impl Armed {
             .file_name()
             .map(|name| paths.watch_terms().join(name))
             .filter(|terms_path| {
-                ledger::write_json(terms_path, &terms_of(&record, request)).is_ok()
+                ledger::write_json(
+                    terms_path,
+                    &terms_of(&record, request.timeout, &request.until),
+                )
+                .is_ok()
             });
         let path = ledger::write_json(&path, &record).ok().map(|()| path);
         let mut armed = Self { path, terms };
@@ -910,11 +915,14 @@ impl Drop for Armed {
 }
 
 /// The terms one watch is armed under, from the lease it writes beside them and
-/// the request it resolved.
-fn terms_of(record: &WatcherRecord, request: &crate::watch::Request) -> WatchTerms {
+/// the wait and conditions its request resolved.
+fn terms_of(
+    record: &WatcherRecord,
+    timeout: crate::cli::WatchTimeout,
+    conditions: &[crate::cli::WatchUntil],
+) -> WatchTerms {
     let mut until: Vec<String> = Vec::new();
-    for condition in request
-        .until
+    for condition in conditions
         .iter()
         .map(ToString::to_string)
         .chain(["settled".to_owned(), "nothing-driving".to_owned()])
@@ -928,7 +936,7 @@ fn terms_of(record: &WatcherRecord, request: &crate::watch::Request) -> WatchTer
         run_id: record.run_id.clone(),
         pid: record.pid,
         started: record.started.clone(),
-        deadline: match request.timeout {
+        deadline: match timeout {
             crate::cli::WatchTimeout::Bounded(seconds) => Some(sys::rfc3339_from_millis(
                 sys::now_millis()
                     .saturating_add(seconds.saturating_mul(1_000))
@@ -1215,6 +1223,58 @@ mod tests {
         }
         assert_eq!(instant_millis("2026-02-30T00:00:00Z"), None);
         assert_eq!(instant_millis("soon"), None);
+    }
+
+    /// `--timeout 0` records the arming instant, a bound records that many
+    /// seconds past it, `none` records no deadline, and every watch's conditions
+    /// include the two every watch returns on, once each.
+    ///
+    /// Here rather than only in a journey because a `--timeout 0` watch reads the
+    /// run once and returns: its terms are gone before any other process could
+    /// read them, so the instant it records can only be read off the writer.
+    #[test]
+    fn the_terms_record_the_deadline_and_the_conditions_a_watch_resolved() {
+        use crate::cli::{WatchTimeout, WatchUntil};
+        let record = WatcherRecord {
+            schema_version: WATCHER_SCHEMA_VERSION,
+            run_id: "gated".into(),
+            pid: NonZeroU32::MIN,
+            host: "a-host".into(),
+            started: "linux-proc-stat:1".into(),
+            began_at: sys::now_rfc3339(),
+        };
+        let at = |terms: &WatchTerms| {
+            terms
+                .deadline
+                .as_deref()
+                .and_then(instant_millis)
+                .expect("a bounded watch records a deadline")
+        };
+        let before = i128::from(sys::now_millis());
+        let now = terms_of(&record, WatchTimeout::Bounded(0), &[WatchUntil::Surface]);
+        let later = terms_of(&record, WatchTimeout::Bounded(90), &[WatchUntil::Settled]);
+        let after = i128::from(sys::now_millis());
+        assert!((before..=after).contains(&at(&now)), "{now:?}");
+        assert!(
+            (before + 90_000..=after + 90_000).contains(&at(&later)),
+            "{later:?}"
+        );
+        assert_eq!(now.until, ["surface", "settled", "nothing-driving"]);
+        assert_eq!(later.until, ["settled", "nothing-driving"]);
+        let unbounded = terms_of(
+            &record,
+            WatchTimeout::Unbounded,
+            &[WatchUntil::Node("build".into()), WatchUntil::NothingDriving],
+        );
+        assert_eq!(unbounded.deadline, None);
+        assert_eq!(
+            unbounded.until,
+            ["node=build", "nothing-driving", "settled"]
+        );
+        assert_eq!(
+            (unbounded.run_id, unbounded.pid, unbounded.started),
+            (record.run_id, record.pid, record.started)
+        );
     }
 
     /// And what is not one is refused, including the near misses.

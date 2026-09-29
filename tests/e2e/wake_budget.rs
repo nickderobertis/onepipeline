@@ -724,7 +724,7 @@ fn a_run_this_release_drives_is_owed_in_every_standing_until_it_is_acknowledged(
     let success_hook = world.root.join("success-hook.sh");
     onepipeline_testfakes::executable(
         &success_hook,
-        &format!(
+        format!(
             "#!/bin/sh\n\"${}\" start '{next}' --detach >/dev/null 2>&1\nexit 0\n",
             onepipeline_testfakes::CLI_BIN_ENV
         ),
