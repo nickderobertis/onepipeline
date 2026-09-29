@@ -2296,7 +2296,8 @@ fn read_lock_file(path: &Path) -> Result<LockFile> {
 /// dead contends under one name and the filesystem picks one — and that process
 /// re-reads the lock before it writes, so a record already put there by an
 /// earlier winner is reported rather than overwritten. A loser reads the winner's
-/// record, or the winner's entry while its record is on the way, and reports it
+/// record — waiting up to [`RECLAIM_PATIENCE`] for it while the winner's entry
+/// says it is on the way, and naming the entry only past that — and reports it
 /// as the holder: it never writes.
 ///
 /// The entries are numbered, and a number is stepped over only when the process
@@ -2318,6 +2319,7 @@ fn read_lock_file(path: &Path) -> Result<LockFile> {
 fn reclaim(path: &Path, dead: &LockRecord, body: &str) -> Result<Reclaimed> {
     let key = reclaim_key(dead);
     let mut number = 1u64;
+    let patience = std::time::Instant::now() + RECLAIM_PATIENCE;
     loop {
         let entry = reclaim_entry(path, &key, number);
         if create_exclusively_filled(&entry, body)? {
@@ -2363,6 +2365,12 @@ fn reclaim(path: &Path, dead: &LockRecord, body: &str) -> Result<Reclaimed> {
             {
                 number += 1;
             }
+            // A live reclaimer about to write the lock: give it the moment it
+            // needs, so what this process reports is the lock the run is left
+            // with rather than a record the lock does not name yet.
+            LockFile::Record(_) if std::time::Instant::now() < patience => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
             LockFile::Record(reclaimer) => return Ok(Reclaimed::HeldBy(reclaimer)),
             // Gone since the create was refused: its creator has written the
             // lock and taken the entries away. The next look at the lock
@@ -2373,6 +2381,16 @@ fn reclaim(path: &Path, dead: &LockRecord, body: &str) -> Result<Reclaimed> {
         // llmlint: ignore-end[changed_behavior_has_e2e]
     }
 }
+
+/// How long a reclaim that lost to a live reclaimer waits for the winner's record
+/// to be the lock before it names the winner from its entry instead.
+///
+/// The winner is one read and one write away from the lock, so the wait is
+/// normally a few milliseconds; a loser that answered at once would leave, beside
+/// a refusal naming the winner, a lock still naming the dead driver — and every
+/// view reading it then calls the run undriven. The bound is for a winner stopped
+/// in that window, which is named from its entry as before.
+const RECLAIM_PATIENCE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Create `path` exclusively, **with** `body` already in it.
 ///
@@ -4100,8 +4118,9 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    /// A reclaimer that is between creating its entry and writing the lock is
-    /// the run's holder to anyone arriving then, named with what it is doing —
+    /// A reclaimer that stays between creating its entry and writing the lock
+    /// past [`RECLAIM_PATIENCE`] is the run's holder to anyone arriving then,
+    /// named with what it is doing —
     /// which is how a second reply learns to wait for the first's answer rather
     /// than reporting the edit queued behind a driver that is gone.
     #[test]
@@ -4139,6 +4158,56 @@ mod tests {
             taking_over.exists(),
             "the loser took away an entry it did not create"
         );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A loser to a live reclaimer reports the lock the winner leaves, not the
+    /// winner's entry, once the winner has written it: so the refusal never
+    /// names a holder the lock does not.
+    #[test]
+    fn a_loser_to_a_live_reclaimer_reports_the_lock_it_writes() {
+        let root = scratch("reclaim-settles");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let dead = a_dead_holders_lock(&paths);
+
+        let taking_over = reclaim_entry(&paths.lock(), &reclaim_key(&dead), 1);
+        let entry = LockRecord {
+            pid: sys::pid(),
+            host: sys::hostname(),
+            acquired_at: sys::now_rfc3339(),
+            verb: "entry".to_string(),
+            started: String::new(),
+        };
+        write_json(&taking_over, &entry).expect("an entry a live reclaimer holds");
+        let won = LockRecord {
+            verb: "drive".to_string(),
+            ..entry
+        };
+        let winner = {
+            let (lock, won) = (paths.lock(), won.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                write_json(&lock, &won).expect("the winner's record");
+                fs::remove_file(&taking_over).expect("the winner takes its entry away");
+            })
+        };
+
+        let began = std::time::Instant::now();
+        match OwnershipLock::acquire(&paths, "adopt") {
+            Err(Error::Locked { pid, verb, .. }) => {
+                assert_eq!(pid, won.pid);
+                assert_eq!(verb, "drive", "the loser named the entry, not the lock");
+            }
+            other => panic!("a run being taken over was not reported as held: {other:?}"),
+        }
+        assert!(
+            began.elapsed() < RECLAIM_PATIENCE,
+            "the loser waited out its whole patience for a winner that wrote the lock"
+        );
+        winner.join().expect("the winner");
+        let left: LockRecord = read_json(&paths.lock()).expect("the lock reads back");
+        assert_eq!(left, won, "the loser wrote the lock");
         fs::remove_dir_all(&root).ok();
     }
 
