@@ -28,6 +28,11 @@ if not "%~1"=="" (
 
 :write
 if not defined ONEPIPELINE_E2E_MAINTAIN_SLEEP goto mark
+echo %ONEPIPELINE_E2E_MAINTAIN_SLEEP%| findstr /r /x "[0-9][0-9]*" >nul
+if errorlevel 1 (
+  echo maintain: ONEPIPELINE_E2E_MAINTAIN_SLEEP is '%ONEPIPELINE_E2E_MAINTAIN_SLEEP%', which is not a whole number of seconds; set it to digits only, such as 20, or unset it for no wait 1>&2
+  exit /b 64
+)
 set /a "slept=%ONEPIPELINE_E2E_MAINTAIN_SLEEP%"
 :sleeploop
 if !slept! LEQ 0 goto mark

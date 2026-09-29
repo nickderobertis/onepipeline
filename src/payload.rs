@@ -1029,10 +1029,39 @@ pub(crate) struct CutShort {
     /// What stopped it.
     pub(crate) reason: CutReason,
     /// Every identity the pass never began, spelled as the record's `identity`
-    /// fields are, in the sorted order the sweep visits them. Never empty: a pass
-    /// that reached every identity carries no `cut_short` at all.
-    #[schemars(length(min = 1))]
-    pub(crate) unreached: Vec<String>,
+    /// fields are, in the sorted order the sweep visits them.
+    pub(crate) unreached: Unreached,
+}
+
+/// The identities a cut-short pass never began: never empty, because a pass that
+/// reached every identity carries no `cut_short` at all. Built through
+/// [`Unreached::new`] and read back refusing an empty list, so no value of this
+/// type is a cut that left nothing out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(transparent)]
+pub(crate) struct Unreached(#[schemars(length(min = 1))] Vec<String>);
+
+impl Unreached {
+    /// `None` for an empty list, which is a pass that was not cut short.
+    pub(crate) fn new(identities: Vec<String>) -> Option<Self> {
+        (!identities.is_empty()).then_some(Self(identities))
+    }
+
+    /// The identity keys, in visiting order.
+    pub(crate) fn identities(&self) -> &[String] {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for Unreached {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(Vec::deserialize(deserializer)?).ok_or_else(|| {
+            serde::de::Error::custom(
+                "`unreached` is empty, and a pass cut short names at least one identity it \
+                 never began",
+            )
+        })
+    }
 }
 
 /// What stopped a pass of the sweep before every identity.
@@ -1499,6 +1528,19 @@ mod tests {
         assert_eq!(
             serde_json::to_value(CutReason::DriverClosing).expect("a word"),
             "driver-closing"
+        );
+        // The type holds the same rule as the document: no cut leaves nothing out.
+        assert!(Unreached::new(Vec::new()).is_none());
+        let read: CutShort = serde_json::from_value(cut.clone()).expect("a cut reads back");
+        assert_eq!(read.unreached.identities(), ["github.com/owner/b"]);
+        assert_eq!(serde_json::to_value(&read).expect("it serializes"), cut);
+        let empty = serde_json::from_value::<CutShort>(
+            serde_json::json!({"reason": "driver-closing", "unreached": []}),
+        )
+        .expect_err("an empty cut is refused");
+        assert!(
+            empty.to_string().contains("`unreached` is empty"),
+            "{empty}"
         );
     }
 

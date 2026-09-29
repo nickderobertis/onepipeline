@@ -34,7 +34,16 @@ if [ "$#" -eq 1 ]; then
 fi
 
 if [ -n "${ONEPIPELINE_E2E_MAINTAIN_SLEEP:-}" ]; then
-  sleep "$ONEPIPELINE_E2E_MAINTAIN_SLEEP"
+  case "$ONEPIPELINE_E2E_MAINTAIN_SLEEP" in
+    *[!0-9]*)
+      echo "maintain: ONEPIPELINE_E2E_MAINTAIN_SLEEP is '$ONEPIPELINE_E2E_MAINTAIN_SLEEP', which is not a whole number of seconds; set it to digits only, such as 20, or unset it for no wait" >&2
+      exit 64
+      ;;
+  esac
+  if ! sleep "$ONEPIPELINE_E2E_MAINTAIN_SLEEP"; then
+    echo "maintain: sleeping $ONEPIPELINE_E2E_MAINTAIN_SLEEP seconds failed, so this maintenance did not take the time the journey asked of it; check that sleep is on PATH" >&2
+    exit 1
+  fi
 fi
 
 if ! printf 'maintained in %s at %s\n' "$(pwd)" "$(date +%s)" >>maintained.log; then

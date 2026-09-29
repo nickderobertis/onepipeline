@@ -66,7 +66,8 @@ use crate::error::{Error, Result};
 use crate::graph::NodeStatus;
 use crate::ledger::RunPaths;
 use crate::payload::{
-    BranchesRetired, CutReason, CutShort, RetiredBranch, RetirementTrigger, UnretiredIdentity,
+    BranchesRetired, CutReason, CutShort, RetiredBranch, RetirementTrigger, Unreached,
+    UnretiredIdentity,
 };
 use crate::projection::RunState;
 
@@ -591,9 +592,9 @@ impl PoolsMaintained {
 
 /// A record's `cut_short`, where the pass left any identity unreached.
 fn cut_short(unreached: &[String]) -> Option<CutShort> {
-    (!unreached.is_empty()).then(|| CutShort {
+    Unreached::new(unreached.to_vec()).map(|unreached| CutShort {
         reason: CutReason::DriverClosing,
-        unreached: unreached.to_vec(),
+        unreached,
     })
 }
 
@@ -927,6 +928,7 @@ pub(crate) fn results_lines(view: &crate::views::RunView) -> String {
         out.push_str(&format!(
             "      the sweep was cut short {why}, and did not reach: {}\n",
             cut.unreached
+                .identities()
                 .iter()
                 .map(|identity| crate::views::one_line(identity))
                 .collect::<Vec<_>>()

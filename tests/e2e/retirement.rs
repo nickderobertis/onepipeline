@@ -2701,15 +2701,15 @@ fn a_run_settling_mid_sweep_journals_its_maintenance_and_the_retirement_it_never
     std::fs::write(&go, "go").expect("the origin is released");
 }
 
-/// How long each later identity's retirement takes in the closing journey, in
-/// whole seconds: its origin sleeps this long on every push it receives.
+/// How long each identity's retirement takes in the closing journey, in whole
+/// seconds: its origin sleeps this long on every push it receives.
 #[cfg(unix)]
 const SLOW_RETIREMENT_SECONDS: u64 = 20;
 
 /// How far past the identity in progress a closing driver may run before its
-/// result is late — the close-out and the result's write on a loaded host — and
-/// well below [`SLOW_RETIREMENT_SECONDS`], so a driver that began one more
-/// identity's retirement cannot come in under it.
+/// result is late — the settlement, the close-out and the result's write on a
+/// loaded host — and well below [`SLOW_RETIREMENT_SECONDS`], so a driver that
+/// began one more identity's retirement cannot come in under it.
 #[cfg(unix)]
 const CLOSE_OUT_MARGIN_SECONDS: u64 = 8;
 
@@ -2717,16 +2717,17 @@ const CLOSE_OUT_MARGIN_SECONDS: u64 = 8;
 /// no other.
 ///
 /// Three identities, each holding a published branch that provably holds no
-/// work, so each identity's pass pushes a deletion to its own real origin: the
-/// origins of `tail` and `uplink` take [`SLOW_RETIREMENT_SECONDS`] over every push,
-/// and `service`'s — first in visiting order — holds the pass inside it until the
-/// journey lets it go. The run's one node settles while that hold stands, and
-/// the run does not settle past it; once it is let go, the result comes within
-/// [`CLOSE_OUT_MARGIN_SECONDS`], where beginning `tail` would cost a whole
-/// [`SLOW_RETIREMENT_SECONDS`] more. `service`'s branch is fully retired — gone
-/// from the checkout and the origin, recorded retired by `onevcs` itself, and in
-/// the record's `retired` — while `tail`'s and `uplink`'s are untouched on
-/// every copy, and the record names those two identities unreached.
+/// work, so each identity's pass pushes a deletion to its own real origin, and
+/// every origin takes [`SLOW_RETIREMENT_SECONDS`] over each push it receives.
+/// The run's one node is released once the pass has reached `service`'s origin
+/// — first in visiting order — so it settles, and the driver closes out, inside
+/// that identity. The result then comes within that one identity plus
+/// [`CLOSE_OUT_MARGIN_SECONDS`] of the release, where beginning `tail` would
+/// cost a whole [`SLOW_RETIREMENT_SECONDS`] more. `service`'s branch is fully
+/// retired — gone from the checkout and the origin, recorded retired by `onevcs`
+/// itself, and in the record's `retired` — while `tail`'s and `uplink`'s are
+/// untouched on every copy, and the record names those two identities
+/// unreached.
 #[cfg(unix)]
 #[test]
 fn a_closing_driver_finishes_the_retirement_in_progress_and_begins_no_other() {
@@ -2745,11 +2746,14 @@ fn a_closing_driver_finishes_the_retirement_in_progress_and_begins_no_other() {
         let class = classified_in(&world, alias, branch);
         assert_eq!(class["class"], "retirable", "{alias} {branch}: {class}");
     }
-    let (entered, go) = origin_held(&world, &repo);
-    for later in [&tail, &uplink] {
+    let entered = world.root.join("origin.entered");
+    for slow in [&repo, &tail, &uplink] {
         origin_hook(
-            later,
-            &format!("#!/bin/sh\ncat >/dev/null\nsleep {SLOW_RETIREMENT_SECONDS}\n"),
+            slow,
+            &format!(
+                "#!/bin/sh\ncat >/dev/null\ntouch '{}'\nsleep {SLOW_RETIREMENT_SECONDS}\n",
+                entered.display()
+            ),
         );
     }
 
@@ -2766,26 +2770,25 @@ fn a_closing_driver_finishes_the_retirement_in_progress_and_begins_no_other() {
         "the retirement pass to reach service's origin",
         |_| entered.is_file(),
     );
+    let released = std::time::Instant::now();
     world.release("hold.go");
     world.until("the held node to settle", |world| {
         !world.events_of("closing", "node-settled").is_empty()
     });
     assert!(
         !world.run_file("closing", "result.json").is_file(),
-        "the run settled while the retirement in progress was held"
+        "the run settled while the retirement in progress was still pushing"
     );
-
-    let released = std::time::Instant::now();
-    std::fs::write(&go, "go").expect("the origin is released");
     world.until("the run to settle", |world| {
         world.run_file("closing", "result.json").is_file()
     });
     let took = released.elapsed();
-    let bound = std::time::Duration::from_secs(CLOSE_OUT_MARGIN_SECONDS);
+    let bound = std::time::Duration::from_secs(SLOW_RETIREMENT_SECONDS + CLOSE_OUT_MARGIN_SECONDS);
     assert!(
         took <= bound,
-        "the run's result came {took:?} after the retirement in progress was let go, past the \
-         {bound:?} the close-out takes: the closing driver began another identity's retirement\n{}",
+        "the run's result came {took:?} after its node was released, past the {bound:?} the \
+         retirement in progress and the close-out take: the closing driver began another \
+         identity's retirement\n{}",
         world.dump()
     );
 
