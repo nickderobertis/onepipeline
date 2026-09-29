@@ -257,7 +257,7 @@ pub struct RunState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub let_go_by: Option<DriverClaim>,
     /// What the journal says about whether the run's launching session still owes
-    /// it attention: the closure rule of `docs/contract-divergences.md` entry 96.
+    /// it attention: the closure rule of `docs/contract-divergences.md` entry 98.
     /// Omitted when empty, so a fold of a run no driver of that release drove is
     /// written as it always was.
     #[serde(default, skip_serializing_if = "Closure::is_empty")]
@@ -689,7 +689,7 @@ fn change_requests_only<'de, D: serde::Deserializer<'de>>(
     Ok(read)
 }
 
-/// The journal's own account of whether a run is **closed** — entry 96 of
+/// The journal's own account of whether a run is **closed** — entry 98 of
 /// `docs/contract-divergences.md` states the rule; this is the part of it the
 /// journal holds.
 ///

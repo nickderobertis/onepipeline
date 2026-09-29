@@ -702,7 +702,7 @@ pub const ADOPTED_ABANDONED: &str = "abandoned";
 /// `true` wherever it is written, and absent from every record an earlier build
 /// wrote — which is the whole of its meaning: a run no record of which carries it
 /// was never driven under that rule, and is decided by the rule it was driven
-/// under. Entry 96 of `docs/contract-divergences.md` states both rules.
+/// under. Entry 98 of `docs/contract-divergences.md` states both rules.
 pub const OWED_UNTIL_CLOSED: &str = "owed_until_closed";
 
 /// Whether one `run-started` or `driver-adopted` payload carries

@@ -2,7 +2,7 @@
 //!
 //! What the record is and what it promises is entry 68 of
 //! `docs/contract-divergences.md`, and what the terms record beside it adds —
-//! and the wake budget decided from it — is entry 96; neither is restated here. What is worth saying
+//! and the wake budget decided from it — is entry 98; neither is restated here. What is worth saying
 //! beside the code is the two rules a maintainer has to keep apart, because
 //! nothing in the types enforces them:
 //!
@@ -149,7 +149,7 @@ fn this_terms_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32
 /// before this one reads every file in `watchers/` closed: a lease that grew a
 /// field would read to it as a record it cannot parse, and every run it watched
 /// would read unwatched to it. The lease is written byte-identical to what that
-/// engine wrote, and this is what a wake budget is decided from. Entry 96 of
+/// engine wrote, and this is what a wake budget is decided from. Entry 98 of
 /// `docs/contract-divergences.md` states the record and the rule over it.
 ///
 /// Every field is required, `null` included where a field is nullable: a record
@@ -959,7 +959,7 @@ fn terms_of(
             crate::cli::WatchTimeout::Unbounded => None,
         },
         until,
-        // Unset and blank are one answer, `null`, by the ruling entry 96 records:
+        // Unset and blank are one answer, `null`, by the ruling entry 98 records:
         // a watch is armed whatever session it runs under, and a blank one names
         // nobody, so it is recorded as naming nobody rather than refused.
         session: std::env::var(sys::LAUNCHER_SESSION_ENV)

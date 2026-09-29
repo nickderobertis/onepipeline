@@ -739,7 +739,7 @@ pub const DEFAULT_WATCH_TIMEOUT_SECONDS: u64 = 300;
 /// supervising session may go without being woken, in whole seconds.
 ///
 /// Read by three verbs, each for its own default: `watch`'s `--timeout`, and the
-/// `--wake-budget` of `unwatched` and `stop-guard`. Entry 96 of
+/// `--wake-budget` of `unwatched` and `stop-guard`. Entry 98 of
 /// `docs/contract-divergences.md` states what each does with it.
 pub const WAKE_BUDGET_ENV: &str = "ONEPIPELINE_WAKE_BUDGET";
 

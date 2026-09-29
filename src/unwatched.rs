@@ -3,7 +3,7 @@
 //!
 //! What the verb promises, and why it exists at all, is entry 68 of
 //! `docs/contract-divergences.md`: the proposal it waits on. The wake budget,
-//! the closure rule and the acknowledgement are entry 96's. Neither is restated
+//! the closure rule and the acknowledgement are entry 98's. Neither is restated
 //! here, on the terms [`crate::watch`] keeps beside its own entry.
 //!
 //! The one thing worth saying beside the code is the cost, because it is a
@@ -164,7 +164,7 @@ fn an_instant<'de, D: serde::Deserializer<'de>>(
 /// journal, so it needs no driver and takes no lock.
 ///
 /// It closes the run for the session it names, which has to be the run's own,
-/// until a later `driver-adopted` or `edit-committed` re-opens it. Entry 96 of
+/// until a later `driver-adopted` or `edit-committed` re-opens it. Entry 98 of
 /// `docs/contract-divergences.md` states the rule.
 // llmlint: ignore-block[invalid_states_unrepresentable] the run id, the session and the
 // instant are `String`s for the reason the watcher record's own block states — a record read
@@ -877,7 +877,7 @@ pub(crate) mod tests {
         serde_json::from_str(block).expect("entry 68's block is JSON")
     }
 
-    /// Entry 96, which proposes the terms record, the wake budget, the closure
+    /// Entry 98, which proposes the terms record, the wake budget, the closure
     /// rule and the acknowledgement, as its JSON block.
     pub(crate) fn budget_block() -> serde_json::Value {
         let record = std::fs::read_to_string(
@@ -887,18 +887,18 @@ pub(crate) mod tests {
         )
         .expect("the divergence record ships");
         let entry = record
-            .split_once("\n## 96.")
-            .expect("the wake budget is recorded under entry 96")
+            .split_once("\n## 98.")
+            .expect("the wake budget is recorded under entry 98")
             .1;
         let entry = entry.split_once("\n## ").map_or(entry, |(head, _)| head);
         let block = entry
             .split_once("```json")
-            .expect("entry 96 carries the json block these tests drive")
+            .expect("entry 98 carries the json block these tests drive")
             .1
             .split_once("```")
             .expect("the block is fenced")
             .0;
-        serde_json::from_str(block).expect("entry 96's block is JSON")
+        serde_json::from_str(block).expect("entry 98's block is JSON")
     }
 
     /// The keys one document serializes under.
@@ -912,7 +912,7 @@ pub(crate) mod tests {
             .collect()
     }
 
-    /// The terms record and the acknowledgement are the ones entry 96 names,
+    /// The terms record and the acknowledgement are the ones entry 98 names,
     /// both ways, and each round-trips.
     ///
     /// Built through the types, so a field either grows does not compile here
@@ -937,11 +937,11 @@ pub(crate) mod tests {
             session: Some("a-session".into()),
         };
         let named: BTreeSet<String> =
-            serde_json::from_value(block["terms_fields"].clone()).expect("entry 96 names them");
+            serde_json::from_value(block["terms_fields"].clone()).expect("entry 98 names them");
         assert_eq!(
             named,
             keys_of(&terms),
-            "entry 96's terms inventory is not the record this build writes"
+            "entry 98's terms inventory is not the record this build writes"
         );
         let read: WatchTerms =
             serde_json::from_str(&serde_json::to_string(&terms).expect("terms serialize"))
@@ -969,11 +969,11 @@ pub(crate) mod tests {
         };
         let named: BTreeSet<String> =
             serde_json::from_value(block["acknowledgement_fields"].clone())
-                .expect("entry 96 names them");
+                .expect("entry 98 names them");
         assert_eq!(
             named,
             keys_of(&acknowledged),
-            "entry 96's acknowledgement inventory is not the record this build writes"
+            "entry 98's acknowledgement inventory is not the record this build writes"
         );
         let read: Acknowledgement = serde_json::from_str(
             &serde_json::to_string(&acknowledged).expect("an acknowledgement serializes"),
@@ -1005,7 +1005,7 @@ pub(crate) mod tests {
             Some(crate::journal::OWED_UNTIL_CLOSED)
         );
         let summary: Vec<String> =
-            serde_json::from_value(block["summary_fields"].clone()).expect("entry 96 names them");
+            serde_json::from_value(block["summary_fields"].clone()).expect("entry 98 names them");
         // Read off the checked-in golden, which pins every field present.
         let golden: RunSummary =
             serde_json::from_str(include_str!("../tests/golden/run-summary-v8.json"))
@@ -1014,7 +1014,7 @@ pub(crate) mod tests {
         for field in &summary {
             assert!(
                 carried.contains(field),
-                "entry 96 names `{field}`, which the summary document does not carry"
+                "entry 98 names `{field}`, which the summary document does not carry"
             );
         }
     }

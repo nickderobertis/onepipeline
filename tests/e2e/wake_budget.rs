@@ -1,4 +1,4 @@
-//! The wake budget, the watch-terms record and the closure rule — entry 96 of
+//! The wake budget, the watch-terms record and the closure rule — entry 98 of
 //! `docs/contract-divergences.md` — driven through the compiled binary.
 //!
 //! What this exists for is the question a supervising session actually needs

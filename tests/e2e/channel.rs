@@ -1151,7 +1151,7 @@ fn a_settled_run_refuses_a_reply_nothing_will_ever_read() {
     });
 
     // A verdict that is not `complete`: that one verdict is still owed to a settled
-    // run nothing drives, and closes it (entry 96, `tests/e2e/wake_budget.rs`).
+    // run nothing drives, and closes it (entry 98, `tests/e2e/wake_budget.rs`).
     world
         .run_with_stdin(
             &["reply", "settled"],

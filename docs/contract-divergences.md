@@ -11,14 +11,14 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95 and 96 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95 and 98 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95 and 96 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95 and 98 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -3414,7 +3414,7 @@ contract's vocabulary has nowhere to put one. So this crate now ships:
   names it (entry 84) — because a version-6 document carries no answer to where
   the run's sessions are rather than a run nothing wrote a pointer line for.
   It moved to version 8 when the row grew the closure rule's three facts —
-  `owed_until_closed`, `completion_requested` and `reopened_at` (entry 96) —
+  `owed_until_closed`, `completion_requested` and `reopened_at` (entry 98) —
   because a version-7 document carries no answer to whether its run was driven
   under that rule rather than a run that was not.
 - **`views::{RunTelemetry, Bucket, BucketName, Party, Usage}`**, re-exported
@@ -4980,8 +4980,8 @@ match — is undecidable, named on standard error and blocking nothing, never
 reported at `6`, because a stale stamp is no proof of what the document says and
 `6` means *proven* unwatched. This is left OPEN, as the entry is.
 
-**Amendment — entry 96.** `--wake-budget`, `--acknowledge` and `--reason` are
-entry 96's, which also replaces this entry's exclusion rule for runs driven by
+**Amendment — entry 98.** `--wake-budget`, `--acknowledge` and `--reason` are
+entry 98's, which also replaces this entry's exclusion rule for runs driven by
 its release — owed until closed rather than until settled — and adds a terms
 record beside each lease. The lease itself, its directory and its six conditions
 are unchanged, and so is everything below for a caller that passes neither flag
@@ -6982,7 +6982,7 @@ the SDK call, and `agents::tests` holds the merge rule and the reader against th
 [--session <ID>] [--continuation] [--format neutral|claude-code|codex]
 [--source <COMMAND>]... [--source-timeout <SECONDS>] [--wake-budget <SECONDS>]`
 to the Views line beside `unwatched`, as a verb whose contract is one verdict
-object and exit `0` always.** `--wake-budget` is entry 96's, and so is the
+object and exit `0` always.** `--wake-budget` is entry 98's, and so is the
 `warn` it answers for a run whose watch it cannot judge.
 
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] a register entry states

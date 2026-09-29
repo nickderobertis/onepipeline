@@ -329,7 +329,7 @@ pub struct RunSummary {
     /// this run, so its launching session owes it attention until it is closed
     /// rather than until it settles.
     ///
-    /// The rule and its migration are entry 96 of `docs/contract-divergences.md`.
+    /// The rule and its migration are entry 98 of `docs/contract-divergences.md`.
     /// Absent — `false` — for a run no such driver drove, which is decided by the
     /// rule it was driven under.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
