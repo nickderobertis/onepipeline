@@ -371,25 +371,19 @@ fn health_asked(world: &World) -> usize {
         .count()
 }
 
-/// A view with the two readings that move between two invocations held still:
-/// the free-space measurement and the age of the oldest unread planner update.
-/// Their lines, and where those lines sit, are held; the numbers are not.
-fn steady(view: &str) -> String {
+/// The view `status` prints, cut above its provider report: the report is the
+/// view's last block, so this is every line before `  providers: `, verbatim.
+fn above_the_report(view: &str) -> String {
     view.lines()
-        .map(|line| {
-            if let Some((_, roots)) = line
-                .strip_prefix("  free space: ")
-                .and_then(|rest| rest.split_once(" on the filesystem holding "))
-            {
-                format!("  free space: <measured> on the filesystem holding {roots}\n")
-            } else if let Some((waiting, _)) = line.split_once("), unread for ") {
-                format!("{waiting}), unread for <age>\n")
-            } else {
-                format!("{line}\n")
-            }
-        })
+        .take_while(|line| !line.starts_with("  providers: "))
+        .map(|line| format!("{line}\n"))
         .collect()
 }
+
+/// How many brackets a comparison may take before a moving reading is called
+/// a failure rather than the clock: each bracket is three quick invocations,
+/// and the readings move by the second and by a tenth of a gibibyte.
+const BRACKETS: usize = 20;
 
 /// `status --no-providers` leaves the provider report out and never asks
 /// `oneagentgraph` for it, and every other line is the one `status` prints —
@@ -414,36 +408,48 @@ fn status_without_providers_omits_the_report_asks_for_none_and_moves_no_other_li
         .exited(0);
 
     for scope in [vec!["status", run.as_str()], vec!["status"]] {
-        let reported = world.run(&scope);
-        reported.exited(0);
-        // llmlint: ignore-block[tests_mirror_real_usage] the provider-health call is a spawn of
-        // the sibling, observable only at the double that receives it; the full reason is at
-        // `health_asked`.
-        let asked = health_asked(&world);
-        let omitted = world.run(&[scope.as_slice(), &["--no-providers"]].concat());
-        omitted.exited(0);
-        assert_eq!(
-            health_asked(&world),
-            asked,
-            "`{}` asked oneagentgraph for the provider report",
-            omitted.args
-        );
-        // llmlint: ignore-end[tests_mirror_real_usage]
-        omitted.out_lacks("providers:");
-        assert_eq!(omitted.stderr, reported.stderr, "{}", omitted.args);
-        // Everything above the report, and nothing below it: the report is the
-        // view's last block, so what is left is the view cut at that line.
-        let cut: String = reported
-            .stdout
-            .lines()
-            .take_while(|line| !line.starts_with("  providers: "))
-            .map(|line| format!("{line}\n"))
-            .collect();
-        assert_eq!(
-            steady(&omitted.stdout),
-            steady(&cut),
-            "`{}` moved a line besides the provider report",
-            omitted.args
+        // Two readings in the view move on their own between invocations: the
+        // free space on the host and the age of the unread planner update. So
+        // `--no-providers` is run between two plain `status` runs, and compared
+        // byte for byte only when those two agree above the report — nothing
+        // moved across the bracket, so any difference is the flag's.
+        let mut compared = false;
+        for _ in 0..BRACKETS {
+            let before = world.run(&scope);
+            before.exited(0);
+            // llmlint: ignore-block[tests_mirror_real_usage] the provider-health call is a spawn of
+            // the sibling, observable only at the double that receives it; the full reason is at
+            // `health_asked`.
+            let asked = health_asked(&world);
+            let omitted = world.run(&[scope.as_slice(), &["--no-providers"]].concat());
+            omitted.exited(0);
+            assert_eq!(
+                health_asked(&world),
+                asked,
+                "`{}` asked oneagentgraph for the provider report",
+                omitted.args
+            );
+            // llmlint: ignore-end[tests_mirror_real_usage]
+            let after = world.run(&scope);
+            after.exited(0);
+            omitted.out_lacks("providers:");
+            assert_eq!(omitted.stderr, before.stderr, "{}", omitted.args);
+            let cut = above_the_report(&before.stdout);
+            if cut != above_the_report(&after.stdout) {
+                continue;
+            }
+            assert_eq!(
+                omitted.stdout, cut,
+                "`{}` moved a line besides the provider report",
+                omitted.args
+            );
+            compared = true;
+            break;
+        }
+        assert!(
+            compared,
+            "`{}` never held still across {BRACKETS} brackets to compare against",
+            scope.join(" ")
         );
     }
 
