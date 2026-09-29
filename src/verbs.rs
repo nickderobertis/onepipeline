@@ -179,6 +179,23 @@ pub fn render_status(status: &Status) -> String {
     }
 }
 
+impl Status {
+    /// The text `onepipeline status [RUN] --no-providers` prints: what
+    /// [`render_status`] renders, less the host's provider report, which is
+    /// not asked for at all.
+    ///
+    /// A method rather than a second `render_` function beside
+    /// [`render_status`], because the contract's verbs paragraph names every
+    /// function this module publishes and is amended only by the planner who
+    /// owns it — `docs/contract-divergences.md` entry 95 proposes the name.
+    pub fn render_without_providers(&self) -> String {
+        match self {
+            Self::Run(detail) => views::status_reporting(&detail.view, views::Providers::Omitted),
+            Self::Listing(projects) => views::status_listed(projects),
+        }
+    }
+}
+
 /// `onepipeline host`: every live dispatch on this host, read off every run
 /// under the root.
 #[derive(Debug)]

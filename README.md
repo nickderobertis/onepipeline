@@ -592,6 +592,9 @@ node is doing right now, with an event count and an age; `transcript RUN [NODE]`
 renders a dispatched turn's tools and its words; `telemetry` reports what each
 party spent and where the wall clock went, in eight buckets that sum exactly.
 Anything nothing in the stack measures is reported absent, never as a zero.
+`status [RUN] --no-providers` leaves out the closing provider report and does not
+ask `oneagentgraph` for it; every other line is the one `status` prints without the
+flag, so a watch that used to cut the view with a shell filter is one plain command.
 
 ![a live run's state: ACTIVE, NO OBSERVER, 2 of 6 nodes done, then one line each for docs and service saying how long it has been running, how many events it has produced and how long ago the last one was, then the free space on the filesystem holding the runs root and a provider-health line](screenshots/images/status.svg)
 
@@ -687,7 +690,14 @@ record's `node` naming which one. It prints a cursor on exit, and `--cursor`
 resumes from one without re-emitting what the earlier watch already did.
 `--tick-interval` is **this stream's** clock and is not `start`'s
 `--heartbeat-interval`, which sets the pacemaker agent's cadence; neither verb
-accepts the other's flag.
+accepts the other's flag. `--log PATH` appends the human lines to `PATH` instead
+of standard error, each flushed as it is written, so a quiet run and a dead one
+still read apart through a file; it is created when absent and never truncated, so
+a re-armed watch appends to the same log. Standard output, the exit statuses and
+the ending line are what they are without it. A path that cannot be opened for
+appending is refused before anything waits, naming it, as every other refusal of
+this verb is; and a log that stops taking writes ends the watch as a broken stream
+does.
 
 **`--until` is repeatable, and it is how a supervisor says what the wait is for** —
 so that waiting for something is this verb's job rather than a loop somebody writes

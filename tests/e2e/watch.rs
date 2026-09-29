@@ -2310,3 +2310,387 @@ fn every_refusal_a_watch_makes_is_made_before_it_blocks() {
 
     world.release("build.go");
 }
+
+/// Run one watch twice over the same state — as it always ran, then with
+/// `--log` — and hold the two to one answer: the same exit status and the same
+/// standard output, nothing on standard error, and the human lines the first
+/// wrote to standard error appended to the log after whatever it held already.
+///
+/// Answers the watch without the log, whose standard error is what the log was
+/// held to, so the caller's assertions about the human form read the same lines.
+fn logged_alike(world: &World, args: &[&str], log: &std::path::Path) -> Run {
+    let plain = world.run(&[&["watch"], args].concat());
+    let before = std::fs::read_to_string(log).unwrap_or_default();
+    let path = log.display().to_string();
+    let logged = world.run(&[&["watch"], args, &["--log", &path]].concat());
+    assert_eq!(
+        logged.code, plain.code,
+        "`{}` exited differently from the same watch without the log",
+        logged.args
+    );
+    assert_eq!(
+        logged.stdout, plain.stdout,
+        "`{}` wrote a different machine form from the same watch without the log",
+        logged.args
+    );
+    assert_eq!(
+        logged.stderr, "",
+        "`{}` still wrote to standard error",
+        logged.args
+    );
+    let after = std::fs::read_to_string(log).expect("the log reads");
+    let appended = after.strip_prefix(&before).unwrap_or_else(|| {
+        panic!(
+            "`{}` did not append to what the log held:\n--- before ---\n{before}\n--- after ---\n{after}",
+            logged.args
+        )
+    });
+    assert_eq!(
+        appended, plain.stderr,
+        "`{}` logged other lines than the same watch wrote to standard error",
+        logged.args
+    );
+    plain
+}
+
+/// `--log PATH` moves the human lines into a file and changes nothing else, on
+/// every ending a watch returns on: the status, the machine form and the ending
+/// line with its cursor are each what the same watch without the flag gives.
+///
+/// A supervisor used to get this with a shell redirect, which no allowlist can
+/// approve as one simple command.
+#[test]
+fn a_logged_watch_answers_every_ending_as_an_unlogged_one_does() {
+    let world = World::new("watch-logged-endings");
+    let log = world.root.join("endings.log");
+
+    // Node `build` has settled and `check` is held.
+    let run = settling_run(&world, "watchlogged");
+    agreed(
+        &logged_alike(
+            &world,
+            &[
+                &run,
+                "--until",
+                "node-settled",
+                "--timeout",
+                "30",
+                "--tick-interval",
+                "0",
+            ],
+            &log,
+        ),
+        "node-settled",
+        NODE_SETTLED,
+    );
+    agreed(
+        &logged_alike(
+            &world,
+            &[
+                &run,
+                "--until",
+                "node=check",
+                "--timeout",
+                "0",
+                "--tick-interval",
+                "0",
+            ],
+            &log,
+        ),
+        "elapsed",
+        WATCH_ELAPSED,
+    );
+    world.release("check.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    agreed(
+        &logged_alike(
+            &world,
+            &[&run, "--timeout", "30", "--tick-interval", "0"],
+            &log,
+        ),
+        "settled",
+        0,
+    );
+
+    // A blocking surface, raised through the host's channel server as the
+    // journey above raises one.
+    world.script("gate.wait", "hold");
+    let gated = running(&world, "watchloggedgate", vec![agent("gate", &[])]);
+    let mut serving = world
+        .host_channel(&gated)
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"logged, not printed","blocking":true,"node":"gate"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    world.until("the blocking surface to reach the planner", |world| {
+        world
+            .queued_surfaces(&gated)
+            .iter()
+            .any(|surface| surface["blocking"] == json!(true))
+    });
+    agreed(
+        &logged_alike(
+            &world,
+            &[&gated, "--timeout", "30", "--tick-interval", "0"],
+            &log,
+        ),
+        "surface-waiting",
+        SURFACE_WAITING,
+    );
+    drop(stdin);
+    ended(serving);
+    world.release("gate.go");
+
+    // Nothing driving: the one node fails.
+    world.script("lone.fail", "1");
+    let undriven = "watchloggedundriven";
+    let path = world.plan(undriven, &plan_of(undriven, vec![agent("lone", &[])]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the run to stop being driven", |world| {
+        world
+            .run(&["status", undriven])
+            .stdout
+            .contains("DRIVER DEAD")
+    });
+    agreed(
+        &logged_alike(
+            &world,
+            &[undriven, "--timeout", "30", "--tick-interval", "0"],
+            &log,
+        ),
+        "nothing-driving",
+        NOTHING_DRIVING,
+    );
+}
+
+/// The log is appended to and never truncated — a watch re-armed from the last
+/// one's cursor goes on writing the same file — and a line is in the file, for
+/// anyone reading it, while the watch that wrote it is still blocked.
+#[test]
+fn a_logged_watch_appends_across_a_resume_and_each_line_is_readable_as_it_is_written() {
+    use std::io::Read;
+
+    let world = World::new("watch-logged-resume");
+    world.script("build.wait", "hold");
+    let run = running(&world, "watchloggedresume", vec![agent("build", &[])]);
+    let log = world.root.join("resume.log");
+    let path = log.display().to_string();
+    std::fs::write(&log, "a line written before any watch\n").expect("the log is seeded");
+
+    world
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "finding",
+            "--message",
+            "the first thing",
+        ])
+        .exited(0);
+    let first = world.run(&[
+        "watch",
+        &run,
+        "--timeout",
+        "0",
+        "--tick-interval",
+        "0",
+        "--log",
+        &path,
+    ]);
+    first.exited(WATCH_ELAPSED);
+    assert_eq!(first.stderr, "", "{}", first.args);
+    let cursor = returned(&first)["cursor"]
+        .as_str()
+        .expect("a watch prints a cursor on exit")
+        .to_string();
+
+    world
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "finding",
+            "--message",
+            "the second thing",
+        ])
+        .exited(0);
+    let second = world.run(&[
+        "watch",
+        &run,
+        "--timeout",
+        "0",
+        "--tick-interval",
+        "0",
+        "--cursor",
+        &cursor,
+        "--log",
+        &path,
+    ]);
+    second.exited(WATCH_ELAPSED);
+    assert_eq!(second.stderr, "", "{}", second.args);
+
+    let logged = std::fs::read_to_string(&log).expect("the log reads");
+    let lines: Vec<&str> = logged.lines().collect();
+    assert_eq!(
+        lines.first(),
+        Some(&"a line written before any watch"),
+        "the log was truncated:\n{logged}"
+    );
+    let at = |needle: &str| {
+        lines
+            .iter()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("the log carries no line with `{needle}`:\n{logged}"))
+    };
+    let first_ending = format!("cursor {cursor}");
+    assert!(
+        at("the first thing") < at(&first_ending) && at(&first_ending) < at("the second thing"),
+        "the resumed watch's lines are not after the first watch's:\n{logged}"
+    );
+    assert_eq!(
+        logged.matches("the first thing").count(),
+        1,
+        "the resumed watch repeated what the first had logged:\n{logged}"
+    );
+    assert!(
+        lines
+            .last()
+            .is_some_and(|line| line.starts_with("-- watch ")),
+        "the log does not end on the resumed watch's ending line:\n{logged}"
+    );
+
+    // Live: a heartbeat is only written after an interval in which nothing
+    // happened, so reading one in the file while the process has not exited is
+    // a line readable while the watch is still blocked.
+    let already = logged.len();
+    let mut watching = world
+        .cmd(&[
+            "watch",
+            &run,
+            "--timeout",
+            "600",
+            "--tick-interval",
+            "1",
+            "--log",
+            &path,
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the watch starts");
+    world.until("a heartbeat to reach the log", |_| {
+        std::fs::read_to_string(&log)
+            .is_ok_and(|text| text[already..].contains(&format!("-- watching {run}")))
+    });
+    assert!(
+        watching
+            .try_wait()
+            .expect("the watch is asked after")
+            .is_none(),
+        "the watch had already returned when its heartbeat was read"
+    );
+    world.release("build.go");
+    let status = watching.wait().expect("the watch exits");
+    let mut said = String::new();
+    watching
+        .stderr
+        .take()
+        .expect("stderr is piped")
+        .read_to_string(&mut said)
+        .expect("stderr reads");
+    assert_eq!(status.code(), Some(0), "{said}");
+    assert_eq!(said, "", "a logged watch wrote to standard error");
+    let logged = std::fs::read_to_string(&log).expect("the log reads");
+    assert!(
+        logged
+            .lines()
+            .last()
+            .is_some_and(|line| line.contains(" settled ")),
+        "the live watch's ending line is not the log's last:\n{logged}"
+    );
+}
+
+/// A log that cannot be opened for appending is refused before anything waits,
+/// naming the path, with the refusal status every other refusal of this verb
+/// exits with.
+#[test]
+fn a_log_that_cannot_be_opened_is_refused_before_the_wait() {
+    let world = World::new("watch-log-unopenable");
+    world.script("build.wait", "hold");
+    let run = running(&world, "watchlogunopenable", vec![agent("build", &[])]);
+
+    let missing = world.root.join("no-such-directory").join("watch.log");
+    for log in [missing, world.root.clone()] {
+        let path = log.display().to_string();
+        let started = std::time::Instant::now();
+        // Ten minutes, with nothing to end it sooner: a command that returns at
+        // all returned on the refusal.
+        let refused = world.run(&[
+            "watch",
+            &run,
+            "--timeout",
+            "600",
+            "--tick-interval",
+            "1",
+            "--log",
+            &path,
+        ]);
+        refused.exited(REFUSED);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "`{}` waited before refusing",
+            refused.args
+        );
+        refused.err_has(&path);
+        assert_eq!(refused.stdout, "", "`{}` wrote a record", refused.args);
+    }
+
+    world.release("build.go");
+}
+
+/// A log that stops taking writes part-way through a watch ends it as a broken
+/// standard error does: the refusal status, naming what could not be written,
+/// and no record on standard output that the status contradicts.
+///
+/// `/dev/full` opens for appending and refuses every write, so the refusal is
+/// the first line the wait has to say rather than the opening of the file.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_log_that_stops_taking_writes_ends_the_watch_as_a_broken_stream_does() {
+    let world = World::new("watch-log-full");
+    world.script("build.wait", "hold");
+    let run = running(&world, "watchlogfull", vec![agent("build", &[])]);
+
+    // The wait is ten minutes and the heartbeat one second, so a command that
+    // returns at all returned because the heartbeat could not be written.
+    let full = world.run(&[
+        "watch",
+        &run,
+        "--timeout",
+        "600",
+        "--tick-interval",
+        "1",
+        "--log",
+        "/dev/full",
+    ]);
+    full.exited(REFUSED);
+    full.err_has("could not write to /dev/full");
+    assert_eq!(
+        full.stdout.trim(),
+        "",
+        "the watch left an outcome on stdout that its exit status contradicts"
+    );
+
+    world.release("build.go");
+}

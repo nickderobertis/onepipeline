@@ -360,6 +360,102 @@ fn status_carries_the_provider_health_block_from_the_sibling() {
         .out_has("providers: fake-provider");
 }
 
+/// How many times `onepipeline` has asked the `oneagentgraph` double for the
+/// provider report.
+fn health_asked(world: &World) -> usize {
+    world
+        .invocations()
+        .iter()
+        .filter(|call| call["tool"] == "oneagentgraph" && call["args"][0] == "health")
+        .count()
+}
+
+/// A view with the two readings that move between two invocations held still:
+/// the free-space measurement and the age of the oldest unread planner update.
+/// Their lines, and where those lines sit, are held; the numbers are not.
+fn steady(view: &str) -> String {
+    view.lines()
+        .map(|line| {
+            if let Some((_, roots)) = line
+                .strip_prefix("  free space: ")
+                .and_then(|rest| rest.split_once(" on the filesystem holding "))
+            {
+                format!("  free space: <measured> on the filesystem holding {roots}\n")
+            } else if let Some((waiting, _)) = line.split_once("), unread for ") {
+                format!("{waiting}), unread for <age>\n")
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect()
+}
+
+/// `status --no-providers` leaves the provider report out and never asks
+/// `oneagentgraph` for it, and every other line is the one `status` prints —
+/// the unread planner update and the free-space reading above the cut included —
+/// for one run and for the listing alike.
+///
+/// This is what a supervisor's watch guidance used to get by piping the view
+/// through `sed`, which no allowlist can approve as one command.
+#[test]
+fn status_without_providers_omits_the_report_asks_for_none_and_moves_no_other_line() {
+    let world = World::new("views-noproviders");
+    let run = settled(&world, "unprovided", vec![agent("build", &[])]);
+    world
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "finding",
+            "--message",
+            "read this before the cut",
+        ])
+        .exited(0);
+
+    for scope in [vec!["status", run.as_str()], vec!["status"]] {
+        let reported = world.run(&scope);
+        reported.exited(0);
+        let asked = health_asked(&world);
+        let omitted = world.run(&[scope.as_slice(), &["--no-providers"]].concat());
+        omitted.exited(0);
+        assert_eq!(
+            health_asked(&world),
+            asked,
+            "`{}` asked oneagentgraph for the provider report",
+            omitted.args
+        );
+        omitted.out_lacks("providers:");
+        assert_eq!(omitted.stderr, reported.stderr, "{}", omitted.args);
+        // Everything above the report, and nothing below it: the report is the
+        // view's last block, so what is left is the view cut at that line.
+        let cut: String = reported
+            .stdout
+            .lines()
+            .take_while(|line| !line.starts_with("  providers: "))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert_eq!(
+            steady(&omitted.stdout),
+            steady(&cut),
+            "`{}` moved a line besides the provider report",
+            omitted.args
+        );
+    }
+
+    // The detail view is the one that carries the report, and every line the
+    // guidance's cut had to keep is still there.
+    let reported = world.run(&["status", &run]);
+    reported.out_has("  providers: fake-provider");
+    let omitted = world.run(&["status", &run, "--no-providers"]);
+    omitted.out_has("planner update(s) waiting");
+    assert_eq!(
+        free_space_lines(&omitted.stdout).len(),
+        1,
+        "{}",
+        omitted.stdout
+    );
+}
+
 /// The `free space:` lines a view carries, in order.
 fn free_space_lines(stdout: &str) -> Vec<&str> {
     stdout
