@@ -6,7 +6,7 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91 and 94** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94 and 96** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
@@ -7912,3 +7912,49 @@ further record to standard output.
 this entry's flags, renderer and exit statuses, and the README's `status` flags, to the code,
 and `the_divergence_entry_proposes_exactly_the_flags_this_build_offers` in `src/watch.rs` holds
 entry 58's synopsis to `watch`'s.
+
+## 96. A decision about a node a committed edit removed stayed pending for the life of the run — RESOLVED
+
+**Ruling: when a committed edit drops or supersedes the node a pending decision surface is
+about, the engine answers that surface, on the ruling of the manager of run
+`manager-wake-deadline-2026-09-29`.** It appends an answer carrying the surface's correlation,
+through the same reply record a verdict or a finding's answer is appended to, with a reason
+naming the edit that removed the node. The surface then leaves both waiting and pending, so
+`blocking_surface` no longer counts it, `watch --until surface` does not return on it, and
+`status` no longer reports the run as held on it. The answer is recorded once, and never for a
+surface about a node still in the graph. `docs/contract.md`'s Channel paragraph carries it as
+"A decision about a node a committed edit removed is discharged by that edit".
+
+**What diverged.** Issues #510 and #515. The Channel paragraph has a `retry` take the node it
+supersedes out of the graph in the same edit, and a `drop` does the same, but nothing answered a
+blocking surface about that node: a worker asked about its node, the manager answered by
+retrying it, and the question stayed pending. `watch --until surface` returned on it every time
+it was asked and `status` kept asking for it, while the replacement worked. Entry 39's finding
+rule had closed the one case where the removal was the edit the surface asked for; this is every
+other surface whose node left.
+
+**How a surface names its node.** By its `workstream`: `onepipeline ask --about NODE` has the
+bus stamp it there beside the question's correlation, a reconciler finding carries it with a
+stable correlation, and a `finding` command's `id` lands there with no correlation at all.
+
+**A second ruling, for the surface with no correlation**, relayed by the same manager while this
+was built: a blocking `finding` a watcher raised about the node has nothing a reply could be
+bound to — a reply carrying no correlation is a verdict for whichever listener reads next — and
+it must not stay standing either. So it is marked abandoned by its own id, which is the mark
+every reader of what is standing already consults, and no correlation is minted for blocking
+findings to get there. Nothing records a reason for it: the abandon mark carries none.
+
+**One consequence, as entry 39's had.** An envelope's commands are committed before its verdict
+half is delivered, so a `reply --correlation C` carrying the `retry` or `drop` of C's node finds C
+answered by its own edit. That verdict is appended beside the answer rather than refused,
+decided from the envelope's own commands exactly as a finding's is. Every other verdict naming
+an answered question is refused as it was.
+
+**What this build does.** `src/discharge.rs` holds the rule, called by both writers of the graph
+beside the finding rule. Nothing published moves: the answer is the `agent.queued-reply@1` a
+verdict is appended as, the mark is the one `agent.planner-surface@1` already declares, and
+neither schema changes. `tests/e2e/live_edit.rs`'s
+`a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit` drives a `retry`, a `drop`,
+a question about a node still in the graph and the bound verdict through the binary, and
+`tests/contract.rs`'s `a_decision_about_a_removed_node_is_discharged_by_that_edit` holds the
+contract's sentences and this entry's.

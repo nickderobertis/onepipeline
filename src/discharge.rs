@@ -13,8 +13,8 @@
 //! a verdict is appended to, carrying the surface's correlation and a reason
 //! naming that edit — and a blocking surface raised under no correlation, such
 //! as a `finding` a watcher raised about the node, is marked by its own id as
-//! one nobody is waiting on. What the rule is and the ruling it rests on are entry 119 of
-//! `docs/contract-divergences.md`; they are not restated here.
+//! one nobody is waiting on. What the rule is and the ruling it rests on are
+//! entry 96 of `docs/contract-divergences.md`; they are not restated here.
 
 use std::collections::BTreeMap;
 
