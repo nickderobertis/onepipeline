@@ -252,6 +252,7 @@ pub(crate) fn watch(
         Some(token) => resolve_cursor(paths, token)?,
         None => Cursor::start(&paths.run),
     };
+    let began = Instant::now();
     let deadline = deadline(request.timeout)?;
     let tick = request.tick;
     let mut quiet_since = Instant::now();
@@ -286,7 +287,7 @@ pub(crate) fn watch(
     // output nor any of its statuses. See `src/watchers.rs` for why its absence
     // may never be relied upon.
     let _armed = crate::watchers::Armed::arm(paths);
-    let mut wait = Wait::armed(paths, &view, files);
+    let mut wait = Wait::armed(paths, &view, files, began);
 
     let ended = |view: &RunView,
                  (ending, blocking): (Ending, bool),
@@ -375,8 +376,9 @@ pub(crate) fn watch(
 /// returning at once, and `nothing-driving` is a transition out of being
 /// driven — and the rest is what an elapsed wait's summary reports.
 struct Wait {
-    /// When the watch armed, which is what "during this wait" is measured from.
-    armed_at: Instant,
+    /// When the wait began — the instant its deadline is counted from — which
+    /// is what "during this wait" is measured from.
+    began: Instant,
     /// Whether the last pass read the run as driven. Nothing driving it ends a
     /// wait only on the pass that sees this go from `true` to `false`.
     driven: bool,
@@ -395,10 +397,10 @@ struct Wait {
 }
 
 impl Wait {
-    fn armed(paths: &RunPaths, view: &RunView, files: Fingerprint) -> Self {
+    fn armed(paths: &RunPaths, view: &RunView, files: Fingerprint, began: Instant) -> Self {
         let driven = !view.liveness().is_undriven();
         Self {
-            armed_at: Instant::now(),
+            began,
             driven,
             armed_undriven: !driven,
             files,
@@ -452,7 +454,7 @@ impl Wait {
             last_progress_seconds: last_progress(&view.events)
                 .map(|at| now.saturating_sub(at) / 1_000),
             observer: views::observer_word(&view.launch),
-            waited: self.armed_at.elapsed(),
+            waited: self.began.elapsed(),
         }
     }
 }
@@ -573,6 +575,9 @@ impl Summary {
         };
         let observer = match self.observer {
             OBSERVER_NONE => "the run launched no observer graph".to_owned(),
+            "not-restarted" => {
+                "the run's observer graph has stopped and nothing will restart it".to_owned()
+            }
             word => format!("the run's observer graph is {word}"),
         };
         format!(

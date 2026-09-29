@@ -3584,3 +3584,256 @@ fn a_watch_armed_on_a_run_nothing_is_driving_ends_when_the_run_moves() {
     agreed(&settled, "settled", 0);
     assert!(began.elapsed() < std::time::Duration::from_secs(60));
 }
+
+/// Surfaces of any kind and either source the channel's `surface` verb raises
+/// each end a default watch, and each is counted in an elapsed watch's summary
+/// of what arrived while it waited; a wait nothing arrived during says so
+/// plainly. Nothing here depends on who raised a surface or what it is called.
+#[test]
+fn every_surface_the_channel_raises_ends_a_default_watch_and_is_counted_while_it_waits() {
+    let world = World::new("watch-wake-kinds");
+    world.script("build.wait", "hold");
+    let run = running(&world, "watchwakekinds", vec![agent("build", &[])]);
+    // `check-in` is raised under the check-in source and every other kind under
+    // the proposal source; the third is a word no part of the engine knows.
+    let raised = [
+        ("check-in", "steady, nothing to decide"),
+        ("finding", "the base moved under us"),
+        ("lantern-7", "a stranger's own kind of news"),
+    ];
+    for (kind, message) in raised {
+        let watching = armed_watch(&world, &run, &["--timeout", "60", "--tick-interval", "0"]);
+        surfaced(&world, &run, kind, message);
+        let (code, last, said) = finished(watching);
+        assert_eq!(code, SURFACE_WAITING, "{kind}: {last}\n{said}");
+        assert_eq!(last["unread"]["kinds"][0]["kind"], json!(kind), "{last}");
+        assert_eq!(drained(&world, &run), vec![message]);
+    }
+
+    // Told to wait for something else, a watch counts all three as they arrive.
+    let watching = armed_watch(
+        &world,
+        &run,
+        &[
+            "--until",
+            "node=build",
+            "--timeout",
+            "5",
+            "--tick-interval",
+            "0",
+        ],
+    );
+    for (kind, message) in raised {
+        surfaced(&world, &run, kind, message);
+    }
+    let (code, last, said) = finished(watching);
+    assert_eq!(code, WATCH_ELAPSED, "{last}\n{said}");
+    assert_eq!(
+        last["summary"]["surfaces_queued_during_wait"],
+        json!(raised.len()),
+        "{last}"
+    );
+    assert!(
+        said.contains("3 planner surface(s) arrived during this"),
+        "{said}"
+    );
+    drained(&world, &run);
+
+    // And none: the summary says so, in words a person reads without the JSON.
+    let quiet = world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "node=build",
+        "--timeout",
+        "1",
+        "--tick-interval",
+        "0",
+    ]);
+    agreed(&quiet, "elapsed", WATCH_ELAPSED);
+    let summary = returned(&quiet)["summary"].clone();
+    assert_eq!(
+        summary["surfaces_queued_during_wait"],
+        json!(0),
+        "{summary}"
+    );
+    assert_eq!(summary["observer"], json!("none"), "{summary}");
+    assert!(summary["last_progress_seconds"].is_u64(), "{summary}");
+    assert_eq!(summary["held"], json!([]), "{summary}");
+    assert!(
+        quiet.stderr.contains(
+            "no planner surface arrived during this 1s wait; the run launched no observer graph"
+        ),
+        "{}",
+        quiet.stderr
+    );
+
+    world.release("build.go");
+}
+
+/// A run where no node has dispatched or settled has no progress to date, and
+/// its summary says `null` rather than a number.
+#[test]
+fn a_run_with_no_dispatch_or_settlement_reports_no_last_progress() {
+    let world = World::new("watch-wake-no-progress");
+    world.script("build.wait", "hold");
+    let upstream = running(&world, "watchwakeupstream", vec![agent("build", &[])]);
+    // Waiting on a node of another run that is still working, so nothing here
+    // dispatches and nothing settles.
+    let mut waiting = agent("after", &[]);
+    waiting["deps"] = json!([format!("run:{upstream}#build")]);
+    let run = "watchwakenoprogress";
+    let path = world.plan(run, &plan_of(run, vec![waiting]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    // Its driver has nothing to dispatch while the upstream works, and lets the
+    // run go; the watch below is armed on it as it then stands.
+    world.until("the run to stop being driven", |world| {
+        world.run_file(run, "launch.json").is_file()
+            && !world.run(&["status", run]).stdout.contains("ACTIVE")
+    });
+
+    let watched = world.run(&["watch", run, "--timeout", "1", "--tick-interval", "0"]);
+    agreed(&watched, "elapsed", WATCH_ELAPSED);
+    let summary = returned(&watched)["summary"].clone();
+    assert!(
+        world.events_of(run, "node-dispatched").is_empty()
+            && world.events_of(run, "node-settled").is_empty(),
+        "the premise did not hold: something in the run moved"
+    );
+    assert_eq!(summary["last_progress_seconds"], Value::Null, "{summary}");
+    assert_eq!(summary["settled_since_cursor"], json!([]), "{summary}");
+    assert!(
+        watched
+            .stderr
+            .contains("last progress: no node has dispatched or settled"),
+        "{}",
+        watched.stderr
+    );
+
+    world.release("build.go");
+}
+
+/// The observer a run's summary names is read by the rules the liveness view
+/// already reads it by, however the graph's members are named: a real observer
+/// graph of members named by nothing built in reads `running` while its graph
+/// run lives and `dead` once its owner is gone.
+#[cfg(unix)]
+#[test]
+fn an_elapsed_summary_names_a_live_observer_running_and_a_killed_one_dead() {
+    let world =
+        World::new("watch-wake-observer").with_env(crate::dispatch::OBSERVER_RESTARTS_ENV, "0");
+    world.write_graphs();
+    let graph = world.write_observer_graph_with_clocks(&[("zz-lantern", true), ("q-7", false)]);
+    world.script("observer.wait", "hold");
+    world.script("turn.hold", "hold");
+    let run = "watchwakeobserved";
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&["start", &path, "--detach", "--dag-graph", &graph])
+        .exited(0);
+    world.until("the observer to be watching the run", |world| {
+        world.observer_saw().len() == 1
+    });
+    world.until("the run to hold a dispatch in flight", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+    let observer = |world: &World| -> Value {
+        let watched = world.run_on_agentgraph(&[
+            "watch",
+            run,
+            "--until",
+            "settled",
+            "--timeout",
+            "1",
+            "--tick-interval",
+            "0",
+        ]);
+        watched.exited(WATCH_ELAPSED);
+        returned(&watched)["summary"]["observer"].clone()
+    };
+    assert_eq!(observer(&world), json!("running"));
+
+    let graph_run = world.run_json(run, "launch.json")["graph_run"]
+        .as_str()
+        .expect("the launch record names the observer's graph run")
+        .to_string();
+    let lock = std::fs::read_to_string(
+        world
+            .graph_state()
+            .join(&graph_run)
+            .join(oneagentgraph::liveness::OWNER_LOCK_FILE),
+    )
+    .expect("the graph run records who owns its state");
+    let owner: u32 = lock
+        .split_whitespace()
+        .next()
+        .and_then(|pid| pid.parse().ok())
+        .unwrap_or_else(|| panic!("the owner lock names no process: {lock:?}"));
+    // The one process this journey may end: the one the graph run's own
+    // ownership record names.
+    crate::harness::end_process(owner);
+    world.until("the observer to read as dead", |world| {
+        observer(world) == json!("dead")
+    });
+
+    world.release("observer.go");
+    world.release("turn.go");
+    world.release("turn.settle");
+}
+
+/// A run whose driver has stopped starting its observer again reads
+/// `not-restarted`, as the liveness view reads it.
+#[test]
+fn an_elapsed_summary_names_an_observer_nothing_will_restart() {
+    // Two restarts rather than the shipped eight, so the bound is reached inside
+    // the journey.
+    let world = World::new("watch-wake-not-restarted")
+        .with_env(crate::dispatch::OBSERVER_RESTARTS_ENV, "2");
+    world.script("build.wait", "hold");
+    world.script("observer.wait", "hold");
+    let run = "watchwakerestarts";
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world
+        .run(&[
+            "start",
+            &path,
+            "--detach",
+            "--dag-graph",
+            &world.shipped_dag_graph(),
+        ])
+        .exited(0);
+    for nth in 1..=3 {
+        world.until(&format!("observer {nth} to be watching"), |world| {
+            world.observer_saw().len() >= nth
+        });
+        world.release(&format!("observer.go.{nth}"));
+    }
+    world.until("the driver to spend its restart bound", |world| {
+        world.run_json(run, "launch.json")["observer_ending"].is_string()
+    });
+
+    let watched = world.run(&[
+        "watch",
+        run,
+        "--until",
+        "settled",
+        "--timeout",
+        "1",
+        "--tick-interval",
+        "0",
+    ]);
+    agreed(&watched, "elapsed", WATCH_ELAPSED);
+    assert_eq!(
+        returned(&watched)["summary"]["observer"],
+        json!("not-restarted")
+    );
+    assert!(
+        watched
+            .stderr
+            .contains("the run's observer graph has stopped and nothing will restart it"),
+        "{}",
+        watched.stderr
+    );
+
+    world.release("build.go");
+}

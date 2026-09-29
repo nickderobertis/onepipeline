@@ -8232,3 +8232,233 @@ fn an_exhausted_identity_at_a_publication_redispatch_keeps_the_pin_and_resumes_o
         repo.base_commits(&world)
     );
 }
+
+/// The queue times, in epoch milliseconds, of every `workspace-wait` the channel
+/// has queued about `node`, or `None` while its projection is behind its log.
+fn workspace_wait_times(world: &World, run: &str, node: &str) -> Option<Vec<u64>> {
+    let queued = world.queued_surfaces(run);
+    if queued.is_empty() {
+        return None;
+    }
+    Some(
+        queued
+            .into_iter()
+            .filter(|surface| surface["kind"] == "workspace-wait" && surface["workstream"] == node)
+            .filter_map(|surface| surface["queued_at"].as_u64())
+            .collect(),
+    )
+}
+
+/// Read every surface the run has waiting, as a supervisor does between looks.
+fn read_everything(world: &World, run: &str) {
+    for _ in 0..64 {
+        let read = world.run(&["next", run]);
+        read.exited(0);
+        if read.json()["status"] != json!("surface") {
+            return;
+        }
+    }
+    panic!("`next` never ran out of surfaces on {run}");
+}
+
+/// A workspace hold is surfaced on the release wait's cadence: an unchanged
+/// wait is not queued again while the one before it is unread, and once read it
+/// is queued again at an interval that doubles from the configured base and
+/// stops doubling at the ceiling. And an elapsed watch over the same run names
+/// the hold, what settled past its cursor, and when the run last moved.
+/// Divergence entry 97.
+#[test]
+fn a_workspace_wait_is_queued_again_only_once_read_and_an_elapsed_watch_names_the_hold() {
+    let world = World::new("lifecycle-pool-cadence")
+        .with_env("ONEPIPELINE_WORKSPACE_POLL_SECONDS", "1")
+        .with_env("ONEPIPELINE_RELEASE_SURFACE_SECONDS", "1")
+        .with_env("ONEPIPELINE_RELEASE_SURFACE_CEILING_SECONDS", "4");
+    let _repo = world.repository("local-direct", &[]);
+    pool_one_slot_no_overflow(&world);
+    world.script("first.work", "the first wrote this\n");
+    world.script("first.wait", "");
+    world.script("second.work", "the second wrote this\n");
+    // A node that settles when this journey says, past a cursor it took first.
+    world.script("quick.wait", "hold");
+    let mut plan = plan_of(
+        "poolcadence",
+        vec![
+            lifecycle("first", &[]),
+            lifecycle("second", &[]),
+            agent("quick", &[]),
+        ],
+    );
+    plan["concurrency"] = json!(5);
+    let path = world.plan("poolcadence", &plan);
+    world.run(&["start", &path, "--detach"]).exited(0);
+    let run = "poolcadence".to_string();
+    // The reading the hold is on settles once the first's session holds the
+    // one slot; each reading before that is a different wait, and queued as one.
+    world.until("the hold's reading to settle on the held slot", |world| {
+        workspace_hold_of(world, &run, "second")
+            .is_some_and(|hold| hold["slots"] == 1 && hold["idle"] == 0)
+            && workspace_wait_times(world, &run, "second").is_some_and(|waits| !waits.is_empty())
+    });
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    world.until("the queue to be read back", |world| {
+        workspace_wait_times(world, &run, "second").is_some()
+    });
+    let settled = workspace_wait_times(&world, &run, "second")
+        .expect("read")
+        .len();
+
+    // Unread, the unchanged wait is not queued again.
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    world.until("the queue to be read back", |world| {
+        workspace_wait_times(world, &run, "second").is_some()
+    });
+    assert_eq!(
+        workspace_wait_times(&world, &run, "second")
+            .expect("read")
+            .len(),
+        settled,
+        "an unchanged workspace wait was queued again while the one before it was unread"
+    );
+
+    // An elapsed watch from a cursor taken now: `quick` settles past it while
+    // `second` stays held.
+    let cursor = returned(&world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "settled",
+        "--timeout",
+        "0",
+        "--tick-interval",
+        "0",
+    ]))["cursor"]
+        .as_str()
+        .map(str::to_owned)
+        .expect("a watch prints a cursor");
+    world.release("quick.go");
+    world.until("quick to settle", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "quick")
+    });
+    let watched = world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "settled",
+        "--cursor",
+        &cursor,
+        "--timeout",
+        "1",
+        "--tick-interval",
+        "0",
+    ]);
+    watched.exited(WATCH_ELAPSED);
+    let last = returned(&watched);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_secs();
+    let seconds_since = |kind: &str, node: &str| -> u64 {
+        let event = world
+            .events_of(&run, kind)
+            .into_iter()
+            .rfind(|event| event["labels"]["node"] == node)
+            .unwrap_or_else(|| panic!("no {kind} for {node}"));
+        let at = event["ts"].as_str().expect("a record is stamped");
+        now.saturating_sub(epoch_seconds(at))
+    };
+    let summary = &last["summary"];
+    assert_eq!(
+        summary["settled_since_cursor"],
+        json!([{"node": "quick", "status": "done"}]),
+        "{last}"
+    );
+    assert_eq!(summary["held"][0]["node"], json!("second"), "{last}");
+    assert_eq!(summary["held"][0]["reason"], json!("workspace"), "{last}");
+    let held_for = summary["held"][0]["waited_seconds"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the hold carries no waited_seconds: {last}"));
+    assert!(
+        held_for.abs_diff(seconds_since("node-held", "second")) <= 2,
+        "the hold's waited_seconds is not how long it has been held: {last}"
+    );
+    let progress = summary["last_progress_seconds"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("no last_progress_seconds: {last}"));
+    assert!(
+        progress.abs_diff(seconds_since("node-settled", "quick")) <= 2,
+        "last_progress_seconds is not the latest settlement: {last}"
+    );
+    assert_eq!(summary["observer"], json!("none"), "{last}");
+    assert!(
+        watched.stderr.contains("   held: second on workspace for "),
+        "{}",
+        watched.stderr
+    );
+
+    // Read, it is queued again: at once, then after two, four, and four again.
+    world.until(
+        "four unchanged waits queued again as each is read",
+        |world| {
+            read_everything(world, &run);
+            workspace_wait_times(world, &run, "second")
+                .is_some_and(|waits| waits.len() >= settled + 4)
+        },
+    );
+    let waits = workspace_wait_times(&world, &run, "second").expect("read")[settled - 1..].to_vec();
+    let gap = |at: usize| waits[at].saturating_sub(waits[at - 1]);
+    assert!(gap(1) >= 4_000, "{waits:?}");
+    assert!(
+        gap(2) >= 2_000,
+        "the interval did not double from the base: {waits:?}"
+    );
+    assert!(
+        gap(3) >= 4_000,
+        "the interval did not double again: {waits:?}"
+    );
+    assert!(
+        (4_000..8_000).contains(&gap(4)),
+        "the interval did not stop doubling at the ceiling: {waits:?}"
+    );
+
+    world.release("first.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+}
+
+/// The record a watch returned with: the last line of its standard output.
+fn returned(watched: &crate::harness::Run) -> serde_json::Value {
+    let line = watched
+        .stdout
+        .lines()
+        .last()
+        .unwrap_or_else(|| panic!("the watch wrote nothing:\n{}", watched.stderr));
+    let record: serde_json::Value = serde_json::from_str(line)
+        .unwrap_or_else(|e| panic!("the watch's last line is not JSON ({e}): {line}"));
+    assert_eq!(record["watch"], "return", "{record}");
+    record
+}
+
+/// Seconds since the epoch of an RFC 3339 UTC stamp as the journal writes one,
+/// `YYYY-MM-DDTHH:MM:SS(.fff)Z`.
+fn epoch_seconds(stamp: &str) -> u64 {
+    let number = |range: std::ops::Range<usize>| -> i64 {
+        stamp[range]
+            .parse()
+            .unwrap_or_else(|_| panic!("`{stamp}` is not a journal stamp"))
+    };
+    let (year, month, day) = (number(0..4), number(5..7), number(8..10));
+    let (hour, minute, second) = (number(11..13), number(14..16), number(17..19));
+    // Days from the civil date, by the standard era arithmetic.
+    let shifted = if month <= 2 { year - 1 } else { year };
+    let era = shifted.div_euclid(400);
+    let of_era = shifted - era * 400;
+    let of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let of_cycle = of_era * 365 + of_era / 4 - of_era / 100 + of_year;
+    let days = era * 146_097 + of_cycle - 719_468;
+    u64::try_from(days * 86_400 + hour * 3_600 + minute * 60 + second)
+        .expect("a stamp after the epoch")
+}
