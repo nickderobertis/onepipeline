@@ -1182,7 +1182,8 @@ fn the_verdict_is_the_same_whatever_observes_the_run() {
 /// What `docs/stop-guard.md` tells a host to set is what the binary reads: the
 /// variable is this build's, every flag the section names is one the verbs
 /// offer, and the command it says closes a settled run is the one a blocked
-/// line names for it.
+/// line names for it — and the command a warning under `--wake-budget` names to
+/// ask the question by hand is the one the page's `warn` row spells.
 #[test]
 fn the_stop_guard_page_names_the_budget_the_binary_reads() {
     let world = World::new("wake-page");
@@ -1219,5 +1220,39 @@ fn the_stop_guard_page_names_the_budget_the_binary_reads() {
     assert!(
         line.contains(&spelled.replace("<RUN>", &run)),
         "a blocked settled run's line is not the page's command: {line}"
+    );
+
+    // The by-hand command a warning names, as the page's `warn` row spells it for
+    // a guard given the flag.
+    let row = page
+        .lines()
+        .find(|line| line.starts_with("| warn |"))
+        .expect("the page has a `warn` row");
+    let by_hand = "onepipeline unwatched --session <ID> --wake-budget <SECONDS>";
+    assert!(row.contains(&format!("`{by_hand}`")), "{row}");
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb makes a runs root out of a
+    // file: this stands in for a harness pointing `ONEPIPELINE_RUNS_DIR` at something that
+    // is not a directory of runs, the question the guard then warns it could not ask.
+    // Everything asserted after it is read off the compiled binary's own streams.
+    let unreadable = world.root.join("runs-that-are-a-file");
+    std::fs::write(&unreadable, "not a directory of runs").expect("something in the way");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let mut asked = world.cmd(&["stop-guard", "--wake-budget", BUDGET]);
+    asked.env("ONEPIPELINE_RUNS_DIR", &unreadable);
+    let asked = world.run_with_stdin_on(
+        asked,
+        &json!({"session": world.session.as_str()}).to_string(),
+    );
+    asked.exited(0);
+    let told: Value = serde_json::from_str(asked.stdout.trim()).expect("one verdict object");
+    assert_eq!(told["verdict"], json!("warn"), "{told}");
+    let spelled = by_hand
+        .replace("<ID>", &world.session)
+        .replace("<SECONDS>", BUDGET);
+    assert!(
+        told["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(&spelled)),
+        "the warning does not name the page's command, `{spelled}`: {told}"
     );
 }
