@@ -2529,7 +2529,7 @@ fn a_wait_queued_about_a_hold_that_has_since_cleared_is_withheld_from_the_reader
     // wait is not queued again while one is unread.
     let read_after = queued_waits(&world, &run).len();
     world.until("the wait to be queued again after the read", |world| {
-        queued_waits(world, &run).len() >= read_after + 1
+        queued_waits(world, &run).len() > read_after
     });
     assert!(!dispatched(&world, &run, "consumer"));
 
