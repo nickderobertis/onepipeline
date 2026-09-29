@@ -844,12 +844,12 @@ pub const DEFAULT_WATCH_UNTIL: [WatchUntil; 2] = [WatchUntil::Surface, WatchUnti
 /// What ends a `watch`, as a caller names it.
 ///
 /// **Repeatable, and additive to what the verb always returns on.** A run that
-/// settles `complete` and a run nothing is driving end every wait whether or not
-/// they were asked for, because a wait that could outlive the run it watches is
-/// the unbounded silence this verb exists to end — so [`Settled`](Self::Settled)
-/// and [`NothingDriving`](Self::NothingDriving) name conditions rather than
-/// switch them on, and what `--until settled` *adds* is nothing, which is why it
-/// still means "do not return on a blocking surface".
+/// settles `complete`, and a run that stops being driven while the watch waits,
+/// end every wait whether or not they were asked for, because a wait that could
+/// outlive the run it watches is the unbounded silence this verb exists to end —
+/// so [`Settled`](Self::Settled) and [`NothingDriving`](Self::NothingDriving)
+/// name conditions rather than switch them on, and what `--until settled` *adds*
+/// is nothing, which is why it still means "do not return on a surface".
 ///
 /// [`Surface`](Self::Surface) is spelled for the surface rather than for a
 /// "decision", which in this crate is the wider fact `status` reports: a ready

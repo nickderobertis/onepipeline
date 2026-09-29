@@ -453,7 +453,7 @@ impl Wait {
                 .collect(),
             last_progress_seconds: last_progress(&view.events)
                 .map(|at| now.saturating_sub(at) / 1_000),
-            observer: views::observer_word(&view.launch),
+            observer: views::observer_state(&view.launch),
             waited: self.began.elapsed(),
         }
     }
@@ -504,7 +504,7 @@ pub(crate) struct Summary {
     /// `null` for a run with neither.
     last_progress_seconds: Option<u64>,
     /// The run's observer graph, in one word the liveness view already reads.
-    observer: &'static str,
+    observer: views::ObserverState,
     /// How long the wait lasted, for the human form's sentence.
     #[serde(skip)]
     waited: Duration,
@@ -525,7 +525,7 @@ struct HeldNode {
     // llmlint: ignore[invalid_states_unrepresentable] a node id the run's own `node-held` named, written back out as the crate spells one everywhere else.
     node: String,
     /// What holds it: `release` or `workspace`, the hold's own kind.
-    reason: &'static str,
+    reason: views::HoldKind,
     /// How long it has been held, from the record that opened the hold; `null`
     /// for a record whose stamp this build cannot read.
     waited_seconds: Option<u64>,
@@ -552,10 +552,10 @@ impl Summary {
                     Some(seconds) => format!(
                         "{} on {} for {}",
                         held.node,
-                        held.reason,
+                        held.reason.as_str(),
                         crate::telemetry::duration(seconds.saturating_mul(1_000))
                     ),
-                    None => format!("{} on {}", held.node, held.reason),
+                    None => format!("{} on {}", held.node, held.reason.as_str()),
                 })
                 .collect::<Vec<_>>()
                 .join(", "),
@@ -574,11 +574,12 @@ impl Summary {
             count => format!("{count} planner surface(s) arrived during this {waited} wait"),
         };
         let observer = match self.observer {
-            OBSERVER_NONE => "the run launched no observer graph".to_owned(),
-            "not-restarted" => {
-                "the run's observer graph has stopped and nothing will restart it".to_owned()
+            views::ObserverState::None => "the run launched no observer graph",
+            views::ObserverState::NotRestarted => {
+                "the run's observer graph has stopped and nothing will restart it"
             }
-            word => format!("the run's observer graph is {word}"),
+            views::ObserverState::Running => "the run's observer graph is running",
+            views::ObserverState::Dead => "the run's observer graph is dead",
         };
         format!(
             "   settled since cursor: {settled}\n   held: {held}\n   last progress: \
@@ -586,9 +587,6 @@ impl Summary {
         )
     }
 }
-
-/// The observer word for a run that launched no observer graph.
-const OBSERVER_NONE: &str = "none";
 
 /// One read of the run: its view, and the records past the cursor.
 ///
@@ -1809,11 +1807,11 @@ mod tests {
             surfaces_queued_during_wait: 0,
             held: vec![HeldNode {
                 node: "deploy".to_owned(),
-                reason: "release",
+                reason: views::HoldKind::Release,
                 waited_seconds: Some(60),
             }],
             last_progress_seconds: None,
-            observer: OBSERVER_NONE,
+            observer: views::ObserverState::None,
             waited: Duration::from_secs(2_100),
         }
     }
@@ -2425,7 +2423,14 @@ mod tests {
                 "entry 97 does not name `{key}`, which the summary carries"
             );
         }
-        for word in ["running", "dead", "not-restarted", OBSERVER_NONE] {
+        for state in [
+            views::ObserverState::Running,
+            views::ObserverState::Dead,
+            views::ObserverState::NotRestarted,
+            views::ObserverState::None,
+        ] {
+            let rendered = serde_json::to_value(state).expect("a state serializes");
+            let word = rendered.as_str().expect("a state is one word");
             assert!(passage.contains(&format!("`{word}`")), "{word}");
             assert!(ruling.contains(&format!("`{word}`")), "{word}");
         }
@@ -2445,7 +2450,7 @@ mod tests {
         assert!(quiet.contains("deploy on release for 1m00s"), "{quiet}");
         let busy = Summary {
             surfaces_queued_during_wait: 2,
-            observer: "dead",
+            observer: views::ObserverState::Dead,
             last_progress_seconds: Some(120),
             ..a_summary()
         }

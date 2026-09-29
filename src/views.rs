@@ -2978,8 +2978,43 @@ fn held_for_workspace(view: &RunView, id: &str) -> Option<String> {
     ))
 }
 
+/// The two holds an elapsed watch's summary reports, in the words it writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum HoldKind {
+    /// Held for releases it adopts.
+    Release,
+    /// Held for room in its repository identity's workspace.
+    Workspace,
+}
+
+impl HoldKind {
+    /// The word the summary writes for this hold.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::Workspace => "workspace",
+        }
+    }
+}
+
+/// The run's observer graph as an elapsed watch's summary names it: the
+/// verdict [`observer_liveness`] reaches, in the summary's own four words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ObserverState {
+    /// The launch named an observer graph and nothing says its run has ended.
+    Running,
+    /// This host can prove the observer's graph run is over.
+    Dead,
+    /// The driver has stopped starting the observer again.
+    NotRestarted,
+    /// The launch named no observer graph.
+    None,
+}
+
 /// Every node the run's own record holds on a release or on its workspace, with
-/// the hold's kind — `release` or `workspace` — and when it began, read on
+/// the hold's kind and when it began, read on
 /// [`held_for_release`]'s and [`held_for_workspace`]'s terms.
 ///
 /// Those two holds and no other, because they are the waits nothing in the run
@@ -2987,7 +3022,7 @@ fn held_for_workspace(view: &RunView, id: &str) -> Option<String> {
 /// decision is waiting on the run, and each of those is read off the run's own
 /// lines already. The start is `None` for a record whose stamp this build cannot
 /// read.
-pub(crate) fn holds_of(view: &RunView) -> Vec<(String, &'static str, Option<u64>)> {
+pub(crate) fn holds_of(view: &RunView) -> Vec<(String, HoldKind, Option<u64>)> {
     view.state
         .holds
         .keys()
@@ -2995,13 +3030,13 @@ pub(crate) fn holds_of(view: &RunView) -> Vec<(String, &'static str, Option<u64>
             if held_for_release(view, node).is_some() {
                 Some((
                     node.clone(),
-                    "release",
+                    HoldKind::Release,
                     release_hold_since(&view.events, node),
                 ))
             } else if held_for_workspace(view, node).is_some() {
                 Some((
                     node.clone(),
-                    "workspace",
+                    HoldKind::Workspace,
                     hold_since(&view.events, node, |reason| {
                         crate::engine::workspace_held(reason).is_some()
                     }),
@@ -3013,15 +3048,14 @@ pub(crate) fn holds_of(view: &RunView) -> Vec<(String, &'static str, Option<u64>
         .collect()
 }
 
-/// The run's observer graph, in the one word an elapsed watch's summary spells
-/// it with: `running`, `dead`, `not-restarted`, or `none` for a run that launched
-/// none. The verdict is [`observer_liveness`]'s, which every view reads.
-pub(crate) fn observer_word(launch: &LaunchRecord) -> &'static str {
+/// The run's observer graph as an elapsed watch's summary names it. The
+/// verdict is [`observer_liveness`]'s, which every view reads.
+pub(crate) fn observer_state(launch: &LaunchRecord) -> ObserverState {
     match observer_liveness(launch) {
-        ObserverLiveness::Watching => "running",
-        ObserverLiveness::ObserverDead => "dead",
-        ObserverLiveness::ObserverNotRestarted => "not-restarted",
-        ObserverLiveness::Unobserved => "none",
+        ObserverLiveness::Watching => ObserverState::Running,
+        ObserverLiveness::ObserverDead => ObserverState::Dead,
+        ObserverLiveness::ObserverNotRestarted => ObserverState::NotRestarted,
+        ObserverLiveness::Unobserved => ObserverState::None,
     }
 }
 

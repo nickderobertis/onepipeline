@@ -3065,11 +3065,6 @@ fn a_log_that_stops_taking_writes_ends_the_watch_as_a_broken_stream_does() {
     world.release("build.go");
 }
 
-// ---------------------------------------------------------------------------
-// What ends a watch: divergence entry 97's six rulings, each driven through the
-// compiled binary over a real run directory.
-// ---------------------------------------------------------------------------
-
 /// Raise a surface through the channel's own `surface` verb.
 fn surfaced(world: &World, run: &str, kind: &str, message: &str) {
     world
@@ -3716,8 +3711,7 @@ fn a_run_with_no_dispatch_or_settlement_reports_no_last_progress() {
 /// The observer a run's summary names is read by the rules the liveness view
 /// already reads it by, however the graph's members are named: a real observer
 /// graph of members named by nothing built in reads `running` while its graph
-/// run lives and `dead` once its owner is gone.
-#[cfg(unix)]
+/// run lives and `dead` once it has ended with nothing starting another.
 #[test]
 fn an_elapsed_summary_names_a_live_observer_running_and_a_killed_one_dead() {
     let world =
@@ -3753,30 +3747,13 @@ fn an_elapsed_summary_names_a_live_observer_running_and_a_killed_one_dead() {
     };
     assert_eq!(observer(&world), json!("running"));
 
-    let graph_run = world.run_json(run, "launch.json")["graph_run"]
-        .as_str()
-        .expect("the launch record names the observer's graph run")
-        .to_string();
-    let lock = std::fs::read_to_string(
-        world
-            .graph_state()
-            .join(&graph_run)
-            .join(oneagentgraph::liveness::OWNER_LOCK_FILE),
-    )
-    .expect("the graph run records who owns its state");
-    let owner: u32 = lock
-        .split_whitespace()
-        .next()
-        .and_then(|pid| pid.parse().ok())
-        .unwrap_or_else(|| panic!("the owner lock names no process: {lock:?}"));
-    // The one process this journey may end: the one the graph run's own
-    // ownership record names.
-    crate::harness::end_process(owner);
+    // The observer's turn ends and its graph run with it; with restarting off,
+    // nothing starts another, so what the run has is an observer that is over.
+    world.release("observer.go");
     world.until("the observer to read as dead", |world| {
         observer(world) == json!("dead")
     });
 
-    world.release("observer.go");
     world.release("turn.go");
     world.release("turn.settle");
 }
