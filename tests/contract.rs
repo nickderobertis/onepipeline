@@ -5453,6 +5453,19 @@ fn a_closing_driver_stops_its_sweep_at_an_identity_boundary() {
             "the divergence record no longer states: {states}"
         );
     }
+
+    // The README's operator prose is a second copy of the stop and the key.
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+    let readme = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+    for states in [
+        "A driver closing out mid-sweep finishes the identity in progress and begins no other",
+        "its records carry `cut_short` naming the identities it did not reach",
+    ] {
+        assert!(
+            readme.contains(states),
+            "the README no longer states: {states}"
+        );
+    }
 }
 
 #[test]
