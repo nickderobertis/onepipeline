@@ -338,11 +338,23 @@ fn status_lists_every_run_details_one_and_refuses_one_that_is_not_there() {
         &verbs::render_status(&listing),
         EXIT_SUCCESS,
     );
+    same(
+        "status --no-providers",
+        &fixture.binary(&["status", "--no-providers"]),
+        &listing.render_without_providers(),
+        EXIT_SUCCESS,
+    );
     let detail = verbs::status(&fixture.root, Some(RUN)).expect("the run reads");
     same_view(
         "status RUN",
         &fixture.binary(&["status", RUN]),
         &verbs::render_status(&detail),
+        EXIT_SUCCESS,
+    );
+    same_view(
+        "status RUN --no-providers",
+        &fixture.binary(&["status", RUN, "--no-providers"]),
+        &detail.render_without_providers(),
         EXIT_SUCCESS,
     );
     let missing = verbs::status(&fixture.root, Some("nowhere")).expect_err("no such run");

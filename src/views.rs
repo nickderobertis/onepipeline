@@ -2277,6 +2277,20 @@ pub fn status(survey: &Survey) -> String {
 /// `onepipeline status <RUN>`: one run's **detail** read, its run-level lines
 /// and the block under them saying what each of its nodes is doing.
 pub(crate) fn status_of(view: &RunView) -> String {
+    status_reporting(view, Providers::Reported)
+}
+
+/// Whether a `status` view ends with the host's provider report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Providers {
+    Reported,
+    /// `--no-providers`: the report is neither asked for nor written, and
+    /// nothing else in the view moves.
+    Omitted,
+}
+
+/// [`status_of`], with the provider report said or left out.
+pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
     let mut out = String::new();
     {
         // Opened before anything under it renders, so the summary this line
@@ -2480,8 +2494,10 @@ pub(crate) fn status_of(view: &RunView) -> String {
                 .parent()
                 .unwrap_or_else(|| Path::new(ledger::DEFAULT_RUNS_DIR)),
         ));
-        if let Some(health) = crate::agentgraph::health() {
-            out.push_str(&format!("  providers: {health}\n"));
+        if providers == Providers::Reported {
+            if let Some(health) = crate::agentgraph::health() {
+                out.push_str(&format!("  providers: {health}\n"));
+            }
         }
     }
     out

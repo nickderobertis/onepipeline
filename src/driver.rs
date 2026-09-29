@@ -210,7 +210,11 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         }
         Verb::Status(args) => {
             let status = verbs::status(&ledger::runs_root(), args.run.as_deref())?;
-            print!("{}", verbs::render_status(&status));
+            if args.no_providers {
+                print!("{}", status.render_without_providers());
+            } else {
+                print!("{}", verbs::render_status(&status));
+            }
             Ok(EXIT_SUCCESS)
         }
         Verb::Host => {
@@ -248,8 +252,18 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 cursor: args.cursor.clone(),
                 until: args.until.clone(),
             };
+            // Opened before the wait, so a log that cannot be written is refused
+            // rather than discovered on the first line there is to say.
+            let mut log = match &args.log {
+                Some(path) => Some((crate::watch::open_log(path)?, path.display().to_string())),
+                None => None,
+            };
             let outcome = verbs::watch(&paths, &request, &mut |frame| {
-                crate::watch::say(&verbs::render_watch_frame(&frame)?)
+                let lines = verbs::render_watch_frame(&frame)?;
+                match &mut log {
+                    Some((file, called)) => crate::watch::say_to(&lines, file, called),
+                    None => crate::watch::say(&lines),
+                }
             })?;
             Ok(outcome.exit_code())
         }

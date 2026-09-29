@@ -200,7 +200,7 @@ pub enum Command {
     /// List recorded runs.
     Runs(RunsArgs),
     /// A run's live state: what is driving it, and what is running.
-    Status(OptionalRunArgs),
+    Status(StatusArgs),
     /// Every live dispatch on this host, with its owner and load contribution.
     Host,
     /// Stream a run's merged events.
@@ -948,6 +948,12 @@ pub struct WatchArgs {
     /// which one did.
     #[arg(long, value_name = "CONDITION", default_values_t = [WatchUntil::Surface])]
     pub until: Vec<WatchUntil>,
+    /// Append the human lines to this file, each flushed as it is written,
+    /// instead of writing them to standard error. Created when absent and never
+    /// truncated, so a re-armed watch appends to the same log; a path that cannot
+    /// be opened for appending is refused before the wait starts.
+    #[arg(long, value_name = "PATH")]
+    pub log: Option<PathBuf>,
 }
 
 /// `onepipeline unwatched`.
@@ -1167,6 +1173,22 @@ pub struct SupersessionsArgs {
 pub struct OptionalRunArgs {
     /// The run id. Omitted, the view covers every run.
     pub run: Option<String>,
+}
+
+/// `onepipeline status`: the run, or every run, and whether the view ends with
+/// the host's provider report.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct StatusArgs {
+    /// The run id. Omitted, the view covers every run.
+    pub run: Option<String>,
+    /// Leave out the host's provider report, and do not ask for it: every other
+    /// line is the one the view prints without this flag.
+    ///
+    /// The report is about the host rather than the run, and a supervisor
+    /// watching a run used to cut it off with a shell filter, which is a command
+    /// no allowlist can approve as one simple command.
+    #[arg(long)]
+    pub no_providers: bool,
 }
 
 /// `onepipeline reply`.

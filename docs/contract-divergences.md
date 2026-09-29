@@ -11,14 +11,14 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92 and 93 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93 and 95 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80, 84 to 88, 92 and 93 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93 and 95 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -3838,7 +3838,7 @@ the frontier and not one the planner made.
 
 **Proposal (for the contract this repository implements): add `onepipeline watch
 RUN [--filter NAME|SPEC] [--all] [--timeout SECONDS|none] [--tick-interval SECONDS]
-[--cursor CURSOR] [--until CONDITION]...` to the views line, with the three exit
+[--cursor CURSOR] [--until CONDITION]... [--log PATH]` to the views line, with the three exit
 codes it needs beside the three the contract already assigns.**
 
 `docs/contract.md` fixes the read surface as `Views (CLI): runs, status, host,
@@ -7869,3 +7869,46 @@ their renderers. `start` and `plan check` read the root and the check. `tests/co
 `the_task_templates_are_what_the_contract_names` reconciles the block. `tests/e2e/templates.rs`
 drives every verb, and the seam through the released `onetaskgraph` the justfile installs at the
 release the lock links, over a real `local-md` store.
+
+## 95. A supervisor's two most frequent reads needed a shell filter and a redirect to be one command — OPEN
+
+**Proposal (for the planner who owns the contract): the views line reads `status [--no-providers]`,
+entry 58's `watch` takes `--log PATH`, and the verbs paragraph names
+`Status::render_without_providers` beside `render_status`.** Neither flag changes a byte of
+either verb's output when it is not given.
+
+Why: a supervisor approves the commands it runs against an allowlist, and both harnesses it
+runs under — Claude Code and Codex — match a rule only against a command they can parse as
+plain simple commands. The two reads a manager makes most were prescribed as shell: `status
+RUN` piped through `sed '/^  providers:/,$d'` to cut the host's provider report, and `watch`
+redirected into a file so a block-buffering pipe could not make a quiet run and a dead one read
+alike. Codex will not split a script carrying a redirect, a variable or a substitution, so each
+was one command no rule matched, and the permission classifier was asked — and often refused —
+on the commands run most. The user ruled that the engine absorb both shapes as flags rather
+than the host as a wrapper script.
+
+**`status [RUN] --no-providers`.** The `providers:` report, and everything it contributes, is
+left out, and `oneagentgraph health` is not asked at all. Every other line is byte-identical to
+the view without the flag, in the same order and on the same stream — the unread-planner-update
+line and the `free space:` lines above the cut included. Given no run the listing carries no
+provider report either way, so the flag leaves it as it is. The library renders it with
+`Status::render_without_providers`, a method rather than a second `render_` function, because
+the verbs paragraph names every function `src/verbs.rs` publishes and is not this repository's
+to amend.
+
+**`watch RUN ... --log PATH`.** Every human line the watch would have written to standard error
+is appended to `PATH` instead, each flushed as it is written, and none reaches standard error.
+The file is created when absent and never truncated, so a watch re-armed from the previous one's
+cursor appends to the same log. The NDJSON records on standard output, the exit statuses — `0`,
+`3`, `4`, `5` and `6` — and the ending line's text and cursor are exactly what they are without
+the flag. A path that cannot be opened for appending is refused before the wait starts, with
+the refusal exit `2` and a message naming the path; a write to the log that fails mid-watch
+ends the watch as a broken standard error already does, refusing with `2` and writing no
+further record to standard output.
+
+`tests/e2e/views.rs` and `tests/e2e/watch.rs` drive the compiled binary through both, and
+`tests/parity.rs` holds `Status::render_without_providers` to the binary's output.
+`tests/contract.rs`'s `the_supervision_flags_are_what_divergence_95_and_the_readme_name` holds
+this entry's flags, renderer and exit statuses, and the README's `status` flags, to the code,
+and `the_divergence_entry_proposes_exactly_the_flags_this_build_offers` in `src/watch.rs` holds
+entry 58's synopsis to `watch`'s.
