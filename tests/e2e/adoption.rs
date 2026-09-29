@@ -6355,16 +6355,24 @@ fn an_unchanged_release_wait_is_queued_again_only_once_read_and_a_changed_one_at
     assert_ne!(waits[3].1, waits[4].1, "{waits:?}");
     assert!(waits[4].1.contains("not yet resolved"), "{}", waits[4].1);
 
-    // Left unread from here, so every wait queued below is one a change queued.
-    let unchanged = waits.len();
+    // Left unread from here — the last read may or may not have reached the
+    // newest wait, so the queue itself is asked — and every wait queued below is
+    // one a change queued, since an unchanged one is not queued while one sits.
     world.until("an unchanged wait to sit unread", |world| {
-        consumer_waits(world, &run).is_some_and(|waits| waits.len() > unchanged)
+        let queue = world.run(&["channel", "queue", &run]);
+        queue.exited(0);
+        queue.json()["waiting"].as_array().is_some_and(|waiting| {
+            waiting
+                .iter()
+                .any(|surface| surface["kind"] == "release-wait")
+        })
     });
+    let unchanged = consumer_waits(&world, &run).expect("read").len();
     let queued = |world: &World, said: &str| {
         consumer_waits(world, &run).is_some_and(|waits| {
             waits
                 .iter()
-                .skip(unchanged + 1)
+                .skip(unchanged)
                 .any(|(_, text)| text.contains(said))
         })
     };

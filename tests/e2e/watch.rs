@@ -3291,6 +3291,9 @@ fn a_blocking_surface_ends_a_watch_read_or_not_until_it_is_abandoned_and_read() 
 fn an_uncursored_watch_counts_only_settlements_after_it_armed() {
     let world = World::new("watch-wake-settled");
     world.script("keep.wait", "hold");
+    // Held to the end, so no settlement below is also the run completing —
+    // which outranks a settlement and would answer every watch instead.
+    world.script("anchor.wait", "hold");
     // `later` holds its turn open and ends when it is asked to, so a cancel
     // settles it `cancelled` — a settlement before any watch armed, of a node a
     // requeue dispatches again under the same id.
@@ -3302,7 +3305,12 @@ fn an_uncursored_watch_counts_only_settlements_after_it_armed() {
         run,
         &plan_of(
             run,
-            vec![agent("build", &[]), agent("keep", &[]), agent("later", &[])],
+            vec![
+                agent("build", &[]),
+                agent("keep", &[]),
+                agent("later", &[]),
+                agent("anchor", &[]),
+            ],
         ),
     );
     world.run(&["start", &path, "--detach"]).exited(0);
@@ -3415,6 +3423,7 @@ fn an_uncursored_watch_counts_only_settlements_after_it_armed() {
     let (code, last, said) = finished(for_later);
     assert_eq!(code, NODE_SETTLED, "{last}\n{said}");
     assert_eq!(last["node"], json!("later"), "{last}");
+    world.release("anchor.go");
 }
 
 /// An explicit `--until` replaces the default set rather than adding to it: a
