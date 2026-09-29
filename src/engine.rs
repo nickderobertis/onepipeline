@@ -6406,6 +6406,11 @@ fn unprojected_surface(failure: &crate::writeback::Unprojected) -> Surface {
 
 /// Surface something to the planner, recording that it was *sent*.
 pub(crate) fn raise(paths: &RunPaths, journal: &mut Journal, surface: Surface) -> Result<()> {
+    raised(paths, journal, surface).map(|_| ())
+}
+
+/// [`raise`], answering the surface as the channel queued it — id and all.
+pub(crate) fn raised(paths: &RunPaths, journal: &mut Journal, surface: Surface) -> Result<Surface> {
     let queued = ChannelState::new(paths).push(surface)?;
     journal.emit(
         journal::PipelineKind::PlannerSurfaceQueued,
@@ -6416,7 +6421,8 @@ pub(crate) fn raise(paths: &RunPaths, journal: &mut Journal, surface: Surface) -
             ("source", json!(queued.source)),
             ("blocking", json!(queued.blocking)),
         ]),
-    )
+    )?;
+    Ok(queued)
 }
 
 /// Report an in-flight dispatch that has recorded nothing past the threshold.

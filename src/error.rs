@@ -191,6 +191,16 @@ pub const EXIT_RUNS_UNWATCHED: i32 = 6;
 /// and 68 argue it.
 pub const EXIT_NODE_SETTLED: i32 = 6;
 
+/// A watch armed on a run nothing was driving saw the run move, and nothing it
+/// was told to return on fired.
+///
+/// `watch`'s sixth return. A run nobody drives changes only when somebody acts
+/// on it — a reply applied locally, an `adopt`, a surface consumed — and a
+/// supervisor waiting on such a run is waiting for exactly that, so the move
+/// ends the wait under a status of its own rather than under the deadline's.
+/// Divergence entry 97 records the ruling that added it.
+pub const EXIT_RUN_CHANGED: i32 = 7;
+
 #[cfg(test)]
 mod tests {
     use super::*;

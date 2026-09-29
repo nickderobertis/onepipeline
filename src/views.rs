@@ -2978,6 +2978,53 @@ fn held_for_workspace(view: &RunView, id: &str) -> Option<String> {
     ))
 }
 
+/// Every node the run's own record holds on a release or on its workspace, with
+/// the hold's kind — `release` or `workspace` — and when it began, read on
+/// [`held_for_release`]'s and [`held_for_workspace`]'s terms.
+///
+/// Those two holds and no other, because they are the waits nothing in the run
+/// itself will end: a node behind its dependencies, the run's concurrency or a
+/// decision is waiting on the run, and each of those is read off the run's own
+/// lines already. The start is `None` for a record whose stamp this build cannot
+/// read.
+pub(crate) fn holds_of(view: &RunView) -> Vec<(String, &'static str, Option<u64>)> {
+    view.state
+        .holds
+        .keys()
+        .filter_map(|node| {
+            if held_for_release(view, node).is_some() {
+                Some((
+                    node.clone(),
+                    "release",
+                    release_hold_since(&view.events, node),
+                ))
+            } else if held_for_workspace(view, node).is_some() {
+                Some((
+                    node.clone(),
+                    "workspace",
+                    hold_since(&view.events, node, |reason| {
+                        crate::engine::workspace_held(reason).is_some()
+                    }),
+                ))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// The run's observer graph, in the one word an elapsed watch's summary spells
+/// it with: `running`, `dead`, `not-restarted`, or `none` for a run that launched
+/// none. The verdict is [`observer_liveness`]'s, which every view reads.
+pub(crate) fn observer_word(launch: &LaunchRecord) -> &'static str {
+    match observer_liveness(launch) {
+        ObserverLiveness::Watching => "running",
+        ObserverLiveness::ObserverDead => "dead",
+        ObserverLiveness::ObserverNotRestarted => "not-restarted",
+        ObserverLiveness::Unobserved => "none",
+    }
+}
+
 /// When the release hold a node is under began: the first `node-held` naming a
 /// release since the node was last unheld, dispatched, or held for anything else.
 ///
@@ -2985,6 +3032,18 @@ fn held_for_workspace(view: &RunView, id: &str) -> Option<String> {
 /// restates the hold it inherits; neither is a new wait, so each keeps the time
 /// the first one opened.
 fn release_hold_since(events: &[Envelope], id: &str) -> Option<u64> {
+    hold_since(events, id, |reason| {
+        crate::engine::release_awaited(reason).is_some()
+    })
+}
+
+/// When the hold of one kind a node is under began, on [`release_hold_since`]'s
+/// terms, for the kind `is_kind` reads a reason as.
+fn hold_since(
+    events: &[Envelope],
+    id: &str,
+    is_kind: impl Fn(&serde_json::Value) -> bool,
+) -> Option<u64> {
     let mut since = None;
     for event in events
         .iter()
@@ -2992,16 +3051,12 @@ fn release_hold_since(events: &[Envelope], id: &str) -> Option<u64> {
     {
         match PipelineKind::from_wire(&event.kind) {
             Some(PipelineKind::NodeHeld) => {
-                let for_a_release = event
+                let of_the_kind = event
                     .payload
                     .get("reasons")
                     .and_then(serde_json::Value::as_array)
-                    .is_some_and(|reasons| {
-                        reasons
-                            .iter()
-                            .any(|reason| crate::engine::release_awaited(reason).is_some())
-                    });
-                if for_a_release {
+                    .is_some_and(|reasons| reasons.iter().any(&is_kind));
+                if of_the_kind {
                     since = since.or_else(|| crate::projection::millis_of(&event.ts));
                 } else {
                     since = None;

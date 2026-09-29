@@ -28,8 +28,8 @@ use onepipeline::cli::{
 };
 use onepipeline::controls::NodeControls;
 use onepipeline::error::{
-    EXIT_NODE_SETTLED, EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_REFUSED, EXIT_SUCCESS,
-    EXIT_SURFACE_WAITING, EXIT_WATCH_ELAPSED,
+    EXIT_NODE_SETTLED, EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_REFUSED, EXIT_RUN_CHANGED,
+    EXIT_SUCCESS, EXIT_SURFACE_WAITING, EXIT_WATCH_ELAPSED,
 };
 use onepipeline::event::{
     ArtifactId, ArtifactRef, Envelope, EventKind, Labels, Phase, PipelineKind, Source,
@@ -5341,6 +5341,65 @@ fn a_reconciler_finding_that_asks_for_an_edit_is_answered_by_that_edit() {
     );
 }
 
+/// The six endings the verbs paragraph names for a watch are this build's
+/// `WatchEnding`, each exiting the status the paragraph pairs it with, and the
+/// default `until` it names is the one the binary gives a caller who names none.
+///
+/// Divergence 97 adopted the sentence; a variant added, dropped or renumbered in
+/// the code and left standing in the contract fails here.
+#[test]
+fn the_watch_endings_the_contract_names_are_the_ones_this_build_returns() {
+    use onepipeline::cli::{WatchUntil, DEFAULT_WATCH_UNTIL};
+    use onepipeline::verbs::WatchEnding;
+
+    let contract = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
+    let endings = [
+        ("Settled", WatchEnding::Settled),
+        ("NothingDriving", WatchEnding::NothingDriving),
+        ("SurfaceWaiting", WatchEnding::SurfaceWaiting),
+        ("Elapsed", WatchEnding::Elapsed),
+        ("NodeSettled(node)", WatchEnding::NodeSettled("node".into())),
+        ("RunChanged", WatchEnding::RunChanged),
+    ];
+    let named = endings
+        .iter()
+        .map(|(name, _)| format!("`{name}`"))
+        .collect::<Vec<_>>();
+    let codes = endings
+        .iter()
+        .map(|(_, ending)| format!("`{}`", ending.exit_code()))
+        .collect::<Vec<_>>();
+    let sentence = format!(
+        "a `WatchEnding` is {} or {}, exiting {} and {}",
+        named[..named.len() - 1].join(", "),
+        named[named.len() - 1],
+        codes[..codes.len() - 1].join(", "),
+        codes[codes.len() - 1]
+    );
+    assert!(
+        contract.contains(&sentence),
+        "the contract does not state the endings this build returns: {sentence}"
+    );
+    assert_eq!(WatchEnding::RunChanged.exit_code(), EXIT_RUN_CHANGED);
+    // Every variant is in the list above: a match with no wildcard arm is what
+    // makes a variant added to the code fail to compile here.
+    for (_, ending) in &endings {
+        match ending {
+            WatchEnding::Settled
+            | WatchEnding::NothingDriving
+            | WatchEnding::SurfaceWaiting
+            | WatchEnding::Elapsed
+            | WatchEnding::NodeSettled(_)
+            | WatchEnding::RunChanged => {}
+        }
+    }
+    assert_eq!(
+        DEFAULT_WATCH_UNTIL,
+        [WatchUntil::Surface, WatchUntil::NodeSettled]
+    );
+    assert!(contract.contains("an empty `until` is the default set, `surface` and `node-settled`"));
+}
+
 /// A decision about a node a committed edit took out of the graph is
 /// discharged by that edit.
 ///
@@ -5358,7 +5417,8 @@ fn a_decision_about_a_removed_node_is_discharged_by_that_edit() {
          surface names as its `workstream`, the same commit discharges that surface",
         "carrying that correlation and a `reason` naming the edit that removed the node",
         "one raised under no correlation is marked abandoned by its own id",
-        "`status` no longer reports it and `watch --until surface` does not end on it",
+        "`status` no longer reports it and `watch --until surface` does not end on it once \
+         `next` has consumed it",
         "a surface about a node still in the graph is never discharged this way",
         "its verdict is appended beside that answer rather than refused",
     ] {
@@ -7052,6 +7112,11 @@ const RULINGS: &[(&str, &str)] = &[
         "97.",
         "a driver closing out stops it at the next identity boundary",
     ),
+    (
+        "99.",
+        "a `WatchEnding` is `Settled`, `NothingDriving`, `SurfaceWaiting`, `Elapsed`, \
+         `NodeSettled(node)` or `RunChanged`, exiting `0`, `3`, `4`, `5`, `6` and `7`",
+    ),
 ];
 
 #[test]
@@ -7918,8 +7983,8 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
             format!("`{EXIT_NOTHING_DRIVING}` when nothing is driving it"),
         ),
         (
-            "a blocking surface waiting",
-            format!("`{EXIT_SURFACE_WAITING}` when a blocking surface is waiting"),
+            "a planner surface waiting",
+            format!("`{EXIT_SURFACE_WAITING}` when a planner surface is waiting"),
         ),
         (
             "the wait elapsing",
@@ -7928,6 +7993,10 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         (
             "a node the wait named settling",
             format!("`{EXIT_NODE_SETTLED}` when a node the wait was told to return on settled"),
+        ),
+        (
+            "a run nothing was driving moving",
+            format!("`{EXIT_RUN_CHANGED}` when the run changed, `run-changed`"),
         ),
     ] {
         assert!(
@@ -7974,6 +8043,7 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         EXIT_SURFACE_WAITING,
         EXIT_WATCH_ELAPSED,
         EXIT_NODE_SETTLED,
+        EXIT_RUN_CHANGED,
     ]
     .iter()
     .map(i32::to_string)

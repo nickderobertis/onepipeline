@@ -67,8 +67,21 @@ pub const POLL_ENV: &str = "ONEPIPELINE_RELEASE_POLL_SECONDS";
 /// the shipped value stays inside the promise.
 pub const DEFAULT_POLL_SECONDS: u64 = 60;
 
-/// The environment variable bounding how often a held node's wait is surfaced.
+/// The environment variable holding the interval an unchanged held wait is
+/// first re-surfaced after.
 pub const SURFACE_ENV: &str = "ONEPIPELINE_RELEASE_SURFACE_SECONDS";
+
+/// The environment variable holding the interval an unchanged held wait stops
+/// doubling at. Unset, and unusable, is [`DEFAULT_SURFACE_CEILING_SECONDS`].
+///
+/// Beside [`SURFACE_ENV`] for the reason [`WITHDRAWN_ASK_ENV`] exists: the
+/// shipped ceiling is four hours, and a journey proving the doubling stops there
+/// through the compiled binary cannot wait four hours to see it.
+pub const SURFACE_CEILING_ENV: &str = "ONEPIPELINE_RELEASE_SURFACE_CEILING_SECONDS";
+
+/// The interval an unchanged held wait stops doubling at when nothing overrides
+/// it: four hours, which is the longest a hold nobody has touched goes unrepeated.
+pub const DEFAULT_SURFACE_CEILING_SECONDS: u64 = 14_400;
 
 /// The environment variable holding how long the asker goes on asking a question
 /// the loop has **withdrawn**. Zero, and unset, is every build in the field.
@@ -87,14 +100,14 @@ pub const SURFACE_ENV: &str = "ONEPIPELINE_RELEASE_SURFACE_SECONDS";
 /// neither what is asked nor when.
 pub const WITHDRAWN_ASK_ENV: &str = "ONEPIPELINE_RELEASE_WITHDRAWN_ASK_SECONDS";
 
-/// How often a held node's wait is surfaced to the planner when nothing
+/// The interval an unchanged held wait is first re-surfaced after when nothing
 /// overrides it.
 ///
 /// Much longer than [`DEFAULT_POLL_SECONDS`], and deliberately: asking whether a
 /// release has happened is cheap and repeating the question to a person is not.
 /// The wait is repeated rather than stated once so it cannot go silent, and a
 /// person reading it decides whether to keep waiting, flip the node to fast
-/// adoption, or stop the run.
+/// adoption, or stop the run. [`Resurfacing`] is what spaces the repeats out.
 pub const DEFAULT_SURFACE_SECONDS: u64 = 900;
 
 /// The kind a held node's wait is surfaced under.
@@ -646,10 +659,8 @@ pub(crate) struct Watch {
     adopted: BTreeSet<String>,
     /// The awaited releases already reported as arrived, seeded the same way.
     arrived: BTreeSet<Key>,
-    /// When each held node's wait was last surfaced.
-    surfaced: BTreeMap<String, Instant>,
-    /// How often a held node's wait is surfaced.
-    surface_every: Duration,
+    /// When each held node's wait is surfaced again.
+    surfaced: Resurfacing,
     /// How often the identity's release records are read for what they say
     /// about this run's own landed work.
     ///
@@ -749,9 +760,8 @@ impl Watch {
             since: BTreeMap::new(),
             adopted,
             arrived,
-            surfaced: BTreeMap::new(),
+            surfaced: Resurfacing::new(),
             unresolved: BTreeMap::new(),
-            surface_every: Duration::from_secs(surface_every_seconds()),
             relay_every: Duration::from_secs(poll_seconds()),
             relayed: None,
             stated: BTreeMap::new(),
@@ -799,7 +809,8 @@ impl Watch {
     /// for an arriving release, and the ceiling a host that configures neither
     /// falls back to.
     pub(crate) fn take_up_every(&self) -> Duration {
-        self.surface_every
+        self.surfaced
+            .base()
             .min(self.relay_every)
             .min(Duration::from_secs(60))
     }
@@ -1029,14 +1040,10 @@ impl Watch {
             }
         }
         for node in held {
-            let due = self
-                .surfaced
-                .get(node)
-                .is_none_or(|last| last.elapsed() >= self.surface_every);
-            if !due {
+            let content = self.wait_content(node);
+            if !self.surfaced.due(paths, node, &content) {
                 continue;
             }
-            self.surfaced.insert(node.clone(), Instant::now());
             // The surface first and the record second. They are two appends
             // saying one thing, so a reader holding the record and reading the
             // surface beside it gets whichever surface was there when it looked:
@@ -1049,7 +1056,8 @@ impl Watch {
             // pass, or by any later one — makes it a wait about nothing. What
             // fixes the hold it belongs to is its `queued_at`, and
             // [`wait_outlived`] is what the hand-out reads it against.
-            crate::engine::raise(paths, journal, self.wait_surface(node))?;
+            let queued = crate::engine::raised(paths, journal, self.wait_surface(node))?;
+            self.surfaced.queued(node, content, queued.id);
             let awaiting = self.awaiting(node);
             journal.emit(
                 journal::PipelineKind::ReleaseWait,
@@ -1060,8 +1068,47 @@ impl Watch {
         // A node that is no longer held says nothing more: the arrival is
         // reported by `release-arrived`, and repeating the wait after it ended
         // would report a run as waiting on something it has.
-        self.surfaced.retain(|node, _| held.contains(node));
+        self.surfaced.retain(|node| held.contains(node));
         Ok(())
+    }
+
+    /// What one held node's wait says, less how long it has been waiting: the
+    /// dependencies it is held on, each one's release style, and the last answer
+    /// about each.
+    ///
+    /// What [`Resurfacing`] compares, so a hold whose only change is the clock
+    /// is not news, and one whose dependencies, styles or answers moved is.
+    fn wait_content(&self, node: &str) -> String {
+        let mut content: Vec<String> = self
+            .dependencies
+            .get(node)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .filter(|dependency| {
+                self.answers
+                    .get(&(node.to_owned(), dependency.dep.clone()))
+                    .and_then(Answer::version)
+                    .is_none()
+            })
+            .map(|dependency| {
+                let key = (node.to_owned(), dependency.dep.clone());
+                format!(
+                    "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+                    dependency.dep,
+                    dependency.style.map_or("", |style| style.as_str()),
+                    dependency.action.as_deref().unwrap_or_default(),
+                    self.last_answer(&key, dependency)
+                )
+            })
+            .collect();
+        content.extend(self.unresolved_of(node).iter().map(|unresolved| {
+            format!(
+                "{}\u{1f}{UNRESOLVED}\u{1f}{}",
+                unresolved.dep, unresolved.reason
+            )
+        }));
+        content.join("\u{1e}")
     }
 
     /// Relay what the sibling recorded about the releases carrying this run's
@@ -2484,16 +2531,111 @@ fn retire(
     fresh
 }
 
-/// How often a held node's wait is surfaced.
-///
-/// Read by the workspace hold as well, so the two waits a node can be held
-/// under are surfaced on one cadence.
+/// The interval an unchanged held wait is first re-surfaced after.
 pub(crate) fn surface_every_seconds() -> u64 {
     std::env::var(SURFACE_ENV)
         .ok()
         .and_then(|value| value.parse().ok())
         .filter(|seconds| *seconds > 0)
         .unwrap_or(DEFAULT_SURFACE_SECONDS)
+}
+
+/// The interval an unchanged held wait stops doubling at.
+pub(crate) fn surface_ceiling_seconds() -> u64 {
+    std::env::var(SURFACE_CEILING_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(DEFAULT_SURFACE_CEILING_SECONDS)
+}
+
+/// When each held node's wait is queued to the planner again.
+///
+/// Shared by the release hold and the workspace hold, so the two waits a node
+/// can be held under are surfaced on one cadence. A wait is queued when its hold
+/// begins and whenever what it says changes; a wait saying what the last one
+/// said is news to nobody, so it is queued again only once that last one has
+/// been read, and then no sooner than an interval that starts at
+/// [`surface_every_seconds`], doubles after each unchanged re-queue, and stops
+/// doubling at [`surface_ceiling_seconds`]. Divergence entry 97 records the
+/// ruling: a hold re-surfaced every fifteen minutes woke a supervisor every
+/// fifteen minutes for nothing new.
+pub(crate) struct Resurfacing {
+    base: Duration,
+    ceiling: Duration,
+    last: BTreeMap<String, Surfaced>,
+}
+
+/// The last wait queued about one held node.
+struct Surfaced {
+    /// What it said, as the hold's own content reads it.
+    content: String,
+    /// When it was queued.
+    at: Instant,
+    /// How long the next unchanged wait waits after it.
+    every: Duration,
+    /// The id the channel queued it under.
+    id: u64,
+}
+
+impl Resurfacing {
+    pub(crate) fn new() -> Self {
+        Self {
+            base: Duration::from_secs(surface_every_seconds()),
+            ceiling: Duration::from_secs(surface_ceiling_seconds()),
+            last: BTreeMap::new(),
+        }
+    }
+
+    /// The interval an unchanged wait is first queued again after.
+    pub(crate) fn base(&self) -> Duration {
+        self.base
+    }
+
+    /// Whether `node`'s wait, saying `content`, is due to be queued now.
+    ///
+    /// The channel is read only for a wait that is otherwise due, so a held run
+    /// pays for that read once an interval rather than once a pass.
+    pub(crate) fn due(&self, paths: &RunPaths, node: &str, content: &str) -> bool {
+        let Some(last) = self.last.get(node) else {
+            return true;
+        };
+        if last.content != content {
+            return true;
+        }
+        last.at.elapsed() >= last.every
+            && !crate::channel::ChannelState::new(paths)
+                .queue()
+                .waiting
+                .iter()
+                .any(|surface| surface.id == last.id)
+    }
+
+    /// Record that `node`'s wait, saying `content`, was queued under `id`.
+    pub(crate) fn queued(&mut self, node: &str, content: String, id: u64) {
+        let every = match self.last.get(node) {
+            Some(last) if last.content == content => match last.every >= self.ceiling {
+                true => last.every,
+                false => last.every.saturating_mul(2).min(self.ceiling),
+            },
+            _ => self.base,
+        };
+        self.last.insert(
+            node.to_owned(),
+            Surfaced {
+                content,
+                at: Instant::now(),
+                every,
+                id,
+            },
+        );
+    }
+
+    /// Forget every node `held` no longer says is held, so a hold that ends and
+    /// begins again is surfaced as the new hold it is.
+    pub(crate) fn retain(&mut self, held: impl Fn(&str) -> bool) {
+        self.last.retain(|node, _| held(node));
+    }
 }
 
 #[cfg(test)]

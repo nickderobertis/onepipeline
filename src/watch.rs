@@ -23,10 +23,10 @@ use onemessagebus::{
     Transport, TransportError,
 };
 
-use crate::cli::{WatchTimeout, WatchUntil, WATCH_CURSOR_VERSION};
+use crate::cli::{WatchTimeout, WatchUntil, DEFAULT_WATCH_UNTIL, WATCH_CURSOR_VERSION};
 use crate::error::{
-    Error, Result, EXIT_NODE_SETTLED, EXIT_NOTHING_DRIVING, EXIT_SUCCESS, EXIT_SURFACE_WAITING,
-    EXIT_WATCH_ELAPSED,
+    Error, Result, EXIT_NODE_SETTLED, EXIT_NOTHING_DRIVING, EXIT_RUN_CHANGED, EXIT_SUCCESS,
+    EXIT_SURFACE_WAITING, EXIT_WATCH_ELAPSED,
 };
 use crate::event::{Envelope, PipelineKind, Source};
 use crate::filter::EventFilter;
@@ -64,9 +64,11 @@ const MEANINGFUL: [PipelineKind; 9] = [
 pub enum Ending {
     /// The run's graph is complete.
     Settled,
-    /// A blocking surface is waiting to be answered.
+    /// A planner surface is waiting: one `next` has not consumed, or a blocking
+    /// one nobody has answered. Whether a blocking one is among them rides the
+    /// return record as `blocking`.
     SurfaceWaiting,
-    /// Nothing is driving the run.
+    /// The run stopped being driven while the watch waited.
     NothingDriving,
     /// A node the wait named settled, and this is the one that did.
     ///
@@ -78,6 +80,10 @@ pub enum Ending {
     NodeSettled(String),
     /// The wait's own bound ran out.
     Elapsed,
+    /// The watch armed on a run nothing was driving, and the run moved — its
+    /// journal, its launch record or its channel queues — with nothing else
+    /// the wait returns on firing.
+    RunChanged,
 }
 
 impl Ending {
@@ -89,6 +95,7 @@ impl Ending {
             Self::NothingDriving => "nothing-driving",
             Self::NodeSettled(_) => "node-settled",
             Self::Elapsed => "elapsed",
+            Self::RunChanged => "run-changed",
         }
     }
 
@@ -100,6 +107,7 @@ impl Ending {
             Self::NothingDriving => EXIT_NOTHING_DRIVING,
             Self::NodeSettled(_) => EXIT_NODE_SETTLED,
             Self::Elapsed => EXIT_WATCH_ELAPSED,
+            Self::RunChanged => EXIT_RUN_CHANGED,
         }
     }
 
@@ -159,6 +167,8 @@ pub struct Request {
     // llmlint: ignore[invalid_states_unrepresentable] a cursor token is external input — a line an earlier watch or `monitor` printed and a caller handed back — and it is placed against *this run's journal* by `resolve_cursor`, which is the check no type can make: it is this build's spelling, it names this run, its byte is within the journal, and that byte ends a record. A `Cursor` a caller could construct would claim those without the read that decides them; the contract spells it `cursor` on the request, as the CLI takes `--cursor`, and a token this run cannot place is refused by name before anything is waited.
     pub cursor: Option<String>,
     /// What ends the wait, beside the run finishing and nothing driving it.
+    /// Empty is [`DEFAULT_WATCH_UNTIL`], exactly as a command line naming no
+    /// `--until` is.
     pub until: Vec<WatchUntil>,
 }
 
@@ -194,6 +204,12 @@ pub enum Frame<'a> {
 }
 
 /// How a watch ended: the condition, and the cursor the next watch resumes from.
+///
+/// Two more facts ride it for the return record, and neither is public: whether
+/// a blocking surface is among those that ended the wait, and — on an elapsed
+/// wait alone — what the run did while it waited. Crate-private because the
+/// contract spells this type `WatchOutcome { ending, cursor }`; what a consumer
+/// reads of the other two is the record [`Lines::of`] renders from them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     /// Why the wait returned.
@@ -201,6 +217,11 @@ pub struct Outcome {
     /// The cursor token the next watch resumes from.
     // llmlint: ignore[invalid_states_unrepresentable] the token as the binary prints it and a later watch or `monitor` reads it back — `WatchOutcome { ending, cursor }` in the contract — spelled by the private `Cursor` here and read by `resolve_cursor` against the run it names; what a consumer does with it is hand it back, and a type it could inspect would be a second reading of a token whose one reading is that resolution.
     pub cursor: String,
+    /// Whether a blocking surface is among those that ended the wait.
+    pub(crate) blocking: bool,
+    /// What the run did while the wait ran out: present on
+    /// [`Ending::Elapsed`] and on nothing else.
+    pub(crate) summary: Option<Summary>,
 }
 
 impl Outcome {
@@ -226,6 +247,7 @@ pub(crate) fn watch(
     request: &Request,
     sink: &mut dyn FnMut(Frame<'_>) -> Result<()>,
 ) -> Result<Outcome> {
+    let cursored = request.cursor.is_some();
     let mut cursor = match request.cursor.as_deref() {
         Some(token) => resolve_cursor(paths, token)?,
         None => Cursor::start(&paths.run),
@@ -238,6 +260,7 @@ pub(crate) fn watch(
     // written while that read runs moves it past what the read saw.
     let changes = RunChanges::of(paths);
     let mut follow = Follow::from_now(&changes, RunChanges::queue())?;
+    let files = changes.files().map_err(unwatchable)?;
 
     // The first pass's reads, taken before anything is emitted, because the
     // conditions are validated against them: what this watch will read is what
@@ -245,7 +268,14 @@ pub(crate) fn watch(
     // could never be met at all.
     let (mut view, mut fresh) = read_run(paths, &mut cursor)?;
     changes.observe(&view);
-    let selectors = Selectors::resolve(&request.until, &view, &fresh)?;
+    // A settlement a watch given no cursor reads on its first pass was journalled
+    // before it armed, and is not one it was asked to wake on: it is emitted as a
+    // line like any other record, and answers no condition.
+    let ahead = cursored.then_some(&fresh[..]);
+    let selectors = match request.until.is_empty() {
+        true => Selectors::resolve(&DEFAULT_WATCH_UNTIL, Asked::Defaulted, &view, ahead)?,
+        false => Selectors::resolve(&request.until, Asked::Named, &view, ahead)?,
+    };
 
     // The record that says this run is being watched, written once every refusal
     // above has been made — a command that never watched anything leaves no
@@ -256,14 +286,18 @@ pub(crate) fn watch(
     // output nor any of its statuses. See `src/watchers.rs` for why its absence
     // may never be relied upon.
     let _armed = crate::watchers::Armed::arm(paths);
+    let mut wait = Wait::armed(paths, &view, files);
 
     let ended = |view: &RunView,
-                 ending: Ending,
+                 (ending, blocking): (Ending, bool),
+                 summary: Option<Summary>,
                  cursor: &Cursor,
                  sink: &mut dyn FnMut(Frame<'_>) -> Result<()>| {
         let outcome = Outcome {
             ending,
             cursor: cursor.to_string(),
+            blocking,
+            summary,
         };
         sink(Frame::Ended {
             view,
@@ -277,8 +311,10 @@ pub(crate) fn watch(
     // what `RunChanges` fingerprints, so a run that did not move is neither read
     // nor reported on again.
     let mut moved = true;
+    let mut first = true;
     loop {
         if moved {
+            wait.read(&fresh);
             for event in fresh
                 .iter()
                 .filter(|event| meaningful(event) && request.filter.matches(event))
@@ -287,12 +323,32 @@ pub(crate) fn watch(
                 quiet_since = Instant::now();
             }
 
-            if let Some(ending) = concluded(&view, paths, &selectors, &fresh) {
-                return ended(&view, ending, &cursor, sink);
+            let settlements = match first && !cursored {
+                true => &[][..],
+                false => &fresh[..],
+            };
+            let files_moved = !first && changes.files().map_err(unwatchable)? != wait.files;
+            if let Some(ended_on) = concluded(
+                &view,
+                paths,
+                &selectors,
+                settlements,
+                &mut wait.driven,
+                wait.armed_undriven && files_moved,
+            ) {
+                return ended(&view, ended_on, None, &cursor, sink);
             }
         }
+        first = false;
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return ended(&view, Ending::Elapsed, &cursor, sink);
+            let summary = wait.summary(paths, &view);
+            return ended(
+                &view,
+                (Ending::Elapsed, false),
+                Some(summary),
+                &cursor,
+                sink,
+            );
         }
         if !tick.is_zero() && quiet_since.elapsed() >= tick {
             sink(Frame::Tick { view: &view })?;
@@ -310,6 +366,224 @@ pub(crate) fn watch(
         };
     }
 }
+
+/// What one watch knows about its own wait, beside the run it reads: how the
+/// run stood when it armed, and what it has read since.
+///
+/// The arming half is what two conditions are decided against — a run nothing
+/// was driving when the watch armed waits for the run to *move* rather than
+/// returning at once, and `nothing-driving` is a transition out of being
+/// driven — and the rest is what an elapsed wait's summary reports.
+struct Wait {
+    /// When the watch armed, which is what "during this wait" is measured from.
+    armed_at: Instant,
+    /// Whether the last pass read the run as driven. Nothing driving it ends a
+    /// wait only on the pass that sees this go from `true` to `false`.
+    driven: bool,
+    /// Whether nothing was driving the run when the watch armed, which is the
+    /// one wait `run-changed` ends.
+    armed_undriven: bool,
+    /// The run's files as they stood before the first read, which is what a
+    /// move is measured against.
+    files: Fingerprint,
+    /// The highest surface id the channel had queued when the watch armed.
+    surfaces_at_arming: Option<u64>,
+    /// Every settlement this watch has read past the cursor it started from,
+    /// in the order it read them.
+    // llmlint: ignore[invalid_states_unrepresentable] a node id and a settled status are the words a journalled `node-settled` carries in its own label and payload, copied here only to be written back out on an elapsed return; the crate spells both `String` wherever it reads them off a record, for the reasons `Ending::NodeSettled` gives.
+    settled: Vec<(String, String)>,
+}
+
+impl Wait {
+    fn armed(paths: &RunPaths, view: &RunView, files: Fingerprint) -> Self {
+        let driven = !view.liveness().is_undriven();
+        Self {
+            armed_at: Instant::now(),
+            driven,
+            armed_undriven: !driven,
+            files,
+            surfaces_at_arming: newest_surface(paths),
+            settled: Vec::new(),
+        }
+    }
+
+    /// Keep every settlement in what a pass read.
+    fn read(&mut self, fresh: &[Envelope]) {
+        self.settled.extend(fresh.iter().filter_map(|event| {
+            let node = settlement_of(event)?;
+            let status = event
+                .payload
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            Some((node.to_owned(), status.to_owned()))
+        }));
+    }
+
+    /// What an elapsed wait says about the run it waited on.
+    fn summary(&self, paths: &RunPaths, view: &RunView) -> Summary {
+        let queued = crate::channel::ChannelState::new(paths)
+            .every_surface()
+            .iter()
+            .filter(|surface| {
+                self.surfaces_at_arming
+                    .is_none_or(|armed| surface.id > armed)
+            })
+            .count();
+        let now = crate::sys::now_millis();
+        Summary {
+            settled_since_cursor: self
+                .settled
+                .iter()
+                .map(|(node, status)| SettledSince {
+                    node: node.clone(),
+                    status: status.clone(),
+                })
+                .collect(),
+            surfaces_queued_during_wait: queued,
+            held: views::holds_of(view)
+                .into_iter()
+                .map(|(node, reason, since)| HeldNode {
+                    node,
+                    reason,
+                    waited_seconds: since.map(|since| now.saturating_sub(since) / 1_000),
+                })
+                .collect(),
+            last_progress_seconds: last_progress(&view.events)
+                .map(|at| now.saturating_sub(at) / 1_000),
+            observer: views::observer_word(&view.launch),
+            waited: self.armed_at.elapsed(),
+        }
+    }
+}
+
+/// The highest id the run's channel has queued a surface under, or `None` for a
+/// channel that has queued none.
+fn newest_surface(paths: &RunPaths) -> Option<u64> {
+    crate::channel::ChannelState::new(paths)
+        .every_surface()
+        .iter()
+        .map(|surface| surface.id)
+        .max()
+}
+
+/// When a node last dispatched or settled on this run, as the record's own
+/// stamp says, or `None` for a run where neither has happened.
+fn last_progress(events: &[Envelope]) -> Option<u64> {
+    events
+        .iter()
+        .filter(|event| {
+            event.source == Source::Pipeline
+                && matches!(
+                    PipelineKind::from_wire(&event.kind),
+                    Some(PipelineKind::NodeDispatched | PipelineKind::NodeSettled)
+                )
+        })
+        .filter_map(|event| crate::projection::millis_of(&event.ts))
+        .max()
+}
+
+/// What an elapsed wait says about the run it waited on: the return record's
+/// `summary`, and the lines after the human form's ending line.
+///
+/// Stated in the run's own terms and nobody else's. Which host reads it, which
+/// agent raised the surfaces it counts, and how the run's observer graph is
+/// built are all outside it — so what one of these means for a given supervisor
+/// is that supervisor's to interpret.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct Summary {
+    /// Every settlement past the cursor the watch started from.
+    settled_since_cursor: Vec<SettledSince>,
+    /// How many planner surfaces were queued after the watch armed.
+    surfaces_queued_during_wait: usize,
+    /// Every node held on a release or on its workspace.
+    held: Vec<HeldNode>,
+    /// Seconds since the run's latest `node-dispatched` or `node-settled`, or
+    /// `null` for a run with neither.
+    last_progress_seconds: Option<u64>,
+    /// The run's observer graph, in one word the liveness view already reads.
+    observer: &'static str,
+    /// How long the wait lasted, for the human form's sentence.
+    #[serde(skip)]
+    waited: Duration,
+}
+
+/// One settlement an elapsed wait reports.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct SettledSince {
+    // llmlint: ignore-block[invalid_states_unrepresentable] copied off a journalled `node-settled` to be written back out, as `Wait::settled` is.
+    node: String,
+    status: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+}
+
+/// One held node an elapsed wait reports.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct HeldNode {
+    // llmlint: ignore[invalid_states_unrepresentable] a node id the run's own `node-held` named, written back out as the crate spells one everywhere else.
+    node: String,
+    /// What holds it: `release` or `workspace`, the hold's own kind.
+    reason: &'static str,
+    /// How long it has been held, from the record that opened the hold; `null`
+    /// for a record whose stamp this build cannot read.
+    waited_seconds: Option<u64>,
+}
+
+impl Summary {
+    /// The lines the human form writes after its ending line.
+    fn lines(&self) -> String {
+        let settled = match self.settled_since_cursor.is_empty() {
+            true => "none".to_owned(),
+            false => self
+                .settled_since_cursor
+                .iter()
+                .map(|settled| format!("{} {}", settled.node, settled.status))
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
+        let held = match self.held.is_empty() {
+            true => "none".to_owned(),
+            false => self
+                .held
+                .iter()
+                .map(|held| match held.waited_seconds {
+                    Some(seconds) => format!(
+                        "{} on {} for {}",
+                        held.node,
+                        held.reason,
+                        crate::telemetry::duration(seconds.saturating_mul(1_000))
+                    ),
+                    None => format!("{} on {}", held.node, held.reason),
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
+        let progress = match self.last_progress_seconds {
+            Some(seconds) => format!(
+                "{} ago",
+                crate::telemetry::duration(seconds.saturating_mul(1_000))
+            ),
+            None => "no node has dispatched or settled".to_owned(),
+        };
+        let waited =
+            crate::telemetry::duration(u64::try_from(self.waited.as_millis()).unwrap_or(u64::MAX));
+        let arrived = match self.surfaces_queued_during_wait {
+            0 => format!("no planner surface arrived during this {waited} wait"),
+            count => format!("{count} planner surface(s) arrived during this {waited} wait"),
+        };
+        let observer = match self.observer {
+            OBSERVER_NONE => "the run launched no observer graph".to_owned(),
+            word => format!("the run's observer graph is {word}"),
+        };
+        format!(
+            "   settled since cursor: {settled}\n   held: {held}\n   last progress: \
+             {progress}\n   {arrived}; {observer}"
+        )
+    }
+}
+
+/// The observer word for a run that launched no observer graph.
+const OBSERVER_NONE: &str = "none";
 
 /// One read of the run: its view, and the records past the cursor.
 ///
@@ -465,6 +739,40 @@ impl RunChanges {
         )
     }
 
+    /// The run's files as a fingerprint of their own: the journal, the launch
+    /// record and the channel's queues, and nothing the host answers about the
+    /// driver.
+    ///
+    /// What a watch armed on a run nothing is driving waits to see move. The
+    /// driver's two answers are left out because they are not the run changing:
+    /// a driver already over, or a run already quiet past the parked bound, is
+    /// what that watch armed on.
+    fn files(&self) -> std::result::Result<Fingerprint, TransportError> {
+        Ok(Fingerprint::from_parts(self.file_parts(&Self::queue())?))
+    }
+
+    fn file_parts(&self, queue: &QueueName) -> std::result::Result<Vec<u64>, TransportError> {
+        let mut parts = Vec::new();
+        mark(&self.paths.journal(), &mut parts);
+        mark(&self.paths.launch(), &mut parts);
+        match self.channel()? {
+            Some(channel) => {
+                for name in [
+                    crate::channel::layout::SURFACES,
+                    crate::channel::layout::REPLIES,
+                    crate::channel::layout::COMMANDS,
+                    crate::channel::layout::COMMAND_OUTCOMES,
+                ] {
+                    let name = QueueName::try_from(name)
+                        .map_err(|failure| Self::refused(queue, &failure.to_string()))?;
+                    parts.extend_from_slice(channel.fingerprint(&name)?.parts());
+                }
+            }
+            None => parts.push(0),
+        }
+        Ok(parts)
+    }
+
     fn channel(&self) -> std::result::Result<Option<&LocalTransport>, TransportError> {
         if let Some(channel) = self.channel.get() {
             return Ok(Some(channel));
@@ -549,24 +857,7 @@ impl Transport for RunChanges {
                 "a watch fingerprints one run, as the queue `run`",
             ));
         }
-        let mut parts = Vec::new();
-        mark(&self.paths.journal(), &mut parts);
-        mark(&self.paths.launch(), &mut parts);
-        match self.channel()? {
-            Some(channel) => {
-                for name in [
-                    crate::channel::layout::SURFACES,
-                    crate::channel::layout::REPLIES,
-                    crate::channel::layout::COMMANDS,
-                    crate::channel::layout::COMMAND_OUTCOMES,
-                ] {
-                    let name = QueueName::try_from(name)
-                        .map_err(|failure| Self::refused(queue, &failure.to_string()))?;
-                    parts.extend_from_slice(channel.fingerprint(&name)?.parts());
-                }
-            }
-            None => parts.push(0),
-        }
+        let mut parts = self.file_parts(queue)?;
         let observed = self.observed.lock().unwrap_or_else(PoisonError::into_inner);
         parts.push(u64::from(views::driver_claim_is_over(
             observed.host.as_deref(),
@@ -696,21 +987,36 @@ fn tail(paths: &RunPaths, cursor: &mut Cursor) -> Vec<Envelope> {
 /// blocks.
 ///
 /// Two of the terminal conditions are not held here at all: a run that settles
-/// `complete` and a run nothing is driving end every wait whether or not they
-/// were named, because a wait that could outlive the run it watches is the
+/// `complete` and a run that stops being driven end every wait whether or not
+/// they were named, because a wait that could outlive the run it watches is the
 /// unbounded silence this verb exists to end. So `--until settled` and `--until
 /// nothing-driving` name what the verb already does — which is why the first of
-/// them keeps its meaning exactly, "report a blocking surface and wait through
-/// it" — and what is chosen here is everything else.
+/// them keeps its meaning exactly, "report a surface and wait through it" — and
+/// what is chosen here is everything else.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Selectors {
-    /// Return on a blocking surface waiting to be answered.
+    /// Return on a planner surface nobody has read, or a blocking one nobody
+    /// has answered.
     surface: bool,
     /// Return when any node of the run settles.
     any_node: bool,
     /// Return when one of these nodes settles.
     // llmlint: ignore[invalid_states_unrepresentable] every id in here has already been checked against this run's own graph by `resolve`, which is the only thing that constructs one, and that is the whole of what "valid" means for a node id — a fact about one run at one moment, which no type can carry across the moment the graph is edited. The crate spells a node id `String` everywhere else for the same reason.
     named: Vec<String>,
+}
+
+/// Whether the conditions a watch resolves are ones its caller named, or the
+/// default set a caller who named none is given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asked {
+    /// The caller named them, so one that could never fire is a mistake in the
+    /// command and is refused.
+    Named,
+    /// Nobody named them. [`DEFAULT_WATCH_UNTIL`]'s `node-settled` over a run
+    /// with nothing left to settle is not a mistake anybody made — the run
+    /// settling, which that same run is about to do or has done, ends the wait
+    /// — so nothing in the default set is refused.
+    Defaulted,
 }
 
 impl Selectors {
@@ -721,30 +1027,43 @@ impl Selectors {
     /// run cannot answer costs a caller nothing: a node the graph does not hold,
     /// a node that will never settle again, and — for a run with nothing left to
     /// settle — a wait for any node to settle. Each names what it would never
-    /// fire on.
+    /// fire on. The last two are made of a condition a caller named and never of
+    /// the default set; see [`Asked`].
     ///
-    /// **The line between "never" and "already".** A settlement at or past this
-    /// watch's cursor is in `ahead`, is read on the very first pass, and returns
+    /// **The line between "never" and "already".** `ahead` is what this watch
+    /// will read past its cursor, and is `None` for a watch given no cursor. A
+    /// settlement in `ahead` is read on the very first pass and returns
     /// immediately: a condition the run has already satisfied is answered, never
-    /// refused. A settlement *behind* the cursor was handed to the watch that
-    /// printed that cursor and is not handed over twice — so what is left, a node
-    /// that settled `done` with nothing of it ahead, is a wait for a dispatch
-    /// that will not happen, because `done` is the one status nothing schedules
-    /// out of again. Every other settled status can settle again: a failed or
-    /// cancelled node is retried, a parked one requeued, a waiting one attested,
-    /// a draft-complete one dispatched by the release it waits on. (A planner
-    /// *correcting* a record with `settle` can journal a further settlement for a
-    /// done node. That is an intervention in the run rather than the run's own
-    /// life, and it is not what the refusal claims: what it claims is that
-    /// nothing will dispatch the node again.)
+    /// refused. A watch given no cursor counts only settlements journalled after
+    /// it armed, so for it nothing already in the journal is ahead. What is left,
+    /// a node that settled `done` with nothing of it ahead, is a wait for a
+    /// dispatch that will not happen, because `done` is the one status nothing
+    /// schedules out of again. Every other settled status can settle again: a
+    /// failed or cancelled node is retried, a parked one requeued, a waiting one
+    /// attested, a draft-complete one dispatched by the release it waits on. (A
+    /// planner *correcting* a record with `settle` can journal a further
+    /// settlement for a done node. That is an intervention in the run rather than
+    /// the run's own life, and it is not what the refusal claims: what it claims
+    /// is that nothing will dispatch the node again.)
     ///
     /// A condition that cannot fire is refused whether or not some other
     /// condition would have ended the same watch anyway. It is a mistake in the
     /// command, and answering it with a different condition's status would hide
     /// it behind an exit code the caller would read as an answer.
-    fn resolve(until: &[WatchUntil], view: &RunView, ahead: &[Envelope]) -> Result<Self> {
+    fn resolve(
+        until: &[WatchUntil],
+        asked: Asked,
+        view: &RunView,
+        ahead: Option<&[Envelope]>,
+    ) -> Result<Self> {
         let mut chosen = Self::default();
         let statuses = view.state.statuses();
+        let refuses = asked == Asked::Named;
+        let behind = match ahead {
+            Some(_) => "before this watch's cursor",
+            None => "before this watch armed — and a watch given no cursor waits for a settlement after that —",
+        };
+        let ahead = ahead.unwrap_or_default();
         for condition in until {
             match condition {
                 WatchUntil::Settled | WatchUntil::NothingDriving => {}
@@ -754,18 +1073,18 @@ impl Selectors {
                     // A graph with nothing in it is refused on its own terms
                     // rather than through the sentence below, which would be
                     // saying that every one of no nodes settled.
-                    if ids.is_empty() {
+                    if refuses && ids.is_empty() {
                         return Err(Error::Invalid(format!(
                             "`--until {condition}` would never fire: run '{}' holds no nodes \
                              at all, so nothing in it can settle",
                             view.paths.run
                         )));
                     }
-                    if done_behind_the_cursor(&ids, &statuses, ahead) {
+                    if refuses && done_behind_the_cursor(&ids, &statuses, ahead) {
                         return Err(Error::Invalid(format!(
                             "`--until {condition}` would never fire: every node of run '{}' \
-                             ({}) settled `done` before this watch's cursor, and nothing \
-                             dispatches a `done` node again",
+                             ({}) settled `done` {behind}, and nothing dispatches a `done` \
+                             node again",
                             view.paths.run,
                             named(ids.into_iter())
                         )));
@@ -784,8 +1103,8 @@ impl Selectors {
                     if done_behind_the_cursor(&[node], &statuses, ahead) {
                         return Err(Error::Invalid(format!(
                             "`--until {condition}` would never fire: node '{node}' of run \
-                             '{}' settled `done` before this watch's cursor, and nothing \
-                             dispatches a `done` node again",
+                             '{}' settled `done` {behind}, and nothing dispatches a `done` \
+                             node again",
                             view.paths.run
                         )));
                     }
@@ -858,50 +1177,91 @@ fn meaningful(event: &Envelope) -> bool {
         && PipelineKind::from_wire(&event.kind).is_some_and(|kind| MEANINGFUL.contains(&kind))
 }
 
-/// The terminal condition this pass reached, if it reached one.
+/// The terminal condition this pass reached, if it reached one, and whether a
+/// blocking surface is among what ended it.
 ///
 /// **Settled here is the graph being `complete`**, which is the reading an
 /// attached `start` already returns on and deliberately not "the loop has
 /// nothing left to do": a run whose one node failed has converged, and reporting
 /// that as a run that settled would hand a supervisor exit `0` over work nobody
-/// finished. Such a run reaches the caller as [`Ending::NothingDriving`] — the
-/// state to intervene in — exactly as it does through `start`.
+/// finished.
 ///
-/// The order after it is what a supervisor does about each, hardest fact first.
-/// Nothing driving outranks a waiting surface for the same reason `reply`
+/// **Nothing driving the run is a transition.** `driven` is whether the last
+/// pass read the run as driven, and this pass ends the wait only where it reads
+/// that going from yes to no: a watch armed on a run nothing is driving is a
+/// supervisor waiting for somebody to act on it, and returning at once — which
+/// is what sent supervisors back to hand-written waits that said nothing — is
+/// the one thing that wait must not do. What ends such a wait instead is the
+/// run moving, which `run_moved` says and [`Ending::RunChanged`] reports, last
+/// of all so every condition a caller named is answered before it.
+///
+/// The order after `settled` is what a supervisor does about each, hardest fact
+/// first. Nothing driving outranks a waiting surface for the same reason `reply`
 /// refuses one: an answer handed to a run nobody will drive again is delivered
-/// to nothing, and `adopt` comes first. A node settling is last of the four,
-/// because it is a fact *within* a run the three above it are facts *about*: a
-/// settlement read out of a run nobody is driving is not the thing to act on.
+/// to nothing, and `adopt` comes first. A node settling comes after both,
+/// because it is a fact *within* a run the ones above it are facts *about*.
 ///
-/// The settlement is taken from `fresh` — the records this pass read — rather
-/// than from the state folded out of them, so it is the same event the caller was
-/// just handed a line for, and so the whole journal ahead of the cursor is what
-/// answers a condition the run met before this watch started. It is **not** put
-/// through the caller's profile: a profile shapes which events this reader is
-/// shown, and a condition the wait returns on is a fact about the run rather than
-/// about the view over it.
+/// The settlement is taken from `settlements` — the records this pass read, or
+/// none on the first pass of a watch given no cursor, whose first read is the
+/// run's history — rather than from the state folded out of them, so it is the
+/// same event the caller was just handed a line for. It is **not** put through
+/// the caller's profile: a profile shapes which events this reader is shown, and
+/// a condition the wait returns on is a fact about the run rather than about the
+/// view over it.
 fn concluded(
     view: &RunView,
     paths: &RunPaths,
     selectors: &Selectors,
-    fresh: &[Envelope],
-) -> Option<Ending> {
+    settlements: &[Envelope],
+    driven: &mut bool,
+    run_moved: bool,
+) -> Option<(Ending, bool)> {
     let statuses = view.state.statuses();
     if !statuses.is_empty() && graph::state_of(&statuses) == GraphState::Complete {
-        return Some(Ending::Settled);
+        return Some((Ending::Settled, false));
     }
-    if view.liveness().is_undriven() {
-        return Some(Ending::NothingDriving);
+    let was_driven = std::mem::replace(driven, !view.liveness().is_undriven());
+    if was_driven && !*driven {
+        return Some((Ending::NothingDriving, false));
     }
-    if selectors.surface && views::blocking_surface(paths) {
-        return Some(Ending::SurfaceWaiting);
+    if selectors.surface {
+        if let Some(blocking) = surface_waiting(paths) {
+            return Some((Ending::SurfaceWaiting, blocking));
+        }
     }
-    fresh
+    if let Some(node) = settlements
         .iter()
         .filter_map(settlement_of)
         .find(|node| selectors.wants(node))
-        .map(|node| Ending::NodeSettled(node.to_string()))
+    {
+        return Some((Ending::NodeSettled(node.to_string()), false));
+    }
+    run_moved.then_some((Ending::RunChanged, false))
+}
+
+/// Whether a planner surface is waiting for this watch to report, and if one
+/// is, whether a blocking one is among them.
+///
+/// Two readings, either enough. **Any surface `next` has not consumed**,
+/// blocking or not and abandoned or not: the queue is what a supervisor reads,
+/// and a watch that ended only on a blocking question left every update behind
+/// it unread for as long as nothing blocked. And **a blocking surface nobody
+/// has answered**, read or not, abandoned ones aside — [`views::blocking_surface`],
+/// the reading `status` and the liveness verdict share — because a question
+/// `next` handed out and nobody answered is still a question. Once `next` has
+/// consumed a surface, only the second reading can end a wait on it, so an
+/// update read once, or a question whose asker has gone, does not end every
+/// watch after it.
+///
+/// The watch consumes nothing: every surface it reports is still there for
+/// `next`.
+fn surface_waiting(paths: &RunPaths) -> Option<bool> {
+    let queue = crate::channel::ChannelState::new(paths).queue();
+    let unanswered = || views::blocking_surface(paths);
+    match queue.waiting.is_empty() {
+        false => Some(queue.waiting.iter().any(|surface| surface.blocking) || unanswered()),
+        true => unanswered().then_some(true),
+    }
 }
 
 /// A place in one run's journal, as a later invocation is handed it.
@@ -1066,6 +1426,13 @@ enum Record<'a> {
         /// The token, as [`Cursor`] spells it.
         cursor: &'a str,
         unread: UnreadRecord<'a>,
+        /// Whether a blocking surface is among those that ended the wait:
+        /// written on every return, `false` on one no surface ended.
+        blocking: bool,
+        /// What the run did while the wait ran out, on an elapsed return and
+        /// on no other.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<&'a Summary>,
     },
 }
 
@@ -1149,9 +1516,13 @@ impl Lines {
             }
             Frame::Ended { view, outcome } => {
                 let unread = view.unread();
+                let summary = outcome
+                    .summary
+                    .as_ref()
+                    .map_or_else(String::new, |summary| format!("\n{}", summary.lines()));
                 (
                     format!(
-                        "-- watch {} {}  {}  cursor {}",
+                        "-- watch {} {}  {}  cursor {}{summary}",
                         view.paths.run,
                         outcome.ending.phrase(),
                         unread_phrase(&unread),
@@ -1162,6 +1533,8 @@ impl Lines {
                         ending: &outcome.ending,
                         cursor: &outcome.cursor,
                         unread: UnreadRecord::of(&unread),
+                        blocking: outcome.blocking,
+                        summary: outcome.summary.as_ref(),
                     })?,
                 )
             }
@@ -1399,6 +1772,26 @@ mod tests {
             .map_or(entry.clone(), |(head, _)| head.to_string())
     }
 
+    /// A summary carrying one of everything it can hold, so a record rendered
+    /// with it writes every key an elapsed return can.
+    fn a_summary() -> Summary {
+        Summary {
+            settled_since_cursor: vec![SettledSince {
+                node: "build".to_owned(),
+                status: "done".to_owned(),
+            }],
+            surfaces_queued_during_wait: 0,
+            held: vec![HeldNode {
+                node: "deploy".to_owned(),
+                reason: "release",
+                waited_seconds: Some(60),
+            }],
+            last_progress_seconds: None,
+            observer: OBSERVER_NONE,
+            waited: Duration::from_secs(2_100),
+        }
+    }
+
     #[test]
     fn each_terminal_condition_returns_a_status_of_its_own() {
         let endings = [
@@ -1407,6 +1800,7 @@ mod tests {
             Ending::NothingDriving,
             Ending::NodeSettled("build".to_string()),
             Ending::Elapsed,
+            Ending::RunChanged,
         ];
         let codes: std::collections::BTreeSet<i32> =
             endings.iter().map(|end| end.exit_code()).collect();
@@ -1419,6 +1813,8 @@ mod tests {
         assert_eq!(Ending::NothingDriving.exit_code(), EXIT_NOTHING_DRIVING);
         assert_eq!(Ending::SurfaceWaiting.exit_code(), EXIT_SURFACE_WAITING);
         assert_eq!(Ending::Elapsed.exit_code(), EXIT_WATCH_ELAPSED);
+        assert_eq!(Ending::RunChanged.exit_code(), EXIT_RUN_CHANGED);
+        assert_eq!(Ending::RunChanged.as_str(), "run-changed");
         assert_eq!(
             Ending::NodeSettled("build".to_string()).exit_code(),
             EXIT_NODE_SETTLED
@@ -1530,6 +1926,8 @@ mod tests {
             format!("`{}`", Ending::SurfaceWaiting.exit_code()),
             format!("`{}`", Ending::Elapsed.exit_code()),
             format!("`{}`", Ending::NodeSettled("any".to_string()).exit_code()),
+            format!("`{}`", Ending::RunChanged.exit_code()),
+            format!("`{}`", Ending::RunChanged.as_str()),
             // The unbounded wait's spelling, and the vocabulary it made
             // necessary. Both are read out of the constants a caller's command
             // line is parsed against, so a word changed in the code and left
@@ -1679,11 +2077,12 @@ mod tests {
         let entry = divergence_entry();
 
         let unread = Unread::default();
-        // The return is rendered on the ending that **names a node**, because
-        // that record is the superset: `node` is the one key a base condition's
-        // return leaves out, and the reconciliation below runs both ways — a
-        // record rendered without it would read the entry's `node` as a key
-        // nothing writes.
+        let summary = a_summary();
+        // The return is rendered on the ending that **names a node**, and with
+        // a summary, because that record is the superset: `node` and `summary`
+        // are the keys a base condition's return leaves out, and the
+        // reconciliation below runs both ways — a record rendered without them
+        // would read the entry's `node` and `summary` as keys nothing writes.
         let written = [
             Record::Heartbeat {
                 run_id: "demo",
@@ -1694,6 +2093,8 @@ mod tests {
                 ending: &Ending::NodeSettled("build".to_string()),
                 cursor: &Cursor::start("demo").to_string(),
                 unread: UnreadRecord::of(&unread),
+                blocking: false,
+                summary: Some(&summary),
             },
         ];
         for shape in &written {
@@ -1806,6 +2207,7 @@ mod tests {
         // reconciliation is the divergence entry's, below, where the records are
         // written as JSON fragments that can be told apart.
         let unread = Unread::default();
+        let summary = a_summary();
         for shape in [
             Record::Heartbeat {
                 run_id: "demo",
@@ -1818,6 +2220,8 @@ mod tests {
                 ending: &Ending::NodeSettled("build".to_string()),
                 cursor: &Cursor::start("demo").to_string(),
                 unread: UnreadRecord::of(&unread),
+                blocking: false,
+                summary: Some(&summary),
             },
         ] {
             let rendered = serde_json::to_value(&shape).expect("the record serializes");
@@ -1947,6 +2351,87 @@ mod tests {
         assert!(Instant::now()
             .checked_add(Duration::from_secs(u64::MAX))
             .is_none());
+    }
+
+    /// The summary an elapsed return carries is named, key by key, by the
+    /// README's watch passage and by divergence entry 97, which is where it was
+    /// ruled; and its human lines say plainly when nothing arrived.
+    ///
+    /// Read off the serialized form rather than copied, so a key renamed in the
+    /// code and left standing in either document fails here.
+    #[test]
+    fn the_summary_is_named_key_by_key_where_it_is_documented_and_says_when_nothing_arrived() {
+        let record = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("docs")
+                .join("contract-divergences.md"),
+        )
+        .expect("the divergence record ships");
+        let ruling = record
+            .split_once("\n## 97.")
+            .expect("the ruling is recorded under entry 97")
+            .1
+            .to_string();
+        let passage = readme_watch_passage();
+        let rendered = serde_json::to_value(a_summary()).expect("the summary serializes");
+        let mut keys: Vec<String> = rendered
+            .as_object()
+            .expect("a summary is an object")
+            .keys()
+            .cloned()
+            .collect();
+        for nested in ["settled_since_cursor", "held"] {
+            keys.extend(
+                rendered[nested][0]
+                    .as_object()
+                    .expect("one of each is rendered")
+                    .keys()
+                    .cloned(),
+            );
+        }
+        for key in &keys {
+            assert!(
+                passage.contains(&format!("`{key}`")),
+                "the README's watch passage does not name `{key}`, which the summary carries"
+            );
+            assert!(
+                ruling.contains(&format!("`{key}`")),
+                "entry 97 does not name `{key}`, which the summary carries"
+            );
+        }
+        for word in ["running", "dead", "not-restarted", OBSERVER_NONE] {
+            assert!(passage.contains(&format!("`{word}`")), "{word}");
+            assert!(ruling.contains(&format!("`{word}`")), "{word}");
+        }
+        assert!(passage.contains(&format!("`{}`", Ending::RunChanged.as_str())));
+        assert!(passage.contains(&format!("`{}`", Ending::RunChanged.exit_code())));
+
+        // What the human form says when nothing arrived, in the run's own terms.
+        let quiet = a_summary().lines();
+        assert!(
+            quiet.contains("no planner surface arrived during this 35m00s wait"),
+            "{quiet}"
+        );
+        assert!(
+            quiet.contains("the run launched no observer graph"),
+            "{quiet}"
+        );
+        assert!(quiet.contains("deploy on release for 1m00s"), "{quiet}");
+        let busy = Summary {
+            surfaces_queued_during_wait: 2,
+            observer: "dead",
+            last_progress_seconds: Some(120),
+            ..a_summary()
+        }
+        .lines();
+        assert!(
+            busy.contains(
+                "2 planner surface(s) arrived during this 35m00s wait; the run's \
+                           observer graph is dead"
+            ),
+            "{busy}"
+        );
+        assert!(busy.contains("last progress: 2m00s ago"), "{busy}");
     }
 
     #[test]
