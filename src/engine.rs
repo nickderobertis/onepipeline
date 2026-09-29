@@ -973,7 +973,7 @@ pub(crate) fn take_if_undriven(paths: &RunPaths) -> Result<Option<OwnershipLock>
         Ok(lock) => Ok(Some(lock)),
         Err(Error::Locked { .. }) => Ok(None),
         // A lock nobody can be named as holding is still a claim on the run.
-        Err(unreadable) if ledger::is_unreadable_lock(&unreadable) => Ok(None),
+        Err(unreadable) if ledger::is_unnamed_claim(&unreadable) => Ok(None),
         Err(other) => Err(other),
     };
     drop(handover);
@@ -992,7 +992,7 @@ fn accepting_under_the_handover(
         Ok(lock) => Ok(Accepted::NothingIsDriving(lock)),
         Err(Error::Locked { .. }) => channel.submit(author, commands).map(Accepted::Queued),
         // A lock nobody can be named as holding is still a claim on the run.
-        Err(unreadable) if ledger::is_unreadable_lock(&unreadable) => {
+        Err(unreadable) if ledger::is_unnamed_claim(&unreadable) => {
             channel.submit(author, commands).map(Accepted::Queued)
         }
         Err(other) => Err(other),

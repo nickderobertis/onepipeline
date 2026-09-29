@@ -2220,6 +2220,9 @@ fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> 
             Reclaimed::Won => return Ok(()),
             Reclaimed::HeldBy(holder) => return Err(locked_by(run, &holder)),
             Reclaimed::Unreadable(at) => return Err(unreadable_lock(&at, run)),
+            Reclaimed::Unsettled(at, reclaimer) => {
+                return Err(unsettled_claim(&at, run, &reclaimer))
+            }
             // The lock was let go while this process was contending for it,
             // so there is nobody to reclaim it from: it is taken the way a
             // lock nobody holds is taken, exclusively.
@@ -2236,6 +2239,10 @@ enum Reclaimed {
     HeldBy(LockRecord),
     /// A claim on the run exists that this build cannot read, at this path.
     Unreadable(PathBuf),
+    /// A live process is taking the run over — its entry is at this path — and
+    /// has not put its record where the dead one is, so the lock names nobody
+    /// who is driving the run.
+    Unsettled(PathBuf, LockRecord),
     /// The lock was released while this process was contending for it.
     Released,
 }
@@ -2297,8 +2304,9 @@ fn read_lock_file(path: &Path) -> Result<LockFile> {
 /// re-reads the lock before it writes, so a record already put there by an
 /// earlier winner is reported rather than overwritten. A loser reads the winner's
 /// record — waiting up to [`RECLAIM_PATIENCE`] for it while the winner's entry
-/// says it is on the way, and naming the entry only past that — and reports it
-/// as the holder: it never writes.
+/// says it is on the way — and reports it as the holder: it never writes. A
+/// winner still short of the lock past that is reported as taking the run over,
+/// never as its holder, because the lock does not name it.
 ///
 /// The entries are numbered, and a number is stepped over only when the process
 /// that created it is one this host can prove is gone with the dead record still
@@ -2371,7 +2379,10 @@ fn reclaim(path: &Path, dead: &LockRecord, body: &str) -> Result<Reclaimed> {
             LockFile::Record(_) if std::time::Instant::now() < patience => {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
-            LockFile::Record(reclaimer) => return Ok(Reclaimed::HeldBy(reclaimer)),
+            // Past it the lock still names the dead holder, so the reclaimer is
+            // not named as driving the run: what is known is only that it is
+            // taking the run over.
+            LockFile::Record(reclaimer) => return Ok(Reclaimed::Unsettled(entry, reclaimer)),
             // Gone since the create was refused: its creator has written the
             // lock and taken the entries away. The next look at the lock
             // finds that record.
@@ -2383,13 +2394,14 @@ fn reclaim(path: &Path, dead: &LockRecord, body: &str) -> Result<Reclaimed> {
 }
 
 /// How long a reclaim that lost to a live reclaimer waits for the winner's record
-/// to be the lock before it names the winner from its entry instead.
+/// to be the lock before it answers that the run is part-way through a takeover.
 ///
 /// The winner is one read and one write away from the lock, so the wait is
 /// normally a few milliseconds; a loser that answered at once would leave, beside
 /// a refusal naming the winner, a lock still naming the dead driver — and every
 /// view reading it then calls the run undriven. The bound is for a winner stopped
-/// in that window, which is named from its entry as before.
+/// in that window, which is then reported as taking the run over and never as
+/// holding it, because the lock does not name it.
 const RECLAIM_PATIENCE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Create `path` exclusively, **with** `body` already in it.
@@ -2509,6 +2521,57 @@ fn unreadable_lock(path: &Path, run: &str) -> Error {
             },
         ),
     }
+}
+
+/// What a claim refused over a run another process is part-way through taking
+/// over says, as the source of the [`Error::Ledger`] that reports it.
+///
+/// Not an [`Error::Locked`], for the reason [`UnreadableLock`] is not: the lock
+/// still names the dead holder, so no process can be named as holding the run —
+/// and naming the one taking it over as its driver is a claim the lock does not
+/// back.
+#[derive(Debug)]
+struct UnsettledClaim {
+    run: String,
+    taking_over: LockRecord,
+}
+
+impl std::fmt::Display for UnsettledClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "run '{}' is part-way through being taken over: pid {} on {} ({}) is taking it \
+             over and has not claimed the lock yet, so no process can be named as its holder",
+            self.run, self.taking_over.pid, self.taking_over.host, self.taking_over.verb
+        )
+    }
+}
+
+impl std::error::Error for UnsettledClaim {}
+
+fn unsettled_claim(entry: &Path, run: &str, taking_over: &LockRecord) -> Error {
+    Error::Ledger {
+        path: entry.to_path_buf(),
+        source: io::Error::new(
+            io::ErrorKind::WouldBlock,
+            UnsettledClaim {
+                run: run.to_string(),
+                taking_over: taking_over.clone(),
+            },
+        ),
+    }
+}
+
+/// Whether `error` refused a claim over a run no process can be named as holding
+/// — a lock nobody can read, or one a live process is part-way through taking
+/// over. Either is still a claim on the run, and answered as one.
+pub(crate) fn is_unnamed_claim(error: &Error) -> bool {
+    is_unreadable_lock(error)
+        || matches!(
+            error,
+            Error::Ledger { source, .. }
+                if source.get_ref().is_some_and(|inner| inner.is::<UnsettledClaim>())
+        )
 }
 
 /// Whether `error` refused a claim over a lock nobody can be named as holding —
@@ -4118,14 +4181,14 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    /// A reclaimer that stays between creating its entry and writing the lock
-    /// past [`RECLAIM_PATIENCE`] is the run's holder to anyone arriving then,
-    /// named with what it is doing —
-    /// which is how a second reply learns to wait for the first's answer rather
-    /// than reporting the edit queued behind a driver that is gone.
+    /// A reclaimer paused between creating its entry and writing the lock for
+    /// longer than [`RECLAIM_PATIENCE`] is **not** named as driving the run: the
+    /// lock still names the dead holder, so the loser refuses without a holder —
+    /// a claim on the run, answered as one — and names the process taking the run
+    /// over only as that.
     #[test]
-    fn a_live_reclaimers_entry_names_it_as_the_holder() {
-        let root = scratch("reclaim-live");
+    fn a_reclaimer_paused_past_the_patience_is_not_named_as_the_holder() {
+        let root = scratch("reclaim-paused");
         let paths = RunPaths::under(&root, "demo");
         paths.create().expect("the run directory");
         let dead = a_dead_holders_lock(&paths);
@@ -4142,16 +4205,29 @@ mod tests {
                 started: String::new(),
             },
         )
-        .expect("an entry a live reclaimer holds");
+        .expect("an entry a live reclaimer holds, and never writes the lock past");
 
+        let began = std::time::Instant::now();
         match OwnershipLock::acquire(&paths, "adopt") {
-            Err(Error::Locked { run, pid, verb, .. }) => {
-                assert_eq!(run, "demo");
-                assert_eq!(pid, sys::pid());
-                assert_eq!(verb, "reply");
+            Err(unsettled) if is_unnamed_claim(&unsettled) => {
+                let said = unsettled.to_string();
+                assert!(
+                    said.contains(&format!("pid {}", sys::pid())) && said.contains("taking"),
+                    "the refusal did not say which process is taking the run over: {said}"
+                );
+                assert!(
+                    !said.contains("being written by"),
+                    "the refusal named the reclaimer as the run's holder: {said}"
+                );
             }
-            other => panic!("a run being taken over was not reported as held: {other:?}"),
+            other => {
+                panic!("a reclaimer the lock does not name was reported as the holder: {other:?}")
+            }
         }
+        assert!(
+            began.elapsed() >= RECLAIM_PATIENCE,
+            "the loser answered before the reclaimer had its patience"
+        );
         let untouched: LockRecord = read_json(&paths.lock()).expect("the lock reads back");
         assert_eq!(untouched, dead, "the loser wrote the lock");
         assert!(
