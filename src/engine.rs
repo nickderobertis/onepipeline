@@ -6172,6 +6172,9 @@ pub(crate) fn record_operation_facts(
     // finding whose text asked for exactly this edit leaves the planner's queue
     // on the commit rather than waiting for a second reply nobody owes it.
     crate::findings::answer_requested(paths, operations)?;
+    // And any decision about a node this edit took out of the graph: nothing is
+    // left for it to decide, so it stops holding the run on it.
+    crate::discharge::answer_removed(paths, operations)?;
     Ok(())
 }
 
