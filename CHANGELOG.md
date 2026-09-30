@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.55.0](https://github.com/nickderobertis/onepipeline/compare/v0.54.0...v0.55.0) - 2026-09-30
+
+### Added
+
+- *(concurrency)* let a cross-DAG dependency acknowledge the holder it waits on ([#604](https://github.com/nickderobertis/onepipeline/pull/604))
+- *(deps)* adopt oneagentgraph, onejudge and oneharness-core with layered config and readable streams ([#605](https://github.com/nickderobertis/onepipeline/pull/605))
+- *(watch)* wake on every planner surface, wait on an undriven run, and summarise a deadline ([#599](https://github.com/nickderobertis/onepipeline/pull/599))
+
+### Fixed
+
+- *(test)* remove the orderings behind three intermittent watch and driver e2e failures ([#611](https://github.com/nickderobertis/onepipeline/pull/611))
+- *(deps)* move off the yanked yoke-derive release ([#608](https://github.com/nickderobertis/onepipeline/pull/608))
+
 ## [0.54.0](https://github.com/nickderobertis/onepipeline/compare/v0.53.3...v0.54.0) - 2026-09-30
 
 ### Added
