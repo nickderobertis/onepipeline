@@ -8367,12 +8367,21 @@ fn a_workspace_wait_is_queued_again_only_once_read_and_an_elapsed_watch_names_th
         .duration_since(std::time::UNIX_EPOCH)
         .expect("after the epoch")
         .as_secs();
-    let seconds_since = |kind: &str, node: &str| -> u64 {
-        let event = world
-            .events_of(&run, kind)
+    // `first` picks which of a node's records of `kind` to measure from. A hold
+    // is measured from the record that opened it: the driver restates it at
+    // each reading before the reading settles, and a restatement is not a new
+    // wait. `second` is never dispatched here, so its first `node-held` is that.
+    let seconds_since = |kind: &str, node: &str, first: bool| -> u64 {
+        let records = world.events_of(&run, kind);
+        let mut of_node = records
             .into_iter()
-            .rfind(|event| event["labels"]["node"] == node)
-            .unwrap_or_else(|| panic!("no {kind} for {node}"));
+            .filter(|event| event["labels"]["node"] == node);
+        let event = if first {
+            of_node.next()
+        } else {
+            of_node.next_back()
+        }
+        .unwrap_or_else(|| panic!("no {kind} for {node}"));
         let at = event["ts"].as_str().expect("a record is stamped");
         now.saturating_sub(epoch_seconds(at))
     };
@@ -8388,14 +8397,14 @@ fn a_workspace_wait_is_queued_again_only_once_read_and_an_elapsed_watch_names_th
         .as_u64()
         .unwrap_or_else(|| panic!("the hold carries no waited_seconds: {last}"));
     assert!(
-        held_for.abs_diff(seconds_since("node-held", "second")) <= 2,
+        held_for.abs_diff(seconds_since("node-held", "second", true)) <= 2,
         "the hold's waited_seconds is not how long it has been held: {last}"
     );
     let progress = summary["last_progress_seconds"]
         .as_u64()
         .unwrap_or_else(|| panic!("no last_progress_seconds: {last}"));
     assert!(
-        progress.abs_diff(seconds_since("node-settled", "quick")) <= 2,
+        progress.abs_diff(seconds_since("node-settled", "quick", false)) <= 2,
         "last_progress_seconds is not the latest settlement: {last}"
     );
     assert_eq!(summary["observer"], json!("none"), "{last}");
