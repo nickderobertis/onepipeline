@@ -1813,6 +1813,16 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
             .and_then(Value::as_str)
             .unwrap_or_default()
     };
+    // The agent's own words name no tool, and are what it is doing all the
+    // same: its text or its reasoning, on the line oneharness draws it on, so a
+    // node thinking between two calls reads as thinking rather than as still
+    // running the last one.
+    if let Some(voice) = crate::report::Voice::of(text("kind")) {
+        if let Some(said) = voice.line(text("output")) {
+            activity.doing = Some(said);
+        }
+        return;
+    }
     // The producer's own two fields, joined the way its own renderer joins
     // them. An activity naming neither leaves the last one that did standing
     // rather than blanking the line: the dispatch is still doing what it said.

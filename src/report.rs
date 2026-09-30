@@ -673,13 +673,16 @@ impl Turn {
     }
 }
 
-/// One tool call a turn made, or the observation that answered it.
+/// One tool call a turn made, the observation that answered it, or one of the
+/// agent's own items — its `message` or its `reasoning`.
 ///
-/// Both halves, because a report carries both and a reader shown only the asks
-/// is reading half a turn.
+/// Both halves of an exchange, because a report carries both and a reader shown
+/// only the asks is reading half a turn; and the agent's words beside them,
+/// because they are what says *why* it reached for the tool.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Tool {
-    /// `tool_call` or `tool_result`, as the report names it.
+    /// `tool_call`, `tool_result`, `message` or `reasoning`, as the report names
+    /// it.
     pub kind: String,
     /// The tool, where the harness named one.
     pub name: String,
@@ -701,11 +704,11 @@ impl Tool {
 /// The kind a producer gives the half of an exchange that carries an output.
 const TOOL_RESULT: &str = "tool_result";
 
-/// A tool event's own text: what a call acted on, or what the result answering
-/// it returned.
+/// An event's own text: what a call acted on, what the result answering it
+/// returned, or what the agent itself said or thought.
 ///
-/// One or the other and never both. A pair of strings could hold both at once —
-/// a state no producer emits, and one that leaves a renderer choosing between
+/// One of them and never two. A pair of strings could hold both at once — a
+/// state no producer emits, and one that leaves a renderer choosing between
 /// them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ToolText {
@@ -721,7 +724,85 @@ pub(crate) enum ToolText {
         /// source for.
         truncated: Truncation,
     },
+    /// The agent's own words, which are no tool's: its text or its reasoning.
+    Spoken {
+        voice: Voice,
+        /// The text, as the producer carried it — newlines and all, because a
+        /// paragraph of reasoning is laid out rather than flattened.
+        text: String,
+        /// As on [`Returned`](Self::Returned): the producer carries the words
+        /// under `output`, and bounds them the same way.
+        truncated: Truncation,
+    },
 }
+
+/// Which of the agent's own items an event is.
+///
+/// `oneharness` normalizes both beside the tool events and `oneagentgraph`
+/// relays both as `turn-activity` under their own kind; neither names a tool,
+/// so read as one each would be a call to nothing with a blank column beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Voice {
+    /// `message` — what the agent said.
+    Message,
+    /// `reasoning` — what it thought on the way.
+    Reasoning,
+}
+
+impl Voice {
+    /// The voice an event of this `kind` speaks in, or `None` for every kind
+    /// that is not the agent's own words.
+    pub(crate) fn of(kind: &str) -> Option<Self> {
+        match kind {
+            MESSAGE => Some(Self::Message),
+            REASONING => Some(Self::Reasoning),
+            _ => None,
+        }
+    }
+
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Message => MESSAGE,
+            Self::Reasoning => REASONING,
+        }
+    }
+
+    /// `text` as oneharness's own text view draws this voice — its mark, then
+    /// the words, continuation lines indented under the first and every control
+    /// character but the newline flattened — or `None` for text with nothing to
+    /// read.
+    ///
+    /// Drawn through that library's `render_event` rather than a copy of its
+    /// marks, so a person reading a run here and one reading the same turn off
+    /// `oneharness run` read the same line.
+    pub(crate) fn block(self, text: &str) -> Option<String> {
+        oneharness_core::domain::render::render_event(
+            &oneharness_core::domain::events::ActionEvent {
+                kind: self.kind().to_string(),
+                name: None,
+                input: None,
+                output: Some(text.to_string()),
+                index: 0,
+                tool_call_id: None,
+                started_at: None,
+                finished_at: None,
+                duration_ms: None,
+                status: None,
+                timing_source: None,
+            },
+        )
+    }
+
+    /// [`block`](Self::block) on one line, at the bound a relayed tool detail is
+    /// held to — what a one-line readout of a live node has room for.
+    pub(crate) fn line(self, text: &str) -> Option<String> {
+        self.block(&onemessagebus::bound_detail(text).0)
+    }
+}
+
+/// The kinds a producer gives the agent's own items.
+const MESSAGE: &str = "message";
+const REASONING: &str = "reasoning";
 
 impl ToolText {
     /// The text an event of this `kind` carries, read out of the payload by
@@ -738,6 +819,13 @@ impl ToolText {
     /// `input`. That divergence is read in this one place, so the two sources
     /// cannot come to disagree about what a tool did.
     pub(crate) fn of<'a>(kind: &str, field: impl Fn(&str) -> Option<&'a Value>) -> Self {
+        if let Some(voice) = Voice::of(kind) {
+            return Self::Spoken {
+                voice,
+                text: compact(field("output")),
+                truncated: Truncation::of(field("output_truncated")),
+            };
+        }
         if kind == TOOL_RESULT {
             return Self::Returned {
                 output: compact(field("output")),
