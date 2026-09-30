@@ -795,7 +795,9 @@ onejudge = "0.17.1"
 # into its argv grammar. Crossed on the way: 0.22.0 streams readable text unless
 # `--format json` is named, which the double's `View` already follows, and 0.23.0
 # widens the SDK's `history show` entry, which nothing here calls.
-# `oneagentgraph` 0.5.5 and `onejudge` 0.17.1 each require it exactly.
+# `tests/e2e/agents.rs`'s `unscanned` journeys record through both member kinds
+# into a store whose legacy indexes cannot be opened, under `strace`, so a core
+# that lists, scans or locks the store fails there. `oneagentgraph` 0.5.5 and `onejudge` 0.17.1 each require it exactly.
 oneharness-core = "0.24.0"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
