@@ -623,9 +623,12 @@ found with `onepipeline agents RUN [NODE]` (every session, or a node's), across
 every run of a project with `onepipeline agents --project PROJECT`, or with
 oneharness's own `oneharness history pointers <run root>/oneharness-sessions.jsonl`;
 each entry names its `history_dir`, `history_project` and `history_session`,
-which is exactly what `oneharness history show` opens the transcript through. A
-turn a repository runs with `--no-history` writes no line, and that is not an
-error.
+which is exactly what `oneharness history show` opens the transcript through —
+though `history show <name>`, `history list` and `--last` read only the last 7
+UTC days and `history watch` only the current one unless `--since` or
+`--all-time` widens them, so an older session is shown by its id or with one of
+those flags. A turn a repository runs with `--no-history` writes no line, and
+that is not an error.
 
 **A listing groups its runs by project.** `runs`, and `status` and `goals` given
 no run, render every run under a header line per project — `== <project id> —
