@@ -2627,11 +2627,118 @@ fn a_lower_file_that_is_not_text_is_refused_as_that_and_never_as_not_found() {
     let world = World::new("templates-extend-unreadable");
     let (root, hosted, repo, templates) = layered(&world);
     let dir = world.project.clone();
-    std::fs::write(&hosted, b"# Design\n\n\xff\xfe not UTF-8\n").expect("the host's file");
     let overriding = templates.join("design-doc.md.j2");
+    let refusal = format!(
+        "onepipeline/host/design-doc.md.j2 is {} (host layer), which cannot be read as a \
+         template: ",
+        hosted.display()
+    );
+    let gone = world.root.join("gone-design-doc.md.j2");
 
-    // A chain that never names the host's file resolves as it did, whatever that file holds.
-    write(&overriding, "# Repository design\n\nNo blocks here.\n");
+    // Each way a file can be there and not be text: not UTF-8, a directory, a link to nothing.
+    let cases: [(&str, &dyn Fn(), &str); 3] = [
+        (
+            "not UTF-8",
+            &|| std::fs::write(&hosted, b"# Design\n\n\xff\xfe not UTF-8\n").expect("written"),
+            "it is not UTF-8 text",
+        ),
+        (
+            "a directory",
+            &|| std::fs::create_dir_all(&hosted).expect("a directory where the file goes"),
+            "",
+        ),
+        (
+            "a link to nothing",
+            &|| std::os::unix::fs::symlink(&gone, &hosted).expect("a link to nothing"),
+            "it links to a file that does not exist",
+        ),
+    ];
+    for (case, make, why) in cases {
+        match std::fs::symlink_metadata(&hosted) {
+            Ok(held) if held.is_dir() => std::fs::remove_dir_all(&hosted).expect("cleared"),
+            Ok(_) => std::fs::remove_file(&hosted).expect("cleared"),
+            Err(_) => {}
+        }
+        make();
+
+        // A chain that never names the host's file resolves as it did, whatever is there.
+        write(&overriding, "# Repository design\n\nNo blocks here.\n");
+        let resolved = verb(
+            &world,
+            &dir,
+            &root,
+            &["resolve", "design-doc", "--repo", &text(&repo), "--json"],
+        )
+        .whole();
+        assert_eq!(resolved["digest"], REPOSITORY_DOCUMENT_DIGEST, "{case}");
+
+        // One that extends it is refused naming the host layer, the file and why.
+        write(&overriding, EXTENDING_DESIGN);
+        for verb_name in ["resolve", "check"] {
+            let refused = verb(
+                &world,
+                &dir,
+                &root,
+                &[verb_name, "design-doc", "--repo", &text(&repo)],
+            );
+            refused
+                .exited(REFUSED)
+                .err_has("does not load")
+                .err_has(&format!("{refusal}{why}"));
+            assert!(
+                !refused.stderr.contains("was not found"),
+                "`{verb_name}` read {case} as an absent file: {}",
+                refused.stderr
+            );
+        }
+    }
+}
+
+#[test]
+fn a_layer_directory_holding_a_reserved_name_is_found_before_the_lower_layer() {
+    let world = World::new("templates-extend-shadowed");
+    let (root, hosted, repo, templates) = layered(&world);
+    let dir = world.project.clone();
+    let overriding = templates.join("design-doc.md.j2");
+    write(&overriding, EXTENDING_DESIGN);
+    // The hazard C4 names: the `onepipeline/` names are the engine's, and a file at that
+    // relative path in a searched directory is what the chain loads instead.
+    let shadow = templates
+        .join("onepipeline")
+        .join("host")
+        .join("design-doc.md.j2");
+    write(
+        &shadow,
+        "# Shadowed\n\n{% block contracts_guidance %}{% endblock %}\n",
+    );
+    let loader = verb(
+        &world,
+        &dir,
+        &root,
+        &["resolve", "design-doc", "--repo", &text(&repo), "--json"],
+    )
+    .exited(0)
+    .stdout
+    .clone();
+    let resolved: Value = serde_json::from_str(&loader).expect("a loader document");
+    assert_eq!(
+        chain_of(&resolved),
+        [
+            link("design-doc.md.j2", "repository", Some(&overriding)),
+            link(
+                "onepipeline/host/design-doc.md.j2",
+                "repository",
+                Some(&shadow)
+            ),
+        ]
+    );
+    let body = rendered_document(&world, &loader);
+    assert!(
+        body.contains("# Shadowed") && !body.contains("The summary."),
+        "{body}"
+    );
+    // The host's file is still stated, and loads once the shadow is gone.
+    std::fs::remove_file(&shadow).expect("the shadow is removed");
     let resolved = verb(
         &world,
         &dir,
@@ -2639,29 +2746,8 @@ fn a_lower_file_that_is_not_text_is_refused_as_that_and_never_as_not_found() {
         &["resolve", "design-doc", "--repo", &text(&repo), "--json"],
     )
     .whole();
-    assert_eq!(resolved["digest"], REPOSITORY_DOCUMENT_DIGEST);
-
-    // One that extends it is refused naming the host layer, the file and why.
-    write(&overriding, EXTENDING_DESIGN);
-    for verb_name in ["resolve", "check"] {
-        let refused = verb(
-            &world,
-            &dir,
-            &root,
-            &[verb_name, "design-doc", "--repo", &text(&repo)],
-        );
-        refused
-            .exited(REFUSED)
-            .err_has("does not load")
-            .err_has(&format!(
-                "onepipeline/host/design-doc.md.j2 is {} (host layer), which cannot be read as a \
-                 template: it is not UTF-8 text",
-                hosted.display()
-            ));
-        assert!(
-            !refused.stderr.contains("was not found"),
-            "`{verb_name}` read an unreadable file as an absent one: {}",
-            refused.stderr
-        );
-    }
+    assert_eq!(
+        chain_of(&resolved)[1],
+        link("onepipeline/host/design-doc.md.j2", "host", Some(&hosted))
+    );
 }
