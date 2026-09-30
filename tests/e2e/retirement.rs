@@ -2827,3 +2827,96 @@ fn a_closing_driver_finishes_the_retirement_in_progress_and_begins_no_other() {
         assert!(holds(&world, &later.origin, branch), "{branch}");
     }
 }
+
+/// One pass of the automatic retirement the engine's idle maintenance makes over
+/// `service` — the linked library's own `retire_finished`, called as
+/// `src/maintenance.rs` calls it — answering what it reported for `branch`.
+///
+/// Read as the JSON the report serializes to rather than through its fields, so a
+/// build linking a release without `derivation` answers `null` there and the
+/// journey fails on the assertion that names it rather than on a compile error.
+fn passed_over(world: &World, branch: &str) -> Value {
+    let report = world
+        .on_onevcs(|| {
+            onevcs::retire_finished(
+                &onevcs::Providers::real(),
+                &onevcs::RetirePass {
+                    scope: onevcs::Scope::Repo(SERVICE_IDENTITY.to_owned()),
+                    exclude: Vec::new(),
+                    dry_run: false,
+                },
+            )
+        })
+        .expect("the retirement pass answers");
+    let report = serde_json::to_value(report).expect("the report serializes");
+    report["examined"]
+        .as_array()
+        .expect("examined")
+        .iter()
+        .find(|entry| entry["branch"] == branch)
+        .cloned()
+        .unwrap_or_else(|| panic!("the pass never examined {branch}: {report}"))
+}
+
+/// The retirement pass the engine links records each verdict and reuses it while
+/// the branch and its base stand where they did — and derives it again once the
+/// branch moves, so a reused `keep` is never one the branch's new work outran.
+///
+/// A branch with work beyond its base is what every idle pass meets and keeps: it
+/// is the verdict a host re-proving hundreds of such branches each pass spent its
+/// time on.
+#[test]
+fn the_linked_retirement_pass_reuses_a_verdict_until_its_branch_moves() {
+    const BRANCH: &str = "kept/work";
+    let world = World::new("retirement-verdicts");
+    let repo = world.repository("change-open", &[]);
+    let first_tip = unique(&world, &repo, BRANCH, "kept.md");
+
+    let derived = passed_over(&world, BRANCH);
+    assert_eq!(derived["outcome"], "kept", "{derived}");
+    assert_eq!(derived["tip"], first_tip, "{derived}");
+    assert_eq!(derived["derivation"], "derived", "{derived}");
+    let verdicts = world.onevcs_home().join("verdicts");
+    let recorded = std::fs::read_dir(&verdicts)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert!(
+        recorded > 0,
+        "the pass recorded no verdict under {}",
+        verdicts.display()
+    );
+
+    let reused = passed_over(&world, BRANCH);
+    assert_eq!(reused["derivation"], "reused", "{reused}");
+    assert_eq!(reused["outcome"], "kept", "{reused}");
+    assert_eq!(reused["class"], derived["class"], "{reused}");
+
+    // More work on the branch: its tip is an input the recorded verdict was keyed
+    // under, so the next pass proves it again.
+    let clone = person(&world, &repo);
+    git(&world, &clone, &["checkout", BRANCH]);
+    std::fs::write(clone.join("kept.md"), "more work on the branch\n").expect("written");
+    git(&world, &clone, &["commit", "-am", "chore: more work"]);
+    let moved_tip = git(&world, &clone, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    git(&world, &clone, &["checkout", "main"]);
+    git(
+        &world,
+        &repo.checkout,
+        &[
+            "fetch",
+            &clone.to_string_lossy(),
+            &format!("+{BRANCH}:{BRANCH}"),
+        ],
+    );
+
+    let rederived = passed_over(&world, BRANCH);
+    assert_eq!(rederived["tip"], moved_tip, "{rederived}");
+    assert_eq!(rederived["derivation"], "derived", "{rederived}");
+    assert_eq!(rederived["outcome"], "kept", "{rederived}");
+    assert!(
+        holds(&world, &repo.checkout, BRANCH),
+        "{BRANCH} was deleted"
+    );
+}
