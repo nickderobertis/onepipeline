@@ -279,6 +279,11 @@ fn protection(args: &[String], dir: &Path, path: &str) -> ExitCode {
         return fake::refuse(&format!("gh api {path} takes no flags here: {args:?}"));
     }
     let segments: Vec<&str> = path.split('/').collect();
+    // An empty owner, repository or branch is a path GitHub would not answer, so
+    // it is refused here rather than read as a declaration for nobody's branch.
+    if segments.iter().any(|segment| segment.is_empty()) {
+        return fake::refuse(&format!("gh api path '{path}' has an empty segment"));
+    }
     match segments.as_slice() {
         // GitHub's own ruleset shape. What reads it is `onevcs`'s `GitHub::required_on`,
         // which refuses a shape it cannot read rather than reading it as "nothing
