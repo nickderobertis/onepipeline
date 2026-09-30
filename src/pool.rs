@@ -387,7 +387,7 @@ impl Workspaces {
                 continue;
             }
             let queued = crate::engine::raised(paths, journal, wait_surface(node, hold))?;
-            self.surfaced.queued(node, content, queued.id);
+            self.surfaced.queued(node, content, &queued);
         }
         let held = &self.held;
         self.surfaced.retain(|node| held.contains_key(node));

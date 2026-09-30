@@ -8270,16 +8270,16 @@ fn read_everything(world: &World, run: &str) {
 
 /// A workspace hold is surfaced on the release wait's cadence: an unchanged
 /// wait is not queued again while the one before it is unread, and once read it
-/// is queued again at an interval that doubles from the configured base and
-/// stops doubling at the ceiling. And an elapsed watch over the same run names
+/// is queued again at an interval that doubles from the configured base — the
+/// one cadence `tests/e2e/adoption.rs` climbs to its fixed four-hour ceiling.
+/// And an elapsed watch over the same run names
 /// the hold, what settled past its cursor, and when the run last moved.
 /// Divergence entry 97.
 #[test]
 fn a_workspace_wait_is_queued_again_only_once_read_and_an_elapsed_watch_names_the_hold() {
     let world = World::new("lifecycle-pool-cadence")
         .with_env("ONEPIPELINE_WORKSPACE_POLL_SECONDS", "1")
-        .with_env("ONEPIPELINE_RELEASE_SURFACE_SECONDS", "1")
-        .with_env("ONEPIPELINE_RELEASE_SURFACE_CEILING_SECONDS", "4");
+        .with_env("ONEPIPELINE_RELEASE_SURFACE_SECONDS", "1");
     let _repo = world.repository("local-direct", &[]);
     pool_one_slot_no_overflow(&world);
     world.script("first.work", "the first wrote this\n");
@@ -8405,7 +8405,7 @@ fn a_workspace_wait_is_queued_again_only_once_read_and_an_elapsed_watch_names_th
         watched.stderr
     );
 
-    // Read, it is queued again: at once, then after two, four, and four again.
+    // Read, it is queued again: at once, then after two, four, and eight.
     world.until(
         "four unchanged waits queued again as each is read",
         |world| {
@@ -8426,8 +8426,8 @@ fn a_workspace_wait_is_queued_again_only_once_read_and_an_elapsed_watch_names_th
         "the interval did not double again: {waits:?}"
     );
     assert!(
-        (4_000..8_000).contains(&gap(4)),
-        "the interval did not stop doubling at the ceiling: {waits:?}"
+        gap(4) >= 8_000,
+        "the interval did not double a third time: {waits:?}"
     );
 
     world.release("first.go");

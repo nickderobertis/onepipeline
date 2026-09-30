@@ -8109,12 +8109,15 @@ about each, and for a workspace hold its identity and reading — never counting
 has waited. An unchanged hold is queued again never while its previous surface is still
 unread, and otherwise no sooner than an interval that starts at
 `ONEPIPELINE_RELEASE_SURFACE_SECONDS` (default 900), doubles after each unchanged re-queue,
-and stops doubling at 14400 seconds. That ceiling reads
-`ONEPIPELINE_RELEASE_SURFACE_CEILING_SECONDS` for the reason
-`ONEPIPELINE_RELEASE_WITHDRAWN_ASK_SECONDS` exists: a journey through the compiled binary
-cannot wait four hours to see the doubling stop. Unset, it is 14400. Under ruling 1 a hold
-re-surfaced every fifteen minutes would have woken a supervisor every fifteen minutes for
-nothing new.
+and stops doubling at 14400 seconds. The ceiling is fixed — nothing configures it — and
+the interval is counted from the run's own record of when the previous wait was queued:
+the `queued_at` of the channel log's `queued` record for it, read again while the wait
+sits out its interval, rather than a clock inside the driver. That is the moment the
+ruling measures from, and it is what lets a journey through the compiled binary reach
+intervals hours long: `tests/e2e/adoption.rs` backdates that record before reading each
+wait, and shows the interval doubling to 8192 seconds and then holding at 14400 where
+doubling would have asked 16384. Under ruling 1 a hold re-surfaced every fifteen minutes
+would have woken a supervisor every fifteen minutes for nothing new.
 
 **What moved in the published surface.** `verbs::WatchEnding` gains a variant,
 `RunChanged`, and `onepipeline::error` a constant, `EXIT_RUN_CHANGED`: a **public API
@@ -8131,4 +8134,5 @@ entry 58's record fragment, its statuses and the README's watch passage to both,
 the summary's own keys, and `tests/contract.rs` holds the README's statuses and the
 contract's two amended sentences. `tests/e2e/watch.rs` drives every ruling above through
 the compiled binary over real run directories, and `tests/e2e/lifecycle.rs` and
-`tests/e2e/adoption.rs` drive the held-wait cadence with the surface interval shortened.
+`tests/e2e/adoption.rs` drive the held-wait cadence with the surface interval shortened —
+the second to its fixed ceiling, on a backdated record of when each wait was queued.

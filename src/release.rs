@@ -71,17 +71,10 @@ pub const DEFAULT_POLL_SECONDS: u64 = 60;
 /// first re-surfaced after.
 pub const SURFACE_ENV: &str = "ONEPIPELINE_RELEASE_SURFACE_SECONDS";
 
-/// The environment variable holding the interval an unchanged held wait stops
-/// doubling at. Unset, and unusable, is [`DEFAULT_SURFACE_CEILING_SECONDS`].
-///
-/// Beside [`SURFACE_ENV`] for the reason [`WITHDRAWN_ASK_ENV`] exists: the
-/// shipped ceiling is four hours, and a journey proving the doubling stops there
-/// through the compiled binary cannot wait four hours to see it.
-pub const SURFACE_CEILING_ENV: &str = "ONEPIPELINE_RELEASE_SURFACE_CEILING_SECONDS";
-
-/// The interval an unchanged held wait stops doubling at when nothing overrides
-/// it: four hours, which is the longest a hold nobody has touched goes unrepeated.
-pub const DEFAULT_SURFACE_CEILING_SECONDS: u64 = 14_400;
+/// The interval an unchanged held wait stops doubling at: four hours, which is
+/// the longest a hold nobody has touched goes unrepeated. Fixed by the ruling
+/// divergence entry 97 records, so nothing configures it.
+pub const SURFACE_CEILING_SECONDS: u64 = 14_400;
 
 /// The environment variable holding how long the asker goes on asking a question
 /// the loop has **withdrawn**. Zero, and unset, is every build in the field.
@@ -1057,7 +1050,7 @@ impl Watch {
             // fixes the hold it belongs to is its `queued_at`, and
             // [`wait_outlived`] is what the hand-out reads it against.
             let queued = crate::engine::raised(paths, journal, self.wait_surface(node))?;
-            self.surfaced.queued(node, content, queued.id);
+            self.surfaced.queued(node, content, &queued);
             let awaiting = self.awaiting(node);
             journal.emit(
                 journal::PipelineKind::ReleaseWait,
@@ -2540,15 +2533,6 @@ pub(crate) fn surface_every_seconds() -> u64 {
         .unwrap_or(DEFAULT_SURFACE_SECONDS)
 }
 
-/// The interval an unchanged held wait stops doubling at.
-pub(crate) fn surface_ceiling_seconds() -> u64 {
-    std::env::var(SURFACE_CEILING_ENV)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|seconds| *seconds > 0)
-        .unwrap_or(DEFAULT_SURFACE_CEILING_SECONDS)
-}
-
 /// When each held node's wait is queued to the planner again.
 ///
 /// Shared by the release hold and the workspace hold, so the two waits a node
@@ -2557,21 +2541,36 @@ pub(crate) fn surface_ceiling_seconds() -> u64 {
 /// said is news to nobody, so it is queued again only once that last one has
 /// been read, and then no sooner than an interval that starts at
 /// [`surface_every_seconds`], doubles after each unchanged re-queue, and stops
-/// doubling at [`surface_ceiling_seconds`]. Divergence entry 97 records the
+/// doubling at [`SURFACE_CEILING_SECONDS`]. Divergence entry 97 records the
 /// ruling: a hold re-surfaced every fifteen minutes woke a supervisor every
 /// fifteen minutes for nothing new.
+///
+/// **The interval is counted from the run's own record of when the last wait
+/// was queued** — the `queued_at` of the channel log's `queued` record for it,
+/// read once it has been read — rather than from a clock inside this process. That is the
+/// moment the ruling measures from, and it is one a reader of the run can see;
+/// it is also what lets a journey prove a four-hour ceiling through the
+/// compiled binary by backdating that record, with nothing about the cadence
+/// configurable.
 pub(crate) struct Resurfacing {
     base: Duration,
-    ceiling: Duration,
     last: BTreeMap<String, Surfaced>,
+    /// The run's channel, kept so an unchanged queue is re-read as one
+    /// fingerprint rather than as its whole projection each pass.
+    channel: Option<crate::channel::ChannelState>,
 }
 
 /// The last wait queued about one held node.
 struct Surfaced {
     /// What it said, as the hold's own content reads it.
     content: String,
-    /// When it was queued.
-    at: Instant,
+    /// When it was queued, in epoch milliseconds: the stamp it was queued
+    /// under, and — once it has been read — the stamp the log's own `queued`
+    /// record of it carries.
+    at: u64,
+    /// When [`at`](Self::at) was last taken from that record, so it is read
+    /// again at most once a second while the wait sits out its interval.
+    checked: Option<Instant>,
     /// How long the next unchanged wait waits after it.
     every: Duration,
     /// The id the channel queued it under.
@@ -2582,8 +2581,8 @@ impl Resurfacing {
     pub(crate) fn new() -> Self {
         Self {
             base: Duration::from_secs(surface_every_seconds()),
-            ceiling: Duration::from_secs(surface_ceiling_seconds()),
             last: BTreeMap::new(),
+            channel: None,
         }
     }
 
@@ -2594,29 +2593,51 @@ impl Resurfacing {
 
     /// Whether `node`'s wait, saying `content`, is due to be queued now.
     ///
-    /// The channel is read only for a wait that is otherwise due, so a held run
-    /// pays for that read once an interval rather than once a pass.
-    pub(crate) fn due(&self, paths: &RunPaths, node: &str, content: &str) -> bool {
+    /// A changed wait always is. An unchanged one is not while the last one is
+    /// still unread — the queue is read for that each pass, as one fingerprint
+    /// while it has not moved — and once it has been read, the stamp the
+    /// interval counts from is the log's `queued` record of it, read again at
+    /// most once a second.
+    pub(crate) fn due(&mut self, paths: &RunPaths, node: &str, content: &str) -> bool {
         let Some(last) = self.last.get(node) else {
             return true;
         };
         if last.content != content {
             return true;
         }
-        last.at.elapsed() >= last.every
-            && !crate::channel::ChannelState::new(paths)
-                .queue()
-                .waiting
-                .iter()
-                .any(|surface| surface.id == last.id)
+        let channel = self
+            .channel
+            .get_or_insert_with(|| crate::channel::ChannelState::new(paths));
+        if channel
+            .queue()
+            .waiting
+            .iter()
+            .any(|surface| surface.id == last.id)
+        {
+            return false;
+        }
+        if last
+            .checked
+            .is_none_or(|checked| checked.elapsed() >= Duration::from_secs(1))
+        {
+            let recorded = channel.queued_at(last.id);
+            if let Some(last) = self.last.get_mut(node) {
+                last.at = recorded.unwrap_or(last.at);
+                last.checked = Some(Instant::now());
+            }
+        }
+        self.last.get(node).is_some_and(|last| {
+            u128::from(crate::sys::now_millis().saturating_sub(last.at)) >= last.every.as_millis()
+        })
     }
 
-    /// Record that `node`'s wait, saying `content`, was queued under `id`.
-    pub(crate) fn queued(&mut self, node: &str, content: String, id: u64) {
+    /// Record that `node`'s wait, saying `content`, was queued as `queued`.
+    pub(crate) fn queued(&mut self, node: &str, content: String, queued: &Surface) {
+        let ceiling = Duration::from_secs(SURFACE_CEILING_SECONDS);
         let every = match self.last.get(node) {
-            Some(last) if last.content == content => match last.every >= self.ceiling {
+            Some(last) if last.content == content => match last.every >= ceiling {
                 true => last.every,
-                false => last.every.saturating_mul(2).min(self.ceiling),
+                false => last.every.saturating_mul(2).min(ceiling),
             },
             _ => self.base,
         };
@@ -2624,9 +2645,10 @@ impl Resurfacing {
             node.to_owned(),
             Surfaced {
                 content,
-                at: Instant::now(),
+                at: queued.queued_at,
+                checked: None,
                 every,
-                id,
+                id: queued.id,
             },
         );
     }
