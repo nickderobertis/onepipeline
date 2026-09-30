@@ -9093,6 +9093,11 @@ fn the_task_templates_are_what_the_contract_names() {
     assert_eq!(resolved.layer, Layer::BuiltIn);
     let stated = serde_json::to_value(&resolved).expect("the document serialises");
     assert_eq!(keys(stated.clone()), block["resolved_keys"]);
+    // C8's `chain`: the built-in loads the base alone, stated as the base entry C8 spells.
+    assert_eq!(
+        stated["chain"],
+        json!([{"name": block["base"], "layer": "built-in", "path": null}])
+    );
     assert_eq!(
         block["loader_document_keys"],
         json!(onetaskgraph_core::LoaderDocument::KEYS),
