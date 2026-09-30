@@ -90,11 +90,9 @@ pub fn attribution(holder: &Holder) -> Option<(&str, &str)> {
 /// A live holder the plan's own dependencies acknowledge.
 #[derive(Debug)]
 pub struct Deferred<'a> {
-    /// The holder.
     pub holder: &'a Holder,
-    /// Its run.
+    /// The run and node its session labels attribute it to.
     pub run: &'a str,
-    /// Its node.
     pub node: &'a str,
     /// The reference every dependent reaches, `run:<run>#<node>`.
     pub dependency: String,
@@ -105,7 +103,6 @@ pub struct Deferred<'a> {
 /// A live holder nothing but `--acknowledge-concurrent` passes.
 #[derive(Debug)]
 pub struct Conflict<'a> {
-    /// The holder.
     pub holder: &'a Holder,
     /// Its run and node, `None` when its session carries neither label.
     pub attribution: Option<(&'a str, &'a str)>,
