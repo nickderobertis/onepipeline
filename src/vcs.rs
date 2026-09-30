@@ -2673,7 +2673,7 @@ mod tests {
     }
 
     /// The green team draft's word is the one entry 100 of the divergence record
-    /// names, and the contract names it too.
+    /// names, and the contract and the README name it too.
     #[test]
     fn the_review_draft_word_is_what_the_divergence_record_names() {
         let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
@@ -2696,6 +2696,18 @@ mod tests {
         assert!(
             contract.contains(&format!("`{REVIEW_DRAFTED}`")),
             "docs/contract.md does not name {REVIEW_DRAFTED}"
+        );
+        // And the README's account of it says the same status and word.
+        let readme = std::fs::read_to_string(docs.join("../README.md"))
+            .expect("the README ships")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            readme.contains(&format!(
+                "settles `done` with outcome `{REVIEW_DRAFTED}`, unlanded"
+            )),
+            "README.md does not say a green team draft settles done as {REVIEW_DRAFTED}"
         );
     }
 

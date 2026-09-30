@@ -367,6 +367,8 @@ fn a_check_that_never_settles_on_a_change_open_identity_is_retried_as_unsettled(
         "{}",
         why(&world, run)
     );
+    // Never lifted: a draft whose checks never settled stays a draft.
+    assert_eq!(host_holds(&world, 1), "draft");
 }
 
 /// **The lift is one-way**, and the engine does not work against it: a node with
@@ -541,6 +543,9 @@ fn an_early_lift_the_identity_silenced_says_nothing_on_the_node() {
     let early = world.events_of(run, "draft-lifted-early");
     assert_eq!(early.len(), 1, "{}", why(&world, run));
     assert_eq!(early[0]["payload"]["warned"], false);
+    // Lifted all the same: the silenced warning changes what is said, not what
+    // the host holds.
+    assert_eq!(host_holds(&world, 1), "open");
     let detail = world
         .events_of(run, "node-settled")
         .into_iter()
@@ -584,6 +589,8 @@ fn a_skipped_required_check_is_named_and_never_shown_as_passed() {
     assert_eq!(settled.len(), 1, "{}", why(&world, run));
     assert_eq!(settled[0]["payload"]["verdict"], "passed-with-skipped");
     assert_eq!(settled[0]["payload"]["skipped"], json!(["lint"]));
+    // Opened ready — the identity opted out of the lifecycle — and left so.
+    assert_eq!(host_holds(&world, 1), "open");
 
     // The relayed records carry each check's state as `onevcs` classified it.
     let checks = world.events_of(run, "change-check");
