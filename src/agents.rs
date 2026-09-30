@@ -382,9 +382,7 @@ pub struct AgentSession {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AgentRun {
     /// The history id the run's record closes with — what
-    /// `oneharness history show <id>` resolves, through the dated segment the
-    /// id was minted on; a run recorded before its store had that index is
-    /// found only with `--all-time`.
+    /// `oneharness history show <id>` resolves.
     pub history_id: HistoryId,
     /// The harness id's base, e.g. `claude-code`.
     pub harness: String,

@@ -781,23 +781,16 @@ onejudge = "0.17.1"
 # reads are oneharness's and not a copy. `oneagentgraph` 0.5.4 and `onejudge`
 # 0.17.0 each require it exactly.
 #
-# **0.24.0 indexes history in dated segments** (oneharness `docs/history-index.md`):
-# recording a run appends one line to `<history_dir>/.index.d/runs-<UTC
-# date>.ndjson` (and its events to `events-<date>.ndjson`) after reading at most
-# that segment's last byte, and opens no legacy `.index.jsonl` or
-# `.event-index.jsonl`, takes no `.index.lock`, and lists no directory — so a turn
-# costs the same on a store of any size. `list_sessions` gains a `HistoryWindow`,
-# and the CLI's `history list`, `show <name>` and `--last` read the last 7 UTC
-# days unless `--since` or `--all-time` widens them; `read_pointers`,
-# `HistoryWriter::open` and the session-file format keep their shapes, so
-# `src/agents.rs` reads the pointer file as before. The capability table gains a
-# `FlagKind::Window` binding, which `crates/testfakes`'s `fake-oneharness` reads
-# into its argv grammar. Crossed on the way: 0.22.0 streams readable text unless
-# `--format json` is named, which the double's `View` already follows, and 0.23.0
-# widens the SDK's `history show` entry, which nothing here calls.
+# **0.24.0 is the release whose recording never scans the store**, under
+# oneharness `docs/history-index.md`. Every turn a dispatch runs records through
+# the core this lock links, and below it each one re-read the store's whole index
+# and walked its session files under one lock, so every dispatch on a long-lived
+# host queued behind the last. `src/agents.rs` reads the pointer file through the
+# unchanged `read_pointers`; the capability table's new window binding is read
+# into `crates/testfakes`'s `fake-oneharness` argv grammar.
 # `tests/e2e/agents.rs`'s `unscanned` journeys record through both member kinds
-# into a store whose legacy indexes cannot be opened, under `strace`, so a core
-# that lists, scans or locks the store fails there. `oneagentgraph` 0.5.5 and `onejudge` 0.17.1 each require it exactly.
+# under `strace`, so a core that lists, scans or locks the store fails there.
+# `oneagentgraph` 0.5.5 and `onejudge` 0.17.1 each require it exactly.
 oneharness-core = "0.24.0"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
