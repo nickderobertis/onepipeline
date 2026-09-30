@@ -568,6 +568,11 @@ fn every_name_resolves_at_the_first_layer_that_supplies_it_and_says_which() {
     assert_eq!(resolved["path"], Value::Null);
     assert_eq!(resolved["reference"], "onepipeline:plan-task");
     assert_eq!(resolved["entry"], BASE);
+    // Its chain is the base alone, from no file.
+    assert_eq!(
+        resolved["chain"],
+        json!([{"name": BASE, "layer": "built-in", "path": null}])
+    );
 
     for name in [BUILT_IN, "follow-up", "design-doc"] {
         let file = format!("{name}.md.j2");
