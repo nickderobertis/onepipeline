@@ -284,7 +284,8 @@ pub const REFUSED: i32 = onepipeline::error::EXIT_REFUSED;
 /// The exit code for a run nothing is driving.
 pub const NOTHING_DRIVING: i32 = onepipeline::error::EXIT_NOTHING_DRIVING;
 
-/// A `watch` returning because a blocking surface is waiting to be answered.
+/// A `watch` returning because a planner surface is waiting: unread, or blocking
+/// and still unanswered.
 pub const SURFACE_WAITING: i32 = onepipeline::error::EXIT_SURFACE_WAITING;
 
 /// A `watch` returning because its bounded wait ran out with the run still live.

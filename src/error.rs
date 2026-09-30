@@ -137,9 +137,10 @@ pub const EXIT_REFUSED: i32 = 2;
 /// Nothing is driving the run — the state to intervene in.
 pub const EXIT_NOTHING_DRIVING: i32 = 3;
 
-/// A blocking surface is waiting to be answered.
+/// A planner surface is waiting: one `next` has not consumed, or a blocking one
+/// still unanswered.
 ///
-/// `watch`'s own, and the one of its four returns that has no code above it
+/// `watch`'s own, and the first of its returns that has no code above it
 /// already: `0` is the run settling, [`EXIT_NOTHING_DRIVING`] is the state
 /// `adopt` is the way back from, and [`EXIT_QUEUED`] and [`EXIT_REFUSED`] are
 /// each spoken for by a different question. A caller branches on this rather
