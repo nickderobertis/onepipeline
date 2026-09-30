@@ -3999,6 +3999,10 @@ fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_m
     // this journey is about is reachable: without the draft the change merges and
     // the node goes green, which is the failure — a success — this closes.
     world.script("gh.merged", "");
+    // And every required check is green, so the only thing standing between the
+    // draft and a lift is the reason it carries: a publication carrying one is
+    // never lifted by green checks.
+    world.script("gh.checks", "lint completed success required");
 
     let mut packager = lifecycle("packager", &[]);
     packager["repo"] = json!("tool");
@@ -4095,6 +4099,16 @@ fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_m
     assert_eq!(drafted[0]["labels"]["node"], json!("consumer"));
     // The release's reason and not the plan's: the field above lost to it.
     assert_eq!(drafted[0]["payload"]["kind"], json!("awaiting-release"));
+    // And the host still holds it as a draft, green checks and all.
+    let id = drafted[0]["payload"]["id"]
+        .as_str()
+        .expect("the record names the change request");
+    assert_eq!(
+        std::fs::read_to_string(world.fakes.join("gh").join(id))
+            .expect("the host recorded the change request's state")
+            .trim(),
+        "draft"
+    );
     assert_eq!(
         drafted[0]["payload"]["awaiting"],
         json!("github.com/owner/engine")
