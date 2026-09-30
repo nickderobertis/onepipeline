@@ -36,10 +36,16 @@ fn main() -> ExitCode {
     match onevcs::Git.open_session(request) {
         Ok(session) => {
             let mut stdout = std::io::stdout();
-            let _ = writeln!(stdout, "{}", session.token.0);
-            let _ = stdout.flush();
-            let _ = std::io::stdin().read_to_end(&mut Vec::new());
-            ExitCode::SUCCESS
+            let held = writeln!(stdout, "{}", session.token.0)
+                .and_then(|()| stdout.flush())
+                .and_then(|()| std::io::stdin().read_to_end(&mut Vec::new()));
+            match held {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("session-holder: {error}");
+                    ExitCode::from(1)
+                }
+            }
         }
         Err(error) => {
             eprintln!("session-holder: {error}");

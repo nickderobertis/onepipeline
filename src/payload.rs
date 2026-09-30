@@ -349,6 +349,11 @@ pub(crate) struct Holder {
     pub(crate) session: String,
     /// The process that owns it.
     pub(crate) owner_pid: u64,
+    // llmlint: ignore-block[invalid_states_unrepresentable] a wire document, as the task's
+    // contract spells it: `identity`, `session`, `run`, `node`, `dependency` and `dependents`
+    // are strings on the wire, as `session` and `launching` beside them already are, and
+    // `onevcs::SessionHolder` carries the identity and the labels as `String` itself; this
+    // crate writes them and reads them back only to render them.
     /// The identity it holds; absent from a record an earlier build wrote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) identity: Option<String>,
@@ -363,21 +368,33 @@ pub(crate) struct Holder {
     /// where one does, so a reader tells those from flag-only holders.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) dependency: Option<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// `concurrent-deferred`: a launch whose plan depends on live repository
 /// holders, so waits for them rather than racing them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct ConcurrentDeferred {
+    // llmlint: ignore-block[invalid_states_unrepresentable] a wire document, as the task's
+    // contract spells it: `identity`, `session`, `run`, `node`, `dependency` and `dependents`
+    // are strings on the wire, as `session` and `launching` beside them already are, and
+    // `onevcs::SessionHolder` carries the identity and the labels as `String` itself; this
+    // crate writes them and reads them back only to render them.
     /// The run being launched.
     pub(crate) launching: String,
     /// Each live holder a dependency acknowledges.
     pub(crate) holders: Vec<DeferredHolder>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// One live holder the launching plan depends on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct DeferredHolder {
+    // llmlint: ignore-block[invalid_states_unrepresentable] a wire document, as the task's
+    // contract spells it: `identity`, `session`, `run`, `node`, `dependency` and `dependents`
+    // are strings on the wire, as `session` and `launching` beside them already are, and
+    // `onevcs::SessionHolder` carries the identity and the labels as `String` itself; this
+    // crate writes them and reads them back only to render them.
     /// The identity it holds.
     pub(crate) identity: String,
     /// The holding session.
@@ -392,6 +409,7 @@ pub(crate) struct DeferredHolder {
     pub(crate) dependency: String,
     /// The launching plan's nodes on the identity, each of which reaches it.
     pub(crate) dependents: Vec<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// `node-ready`: carries nothing beyond the node label.

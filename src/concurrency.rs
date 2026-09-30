@@ -34,10 +34,17 @@ pub(crate) use onevcs::SessionHolder as Holder;
 
 /// The one sentence that says which way forward fits, in the refusal's close.
 /// `--acknowledge-concurrent`'s own `--help` says the same.
-pub const JUDGMENT: &str = "Depend on the holding node when this work needs that work first; \
-acknowledge when this work outranks the concurrent run or no conflict between the two runs' \
-changes is expected.";
+///
+/// Held to both by `the_judgment_is_the_one_the_help_and_the_contract_state`.
+pub const JUDGMENT: &str = "Depend on the holding node (a cross-DAG `run:<run>#<node>` dep) \
+when this work needs that work first; acknowledge when this work outranks the concurrent run or \
+no conflict between the two runs' changes is expected.";
 
+// llmlint: ignore-block[invalid_states_unrepresentable] a repository spelling, an identity key,
+// a run id, a node id and a `run:<run>#<node>` dependency are the plain strings the plan
+// schema spells and `onevcs::SessionHolder` carries (its `identity` and `labels`), exactly as
+// `src/crossdag.rs` records for the same identifiers; these are borrowed views of those
+// values, compared for equality and rendered, and never parsed back into anything.
 /// Every holder of the plan's repositories, and which identity each `repo` the
 /// plan names resolved to.
 #[derive(Debug, Default)]
@@ -50,6 +57,7 @@ pub struct Holdings {
     /// maps to nothing, which is all this interlock needs of it.
     pub identities: BTreeMap<String, BTreeSet<String>>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// Ask `onevcs` about every distinct repository named by the plan.
 pub fn holders(plan: &Plan) -> Result<Holdings> {
@@ -87,6 +95,8 @@ pub fn attribution(holder: &Holder) -> Option<(&str, &str)> {
     (!run.is_empty() && !node.is_empty()).then_some((run.as_str(), node.as_str()))
 }
 
+// llmlint: ignore-block[invalid_states_unrepresentable] the same identifiers as `Holdings`
+// above, for the reason given there.
 /// A live holder the plan's own dependencies acknowledge.
 #[derive(Debug)]
 pub struct Deferred<'a> {
@@ -119,6 +129,7 @@ pub struct Classified<'a> {
     /// Everything else.
     pub conflicts: Vec<Conflict<'a>>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Classified<'_> {
     /// The dependency covering `holder`, if one does.
@@ -371,6 +382,31 @@ mod tests {
         ]);
         let classified = classify(&cyclic, &identities(), &[&held]);
         assert_eq!(classified.conflicts[0].undeclared, ["a"]);
+    }
+
+    #[test]
+    fn the_judgment_is_the_one_the_help_and_the_contract_state() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let command = <crate::cli::Cli as clap::CommandFactory>::command();
+        let start = command
+            .find_subcommand("start")
+            .expect("`start` is a subcommand");
+        let flag = start
+            .get_arguments()
+            .find(|arg| arg.get_id() == "acknowledge_concurrent")
+            .expect("`start` takes --acknowledge-concurrent");
+        let help = flag
+            .get_long_help()
+            .or_else(|| flag.get_help())
+            .expect("the flag documents itself")
+            .to_string();
+        // clap drops a doc comment's closing period.
+        assert!(
+            flat(&help).contains(JUDGMENT.trim_end_matches('.')),
+            "{help}"
+        );
+        let contract = include_str!("../docs/contract.md");
+        assert!(flat(contract).contains(JUDGMENT));
     }
 
     #[test]
