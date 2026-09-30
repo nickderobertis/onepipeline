@@ -623,6 +623,8 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         | EngineError::NoSuchDocument { .. } => decided("no-such-item"),
         EngineError::NoSuchComment { .. } => decided("no-such-comment"),
         EngineError::StaleOrigin { .. } => decided("stale-origin"),
+        // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: the only link a copy here records is on a shadow task, and `write_shadow` rewrites those before every copy; `writeback::tests` holds the word.
+        EngineError::StaleLink { .. } => decided("stale-link"),
         EngineError::NotAMember { .. } => decided("not-a-member"),
         EngineError::UnrecordedMember { .. } => decided("unrecorded-member"),
         EngineError::DestinationUnavailable { error, .. }
@@ -3354,7 +3356,7 @@ fn actions(report: &CopyReport) -> ProjectionActions {
         .items
         .iter()
         .filter_map(|item| match &item.action {
-            CopyAction::Updated { destination } => Some(destination),
+            CopyAction::Updated { destination, .. } => Some(destination),
             CopyAction::Created { .. }
             | CopyAction::Unchanged { .. }
             | CopyAction::Orphaned { .. } => None,
@@ -4700,6 +4702,10 @@ mod tests {
             EngineError::StaleOrigin {
                 item: "a".into(),
                 origin: "b".into(),
+            },
+            EngineError::StaleLink {
+                item: "a".into(),
+                link: "b".into(),
             },
             EngineError::NotAMember {
                 id: id(),
@@ -6399,11 +6405,12 @@ mod tests {
         let report: onetaskgraph_core::CopyReport = serde_json::from_value(json!({
             "items": [
                 {"source": format!("onepipeline-writeback:{}", super::project_file(&snapshot.project)),
-                 "action": "unchanged", "destination": "plans:board"},
+                 "action": "unchanged", "destination": "plans:board", "via": "origin",
+                 "link": "unchanged"},
                 {"source": member_id(snapshot, "build"), "action": "updated",
-                 "destination": "plans:board/002-build"},
+                 "destination": "plans:board/002-build", "via": "origin", "link": "unchanged"},
                 {"source": member_id(snapshot, "design"), "action": "created",
-                 "destination": "plans:board/003-design"},
+                 "destination": "plans:board/003-design", "via": "created", "link": "recorded"},
                 {"source": "elsewhere:board/gone", "action": "orphaned",
                  "destination": "plans:board/009-gone"},
             ],
@@ -6454,7 +6461,7 @@ mod tests {
         let report: onetaskgraph_core::CopyReport = serde_json::from_value(json!({
             "items": [
                 {"source": member_id(snapshot, "build"), "action": "updated",
-                 "destination": "plans:board/002-build"},
+                 "destination": "plans:board/002-build", "via": "origin", "link": "unchanged"},
                 {"source": "onepipeline-writeback:older/build-2", "action": "orphaned",
                  "destination": "plans:board/002-build"},
                 {"source": "elsewhere:board/gone", "action": "orphaned",
