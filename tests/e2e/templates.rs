@@ -2621,3 +2621,47 @@ fn a_document_rendered_through_an_extending_chain_holds_until_the_host_s_file_ch
         .err_has(&rendered_with)
         .err_has(&now);
 }
+
+#[test]
+fn a_lower_file_that_is_not_text_is_refused_as_that_and_never_as_not_found() {
+    let world = World::new("templates-extend-unreadable");
+    let (root, hosted, repo, templates) = layered(&world);
+    let dir = world.project.clone();
+    std::fs::write(&hosted, b"# Design\n\n\xff\xfe not UTF-8\n").expect("the host's file");
+    let overriding = templates.join("design-doc.md.j2");
+
+    // A chain that never names the host's file resolves as it did, whatever that file holds.
+    write(&overriding, "# Repository design\n\nNo blocks here.\n");
+    let resolved = verb(
+        &world,
+        &dir,
+        &root,
+        &["resolve", "design-doc", "--repo", &text(&repo), "--json"],
+    )
+    .whole();
+    assert_eq!(resolved["digest"], REPOSITORY_DOCUMENT_DIGEST);
+
+    // One that extends it is refused naming the host layer, the file and why.
+    write(&overriding, EXTENDING_DESIGN);
+    for verb_name in ["resolve", "check"] {
+        let refused = verb(
+            &world,
+            &dir,
+            &root,
+            &[verb_name, "design-doc", "--repo", &text(&repo)],
+        );
+        refused
+            .exited(REFUSED)
+            .err_has("does not load")
+            .err_has(&format!(
+                "onepipeline/host/design-doc.md.j2 is {} (host layer), which cannot be read as a \
+                 template: it is not UTF-8 text",
+                hosted.display()
+            ));
+        assert!(
+            !refused.stderr.contains("was not found"),
+            "`{verb_name}` read an unreadable file as an absent one: {}",
+            refused.stderr
+        );
+    }
+}

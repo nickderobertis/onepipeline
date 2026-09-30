@@ -571,10 +571,15 @@ impl Lookup {
     }
 }
 
-/// Each layer strictly below `layer` holding `<name>.md.j2`, in layer order, with that
-/// file's path and whole text. A file that cannot be read as text is left out, so a chain
-/// naming it is refused as naming a template that is not there.
-fn lower_files(name: &str, layer: Layer, search: Search<'_>) -> Vec<(Layer, PathBuf, String)> {
+/// Each layer strictly below `layer` with something at `<name>.md.j2`, in layer order, with
+/// that path and its whole text — or, for one that is there and cannot be read as text, why.
+/// Only an absent file is passed over, so a chain naming an unreadable one is refused for
+/// what it is rather than as a template that is not there.
+fn lower_files(
+    name: &str,
+    layer: Layer,
+    search: Search<'_>,
+) -> Vec<(Layer, PathBuf, std::result::Result<String, String>)> {
     let below: &[Layer] = match layer {
         Layer::Explicit => &[Layer::Repository, Layer::Host],
         Layer::Repository => &[Layer::Host],
@@ -589,7 +594,23 @@ fn lower_files(name: &str, layer: Layer, search: Search<'_>) -> Vec<(Layer, Path
                 _ => search.root.map(Path::to_path_buf),
             }?;
             let path = directory.join(&file);
-            let source = std::fs::read_to_string(&path).ok()?;
+            // A link whose target is gone reads as NotFound, so the link itself is asked
+            // before the file is taken as absent.
+            let source = match std::fs::read(&path) {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && std::fs::symlink_metadata(&path).is_err() =>
+                {
+                    return None
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Err("it links to a file that does not exist".to_owned())
+                }
+                Err(error) => Err(error.to_string()),
+                Ok(bytes) => {
+                    String::from_utf8(bytes).map_err(|_| "it is not UTF-8 text".to_owned())
+                }
+            };
             Some((*lower, path, source))
         })
         .collect()
@@ -683,8 +704,16 @@ pub(crate) fn resolve(registry: &Registry, name: &str, search: Search<'_>) -> Re
     };
     let mut templates = vec![base];
     let mut lower = Vec::new();
+    let mut unreadable = Vec::new();
     for (below, file, source) in lower_files(name, layer, search) {
         let reserved = lower_name(below, name);
+        let source = match source {
+            Ok(source) => source,
+            Err(why) => {
+                unreadable.push((reserved, below, file, why));
+                continue;
+            }
+        };
         directories.push((
             below,
             file.parent().map(Path::to_path_buf).unwrap_or_default(),
@@ -725,6 +754,20 @@ pub(crate) fn resolve(registry: &Registry, name: &str, search: Search<'_>) -> Re
             Error::Refused(format!(
                 "template {name} ({}): {RULE_CRITERIA_TYPE}: {error}",
                 whence(layer, path.as_deref())
+            ))
+        }
+        // A reserved name whose lower file is there and cannot be read is refused as that,
+        // naming the layer and the file, never as a template that is not there.
+        TemplateError::NotFound { name: missing, .. }
+            if unreadable.iter().any(|(reserved, ..)| reserved == missing) =>
+        {
+            let (reserved, below, file, why) = unreadable
+                .iter()
+                .find(|(reserved, ..)| reserved == missing)
+                .expect("the guard found it");
+            unloadable(format!(
+                "{reserved} is {} ({below} layer), which cannot be read as a template: {why}",
+                file.display()
             ))
         }
         // A name a lower file spells is refused naming that file too, not only the one the
