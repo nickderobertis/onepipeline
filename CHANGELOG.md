@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.54.0](https://github.com/nickderobertis/onepipeline/compare/v0.53.3...v0.54.0) - 2026-09-30
+
+### Added
+
+- *(stop-guard)* hold a session's owed runs to a wake budget until each is closed ([#592](https://github.com/nickderobertis/onepipeline/pull/592))
+
+### Fixed
+
+- *(deps)* link the onevcs release whose retirement reuses verdicts ([#600](https://github.com/nickderobertis/onepipeline/pull/600))
+
 ## [0.53.3](https://github.com/nickderobertis/onepipeline/compare/v0.53.2...v0.53.3) - 2026-09-30
 
 ### Fixed
