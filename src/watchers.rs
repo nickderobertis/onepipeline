@@ -1,7 +1,8 @@
 //! The **watcher record**: the evidence that a run is being watched.
 //!
 //! What the record is and what it promises is entry 68 of
-//! `docs/contract-divergences.md`, and is not restated here. What is worth saying
+//! `docs/contract-divergences.md`, and what the terms record beside it adds —
+//! and the wake budget decided from it — is entry 98; neither is restated here. What is worth saying
 //! beside the code is the two rules a maintainer has to keep apart, because
 //! nothing in the types enforces them:
 //!
@@ -124,6 +125,171 @@ pub struct WatcherRecord {
     pub began_at: String,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// The schema version of the watch-terms record, read closed exactly as
+/// [`WATCHER_SCHEMA_VERSION`] is and for the same reason.
+pub const WATCH_TERMS_SCHEMA_VERSION: u32 = 1;
+
+/// Read the terms' version, refusing a record this build cannot honestly read.
+fn this_terms_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
+    let found = u32::deserialize(reader)?;
+    if found != WATCH_TERMS_SCHEMA_VERSION {
+        return Err(serde::de::Error::custom(format!(
+            "watch-terms schema_version {found}, and this build reads {WATCH_TERMS_SCHEMA_VERSION}"
+        )));
+    }
+    Ok(found)
+}
+
+/// What one live watch was armed to do: when it gives up, what it returns on,
+/// and whose it is — written beside its [`WatcherRecord`], under the lease's own
+/// file name in `watch-terms/`, and removed and swept with it.
+///
+/// A second document rather than more fields on the lease, because an engine
+/// before this one reads every file in `watchers/` closed: a lease that grew a
+/// field would read to it as a record it cannot parse, and every run it watched
+/// would read unwatched to it. The lease is written byte-identical to what that
+/// engine wrote, and this is what a wake budget is decided from. Entry 98 of
+/// `docs/contract-divergences.md` states the record and the rule over it.
+///
+/// Every field is required, `null` included where a field is nullable: a record
+/// missing one is not the terms of any watch this build armed, and is refused
+/// rather than read as the absence of a deadline or of a session.
+// llmlint: ignore-block[invalid_states_unrepresentable] the run id, the start token, the
+// instant and the session are `String`s for the reason the lease's own block above states —
+// this is a record another build may have written, read back as it stands, and the contract
+// names no type for any of them. What is checked is checked at the boundary: the version,
+// `deadline` as an RFC 3339 instant, each `until` word as a condition `--until` takes, and
+// `session` as a session that names somebody.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WatchTerms {
+    /// The record's own version. See [`WATCH_TERMS_SCHEMA_VERSION`].
+    #[serde(deserialize_with = "this_terms_version")]
+    pub schema_version: u32,
+    /// The run the watch is of — the lease's own.
+    pub run_id: String,
+    /// The watching process — the lease's own.
+    pub pid: NonZeroU32,
+    /// That process's start token — the lease's own.
+    pub started: String,
+    /// When the watch gives up on the clock, as an RFC 3339 instant; `null` for
+    /// `--timeout none`, which never does. `--timeout 0` records the arming
+    /// instant.
+    #[serde(deserialize_with = "a_deadline")]
+    pub deadline: Option<String>,
+    /// Every condition the watch returns on, spelled as `--until` takes them —
+    /// always including `settled` and `nothing-driving`, which every watch
+    /// returns on.
+    #[serde(deserialize_with = "conditions")]
+    pub until: Vec<String>,
+    /// The non-blank `ONEPIPELINE_LAUNCHER_SESSION` the watch was armed under,
+    /// or `null` where none was.
+    #[serde(deserialize_with = "a_session")]
+    pub session: Option<String>,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// Read a deadline: an RFC 3339 instant, or `null`, and required either way.
+fn a_deadline<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Option<String>, D::Error> {
+    let found = Option::<String>::deserialize(reader)?;
+    if let Some(deadline) = &found {
+        if instant_millis(deadline).is_none() {
+            return Err(serde::de::Error::custom(format!(
+                "deadline is '{deadline}', which is not an RFC 3339 instant"
+            )));
+        }
+    }
+    Ok(found)
+}
+
+/// Read the conditions: each one a word `--until` takes, and among them the two
+/// every watch returns on, which every record this build writes carries.
+fn conditions<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Vec<String>, D::Error> {
+    let found = Vec::<String>::deserialize(reader)?;
+    for word in &found {
+        word.parse::<crate::cli::WatchUntil>().map_err(|_| {
+            serde::de::Error::custom(format!(
+                "until names '{word}', which is not a condition `--until` takes"
+            ))
+        })?;
+    }
+    for always in ALWAYS_UNTIL {
+        if !found.iter().any(|word| word == always) {
+            return Err(serde::de::Error::custom(format!(
+                "until does not name '{always}', which every watch returns on"
+            )));
+        }
+    }
+    Ok(found)
+}
+
+/// The conditions every watch returns on whatever it was told, as `--until`
+/// spells them.
+const ALWAYS_UNTIL: [&str; 2] = ["settled", "nothing-driving"];
+
+/// Read a session: one that names somebody, or `null`.
+fn a_session<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Option<String>, D::Error> {
+    let found = Option::<String>::deserialize(reader)?;
+    if found
+        .as_deref()
+        .is_some_and(|session| session.trim().is_empty())
+    {
+        return Err(serde::de::Error::custom(
+            "session is blank, which names nobody; a watch armed under no session records null",
+        ));
+    }
+    Ok(found)
+}
+
+/// An RFC 3339 instant as milliseconds since the Unix epoch, or nothing where
+/// `text` is not one.
+///
+/// Decided by [`is_rfc3339`] first, so what this admits is exactly what that
+/// admits; the arithmetic after it reads fields that check has already bounded.
+/// The fraction is truncated to the millisecond, the precision everything this
+/// crate writes carries.
+pub(crate) fn instant_millis(text: &str) -> Option<i128> {
+    if !is_rfc3339(text) {
+        return None;
+    }
+    let (date, rest) = text.split_once(['T', 't'])?;
+    let mut ymd = date.split('-').map(|part| part.parse::<i128>().ok());
+    let (year, month, day) = (ymd.next()??, ymd.next()??, ymd.next()??);
+    let (clock, offset_minutes) = match rest.find(['Z', 'z']) {
+        Some(at) => (&rest[..at], 0),
+        None => {
+            let at = rest.rfind(['+', '-'])?;
+            let (clock, zone) = rest.split_at(at);
+            let sign = if zone.starts_with('-') { -1 } else { 1 };
+            let (hours, minutes) = zone[1..].split_once(':')?;
+            (
+                clock,
+                sign * (hours.parse::<i128>().ok()? * 60 + minutes.parse::<i128>().ok()?),
+            )
+        }
+    };
+    let (clock, fraction) = clock.split_once('.').unwrap_or((clock, "0"));
+    let mut hms = clock.split(':').map(|part| part.parse::<i128>().ok());
+    let (hour, minute, second) = (hms.next()??, hms.next()??, hms.next()??);
+    let millis: i128 = format!("{fraction:0<3}")[..3].parse().ok()?;
+    let days = days_from_civil(year, month, day);
+    Some(
+        ((days * 86_400 + hour * 3_600 + minute * 60 + second - offset_minutes * 60) * 1_000)
+            + millis,
+    )
+}
+
+/// Howard Hinnant's `days_from_civil`: a proleptic Gregorian date to days since
+/// 1970-01-01 — the inverse of the one `sys` renders instants with.
+fn days_from_civil(year: i128, month: i128, day: i128) -> i128 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let of_era = year - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = of_era * 365 + of_era / 4 - of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
 
 /// Read an RFC 3339 date and time, refusing anything that is not one.
 fn an_instant<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<String, D::Error> {
@@ -369,17 +535,7 @@ pub struct Watchers {
 impl Watchers {
     /// Read every watcher record on one run, deciding each against this host now.
     pub fn of(paths: &RunPaths) -> Self {
-        let mut held = Self::default();
-        for (path, read) in records(paths) {
-            match read {
-                Ok(record) => {
-                    let standing = standing_of(&record, &paths.run);
-                    held.watches.push(Watch { record, standing });
-                }
-                Err(reason) => held.refused.push(Skipped { path, reason }),
-            }
-        }
-        held
+        Leases::of(paths).watchers
     }
 
     /// Whether anything is watching the run.
@@ -408,6 +564,163 @@ impl Watchers {
                 .map(|refused| format!("a record that cannot be read: {}", refused.reason)),
         );
         said.join("; ")
+    }
+}
+
+/// Every lease on one run with the terms recorded beside each, as the wake
+/// budget reads them.
+///
+/// Crate-private and apart from [`Watchers`], whose shape is published: the
+/// terms are what `unwatched` and `stop-guard` decide a budget from, and they are
+/// read from the same walk, so a lease and its terms are the ones one reading
+/// found together.
+pub(crate) struct Leases {
+    /// The leases, exactly as [`Watchers::of`] answers them.
+    pub(crate) watchers: Watchers,
+    /// The terms recorded beside each of [`Watchers::watches`], index for index.
+    pub(crate) terms: Vec<TermsRead>,
+}
+
+/// What sits beside one lease in `watch-terms/`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TermsRead {
+    /// Nothing: the lease an engine before the terms record leaves.
+    Absent,
+    /// A document this build refused, with the reason.
+    Unreadable(String),
+    /// The terms, as written.
+    Read(WatchTerms),
+}
+
+/// What a wake budget makes of one live lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Wake {
+    /// Its terms are this lease's, name the asking session, give up within the
+    /// budget and return on a surface: it will wake the session in time.
+    Within,
+    /// Its terms positively fail the budget, in their own words.
+    Fails(String),
+    /// Nothing here can say whether it will wake the session in time, and why.
+    Unknown(String),
+}
+
+impl Leases {
+    /// Read every lease on one run and the terms beside each, deciding each lease
+    /// against this host now.
+    pub(crate) fn of(paths: &RunPaths) -> Self {
+        let mut watchers = Watchers::default();
+        let mut terms = Vec::new();
+        for (path, read) in records(paths) {
+            match read {
+                Ok(record) => {
+                    let standing = standing_of(&record, &paths.run);
+                    terms.push(terms_beside(paths, &path));
+                    watchers.watches.push(Watch { record, standing });
+                }
+                Err(reason) => watchers.refused.push(Skipped { path, reason }),
+            }
+        }
+        Self { watchers, terms }
+    }
+
+    /// What `budget_ms` makes of each **live** lease, in file-name order, for a
+    /// session asking at `now_ms`.
+    pub(crate) fn wakes(&self, session: &str, budget_ms: i128, now_ms: i128) -> Vec<Wake> {
+        self.watchers
+            .watches
+            .iter()
+            .zip(&self.terms)
+            .filter(|(watch, _)| watch.standing.is_live())
+            .map(|(watch, terms)| wake(&watch.record, terms, session, now_ms + budget_ms))
+            .collect()
+    }
+}
+
+/// What one live lease's terms say about waking `session` by `latest_ms`.
+///
+/// Every conjunct is asked, and one that fails is a positive failure whatever
+/// the others say — so a terms record naming no session but recording no
+/// deadline fails on the deadline, and only one whose every other conjunct holds
+/// is left unknown by the session it does not name.
+fn wake(record: &WatcherRecord, terms: &TermsRead, session: &str, latest_ms: i128) -> Wake {
+    let pid = record.pid;
+    let terms = match terms {
+        TermsRead::Absent => {
+            return Wake::Unknown(format!(
+                "pid {pid}: its watch recorded no terms, as an engine before the wake budget \
+                 leaves it, so whether it wakes this session in time cannot be said"
+            ))
+        }
+        TermsRead::Unreadable(reason) => {
+            return Wake::Unknown(format!(
+                "pid {pid}: its terms record cannot be read, so whether it wakes this session \
+                 in time cannot be said: {reason}"
+            ))
+        }
+        TermsRead::Read(terms) => terms,
+    };
+    if (terms.run_id.as_str(), terms.pid, terms.started.as_str())
+        != (record.run_id.as_str(), record.pid, record.started.as_str())
+    {
+        return Wake::Fails(format!(
+            "pid {pid}: its terms record is not this watch's — it names run '{}', pid {}, \
+             started '{}'",
+            terms.run_id, terms.pid, terms.started
+        ));
+    }
+    let mut fails: Vec<String> = Vec::new();
+    match &terms.deadline {
+        None => fails.push("it has no deadline (`--timeout none`)".to_owned()),
+        Some(deadline) => {
+            if instant_millis(deadline).is_none_or(|at| at > latest_ms) {
+                fails.push(format!("its deadline {deadline} is past the wake budget"));
+            }
+        }
+    }
+    if !terms.until.iter().any(|word| word == "surface") {
+        fails.push(format!(
+            "it does not return on a surface (`--until {}`)",
+            terms.until.join(" ")
+        ));
+    }
+    match &terms.session {
+        Some(named) if named != session => {
+            fails.push(format!("it is another session's ('{named}')"));
+        }
+        _ => {}
+    }
+    if !fails.is_empty() {
+        return Wake::Fails(format!("pid {pid}: {}", fails.join("; ")));
+    }
+    if terms.session.is_none() {
+        return Wake::Unknown(format!(
+            "pid {pid}: its terms name no session, so whether it wakes this session cannot be \
+             said"
+        ));
+    }
+    Wake::Within
+}
+
+/// The terms beside the lease at `lease`, read closed.
+fn terms_beside(paths: &RunPaths, lease: &std::path::Path) -> TermsRead {
+    let Some(name) = lease.file_name() else {
+        return TermsRead::Absent;
+    };
+    let directory = paths.watch_terms();
+    // A terms directory that is not a directory is one no watch could have
+    // written into, which is not the absence an older engine leaves. It is asked
+    // about before the read because the read cannot say so everywhere: Unix
+    // reports a path through a file as not a directory, Windows as not found.
+    if std::fs::metadata(&directory).is_ok_and(|found| !found.is_dir()) {
+        return TermsRead::Unreadable(format!("{} is not a directory", directory.display()));
+    }
+    match std::fs::read_to_string(directory.join(name)) {
+        Ok(text) => match serde_json::from_str(&text) {
+            Ok(terms) => TermsRead::Read(terms),
+            Err(error) => TermsRead::Unreadable(error.to_string()),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => TermsRead::Absent,
+        Err(error) => TermsRead::Unreadable(error.to_string()),
     }
 }
 
@@ -534,6 +847,8 @@ fn token_standing(read: Option<&sys::StartToken>, recorded: &str) -> WatchStandi
 pub(crate) struct Armed {
     /// The document this watch wrote, or nothing where it could not write one.
     path: Option<PathBuf>,
+    /// The terms written beside it, or nothing where they could not be.
+    terms: Option<PathBuf>,
 }
 
 impl Armed {
@@ -546,7 +861,14 @@ impl Armed {
     /// stream a supervisor is reading events on. The sweep is what keeps a run
     /// that has been watched a thousand times from holding a thousand records,
     /// and it removes only what `WatchStanding::proved_gone` admits.
-    pub(crate) fn arm(paths: &RunPaths) -> Self {
+    ///
+    /// The terms go down **before** the lease and come away **after** it, so no
+    /// reader finds this lease without terms this watch wrote. Where the terms
+    /// cannot be written the lease still is, and reads as a watch whose terms
+    /// cannot be judged — an unknown, which makes the guard warn under a budget
+    /// and counts as watching without one — rather than as no watch at all; `wake_budget::a_watch_whose_terms_cannot_be_written_is_an_unknown`
+    /// drives that through the binary.
+    pub(crate) fn arm(paths: &RunPaths, request: &crate::watch::Request) -> Self {
         Self::sweep(paths);
         let pid = sys::pid();
         let record = WatcherRecord {
@@ -564,9 +886,26 @@ impl Armed {
             began_at: sys::now_rfc3339(),
         };
         let path = paths.watcher(pid, &nonce());
-        Self {
-            path: ledger::write_json(&path, &record).ok().map(|()| path),
+        let terms = path
+            .file_name()
+            .map(|name| paths.watch_terms().join(name))
+            .filter(|terms_path| {
+                ledger::write_json(
+                    terms_path,
+                    &terms_of(&record, request.timeout, &request.until),
+                )
+                .is_ok()
+            });
+        let path = ledger::write_json(&path, &record).ok().map(|()| path);
+        let mut armed = Self { path, terms };
+        // Terms with no lease beside them are nobody's: a lease that could not be
+        // written takes its terms with it.
+        if armed.path.is_none() {
+            if let Some(terms) = armed.terms.take() {
+                let _ = std::fs::remove_file(terms);
+            }
         }
+        armed
     }
 
     /// Remove the records under this run that this host can prove are not live
@@ -578,6 +917,9 @@ impl Armed {
     fn sweep(paths: &RunPaths) {
         for (path, read) in records(paths) {
             if read.is_ok_and(|record| standing_of(&record, &paths.run).proved_gone()) {
+                if let Some(name) = path.file_name() {
+                    let _ = std::fs::remove_file(paths.watch_terms().join(name));
+                }
                 let _ = std::fs::remove_file(path);
             }
         }
@@ -589,8 +931,56 @@ impl Drop for Armed {
         if let Some(path) = self.path.take() {
             let _ = std::fs::remove_file(path);
         }
+        if let Some(terms) = self.terms.take() {
+            let _ = std::fs::remove_file(terms);
+        }
     }
 }
+
+/// The terms one watch is armed under, from the lease it writes beside them and
+/// the wait and conditions its request resolved.
+fn terms_of(
+    record: &WatcherRecord,
+    timeout: crate::cli::WatchTimeout,
+    conditions: &[crate::cli::WatchUntil],
+) -> WatchTerms {
+    let mut until: Vec<String> = Vec::new();
+    for condition in conditions
+        .iter()
+        .map(ToString::to_string)
+        .chain(ALWAYS_UNTIL.map(str::to_owned))
+    {
+        if !until.contains(&condition) {
+            until.push(condition);
+        }
+    }
+    WatchTerms {
+        schema_version: WATCH_TERMS_SCHEMA_VERSION,
+        run_id: record.run_id.clone(),
+        pid: record.pid,
+        started: record.started.clone(),
+        deadline: match timeout {
+            crate::cli::WatchTimeout::Bounded(seconds) => Some(sys::rfc3339_from_millis(
+                sys::now_millis()
+                    .saturating_add(seconds.saturating_mul(1_000))
+                    // The latest instant RFC 3339's four-digit year can spell, so a
+                    // wait no clock reaches is still a deadline a reader can read.
+                    .min(LATEST_INSTANT_MS),
+            )),
+            crate::cli::WatchTimeout::Unbounded => None,
+        },
+        until,
+        // Unset and blank are one answer, `null`, by the ruling entry 98 records:
+        // a watch is armed whatever session it runs under, and a blank one names
+        // nobody, so it is recorded as naming nobody rather than refused.
+        session: std::env::var(sys::LAUNCHER_SESSION_ENV)
+            .ok()
+            .filter(|session| !session.trim().is_empty()),
+    }
+}
+
+/// `9999-12-31T23:59:59.999Z`, in epoch milliseconds.
+const LATEST_INSTANT_MS: u64 = 253_402_300_799_999;
 
 /// What tells one watch's record from another's in a file name, as hexadecimal
 /// characters.
@@ -611,7 +1001,7 @@ impl Drop for Armed {
 ///
 /// Staleness is never decided by a name. What this buys is only that two live
 /// records are two files.
-fn nonce() -> String {
+pub(crate) fn nonce() -> String {
     static MINTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = MINTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     minted(
@@ -833,6 +1223,83 @@ mod tests {
             is_rfc3339(&sys::now_rfc3339()),
             "this crate's own writer does not produce one: {}",
             sys::now_rfc3339()
+        );
+    }
+
+    /// An instant reads as the moment it names, whatever offset it is spelled in,
+    /// and as exactly the moment this crate's own writer rendered.
+    ///
+    /// The deadline a wake budget is compared against is read by this, so an
+    /// offset read the wrong way round would pass a watch that gives up an hour
+    /// late or fail one that is on time.
+    #[test]
+    fn an_instant_reads_as_the_moment_it_names() {
+        assert_eq!(instant_millis("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(instant_millis("1970-01-01T01:00:00+01:00"), Some(0));
+        assert_eq!(instant_millis("1969-12-31T18:30:00-05:30"), Some(0));
+        assert_eq!(instant_millis("1970-01-01T00:00:01.5z"), Some(1_500));
+        assert_eq!(instant_millis("1970-01-01T00:00:00.123456Z"), Some(123));
+        for millis in [0, 951_782_400_000, 1_790_700_724_947, LATEST_INSTANT_MS] {
+            assert_eq!(
+                instant_millis(&sys::rfc3339_from_millis(millis)),
+                Some(i128::from(millis)),
+                "{}",
+                sys::rfc3339_from_millis(millis)
+            );
+        }
+        assert_eq!(instant_millis("2026-02-30T00:00:00Z"), None);
+        assert_eq!(instant_millis("soon"), None);
+    }
+
+    /// `--timeout 0` records the arming instant, a bound records that many
+    /// seconds past it, `none` records no deadline, and every watch's conditions
+    /// include the two every watch returns on, once each.
+    ///
+    /// Here rather than only in a journey because a `--timeout 0` watch reads the
+    /// run once and returns: its terms are gone before any other process could
+    /// read them, so the instant it records can only be read off the writer.
+    #[test]
+    fn the_terms_record_the_deadline_and_the_conditions_a_watch_resolved() {
+        use crate::cli::{WatchTimeout, WatchUntil};
+        let record = WatcherRecord {
+            schema_version: WATCHER_SCHEMA_VERSION,
+            run_id: "gated".into(),
+            pid: NonZeroU32::MIN,
+            host: "a-host".into(),
+            started: "linux-proc-stat:1".into(),
+            began_at: sys::now_rfc3339(),
+        };
+        let at = |terms: &WatchTerms| {
+            terms
+                .deadline
+                .as_deref()
+                .and_then(instant_millis)
+                .expect("a bounded watch records a deadline")
+        };
+        let before = i128::from(sys::now_millis());
+        let now = terms_of(&record, WatchTimeout::Bounded(0), &[WatchUntil::Surface]);
+        let later = terms_of(&record, WatchTimeout::Bounded(90), &[WatchUntil::Settled]);
+        let after = i128::from(sys::now_millis());
+        assert!((before..=after).contains(&at(&now)), "{now:?}");
+        assert!(
+            (before + 90_000..=after + 90_000).contains(&at(&later)),
+            "{later:?}"
+        );
+        assert_eq!(now.until, ["surface", "settled", "nothing-driving"]);
+        assert_eq!(later.until, ["settled", "nothing-driving"]);
+        let unbounded = terms_of(
+            &record,
+            WatchTimeout::Unbounded,
+            &[WatchUntil::Node("build".into()), WatchUntil::NothingDriving],
+        );
+        assert_eq!(unbounded.deadline, None);
+        assert_eq!(
+            unbounded.until,
+            ["node=build", "nothing-driving", "settled"]
+        );
+        assert_eq!(
+            (unbounded.run_id, unbounded.pid, unbounded.started),
+            (record.run_id, record.pid, record.started)
         );
     }
 

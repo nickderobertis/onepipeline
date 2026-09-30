@@ -255,7 +255,7 @@ pub(crate) fn watch(
     // exists and costs the watch itself nothing, so it changes neither this verb's
     // output nor any of its statuses. See `src/watchers.rs` for why its absence
     // may never be relied upon.
-    let _armed = crate::watchers::Armed::arm(paths);
+    let _armed = crate::watchers::Armed::arm(paths, request);
 
     let ended = |view: &RunView,
                  ending: Ending,

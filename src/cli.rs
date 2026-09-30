@@ -735,6 +735,54 @@ pub struct MonitorArgs {
 /// for the length of the run.
 pub const DEFAULT_WATCH_TIMEOUT_SECONDS: u64 = 300;
 
+/// The environment variable a host names its **wake budget** in: the longest a
+/// supervising session may go without being woken, in whole seconds.
+///
+/// Read by three verbs, each for its own default: `watch`'s `--timeout`, and the
+/// `--wake-budget` of `unwatched` and `stop-guard`. Entry 98 of
+/// `docs/contract-divergences.md` states what each does with it.
+pub const WAKE_BUDGET_ENV: &str = "ONEPIPELINE_WAKE_BUDGET";
+
+/// The wake budget the environment names: nothing where the variable is unset,
+/// and a refusal naming the variable where it is set to anything but a positive
+/// whole number of seconds — blank, zero, negative, a fraction, or not a number.
+///
+/// # Errors
+///
+/// The refusal, worded for the person who set the variable.
+pub fn wake_budget_from_environment() -> std::result::Result<Option<std::num::NonZeroU64>, String> {
+    let Some(named) = std::env::var_os(WAKE_BUDGET_ENV) else {
+        return Ok(None);
+    };
+    let named = named.to_string_lossy();
+    named
+        .bytes()
+        .all(|byte| byte.is_ascii_digit())
+        .then(|| named.parse::<std::num::NonZeroU64>().ok())
+        .flatten()
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "{WAKE_BUDGET_ENV} is '{named}', which is not a wake budget: it is a positive \
+                 whole number of seconds; set it to one, or unset it"
+            )
+        })
+}
+
+/// `watch`'s `--timeout` when none is given: the wake budget the environment
+/// names, and [`DEFAULT_WATCH_TIMEOUT_SECONDS`] where it names none.
+///
+/// A variable that names no budget is refused by the verb before anything is
+/// waited, so the value this falls back to for it is never waited on.
+pub fn default_watch_timeout() -> WatchTimeout {
+    WatchTimeout::Bounded(
+        wake_budget_from_environment()
+            .ok()
+            .flatten()
+            .map_or(DEFAULT_WATCH_TIMEOUT_SECONDS, std::num::NonZeroU64::get),
+    )
+}
+
 /// How often a `watch` says it is still there while nothing is happening, when
 /// it is given none.
 pub const DEFAULT_WATCH_TICK_SECONDS: u64 = 30;
@@ -927,8 +975,9 @@ pub struct WatchArgs {
     #[command(flatten)]
     pub read: ReadArgs,
     /// How long to wait before giving up, in seconds. `0` reads once and
-    /// returns; `none` does not bound the wait at all.
-    #[arg(long, value_name = "SECONDS|none", default_value_t = WatchTimeout::Bounded(DEFAULT_WATCH_TIMEOUT_SECONDS))]
+    /// returns; `none` does not bound the wait at all. Omitted, the wake budget
+    /// `ONEPIPELINE_WAKE_BUDGET` names, else 300.
+    #[arg(long, value_name = "SECONDS|none", default_value_t = default_watch_timeout())]
     pub timeout: WatchTimeout,
     /// How long a silence may last before this stream says it is still there,
     /// in seconds. `0` turns the heartbeat off.
@@ -969,6 +1018,24 @@ pub struct UnwatchedArgs {
     /// `ONEPIPELINE_LAUNCHER_SESSION` names.
     #[arg(long, value_name = "ID")]
     pub session: Option<String>,
+    /// The longest the session may go unwoken, in seconds: a run counts as
+    /// watched only by a live watch of this session's that returns on a surface
+    /// and gives up within it. Omitted, `ONEPIPELINE_WAKE_BUDGET`; with neither,
+    /// any live watch counts.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        value_parser = clap::value_parser!(u64).range(1..),
+        conflicts_with = "acknowledge"
+    )]
+    pub wake_budget: Option<u64>,
+    /// Close this run for the session instead of asking about its runs: it is
+    /// owed nothing further until a later adoption or edit re-opens it.
+    #[arg(long, value_name = "RUN", requires = "reason")]
+    pub acknowledge: Option<String>,
+    /// Why the run needs nothing further, recorded with the acknowledgement.
+    #[arg(long, value_name = "TEXT", requires = "acknowledge")]
+    pub reason: Option<String>,
 }
 
 /// `onepipeline stop-guard`.
@@ -1011,6 +1078,11 @@ pub struct StopGuardArgs {
         value_parser = clap::value_parser!(u64).range(1..=MAX_SOURCE_TIMEOUT_SECONDS)
     )]
     pub source_timeout: u64,
+    /// The longest the session may go unwoken, in seconds, as `unwatched`
+    /// takes it. Omitted, `ONEPIPELINE_WAKE_BUDGET`; with neither, any live
+    /// watch counts.
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub wake_budget: Option<u64>,
 }
 
 /// How long a `stop-guard --source` has to answer: a third of the 30-second

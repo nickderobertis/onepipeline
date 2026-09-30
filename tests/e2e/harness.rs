@@ -738,6 +738,10 @@ impl World {
             // holds it. Spelled out because the engine's own name for it is not
             // public.
             .env_remove("ONEVCS_SESSION")
+            // And the wake budget a supervising host exports: every journey about
+            // `watch`, `unwatched` or `stop-guard` without one means a host that sets
+            // none, and one about the budget sets it with `.env` of its own.
+            .env_remove(onepipeline::cli::WAKE_BUDGET_ENV)
             // And the branch-name template a host may export: a journey about the
             // shipped default means a launch that names none, and one about the
             // variable sets it with `.env` of its own.

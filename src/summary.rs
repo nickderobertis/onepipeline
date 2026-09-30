@@ -111,7 +111,15 @@ use crate::telemetry::{self, RunTelemetry};
 /// the row and not the record, and a version-6 document carries no answer to
 /// where the run's sessions are rather than a run that recorded none — so it is
 /// refolded once rather than served as a run nothing wrote a pointer line for.
-pub const SUMMARY_SCHEMA_VERSION: u32 = 7;
+///
+/// **8** since a row carries the closure rule's three facts —
+/// [`owed_until_closed`](RunSummary::owed_until_closed),
+/// [`completion_requested`](RunSummary::completion_requested) and
+/// [`reopened_at`](RunSummary::reopened_at): `unwatched` decides whether a run is
+/// still owed from this document alone, and a version-7 document carries no
+/// answer to whether its run was driven under that rule rather than a run that
+/// was not — so it is refolded once rather than served as a run nobody owes.
+pub const SUMMARY_SCHEMA_VERSION: u32 = 8;
 
 /// Read the version, refusing a document this build cannot honestly read.
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
@@ -317,6 +325,24 @@ pub struct RunSummary {
     /// hook and holds nothing. Absent for every run that fired no hook.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub let_go_by: Option<crate::projection::DriverClaim>,
+    /// Whether a driver of the release that wrote the closure rule has driven
+    /// this run, so its launching session owes it attention until it is closed
+    /// rather than until it settles.
+    ///
+    /// The rule and its migration are entry 98 of `docs/contract-divergences.md`.
+    /// Absent — `false` — for a run no such driver drove, which is decided by the
+    /// rule it was driven under.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owed_until_closed: bool,
+    /// Whether a `completion-requested` has been recorded since the run last
+    /// re-opened — one of the three ways a run is closed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub completion_requested: bool,
+    /// When the run last re-opened — its latest `driver-adopted` or
+    /// `edit-committed` — in epoch milliseconds, so an acknowledgement made
+    /// before it is told from one made after. Absent for a run neither re-opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reopened_at: Option<u64>,
     /// The run's aggregate wall clock and usage.
     ///
     /// The **whole of [`RunTelemetry`](crate::views::RunTelemetry)**, referenced
@@ -613,6 +639,9 @@ impl RunSummary {
             host: launch.recorded_host().map(str::to_string),
             started: launch.driver_stamp().map(str::to_string),
             let_go_by: state.let_go_by.clone(),
+            owed_until_closed: state.closure.owed_until_closed.is_some(),
+            completion_requested: state.closure.completion_requested,
+            reopened_at: state.closure.reopened_at,
             timing: timing.clone(),
             oneharness_sessions: launch.oneharness_sessions.clone(),
             parked: with_status(graph::NodeStatus::Parked),
@@ -1692,7 +1721,7 @@ mod tests {
     /// Read rather than restated: this is the wire a consumer parses, and the
     /// only thing that stops a field being renamed, an absence becoming a zero,
     /// or the version moving without anyone deciding to move it.
-    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v7.json");
+    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v8.json");
 
     /// The documents earlier builds wrote, kept exactly as those builds wrote them.
     ///
@@ -1704,15 +1733,18 @@ mod tests {
     /// document, written by a build whose `stop_recorded` outlived the adoption
     /// that answered it — a real schema 5 document, which carries no plan
     /// name — and a real schema 6 document, which carries no answer to where
-    /// the run's oneharness sessions are. The reader below has to refuse all
-    /// six rather than read any as one of its own.
-    const GOLDEN_EARLIER: [(u32, &str); 6] = [
+    /// the run's oneharness sessions are — and a real schema 7 document, which
+    /// carries no answer to whether its run was driven under the closure rule.
+    /// The reader below has to refuse all seven rather than read any as one of
+    /// its own.
+    const GOLDEN_EARLIER: [(u32, &str); 7] = [
         (1, include_str!("../tests/golden/run-summary-v1.json")),
         (2, include_str!("../tests/golden/run-summary-v2.json")),
         (3, include_str!("../tests/golden/run-summary-v3.json")),
         (4, include_str!("../tests/golden/run-summary-v4.json")),
         (5, include_str!("../tests/golden/run-summary-v5.json")),
         (6, include_str!("../tests/golden/run-summary-v6.json")),
+        (7, include_str!("../tests/golden/run-summary-v7.json")),
     ];
 
     /// The document the golden pins, built through the types.
@@ -1749,6 +1781,12 @@ mod tests {
                 crate::projection::DriverClaim::of_stream("golden-host-4242")
                     .expect("the golden stream names a driver"),
             ),
+            // Driven under the closure rule, closed by a completion request, and
+            // re-opened once before it: all three present, so none of the three
+            // names can move without the version.
+            owed_until_closed: true,
+            completion_requested: true,
+            reopened_at: Some(1_785_999_000_000),
             timing: serde_json::from_str(include_str!("../tests/golden/telemetry-v2.json"))
                 .expect("the telemetry golden reads back into the types"),
             oneharness_sessions: Some(PathBuf::from("/runs/golden/oneharness-sessions.jsonl")),
@@ -1785,13 +1823,13 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_7_document_is_the_shape_the_golden_pins() {
+    fn a_schema_8_document_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&golden()).expect("it serialises");
         assert_eq!(
             rendered.trim(),
             GOLDEN.trim(),
             "the summary document changed shape. If that was deliberate, bump \
-             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v7.json together"
+             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v8.json together"
         );
     }
 
@@ -1817,7 +1855,7 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_7_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
+    fn a_schema_8_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
         let read: RunSummary =
             serde_json::from_str(GOLDEN).expect("the golden reads back into the types");
         assert_eq!(read, golden());

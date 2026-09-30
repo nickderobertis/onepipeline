@@ -139,7 +139,10 @@ pub fn liveness_of(summary: &RunSummary) -> DriverLiveness {
 /// `src/watchers.rs` states why: for a driver the worse error is reporting live
 /// work as dead, and for a watch it is reporting a run as watched while nothing is
 /// watching it.
-pub use crate::watchers::{Watch, WatchStanding, WatcherRecord, Watchers, WATCHER_SCHEMA_VERSION};
+pub use crate::watchers::{
+    Watch, WatchStanding, WatchTerms, WatcherRecord, Watchers, WATCHER_SCHEMA_VERSION,
+    WATCH_TERMS_SCHEMA_VERSION,
+};
 
 /// One run's timing and usage, with a breakdown that sums exactly to its wall
 /// clock.

@@ -256,6 +256,12 @@ pub struct RunState {
     /// a fold of a run that fired no hook is written as it always was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub let_go_by: Option<DriverClaim>,
+    /// What the journal says about whether the run's launching session still owes
+    /// it attention: the closure rule of `docs/contract-divergences.md` entry 98.
+    /// Omitted when empty, so a fold of a run no driver of that release drove is
+    /// written as it always was.
+    #[serde(default, skip_serializing_if = "Closure::is_empty")]
+    pub(crate) closure: Closure,
     /// Whether the fold met a line it could not read. Strict replay reports
     /// rather than silently folding an incomplete graph.
     pub strict: bool,
@@ -683,6 +689,51 @@ fn change_requests_only<'de, D: serde::Deserializer<'de>>(
     Ok(read)
 }
 
+/// The journal's own account of whether a run is **closed** — entry 98 of
+/// `docs/contract-divergences.md` states the rule; this is the part of it the
+/// journal holds.
+///
+/// Three facts and no verdict: an acknowledgement beside the run is the third
+/// way a run closes, and it is not in the journal, so what is closed is decided
+/// where both are in hand.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Closure {
+    /// Whether a driver of the release that wrote the closure rule has driven
+    /// the run: some `run-started` or `driver-adopted` carried
+    /// [`journal::OWED_UNTIL_CLOSED`]. Never cleared, because a run held to the
+    /// rule once is held to it for good.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) owed_until_closed: Option<crate::payload::Owed>,
+    /// Whether a `completion-requested` has been recorded since the run last
+    /// re-opened.
+    // llmlint: ignore[invalid_states_unrepresentable] a two-state fact with no invalid combination: it is set by a `completion-requested` and cleared by a re-opening, on a run held to the closure rule or not, and it is copied as-is into the public `RunSummary::completion_requested: bool` the run-summary v8 golden pins, so a narrower type here would only be converted back at that one read.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) completion_requested: bool,
+    /// When the run last re-opened — its latest `driver-adopted` or
+    /// `edit-committed` — in epoch milliseconds. An acknowledgement made before
+    /// it closes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reopened_at: Option<u64>,
+}
+
+impl Closure {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// A later `driver-adopted` or `edit-committed`: whatever closed the run
+    /// before it no longer does.
+    fn reopened(&mut self, at: Option<u64>) {
+        self.completion_requested = false;
+        // A record whose instant this build cannot read still re-opens the run,
+        // at the latest instant the fold has read; the caller hands that in.
+        if at.is_some() {
+            self.reopened_at = at;
+        }
+    }
+}
+
 impl RunState {
     /// Whether a stop has been recorded at all, however it went, with no
     /// adoption driving the run since.
@@ -971,6 +1022,9 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
     let payload = &event.payload;
     match journal::PipelineKind::from_wire(&event.kind) {
         Some(journal::PipelineKind::RunStarted) => {
+            if journal::owed_until_closed(payload) {
+                state.closure.owed_until_closed = Some(crate::payload::Owed);
+            }
             if let Some(plan) = plan_of(payload) {
                 state.graph = Graph::from_plan(&plan);
                 state.plan = Some(plan);
@@ -1127,7 +1181,16 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         // a reader that folds both is right whatever a newer build decides to
         // put where. Today a `command-accepted` carries only operations this
         // fold ignores, so folding it costs nothing and cannot be wrong.
-        Some(journal::PipelineKind::EditCommitted | journal::PipelineKind::CommandAccepted) => {
+        Some(
+            kind @ (journal::PipelineKind::EditCommitted | journal::PipelineKind::CommandAccepted),
+        ) => {
+            // Only a graph edit re-opens the run: an accepted command that changed
+            // nothing a reader folds changed nothing the session owes attention to.
+            if kind == journal::PipelineKind::EditCommitted {
+                state
+                    .closure
+                    .reopened(millis_of(&event.ts).or(state.last_write_at));
+            }
             let operations = payload
                 .get("operations")
                 .and_then(|value| serde_json::from_value::<Vec<Operation>>(value.clone()).ok());
@@ -1193,6 +1256,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
             if let Some(reason) = payload.get("reason").and_then(Value::as_str) {
                 state.completion_requests.push(reason.to_string());
             }
+            state.closure.completion_requested = true;
         }
         // A fresh driver means no dispatch the previous one started survives:
         // the process that was running them is gone, and this crate's dispatches
@@ -1209,6 +1273,15 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         // [`abandon_the_dispatch_in_flight`].
         Some(journal::PipelineKind::DriverAdopted) => {
             state.let_go_by = None;
+            // A run adopted is being driven again, so whatever closed it is spent;
+            // and an adopting driver of the closure rule's release holds it to that
+            // rule from here on, whoever drove it before.
+            state
+                .closure
+                .reopened(millis_of(&event.ts).or(state.last_write_at));
+            if journal::owed_until_closed(payload) {
+                state.closure.owed_until_closed = Some(crate::payload::Owed);
+            }
             // A recorded stop is the same kind of claim as a let-go: it is about
             // the driver it ended, and the one adopting the run now is driving
             // it. See `RunState::stop`.

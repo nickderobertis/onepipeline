@@ -194,6 +194,13 @@ mod unreadable_sessions;
 mod unwatched;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod views;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the wake budget is
+// decided by `watchers`, `unwatched`, `stopguard`, `summary`, `projection` and `driver`'s
+// reply path at once, over the run store every launch writes, so any change under `src/`
+// can move what it decides: the crate is the narrowest edge it can honestly sit behind, as
+// for `mod unwatched` and `mod stop_guard` above.
+mod wake_budget;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] twelve journeys,
 // 15.1s together, driving the binary they test — cheaper than single journeys already in
 // this file that nextest marks SLOW past 120s. The `onepipeline-note-journeys` edge the
