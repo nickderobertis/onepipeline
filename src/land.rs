@@ -113,9 +113,10 @@ pub(crate) fn land(verb: Verb, args: Vec<OsString>) -> Result<i32> {
 /// will not commit under, a body named twice, a body file that cannot be read — is
 /// left to `onevcs::run`, which refuses it in its own words.
 enum Landing {
-    /// `onevcs publish-branch`.
+    /// A completed branch no session holds, which `onevcs` refuses where it
+    /// carries an unattested incomplete-step marker.
     PublishBranch(onevcs::BranchPublishRequest),
-    /// `onevcs recover`.
+    /// A branch a step left behind, attested as it lands.
     Recover(onevcs::RecoverRequest),
 }
 
@@ -180,6 +181,12 @@ fn report(landed: onevcs::Result<onevcs::PublishOutcome>) -> i32 {
                 crate::vcs::REVIEW_DRAFTED
             );
             0
+        }
+        // A publication that ran and did not land is a failure however it arrived,
+        // said on stderr at its kind's code — never a success on stdout.
+        Ok(onevcs::PublishOutcome::Failed { kind, reason, .. }) => {
+            eprintln!("onevcs: {reason}");
+            i32::from(kind.exit_code())
         }
         Ok(outcome) => {
             println!("{}", outcome.describe());

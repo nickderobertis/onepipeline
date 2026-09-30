@@ -85,7 +85,13 @@ mod dispatch;
 // `nx affected` for the very changes they exist to catch. Same grounds as `mod dispatch`
 // above and `mod run_end_hooks` below.
 mod dispatch_env_hook;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
+// exercise is `lifecycle`, `vcs`, `land` and `telemetry` together against the linked
+// `onevcs`'s draft lifecycle over a real origin, so the narrowest edge they can honestly
+// sit behind is the crate itself, which is this target's — the same grounds as `mod
+// lifecycle` below, whose journeys these extend.
 mod draft_lifecycle;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod driver;
 mod envelope_reviewer;
 mod filter;

@@ -280,6 +280,10 @@ fn protection(args: &[String], dir: &Path, path: &str) -> ExitCode {
     }
     let segments: Vec<&str> = path.split('/').collect();
     match segments.as_slice() {
+        // GitHub's own ruleset shape. What reads it is `onevcs`'s `GitHub::required_on`,
+        // which refuses a shape it cannot read rather than reading it as "nothing
+        // required", so a drift here fails every draft journey loudly instead of
+        // passing one silently.
         ["repos", _, _, "rules", "branches", _] => {
             let mut required: Vec<String> = declared_required(dir);
             required.sort();
@@ -310,18 +314,33 @@ fn protection(args: &[String], dir: &Path, path: &str) -> ExitCode {
 
 /// Every check name any scripted rollup marks `required`: `gh.checks`,
 /// `gh.checks.draft`, and each `gh.checks.<NUMBER>`.
+///
+/// A script directory or a check script that cannot be read is a broken fixture
+/// and fatal, for [`read_if_present`]'s reason: answering it as "nothing required"
+/// would be this host declaring a merge path nobody wrote.
 fn declared_required(dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
+    let entries = std::fs::read_dir(dir).unwrap_or_else(|error| {
+        fake::fail(&format!("{} could not be listed: {error}", dir.display()))
+    });
     entries
-        .filter_map(Result::ok)
+        .map(|entry| {
+            entry.unwrap_or_else(|error| {
+                fake::fail(&format!("{} could not be listed: {error}", dir.display()))
+            })
+        })
         .filter(|entry| {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             name == "gh.checks" || name.starts_with("gh.checks.")
         })
-        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .map(|entry| {
+            std::fs::read_to_string(entry.path()).unwrap_or_else(|error| {
+                fake::fail(&format!(
+                    "{} could not be read: {error}",
+                    entry.path().display()
+                ))
+            })
+        })
         .flat_map(|text| {
             text.lines()
                 .map(str::trim)

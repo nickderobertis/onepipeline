@@ -8418,8 +8418,7 @@ answered; a draft lifted before its checks ran, where the identity did not silen
 the warning, and required checks that concluded `skipped`, each add one sentence to
 the detail; and `onepipeline publish-branch` and `repo-recover` report the word and
 the URL and exit `0`. The `skipped` check state is carried as `onevcs` classifies it
-and never read as passed. `docs/contract.md`'s publication paragraph and its run-end
-hooks paragraph say so.
+and never read as passed.
 
 **The block below is the source.** `vcs::tests` parses it out of this file and holds
 the outcome to the constant this crate publishes and the status to the one

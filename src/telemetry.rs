@@ -339,6 +339,13 @@ impl Phase {
             // The draft lifecycle's own records: a draft opened while the checks
             // run, the watch settling them, and the lift or keep that follows. Each
             // is the publication waiting on its host, as a `change-check` is.
+            // `tests::the_draft_lifecycle_is_publication_waiting` holds these words
+            // to `onevcs::EventKind`'s own wire spelling.
+            // llmlint: ignore[changed_behavior_has_e2e] through the binary these arms
+            // cannot change a reported bucket: `onevcs` writes `change-opened`, a
+            // publication kind, before any of them on every stream, so a run reports
+            // the same `publication-wait` with or without them. The fold where they
+            // decide the bucket is driven by that unit test instead.
             "change-drafted"
             | "checks-settled"
             | "draft-lifted"
@@ -1018,14 +1025,21 @@ mod tests {
     /// that ends it are all charged to `publication-wait`, never to setup.
     #[test]
     fn the_draft_lifecycle_is_publication_waiting() {
+        // Spelled through `onevcs`'s own kinds, so a word that library renames
+        // fails here rather than silently falling out of the bucket.
         for kind in [
-            "change-drafted",
-            "checks-settled",
-            "draft-lifted",
-            "draft-lifted-early",
-            "draft-kept-for-review",
+            onevcs::EventKind::ChangeDrafted,
+            onevcs::EventKind::ChecksSettled,
+            onevcs::EventKind::DraftLifted,
+            onevcs::EventKind::DraftLiftedEarly,
+            onevcs::EventKind::DraftKeptForReview,
         ] {
-            assert_eq!(Phase::of(kind), Some(Phase::Publication), "{kind}");
+            let wire = onemessagebus::Kind::from(kind);
+            assert_eq!(
+                Phase::of(wire.as_str()),
+                Some(Phase::Publication),
+                "{wire:?}"
+            );
         }
         let events = vec![
             started(),
