@@ -209,7 +209,7 @@ pub enum Frame<'a> {
 /// a blocking surface is among those that ended the wait, and — on an elapsed
 /// wait alone — what the run did while it waited. Crate-private because the
 /// contract spells this type `WatchOutcome { ending, cursor }`; what a consumer
-/// reads of the other two is the record [`Lines::of`] renders from them.
+/// reads of the other two is the `return` record the watch prints from them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     /// Why the wait returned.
