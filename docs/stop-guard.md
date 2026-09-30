@@ -13,7 +13,7 @@ let the turn end.
 ## The contract
 
 ```
-onepipeline stop-guard [--session <ID>] [--continuation] [--format <FORMAT>] [--source <COMMAND>]... [--source-timeout <SECONDS>]
+onepipeline stop-guard [--session <ID>] [--continuation] [--format <FORMAT>] [--source <COMMAND>]... [--source-timeout <SECONDS>] [--wake-budget <SECONDS>]
 ```
 
 **Input** — the session whose stop this is, and whether the stop continues a
@@ -39,7 +39,7 @@ running under. `--session ""` is that same nothing.
 | Verdict | Object | When |
 | --- | --- | --- |
 | block | `{"verdict":"block","reason":"<report>"}` | A run the session owns is **proven** unwatched, or a [declared source](#declared-sources) refuses the stop or could not be consulted. With no source declared, `reason` is `onepipeline unwatched`'s own lines, byte for byte: one per run, naming it, its standing word, why nothing counts as watching it, and the `onepipeline watch <run>` that does. With sources declared it is the [combination](#declared-sources). |
-| warn | `{"verdict":"warn","message":"<one sentence>"}` | Something that is not evidence: the runs root could not be read, the question was refused, the engine answered with an error, or the guard's own memory could not be read, written or removed. The sentence names what could not be answered and the exact command to ask it by hand — `onepipeline unwatched --session <ID>` — and, where runs *are* unwatched over a memory the guard could not keep, names them and the `onepipeline watch <run>` for each. |
+| warn | `{"verdict":"warn","message":"<one sentence>"}` | Something that is not evidence: a run whose watch or closure could not be judged under a [wake budget](#the-wake-budget), a wake budget that could not be read, the runs root could not be read, the question was refused, the engine answered with an error, or the guard's own memory could not be read, written or removed. The sentence names what could not be answered and the exact command to ask it by hand — `onepipeline unwatched --session <ID>`, or `onepipeline unwatched --session <ID> --wake-budget <SECONDS>` where the guard was given `--wake-budget` — and, where runs *are* unwatched over a memory the guard could not keep, names them and the `onepipeline watch <run>` for each. |
 | none | `{"verdict":"none"}` | Nothing to say: the session owns nothing unwatched, the input could not be read or named no session, or this stop continues a block on a report that has not changed. |
 
 Nothing else is written on standard output. Standard error carries exactly what
@@ -68,6 +68,21 @@ source](#declared-sources), bounded by `--source-timeout`.
 payload off standard input and render the same verdict in the harness's
 decision shape. They are presentation over the one verdict — the decision path
 is the same — and they are the whole of the harness-specific text in this crate.
+
+## The wake budget
+
+To have the guard ask whether each run the session owes will **wake it** in
+time, rather than whether anything is watching it, export
+`ONEPIPELINE_WAKE_BUDGET=<SECONDS>` in the environment the session and its hook
+run in, or pass `--wake-budget <SECONDS>` on the hook's command line. Setting the
+variable also makes it `onepipeline watch`'s default `--timeout`, so the bare
+`onepipeline watch <RUN>` a blocked line names, run from that session, is the
+watch that clears it. Leave both unset and nothing changes.
+
+A blocked line names what clears it; a `warn` names a run whose watch or closure
+the guard could not judge. A run that has settled is cleared by closing it —
+`onepipeline reply <RUN>` with a `complete` verdict, or
+`onepipeline unwatched --acknowledge <RUN> --reason <TEXT>`.
 
 ## Declared sources
 

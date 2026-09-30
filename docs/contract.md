@@ -348,7 +348,7 @@ branch_template: "{{ task.key }}/{{ node.id }}" # --branch-template and ONEPIPEL
     "inherited": "owner=ci,onepipeline.node=other",
     "stamp": {"run_id": "demo-1", "project": "plans:demo", "scope": "node", "node": "service", "step": "implement", "attempt": 1},
     "composed": "onepipeline.attempt=1,onepipeline.node=service,onepipeline.project=plans:demo,onepipeline.run_id=demo-1,onepipeline.scope=node,onepipeline.step=implement,owner=ci",
-    "summary_schema_version": 7,
+    "summary_schema_version": 8,
     "opt_out": "--no-history"
   }
 }

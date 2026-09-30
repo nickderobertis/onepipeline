@@ -66,14 +66,42 @@ fn held(world: &World, name: &str) -> String {
     name.to_string()
 }
 
-/// A run driven to settlement, with its driver gone.
-fn settled(world: &World, name: &str) -> String {
+/// A run driven to settlement and **closed**, with its driver gone.
+///
+/// Closed by the happy path a supervisor takes, a `complete` verdict sent with
+/// `onepipeline reply`: a run this engine drives is owed to its session until it
+/// is closed rather than until it settles (entry 98), so a settled run that
+/// nobody closed is not the excluded run the journeys below are about.
+fn settled_and_closed(world: &World, name: &str) -> String {
     let path = world.plan(name, &plan_of(name, vec![agent("build", &[])]));
     world.run(&["start", &path, "--attach"]).settled();
     world.until("the run to settle", |world| {
         world.run_file(name, "result.json").is_file()
     });
+    close(world, name);
     name.to_string()
+}
+
+/// Close a settled run nothing is driving, with a `complete` verdict.
+fn close(world: &World, run: &str) {
+    world
+        .run_with_stdin(&["reply", run], r#"{"completion":true,"reason":"done"}"#)
+        .exited(0);
+}
+
+/// Acknowledge a run for its own session, which closes it without a write to its
+/// journal — so an exclusion that follows is decided on the document the run's
+/// driver left, and nothing else.
+fn acknowledge(world: &World, run: &str) {
+    world
+        .run(&[
+            "unwatched",
+            "--acknowledge",
+            run,
+            "--reason",
+            "nothing further is owed",
+        ])
+        .exited(0);
 }
 
 fn paths_of(world: &World, run: &str) -> RunPaths {
@@ -653,11 +681,11 @@ fn a_settled_run_is_excluded_and_a_document_recording_settlement_behind_its_jour
 {
     let world = World::new("unwatched-settled");
     world.script("build.work", "the worker wrote this\n");
-    let complete = settled(&world, "unwatchedcomplete");
+    let complete = settled_and_closed(&world, "unwatchedcomplete");
     // A run whose graph did not complete, stopped by a planner: the other of the
     // two facts a settled run is excluded on.
     world.script("build.fail", "1");
-    let stopped = settled(&world, "unwatchedstopped");
+    let stopped = settled_and_closed(&world, "unwatchedstopped");
     world.run(&["stop", &stopped, "--force"]).exited(0);
 
     // Both are excluded, and both were excluded on a document whose stamp matches
@@ -755,6 +783,8 @@ fn a_settled_run_is_excluded_and_a_document_recording_settlement_behind_its_jour
     let mut recording = document(&paths);
     recording["graph_complete"] = json!(false);
     recording["stop_recorded"] = json!(false);
+    // And no completion request, which closes a run this build drove as a stop does.
+    recording["completion_requested"] = json!(false);
     recording["journal_len"] = json!(1);
     std::fs::write(paths.summary(), recording.to_string()).expect("the document");
     // llmlint: ignore-end[tests_mirror_real_usage]
@@ -808,7 +838,7 @@ const STANDING_WORDS: [&str; 4] = ["ACTIVE", "PARKED", "DRIVER DEAD", "UNDRIVEN"
 fn a_document_at_a_superseded_schema_is_refreshed_and_decided_from_the_run() {
     let world = World::new("unwatched-superseded");
     world.script("build.work", "the worker wrote this\n");
-    let run = settled(&world, "unwatchedsuperseded");
+    let run = settled_and_closed(&world, "unwatchedsuperseded");
     let paths = paths_of(&world, &run);
     let written = document(&paths);
 
@@ -858,7 +888,7 @@ fn a_document_at_a_superseded_schema_is_refreshed_and_decided_from_the_run() {
     // release's document is reported from what its store says, never silenced.
     // The run the mixed-root half below leaves undecidable is settled first, while
     // the worker script still runs to completion.
-    let undecided = settled(&world, "unwatchedalongside");
+    let undecided = settled_and_closed(&world, "unwatchedalongside");
     let undecided_paths = paths_of(&world, &undecided);
     world.script("build.wait", "hold");
     // Beating while held, so the run goes on recording between this build's
@@ -1029,7 +1059,7 @@ const UNDECIDABLE: [Undecidable; 5] = [
 fn the_verb_decides_runs_whose_merged_store_cannot_be_read() {
     let world = World::new("unwatched-unreadablestore");
     world.script("build.work", "the worker wrote this\n");
-    let settled_run = settled(&world, "unwatchedsettledstore");
+    let settled_run = settled_and_closed(&world, "unwatchedsettledstore");
     world.script("build.wait", "hold");
     let reported = held(&world, "unwatchedheldstore");
 
@@ -1123,7 +1153,7 @@ fn store_unreadable(paths: &RunPaths) {
 fn a_run_whose_settlement_cannot_be_decided_is_named_on_standard_error_and_changes_no_status() {
     let world = World::new("unwatched-undecidable");
     world.script("build.work", "the worker wrote this\n");
-    let run = settled(&world, "unwatchedundecided");
+    let run = settled_and_closed(&world, "unwatchedundecided");
     let paths = paths_of(&world, &run);
     let written = document(&paths);
 
@@ -1923,9 +1953,9 @@ fn unwatched_opens_no_run_store_that_is_there() {
     world.script("build.work", "the worker wrote this\n");
     // Three runs this session owns, in the three states this verb's settlement
     // reading meets: a current document, none at all, and one behind its journal.
-    let current = settled(&world, "unwatchedcurrent");
-    let absent = settled(&world, "unwatchedabsent");
-    let stale = settled(&world, "unwatchedstale");
+    let current = settled_and_closed(&world, "unwatchedcurrent");
+    let absent = settled_and_closed(&world, "unwatchedabsent");
+    let stale = settled_and_closed(&world, "unwatchedstale");
     world.script("build.wait", "hold");
     let reported = held(&world, "unwatchedheld");
 
@@ -2313,6 +2343,16 @@ fn a_run_settled_under_an_observer_mid_turn_leaves_a_current_document_and_is_exc
         "the driver left a document behind its journal at handback: {left}"
     );
 
+    // Settled is not closed: the run is owed to its session until it is, and the
+    // line names the two ways to close it.
+    world
+        .run(&["unwatched"])
+        .exited(RUNS_UNWATCHED)
+        .out_has(run)
+        .out_has("--acknowledge");
+    // Acknowledged, which writes beside the run and not to its journal: the
+    // exclusion is then decided on the document the driver left.
+    acknowledge(&world, run);
     let asked = world.run(&["unwatched"]);
     world.release("observer.go");
     asked.exited(SUCCESS);
@@ -2359,6 +2399,7 @@ fn a_detached_driver_that_settles_leaves_a_current_document_and_is_excluded() {
         "the detached driver left a document behind its journal at handback: {left}"
     );
 
+    acknowledge(&world, run);
     let asked = world.run(&["unwatched"]);
     asked.exited(SUCCESS);
     assert!(
@@ -2460,6 +2501,7 @@ fn an_adopted_run_over_a_lifecycle_node_leaves_a_current_document_and_is_exclude
         "the adopted driver left a document behind its journal at handback: {left}"
     );
 
+    acknowledge(&world, run);
     let asked = world.run(&["unwatched"]);
     world.release("observer.go");
     asked.exited(SUCCESS);
@@ -2510,7 +2552,9 @@ fn a_run_the_previous_release_settled_is_refreshed_and_excluded_rather_than_repo
         stamp_of(&paths),
         "the adopted driver left a document behind its journal at handback: {left}"
     );
-    let mut previous = left.clone();
+    // Closed as its session closes it, so what is decided below is the refresh.
+    close(&world, run);
+    let mut previous = document(&paths);
     previous["schema_version"] = json!(SUMMARY_SCHEMA_VERSION - 1);
     std::fs::write(paths.summary(), previous.to_string()).expect("the document");
 

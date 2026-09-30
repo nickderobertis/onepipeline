@@ -2875,6 +2875,9 @@ fn summary_fields() -> BTreeSet<String> {
         // inventory counts is the key it is written under.
         let_go_by: serde_json::from_value(json!({"host": "a-host", "pid": 4242}))
             .expect("a driver claim reads"),
+        owed_until_closed: true,
+        completion_requested: true,
+        reopened_at: Some(1_786_000_000_000),
         timing: serde_json::from_str::<RunTelemetry>(include_str!("golden/telemetry-v2.json"))
             .expect("the telemetry golden reads back into the types"),
         parked: vec!["idle".into()],
@@ -8546,7 +8549,7 @@ fn the_grouped_listing_is_what_the_contract_states() {
     // Rows over the checked-in golden document, so a row here is a document this
     // build reads rather than one assembled by hand.
     let golden: RunSummary =
-        serde_json::from_str(include_str!("golden/run-summary-v7.json")).expect("the golden reads");
+        serde_json::from_str(include_str!("golden/run-summary-v8.json")).expect("the golden reads");
     let row = |run: &str, project: &str, name: Option<&str>, at: Option<u64>| RunSummary {
         run_id: run.into(),
         project: project.into(),
