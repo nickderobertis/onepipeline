@@ -1075,6 +1075,13 @@ fn a_detached_adoption_leaves_a_driver_holding_the_run_its_record_names() {
     world.script("build.wait", "hold");
     let (run, displaced) =
         start_detached_announcing(&world, "handed-over", vec![agent("build", &[])]);
+    // Parked only says the driver has written nothing for the bound, which a
+    // slow driver also reads as between `node-ready` and its dispatch. An
+    // adoption then would displace a driver that never dispatched, and the
+    // re-dispatch below would be the only one.
+    world.until("the held node to be dispatched", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
     world.until("the run to be reported parked", |world| {
         let mut status = world.cmd(&["status", &run]);
         status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
@@ -1959,16 +1966,24 @@ fn a_detached_adoptions_driver_outlives_its_launcher_and_the_interrupt_its_group
 
     // The launcher: this build adopting detached, from a shell that then stays
     // so there is a group to interrupt. `$0` is the binary, so the shell's own
-    // words never carry the path.
+    // words never carry the path. The shell says it has stayed only once the
+    // adopting verb has returned to it: a shell still waiting on a child that
+    // exits `0` after the interrupt reads that child as having handled it, as
+    // bash — macOS's `sh` — does, and goes on to its `sleep`. It stays in
+    // one-second sleeps because dash, Linux's `sh`, catches an interrupt that
+    // lands between two commands and acts on it only once the next one ends.
     let announced = world.root.join("adopt.announced");
+    let stayed = world.root.join("launcher.stayed");
     let mut launcher = world.cmd_on(
         Path::new("sh"),
         &[
             "-c",
-            "\"$0\" adopt \"$1\" --detach > \"$2\" && sleep 120",
+            "\"$0\" adopt \"$1\" --detach > \"$2\" && : > \"$3\" && i=0 && \
+             while [ $i -lt 120 ]; do sleep 1; i=$((i + 1)); done",
             &crate::harness::binary().display().to_string(),
             &run,
             &announced.display().to_string(),
+            &stayed.display().to_string(),
         ],
     );
     launcher.process_group(0);
@@ -1998,6 +2013,9 @@ fn a_detached_adoptions_driver_outlives_its_launcher_and_the_interrupt_its_group
         json!(retained),
         "the run names a driver other than the one the adoption announced"
     );
+    world.until("the launcher to have stayed past its adoption", |_| {
+        stayed.is_file()
+    });
 
     // The interrupt a terminal sends its foreground group, to the launcher's.
     // SAFETY: `killpg` takes a group id and a signal and reports failure in its

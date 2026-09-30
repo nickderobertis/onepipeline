@@ -3588,12 +3588,18 @@ fn a_watch_armed_on_a_run_nothing_is_driving_ends_when_the_run_moves() {
     assert_eq!(code, SURFACE_WAITING, "{last}\n{said}");
     assert_eq!(drained(&world, run), vec!["raised on a run nobody drives"]);
 
-    // Adoption rewrites the launch record, and ends the wait the same way.
+    // Adoption rewrites the launch record, and ends the wait the same way. The
+    // driver it retains dispatches the node the edit above added, and that node
+    // is held until the watch has returned: a settlement outranks the run
+    // moving, so one landing before the watch reads the rewrite ends it
+    // `node-settled` instead, which is a different journey.
+    world.script("extra.wait", "hold");
     let launch = std::fs::read_to_string(world.run_file(run, "launch.json"))
         .expect("the launch record reads");
     let watching = armed_watch(&world, run, &default);
     world.run(&["adopt", run, "--detach"]).exited(0);
     let (code, last, said) = finished(watching);
+    world.release("extra.go");
     assert_eq!(code, RUN_CHANGED, "{last}\n{said}");
     assert_ne!(
         std::fs::read_to_string(world.run_file(run, "launch.json")).expect("it reads"),
