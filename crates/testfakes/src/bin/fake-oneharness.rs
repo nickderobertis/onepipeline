@@ -412,9 +412,9 @@ impl Selection {
 /// declaration rather than a copy of it; what makes a chain resolvable at all is
 /// [`Chain`]'s — what is left here is the one case a chain cannot answer.
 fn selection(path: &str) -> Result<Selection, String> {
-    let path = std::path::Path::new(path);
+    let path = std::path::PathBuf::from(path);
     let config = oneharness_core::io::config::load(
-        Some(path),
+        std::slice::from_ref(&path),
         false,
         path.parent().unwrap_or(std::path::Path::new("")),
     )
