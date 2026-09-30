@@ -2701,9 +2701,12 @@ fn a_launch_record_the_driver_cannot_write_does_not_end_a_working_observer() {
     use std::os::unix::fs::PermissionsExt;
 
     let world = World::new("driver-observer-record-unwritable");
-    // The node's dispatch is held throughout, so the run is being driven; the
-    // observer is not held, so it stops and the driver starts another.
+    // The node's dispatch is held throughout, so the run is being driven. Every
+    // observer is held too, until this journey lets the first one go after the
+    // run's directory is closed: an unheld one stops at once, so the driver's
+    // restarts could all land before the close and none would meet it.
     world.script("build.wait", "hold");
+    world.script("observer.wait", "hold");
     let run = start_detached_observed(&world, "unwritable", vec![agent("build", &[])]);
     world.until(
         "the observer to be watching and the node to be in flight",
@@ -2729,6 +2732,7 @@ fn a_launch_record_the_driver_cannot_write_does_not_end_a_working_observer() {
     std::fs::set_permissions(&dir, closed).expect("the run directory closes");
 
     let watching = world.observer_saw().len();
+    world.release("observer.go.1");
     world.until("another observer to be watching", |world| {
         world.observer_saw().len() > watching
     });
@@ -2736,6 +2740,7 @@ fn a_launch_record_the_driver_cannot_write_does_not_end_a_working_observer() {
     world.until_run_file_holds(&run, "driver.log", "started another observer graph");
 
     std::fs::set_permissions(&dir, opened).expect("the run directory opens again");
+    world.release("observer.go");
     world.release("build.go");
 }
 
