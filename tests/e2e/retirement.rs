@@ -2653,6 +2653,13 @@ fn a_run_settling_mid_sweep_journals_its_maintenance_and_the_retirement_it_never
     world.until("the held node to settle", |world| {
         !world.events_of("closing", "node-settled").is_empty()
     });
+    // The maintenance is let go only once the driver is closing out. Released at
+    // `node-settled` alone, it ended before the driver had raised the sweep's stop
+    // — the whole close-out takes longer than the command's poll — so the sweep
+    // began the retirement pass this journey says is never begun, and waited on
+    // the held origin for good.
+    world.until("the driver to close out", closed_out);
+    std::thread::sleep(std::time::Duration::from_secs(CLOSE_OUT_STOP_SECONDS));
 
     assert!(
         !world.run_file("closing", "result.json").is_file(),
@@ -2700,6 +2707,27 @@ fn a_run_settling_mid_sweep_journals_its_maintenance_and_the_retirement_it_never
     // Nothing waits on the origin now; letting it go leaves no hook spinning.
     std::fs::write(&go, "go").expect("the origin is released");
 }
+
+/// Whether the `closing` run's driver has projected its close-out: the one
+/// write-back record naming no item. Every earlier record of that one-node run
+/// names `hold`, and the close-out's names nothing because the settled node has
+/// nothing left to release.
+#[cfg(unix)]
+fn closed_out(world: &World) -> bool {
+    std::fs::read_to_string(world.run_file("closing", "writeback-projections.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .any(|record| record["items"].as_array().is_some_and(Vec::is_empty))
+}
+
+/// How long after its close-out record a driver has certainly raised its sweep's
+/// stop, in whole seconds. The driver records nothing between the two, and on an
+/// idle host they are about two milliseconds apart: the close-out's queue claim
+/// and the landing hand-off are all that come between. The margin is for a loaded
+/// host, and costs the journey nothing, because it holds the maintenance open.
+#[cfg(unix)]
+const CLOSE_OUT_STOP_SECONDS: u64 = 2;
 
 /// How long each identity's retirement takes in the closing journey, in whole
 /// seconds: its origin sleeps this long on every push it receives.
