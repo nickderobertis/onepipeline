@@ -347,7 +347,18 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     } else {
         Outcome::Answered
     };
+    // `thought.hold` and `said.hold` hold a worker turn open just after it has
+    // reasoned and just after it has spoken, each until its `.go` gate: the two
+    // moments a live readout of a running dispatch has the agent's own words,
+    // rather than a tool, as the last thing it did.
+    let hold_at = |gate: &str| {
+        if !observing && dir.join(format!("{gate}.hold")).exists() {
+            fake::wait_for(&dir.join(format!("{gate}.go")));
+        }
+    };
     if streaming {
+        thinking();
+        hold_at("thought");
         tool_call(1, "echo the turn ran");
     }
     // A worker turn that reports again after a hold: what a live readout of a
@@ -367,6 +378,7 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     }
     if streaming {
         assistant_text();
+        hold_at("said");
     }
     result(outcome, &prompt, args, dir);
     outcome.exit_code()
@@ -495,6 +507,28 @@ fn observation(index: u64) {
 /// journey can assert on the observation a turn was given rather than on the
 /// fact that it was given one.
 const OBSERVED: &str = "the turn ran";
+
+/// What the agent reasoned before it reached for the tool: a `thinking` block on
+/// an assistant message, which `oneharness_core` normalizes to a `reasoning`
+/// event — the kind a person watching the turn reads as its thinking rather than
+/// as a tool it ran.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same provider wire shape
+// as `tool_call` above, gated the same way: the real `oneharness_core` normalizes this
+// line, so a shape it stops reading is `tests/e2e/turns.rs` finding a turn that relayed
+// no reasoning.
+fn thinking() {
+    println!(
+        "{}",
+        serde_json::json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "thinking", "thinking": REASONED}]},
+        })
+    );
+}
+
+/// What the turn reasoned. Recognisable, and the same every time, so a journey can
+/// find it in a rendered view rather than assert that some reasoning arrived.
+const REASONED: &str = "The quickest proof is to run it.";
 
 fn assistant_text() {
     println!(

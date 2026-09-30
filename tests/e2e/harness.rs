@@ -41,49 +41,203 @@ use onepipeline_testfakes::{
 };
 use serde_json::{json, Value};
 
-/// The harness double answers `oneharness run --format` the way the real CLI's grammar
-/// reads it — and only for the one report it renders.
+/// The harness double draws its stdout as the released `oneharness` CLI does: the
+/// readable **text** view unless JSON is asked for by name.
 ///
-/// onejudge 0.13.2 and oneagentgraph 0.4.5 ask the spawned oneharness for its JSON report
-/// by name, so the double takes `--format json` and reads on to what the turn needs next;
-/// a view it does not render is refused naming the value, since a caller asking for a
-/// human report would otherwise read a JSON one it did not ask for. Driven as the process
-/// onejudge spawns, at the argv onejudge sends, against the compiled double.
+/// oneharness 0.20.0 made text the default on a stream as well as on a report, so
+/// a program reading the NDJSON protocol passes `--format json` — as onejudge
+/// does on both sides. The double answers each reading at the argv a caller
+/// sends: with no `--format`, and with `--format text`, one line per event in the
+/// core's own text view — the agent's reasoning and words beside its tool call —
+/// then the text report; under `--format json` the event envelopes, `reasoning`,
+/// `tool_call`, `tool_result` and `message` in turn order, then the `result`
+/// line. `--format text` beside `--compact` is the contradiction the CLI refuses,
+/// and a view it has no name for is refused naming it. The judge side's buffered
+/// report follows the same flag, pretty unless compact. Driven as the process
+/// onejudge spawns, against the compiled double.
 #[test]
-fn the_harness_double_takes_the_json_report_by_name_and_refuses_a_view_it_does_not_render() {
+fn the_harness_double_draws_its_stream_as_the_released_cli_does() {
     let fakes = std::env::temp_dir().join(format!("onepipeline-format-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&fakes);
-    std::fs::create_dir_all(&fakes).expect("a scratch directory for the double");
-    let run = |format: &str| -> Output {
+    let worktree = fakes.join("worktree");
+    std::fs::create_dir_all(&worktree).expect("a scratch directory for the double");
+    let config = fakes.join("role.toml");
+    std::fs::write(&config, "harnesses = [\"claude-code\"]\n").expect("the config is written");
+    let run = |side: &[&str], extra: &[&str]| -> Output {
         Command::new(double("fake-oneharness"))
-            .args(["run", "--format", format, "--compact", "--prompt", "probe"])
+            .arg("run")
+            .args(side)
+            .args([
+                "--config",
+                config.to_string_lossy().as_ref(),
+                "--no-history",
+            ])
+            .args(extra)
             .env(SCRIPT_DIR_ENV, &fakes)
             .stdin(Stdio::null())
             .output()
             .expect("the compiled double runs")
     };
-    let human = run("human");
+    let worker = [
+        "--events",
+        "--stream",
+        "--cwd",
+        worktree.to_str().expect("a UTF-8 scratch path"),
+        "--prompt",
+        "do the work",
+    ];
+    let answered = |output: &Output| -> String {
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+
+    // No `--format`: the text stream, the agent's words and its tool each on
+    // their own line in the order the turn reached them, and no JSON anywhere.
+    let text = answered(&run(&worker, &[]));
+    let lines: Vec<&str> = text.lines().collect();
+    let at = |line: &str| {
+        lines
+            .iter()
+            .position(|drawn| *drawn == line)
+            .unwrap_or_else(|| panic!("the text stream draws no {line:?}:\n{text}"))
+    };
+    let (thought, call, said) = (
+        at("(thinking) The quickest proof is to run it."),
+        at("$ echo the turn ran"),
+        at("› Ran what the task asked for."),
+    );
+    assert!(thought < call && call < said, "{text}");
+    assert!(
+        lines.iter().any(|line| line.starts_with("prompt: ")),
+        "the text stream closes on no text report:\n{text}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| serde_json::from_str::<Value>(line).is_ok_and(|v| v.is_object())),
+        "the default stream carries a JSON line:\n{text}"
+    );
+    // `--format text`, said outright, reads exactly as the default.
+    assert_eq!(answered(&run(&worker, &["--format", "text"])), text);
+
+    // `--format json`: the NDJSON protocol a program reads.
+    let ndjson = answered(&run(&worker, &["--format", "json"]));
+    let envelopes: Vec<Value> = ndjson
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|_| panic!("{line:?} is not JSON")))
+        .collect();
+    let kinds: Vec<&str> = envelopes
+        .iter()
+        .filter(|envelope| envelope["type"] == "event")
+        .filter_map(|envelope| envelope["event"]["kind"].as_str())
+        .collect();
     assert_eq!(
-        human.status.code(),
+        kinds,
+        ["reasoning", "tool_call", "tool_result", "message"],
+        "{ndjson}"
+    );
+    assert_eq!(
+        envelopes.last().map(|envelope| &envelope["type"]),
+        Some(&json!("result")),
+        "{ndjson}"
+    );
+
+    // The contradiction, and a view with no name, are refused naming what
+    // was asked.
+    for (extra, refusal) in [
+        (
+            &["--format", "text", "--compact"][..],
+            "`--format text` beside `--compact`",
+        ),
+        (&["--format", "human"][..], "`--format human`"),
+    ] {
+        let refused = run(&worker, extra);
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert_eq!(
+            refused.status.code(),
+            Some(i32::from(onepipeline_testfakes::USAGE)),
+            "{stderr}"
+        );
+        assert!(stderr.contains(refusal), "{stderr}");
+    }
+
+    // The judge side's one buffered report follows the same flag.
+    let judge = ["--prompt", EVALUATOR_OPENING];
+    let report = answered(&run(&judge, &[]));
+    assert!(report.starts_with("prompt: "), "{report}");
+    let pretty = answered(&run(&judge, &["--format", "json"]));
+    assert!(pretty.lines().count() > 1, "not pretty: {pretty}");
+    let parsed: Value = serde_json::from_str(&pretty).expect("one JSON report");
+    assert_eq!(parsed["results"][0]["harness"], "claude-code", "{parsed}");
+    let _ = std::fs::remove_dir_all(&fakes);
+}
+
+/// The harness double takes `--config` **repeated**, and layers the files in the
+/// order given — each later one over the ones before it — as the released CLI's
+/// loader does.
+///
+/// Two files each naming a chain select the second's, and given the other way
+/// round the first's; a second file that is not there is refused by name rather
+/// than read as though only the first were given. Driven as the process onejudge
+/// spawns, against the compiled double.
+#[test]
+fn the_harness_double_layers_a_repeated_config_in_order() {
+    let fakes = std::env::temp_dir().join(format!("onepipeline-layers-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fakes);
+    std::fs::create_dir_all(&fakes).expect("a scratch directory for the double");
+    let write = |name: &str, text: &str| -> String {
+        let path = fakes.join(name);
+        std::fs::write(&path, text).expect("the config is written");
+        path.to_string_lossy().into_owned()
+    };
+    let codex = write("codex.toml", "harnesses = [\"codex\"]\n");
+    let claude = write("claude.toml", "harnesses = [\"claude-code\"]\n");
+    let judge = |configs: &[&str]| -> Output {
+        Command::new(double("fake-oneharness"))
+            .args(["run", "--format", "json", "--compact", "--no-history"])
+            .args(configs.iter().flat_map(|config| ["--config", config]))
+            .args(["--prompt", EVALUATOR_OPENING])
+            .env(SCRIPT_DIR_ENV, &fakes)
+            .stdin(Stdio::null())
+            .output()
+            .expect("the compiled double runs")
+    };
+    for (configs, ran) in [
+        ([codex.as_str(), claude.as_str()], "claude-code"),
+        ([claude.as_str(), codex.as_str()], "codex"),
+    ] {
+        let output = judge(&configs);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value =
+            serde_json::from_slice(&output.stdout).expect("the double prints one report");
+        assert_eq!(
+            report["results"][0]["harness"], ran,
+            "{configs:?} did not layer the later file over the earlier: {report}"
+        );
+    }
+
+    let missing = fakes.join("gone.toml");
+    let refused = judge(&[codex.as_str(), missing.to_string_lossy().as_ref()]);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(
+        refused.status.code(),
         Some(i32::from(onepipeline_testfakes::USAGE)),
-        "{}",
-        String::from_utf8_lossy(&human.stderr)
+        "{stderr}"
     );
     assert!(
-        String::from_utf8_lossy(&human.stderr)
-            .contains("asked for `--format human`, and this double prints only json"),
-        "{}",
-        String::from_utf8_lossy(&human.stderr)
+        stderr.contains("gone.toml") && stderr.contains("not a file"),
+        "{stderr}"
     );
-    // Asked for by name, the format is read past, and the turn is refused for what it
-    // needs next rather than for the flag.
-    let json = run("json");
-    let said = String::from_utf8_lossy(&json.stderr);
-    assert!(
-        !said.contains("--format"),
-        "the double refused the format the real CLI takes: {said}"
-    );
-    assert!(said.contains("requires --config"), "{said}");
     let _ = std::fs::remove_dir_all(&fakes);
 }
 
