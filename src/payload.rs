@@ -349,6 +349,49 @@ pub(crate) struct Holder {
     pub(crate) session: String,
     /// The process that owns it.
     pub(crate) owner_pid: u64,
+    /// The identity it holds; absent from a record an earlier build wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) identity: Option<String>,
+    /// The run its session was opened for, from the session's `run` label;
+    /// absent for an unattributed holder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) run: Option<String>,
+    /// The node its session was opened for, from the session's `node` label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) node: Option<String>,
+    /// The `run:<run>#<node>` dependency that also acknowledges it, set only
+    /// where one does, so a reader tells those from flag-only holders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dependency: Option<String>,
+}
+
+/// `concurrent-deferred`: a launch whose plan depends on live repository
+/// holders, so waits for them rather than racing them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ConcurrentDeferred {
+    /// The run being launched.
+    pub(crate) launching: String,
+    /// Each live holder a dependency acknowledges.
+    pub(crate) holders: Vec<DeferredHolder>,
+}
+
+/// One live holder the launching plan depends on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct DeferredHolder {
+    /// The identity it holds.
+    pub(crate) identity: String,
+    /// The holding session.
+    pub(crate) session: String,
+    /// The process that owns it.
+    pub(crate) owner_pid: u64,
+    /// The run its session was opened for.
+    pub(crate) run: String,
+    /// The node its session was opened for.
+    pub(crate) node: String,
+    /// The reference the dependents reach, `run:<run>#<node>`.
+    pub(crate) dependency: String,
+    /// The launching plan's nodes on the identity, each of which reaches it.
+    pub(crate) dependents: Vec<String>,
 }
 
 /// `node-ready`: carries nothing beyond the node label.
@@ -1297,6 +1340,7 @@ macro_rules! payload_messages {
 payload_messages! {
     RunStarted => "run-started";
     ConcurrentAcknowledged => "concurrent-acknowledged";
+    ConcurrentDeferred => "concurrent-deferred";
     NodeReady => "node-ready";
     NodeDispatched => "node-dispatched";
     NodeSettled => "node-settled";
@@ -1513,6 +1557,35 @@ mod tests {
                 other => panic!("{kind} without `{key}` was not refused: {other:?}"),
             }
         }
+    }
+
+    /// A `concurrent-acknowledged` holder written before a holder could say
+    /// whose it was still reads, and the four keys that say so are optional in
+    /// its document and omitted when absent.
+    #[test]
+    fn a_concurrent_acknowledgement_written_before_attribution_still_reads() {
+        let older = serde_json::json!({
+            "shared_identities": ["github.com/owner/service"],
+            "runs": {"launching": "second", "holding_sessions": ["s-1"]},
+            "holders": [{"session": "s-1", "owner_pid": 7}],
+        });
+        let read: ConcurrentAcknowledged =
+            serde_json::from_value(older.clone()).expect("an older record reads");
+        assert_eq!(read.holders[0].identity, None);
+        assert_eq!(read.holders[0].dependency, None);
+        assert_eq!(serde_json::to_value(&read).expect("it writes"), older);
+        let id = schema_of(PipelineKind::ConcurrentAcknowledged);
+        registry()
+            .check(&id, &older)
+            .unwrap_or_else(|refusal| panic!("an older record is refused: {refusal}"));
+        let mut attributed = older;
+        attributed["holders"][0] = serde_json::json!({
+            "session": "s-1", "owner_pid": 7, "identity": "github.com/owner/service",
+            "run": "first", "node": "build", "dependency": "run:first#build",
+        });
+        registry()
+            .check(&id, &attributed)
+            .unwrap_or_else(|refusal| panic!("an attributed record is refused: {refusal}"));
     }
 
     /// `pool-maintenance` and `branches-retired` each declare `cut_short` and

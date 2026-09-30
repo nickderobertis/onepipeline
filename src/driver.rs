@@ -1035,7 +1035,8 @@ fn start(args: &StartArgs) -> Result<i32> {
 
     let root = ledger::runs_root();
     let run = mint_run_id(&plan, project.native(), &root);
-    let holders = concurrency::holders(&plan)?;
+    let holdings = concurrency::holders(&plan)?;
+    let holders = &holdings.holders;
     // Every stale holder the sibling still has anybody to answer for. Since
     // `onevcs` 0.17.1 a record whose owner process has gone, whose run root
     // nothing is working inside, and whose branch carries nothing unpublished is
@@ -1056,22 +1057,33 @@ fn start(args: &StartArgs) -> Result<i32> {
         .iter()
         .filter(|holder| holder.state == State::Open && holder.liveness == Liveness::Live)
         .collect();
-    if !live.is_empty() && !args.acknowledge_concurrent {
-        let shared = live
+    // A live holder every plan node on its identity waits for, through a
+    // cross-DAG edge to that holder's own node, is not concurrent with this
+    // launch; every other one is, and refuses unless acknowledged.
+    let classified = concurrency::classify(&plan, &holdings.identities, &live);
+    if !classified.conflicts.is_empty() && !args.acknowledge_concurrent {
+        return Err(Error::Refused(concurrency::refusal(
+            &run,
+            &classified.conflicts,
+        )));
+    }
+    if !classified.deferred.is_empty() {
+        let deferred = classified
+            .deferred
             .iter()
-            .map(|holder| {
+            .map(|deferred| {
                 format!(
-                    "identity '{}' held by session '{}' (owner_pid {})",
-                    holder.identity, holder.token.0, holder.owner_pid
+                    "identity '{}' run '{}' node '{}' via `{}`",
+                    deferred.holder.identity, deferred.run, deferred.node, deferred.dependency
                 )
             })
             .collect::<Vec<_>>()
             .join(", ");
-        return Err(Error::Refused(format!(
-            "concurrent project work refused for run '{run}': {shared}; pass --acknowledge-concurrent to proceed deliberately"
-        )));
+        eprintln!(
+            "onepipeline: launch '{run}' depends on live holder(s), so waits for them rather than racing them: {deferred}"
+        );
     }
-    if !live.is_empty() {
+    if !live.is_empty() && args.acknowledge_concurrent {
         let shared = live
             .iter()
             .map(|holder| {
@@ -1182,7 +1194,7 @@ fn start(args: &StartArgs) -> Result<i32> {
     ledger::write_json(&paths.launch(), &record)?;
 
     let mut open = Journal::open(&paths);
-    if !live.is_empty() {
+    if !live.is_empty() && args.acknowledge_concurrent {
         open.emit(
             journal::PipelineKind::ConcurrentAcknowledged,
             journal::labels(&run, None),
@@ -1208,9 +1220,47 @@ fn start(args: &StartArgs) -> Result<i32> {
                     "holders",
                     json!(live
                         .iter()
-                        .map(|holder| json!({
-                            "session": holder.token.0.clone(),
-                            "owner_pid": holder.owner_pid,
+                        .map(|holder| {
+                            let mut entry = json!({
+                                "session": holder.token.0.clone(),
+                                "owner_pid": holder.owner_pid,
+                                "identity": holder.identity,
+                            });
+                            if let Some((holding_run, holding_node)) =
+                                concurrency::attribution(holder)
+                            {
+                                entry["run"] = json!(holding_run);
+                                entry["node"] = json!(holding_node);
+                            }
+                            if let Some(dependency) = classified.dependency_of(holder) {
+                                entry["dependency"] = json!(dependency);
+                            }
+                            entry
+                        })
+                        .collect::<Vec<_>>()),
+                ),
+            ]),
+        )?;
+    }
+    if !classified.deferred.is_empty() {
+        open.emit(
+            journal::PipelineKind::ConcurrentDeferred,
+            journal::labels(&run, None),
+            journal::payload(&[
+                ("launching", json!(run)),
+                (
+                    "holders",
+                    json!(classified
+                        .deferred
+                        .iter()
+                        .map(|deferred| json!({
+                            "identity": deferred.holder.identity,
+                            "session": deferred.holder.token.0,
+                            "owner_pid": deferred.holder.owner_pid,
+                            "run": deferred.run,
+                            "node": deferred.node,
+                            "dependency": deferred.dependency,
+                            "dependents": deferred.dependents,
                         }))
                         .collect::<Vec<_>>()),
                 ),

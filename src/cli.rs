@@ -631,6 +631,9 @@ pub struct StartArgs {
     #[arg(long = "node-set", value_name = "PATH=VALUE")]
     pub node_sets: Vec<String>,
     /// Proceed even when another live session holds a targeted repository.
+    /// Depend on the holding node (`run:<run>#<node>`) instead when this work
+    /// needs that work first; acknowledge when this work outranks the
+    /// concurrent run or no conflict between the two runs' changes is expected.
     #[arg(long)]
     pub acknowledge_concurrent: bool,
     /// The launch config: what this launch declares about its run, as one
