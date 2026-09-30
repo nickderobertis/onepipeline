@@ -623,7 +623,7 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         | EngineError::NoSuchDocument { .. } => decided("no-such-item"),
         EngineError::NoSuchComment { .. } => decided("no-such-comment"),
         EngineError::StaleOrigin { .. } => decided("stale-origin"),
-        // llmlint: ignore[changed_behavior_has_e2e] no write-back journey can reach this arm: the link a stale-link refusal follows is recorded only on a shadow task, and `write_shadow` rewrites every shadow task's front matter from the plan before each copy, so no copy here ever finds one to follow. It is here because this match is exhaustive over the store's failures, and `writeback::tests` holds its word to the store's own.
+        // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: the only link a copy here records is on a shadow task, and `write_shadow` rewrites those before every copy; `writeback::tests` holds the word.
         EngineError::StaleLink { .. } => decided("stale-link"),
         EngineError::NotAMember { .. } => decided("not-a-member"),
         EngineError::UnrecordedMember { .. } => decided("unrecorded-member"),
