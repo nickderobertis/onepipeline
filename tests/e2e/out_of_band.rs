@@ -312,8 +312,8 @@ fn a_green_branch_landed_on_a_team_repository_reports_the_review_draft_word() {
     }
 }
 
-/// Every `gh` invocation the host has been asked so far.
-fn gh_calls(world: &World) -> usize {
+/// How many `gh` invocations the host has been asked so far.
+fn gh_call_count(world: &World) -> usize {
     world
         .invocations()
         .iter()
@@ -321,21 +321,52 @@ fn gh_calls(world: &World) -> usize {
         .count()
 }
 
-/// A git bound set to something that is not one is refused **before** a landing
-/// does anything — the refusal `onevcs`'s own command line makes up front, word for
-/// word and at its exit code — for both verbs and both bounds, and the host is
-/// never asked a thing.
+/// Where the origin holds `branch`, or `None` where it holds no such branch.
+fn origin_ref(repository: &Repository, branch: &str) -> Option<String> {
+    let answer = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(&repository.origin)
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .output()
+        .expect("git runs");
+    answer
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&answer.stdout).trim().to_owned())
+}
+
+/// Every bound `onevcs` validates before a publication pushes, each set to
+/// something that is not a number of seconds: the two git bounds its command line
+/// checks up front, and the checks watch's bound, its poll, and the draft
+/// lifecycle's grace window, which the library itself refuses before anything is
+/// pushed.
+const BOUNDS: [&str; 5] = [
+    "ONEVCS_GIT_TIMEOUT",
+    "ONEVCS_GIT_HOOK_TIMEOUT",
+    "ONEVCS_CHECKS_TIMEOUT_SECONDS",
+    "ONEVCS_CHECKS_POLL_SECONDS",
+    "ONEVCS_DRAFT_CHECKS_GRACE_SECONDS",
+];
+
+/// A bound set to something that is not one is refused, naming it, **before** a
+/// landing pushes anything or asks the host anything — for both verbs and every
+/// bound — and the refusal is word for word and code for code what `onevcs`'s own
+/// command line makes.
 ///
 /// Held against the real `onevcs` binary rather than against a copy of its
 /// sentence: the two are run with the same bound over the same world, so a
-/// sibling that rewords or recodes the refusal moves both answers together.
+/// sibling that rewords or recodes the refusal moves both answers together. The
+/// validation is `onevcs`'s own — this crate calls the verbs' library forms, which
+/// check these bounds before their push — so nothing here restates it.
 #[test]
-fn an_unusable_git_bound_is_refused_before_a_landing_touches_the_host() {
+fn an_unusable_bound_is_refused_before_a_landing_pushes_or_touches_the_host() {
     for (verb, onevcs_verb) in [
         ("publish-branch", "publish-branch"),
         ("repo-recover", "recover"),
     ] {
-        for bound in ["ONEVCS_GIT_TIMEOUT", "ONEVCS_GIT_HOOK_TIMEOUT"] {
+        // A world holding the branch this verb lands, as an operator leaves it.
+        let prepared = || {
             let world = World::new(&format!("oob-bound-{verb}"));
             let repository = world.repository("change-open", &[]);
             if verb == "publish-branch" {
@@ -343,7 +374,12 @@ fn an_unusable_git_bound_is_refused_before_a_landing_touches_the_host() {
             } else {
                 preserved_branch(&world, &repository);
             }
-            let asked_before = gh_calls(&world);
+            (world, repository)
+        };
+        for bound in BOUNDS {
+            let (world, repository) = prepared();
+            let asked_before = gh_call_count(&world);
+            let pushed_before = origin_ref(&repository, BRANCH);
             let checkout = repository.checkout.to_string_lossy().into_owned();
             let args = [
                 BRANCH,
@@ -365,9 +401,14 @@ fn an_unusable_git_bound_is_refused_before_a_landing_touches_the_host() {
                 "{verb} {bound}: the refusal does not name the bound and its value: {stderr}"
             );
             assert_eq!(
-                gh_calls(&world),
+                gh_call_count(&world),
                 asked_before,
                 "{verb} {bound}: the host was asked something before the refusal"
+            );
+            assert_eq!(
+                origin_ref(&repository, BRANCH),
+                pushed_before,
+                "{verb} {bound}: the branch was pushed before the refusal"
             );
             assert!(
                 opened(&world).is_empty(),
@@ -375,10 +416,21 @@ fn an_unusable_git_bound_is_refused_before_a_landing_touches_the_host() {
                 opened(&world)
             );
 
-            // Exactly what `onevcs` itself answers, `--no-draft` being this crate's.
-            let mut own = vec![onevcs_verb];
-            own.extend(args.iter().filter(|arg| **arg != "--no-draft"));
-            let sibling = world
+            // Exactly what `onevcs` itself answers, `--no-draft` being this crate's,
+            // over a world of its own: `recover` attests the branch before the
+            // bound is refused, on either path, so a second landing in the first
+            // world would meet a branch already attested.
+            let (apart, apart_repository) = prepared();
+            let apart_checkout = apart_repository.checkout.to_string_lossy().into_owned();
+            let own = [
+                onevcs_verb,
+                BRANCH,
+                "--repo",
+                &apart_checkout,
+                "--title",
+                "feat: add the widget",
+            ];
+            let sibling = apart
                 .cmd_on(&onevcs_binary(), &own)
                 .env(bound, "soon")
                 .output()
