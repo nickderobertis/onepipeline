@@ -6250,7 +6250,7 @@ const CEILING_SECONDS: u64 = 14_400;
 
 /// How many release waits the channel has queued about the consumer, once its
 /// projection has caught up with its log.
-fn unchanged_waits(world: &World, run: &str) -> usize {
+fn consumer_wait_count(world: &World, run: &str) -> usize {
     let mut counted = 0;
     world.until("the channel's queue to be read back", |world| {
         consumer_waits(world, run).is_some_and(|waits| {
@@ -6420,21 +6420,21 @@ fn an_unchanged_release_wait_is_queued_again_only_once_read_and_a_changed_one_at
     let mut every: u64 = 8;
     let mut measured = Vec::new();
     for _ in 0..13 {
-        let before = unchanged_waits(&world, &run);
+        let before = consumer_wait_count(&world, &run);
         let precise = every >= 8_192;
         backdate_newest_wait(&world, &run, if precise { every - 5 } else { every + 60 });
         read_waits(&world, &run);
         if precise {
             std::thread::sleep(std::time::Duration::from_secs(2));
             assert_eq!(
-                unchanged_waits(&world, &run),
+                consumer_wait_count(&world, &run),
                 before,
                 "a wait was queued again before its {every}-second interval had passed"
             );
         }
         world.until(
             &format!("the wait after a {every}-second interval"),
-            |world| unchanged_waits(world, &run) > before,
+            |world| consumer_wait_count(world, &run) > before,
         );
         measured.push(every);
         every = (every * 2).min(CEILING_SECONDS);
