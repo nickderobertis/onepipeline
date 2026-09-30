@@ -6,7 +6,7 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96 and 97** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96, 97 and 99** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
@@ -3870,7 +3870,11 @@ noticed; what eventually surfaced them was the run dying.
 **What this build now does.** `onepipeline watch RUN` blocks. It takes the run
 and the profile selection `monitor` takes — the same `ReadArgs`, so a profile
 this run does not have refuses the command before anything blocks — and four
-more:
+more. **Entry 99 records rulings that since moved what ends the wait**: the
+default set, what `surface` and `node-settled` fire on, a run nothing is driving,
+a sixth ending `run-changed` with exit `7`, and the return record's `blocking` and
+`summary`. What follows states this build as it now stands, and entry 99 is where
+each change is argued:
 
 - `--timeout SECONDS|none` (default 300) bounds the wait. `0` reads once and
   returns; `none` does not bound it at all, so a supervisor asking to be woken
@@ -3887,6 +3891,8 @@ more:
   wait returns on the first of them to fire and the return record says which one
   did. The vocabulary is `settled`, `surface`, `nothing-driving`, `node-settled`
   and `node=<ID>`, and it is validated when the command is invoked — see below.
+  Given none, the wait returns on `surface` and `node-settled`; given any, those
+  named replace that set.
 
 It writes one line per meaningful event and one heartbeat line per interval of
 silence. **Meaningful** is a closed set of this crate's own kinds —
@@ -3914,15 +3920,17 @@ nothing is happening* is what makes it unfilterable by a caller matching events.
 A zero is said out loud — "0 unread planner surfaces" — because "nothing is
 waiting" and "this line does not mention what is waiting" read identically.
 
-**Five terminal conditions, five exit statuses.** The run settled `complete` is
+**Six terminal conditions, six exit statuses.** The run settled `complete` is
 `0`. Nothing is driving the run is `3`, which is the code this crate already
-assigns to that condition and is reused rather than given a number of its own. A
-blocking surface waiting to be answered is `4`, the wait elapsing with the run
-still live is `5`, and a node the wait was told to return on settling is `6` —
-three new public constants in `src/error.rs`, `EXIT_SURFACE_WAITING`,
-`EXIT_WATCH_ELAPSED` and `EXIT_NODE_SETTLED`, because `1` and `2` are each
-spoken for by a different question and overloading either would put a caller back
-to reading prose.
+assigns to that condition and is reused rather than given a number of its own —
+and, since entry 99, it is the run going from driven to undriven while the watch
+waits. A planner surface waiting is `4`, the wait elapsing with the run still live
+is `5`, a node the wait was told to return on settling is `6`, and `run-changed`,
+a run nothing was driving when the watch armed moving under it, is `7` — four new
+public constants in `src/error.rs`, `EXIT_SURFACE_WAITING`, `EXIT_WATCH_ELAPSED`,
+`EXIT_NODE_SETTLED` and `EXIT_RUN_CHANGED`, because `1` and `2` are each spoken
+for by a different question and overloading either would put a caller back to
+reading prose.
 
 **Entry 66 later gave `unwatched` that same `6`**, on the reading this paragraph
 already takes: every code above `3` belongs to a single verb's protocol, an exit
@@ -3942,13 +3950,15 @@ to wait for. So `--until` is repeatable and its vocabulary is
 returns on the first of them to fire, and the return record's `condition`, `exit`
 and — for the two that name a settlement — `node` say which one did, so a caller
 branches on a status and a field rather than on prose. **The two values that
-predate this keep their meanings exactly**, and the default is still `surface`.
+predate this kept their meanings exactly** when the selector was added; entry 99
+since widened `surface` and made the default `surface` and `node-settled`.
 
 `--until settled` and `--until nothing-driving` name conditions this verb returns
 on whether or not they were asked for, because a wait that could outlive the run
 it watches is the silence the verb exists to end — so what naming them *adds* is
-nothing, which is precisely why `--until settled` still means "report a blocking
-surface, and wait through it". `--until node-settled` fires on any node of the run
+nothing, which is precisely why `--until settled` still means "report a surface,
+and wait through it" — any unread one since entry 99, which widened what a
+surface is. `--until node-settled` fires on any node of the run
 settling, and `--until node=<ID>` on that node settling; both are read from this
 crate's own `node-settled` records ahead of the watch's cursor, and neither is put
 through the caller's profile — a profile shapes what this reader is *shown*, and
@@ -3983,7 +3993,7 @@ The two forms go out on the two descriptors an attached `start` already splits:
 the human lines on standard error, and one NDJSON record per line on standard
 output — `{"watch":"event","event":{…}}`,
 `{"watch":"heartbeat","run_id":…,"unread":…}`, and a final
-`{"watch":"return","run_id":…,"condition":…,"exit":…,"node":…,"cursor":…,"unread":…}`
+`{"watch":"return","run_id":…,"condition":…,"exit":…,"node":…,"cursor":…,"unread":…,"blocking":…,"summary":…}`
 — each flushed
 as it is written, because a blocking verb whose consumer sees nothing until it
 exits is the silence this verb exists to end. The machine form carries the whole
@@ -4009,7 +4019,7 @@ half-written line would never come back for the rest of it, and on a live run
 that line is the newest thing there is to say.
 
 **What this does not do, and is the part the contract owner should rule on.**
-`--until surface` returns on a blocking surface and on nothing else that is
+`--until surface` returns on a planner surface and on nothing else that is
 waiting for a person. This crate's own `decision_outstanding` is wider — a ready
 `kind: human` node is a decision point too, and `status` reports it as one — so a
 watch over a run parked on an attestation runs to its timeout and returns `5`.
@@ -8256,3 +8266,121 @@ and each unknown, the closure rule in every standing, the re-openings, the
 compiled binary over real run roots, with real `onepipeline watch` processes
 holding the leases. What an older engine does is read off its code, as stated
 under *Older engines*, and is not driven.
+
+## 99. A watch could not wake a supervisor on anything but a blocking question — RESOLVED
+
+**Ruling: what ends `onepipeline watch` is redefined so the default watch is the one a
+supervisor needs — it wakes on every planner surface, keeps waiting on a run nothing is
+driving, and says plainly what did and did not happen when it runs out of time — on the
+rulings of the manager of the plan carrying node `op-watch-wake`, from a design document
+the user approved.** Six rulings, each general engine behaviour: nothing here names a
+host's observer, its members, or any particular observer graph. `docs/contract.md`'s verbs
+paragraph now names the six endings and their statuses, and its Channel paragraph says a
+discharged surface does not end a watch *once `next` has consumed it*.
+
+**Why.** A user supervising long runs through a manager session expects an update at least
+every thirty minutes, and called out a silent manager 28 times in 13 sessions, with
+silences from forty minutes to twelve hours. The largest cause was a live watch that could
+not wake the manager: it ended only on a blocking surface, a settlement, or nothing
+driving the run, so non-blocking updates piled up unread, and a held node kept one watch
+open for six hours. The next was a run nothing was driving: a watch on it returned at
+once, so the manager fell back to hand-written waits that said nothing until they
+finished.
+
+**1. `--until surface` ends on any unread planner surface.** Its word, its ending
+`surface-waiting` and its exit `4` are unchanged. It fires when the run's channel holds a
+surface `next` has not consumed — blocking or not, abandoned included, and one already
+unread when the watch armed included — or when a non-abandoned blocking surface is still
+unanswered, which is the rule it had. Once `next` has consumed a surface, an abandoned or
+answered blocking one no longer ends a wait, and neither does a consumed non-blocking one;
+a consumed, unanswered, non-abandoned blocking one still does. The `return` record gains
+`"blocking": true|false`, true when a blocking surface is among those that ended it, and
+written on every return; the `unread` block beside it is unchanged. One return may report
+several surfaces, and the watch consumes none of them. `start --attach`'s own return on a
+blocking surface, `awaiting-planner`, is not changed by this.
+
+**2. A watch given no `--cursor` counts only settlements journalled after it armed.**
+`node-settled` and `node=<ID>` fire, for such a watch, only on a settlement it reads after
+its first pass; the event lines it prints are unchanged. A cursored watch keeps the rule it
+had: a settlement past the cursor fires, at once if it is already there. The "would never
+fire" refusals follow: for a watch given no cursor, a node that settled `done` before it
+armed is one nothing dispatches again, and is refused as such.
+
+**3. The default `--until` is `surface` and `node-settled`.** `settled` and
+`nothing-driving` still apply always, and an explicit `--until` replaces the default set
+as it did. The flag carries no clap default any more, so the default set and a caller's
+own stay tellable apart: nothing in the default set is refused as a condition that could
+never fire, because nobody asked for it, and a finished run a default watch is armed on
+still ends `settled`. An empty `until` on a library `WatchRequest` is that same default
+set, where before this it was the two terminal conditions alone — so a library caller that
+built an empty one now also wakes on surfaces and settlements, which is the behaviour the
+binary gives the same request. The default `--timeout` is not moved here.
+
+**4. A watch armed on a run nothing is driving waits.** It does not end `nothing-driving`
+at arming. It ends at its deadline (`elapsed`, `5`), on any condition above, or — with
+none of them firing — when what it fingerprints moves: the run's journal, its launch
+record, or its channel queues. That is a new ending, **`run-changed`, exit `7`**, which an
+`adopt` produces too, since adoption rewrites the launch record. The driver's own two
+answers that move with no file moving — a claim proved over, and the run falling quiet
+past the parked bound — are not the run changing and do not produce it. `nothing-driving`
+(`3`) fires only on a transition during the wait, from driven to undriven, and a run whose
+graph is complete still ends `settled` at once. The order in which one pass's conditions
+are asked is settled, nothing-driving (the transition), surface, node-settled,
+run-changed. A landing `onevcs` reconciles in its own state, writing nothing to the run,
+is seen only at the deadline, and that is accepted.
+
+**5. An `elapsed` ending carries a summary.** The `return` record gains `summary`, present
+on `elapsed` and on no other ending:
+
+- `settled_since_cursor`: every settlement the watch read past the cursor it started
+  from — the start of the journal for a watch given none — each as its `node` and
+  `status`;
+- `surfaces_queued_during_wait`: how many planner surfaces were queued after it armed;
+- `held`: every hold the run records a node under, each as its `node`, its `reason` —
+  the hold's own kind, `dependencies`, `concurrency`, `decision`, `release` or
+  `workspace` — and its `waited_seconds`, timed from the `node-held` that opened that
+  kind of hold; a node held for two reasons at once is two entries;
+- `last_progress_seconds`: seconds since the run's latest `node-dispatched` or
+  `node-settled`, or `null` for a run with neither;
+- `observer`: one word, `running`, `dead`, `not-restarted` or `none` — the verdict the
+  liveness view already reads off the observer graph the launch record names, `none` for a
+  run that launched none.
+
+The human form writes it as a few lines after the ending line, and when nothing was queued
+it says so in generic terms: "no planner surface arrived during this 35m00s wait; the run's
+observer graph is dead". What that means for a given host is the host's to interpret.
+
+**6. An unchanged held wait stops re-surfacing every 900 seconds.** The `release-wait` and
+`workspace-wait` surfaces are queued when a hold begins and when what the hold says
+changes — for a release hold its dependencies, their release style and the last answer
+about each, and for a workspace hold its identity and reading — never counting how long it
+has waited. An unchanged hold is queued again never while its previous surface is still
+unread, and otherwise no sooner than an interval that starts at
+`ONEPIPELINE_RELEASE_SURFACE_SECONDS` (default 900), doubles after each unchanged re-queue,
+and stops doubling at 14400 seconds. The ceiling is fixed — nothing configures it — and
+the interval is counted from the run's own record of when the previous wait was queued:
+the `queued_at` of the channel log's `queued` record for it, read again while the wait
+sits out its interval, rather than a clock inside the driver. That is the moment the
+ruling measures from, and it is what lets a journey through the compiled binary reach
+intervals hours long: `tests/e2e/adoption.rs` backdates that record before reading each
+wait, and shows the interval doubling to 8192 seconds and then holding at 14400 where
+doubling would have asked 16384. Under ruling 1 a hold re-surfaced every fifteen minutes
+would have woken a supervisor every fifteen minutes for nothing new.
+
+**What moved in the published surface.** `verbs::WatchEnding` gains a variant,
+`RunChanged`, and `onepipeline::error` a constant, `EXIT_RUN_CHANGED`: a **public API
+addition**, and a consumer matching `WatchEnding` exhaustively has one more arm to write.
+`WatchOutcome` keeps its two public fields and gains two crate-private ones, what the
+`blocking` and `summary` fields are rendered from, so a consumer reads both through
+`render_watch_frame` exactly as the binary prints them and can no longer build a
+`WatchOutcome` by hand. `onepipeline-ui` relinks against the new ending in a later node of
+the same plan.
+
+**Where it is held.** `src/watch.rs`'s `Ending` and `Record` are the one source of the
+endings, their statuses and the return record's fields; the unit tests beside them hold
+entry 58's record fragment, its statuses and the README's watch passage to both, down to
+the summary's own keys, and `tests/contract.rs` holds the README's statuses and the
+contract's two amended sentences. `tests/e2e/watch.rs` drives every ruling above through
+the compiled binary over real run directories, and `tests/e2e/lifecycle.rs` and
+`tests/e2e/adoption.rs` drive the held-wait cadence with the surface interval shortened —
+the second to its fixed ceiling, on a backdated record of when each wait was queued.

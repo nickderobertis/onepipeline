@@ -365,7 +365,8 @@ fn a_running_watch_writes_its_unchanged_lease_and_its_terms_and_removes_both_whe
     assert!(!terms_path.exists(), "the terms outlived their watch");
 
     // Unbounded, and armed under no session: both recorded as `null`, never
-    // omitted.
+    // omitted. Given no `--until`, the conditions recorded are the default set
+    // the watch returns on (entry 99), `surface` among them.
     let nobody = world.as_session("").with_env(SESSION_ENV, "  ");
     let watch = watching(&nobody, &run, &["--timeout", "none"]);
     let terms = read(&terms_of(&world, &run, watch.id()));
@@ -373,7 +374,7 @@ fn a_running_watch_writes_its_unchanged_lease_and_its_terms_and_removes_both_whe
     assert_eq!(terms["session"], Value::Null, "{terms}");
     assert_eq!(
         terms["until"],
-        json!(["surface", "settled", "nothing-driving"])
+        json!(["surface", "node-settled", "settled", "nothing-driving"])
     );
     end(watch);
     world.release("build.go");
