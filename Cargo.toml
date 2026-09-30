@@ -563,6 +563,16 @@ resolver = "2"
 # `src/supersession.rs` and `src/maintenance.rs` call — and `^0.33` admits none of
 # it. `onevcs-testing` 0.8.5 requires exactly `^0.34.1`, so the two pins move as one.
 #
+# `onevcs` 0.35.0 is the floor because it is the release whose retirement pass
+# records each branch's verdict under `$ONEVCS_HOME/verdicts/` and reuses it while
+# its inputs are unchanged, reads the origin's refs in bulk, and asks no existence
+# or ancestry question twice in one pass — so the idle retirement
+# `src/maintenance.rs` makes per identity reuses recorded verdicts instead of
+# re-deriving every branch. Each `Retired` it reports now says `derivation`
+# (`derived` | `reused`); the `branches-retired` record reads nothing new from it,
+# because none of its fields says how a verdict was reached. `onevcs-testing` 0.8.6
+# requires exactly `^0.35.0`, so the pair moves as one again.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -584,7 +594,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.2"
-onevcs = "0.34.1"
+onevcs = "0.35.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -749,7 +759,7 @@ oneharness-core = "0.18.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.8.5"
+onevcs-testing = "0.8.6"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
