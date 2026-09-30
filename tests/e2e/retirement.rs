@@ -2828,37 +2828,40 @@ fn a_closing_driver_finishes_the_retirement_in_progress_and_begins_no_other() {
     }
 }
 
-/// The verdict `onevcs` recorded for `branch` under the world's state root, and when
-/// its file was last written — or `None` while there is none.
+/// What `onevcs`'s own finished-branches pass answers for `branch` of `service`,
+/// rehearsed through the verb a person asks it with: `retire-finished --dry-run`,
+/// which moves no ref and deletes nothing.
 ///
-/// Found by the key the record carries rather than by its file name, which is the
-/// sibling's digest of the identity and branch and not this suite's to recompute. A
-/// pass that reuses a verdict leaves its file as it was; one that derives it again
-/// replaces the file whole, so a later write time is a derivation.
-fn recorded_verdict(world: &World, branch: &str) -> Option<(Value, std::time::SystemTime)> {
-    let entries = std::fs::read_dir(world.onevcs_home().join("verdicts")).ok()?;
-    entries.flatten().find_map(|entry| {
-        let path = entry.path();
-        if path.extension().is_none_or(|extension| extension != "json") {
-            return None;
-        }
-        let record: Value = serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
-        (record["key"]["identity"] == SERVICE_IDENTITY && record["key"]["branch"] == branch)
-            .then(|| Some((record, entry.metadata().ok()?.modified().ok()?)))
-            .flatten()
-    })
-}
-
-/// The commit the registered checkout's copy of `branch` stands at, as a verdict's
-/// key holds it.
-fn keyed_tip(record: &Value) -> Value {
-    record["key"]["copies"]
+/// Its `derivation` says whether the pass reused a verdict recorded under exactly
+/// the inputs it read, or derived one — which it then records itself — so a
+/// rehearsal answering `reused` at a tip is one a pass before it derived there.
+fn rehearsed(world: &World, branch: &str) -> Value {
+    let output = world
+        .cmd_on(
+            &onevcs_binary(),
+            &[
+                "retire-finished",
+                "--repo",
+                "service",
+                "--dry-run",
+                "--json",
+            ],
+        )
+        .output()
+        .expect("onevcs runs");
+    assert!(
+        output.status.success(),
+        "onevcs retire-finished refused: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("the report is JSON");
+    report["examined"]
         .as_array()
-        .expect("copies")
+        .expect("examined")
         .iter()
-        .find(|copy| copy["kind"] == "checkout")
-        .map(|copy| copy["tip"].clone())
-        .unwrap_or_else(|| panic!("the key holds no checkout copy: {record}"))
+        .find(|entry| entry["branch"] == branch)
+        .cloned()
+        .unwrap_or_else(|| panic!("the pass never examined {branch}: {report}"))
 }
 
 /// Wait until `run`'s driver has begun `n` sweeps, each of which ends with the
@@ -2870,18 +2873,19 @@ fn until_swept(world: &World, run: &str, n: u64) {
     });
 }
 
-/// An idle driver's retirement pass records each branch's verdict under the
-/// sibling's state root and, on the sweeps after, reuses it while the branch and
-/// its base stand where they did — and derives it again once the branch moves, so
-/// a reused `keep` is never one the branch's new work outran.
+/// An idle driver's retirement pass records the verdict it derives for each
+/// branch, so the pass after it reuses that verdict while the branch and its base
+/// stand where they did — and once the branch moves, the driver's next pass
+/// derives it again, so a reused `keep` is never one the branch's new work outran.
 ///
 /// A branch with work beyond its base is what every idle pass meets and keeps: it
 /// is the verdict a host re-proving hundreds of such branches each pass spent its
-/// time on. Read off the record the linked `onevcs` leaves — the key it was
-/// derived under and when it was written — since the run's `branches-retired`
-/// says nothing of a branch it kept.
+/// time on. The run's `branches-retired` says nothing of a branch it kept, so what
+/// the driver's pass recorded is read back through `onevcs`'s own rehearsal of the
+/// same pass: nothing but the driver ran a pass before it, so a rehearsal that
+/// reuses a verdict at the branch's tip reuses the one the driver derived there.
 #[test]
-fn an_idle_driver_reuses_a_recorded_verdict_until_its_branch_moves() {
+fn an_idle_driver_records_the_verdict_the_next_pass_reuses_until_its_branch_moves() {
     const BRANCH: &str = "kept/work";
     let world = sweeping_world("retirement-verdicts").with_env(crate::harness::LOOP_STATS_ENV, "1");
     let repo = world.repository("local-direct", &[]);
@@ -2894,33 +2898,18 @@ fn an_idle_driver_reuses_a_recorded_verdict_until_its_branch_moves() {
         crate::harness::agent("hold", &[]),
         Vec::new(),
     );
-    world.until("the idle pass to record the branch's verdict", |world| {
-        recorded_verdict(world, BRANCH).is_some()
-    });
-    let (derived, written) = recorded_verdict(&world, BRANCH).expect("a verdict");
-    assert_eq!(keyed_tip(&derived), first_tip, "{derived}");
+    until_swept(&world, "verdicts", 2);
+    let reused = rehearsed(&world, BRANCH);
+    assert_eq!(reused["tip"], first_tip, "{reused}");
+    assert_eq!(reused["outcome"], "kept", "{reused}");
+    assert_eq!(reused["class"], "keep", "{reused}");
     assert_eq!(
-        derived["verdict"]["retirement"]["class"], "keep",
-        "{derived}"
-    );
-
-    // Two whole passes more over the same branch and base: the record is the one
-    // the first derivation wrote, untouched.
-    crate::harness::reporting(&world, "verdicts");
-    let swept = crate::harness::counts(&world, "verdicts").maintenance_sweeps;
-    until_swept(&world, "verdicts", swept + 3);
-    let (reused, rewritten) = recorded_verdict(&world, BRANCH).expect("a verdict");
-    assert_eq!(
-        reused, derived,
-        "a pass over an unmoved branch changed its verdict"
-    );
-    assert_eq!(
-        rewritten, written,
-        "a pass over an unmoved branch derived its verdict again rather than reusing it"
+        reused["derivation"], "reused",
+        "the driver's pass recorded no verdict the next pass could reuse: {reused}"
     );
 
     // More work on the branch: its tip is an input the recorded verdict was keyed
-    // under, so the next pass proves it again.
+    // under, so the driver's next pass proves it again and records that.
     let clone = person(&world, &repo);
     git(&world, &clone, &["checkout", BRANCH]);
     std::fs::write(clone.join("kept.md"), "more work on the branch\n").expect("written");
@@ -2938,18 +2927,15 @@ fn an_idle_driver_reuses_a_recorded_verdict_until_its_branch_moves() {
             &format!("+{BRANCH}:{BRANCH}"),
         ],
     );
-    world.until(
-        "the idle pass to derive the moved branch's verdict",
-        |world| {
-            recorded_verdict(world, BRANCH)
-                .is_some_and(|(record, _)| keyed_tip(&record) == moved_tip)
-        },
-    );
-    let (rederived, rederived_at) = recorded_verdict(&world, BRANCH).expect("a verdict");
-    assert!(rederived_at > written, "{rederived}");
+    crate::harness::reporting(&world, "verdicts");
+    let swept = crate::harness::counts(&world, "verdicts").maintenance_sweeps;
+    until_swept(&world, "verdicts", swept + 2);
+    let rederived = rehearsed(&world, BRANCH);
+    assert_eq!(rederived["tip"], moved_tip, "{rederived}");
+    assert_eq!(rederived["outcome"], "kept", "{rederived}");
     assert_eq!(
-        rederived["verdict"]["retirement"]["class"], "keep",
-        "{rederived}"
+        rederived["derivation"], "reused",
+        "the driver's pass recorded no verdict for the moved branch: {rederived}"
     );
     assert!(
         holds(&world, &repo.checkout, BRANCH),
