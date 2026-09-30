@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.53.2](https://github.com/nickderobertis/onepipeline/compare/v0.53.1...v0.53.2) - 2026-09-30
+
+### Fixed
+
+- *(maintenance)* stop a closing driver's sweep at the next identity ([#595](https://github.com/nickderobertis/onepipeline/pull/595))
+- *(channel)* answer a decision surface when an edit removes its node ([#591](https://github.com/nickderobertis/onepipeline/pull/591))
+
 ## [0.53.1](https://github.com/nickderobertis/onepipeline/compare/v0.53.0...v0.53.1) - 2026-09-29
 
 ### Fixed
