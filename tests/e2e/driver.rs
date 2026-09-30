@@ -1969,14 +1969,17 @@ fn a_detached_adoptions_driver_outlives_its_launcher_and_the_interrupt_its_group
     // words never carry the path. The shell says it has stayed only once the
     // adopting verb has returned to it: a shell still waiting on a child that
     // exits `0` after the interrupt reads that child as having handled it, as
-    // bash — macOS's `sh` — does, and goes on to its `sleep`.
+    // bash — macOS's `sh` — does, and goes on to its `sleep`. It stays in
+    // one-second sleeps because dash, Linux's `sh`, catches an interrupt that
+    // lands between two commands and acts on it only once the next one ends.
     let announced = world.root.join("adopt.announced");
     let stayed = world.root.join("launcher.stayed");
     let mut launcher = world.cmd_on(
         Path::new("sh"),
         &[
             "-c",
-            "\"$0\" adopt \"$1\" --detach > \"$2\" && : > \"$3\" && sleep 120",
+            "\"$0\" adopt \"$1\" --detach > \"$2\" && : > \"$3\" && i=0 && \
+             while [ $i -lt 120 ]; do sleep 1; i=$((i + 1)); done",
             &crate::harness::binary().display().to_string(),
             &run,
             &announced.display().to_string(),
