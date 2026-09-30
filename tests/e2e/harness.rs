@@ -146,6 +146,9 @@ fn the_harness_double_draws_its_stream_as_the_released_cli_does() {
         Some(&json!("result")),
         "{ndjson}"
     );
+    // `--compact` alone implies JSON, as it does for the released CLI — which
+    // is the argv oneharness-core's own streaming SDK row sends.
+    assert_eq!(answered(&run(&worker, &["--compact"])), ndjson);
 
     // The contradiction, and a view with no name, are refused naming what
     // was asked.
@@ -174,6 +177,12 @@ fn the_harness_double_draws_its_stream_as_the_released_cli_does() {
     assert!(pretty.lines().count() > 1, "not pretty: {pretty}");
     let parsed: Value = serde_json::from_str(&pretty).expect("one JSON report");
     assert_eq!(parsed["results"][0]["harness"], "claude-code", "{parsed}");
+    let compact = answered(&run(&judge, &["--compact"]));
+    assert_eq!(compact.lines().count(), 1, "not compact: {compact}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&compact).expect("one JSON report"),
+        parsed
+    );
     let _ = std::fs::remove_dir_all(&fakes);
 }
 
@@ -183,8 +192,10 @@ fn the_harness_double_draws_its_stream_as_the_released_cli_does() {
 ///
 /// Two files each naming a chain select the second's, and given the other way
 /// round the first's; a second file that is not there is refused by name rather
-/// than read as though only the first were given. Driven as the process onejudge
-/// spawns, against the compiled double.
+/// than read as though only the first were given. A worker turn that runs a
+/// nested `oneharness run` hands it every file, in order, so the nested turn
+/// selects what the outer one did. Driven as the process onejudge spawns,
+/// against the compiled double.
 #[test]
 fn the_harness_double_layers_a_repeated_config_in_order() {
     let fakes = std::env::temp_dir().join(format!("onepipeline-layers-{}", std::process::id()));
@@ -225,6 +236,62 @@ fn the_harness_double_layers_a_repeated_config_in_order() {
             "{configs:?} did not layer the later file over the earlier: {report}"
         );
     }
+
+    // A nested run inherits the whole layering: the outer turn is a worker's,
+    // and its nested evaluator turn is recorded with both files' texts and
+    // answers under the chain the later one names.
+    let worktree = fakes.join("worktree");
+    std::fs::create_dir_all(&worktree).expect("the agent side's worktree");
+    std::fs::write(fakes.join("harness.nested"), "--no-history").expect("the nested script");
+    // The direct turns above recorded these same files, so what is read back
+    // below has to be the outer turn's alone.
+    std::fs::remove_file(fakes.join("invocations.jsonl")).expect("the direct turns recorded");
+    let outer = Command::new(double("fake-oneharness"))
+        .args([
+            "run",
+            "--format",
+            "json",
+            "--events",
+            "--stream",
+            "--no-history",
+        ])
+        .args(["--config", &codex, "--config", &claude])
+        .args(["--cwd", worktree.to_str().expect("a UTF-8 scratch path")])
+        .args(["--prompt", "do the work"])
+        .env(SCRIPT_DIR_ENV, &fakes)
+        .stdin(Stdio::null())
+        .output()
+        .expect("the compiled double runs");
+    assert_eq!(
+        outer.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&outer.stderr)
+    );
+    std::fs::remove_file(fakes.join("harness.nested")).expect("the nested script is removed");
+    let recorded: Vec<Value> = std::fs::read_to_string(fakes.join("invocations.jsonl"))
+        .expect("the double records its invocations")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("one JSON record per line"))
+        .collect();
+    let texts = |path: &str| std::fs::read_to_string(path).expect("the config is readable");
+    let nested_configs: Vec<&Value> = recorded
+        .iter()
+        .filter(|call| call["tool"] == "oneharness-config")
+        .filter(|call| call["args"][0] == EVALUATOR_OPENING)
+        .collect();
+    assert!(
+        nested_configs
+            .iter()
+            .any(|call| call["args"] == json!([EVALUATOR_OPENING, texts(&codex), texts(&claude)])),
+        "the nested run was not handed both files in order: {recorded:?}"
+    );
+    assert!(
+        recorded
+            .iter()
+            .any(|call| call["tool"] == "oneharness-nested" && call["args"][1] == "0"),
+        "the nested run did not answer under the layered config: {recorded:?}"
+    );
 
     let missing = fakes.join("gone.toml");
     let refused = judge(&[codex.as_str(), missing.to_string_lossy().as_ref()]);

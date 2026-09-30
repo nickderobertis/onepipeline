@@ -59,7 +59,7 @@
 //!
 //! [`NamedVerdict`]: onejudge::NamedVerdict
 
-// llmlint: ignore-file[invalid_states_unrepresentable] `Turn::role` and `Tool::kind` are
+// llmlint: ignore-file[invalid_states_unrepresentable] `Turn::role` and `Activity::kind` are
 // **onejudge's** vocabulary, read out of an artifact that library wrote, and this crate
 // only renders them. Narrowing either into an enum here would re-declare a vocabulary a
 // sibling owns — the re-declaration src/AGENTS.md forbids — and would make a role or a
@@ -627,8 +627,9 @@ pub(crate) struct Turn {
     pub role: String,
     /// What they said.
     pub text: String,
-    /// The tools the turn used, in the order it used them.
-    pub tools: Vec<Tool>,
+    /// What the turn did and said — its tool calls, their answers, and its own
+    /// words — in the order it did them.
+    pub activity: Vec<Activity>,
 }
 
 impl Turn {
@@ -636,7 +637,7 @@ impl Turn {
         Self {
             role: string(message, "role"),
             text: string(message, "content"),
-            tools: Self::tools_of(message),
+            activity: Self::activity_of(message),
         }
     }
 
@@ -658,17 +659,17 @@ impl Turn {
         let turn = Self {
             role: string(result, "harness"),
             text: string(result, "text"),
-            tools: Self::tools_of(result),
+            activity: Self::activity_of(result),
         };
-        let said_something = !turn.text.is_empty() || !turn.tools.is_empty();
+        let said_something = !turn.text.is_empty() || !turn.activity.is_empty();
         (!turn.role.is_empty() && said_something).then_some(turn)
     }
 
-    fn tools_of(value: &Value) -> Vec<Tool> {
+    fn activity_of(value: &Value) -> Vec<Activity> {
         value
             .get("events")
             .and_then(Value::as_array)
-            .map(|events| events.iter().map(Tool::of).collect())
+            .map(|events| events.iter().map(Activity::of).collect())
             .unwrap_or_default()
     }
 }
@@ -680,22 +681,22 @@ impl Turn {
 /// only the asks is reading half a turn; and the agent's words beside them,
 /// because they are what says *why* it reached for the tool.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Tool {
+pub(crate) struct Activity {
     /// `tool_call`, `tool_result`, `message` or `reasoning`, as the report names
     /// it.
     pub kind: String,
     /// The tool, where the harness named one.
     pub name: String,
-    /// The one text this half of the exchange carries.
-    pub text: ToolText,
+    /// The one text this event carries.
+    pub text: ActivityText,
 }
 
-impl Tool {
+impl Activity {
     fn of(event: &Value) -> Self {
         let kind = string(event, "kind");
         Self {
             name: string(event, "name"),
-            text: ToolText::of(&kind, |key| event.get(key)),
+            text: ActivityText::of(&kind, |key| event.get(key)),
             kind,
         }
     }
@@ -711,7 +712,7 @@ const TOOL_RESULT: &str = "tool_result";
 /// state no producer emits, and one that leaves a renderer choosing between
 /// them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ToolText {
+pub(crate) enum ActivityText {
     /// What a call acted on, rendered compactly. Empty where the producer
     /// stated nothing.
     Acted(String),
@@ -804,7 +805,7 @@ impl Voice {
 const MESSAGE: &str = "message";
 const REASONING: &str = "reasoning";
 
-impl ToolText {
+impl ActivityText {
     /// The text an event of this `kind` carries, read out of the payload by
     /// `field`.
     ///
@@ -1077,17 +1078,17 @@ mod tests {
         let turns = turns(&document);
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].role, "user");
-        assert!(turns[0].tools.is_empty());
+        assert!(turns[0].activity.is_empty());
         assert_eq!(turns[1].text, "Ran the gate.");
-        assert_eq!(turns[1].tools[0].name, "bash");
+        assert_eq!(turns[1].activity[0].name, "bash");
         assert!(
-            matches!(&turns[1].tools[0].text, ToolText::Acted(detail) if detail.contains("just check")),
+            matches!(&turns[1].activity[0].text, ActivityText::Acted(detail) if detail.contains("just check")),
             "{:?}",
-            turns[1].tools[0]
+            turns[1].activity[0]
         );
         // A result names no tool, and is not given one.
-        assert_eq!(turns[1].tools[1].kind, "tool_result");
-        assert!(turns[1].tools[1].name.is_empty());
+        assert_eq!(turns[1].activity[1].kind, "tool_result");
+        assert!(turns[1].activity[1].name.is_empty());
     }
 
     /// A single-sided member's report is oneharness's own, and it reads as the
@@ -1115,11 +1116,11 @@ mod tests {
         assert_eq!(turns.len(), 1, "{turns:?}");
         assert_eq!(turns[0].role, "claude-code");
         assert_eq!(turns[0].text, "Ran the gate.");
-        assert_eq!(turns[0].tools[0].name, "bash");
+        assert_eq!(turns[0].activity[0].name, "bash");
         assert!(
-            matches!(&turns[0].tools[0].text, ToolText::Acted(detail) if detail.contains("just check")),
+            matches!(&turns[0].activity[0].text, ActivityText::Acted(detail) if detail.contains("just check")),
             "{:?}",
-            turns[0].tools[0]
+            turns[0].activity[0]
         );
     }
 
