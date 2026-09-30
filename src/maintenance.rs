@@ -28,7 +28,10 @@
 //! it visits every registered identity in sorted order, resolves `every` (rule,
 //! else default) and calls `onevcs::pool_maintain(Scope::Repo(identity),
 //! Some(every))`. It is bounded by construction — every command runs under the
-//! identity's own `timeout` — and a driver closing out joins it. Which identities
+//! identity's own `timeout` — and a driver closing out stops it at the next
+//! identity boundary: the identity in progress is finished, none is begun after
+//! it, and the record says the sweep was cut short and names the identities it
+//! never reached (divergence entry 97). Which identities
 //! exist is [`onevcs::registered_identities`], the library form of the unindented
 //! lines `onevcs repos` prints: the registry is keyed by normalized origin, so
 //! what it answers is already the sorted order a sweep visits in, and a registry
@@ -47,6 +50,7 @@
 //! and its `branches-retired` record.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -61,7 +65,10 @@ use crate::engine::Message;
 use crate::error::{Error, Result};
 use crate::graph::NodeStatus;
 use crate::ledger::RunPaths;
-use crate::payload::{BranchesRetired, RetiredBranch, RetirementTrigger, UnretiredIdentity};
+use crate::payload::{
+    BranchesRetired, CutReason, CutShort, RetiredBranch, RetirementTrigger, Unreached,
+    UnretiredIdentity,
+};
 use crate::projection::RunState;
 
 /// The flag a launch names the schedule with.
@@ -386,6 +393,9 @@ pub(crate) struct Retirements {
     /// Every identity whose pass failed, and every branch whose deletion did not
     /// finish.
     pub(crate) failed: Vec<UnretiredIdentity>,
+    /// Every identity the pass never began because the driver was closing out,
+    /// in visiting order; empty for a pass that reached them all.
+    pub(crate) unreached: Vec<String>,
 }
 
 impl Retirements {
@@ -441,10 +451,20 @@ impl Retirements {
         }
     }
 
+    /// The pass a sweep never began, its maintenance having been cut short:
+    /// every identity it would have visited is unreached.
+    fn never_begun(keys: Vec<String>) -> Self {
+        Self {
+            unreached: keys,
+            ..Self::default()
+        }
+    }
+
     /// A sweep that retired nothing and failed nowhere is the common case on an
-    /// idle host, and writes no record.
+    /// idle host, and writes no record; one cut short writes one regardless,
+    /// because the cut is itself news.
     fn is_recorded(&self) -> bool {
-        !self.retired.is_empty() || !self.failed.is_empty()
+        !self.retired.is_empty() || !self.failed.is_empty() || !self.unreached.is_empty()
     }
 
     /// The `branches-retired` record's payload.
@@ -452,6 +472,7 @@ impl Retirements {
         match serde_json::to_value(BranchesRetired {
             retired: self.retired.clone(),
             failed: self.failed.clone(),
+            cut_short: cut_short(&self.unreached),
         }) {
             Ok(Value::Object(payload)) => payload,
             // llmlint: ignore[changed_behavior_has_e2e] unreachable by construction: a
@@ -524,17 +545,23 @@ pub(crate) struct PoolsMaintained {
     /// to the record as the record's own document spells it.
     // llmlint: ignore[invalid_states_unrepresentable] the instant is a `String` on every record this crate writes — `LaunchRecord::started_at`, the envelope's `ts` — and on the sibling's `SlotStatus::last_maintained` beside it; the one writer is `sys::now_rfc3339`, and `payload::PoolMaintenance` declares the same shape.
     pub(crate) started_at: String,
-    /// Every identity, in sorted order; or why the identities could not be
-    /// enumerated at all, where they could not.
+    /// Every identity it visited, in sorted order; or why the identities could
+    /// not be enumerated at all, where they could not.
     pub(crate) identities: std::result::Result<Vec<Maintained>, String>,
+    /// Every identity the pass never began because the driver was closing out,
+    /// in visiting order; empty for a pass that reached them all, and for one
+    /// that could not enumerate them.
+    pub(crate) unreached: Vec<String>,
 }
 
 impl PoolsMaintained {
-    /// Whether this sweep is written into the record at all.
+    /// Whether this sweep is written into the record at all: one cut short is,
+    /// whatever it visited, because the cut is itself news.
     fn is_recorded(&self) -> bool {
-        self.identities.as_ref().map_or(true, |identities| {
-            identities.iter().any(Maintained::is_recorded)
-        })
+        !self.unreached.is_empty()
+            || self.identities.as_ref().map_or(true, |identities| {
+                identities.iter().any(Maintained::is_recorded)
+            })
     }
 
     /// The `pool-maintenance` record's payload.
@@ -556,8 +583,34 @@ impl PoolsMaintained {
         if let Err(failure) = &self.identities {
             payload.insert("error".to_owned(), json!(crate::engine::bounded(failure)));
         }
+        if let Some(cut) = cut_short(&self.unreached) {
+            payload.insert("cut_short".to_owned(), json!(cut));
+        }
         payload
     }
+}
+
+/// A record's `cut_short`, where the pass left any identity unreached.
+fn cut_short(unreached: &[String]) -> Option<CutShort> {
+    Unreached::new(unreached.to_vec()).map(|unreached| CutShort {
+        reason: CutReason::DriverClosing,
+        unreached,
+    })
+}
+
+/// Visit each key in order until `stop` is raised, and answer the keys never
+/// begun.
+///
+/// `stop` is read before each key and only there: a key once begun runs to
+/// completion, so nothing is abandoned inside a call into the sibling.
+fn visit(keys: &[String], stop: &AtomicBool, mut each: impl FnMut(&String)) -> Vec<String> {
+    for (at, key) in keys.iter().enumerate() {
+        if stop.load(Ordering::SeqCst) {
+            return keys[at..].to_vec();
+        }
+        each(key);
+    }
+    Vec::new()
 }
 
 fn identities() -> std::result::Result<Vec<String>, String> {
@@ -565,9 +618,10 @@ fn identities() -> std::result::Result<Vec<String>, String> {
         .map_err(|error| format!("the host's registered identities could not be read: {error}"))
 }
 
-/// Maintain every registered identity once, on the schedule; and the keys it
-/// visited, which the retirement pass then walks.
-fn maintain_pools(config: &MaintenanceConfig) -> (PoolsMaintained, Vec<String>) {
+/// Maintain every registered identity once, on the schedule, stopping at the
+/// next identity boundary once `stop` is raised; and every registered key, which
+/// the retirement pass then walks.
+fn maintain_pools(config: &MaintenanceConfig, stop: &AtomicBool) -> (PoolsMaintained, Vec<String>) {
     let started_at = crate::sys::now_rfc3339();
     let keys = match identities() {
         Ok(keys) => keys,
@@ -576,19 +630,21 @@ fn maintain_pools(config: &MaintenanceConfig) -> (PoolsMaintained, Vec<String>) 
                 PoolsMaintained {
                     started_at,
                     identities: Err(failure),
+                    unreached: Vec::new(),
                 },
                 Vec::new(),
             )
         }
     };
-    let identities = keys
-        .iter()
-        .map(|identity| maintain(config, identity.clone()))
-        .collect();
+    let mut identities = Vec::with_capacity(keys.len());
+    let unreached = visit(&keys, stop, |identity| {
+        identities.push(maintain(config, identity.clone()));
+    });
     (
         PoolsMaintained {
             started_at,
             identities: Ok(identities),
+            unreached,
         },
         keys,
     )
@@ -607,13 +663,16 @@ fn maintain_pools(config: &MaintenanceConfig) -> (PoolsMaintained, Vec<String>) 
 /// retirement pass costs several times what a pool maintenance does, and a
 /// record held back behind it reaches a reader only after the next sweep may
 /// already have maintained the same slots again.
-fn retire(keys: &[String], named: &Mutex<Vec<Named>>) -> Retirements {
+///
+/// Once `stop` is raised no further identity is begun; the one in progress runs
+/// its whole `retire_finished`, every deletion and record in it included.
+fn retire(keys: &[String], named: &Mutex<Vec<Named>>, stop: &AtomicBool) -> Retirements {
     let mut retirements = Retirements::default();
     if keys.is_empty() {
         return retirements;
     }
     let providers = onevcs::Providers::real();
-    for identity in keys {
+    let unreached = visit(keys, stop, |identity| {
         let current = named.lock().unwrap_or_else(PoisonError::into_inner).clone();
         let named = resolved(&current, |repo| {
             providers
@@ -633,7 +692,8 @@ fn retire(keys: &[String], named: &Mutex<Vec<Named>>) -> Retirements {
                 },
             ),
         );
-    }
+    });
+    retirements.unreached = unreached;
     retirements
 }
 
@@ -669,15 +729,22 @@ fn maintain(config: &MaintenanceConfig, identity: String) -> Maintained {
 ///
 /// Started on an idle pass, it hands its [`PoolsMaintained`] and then its
 /// [`Retirements`] back over the loop's own channel, and is joined where the
-/// loop takes up the second — or, where the loop ends first, when this is
-/// dropped, which is what makes a driver closing out wait for it. The join is bounded by construction: every command the sweep runs is
-/// under its identity's own `timeout`.
+/// loop takes up the second — or, where the loop ends first, by
+/// [`Maintenance::close`] or when this is dropped. A join first raises `stop`, so
+/// a driver closing out waits for the identity in progress and no more: the
+/// sweep begins no further identity, in either pass, and a pool pass cut short
+/// begins no retirement pass at all. That wait is bounded by construction: every
+/// command the sweep runs is under its identity's own `timeout`. What the cut
+/// left due, other drivers' idle passes and the host's own sweep pick up.
 ///
 /// While it is live the run root carries a marker, which is what lets `status`
 /// — another process — say a maintenance is in progress.
 pub(crate) struct Sweep {
     handle: Option<JoinHandle<()>>,
     paths: RunPaths,
+    /// Raised when the driver stops waiting on the sweep; read by the thread
+    /// before it begins each identity.
+    stop: Arc<AtomicBool>,
 }
 
 impl Sweep {
@@ -705,14 +772,22 @@ impl Sweep {
             &paths.maintenance(),
             &json!({"started_at": started_at, "pid": crate::sys::pid()}),
         ); // llmlint: ignore-end[changed_behavior_has_e2e]
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
         let handle = std::thread::Builder::new()
             .name("pool-maintenance".to_owned())
             .spawn(move || {
-                let (swept, keys) = maintain_pools(&config);
+                let (swept, keys) = maintain_pools(&config, &stopping);
+                let cut = !swept.unreached.is_empty();
                 // A loop that has gone has nobody to record it; the slots keep
                 // their own stamps regardless.
                 let _ = tx.send(Message::Maintained(Box::new(swept)));
-                let _ = tx.send(Message::Retired(Box::new(retire(&keys, &named))));
+                let retirements = if cut {
+                    Retirements::never_begun(keys)
+                } else {
+                    retire(&keys, &named, &stopping)
+                };
+                let _ = tx.send(Message::Retired(Box::new(retirements)));
             });
         match handle {
             Ok(handle) => {
@@ -725,6 +800,7 @@ impl Sweep {
                 Some(Self {
                     handle: Some(handle),
                     paths: paths.clone(),
+                    stop,
                 })
             }
             // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can
@@ -740,8 +816,13 @@ impl Sweep {
         }
     }
 
-    /// Wait for the thread, and take the marker back.
+    /// Stop the thread at its next identity boundary, wait for it, and take the
+    /// marker back.
+    ///
+    /// Where the thread has already sent its last report — the loop taking up
+    /// its retirement pass — the stop reaches nothing and the wait is its exit.
     fn join(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -835,6 +916,24 @@ pub(crate) fn results_lines(view: &crate::views::RunView) -> String {
             (None, None) => "no outcome recorded".to_owned(),
         };
         out.push_str(&format!("      {identity} (every {every}): {what}\n"));
+    }
+    if let Some(cut) = record
+        .payload
+        .get("cut_short")
+        .and_then(|cut| serde_json::from_value::<CutShort>(cut.clone()).ok())
+    {
+        let why = match cut.reason {
+            CutReason::DriverClosing => "as the driver closed",
+        };
+        out.push_str(&format!(
+            "      the sweep was cut short {why}, and did not reach: {}\n",
+            cut.unreached
+                .identities()
+                .iter()
+                .map(|identity| crate::views::one_line(identity))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     out
 }
@@ -1059,8 +1158,9 @@ impl Maintenance {
         Ok(())
     }
 
-    /// Wait for a sweep still running as the driver closes out, and record what
-    /// it did.
+    /// Stop a sweep still running as the driver closes out at its next identity
+    /// boundary, wait for the identity in progress, and record what it did —
+    /// with the identities it never reached, where it was cut short.
     ///
     /// The thread hands its reports over the loop's channel, which the loop has
     /// stopped reading; so it is joined here and the channel drained for
@@ -1497,6 +1597,7 @@ mod tests {
                     ]),
                 ),
             ]),
+            unreached: Vec::new(),
         };
         assert!(!nothing.is_recorded());
 
@@ -1520,6 +1621,7 @@ mod tests {
                         outcome: kept.clone(),
                     }]),
                 )]),
+                unreached: Vec::new(),
             };
             assert!(held.is_recorded(), "{kept:?} was not recorded");
         }
@@ -1536,6 +1638,7 @@ mod tests {
                     outcome: Err("the registry could not be read".into()),
                 },
             ]),
+            unreached: Vec::new(),
         };
         assert!(something.is_recorded());
         let payload = Value::Object(something.payload());
@@ -1574,6 +1677,7 @@ mod tests {
         let failed = PoolsMaintained {
             started_at: "2026-09-20T00:00:00.000Z".into(),
             identities: Err("the host's registered identities could not be read".into()),
+            unreached: Vec::new(),
         };
         assert!(failed.is_recorded());
         let payload = Value::Object(failed.payload());
@@ -1736,6 +1840,97 @@ mod tests {
             identity_phrase(&read),
             "slot 1 kept: busy — a command is working in it right now"
         );
+    }
+
+    /// A stop is read before each identity and only there: the identity whose
+    /// visit raised it runs to its end, no later one is begun, and every one not
+    /// begun is answered in visiting order. A stop never raised leaves nothing
+    /// unreached, and one raised before the first leaves every identity.
+    #[test]
+    fn a_stop_is_honoured_at_the_next_identity_boundary_and_names_what_it_never_began() {
+        let keys: Vec<String> = ["a", "b", "c", "d"].map(str::to_owned).to_vec();
+
+        let stop = AtomicBool::new(false);
+        let mut finished = Vec::new();
+        let unreached = visit(&keys, &stop, |key| {
+            if key == "b" {
+                // Raised mid-identity, as a driver closing out raises it.
+                stop.store(true, Ordering::SeqCst);
+            }
+            finished.push(key.clone());
+        });
+        assert_eq!(finished, ["a", "b"]);
+        assert_eq!(unreached, ["c", "d"]);
+
+        let running = AtomicBool::new(false);
+        let mut all = Vec::new();
+        assert!(visit(&keys, &running, |key| all.push(key.clone())).is_empty());
+        assert_eq!(all, keys);
+
+        let stopped = AtomicBool::new(true);
+        let mut none = Vec::new();
+        assert_eq!(visit(&keys, &stopped, |key| none.push(key.clone())), keys);
+        assert!(none.is_empty());
+    }
+
+    /// A pass cut short writes its record even where it would otherwise record
+    /// nothing, carrying `cut_short` with the reason and exactly the identities
+    /// it never began; the identity in progress is an ordinary entry. A pass that
+    /// visited every identity carries no `cut_short` key at all, and one that
+    /// could not enumerate the identities carries its `error` and no cut.
+    #[test]
+    fn a_pass_cut_short_is_recorded_with_what_it_never_reached_and_a_whole_one_is_not_marked() {
+        let cut = PoolsMaintained {
+            started_at: "2026-09-20T00:00:00.000Z".into(),
+            identities: Ok(vec![quiet("a", IdentityOutcome::NoMaintainCommand)]),
+            unreached: vec!["b".into(), "c".into()],
+        };
+        assert!(cut.is_recorded(), "a cut sweep is news on its own");
+        let payload = Value::Object(cut.payload());
+        assert_eq!(
+            payload["cut_short"],
+            json!({"reason": "driver-closing", "unreached": ["b", "c"]})
+        );
+        assert_eq!(payload["identities"], json!([]), "{payload}");
+
+        let midway = PoolsMaintained {
+            started_at: "2026-09-20T00:00:00.000Z".into(),
+            identities: Ok(vec![ran("a")]),
+            unreached: vec!["b".into()],
+        };
+        let payload = Value::Object(midway.payload());
+        assert_eq!(payload["identities"][0]["identity"], "a");
+        assert_eq!(payload["cut_short"]["unreached"], json!(["b"]));
+
+        let whole = PoolsMaintained {
+            started_at: "2026-09-20T00:00:00.000Z".into(),
+            identities: Ok(vec![ran("a")]),
+            unreached: Vec::new(),
+        };
+        assert!(whole.payload().get("cut_short").is_none());
+
+        let unlisted = PoolsMaintained {
+            started_at: "2026-09-20T00:00:00.000Z".into(),
+            identities: Err("the host's registered identities could not be read".into()),
+            unreached: Vec::new(),
+        };
+        let payload = unlisted.payload();
+        assert!(payload.get("error").is_some());
+        assert!(payload.get("cut_short").is_none(), "{payload:?}");
+
+        // The retirement pass a cut maintenance never began names every
+        // enumerated identity, with nothing retired and nothing failed.
+        let never = Retirements::never_begun(vec!["a".into(), "b".into()]);
+        assert!(never.is_recorded());
+        assert_eq!(
+            Value::Object(never.payload()),
+            json!({
+                "retired": [],
+                "failed": [],
+                "cut_short": {"reason": "driver-closing", "unreached": ["a", "b"]},
+            })
+        );
+        assert!(Retirements::default().payload().get("cut_short").is_none());
     }
 
     /// A driver with no schedule starts nothing and waits on nothing; one with a

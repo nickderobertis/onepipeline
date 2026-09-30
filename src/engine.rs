@@ -1724,9 +1724,11 @@ fn converge(
     // A landing the last pass settled is told to `onevcs` before the driver
     // lets go, since no pass follows it.
     supersessions.pass(paths, journal, state)?;
-    // A sweep still running is waited for: its commands are bounded by their
-    // identities' own timeouts, and a driver that left one behind would leave a
-    // slot claimed by a process that had gone.
+    // A sweep still running is stopped at its next identity boundary and the
+    // identity in progress waited for: its commands are bounded by their
+    // identities' own timeouts, a driver that left one behind would leave a slot
+    // claimed by a process that had gone, and one that waited for every
+    // remaining identity would hold the run's result behind all of them.
     maintenance.close(paths, journal, &rx)?;
 
     Ok(graph::state_of(&statuses_of(&mut derived, state)))
