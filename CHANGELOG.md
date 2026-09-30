@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.53.3](https://github.com/nickderobertis/onepipeline/compare/v0.53.2...v0.53.3) - 2026-09-30
+
+### Fixed
+
+- *(deps)* link the onetaskgraph release that searches boards natively and follows copy links ([#598](https://github.com/nickderobertis/onepipeline/pull/598))
+
 ## [0.53.2](https://github.com/nickderobertis/onepipeline/compare/v0.53.1...v0.53.2) - 2026-09-30
 
 ### Fixed
