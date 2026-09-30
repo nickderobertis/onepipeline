@@ -271,12 +271,18 @@ and the closeout then **finishes** that change request rather than opening anoth
 the drafter is shown it and told how to read the worker's transcript
 (`onepipeline transcript RUN NODE`, which every dispatch's `ONEPIPELINE_RUN_ID` and
 `ONEPIPELINE_RUNS_DIR` serve), the drafted description is written onto it under the
-plan's `title`, and the same publication lifts the draft and lands under the
-resolved policy. The node settles on the publication's own word, and its detail
-says the worker opened the change request as a draft and the closeout marked it
-ready. A node declared `draft: true` leaves its change request as a draft for a
-person instead — opened as one, or held as one — and settles `done` with outcome
-`change-draft`; its dependents proceed. It costs no
+plan's `title`, and the same publication hands it to `onevcs`'s draft lifecycle:
+every change request published with no draft reason is a draft while its required
+checks run, and once they are green it is lifted and lands under the resolved
+policy — or, on a `change-open` identity whose approvals are required, it is kept as
+a draft for its user's review, and the node settles `done` with outcome
+`change-review-draft`, unlanded, lifted on the host or with `onevcs change ready`.
+The node settles on the publication's own word, and its detail says the worker
+opened the change request as a draft and what the publication answered for it —
+never that the closeout marked it ready, because the closeout lifts nothing itself.
+A node declared `draft: true` leaves its change request as a draft for a person
+instead — opened as one, or held as one, and never lifted by green checks — and
+settles `done` with outcome `change-draft`; its dependents proceed. It costs no
 visibility either: a drafting dispatch that was configured, attempted, and produced
 no body is recorded against the node under one of three endings — `dispatch-failed`
 for one that could not be run or ran without succeeding, `schema-refused` for one

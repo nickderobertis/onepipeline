@@ -5307,18 +5307,22 @@ takes this path, and a session with none takes the path it always took.
 5. One publication — `onevcs publish` with no body where the session holds the
    change request, and with the drafted body where it opens one — under the
    release reason `release::draft_reason` composes, or `DraftReason::Held`
-   where the node says `draft: true`, or none. With none, the adopted draft is
-   lifted (`draft-lifted`) and the change lands under the resolved policy; the
-   node settles on the publication's own words — `merged`, `queued`,
-   `change-open`, or a named failure — with the same routing and retry budget
-   every publication has. Its settlement detail says, in one sentence, that the
-   worker opened the change request as a draft — or that an earlier publication
-   of the branch left it as one, or open, which the session's own stream tells
-   apart: a worker's draft records `change-drafted` there before the closeout —
-   that the closeout wrote the drafted description onto it, and that it was
-   marked ready for review — or left as a draft — which is what tells such a
-   node from one that published afresh in `results` and `status`; the outcome
-   word is deliberately the same.
+   where the node says `draft: true`, or none. With none, `onevcs`'s draft
+   lifecycle (entry 100) decides — the closeout lifts nothing itself: the
+   adopted draft is watched until its checks settle and then lifted
+   (`draft-lifted`) and landed under the resolved policy, or kept as a draft for
+   its user's review; the node settles on the publication's own words —
+   `merged`, `queued`, `change-open`, `change-review-draft`, or a named failure —
+   with the same routing and retry budget every publication has. Its settlement
+   detail says, in one sentence, that the worker opened the change request as a
+   draft — or that an earlier publication of the branch left it as one, or open,
+   which the session's own stream tells apart: a worker's draft records
+   `change-drafted` there before the closeout — that the closeout wrote the
+   drafted description onto it, and what the publication answered for it:
+   lifted, lifted and merged, kept as a draft for its user's review, or left as
+   the draft the plan asked for — which is what tells such a node from one that
+   published afresh in `results` and `status`; the outcome word is deliberately
+   the same.
 
 **The composed drafting task.** One composition, sections in this order, every
 heading a `##` so it sits beside the headings the rendered task already carries:
@@ -8384,3 +8388,47 @@ contract's two amended sentences. `tests/e2e/watch.rs` drives every ruling above
 the compiled binary over real run directories, and `tests/e2e/lifecycle.rs` and
 `tests/e2e/adoption.rs` drive the held-wait cadence with the surface interval shortened —
 the second to its fixed ceiling, on a backdated record of when each wait was queued.
+
+## 100. A green change kept as a draft for its user's review had no word — RESOLVED
+
+**Ruling: the plan `authoring:draft-pr-lifecycle` (contracts C2–C5, recorded
+authoritatively in `onevcs`'s own `docs/contract.md`) adds one publication outcome,
+`change-review-draft`, which settles its node `done`.** `onevcs` 0.36.0 opens every
+change request a publication carries no draft reason for as a draft while its
+required checks run, and once they are green lifts it — or, on a `change-open`
+identity whose approvals are required, keeps it as a draft for its own user's review
+and answers `PublishOutcome::ChangeReviewDraft`. That answer is a fourth thing a
+change can be, and the vocabulary had no word for it.
+
+**`change-review-draft`, status `done`.** Declared once, as `vcs::REVIEW_DRAFTED`
+beside `vcs::DRAFTED`, and returned by `vcs::outcome_of`. The node is unlanded, names
+its change request's URL, and its detail says in one line that the checks are green
+and the change request is kept as a draft for its user's review, lifted on the host
+or with `onevcs change ready`. Its dependents proceed, and a run whose nodes all
+settle so fires its success hook. It is distinct from both earlier drafts, which keep
+their meanings: `change-draft` under `done` is a draft the plan asked for with
+`draft: true`, and `change-draft` under `complete-but-draft` is a fast-adoption node
+awaiting a release.
+
+**What else moved with it.** `change-open` now watches its checks, so a red required
+check or an elapsed bound there is `checks-failed` or `checks-unsettled` and is
+re-dispatched on the same branch like any other; the closeout lifts nothing itself,
+and what its settlement says of a draft the session held is what the publication
+answered; a draft lifted before its checks ran, where the identity did not silence
+the warning, and required checks that concluded `skipped`, each add one sentence to
+the detail; and `onepipeline publish-branch` and `repo-recover` report the word and
+the URL and exit `0`. The `skipped` check state is carried as `onevcs` classifies it
+and never read as passed. `docs/contract.md`'s publication paragraph and its run-end
+hooks paragraph say so.
+
+**The block below is the source.** `vcs::tests` parses it out of this file and holds
+the outcome to the constant this crate publishes and the status to the one
+`drafted_status` settles it at; `tests/e2e/draft_lifecycle.rs` drives each case above
+through the compiled binary.
+
+```json
+{
+  "outcomes": ["change-review-draft"],
+  "status": "done"
+}
+```

@@ -7120,6 +7120,11 @@ const RULINGS: &[(&str, &str)] = &[
         "a `WatchEnding` is `Settled`, `NothingDriving`, `SurfaceWaiting`, `Elapsed`, \
          `NodeSettled(node)` or `RunChanged`, exiting `0`, `3`, `4`, `5`, `6` and `7`",
     ),
+    (
+        "100.",
+        "**`change-review-draft`**: status `done`, the checks green and the change request \
+         **kept as a draft for its user's review**",
+    ),
 ];
 
 #[test]

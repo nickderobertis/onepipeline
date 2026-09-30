@@ -98,7 +98,98 @@ pub(crate) fn land(verb: Verb, args: Vec<OsString>) -> Result<i32> {
             _ => {}
         }
     }
+    if let Some(request) = Landing::of(&cli.command) {
+        return Ok(report(request.land()));
+    }
     Ok(i32::from(onevcs::run(&cli)))
+}
+
+/// One branch-keyed landing, in the library form of the verb it fronts.
+///
+/// Called rather than handed to `onevcs::run`, so what the landing **answered** is a
+/// value this crate renders — the draft lifecycle's green-and-kept-for-review ending
+/// is reported under this crate's own word for it. Only a command line the verb
+/// would take as it stands is built here; every other one — a title the sibling
+/// will not commit under, a body named twice, a body file that cannot be read — is
+/// left to `onevcs::run`, which refuses it in its own words.
+enum Landing {
+    /// `onevcs publish-branch`.
+    PublishBranch(onevcs::BranchPublishRequest),
+    /// `onevcs recover`.
+    Recover(onevcs::RecoverRequest),
+}
+
+impl Landing {
+    fn of(command: &onevcs::cli::Command) -> Option<Self> {
+        let title = |title: &Option<String>| -> Option<Option<onevcs::Subject>> {
+            match title {
+                None => Some(None),
+                Some(title) => onevcs::Subject::try_from(title.clone()).ok().map(Some),
+            }
+        };
+        let body = |body: &Option<String>, file: &Option<PathBuf>| -> Option<Option<String>> {
+            match (body, file) {
+                (Some(_), Some(_)) => None,
+                (Some(body), None) => Some(Some(body.clone())),
+                (None, Some(path)) => std::fs::read_to_string(path).ok().map(Some),
+                (None, None) => Some(None),
+            }
+        };
+        match command {
+            onevcs::cli::Command::PublishBranch(args) => {
+                Some(Self::PublishBranch(onevcs::BranchPublishRequest {
+                    repo: args.repo.clone(),
+                    branch: args.branch.clone(),
+                    title: title(&args.title)?,
+                    body: body(&args.body, &args.body_file)?,
+                    policy: args.policy,
+                }))
+            }
+            onevcs::cli::Command::Recover(args) => Some(Self::Recover(onevcs::RecoverRequest {
+                repo: args.repo.clone(),
+                branch: args.branch.clone(),
+                title: title(&args.title)?,
+                body: body(&args.body, &args.body_file)?,
+            })),
+            _ => None,
+        }
+    }
+
+    fn land(&self) -> onevcs::Result<onevcs::PublishOutcome> {
+        let providers = onevcs::Providers::real();
+        match self {
+            Self::PublishBranch(request) => onevcs::publish_branch(&providers, request),
+            Self::Recover(request) => onevcs::recover(&providers, request),
+        }
+    }
+}
+
+/// Render what a branch-keyed landing answered, and the exit code it answers with.
+///
+/// Every ending `onevcs` renders is rendered in its words and at its code, exactly
+/// as `onevcs::run` would. The one this crate names is a change request whose checks
+/// came back green and that is kept as a draft for its user's review: it leads with
+/// [`crate::vcs::REVIEW_DRAFTED`] and the change request's URL, and exits as every
+/// successful landing does.
+fn report(landed: onevcs::Result<onevcs::PublishOutcome>) -> i32 {
+    match landed {
+        Ok(onevcs::PublishOutcome::ChangeReviewDraft(url)) => {
+            println!(
+                "{}: {url}: the required checks are green and the change request is kept as a \
+                 draft for its user's review; lift it on the host when it is ready for the team",
+                crate::vcs::REVIEW_DRAFTED
+            );
+            0
+        }
+        Ok(outcome) => {
+            println!("{}", outcome.describe());
+            0
+        }
+        Err(error) => {
+            eprintln!("onevcs: {error}");
+            i32::from(onevcs::FailureKind::of(&error).exit_code())
+        }
+    }
 }
 
 /// Take this crate's two flags out of a landing's command line, leaving every

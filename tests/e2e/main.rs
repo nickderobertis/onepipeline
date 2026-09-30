@@ -85,6 +85,7 @@ mod dispatch;
 // `nx affected` for the very changes they exist to catch. Same grounds as `mod dispatch`
 // above and `mod run_end_hooks` below.
 mod dispatch_env_hook;
+mod draft_lifecycle;
 mod driver;
 mod envelope_reviewer;
 mod filter;

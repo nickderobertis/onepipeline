@@ -256,6 +256,62 @@ fn repo_recover_lands_a_preserved_branch_with_the_body_it_was_drafted() {
     assert_eq!(drafting_dispatches(&world).len(), 1);
 }
 
+/// Make the world's identity a team repository: `change-open` with approvals
+/// required, whose green change requests `onevcs` keeps as a draft for their user's
+/// review.
+fn approvals_required(world: &World) {
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 3\nrules: []\ndefault:\n  publication: change-open\n  approvals: required\n",
+    )
+    .expect("the rules file is written");
+}
+
+/// What the host holds change request `number` as: `draft`, `open` or `merged`.
+fn host_holds(world: &World, number: u64) -> String {
+    std::fs::read_to_string(world.fakes.join("gh").join(number.to_string()))
+        .unwrap_or_else(|error| panic!("the host holds no change request {number}: {error}"))
+        .trim()
+        .to_owned()
+}
+
+/// A branch landed by hand onto a team repository whose required checks are green
+/// is kept as a draft for its user's review, and both verbs say so under the word a
+/// node settles on — with the change request's URL — and exit as a success does.
+#[test]
+fn a_green_branch_landed_on_a_team_repository_reports_the_review_draft_word() {
+    for verb in ["publish-branch", "repo-recover"] {
+        let world = World::new(&format!("oob-review-{verb}"));
+        let repository = world.repository("change-open", &[]);
+        approvals_required(&world);
+        world.script("gh.checks", "lint completed success required");
+        if verb == "publish-branch" {
+            branch_with_work(&world, &repository);
+        } else {
+            preserved_branch(&world, &repository);
+        }
+        let checkout = repository.checkout.to_string_lossy().into_owned();
+        let landed = world.run(&[
+            verb,
+            BRANCH,
+            "--no-draft",
+            "--repo",
+            &checkout,
+            "--title",
+            "feat: add the widget",
+        ]);
+        landed
+            .exited(0)
+            .out_has("change-review-draft: https://github.com/owner/service/pull/1: ")
+            .out_has("kept as a draft for its user's review");
+        assert_eq!(host_holds(&world, 1), "draft", "{verb}\n{}", world.dump());
+        assert!(
+            repository.base_file("widget.txt").is_none(),
+            "{verb}: a change kept for review reached its base"
+        );
+    }
+}
+
 /// A `local-direct` identity opens no change request, so there is no description
 /// for a body to be: it lands on its base with no drafting turn spent, even with a
 /// drafting graph named — and with none named it is not refused for the lack.

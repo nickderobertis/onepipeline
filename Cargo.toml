@@ -573,6 +573,19 @@ resolver = "2"
 # because none of its fields says how a verdict was reached. `onevcs-testing` 0.8.6
 # requires exactly `^0.35.0`, so the pair moves as one again.
 #
+# `onevcs` 0.36.0 is the floor because it is the release carrying the **draft
+# lifecycle**: every publication with no draft reason opens its change request as a
+# draft while the required checks run, records `change-drafted` with `kind:
+# "awaiting-checks"`, and once they settle lifts it or — under `change-open` with
+# approvals required — keeps it for its user's review as
+# `PublishOutcome::ChangeReviewDraft`, which `src/vcs.rs` settles `done` under
+# `change-review-draft`. It adds `CheckState`, whose `skipped` is never `passed`, and
+# the `checks-settled`, `draft-lifted-early` and `draft-kept-for-review` kinds, and
+# `change-open` now watches its checks, so a red one there is `checks-failed`.
+# `tests/onevcs_seam.rs` drives that surface against the linked release. A
+# **requirement**, because `^0.35` admits no 0.36.x; `onevcs-testing` 0.9.0 requires
+# exactly `^0.36.0`, so the pair moves as one.
+#
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
 # `reasoning` items as `turn-activity` under their own kind — the agent's words,
 # with no tool name — which `src/views.rs` and `src/projection.rs` render as what
@@ -600,7 +613,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.4"
-onevcs = "0.35.0"
+onevcs = "0.36.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -780,7 +793,7 @@ oneharness-core = "0.21.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.8.6"
+onevcs-testing = "0.9.0"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
