@@ -1059,6 +1059,36 @@ mod unscanned {
             !recorded.segment_reads.is_empty(),
             "the tracer saw no append to a segment, so it observed nothing: {recorded:?}"
         );
+        // And at least one turn emitted an event, so the events segment's
+        // append is among what was traced and bounded, not merely permitted.
+        assert!(
+            recorded.segment_reads.iter().any(|(segment, _)| {
+                segment
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("events-"))
+            }),
+            "no turn appended an event, so the events segment went untested: {recorded:?}"
+        );
+        let evented = lines.iter().any(|pointer| {
+            let date = UtcDate::of_history_id(pointer.history_id()).expect("a dated id");
+            let segment = store
+                .root
+                .join(INDEX_DIR)
+                .join(SegmentKind::Events.file_name(date));
+            std::fs::read_to_string(&segment)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<HistoryIndexEntry>(line).ok())
+                .any(|entry| {
+                    matches!(entry, HistoryIndexEntry::Event(event)
+                        if event.run_id == pointer.history_id())
+                })
+        });
+        assert!(
+            evented,
+            "no run's event landed in the events segment of its date"
+        );
         for pointer in &lines {
             assert_eq!(
                 Path::new(pointer.history_dir()),
