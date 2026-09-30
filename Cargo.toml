@@ -762,15 +762,9 @@ onevcs-testing = "0.8.5"
 # lock's whole family to this one release, and fails as well if anything this
 # repository installs as an `onetaskgraph` binary names another.
 #
-# Moved for the host: it reconciles its own `onetaskgraph` pin against the family this
-# engine links, and the store CLI it needs is this release's. What it brings the engine:
-# `github-projects` answers text, metadata and origin queries with GitHub's own search, and
-# a copy records `onetaskgraph.copies` on each item it creates a counterpart for and follows
-# that link on later copies. The write-back's copies create only lineages the board lacks, so
-# that link lands on the in-process shadow task — rewritten on the next projection, and read
-# by nothing here — and never on the destination, which `writeback_projections`' store-call
-# assertions hold. The engine's only changes are the store's new fields and its `stale-link`
-# refusal, which the write-back classes by the store's own word.
+# Moved for the host, which holds its `onetaskgraph` pin to this family: this release
+# answers `github-projects` queries natively and has a copy record `onetaskgraph.copies`.
+# Here that link lands only on the write-back's shadow task, which each projection rewrites.
 onetaskgraph-core = "=0.2.52"
 onetaskgraph-plugin-api = "=0.2.52"
 onetaskgraph-local-md = "=0.2.52"
