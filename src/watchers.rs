@@ -944,6 +944,13 @@ fn terms_of(
     timeout: crate::cli::WatchTimeout,
     conditions: &[crate::cli::WatchUntil],
 ) -> WatchTerms {
+    // A request naming no condition returns on the default set, so that set is
+    // what its terms say it returns on — `surface` among them — rather than
+    // nothing beside the two every watch returns on.
+    let conditions = match conditions.is_empty() {
+        true => &crate::cli::DEFAULT_WATCH_UNTIL[..],
+        false => conditions,
+    };
     let mut until: Vec<String> = Vec::new();
     for condition in conditions
         .iter()
@@ -1286,6 +1293,11 @@ mod tests {
             "{later:?}"
         );
         assert_eq!(now.until, ["surface", "settled", "nothing-driving"]);
+        let defaulted = terms_of(&record, WatchTimeout::Bounded(0), &[]);
+        assert_eq!(
+            defaulted.until,
+            ["surface", "node-settled", "settled", "nothing-driving"]
+        );
         assert_eq!(later.until, ["settled", "nothing-driving"]);
         let unbounded = terms_of(
             &record,

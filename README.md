@@ -679,18 +679,41 @@ heartbeat says how many planner surfaces are unread and of which kinds**, so a c
 matching only on event lines cannot lose the one signal that a question is waiting.
 The human lines go to standard error and one NDJSON record per line to standard
 output — a `watch` of `event`, of `heartbeat`, and one final `return` carrying
-`run_id`, `condition`, `exit`, `node` when the condition names one, `cursor` and
-`unread` — so nothing has to match prose.
+`run_id`, `condition`, `exit`, `node` when the condition names one, `cursor`,
+`unread`, `blocking` — `true` when a blocking surface is among those that ended
+the wait — and, on an elapsed wait alone, `summary` — so nothing has to match
+prose.
 
 ![a bounded wait's human half, on standard error: four event lines, a heartbeat reading -- watching tracked-release ACTIVE 0 unread planner surfaces, the docs node settling done, and a closing return line reading -- watch tracked-release node-settled docs, 0 unread planner surfaces, and the cursor to resume from](screenshots/images/watch.svg)
 
-It returns on the first of five conditions to fire, each with a status of its own:
+It returns on the first of six conditions to fire, each with a status of its own:
 exit `0` when the run settled complete, `3` when nothing is driving it — the same
-code every other verb here uses for that — `4` when a blocking surface is waiting
-to be answered, `5` when the `--timeout SECONDS` wait elapsed with the run still
-live, and `6` when a node the wait was told to return on settled, the `return`
-record's `node` naming which one. It prints a cursor on exit, and `--cursor`
+code every other verb here uses for that — `4` when a planner surface is waiting,
+`5` when the `--timeout SECONDS` wait elapsed with the run still live, `6` when a
+node the wait was told to return on settled, the `return` record's `node` naming
+which one, and `7` when the run changed, `run-changed`, which only a watch armed on
+a run nothing was driving returns. It prints a cursor on exit, and `--cursor`
 resumes from one without re-emitting what the earlier watch already did.
+
+**A run nothing is driving is waited on, not reported at once.** Armed on one, a
+watch does not return `3`: it waits for somebody to act on the run, and returns `7`
+the moment the run's journal, its launch record or its channel queues move with
+nothing else firing — a reply applied, an `adopt`, a surface consumed. `3` is the
+run going from driven to undriven *while* the watch waits. A run whose graph is
+complete still returns `0` at once. A landing `onevcs` reconciles in its own state,
+writing nothing to the run, is seen only at the deadline.
+
+**An elapsed wait says what the run did while it waited.** The `return` record's
+`summary` carries `settled_since_cursor` (each `node` and `status` settled past the
+cursor the watch started from), `surfaces_queued_during_wait`, `held` (each hold
+the run records a node under — its dependencies, the run's concurrency, a
+decision, a release, or its workspace — with its `reason` and `waited_seconds`),
+`last_progress_seconds` (since the latest dispatch or settlement, `null` for a run
+with neither), and `observer` — `running`, `dead`, `not-restarted`, or `none` for a
+run that launched no observer graph. The human form writes the same as a few lines
+after the ending line, and when nothing arrived it says so plainly: "no planner
+surface arrived during this 35m00s wait; the run's observer graph is dead". What that
+means for a given host is the host's to read.
 `--tick-interval` is **this stream's** clock and is not `start`'s
 `--heartbeat-interval`, which sets the pacemaker agent's cadence; neither verb
 accepts the other's flag. `--log PATH` appends the human lines to `PATH` instead
@@ -704,11 +727,20 @@ does.
 
 **`--until` is repeatable, and it is how a supervisor says what the wait is for** —
 so that waiting for something is this verb's job rather than a loop somebody writes
-around it. The default, `--until surface`, returns on a blocking surface;
-`--until settled` waits through one, still reporting it and counting it on every
-heartbeat; `--until nothing-driving` names a condition every wait already returns
-on; `--until node-settled` returns when any node of the run settles; and
-`--until node=<ID>` returns when that node does. The run settling and nothing
+around it. Given none, a watch returns on `surface` and `node-settled`; given any,
+the ones named replace that default set rather than adding to it.
+`--until surface` returns on any planner surface `next` has not consumed —
+blocking or not, abandoned or not, and one already unread when the watch armed
+included — and on a blocking surface nobody has answered, which is what it still
+returns on once `next` has handed that question out; the watch consumes nothing,
+so every surface it reports is still there for `next`. `--until settled` waits
+through a surface, still reporting it and counting it on every heartbeat;
+`--until nothing-driving` names a condition every wait already returns on;
+`--until node-settled` returns when any node of the run settles; and
+`--until node=<ID>` returns when that node does. **A watch given no `--cursor`
+wakes only on a settlement journalled after it armed**; the settlements before
+that are still printed as lines, and answer nothing. Given a cursor, a settlement
+past it answers the condition, at once if it is already there. The run settling and nothing
 driving it end every wait whether they were asked for or not — a wait that could
 outlive the run it watches is the silence this verb exists to end — which is why
 naming them adds nothing, and why the two conditions that predate this selector
@@ -717,10 +749,12 @@ invoked**, before anything is streamed and before anything waits: one this verb 
 not offer is refused naming the ones it does; one naming a node the run's graph does
 not hold is refused naming that node and the ids the graph holds; and one nothing in
 the run's remaining life could satisfy — a node that settled `done` before this
-watch's cursor, which nothing dispatches again — is refused naming that node, rather
-than becoming a wait that never returns. A condition the run has *already* satisfied
-is answered rather than refused: a settlement at or past the cursor is read on the
-first pass and returns straight away. And `--timeout none` does not bound the wait at
+watch's cursor, or before it armed when it was given none, which nothing dispatches
+again — is refused naming that node, rather than becoming a wait that never
+returns; the default set is never refused, since nobody asked for it. A condition
+the run has *already* satisfied past a cursor is answered rather than refused: a
+settlement at or past the cursor is read on the first pass and returns straight
+away. And `--timeout none` does not bound the wait at
 all, which is a different value from `--timeout 0`, whose published meaning is
 unchanged: read the run once and return.
 

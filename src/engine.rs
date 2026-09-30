@@ -2044,6 +2044,19 @@ impl HoldReason {
     }
 }
 
+/// What kind of hold one `node-held` entry is, read by the same reader a driver
+/// restores its holds with: `None` for one this build cannot read whole.
+pub(crate) fn hold_kind(entry: &Value) -> Option<crate::views::HoldKind> {
+    use crate::views::HoldKind;
+    Some(match HoldReason::of_payload(entry)? {
+        HoldReason::Dependencies { .. } => HoldKind::Dependencies,
+        HoldReason::Concurrency { .. } => HoldKind::Concurrency,
+        HoldReason::Decision { .. } => HoldKind::Decision,
+        HoldReason::Release { .. } => HoldKind::Release,
+        HoldReason::Workspace(_) => HoldKind::Workspace,
+    })
+}
+
 /// The workspace hold one `node-held` entry carries, read by the same reader a
 /// driver restores its holds with: `None` for an entry that is not one, and for
 /// one this build cannot read whole.
@@ -6424,6 +6437,11 @@ fn unprojected_surface(failure: &crate::writeback::Unprojected) -> Surface {
 
 /// Surface something to the planner, recording that it was *sent*.
 pub(crate) fn raise(paths: &RunPaths, journal: &mut Journal, surface: Surface) -> Result<()> {
+    raised(paths, journal, surface).map(|_| ())
+}
+
+/// [`raise`], answering the surface as the channel queued it — id and all.
+pub(crate) fn raised(paths: &RunPaths, journal: &mut Journal, surface: Surface) -> Result<Surface> {
     let queued = ChannelState::new(paths).push(surface)?;
     journal.emit(
         journal::PipelineKind::PlannerSurfaceQueued,
@@ -6434,7 +6452,8 @@ pub(crate) fn raise(paths: &RunPaths, journal: &mut Journal, surface: Surface) -
             ("source", json!(queued.source)),
             ("blocking", json!(queued.blocking)),
         ]),
-    )
+    )?;
+    Ok(queued)
 }
 
 /// Report an in-flight dispatch that has recorded nothing past the threshold.

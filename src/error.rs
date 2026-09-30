@@ -137,9 +137,10 @@ pub const EXIT_REFUSED: i32 = 2;
 /// Nothing is driving the run — the state to intervene in.
 pub const EXIT_NOTHING_DRIVING: i32 = 3;
 
-/// A blocking surface is waiting to be answered.
+/// A planner surface is waiting: one `next` has not consumed, or a blocking one
+/// still unanswered.
 ///
-/// `watch`'s own, and the one of its four returns that has no code above it
+/// `watch`'s own, and the first of its returns that has no code above it
 /// already: `0` is the run settling, [`EXIT_NOTHING_DRIVING`] is the state
 /// `adopt` is the way back from, and [`EXIT_QUEUED`] and [`EXIT_REFUSED`] are
 /// each spoken for by a different question. A caller branches on this rather
@@ -190,6 +191,16 @@ pub const EXIT_RUNS_UNWATCHED: i32 = 6;
 /// [`EXIT_NOTHING_DRIVING`] belongs to one verb's protocol. Divergence entries 58
 /// and 68 argue it.
 pub const EXIT_NODE_SETTLED: i32 = 6;
+
+/// A watch armed on a run nothing was driving saw the run move, and nothing it
+/// was told to return on fired.
+///
+/// `watch`'s sixth return. A run nobody drives changes only when somebody acts
+/// on it — a reply applied locally, an `adopt`, a surface consumed — and a
+/// supervisor waiting on such a run is waiting for exactly that, so the move
+/// ends the wait under a status of its own rather than under the deadline's.
+/// Divergence entry 99 records the ruling that added it.
+pub const EXIT_RUN_CHANGED: i32 = 7;
 
 #[cfg(test)]
 mod tests {

@@ -878,15 +878,26 @@ pub fn watch_conditions() -> [&'static str; 5] {
     CONDITIONS.map(|(spelling, _)| spelling)
 }
 
+/// What a `watch` given no `--until` returns on, beside the run settling and
+/// nothing driving it: every planner surface nobody has read, and any node
+/// settling after the watch armed.
+///
+/// A wait with neither is the one that woke a supervisor on nothing but a
+/// blocking question while non-blocking updates piled up unread; divergence entry
+/// 99 records the ruling that made this the default. An empty `until` on a
+/// [`crate::verbs::WatchRequest`] means this set, so the library and the binary
+/// answer a caller who named nothing the same way.
+pub const DEFAULT_WATCH_UNTIL: [WatchUntil; 2] = [WatchUntil::Surface, WatchUntil::NodeSettled];
+
 /// What ends a `watch`, as a caller names it.
 ///
 /// **Repeatable, and additive to what the verb always returns on.** A run that
-/// settles `complete` and a run nothing is driving end every wait whether or not
-/// they were asked for, because a wait that could outlive the run it watches is
-/// the unbounded silence this verb exists to end — so [`Settled`](Self::Settled)
-/// and [`NothingDriving`](Self::NothingDriving) name conditions rather than
-/// switch them on, and what `--until settled` *adds* is nothing, which is why it
-/// still means "do not return on a blocking surface".
+/// settles `complete`, and a run that stops being driven while the watch waits,
+/// end every wait whether or not they were asked for, because a wait that could
+/// outlive the run it watches is the unbounded silence this verb exists to end —
+/// so [`Settled`](Self::Settled) and [`NothingDriving`](Self::NothingDriving)
+/// name conditions rather than switch them on, and what `--until settled` *adds*
+/// is nothing, which is why it still means "do not return on a surface".
 ///
 /// [`Surface`](Self::Surface) is spelled for the surface rather than for a
 /// "decision", which in this crate is the wider fact `status` reports: a ready
@@ -895,21 +906,26 @@ pub fn watch_conditions() -> [&'static str; 5] {
 /// exists to replace.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum WatchUntil {
-    /// Return on a blocking surface waiting to be answered. The default, and on
-    /// its own it is the pair a supervisor answers: this or the run finishing.
+    /// Return on any planner surface `next` has not consumed — blocking or
+    /// not, abandoned or not, and whether it was already unread when the watch
+    /// armed — and on a blocking surface still unanswered. One of the two
+    /// [`DEFAULT_WATCH_UNTIL`] names.
     #[default]
     Surface,
     /// Return when the run finishes. Named on its own it adds nothing, so it is
-    /// still how a caller says a blocking surface should be reported and waited
-    /// through rather than returned on.
+    /// still how a caller says a surface should be reported and waited through
+    /// rather than returned on.
     Settled,
-    /// Return when nothing is driving the run. Always returned on, named here so
-    /// a caller can spell the whole vocabulary.
+    /// Return when the run stops being driven during the wait. Always returned
+    /// on, named here so a caller can spell the whole vocabulary.
     NothingDriving,
-    /// Return when any node of the run settles.
+    /// Return when any node of the run settles — past the cursor the watch was
+    /// given, or, given none, after the watch armed. The other condition
+    /// [`DEFAULT_WATCH_UNTIL`] names.
     NodeSettled,
-    /// Return when this node of the run settles. Validated against the run's own
-    /// graph when the command is invoked.
+    /// Return when this node of the run settles, on the same terms as
+    /// [`NodeSettled`](Self::NodeSettled). Validated against the run's own graph
+    /// when the command is invoked.
     Node(String),
 }
 
@@ -994,8 +1010,14 @@ pub struct WatchArgs {
     pub cursor: Option<String>,
     /// What ends the wait, beside the run finishing and nothing driving it.
     /// Repeatable: the wait returns on the first of them that fires, and says
-    /// which one did.
-    #[arg(long, value_name = "CONDITION", default_values_t = [WatchUntil::Surface])]
+    /// which one did. Given none, the wait returns on `surface` and
+    /// `node-settled`; given any, those it names replace that default set.
+    ///
+    /// No clap default, so a caller's own set and the default one stay
+    /// tellable apart: the default's `node-settled` is never refused as one that
+    /// could not fire, because nobody asked for it — see
+    /// [`DEFAULT_WATCH_UNTIL`].
+    #[arg(long, value_name = "CONDITION")]
     pub until: Vec<WatchUntil>,
     /// Append the human lines to this file, each flushed as it is written,
     /// instead of writing them to standard error. Created when absent and never

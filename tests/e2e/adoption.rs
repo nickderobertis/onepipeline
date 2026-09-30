@@ -1328,19 +1328,30 @@ fn an_unusable_bound_leaves_the_run_behaving_as_the_shipped_one_does() {
 
     // Nor was it read as **zero**, which is the reading that matters: the
     // reconcile loop runs a pass every 25ms, so a surface interval of zero would
-    // raise the wait dozens of times over the two reads below — each of which is
-    // what a person waiting on a held run actually does.
+    // raise a wait nobody's answer changed again the pass after it was read, and
+    // on every pass after that one read. So the probe's answer is let reach the
+    // wait — a changed answer is surfaced whatever the interval — and the wait
+    // is read, over the reads below, each of which is what a person waiting on
+    // a held run actually does.
+    world.until("the probe's answer to reach the wait", |world| {
+        answered(world, &run, "consumer") == Some("not-released".to_owned())
+    });
+    let count = |world: &World| {
+        world
+            .events_of(&run, "planner-surface-queued")
+            .into_iter()
+            .filter(|event| event["payload"]["kind"] == "release-wait")
+            .count()
+    };
+    let surfaced = count(&world);
     for _ in 0..2 {
+        read_waits(&world, &run);
         world.run(&["status", &run]).exited(0);
     }
-    let surfaced = world
-        .events_of(&run, "planner-surface-queued")
-        .into_iter()
-        .filter(|event| event["payload"]["kind"] == "release-wait")
-        .count();
     assert_eq!(
-        surfaced, 1,
-        "an unusable surface bound was read as zero, so the wait was raised on every pass"
+        count(&world),
+        surfaced,
+        "an unusable surface bound was read as zero, so the wait was raised again once read"
     );
     world.run(&["stop", &run]).exited(0);
 }
@@ -1552,10 +1563,13 @@ const ASKS: usize = 5;
 /// A world whose release watch answers on this journey's timescale rather than on
 /// an operator's.
 ///
-/// The two bounds are the shipped ones — 60 seconds between probes and 900
-/// between surfaces — which are right for a run that waits days for a release and
-/// wrong for a test that has to see both happen. Nothing else about the watch
-/// changes: one hold, indefinite, released only by an answer of released.
+/// The two bounds are the shipped ones — 60 seconds between probes, and 900
+/// before an unchanged wait is surfaced again — which are right for a run that
+/// waits days for a release and wrong for a test that has to see both happen.
+/// Nothing else about the watch changes: one hold, indefinite, released only by
+/// an answer of released, and an unchanged wait surfaced again only once the
+/// last one has been read, at an interval that doubles from here to its fixed
+/// four-hour ceiling — which is what [`read_waits`] does between waits.
 fn watching(name: &str) -> World {
     World::new(name)
         .with_env(
@@ -1563,6 +1577,24 @@ fn watching(name: &str) -> World {
             &POLL_SECONDS.to_string(),
         )
         .with_env("ONEPIPELINE_RELEASE_SURFACE_SECONDS", "1")
+}
+
+/// Read every surface the run has waiting, as a supervisor does between two
+/// looks at it.
+///
+/// An unchanged wait is queued again only once the one before it has been read
+/// — divergence entry 99 — so a journey that watches a held node go on waiting
+/// reads what it was told, exactly as a person would, rather than counting
+/// repeats nobody read.
+fn read_waits(world: &World, run: &str) {
+    for _ in 0..64 {
+        let read = world.run(&["next", run]);
+        read.exited(0);
+        if read.json()["status"] != json!("surface") {
+            return;
+        }
+    }
+    panic!("`next` never ran out of surfaces on {run}");
 }
 
 /// A plan naming neither new field produces exactly the run it produced before
@@ -2479,11 +2511,18 @@ fn a_wait_queued_about_a_hold_that_has_since_cleared_is_withheld_from_the_reader
         "the delivered wait was not recorded as delivered"
     );
 
-    // And goes on raising it: the recurring waits queue up behind that read,
-    // unread, while the node stays held.
+    // Every other wait queued so far is read too — the probe answering after
+    // the first was queued made the hold say a second thing — so what is queued
+    // next is queued behind every read.
+    read_waits(&world, &run);
+    let delivered = delivered_waits(&world, &run).len();
+
+    // And goes on raising it: the wait is queued again behind the reads and
+    // sits there unread while the node stays held — once, since an unchanged
+    // wait is not queued again while one is unread.
     let read_after = queued_waits(&world, &run).len();
     world.until("the wait to be queued again after the read", |world| {
-        queued_waits(world, &run).len() >= read_after + 2
+        queued_waits(world, &run).len() > read_after
     });
     assert!(!dispatched(&world, &run, "consumer"));
 
@@ -2499,8 +2538,8 @@ fn a_wait_queued_about_a_hold_that_has_since_cleared_is_withheld_from_the_reader
     });
     let queued_before_the_start = queued_waits(&world, &run).len();
     assert!(
-        queued_before_the_start >= read_after + 2,
-        "the recurring waits were not in the queue when the hold cleared"
+        queued_before_the_start > read_after,
+        "the recurring wait was not in the queue when the hold cleared"
     );
 
     // Drained only now. Not one of the stale waits reaches the reader, and each
@@ -2531,15 +2570,15 @@ fn a_wait_queued_about_a_hold_that_has_since_cleared_is_withheld_from_the_reader
         withheld
             .matches("withheld a stale `release-wait` surface")
             .count(),
-        queued_before_the_start - 1,
+        queued_before_the_start - delivered,
         "not every wait queued before the hold cleared was withheld:\n{withheld}"
     );
-    // The record agrees: the one wait delivered while the node was held is the
-    // only one ever delivered, the withheld ones stand as queued and nothing
+    // The record agrees: the waits delivered while the node was held are the
+    // only ones ever delivered, the withheld ones stand as queued and nothing
     // more, and nothing is left waiting for a reader.
     assert_eq!(
         delivered_waits(&world, &run).len(),
-        1,
+        delivered,
         "a stale wait was recorded as delivered: {:?}",
         delivered_waits(&world, &run)
     );
@@ -2729,9 +2768,11 @@ fn a_published_node_whose_dependency_cannot_be_resolved_is_held_until_it_can_be(
     );
 
     // The wait is surfaced again while the dependencies stay unresolved, still
-    // naming them: an unreadable document does not go quiet.
+    // naming them: an unreadable document does not go quiet, once what it said
+    // has been read.
     let surfaced = wait_surfaces_of(&world, &run, "consumer").len();
     world.until("the wait to be surfaced again", |world| {
+        read_waits(world, &run);
         wait_surfaces_of(world, &run, "consumer").len() > surfaced
     });
     assert_eq!(
@@ -5741,12 +5782,14 @@ fn a_release_that_arrived_is_not_awaited_again_when_its_probe_stops_answering() 
     // because the question is not put again.
     std::fs::remove_file(&engine_answer).expect("the probe's answer is taken away");
     world.until("a wait raised after the answer went", |world| {
+        read_waits(world, &run);
         waits_of(world, &run, "consumer").len() > raised
     });
     stops_answering(&engine_answer);
     // Past whatever question was already in flight when the release arrived, so
     // what the tally below counts is asks made *after* it.
     world.until("the run to go on waiting for the other release", |world| {
+        read_waits(world, &run);
         waits_of(world, &run, "consumer").len() >= raised + 3
     });
     assert_eq!(
@@ -5757,6 +5800,7 @@ fn a_release_that_arrived_is_not_awaited_again_when_its_probe_stops_answering() 
     );
     let asked = world.probe_runs(ENGINE);
     world.until("several more waits to be raised", |world| {
+        read_waits(world, &run);
         waits_of(world, &run, "consumer").len() >= raised + 5
     });
 
@@ -5918,6 +5962,7 @@ fn the_elapsed_wait_a_supervisor_is_shown_counts_from_the_hold_that_is_running()
     // Both holds are put, and are let run until the clock they share is big
     // enough that showing it for a hold that had ended would be unmistakable.
     world.until("both holds to have run long enough to see", |world| {
+        read_waits(world, &run);
         let awaited = awaiting(world, &run, "consumer");
         awaited.len() == 2
             && awaited
@@ -5955,6 +6000,7 @@ fn the_elapsed_wait_a_supervisor_is_shown_counts_from_the_hold_that_is_running()
     // hold rather than from a hold that has ended.
     let raised = waits_of(&world, &run, "consumer").len();
     world.until("several waits after the release arrived", |world| {
+        read_waits(world, &run);
         waits_of(world, &run, "consumer").len() >= raised + 3
     });
     for wait in waits_of(&world, &run, "consumer").into_iter().skip(raised) {
@@ -6193,5 +6239,257 @@ fn a_cross_dag_squash_commit_is_answered_through_the_upstream_change_request() {
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
     });
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// The interval an unchanged wait stops doubling at, as the ruling in
+/// divergence entry 99 fixes it. Stated here because the crate keeps it in a
+/// private module; `release::tests::the_ceiling_is_stated_where_it_is_ruled_and_proven`
+/// holds this value to the crate's own constant.
+const CEILING_SECONDS: u64 = 14_400;
+
+/// How many release waits the channel has queued about the consumer, once its
+/// projection has caught up with its log.
+fn consumer_wait_count(world: &World, run: &str) -> usize {
+    let mut counted = 0;
+    world.until("the channel's queue to be read back", |world| {
+        consumer_waits(world, run).is_some_and(|waits| {
+            counted = waits.len();
+            true
+        })
+    });
+    counted
+}
+
+// llmlint: ignore-block[tests_mirror_real_usage] the ruling puts the ceiling at four hours and nothing may configure it, so the only way through the compiled binary to an interval hours long is a run whose record says the last wait was queued hours ago. That record is the one the interval is counted from; this rewrites its stamp, as time passing would have, and changes nothing else about the run, the driver or the cadence.
+/// Backdate the newest release wait queued about the consumer by `seconds`, in
+/// the run's own record of when it was queued: the `queued_at` of its `queued`
+/// record in the channel's surfaces log, rewritten in place at the same length,
+/// which is the record the interval is counted from. Called while the wait is
+/// unread and nothing else is being queued, which is the state an unchanged
+/// hold holds the channel in.
+fn backdate_newest_wait(world: &World, run: &str, seconds: u64) {
+    let log = world.run_file(run, "channel/surfaces.jsonl");
+    let text = std::fs::read_to_string(&log).expect("the surfaces log reads");
+    let lines: Vec<&str> = text.lines().collect();
+    let newest = lines
+        .iter()
+        .rposition(|line| {
+            let record: Value = serde_json::from_str(line).expect("a surfaces record");
+            record["event"] == "queued"
+                && record["kind"] == "release-wait"
+                && record["workstream"] == "consumer"
+        })
+        .expect("a wait has been queued");
+    let record: Value = serde_json::from_str(lines[newest]).expect("a surfaces record");
+    let stamp = record["queued_at"].as_u64().expect("stamped");
+    let backdated = stamp.saturating_sub(seconds * 1_000);
+    // Both stamps are epoch milliseconds of the same width, so the record keeps
+    // its length and every reader's place in the log stays where it was.
+    let from = format!("\"queued_at\":{stamp}");
+    let to = format!("\"queued_at\":{backdated}");
+    assert_eq!(
+        from.len(),
+        to.len(),
+        "the backdated stamp changes the record's length"
+    );
+    let rewritten: String = lines
+        .iter()
+        .enumerate()
+        .map(|(at, line)| match at == newest {
+            true => format!("{}\n", line.replacen(&from, &to, 1)),
+            false => format!("{line}\n"),
+        })
+        .collect();
+    let whole = log.with_extension("backdated");
+    std::fs::write(&whole, rewritten).expect("the backdated log is written");
+    std::fs::rename(&whole, &log).expect("the backdated log replaces the log");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The queue times, in epoch milliseconds, and the texts of every release wait
+/// the channel has queued about the consumer, in the order it queued them.
+///
+/// `None` while the channel's projection is behind its log, which is a read to
+/// take again rather than a queue holding nothing.
+fn consumer_waits(world: &World, run: &str) -> Option<Vec<(u64, String)>> {
+    let queued = world.queued_surfaces(run);
+    if queued.is_empty() {
+        return None;
+    }
+    Some(
+        queued
+            .into_iter()
+            .filter(|surface| {
+                surface["kind"] == "release-wait" && surface["workstream"] == "consumer"
+            })
+            .map(|surface| {
+                (
+                    surface["queued_at"].as_u64().expect("a surface is stamped"),
+                    surface["message"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect(),
+    )
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs is the crate under test itself — its own release watch, a real `onevcs` publication and real probe subprocesses — so a narrower project would declare the same dependency and skip nothing.
+/// An unchanged release wait is queued again only once the one before it has
+/// been read, at an interval that doubles from the configured base and stops
+/// doubling at the fixed four-hour ceiling — however its waited duration moves,
+/// and measured on the run's own record of when each was queued — and a wait
+/// whose content changes is queued at once, read or not: a dependency's style
+/// appearing as it resolves, a dependency's last answer changing, and the set
+/// of dependencies the node is held on shrinking. Divergence entry 99.
+#[test]
+fn an_unchanged_release_wait_is_queued_again_only_once_read_and_a_changed_one_at_once() {
+    let world = watching("adoption-cadence");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let tool_repo = world.extra_repository("tool");
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    let (tool_script, tool_answer) = world.probe_in(&tool_repo, "tool");
+    let readable = two_that_release(&script, "tool", &tool_script);
+    world.releases(&readable);
+    releases_at(&answer, "0.1.0");
+    releases_at(&tool_answer, "1.0.0");
+
+    // Both dependencies land under a readable document; the consumer is kept
+    // from readiness by a person until the document is broken, so it is held
+    // first on dependencies this host cannot describe — a hold whose content
+    // stays put while its clock runs.
+    let mut packager = lifecycle("packager", &[]);
+    packager["repo"] = json!("tool");
+    let mut consumer = consumer(Some("published"));
+    consumer["deps"] = json!([ENGINE, "packager", "approve"]);
+    let run = start_attached(
+        &world,
+        "adoption-cadence",
+        vec![engine(), packager, human("approve", &[]), consumer],
+    );
+    world.releases("version: 1\nrepositories: [\n");
+    world.run(&["attest", &run, "approve"]).exited(0);
+    world.run(&["adopt", &run, "--detach"]).exited(0);
+    world.until("the unresolved hold's first wait", |world| {
+        consumer_waits(world, &run).is_some_and(|waits| waits.len() == 1)
+    });
+
+    // Unread, an unchanged wait is not queued again, however long it waits.
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    world.until("the queue to be read back", |world| {
+        consumer_waits(world, &run).is_some()
+    });
+    assert_eq!(
+        consumer_waits(&world, &run).expect("read").len(),
+        1,
+        "an unchanged wait was queued again while the one before it was unread"
+    );
+
+    // Read, it is queued again: at once, since four seconds is past the base,
+    // then after two, and after four.
+    world.until(
+        "three unchanged waits queued again as each is read",
+        |world| {
+            read_waits(world, &run);
+            consumer_waits(world, &run).is_some_and(|waits| waits.len() >= 4)
+        },
+    );
+    let waits = consumer_waits(&world, &run).expect("read");
+    let gap = |at: usize| waits[at].0.saturating_sub(waits[at - 1].0);
+    assert!(gap(1) >= 4_000, "{waits:?}");
+    assert!(
+        gap(2) >= 2_000,
+        "the interval did not double from the base: {waits:?}"
+    );
+    assert!(
+        gap(3) >= 4_000,
+        "the interval did not double again: {waits:?}"
+    );
+    // What moved between them is the clock the text states, and that did not
+    // reset the cadence.
+    assert_ne!(waits[2].1, waits[3].1, "{waits:?}");
+    assert!(waits[3].1.contains("not yet resolved"), "{}", waits[3].1);
+
+    // The rest of the climb is hours long, so it is taken on the run's own
+    // record: the interval counts from the stamp the run records a wait was
+    // queued at, and each wait is backdated there before it is read. Well past
+    // the interval, a read wait is queued again at once; and at 8192 seconds and
+    // at the ceiling, a wait backdated five seconds short of the interval is
+    // queued again after those five seconds and not before — which is the
+    // interval, measured. At the ceiling, doubling would have asked 16384.
+    let mut every: u64 = 8;
+    let mut measured = Vec::new();
+    for _ in 0..13 {
+        let before = consumer_wait_count(&world, &run);
+        let precise = every >= 8_192;
+        backdate_newest_wait(&world, &run, if precise { every - 5 } else { every + 60 });
+        read_waits(&world, &run);
+        if precise {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            assert_eq!(
+                consumer_wait_count(&world, &run),
+                before,
+                "a wait was queued again before its {every}-second interval had passed"
+            );
+        }
+        world.until(
+            &format!("the wait after a {every}-second interval"),
+            |world| consumer_wait_count(world, &run) > before,
+        );
+        measured.push(every);
+        every = (every * 2).min(CEILING_SECONDS);
+    }
+    assert_eq!(
+        measured[measured.len() - 3..],
+        [8_192, CEILING_SECONDS, CEILING_SECONDS],
+        "the climb did not reach the ceiling where the ruling puts it: {measured:?}"
+    );
+
+    // Left unread from here — the last read may or may not have reached the
+    // newest wait, so the queue itself is asked — and every wait queued below is
+    // one a change queued, since an unchanged one is not queued while one sits.
+    world.until("an unchanged wait to sit unread", |world| {
+        let queue = world.run(&["channel", "queue", &run]);
+        queue.exited(0);
+        queue.json()["waiting"].as_array().is_some_and(|waiting| {
+            waiting
+                .iter()
+                .any(|surface| surface["kind"] == "release-wait")
+        })
+    });
+    let unchanged = consumer_waits(&world, &run).expect("read").len();
+    let queued = |world: &World, said: &str| {
+        consumer_waits(world, &run).is_some_and(|waits| {
+            waits
+                .iter()
+                .skip(unchanged)
+                .any(|(_, text)| text.contains(said))
+        })
+    };
+
+    // The document is repaired: both dependencies resolve, each now with the
+    // release style it has.
+    world.releases(&readable);
+    world.until("a wait naming the resolved dependencies' style", |world| {
+        queued(world, "automated release")
+    });
+    world.until("the probes' answers to reach a wait", |world| {
+        queued(world, "last answer: not-released")
+    });
+
+    // A dependency's last answer changes.
+    releases_at(&answer, "whatever-the-nightly-was");
+    world.until("a wait carrying the changed answer", |world| {
+        queued(world, "last answer: not-answered")
+    });
+
+    // And the set of dependencies the node is held on shrinks, as one of them
+    // releases.
+    releases_at(&answer, "0.2.0");
+    world.until("a wait naming only the dependency still awaited", |world| {
+        queued(world, "waiting on 1 release(s)")
+    });
+    assert!(!dispatched(&world, &run, "consumer"));
+    world.run(&["stop", &run]).exited(0);
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

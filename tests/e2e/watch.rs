@@ -20,8 +20,8 @@ use std::io::Write;
 use serde_json::{json, Value};
 
 use crate::harness::{
-    agent, ended, human, plan_of, Run, World, NODE_SETTLED, NOTHING_DRIVING, REFUSED,
-    RENDER_COST_ENV, SURFACE_WAITING, USAGE_ERROR, WATCH_ELAPSED,
+    agent, ended, epoch_seconds, human, plan_of, Run, World, NODE_SETTLED, NOTHING_DRIVING,
+    REFUSED, RENDER_COST_ENV, RUN_CHANGED, SURFACE_WAITING, USAGE_ERROR, WATCH_ELAPSED,
 };
 
 /// A window long enough that the tree before `watch` waited on the bus — which
@@ -212,6 +212,18 @@ fn a_watch_reads_the_run_only_when_it_moves_and_reports_a_raised_surface_at_once
     drop(stdin);
     ended(serving);
     world.release("build.go");
+}
+
+/// How many watches have armed on `run`: the records a watch writes under the
+/// run's root once every refusal it could make has been made, which is the
+/// moment it starts waiting.
+fn armed(world: &World, run: &str) -> usize {
+    std::fs::read_dir(world.run_file(run, "watchers")).map_or(0, |entries| {
+        entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .count()
+    })
 }
 
 fn running(world: &World, name: &str, nodes: Vec<Value>) -> String {
@@ -530,7 +542,18 @@ fn a_quiet_run_gets_heartbeats_that_count_what_is_unread_and_then_the_wait_elaps
         ])
         .exited(0);
 
-    let watched = world.run(&["watch", &run, "--timeout", "4", "--tick-interval", "1"]);
+    // Told to wait for the run alone, so the unread surface is counted on every
+    // heartbeat rather than ending the wait, which is what a default one does.
+    let watched = world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "settled",
+        "--timeout",
+        "4",
+        "--tick-interval",
+        "1",
+    ]);
     agreed(&watched, "elapsed", WATCH_ELAPSED);
 
     let beats: Vec<Value> = machine(&watched)
@@ -602,7 +625,16 @@ fn a_watch_told_not_to_tick_stays_silent_for_the_whole_wait() {
     // Four seconds of real waiting. The journey above beats four times over the
     // same span on a one-second interval, so silence here is the flag working
     // rather than the wait being too short for anything to have happened.
-    let watched = world.run(&["watch", &run, "--timeout", "4", "--tick-interval", "0"]);
+    let watched = world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "settled",
+        "--timeout",
+        "4",
+        "--tick-interval",
+        "0",
+    ]);
     agreed(&watched, "elapsed", WATCH_ELAPSED);
     let beats: Vec<Value> = machine(&watched)
         .into_iter()
@@ -854,10 +886,14 @@ fn a_watch_whose_output_cannot_be_written_refuses_instead_of_going_on() {
     world.release("build.go");
 }
 
-/// A run nothing is driving returns the status this crate already assigns to
-/// that condition, rather than a fresh one of the watch's own.
+/// A watch armed on a run nothing is driving waits rather than returning at
+/// once, and runs to its deadline when nothing moves.
+///
+/// A supervisor arming a watch on such a run is waiting for somebody to act on
+/// it; a watch that returned `nothing-driving` at once is what sent supervisors
+/// back to hand-written waits that said nothing until they finished.
 #[test]
-fn a_watch_of_a_run_nothing_is_driving_returns_the_status_this_crate_already_assigns() {
+fn a_watch_armed_on_a_run_nothing_is_driving_waits_and_ends_at_its_deadline() {
     let world = World::new("watch-undriven");
     let run = "watchundriven";
     // The one node fails, so nothing is ready, nothing waits on a person, and no
@@ -869,8 +905,14 @@ fn a_watch_of_a_run_nothing_is_driving_returns_the_status_this_crate_already_ass
         world.run(&["status", run]).stdout.contains("DRIVER DEAD")
     });
 
-    let watched = world.run(&["watch", run, "--timeout", "30", "--tick-interval", "0"]);
-    agreed(&watched, "nothing-driving", NOTHING_DRIVING);
+    let began = std::time::Instant::now();
+    let watched = world.run(&["watch", run, "--timeout", "3", "--tick-interval", "0"]);
+    agreed(&watched, "elapsed", WATCH_ELAPSED);
+    assert!(
+        began.elapsed() >= std::time::Duration::from_secs(3),
+        "a watch armed on a run nothing is driving returned before its deadline:\n{}",
+        watched.stderr
+    );
     // A converged graph with a failed node in it is *not* a run that settled,
     // and exit 0 over it would be the false completion this crate exists to stop
     // reporting.
@@ -880,9 +922,90 @@ fn a_watch_of_a_run_nothing_is_driving_returns_the_status_this_crate_already_ass
     );
     assert!(
         emitted(&watched).iter().any(|kind| kind == "node-settled"),
-        "the watch returned without ever emitting the settlement that ended the run: {}",
+        "the watch never emitted the settlement that ended the run: {}",
         watched.stdout
     );
+    let last = returned(&watched);
+    assert_eq!(
+        last["summary"]["settled_since_cursor"],
+        json!([{"node": "build", "status": "failed"}]),
+        "{last}"
+    );
+}
+
+/// `nothing-driving` is the run going from driven to undriven **while** the
+/// watch waits, and naming it, or `settled`, returns exactly what that
+/// transition returns; a bare watch answers the node settling, because a
+/// settlement after it armed is in its default set.
+///
+/// The bare watch is given its own moment: a second node keeps the run driven
+/// after the first settles, so the settlement is not raced by the driver's exit
+/// inside one tick, where `nothing-driving` rightly ranks first.
+#[test]
+fn a_driver_that_dies_during_the_wait_ends_it_nothing_driving() {
+    use std::process::Stdio;
+
+    let world = World::new("watch-nothing-driving");
+    world.script("build.wait", "hold");
+    world.script("build.fail", "1");
+    world.script("later.wait", "hold");
+    world.script("later.fail", "1");
+    let run = running(
+        &world,
+        "watchnothingdriving",
+        vec![agent("build", &[]), agent("later", &[])],
+    );
+
+    let spawn = |until: &[&str]| {
+        let mut args = vec!["watch", run.as_str()];
+        args.extend_from_slice(until);
+        args.extend(["--timeout", "120", "--tick-interval", "1"]);
+        world
+            .cmd(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the watch starts")
+    };
+    let bare = spawn(&[]);
+    let transitions = [
+        (spawn(&["--until", "nothing-driving"]), "nothing-driving"),
+        (spawn(&["--until", "settled"]), "nothing-driving"),
+    ];
+    // Each is armed, and blocking with nothing to say, before a node is let
+    // go: a watch the run had already left undriven would be the other journey.
+    world.until("every watch to be armed", |world| {
+        armed(world, &run) > transitions.len()
+    });
+    world.release("build.go");
+    let settled = bare.wait_with_output().expect("the bare watch exits");
+    // Only once the bare watch has answered does the run lose its last node.
+    world.release("later.go");
+
+    let transitioned = transitions.into_iter().map(|(watching, expected)| {
+        (
+            watching.wait_with_output().expect("the watch exits"),
+            expected,
+        )
+    });
+    for (finished, expected) in std::iter::once((settled, "node-settled")).chain(transitioned) {
+        let stdout = String::from_utf8_lossy(&finished.stdout);
+        let last: Value = serde_json::from_str(
+            stdout
+                .lines()
+                .last()
+                .unwrap_or_else(|| panic!("the watch wrote nothing:\n{stdout}")),
+        )
+        .expect("the return is JSON");
+        assert_eq!(last["condition"], json!(expected), "{last}");
+        assert_eq!(last["exit"], json!(finished.status.code()), "{last}");
+        let code = match expected {
+            "nothing-driving" => NOTHING_DRIVING,
+            _ => NODE_SETTLED,
+        };
+        assert_eq!(finished.status.code(), Some(code), "{last}");
+        assert!(last.get("summary").is_none(), "{last}");
+    }
 }
 
 /// What happens **while** the watch is already blocking reaches it as it happens.
@@ -901,8 +1024,19 @@ fn what_happens_while_the_watch_is_blocking_reaches_it_as_it_happens() {
     world.script("build.wait", "hold");
     let run = running(&world, "watchlive", vec![agent("build", &[])]);
 
+    // Told to wait for the run to settle, so the surface raised below is a line
+    // it reports and waits through rather than what ends it.
     let mut watching = world
-        .cmd(&["watch", &run, "--timeout", "600", "--tick-interval", "1"])
+        .cmd(&[
+            "watch",
+            &run,
+            "--until",
+            "settled",
+            "--timeout",
+            "600",
+            "--tick-interval",
+            "1",
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -1004,8 +1138,18 @@ fn a_resumed_watch_does_not_repeat_what_the_one_before_it_emitted() {
         .exited(0);
 
     // `--timeout 0` reads once and returns, which is the shape a caller uses to
-    // take a cursor without waiting at all.
-    let first = world.run(&["watch", &run, "--timeout", "0", "--tick-interval", "0"]);
+    // take a cursor without waiting at all. `--until settled`, so the unread
+    // surface is reported rather than ending the read.
+    let first = world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "settled",
+        "--timeout",
+        "0",
+        "--tick-interval",
+        "0",
+    ]);
     agreed(&first, "elapsed", WATCH_ELAPSED);
     assert!(
         first.stderr.contains("the first thing"),
@@ -1031,6 +1175,8 @@ fn a_resumed_watch_does_not_repeat_what_the_one_before_it_emitted() {
     let second = world.run(&[
         "watch",
         &run,
+        "--until",
+        "settled",
         "--timeout",
         "2",
         "--tick-interval",
@@ -1415,9 +1561,11 @@ fn several_conditions_on_one_command_line_return_on_the_first_to_fire_and_say_wh
     let world = World::new("watch-selector");
     let run = settling_run(&world, "watchselector");
 
-    // Two conditions, one of which the run has met. The record names the fact
-    // rather than the flag — the word, the status and the node — which is what a
-    // caller branches on without reading the line beside it.
+    // Two conditions, one of which the run has met past the cursor — the
+    // journal's start. The record names the fact rather than the flag — the
+    // word, the status and the node — which is what a caller branches on without
+    // reading the line beside it.
+    let from_start = format!("1:{run}:0");
     let watched = world.run(&[
         "watch",
         &run,
@@ -1425,6 +1573,8 @@ fn several_conditions_on_one_command_line_return_on_the_first_to_fire_and_say_wh
         "node=check",
         "--until",
         "node-settled",
+        "--cursor",
+        &from_start,
         "--timeout",
         "30",
         "--tick-interval",
@@ -1452,6 +1602,8 @@ fn several_conditions_on_one_command_line_return_on_the_first_to_fire_and_say_wh
         &run,
         "--until",
         "node=build",
+        "--cursor",
+        &from_start,
         "--timeout",
         "30",
         "--tick-interval",
@@ -1483,24 +1635,45 @@ fn several_conditions_on_one_command_line_return_on_the_first_to_fire_and_say_wh
     world.release("check.go");
 }
 
-/// A condition the run has **already** satisfied is answered; the same condition
-/// past the cursor that answered it is refused.
+/// A condition the run has **already** satisfied past a cursor is answered; the
+/// same condition past the cursor that answered it is refused.
 ///
 /// This is the line between "already" and "never", and it is the whole of it: a
 /// settlement at or past this watch's cursor is read on the first pass and
 /// returns immediately, and one behind the cursor was handed to the watch that
 /// printed it. Both waits below are unbounded, so a build that got either side
-/// wrong would hang here rather than fail quietly.
+/// wrong would hang here rather than fail quietly. A watch given **no** cursor
+/// counts no settlement from before it armed, so the same `done` node is refused
+/// to it too.
 #[test]
 fn a_condition_already_met_returns_at_once_and_the_same_one_past_its_cursor_is_refused() {
     let world = World::new("watch-already-met");
     let run = settling_run(&world, "watchalreadymet");
 
+    let uncursored = world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "node=build",
+        "--timeout",
+        "none",
+        "--tick-interval",
+        "0",
+    ]);
+    uncursored
+        .exited(REFUSED)
+        .err_has("would never fire")
+        .err_has("before this watch armed");
+    assert!(machine(&uncursored).is_empty(), "{}", uncursored.stdout);
+
+    let from_start = format!("1:{run}:0");
     let met = world.run(&[
         "watch",
         &run,
         "--until",
         "node=build",
+        "--cursor",
+        &from_start,
         "--timeout",
         "none",
         "--tick-interval",
@@ -1621,14 +1794,17 @@ fn a_wait_for_any_settlement_past_a_finished_run_could_never_fire_and_is_refused
         world.run_file(&run, "result.json").is_file()
     });
 
-    // Everything this run will ever settle is ahead of a watch that starts at the
-    // beginning of its journal, so the condition is answerable — and what answers
-    // it is the run settling, which outranks it and ends every wait.
+    // Everything this run will ever settle is ahead of a watch whose cursor is
+    // the beginning of its journal, so the condition is answerable — and what
+    // answers it is the run settling, which outranks it and ends every wait.
+    let from_start = format!("1:{run}:0");
     let first = world.run(&[
         "watch",
         &run,
         "--until",
         "node-settled",
+        "--cursor",
+        &from_start,
         "--timeout",
         "0",
         "--tick-interval",
@@ -1661,6 +1837,27 @@ fn a_wait_for_any_settlement_past_a_finished_run_could_never_fire_and_is_refused
         "a refused watch wrote records before refusing:\n{}",
         refused.stdout
     );
+
+    // Given no cursor, the same condition waits for a settlement after the
+    // watch armed, which nothing in this finished run will journal — refused
+    // too. And the default set, which nobody asked for, is never refused: the
+    // run having settled is what a bare watch answers.
+    let uncursored = world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "node-settled",
+        "--timeout",
+        "none",
+        "--tick-interval",
+        "0",
+    ]);
+    uncursored
+        .exited(REFUSED)
+        .err_has("would never fire")
+        .err_has("before this watch armed");
+    let bare = world.run(&["watch", &run, "--timeout", "none", "--tick-interval", "0"]);
+    agreed(&bare, "settled", 0);
 }
 
 /// A run whose graph holds nothing refuses a wait for any node to settle, on its
@@ -1822,42 +2019,6 @@ fn an_unbounded_wait_blocks_where_a_zero_one_reads_once_and_ends_on_its_conditio
     assert_eq!(ended.code(), Some(NODE_SETTLED), "{last}\n{said}");
 
     world.release("keep.go");
-}
-
-/// The condition that names what every wait already returns on is accepted, and
-/// returns exactly what an unnamed one does.
-///
-/// `--until nothing-driving` adds nothing, and that is the honest reading rather
-/// than a fifth behaviour behind a word: a wait that could outlive the run it
-/// watches is the silence this verb exists to end, so the run settling and
-/// nothing driving it end every wait however it was spelled.
-#[test]
-fn naming_a_condition_every_wait_already_returns_on_returns_what_an_unnamed_one_does() {
-    let world = World::new("watch-nothing-driving");
-    let run = "watchnothingdriving";
-    world.script("build.fail", "1");
-    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
-    world.run(&["start", &path, "--detach"]).exited(0);
-    world.until("the run to stop being driven", |world| {
-        world.run(&["status", run]).stdout.contains("DRIVER DEAD")
-    });
-
-    for invocation in [
-        vec!["watch", run, "--timeout", "0", "--tick-interval", "0"],
-        vec![
-            "watch",
-            run,
-            "--until",
-            "nothing-driving",
-            "--timeout",
-            "none",
-            "--tick-interval",
-            "0",
-        ],
-    ] {
-        let watched = world.run(&invocation);
-        agreed(&watched, "nothing-driving", NOTHING_DRIVING);
-    }
 }
 
 /// The cursor a `monitor` ends on, read off the one resume line it must print as
@@ -2317,9 +2478,21 @@ type Frame = (String, String);
 
 /// Pair a watch's machine records with the human lines it wrote beside them,
 /// one for one, as `say` writes them.
+///
+/// An elapsed ending's human form is its ending line and the summary lines
+/// indented beneath it, so an indented line belongs to the line before it.
 fn framed(watched: &Run, human: &str) -> Vec<Frame> {
     let records: Vec<String> = watched.stdout.lines().map(str::to_string).collect();
-    let lines: Vec<String> = human.lines().map(str::to_string).collect();
+    let mut lines: Vec<String> = Vec::new();
+    for line in human.lines() {
+        match lines.last_mut() {
+            Some(last) if line.starts_with("   ") => {
+                last.push('\n');
+                last.push_str(line);
+            }
+            _ => lines.push(line.to_string()),
+        }
+    }
     assert_eq!(
         records.len(),
         lines.len(),
@@ -2334,15 +2507,44 @@ fn parsed(line: &str) -> Value {
     serde_json::from_str(line).unwrap_or_else(|e| panic!("not a JSON record ({e}): {line}"))
 }
 
-/// A return record's bytes with the unread age — a function of when it was
-/// read, not of what — written as a placeholder.
+/// A return record's bytes with every age — the unread age and an elapsed
+/// summary's, each a function of when it was read, not of what — written as a
+/// placeholder.
 fn ageless(line: &str) -> String {
-    const AGE: &str = "\"oldest_seconds\":";
-    let Some(at) = line.find(AGE).map(|at| at + AGE.len()) else {
-        return line.to_string();
-    };
-    let digits = line[at..].bytes().take_while(u8::is_ascii_digit).count();
-    format!("{}<age>{}", &line[..at], &line[at + digits..])
+    let mut line = line.to_string();
+    for age in [
+        "\"oldest_seconds\":",
+        "\"last_progress_seconds\":",
+        "\"waited_seconds\":",
+    ] {
+        let mut from = 0;
+        while let Some(at) = line[from..].find(age).map(|at| from + at + age.len()) {
+            let digits = line[at..].bytes().take_while(u8::is_ascii_digit).count();
+            line = format!("{}<age>{}", &line[..at], &line[at + digits..]);
+            from = at;
+        }
+    }
+    line
+}
+
+/// A human ending with the durations its summary lines state — functions of
+/// when it was read — written as a placeholder, and its ending line as it is.
+fn timeless(human: &str) -> String {
+    let mut lines = human.lines();
+    let ending = lines.next().unwrap_or_default().to_string();
+    lines.fold(ending, |text, line| {
+        let mut out = String::new();
+        let mut in_digits = false;
+        for c in line.chars() {
+            match (c.is_ascii_digit(), in_digits) {
+                (true, false) => out.push('#'),
+                (false, _) => out.push(c),
+                _ => {}
+            }
+            in_digits = c.is_ascii_digit();
+        }
+        format!("{text}\n{out}")
+    })
 }
 
 /// The byte a cursor token names.
@@ -2471,7 +2673,7 @@ fn logged_alike(world: &World, args: &[&str], log: &std::path::Path) -> Run {
             .to_string();
         (
             ageless(&line.replace(&cursor, "<cursor>")),
-            human.replace(&cursor, "<cursor>"),
+            timeless(&human.replace(&cursor, "<cursor>")),
             cursor,
         )
     };
@@ -2515,8 +2717,12 @@ fn logged_alike(world: &World, args: &[&str], log: &std::path::Path) -> Run {
 }
 
 /// `--log PATH` moves the human lines into a file and changes nothing else, on
-/// every ending a watch returns on: the status, the machine form and the ending
-/// line with its cursor are each what the same watch without the flag gives.
+/// every ending a watch returns on without the run moving under it: the status,
+/// the machine form and the ending line with its cursor — and an elapsed one's
+/// summary lines — are each what the same watch without the flag gives. The two
+/// endings that need the run to move while the watch waits, `nothing-driving`
+/// and `run-changed`, are driven by journeys of their own below; one watch run
+/// twice cannot be handed the same move twice.
 ///
 /// A supervisor used to get this with a shell redirect, which no allowlist can
 /// approve as one simple command.
@@ -2525,8 +2731,10 @@ fn a_logged_watch_answers_every_ending_as_an_unlogged_one_does() {
     let world = World::new("watch-logged-endings");
     let log = world.root.join("endings.log");
 
-    // Node `build` has settled and `check` is held.
+    // Node `build` has settled and `check` is held. From the journal's start,
+    // so `build`'s settlement is past the cursor and answers the condition.
     let run = settling_run(&world, "watchlogged");
+    let from_start = format!("1:{run}:0");
     agreed(
         &logged_alike(
             &world,
@@ -2534,6 +2742,8 @@ fn a_logged_watch_answers_every_ending_as_an_unlogged_one_does() {
                 &run,
                 "--until",
                 "node-settled",
+                "--cursor",
+                &from_start,
                 "--timeout",
                 "30",
                 "--tick-interval",
@@ -2613,7 +2823,8 @@ fn a_logged_watch_answers_every_ending_as_an_unlogged_one_does() {
     ended(serving);
     world.release("gate.go");
 
-    // Nothing driving: the one node fails.
+    // A run nothing is driving, which a watch waits on rather than returning
+    // at once: the one node fails, and the wait runs out with its summary.
     world.script("lone.fail", "1");
     let undriven = "watchloggedundriven";
     let path = world.plan(undriven, &plan_of(undriven, vec![agent("lone", &[])]));
@@ -2624,14 +2835,16 @@ fn a_logged_watch_answers_every_ending_as_an_unlogged_one_does() {
             .stdout
             .contains("DRIVER DEAD")
     });
-    agreed(
-        &logged_alike(
-            &world,
-            &[undriven, "--timeout", "30", "--tick-interval", "0"],
-            &log,
-        ),
-        "nothing-driving",
-        NOTHING_DRIVING,
+    let waited = logged_alike(
+        &world,
+        &[undriven, "--timeout", "1", "--tick-interval", "0"],
+        &log,
+    );
+    agreed(&waited, "elapsed", WATCH_ELAPSED);
+    assert!(
+        returned(&waited)["summary"].is_object(),
+        "an elapsed return carried no summary: {}",
+        waited.stdout
     );
 }
 
@@ -2662,6 +2875,8 @@ fn a_logged_watch_appends_across_a_resume_and_each_line_is_readable_as_it_is_wri
     let first = world.run(&[
         "watch",
         &run,
+        "--until",
+        "settled",
         "--timeout",
         "0",
         "--tick-interval",
@@ -2689,6 +2904,8 @@ fn a_logged_watch_appends_across_a_resume_and_each_line_is_readable_as_it_is_wri
     let second = world.run(&[
         "watch",
         &run,
+        "--until",
+        "settled",
         "--timeout",
         "0",
         "--tick-interval",
@@ -2724,11 +2941,19 @@ fn a_logged_watch_appends_across_a_resume_and_each_line_is_readable_as_it_is_wri
         1,
         "the resumed watch repeated what the first had logged:\n{logged}"
     );
+    // The last line a watch writes that is not one of an elapsed ending's
+    // summary lines, which are indented beneath it.
     assert!(
         lines
-            .last()
+            .iter()
+            .rev()
+            .find(|line| !line.starts_with("   "))
             .is_some_and(|line| line.starts_with("-- watch ")),
         "the log does not end on the resumed watch's ending line:\n{logged}"
+    );
+    assert!(
+        logged.contains("   last progress: "),
+        "an elapsed watch's summary did not reach the log:\n{logged}"
     );
 
     // Live: a heartbeat is only written after an interval in which nothing
@@ -2739,6 +2964,8 @@ fn a_logged_watch_appends_across_a_resume_and_each_line_is_readable_as_it_is_wri
         .cmd(&[
             "watch",
             &run,
+            "--until",
+            "settled",
             "--timeout",
             "600",
             "--tick-interval",
@@ -2851,6 +3078,859 @@ fn a_log_that_stops_taking_writes_ends_the_watch_as_a_broken_stream_does() {
         full.stdout.trim(),
         "",
         "the watch left an outcome on stdout that its exit status contradicts"
+    );
+
+    world.release("build.go");
+}
+
+/// Raise a surface through the channel's own `surface` verb.
+fn surfaced(world: &World, run: &str, kind: &str, message: &str) {
+    world
+        .run(&["surface", run, "--kind", kind, "--message", message])
+        .exited(0);
+}
+
+/// Every surface `next` hands out until it has none left, as it handed each out.
+fn drained_surfaces(world: &World, run: &str) -> Vec<Value> {
+    let mut read = Vec::new();
+    for _ in 0..64 {
+        let next = world.run(&["next", run]);
+        next.exited(0);
+        let answer = next.json();
+        match answer["surface"].is_object() {
+            true => read.push(answer["surface"].clone()),
+            false => return read,
+        }
+    }
+    panic!("`next` never ran out of surfaces: {read:?}");
+}
+
+/// [`drained_surfaces`], as the messages it handed out.
+fn drained(world: &World, run: &str) -> Vec<String> {
+    drained_surfaces(world, run)
+        .iter()
+        .map(|surface| {
+            surface["message"]
+                .as_str()
+                .expect("a surface carries its message")
+                .to_string()
+        })
+        .collect()
+}
+
+/// A watch spawned to wait, and the moment it armed on the run.
+fn armed_watch(world: &World, run: &str, args: &[&str]) -> std::process::Child {
+    armed_watch_with(world, run, args, &[])
+}
+
+/// [`armed_watch`], with `env` set on the watch's own process.
+fn armed_watch_with(
+    world: &World,
+    run: &str,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> std::process::Child {
+    let before = armed(world, run);
+    let mut argv = vec!["watch", run];
+    argv.extend_from_slice(args);
+    let mut command = world.cmd(&argv);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let child = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the watch starts");
+    world.until("the watch to arm", |world| armed(world, run) > before);
+    child
+}
+
+/// What a spawned watch returned: its status and its last machine record.
+fn finished(child: std::process::Child) -> (i32, Value, String) {
+    let output = child.wait_with_output().expect("the watch exits");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let last: Value = serde_json::from_str(
+        stdout
+            .lines()
+            .last()
+            .unwrap_or_else(|| panic!("the watch wrote nothing:\n{stderr}")),
+    )
+    .unwrap_or_else(|e| panic!("the watch's last line is not JSON ({e}):\n{stdout}"));
+    assert_eq!(last["watch"], json!("return"), "{last}");
+    assert_eq!(
+        last["exit"],
+        json!(output.status.code().expect("the watch exited")),
+        "{last}"
+    );
+    (
+        output.status.code().expect("the watch exited"),
+        last,
+        stderr,
+    )
+}
+
+/// A default watch ends `surface-waiting` on a planner surface nobody has read —
+/// one already unread when it armed, and one raised while it waits — whatever
+/// kind it is and whoever raised it, with `blocking` false for a report; with
+/// several queued, one return reports them all, and the watch consumes none of
+/// them, so `next` still hands out every one. Once `next` has, a watch no longer
+/// ends on them.
+#[test]
+fn a_default_watch_ends_on_every_unread_surface_and_consumes_none_of_them() {
+    let world = World::new("watch-wake-unread");
+    world.script("build.wait", "hold");
+    let run = running(&world, "watchwakeunread", vec![agent("build", &[])]);
+
+    // Already unread when the watch arms.
+    surfaced(&world, &run, "finding", "raised before anybody watched");
+    let first = world.run(&["watch", &run, "--timeout", "30", "--tick-interval", "0"]);
+    agreed(&first, "surface-waiting", SURFACE_WAITING);
+    let last = returned(&first);
+    assert_eq!(last["blocking"], json!(false), "{last}");
+    assert_eq!(last["unread"]["count"], json!(1), "{last}");
+    assert!(last.get("summary").is_none(), "{last}");
+
+    // Several, of kinds nothing in the engine knows, all reported by one return.
+    for (kind, message) in [
+        ("deploy-note", "a kind the engine never raises"),
+        ("x9", "another stranger's word"),
+    ] {
+        surfaced(&world, &run, kind, message);
+    }
+    let several = world.run(&["watch", &run, "--timeout", "30", "--tick-interval", "0"]);
+    agreed(&several, "surface-waiting", SURFACE_WAITING);
+    let last = returned(&several);
+    assert_eq!(last["unread"]["count"], json!(3), "{last}");
+    assert_eq!(last["blocking"], json!(false), "{last}");
+
+    // Two watches later, `next` still hands out every surface either reported.
+    let mut read = drained(&world, &run);
+    read.sort();
+    assert_eq!(
+        read,
+        vec![
+            "a kind the engine never raises",
+            "another stranger's word",
+            "raised before anybody watched",
+        ],
+        "a watch consumed or dropped a surface it reported"
+    );
+
+    // Consumed, a report no longer ends a wait.
+    let quiet = world.run(&["watch", &run, "--timeout", "2", "--tick-interval", "0"]);
+    agreed(&quiet, "elapsed", WATCH_ELAPSED);
+
+    // And one raised while a default watch waits ends it.
+    let watching = armed_watch(&world, &run, &["--timeout", "60", "--tick-interval", "0"]);
+    surfaced(&world, &run, "finding", "raised while the watch waited");
+    let (code, last, _) = finished(watching);
+    assert_eq!(code, SURFACE_WAITING, "{last}");
+    assert_eq!(last["blocking"], json!(false), "{last}");
+
+    world.release("build.go");
+}
+
+/// An abandoned blocking surface ends a watch while `next` has not consumed it,
+/// with `blocking` true, and stops ending one once it has; an unanswered,
+/// non-abandoned blocking surface `next` handed out still ends every watch.
+#[test]
+fn a_blocking_surface_ends_a_watch_read_or_not_until_it_is_abandoned_and_read() {
+    let world = World::new("watch-wake-blocking");
+    world.script("build.wait", "hold");
+    let run = running(&world, "watchwakeblocking", vec![agent("build", &[])]);
+
+    // A question whose asker gave up waiting: raised blocking, and abandoned
+    // when its one-second window closed unanswered.
+    let mut asking = world.cmd(&["ask", "--timeout", "1", "which base should build use?"]);
+    asking.env("ONEPIPELINE_RUN_ID", &run);
+    world.run_on(asking, "ask with a one-second window");
+
+    let unread = world.run(&["watch", &run, "--timeout", "30", "--tick-interval", "0"]);
+    agreed(&unread, "surface-waiting", SURFACE_WAITING);
+    assert_eq!(returned(&unread)["blocking"], json!(true));
+
+    // What `next` hands out is that question, blocking and abandoned — which is
+    // the surface the watch above ended on.
+    let read = drained_surfaces(&world, &run);
+    assert_eq!(read.len(), 1, "{read:?}");
+    assert_eq!(read[0]["message"], json!("which base should build use?"));
+    assert_eq!(read[0]["blocking"], json!(true), "{}", read[0]);
+    assert_eq!(read[0]["abandoned"], json!(true), "{}", read[0]);
+    let read = world.run(&["watch", &run, "--timeout", "2", "--tick-interval", "0"]);
+    agreed(&read, "elapsed", WATCH_ELAPSED);
+
+    // A blocking question whose asker is still waiting, handed out by `next`
+    // and not answered: it still ends a watch, read or not.
+    let mut serving = world
+        .host_channel(&run)
+        // Long enough to outlast the reads below, which is all this question
+        // has to do; closing the pipe after them waits this out.
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "15")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"the gate refused; retry?","blocking":true,"node":"build"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    world.until("the question to reach the planner", |world| {
+        world
+            .queued_surfaces(&run)
+            .iter()
+            .any(|surface| surface["kind"] == json!("blocker"))
+    });
+    assert!(
+        drained(&world, &run).contains(&"the gate refused; retry?".to_string()),
+        "`next` never handed out the question"
+    );
+    let pending = world.run(&["watch", &run, "--timeout", "30", "--tick-interval", "0"]);
+    agreed(&pending, "surface-waiting", SURFACE_WAITING);
+    let last = returned(&pending);
+    assert_eq!(last["blocking"], json!(true), "{last}");
+    assert_eq!(last["unread"]["count"], json!(0), "{last}");
+
+    drop(stdin);
+    ended(serving);
+    world.release("build.go");
+}
+
+/// A watch given no cursor wakes on a settlement journalled after it armed and
+/// on none before; a node that settled before it armed and can settle again is
+/// accepted and waited on; a cursored watch still answers a settlement past its
+/// cursor at once.
+#[test]
+fn an_uncursored_watch_counts_only_settlements_after_it_armed() {
+    let world = World::new("watch-wake-settled");
+    world.script("keep.wait", "hold");
+    // Held to the end, so no settlement below is also the run completing —
+    // which outranks a settlement and would answer every watch instead.
+    world.script("anchor.wait", "hold");
+    // `later` holds its turn open and ends when it is asked to, so a cancel
+    // settles it `cancelled` — a settlement before any watch armed, of a node a
+    // requeue dispatches again under the same id.
+    world.script("later.turn-open", "");
+    world.script("later.wait", "hold");
+    world.script("later.stops-when-interrupted", "");
+    let run = "watchwakesettled";
+    let path = world.plan(
+        run,
+        &plan_of(
+            run,
+            vec![
+                agent("build", &[]),
+                agent("keep", &[]),
+                agent("later", &[]),
+                agent("anchor", &[]),
+            ],
+        ),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    let settled = |world: &World, node: &str| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .filter(|event| event["labels"]["node"] == json!(node))
+            .count()
+    };
+    world.until("build to settle and later's turn to open", |world| {
+        settled(world, "build") == 1
+            && world
+                .events_of(run, "turn-started")
+                .iter()
+                .any(|event| event["labels"]["node"] == json!("later"))
+    });
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [{"op": "cancel", "id": "later"}]}).to_string(),
+        )
+        .exited(0);
+    world.until("later to settle cancelled", |world| {
+        settled(world, "later") == 1
+    });
+    // The cancel reached `later` as a redirection its double keeps on disk, and
+    // a held dispatch ends on that file as it would on its release. Left there,
+    // the requeued dispatch below would pass its hold at once and race `keep`
+    // to the default watch; removed, it holds until `later.go`.
+    world.unscript("later.redirect");
+    // The cancellation's own report, read, so what follows is about
+    // settlements alone.
+    assert!(
+        !drained(&world, run).is_empty(),
+        "the cancel reported nothing"
+    );
+
+    // The run holds earlier settlements, and a default watch does not end on
+    // them — it prints them and waits.
+    let bare = world.run(&["watch", run, "--timeout", "2", "--tick-interval", "0"]);
+    agreed(&bare, "elapsed", WATCH_ELAPSED);
+    assert!(
+        emitted(&bare).iter().any(|kind| kind == "node-settled"),
+        "the earlier settlements were not printed: {}",
+        bare.stdout
+    );
+
+    // `later` settled before arming, and is accepted and waited on rather than
+    // answered by that settlement.
+    let named = world.run(&[
+        "watch",
+        run,
+        "--until",
+        "node=later",
+        "--timeout",
+        "2",
+        "--tick-interval",
+        "0",
+    ]);
+    agreed(&named, "elapsed", WATCH_ELAPSED);
+
+    // A cursored watch keeps the rule it had: from the journal's start, `build`
+    // settled past its cursor, and answers it at once.
+    let from_start = format!("1:{run}:0");
+    let cursored = world.run(&[
+        "watch",
+        run,
+        "--until",
+        "node=build",
+        "--cursor",
+        &from_start,
+        "--timeout",
+        "30",
+        "--tick-interval",
+        "0",
+    ]);
+    agreed(&cursored, "node-settled", NODE_SETTLED);
+    assert_eq!(returned(&cursored)["node"], json!("build"));
+
+    let for_later = armed_watch(
+        &world,
+        run,
+        &[
+            "--until",
+            "node=later",
+            "--timeout",
+            "120",
+            "--tick-interval",
+            "0",
+        ],
+    );
+    let default = armed_watch(&world, run, &["--timeout", "120", "--tick-interval", "0"]);
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [{"op": "requeue", "id": "later"}]}).to_string(),
+        )
+        .exited(0);
+    world.release("keep.go");
+    // A bare watch wakes on the first settlement after it armed, `keep`'s; the
+    // one told to wait for `later` passes over it and wakes on `later`'s own.
+    let (code, last, said) = finished(default);
+    assert_eq!(code, NODE_SETTLED, "{last}\n{said}");
+    assert_eq!(last["node"], json!("keep"), "{last}");
+    world.until("later to be dispatched again", |world| {
+        world
+            .events_of(run, "node-dispatched")
+            .iter()
+            .filter(|event| event["labels"]["node"] == json!("later"))
+            .count()
+            == 2
+    });
+    world.release("later.go");
+    let (code, last, said) = finished(for_later);
+    assert_eq!(code, NODE_SETTLED, "{last}\n{said}");
+    assert_eq!(last["node"], json!("later"), "{last}");
+    world.release("anchor.go");
+}
+
+/// An explicit `--until` replaces the default set rather than adding to it: a
+/// watch told only `node=<ID>` runs past an unread surface and another node
+/// settling to its deadline.
+#[test]
+fn an_explicit_condition_replaces_the_default_set() {
+    let world = World::new("watch-wake-explicit");
+    world.script("build.wait", "hold");
+    world.script("keep.wait", "hold");
+    let run = running(
+        &world,
+        "watchwakeexplicit",
+        vec![agent("build", &[]), agent("keep", &[])],
+    );
+    let watching = armed_watch(
+        &world,
+        &run,
+        &[
+            "--until",
+            "node=keep",
+            "--timeout",
+            "4",
+            "--tick-interval",
+            "0",
+        ],
+    );
+    surfaced(
+        &world,
+        &run,
+        "finding",
+        "unread, and not what this watch waits for",
+    );
+    world.release("build.go");
+    world.until("build to settle", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == json!("build"))
+    });
+    let (code, last, _) = finished(watching);
+    assert_eq!(code, WATCH_ELAPSED, "{last}");
+    assert_eq!(last["condition"], json!("elapsed"), "{last}");
+
+    // The help names the default set a bare watch gets.
+    let help = world.run(&["watch", "--help"]);
+    help.exited(0)
+        .out_has("Given none, the wait returns on `surface` and `node-settled`");
+
+    world.release("keep.go");
+}
+
+/// A run nothing is driving, as the failing lone node leaves one.
+fn undriven(world: &World, run: &str) {
+    world.script("build.fail", "1");
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the run to stop being driven", |world| {
+        world.run(&["status", run]).stdout.contains("DRIVER DEAD")
+    });
+}
+
+/// The length of one of the run's own files, or nothing for one not there.
+fn length(world: &World, run: &str, file: &str) -> u64 {
+    std::fs::metadata(world.run_file(run, file)).map_or(0, |meta| meta.len())
+}
+
+/// A watch armed on a run nothing is driving waits for somebody to act on it,
+/// and ends `run-changed` when the run moves with nothing else firing: a reply
+/// landing in its channel's reply queue, a planner edit appended to its journal,
+/// and its launch record being rewritten, as `adopt` rewrites it. Each of the
+/// three is also held, one file at a time, by the fingerprint's own unit test in
+/// `src/watch.rs`, since no verb writes one of them and nothing else. A queued surface is
+/// answered as the surface it is. A run whose graph is complete still ends
+/// `settled` at once.
+#[test]
+fn a_watch_armed_on_a_run_nothing_is_driving_ends_when_the_run_moves() {
+    let world = World::new("watch-wake-undriven");
+    let default = ["--timeout", "120", "--tick-interval", "0"];
+
+    // Parked: a live driver holding a dispatch open that has written nothing
+    // for longer than the bound the watch reads it by, which is a run nothing
+    // is driving. A verdict for the next listener lands in the channel's reply
+    // queue — a record that is not a surface — and the run journals that it
+    // was replied to.
+    let parked_after = [("ONEPIPELINE_PARKED_AFTER_SECONDS", "1")];
+    world.script("hold.wait", "hold");
+    let quiet = running(&world, "watchwakeparked", vec![agent("hold", &[])]);
+    world.until("the run to read as parked", |world| {
+        let mut status = world.cmd(&["status", &quiet]);
+        status.env(parked_after[0].0, parked_after[0].1);
+        let out = status.output().expect("the binary runs");
+        String::from_utf8_lossy(&out.stdout).contains("PARKED")
+    });
+    let replies = length(&world, &quiet, "channel/replies.jsonl");
+    let watching = armed_watch_with(&world, &quiet, &default, &parked_after);
+    world
+        .run_with_stdin(
+            &["reply", &quiet],
+            r#"{"message": "carry on when you can"}"#,
+        )
+        .exited(0);
+    let (code, last, said) = finished(watching);
+    assert_eq!(code, RUN_CHANGED, "{last}\n{said}");
+    assert_eq!(last["condition"], json!("run-changed"), "{last}");
+    assert!(last.get("summary").is_none(), "{last}");
+    assert!(said.contains("run-changed"), "{said}");
+    assert!(
+        length(&world, &quiet, "channel/replies.jsonl") > replies,
+        "the reply queue did not move, so this was not the move under test"
+    );
+    world.release("hold.go");
+
+    // A driver that failed its one node and exited.
+    let run = "watchwakeundriven";
+    undriven(&world, run);
+
+    // A planner edit applied locally: a record appended to the journal.
+    let journal = length(&world, run, "events.jsonl");
+    let watching = armed_watch(&world, run, &default);
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "add", "node": {"id": "extra", "persona": "engineer",
+                                       "task": "## What\nsweep\n\n## Acceptance criteria\n- It is done."}}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    let (code, last, said) = finished(watching);
+    assert_eq!(code, RUN_CHANGED, "{last}\n{said}");
+    assert!(length(&world, run, "events.jsonl") > journal);
+
+    // A surface is answered as a surface, not as the run changing.
+    let watching = armed_watch(&world, run, &default);
+    surfaced(&world, run, "finding", "raised on a run nobody drives");
+    let (code, last, said) = finished(watching);
+    assert_eq!(code, SURFACE_WAITING, "{last}\n{said}");
+    assert_eq!(drained(&world, run), vec!["raised on a run nobody drives"]);
+
+    // Adoption rewrites the launch record, and ends the wait the same way.
+    let launch = std::fs::read_to_string(world.run_file(run, "launch.json"))
+        .expect("the launch record reads");
+    let watching = armed_watch(&world, run, &default);
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    let (code, last, said) = finished(watching);
+    assert_eq!(code, RUN_CHANGED, "{last}\n{said}");
+    assert_ne!(
+        std::fs::read_to_string(world.run_file(run, "launch.json")).expect("it reads"),
+        launch,
+        "adoption did not rewrite the launch record"
+    );
+
+    // Complete, a run nothing drives any more ends a watch at once.
+    let finished_run = running(&world, "watchwakecomplete", vec![agent("done", &[])]);
+    world.until("the run to settle", |world| {
+        world.run_file(&finished_run, "result.json").is_file()
+    });
+    let began = std::time::Instant::now();
+    let settled = world.run(&["watch", &finished_run, "--timeout", "120"]);
+    agreed(&settled, "settled", 0);
+    assert!(began.elapsed() < std::time::Duration::from_secs(60));
+}
+
+/// Surfaces of any kind and either source the channel's `surface` verb raises
+/// each end a default watch, and each is counted in an elapsed watch's summary
+/// of what arrived while it waited; a wait nothing arrived during says so
+/// plainly. Nothing here depends on who raised a surface or what it is called.
+#[test]
+fn every_surface_the_channel_raises_ends_a_default_watch_and_is_counted_while_it_waits() {
+    let world = World::new("watch-wake-kinds");
+    world.script("build.wait", "hold");
+    let run = running(&world, "watchwakekinds", vec![agent("build", &[])]);
+    // `check-in` is raised under the check-in source and every other kind under
+    // the proposal source; the third is a word no part of the engine knows.
+    let raised = [
+        ("check-in", "steady, nothing to decide"),
+        ("finding", "the base moved under us"),
+        ("lantern-7", "a stranger's own kind of news"),
+    ];
+    for (kind, message) in raised {
+        let watching = armed_watch(&world, &run, &["--timeout", "60", "--tick-interval", "0"]);
+        surfaced(&world, &run, kind, message);
+        let (code, last, said) = finished(watching);
+        assert_eq!(code, SURFACE_WAITING, "{kind}: {last}\n{said}");
+        assert_eq!(last["unread"]["kinds"][0]["kind"], json!(kind), "{last}");
+        assert_eq!(drained(&world, &run), vec![message]);
+    }
+
+    // Told to wait for something else, a watch counts all three as they arrive.
+    let watching = armed_watch(
+        &world,
+        &run,
+        &[
+            "--until",
+            "node=build",
+            "--timeout",
+            "5",
+            "--tick-interval",
+            "0",
+        ],
+    );
+    for (kind, message) in raised {
+        surfaced(&world, &run, kind, message);
+    }
+    let (code, last, said) = finished(watching);
+    assert_eq!(code, WATCH_ELAPSED, "{last}\n{said}");
+    assert_eq!(
+        last["summary"]["surfaces_queued_during_wait"],
+        json!(raised.len()),
+        "{last}"
+    );
+    assert!(
+        said.contains("3 planner surface(s) arrived during this"),
+        "{said}"
+    );
+    drained(&world, &run);
+
+    // And none: the summary says so, in words a person reads without the JSON.
+    let quiet = world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "node=build",
+        "--timeout",
+        "1",
+        "--tick-interval",
+        "0",
+    ]);
+    agreed(&quiet, "elapsed", WATCH_ELAPSED);
+    let summary = returned(&quiet)["summary"].clone();
+    assert_eq!(
+        summary["surfaces_queued_during_wait"],
+        json!(0),
+        "{summary}"
+    );
+    assert_eq!(summary["observer"], json!("none"), "{summary}");
+    assert!(summary["last_progress_seconds"].is_u64(), "{summary}");
+    assert_eq!(summary["held"], json!([]), "{summary}");
+    assert!(
+        quiet.stderr.contains(
+            "no planner surface arrived during this 1s wait; the run launched no observer graph"
+        ),
+        "{}",
+        quiet.stderr
+    );
+
+    world.release("build.go");
+}
+
+/// A run where no node has dispatched or settled has no progress to date, and
+/// its summary says `null` rather than a number.
+#[test]
+fn a_run_with_no_dispatch_or_settlement_reports_no_last_progress() {
+    let world = World::new("watch-wake-no-progress");
+    world.script("build.wait", "hold");
+    let upstream = running(&world, "watchwakeupstream", vec![agent("build", &[])]);
+    // Waiting on a node of another run that is still working, so nothing here
+    // dispatches and nothing settles.
+    let mut waiting = agent("after", &[]);
+    waiting["deps"] = json!([format!("run:{upstream}#build")]);
+    let run = "watchwakenoprogress";
+    let path = world.plan(run, &plan_of(run, vec![waiting]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    // Its driver has nothing to dispatch while the upstream works, and lets the
+    // run go; the watch below is armed on it as it then stands.
+    world.until("the run to stop being driven", |world| {
+        world.run_file(run, "launch.json").is_file()
+            && !world.run(&["status", run]).stdout.contains("ACTIVE")
+    });
+
+    let watched = world.run(&["watch", run, "--timeout", "1", "--tick-interval", "0"]);
+    agreed(&watched, "elapsed", WATCH_ELAPSED);
+    let summary = returned(&watched)["summary"].clone();
+    assert!(
+        world.events_of(run, "node-dispatched").is_empty()
+            && world.events_of(run, "node-settled").is_empty(),
+        "the premise did not hold: something in the run moved"
+    );
+    assert_eq!(summary["last_progress_seconds"], Value::Null, "{summary}");
+    assert_eq!(summary["settled_since_cursor"], json!([]), "{summary}");
+    assert!(
+        watched
+            .stderr
+            .contains("last progress: no node has dispatched or settled"),
+        "{}",
+        watched.stderr
+    );
+
+    world.release("build.go");
+}
+
+/// The observer a run's summary names is read by the rules the liveness view
+/// already reads it by, however the graph's members are named: a real observer
+/// graph of members named by nothing built in reads `running` while its graph
+/// run lives and `dead` once it has ended with nothing starting another.
+#[test]
+fn an_elapsed_summary_names_a_live_observer_running_and_a_killed_one_dead() {
+    let world =
+        World::new("watch-wake-observer").with_env(crate::dispatch::OBSERVER_RESTARTS_ENV, "0");
+    world.write_graphs();
+    let graph = world.write_observer_graph_with_clocks(&[("zz-lantern", true), ("q-7", false)]);
+    world.script("observer.wait", "hold");
+    world.script("turn.hold", "hold");
+    let run = "watchwakeobserved";
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&["start", &path, "--detach", "--dag-graph", &graph])
+        .exited(0);
+    world.until("the observer to be watching the run", |world| {
+        world.observer_saw().len() == 1
+    });
+    world.until("the run to hold a dispatch in flight", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+    let observer = |world: &World| -> Value {
+        let watched = world.run_on_agentgraph(&[
+            "watch",
+            run,
+            "--until",
+            "settled",
+            "--timeout",
+            "1",
+            "--tick-interval",
+            "0",
+        ]);
+        watched.exited(WATCH_ELAPSED);
+        returned(&watched)["summary"]["observer"].clone()
+    };
+    assert_eq!(observer(&world), json!("running"));
+
+    // The observer's turn ends and its graph run with it; with restarting off,
+    // nothing starts another, so what the run has is an observer that is over.
+    world.release("observer.go");
+    world.until("the observer to read as dead", |world| {
+        observer(world) == json!("dead")
+    });
+
+    world.release("turn.go");
+    world.release("turn.settle");
+}
+
+/// A run whose driver has stopped starting its observer again reads
+/// `not-restarted`, as the liveness view reads it.
+#[test]
+fn an_elapsed_summary_names_an_observer_nothing_will_restart() {
+    // Two restarts rather than the shipped eight, so the bound is reached inside
+    // the journey.
+    let world = World::new("watch-wake-not-restarted")
+        .with_env(crate::dispatch::OBSERVER_RESTARTS_ENV, "2");
+    world.script("build.wait", "hold");
+    world.script("observer.wait", "hold");
+    let run = "watchwakerestarts";
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world
+        .run(&[
+            "start",
+            &path,
+            "--detach",
+            "--dag-graph",
+            &world.shipped_dag_graph(),
+        ])
+        .exited(0);
+    for nth in 1..=3 {
+        world.until(&format!("observer {nth} to be watching"), |world| {
+            world.observer_saw().len() >= nth
+        });
+        world.release(&format!("observer.go.{nth}"));
+    }
+    world.until("the driver to spend its restart bound", |world| {
+        world.run_json(run, "launch.json")["observer_ending"].is_string()
+    });
+
+    let watched = world.run(&[
+        "watch",
+        run,
+        "--until",
+        "settled",
+        "--timeout",
+        "1",
+        "--tick-interval",
+        "0",
+    ]);
+    agreed(&watched, "elapsed", WATCH_ELAPSED);
+    assert_eq!(
+        returned(&watched)["summary"]["observer"],
+        json!("not-restarted")
+    );
+    assert!(
+        watched
+            .stderr
+            .contains("the run's observer graph has stopped and nothing will restart it"),
+        "{}",
+        watched.stderr
+    );
+
+    world.release("build.go");
+}
+
+/// An elapsed watch's summary names every hold the run records, whatever its
+/// kind: a node behind a dependency still running, and a node the run's
+/// concurrency is keeping back, each with its own reason and with how long the
+/// run's own `node-held` record says it has been held.
+#[test]
+fn an_elapsed_summary_names_every_hold_the_run_records() {
+    let world = World::new("watch-wake-holds");
+    world.script("build.wait", "hold");
+    let run = "watchwakeholds";
+    let mut plan = plan_of(
+        run,
+        vec![
+            agent("build", &[]),
+            agent("check", &["build"]),
+            agent("spare", &[]),
+        ],
+    );
+    plan["concurrency"] = json!(1);
+    let path = world.plan(run, &plan);
+    world.run(&["start", &path, "--detach"]).exited(0);
+    let held_as = |world: &World, node: &str, kind: &str| {
+        world.events_of(run, "node-held").iter().any(|event| {
+            event["labels"]["node"] == json!(node)
+                && event["payload"]["reasons"]
+                    .as_array()
+                    .is_some_and(|reasons| reasons.iter().any(|reason| reason["kind"] == kind))
+        })
+    };
+    world.until("check and spare to be held", |world| {
+        held_as(world, "check", "dependencies") && held_as(world, "spare", "concurrency")
+    });
+
+    let watched = world.run(&[
+        "watch",
+        run,
+        "--until",
+        "settled",
+        "--timeout",
+        "1",
+        "--tick-interval",
+        "0",
+    ]);
+    agreed(&watched, "elapsed", WATCH_ELAPSED);
+    let summary = returned(&watched)["summary"].clone();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_secs();
+    for (node, kind) in [("check", "dependencies"), ("spare", "concurrency")] {
+        let entry = summary["held"]
+            .as_array()
+            .and_then(|held| {
+                held.iter()
+                    .find(|entry| entry["node"] == json!(node) && entry["reason"] == json!(kind))
+            })
+            .unwrap_or_else(|| panic!("the summary does not hold {node} on {kind}: {summary}"));
+        let opened = world
+            .events_of(run, "node-held")
+            .into_iter()
+            .find(|event| event["labels"]["node"] == json!(node))
+            .expect("the hold is recorded");
+        let held_for = now.saturating_sub(epoch_seconds(
+            opened["ts"].as_str().expect("a record is stamped"),
+        ));
+        let waited = entry["waited_seconds"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("no waited_seconds: {entry}"));
+        assert!(
+            waited.abs_diff(held_for) <= 2,
+            "{node}'s waited_seconds is not how long the run has held it: {entry}"
+        );
+        assert!(
+            watched.stderr.contains(&format!("{node} on {kind} for ")),
+            "{}",
+            watched.stderr
+        );
+    }
+    assert!(
+        !summary["held"]
+            .as_array()
+            .expect("held is a list")
+            .iter()
+            .any(|entry| entry["node"] == json!("build")),
+        "the running node was reported held: {summary}"
     );
 
     world.release("build.go");

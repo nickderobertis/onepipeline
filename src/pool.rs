@@ -231,10 +231,9 @@ pub(crate) struct Workspaces {
     read_at: Option<Instant>,
     /// How often a held node's identity is re-read.
     every: Duration,
-    /// When each held node's wait was last surfaced.
-    surfaced: BTreeMap<String, Instant>,
-    /// How often a held node's wait is surfaced.
-    surface_every: Duration,
+    /// When each held node's wait is surfaced again, on the release hold's
+    /// cadence.
+    surfaced: crate::release::Resurfacing,
 }
 
 impl Workspaces {
@@ -246,8 +245,7 @@ impl Workspaces {
             resuming: BTreeMap::new(),
             read_at: None,
             every: Duration::from_secs(poll_seconds()),
-            surfaced: BTreeMap::new(),
-            surface_every: Duration::from_secs(crate::release::surface_every_seconds()),
+            surfaced: crate::release::Resurfacing::new(),
         }
     }
 
@@ -372,7 +370,11 @@ impl Workspaces {
     /// Surface every held node's wait that is due, and forget the nodes no
     /// longer held so a wait that ends is not repeated after it.
     ///
-    /// Non-blocking, on the cadence a release wait is surfaced at: the hold is
+    /// Non-blocking, on the cadence a release wait is surfaced at — queued when
+    /// the hold begins and when its reading changes, and an unchanged one again
+    /// only once the last is read, on [`crate::release::Resurfacing`]'s
+    /// doubling interval. What changes is the hold's reading, the identity and
+    /// its numbers, which carry no clock. The hold is
     /// the scheduler's, and a blocking surface would hold the same subtree
     /// twice while reading, in every planner view, as a decision somebody has to
     /// answer before the run can move. This one is a report — the decision it
@@ -380,18 +382,15 @@ impl Workspaces {
     /// the identity.
     pub(crate) fn surface_waits(&mut self, paths: &RunPaths, journal: &mut Journal) -> Result<()> {
         for (node, hold) in &self.held {
-            let due = self
-                .surfaced
-                .get(node)
-                .is_none_or(|last| last.elapsed() >= self.surface_every);
-            if !due {
+            let content = format!("{}\u{1f}{}", hold.identity, hold.describe());
+            if !self.surfaced.due(paths, node, &content) {
                 continue;
             }
-            self.surfaced.insert(node.clone(), Instant::now());
-            crate::engine::raise(paths, journal, wait_surface(node, hold))?;
+            let queued = crate::engine::raised(paths, journal, wait_surface(node, hold))?;
+            self.surfaced.queued(node, content, &queued);
         }
         let held = &self.held;
-        self.surfaced.retain(|node, _| held.contains_key(node));
+        self.surfaced.retain(|node| held.contains_key(node));
         Ok(())
     }
 }

@@ -2006,6 +2006,26 @@ impl ChannelState {
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
 
+    /// When the surface queued under `id` was queued, as the log's own
+    /// `queued` record for it says — not as a later record about it restates
+    /// it — or `None` for an id the log holds no such record for.
+    pub(crate) fn queued_at(&self, id: u64) -> Option<u64> {
+        if !self.paths.channel_dir().is_dir() {
+            return None;
+        }
+        self.surfaces()
+            .ok()?
+            .raw()
+            .log(None)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|(record, _)| {
+                record.get("event").and_then(Value::as_str) == Some("queued")
+                    && record.get("id").and_then(Value::as_u64) == Some(id)
+            })
+            .and_then(|(record, _)| record.get("queued_at").and_then(Value::as_u64))
+    }
+
     /// The reconciler's answer to one envelope, if it has given one.
     pub fn outcome_of(&self, id: u64) -> Option<CommandOutcome> {
         self.plain(COMMAND_OUTCOMES)
