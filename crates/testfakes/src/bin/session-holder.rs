@@ -10,6 +10,13 @@
 //!
 //! Prints the token the library minted once the session is open, then holds until its stdin closes.
 
+// llmlint: ignore-file[new_code_lands_in_a_project] `crates/testfakes` has no `project.json`
+// of its own, like every double beside this file: its files are inputs of the
+// `onepipeline-note-journeys` project (`noteJourneySource` lists `crates/**/*` in `nx.json`)
+// and of the root project's `visualDocsSource`, and the crate is a member of the one Cargo
+// workspace those projects build. It ships nowhere, and a project of its own would restate
+// their targets over the same build unit.
+
 use std::io::{Read, Write};
 use std::process::ExitCode;
 

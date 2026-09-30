@@ -3650,12 +3650,9 @@ fn a_run_whose_unfinished_work_is_parked_is_told_to_requeue_before_adopting() {
     // is being read is the advice given to a run nothing is driving.
     // `result.json` is written before the driver exits, so it is not the signal:
     // on Windows the driver was still alive when `runs` read it and the listing
-    // said `NO OBSERVER`. Wait for the process itself to be over.
+    // said `NO OBSERVER`. Wait until `runs` itself reads the driver dead.
     world.until("the driver to close the run out", |world| {
         world.run_file("parkedrun", "result.json").is_file()
-    });
-    world.until("the driver to release the run", |world| {
-        !world.run_file("parkedrun", "owner.lock").exists()
     });
     world.until("the driver to read as dead", |world| {
         world.run(&["runs"]).stdout.contains("DRIVER DEAD")
