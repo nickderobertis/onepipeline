@@ -1242,6 +1242,148 @@ fn every_registered_identity_is_discovered_and_maintained_in_one_sweep() {
     release(&world, "all");
 }
 
+/// How long each identity's maintenance takes in the closing journeys, in whole
+/// seconds: `maintain.sh`'s `ONEPIPELINE_E2E_MAINTAIN_SLEEP`.
+const SLOW_IDENTITY_SECONDS: u64 = 20;
+
+/// How far past the identity in progress a closing driver may run before its
+/// result is late: the settlement, the close-out and the result's write on a
+/// loaded host. Well below [`SLOW_IDENTITY_SECONDS`], so a driver that began one
+/// more identity cannot come in under it.
+const CLOSE_OUT_MARGIN_SECONDS: u64 = 8;
+
+/// A driver closing out stops its sweep at the next identity boundary: it waits
+/// for the identity in progress and begins no other, and journals the cut.
+///
+/// Three identities, each costing [`SLOW_IDENTITY_SECONDS`] in the pool pass. The
+/// run's one node is released while the sweep is inside the first, `other`; the
+/// run's result then comes within that one identity plus
+/// [`CLOSE_OUT_MARGIN_SECONDS`] of the release — which precedes the settlement,
+/// so this bounds settlement-to-result from above — where waiting for the rest
+/// would take two identities more. `other` was maintained to its end, the two
+/// after it were never begun, and both records say so in `cut_short`: the
+/// maintenance naming the two it did not reach, the retirement pass it never
+/// began naming all three. `results` renders the cut.
+#[test]
+fn a_closing_driver_stops_its_sweep_after_the_identity_in_progress() {
+    let world = pooled_world("maintenance-closing", Some(FAST_PACE)).with_env(
+        "ONEPIPELINE_E2E_MAINTAIN_SLEEP",
+        &SLOW_IDENTITY_SECONDS.to_string(),
+    );
+    let service = world.repository("local-direct", &[]);
+    let other = world.extra_repository("other");
+    let third = world.extra_repository("third");
+    let maintain = interpreted_script(&world, "maintain");
+    let command = serde_json::to_string(&[maintain.as_str()]).expect("an argv serializes");
+    pooled_with_commands(
+        &world,
+        &[
+            ("service", command.as_str()),
+            ("other", command.as_str()),
+            ("third", command.as_str()),
+        ],
+        "120s",
+    );
+    for checkout in [&service.checkout, &other.checkout, &third.checkout] {
+        cut_a_slot(&world, checkout);
+    }
+
+    let every = schedule(&world, "closing", "1s", "");
+    held_run(&world, "closing", 2, &["--maintenance-config", &every]).exited(0);
+    // Past `until`'s deadline: a driver whose pace came due on a pass that was
+    // not idle asks again only on its recheck, a minute on, and a loaded host
+    // can take that twice before the first idle pass.
+    world.until_within(
+        std::time::Duration::from_secs(300),
+        "the sweep to be inside its first identity",
+        |world| the_slot_of(world, "other")["state"]["state"] == "maintaining",
+    );
+    assert_eq!(marker_text(&world, "other").lines().count(), 0);
+
+    let released = std::time::Instant::now();
+    world.release("closing-build.go");
+    world.until("the closing run's result", |world| {
+        world.run_file("closing", "result.json").is_file()
+    });
+    let took = released.elapsed();
+    let bound = std::time::Duration::from_secs(SLOW_IDENTITY_SECONDS + CLOSE_OUT_MARGIN_SECONDS);
+    assert!(
+        took <= bound,
+        "the run's result came {took:?} after its node was released, past the {bound:?} the \
+         identity in progress and the close-out take: the closing driver waited for an identity \
+         it should never have begun\n{}",
+        world.dump()
+    );
+    assert!(!world.events_of("closing", "node-settled").is_empty());
+
+    // The identity in progress ran to its end; the two after it never began.
+    assert_eq!(
+        marker_text(&world, "other").lines().count(),
+        1,
+        "other's maintenance was abandoned partway"
+    );
+    for repo in ["service", "third"] {
+        assert_eq!(
+            marker_text(&world, repo).lines().count(),
+            0,
+            "{repo} was begun after the driver began closing"
+        );
+        assert!(
+            the_slot_of(&world, repo)["last_maintained"].is_null(),
+            "{repo} was maintained after the driver began closing"
+        );
+    }
+
+    let recorded = records(&world, "closing");
+    assert_eq!(recorded.len(), 1, "{}", world.dump());
+    let payload = &recorded[0]["payload"];
+    assert_eq!(
+        payload["identities"]
+            .as_array()
+            .expect("identities")
+            .iter()
+            .map(|entry| entry["identity"].as_str().expect("a key"))
+            .collect::<Vec<_>>(),
+        ["github.com/owner/other"],
+        "{payload}"
+    );
+    assert_eq!(
+        payload["identities"][0]["outcome"]["slots"][0]["outcome"]["ran"]["outcome"], "succeeded",
+        "{payload}"
+    );
+    assert_eq!(
+        payload["cut_short"],
+        json!({
+            "reason": "driver-closing",
+            "unreached": [SERVICE_IDENTITY, "github.com/owner/third"],
+        }),
+        "{payload}"
+    );
+
+    let retirement = world.events_of("closing", "branches-retired");
+    assert_eq!(retirement.len(), 1, "{}", world.dump());
+    assert_eq!(
+        retirement[0]["payload"],
+        json!({
+            "retired": [],
+            "failed": [],
+            "cut_short": {
+                "reason": "driver-closing",
+                "unreached": ["github.com/owner/other", SERVICE_IDENTITY, "github.com/owner/third"],
+            },
+        })
+    );
+    assert!(
+        !sweeping(&world, "closing"),
+        "the marker outlived the driver"
+    );
+
+    world.run(&["results", "closing"]).exited(0).out_has(
+        "the sweep was cut short as the driver closed, and did not reach: \
+         github.com/owner/service, github.com/owner/third",
+    );
+}
+
 /// A non-empty command is spawned with the program and the argument the document
 /// named, and neither is mangled on the way.
 ///
@@ -1561,7 +1703,11 @@ fn both_halves_of_each_fixture_take_the_same_arguments() {
     for (sh, bat, marks) in [(
         "maintain.sh",
         "maintain.bat",
-        ["maintained.log", "ONEPIPELINE_E2E_MAINTAIN_EXIT"],
+        [
+            "maintained.log",
+            "ONEPIPELINE_E2E_MAINTAIN_EXIT",
+            "ONEPIPELINE_E2E_MAINTAIN_SLEEP",
+        ],
     )] {
         let shell = std::fs::read_to_string(repo_file(&format!("tests/e2e/{sh}")))
             .expect("the shell half ships");

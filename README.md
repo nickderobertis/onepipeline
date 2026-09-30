@@ -567,7 +567,10 @@ recorded stamp decides what is due, so nothing is kept here, nothing runs twice,
 drivers on one host are safe, and between runs nothing runs. A sweep that ran a
 slot's command — or met another run inside an identity, or failed — journals one
 `pool-maintenance` record; `status` names a sweep in progress and `results` the last
-record. Naming no schedule runs no maintenance at all.
+record. A driver closing out mid-sweep finishes the identity in progress and begins
+no other, so a settled run is not held behind the rest; its records carry
+`cut_short` naming the identities it did not reach, which another driver's idle pass
+or the host's own sweep picks up. Naming no schedule runs no maintenance at all.
 
 The branch a lifecycle node's session **cuts** is named from a **branch-name
 template**: minijinja, rendered over the node's own task — `task.key` (absent where

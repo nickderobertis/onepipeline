@@ -27,6 +27,22 @@ if not "%~1"=="" (
 )
 
 :write
+if not defined ONEPIPELINE_E2E_MAINTAIN_SLEEP goto mark
+rem Read through delayed expansion only, which substitutes after cmd has parsed
+rem the line, so nothing in the value is ever read as part of a command. A
+rem value holding anything but digits leaves a token for `for /f` to find; a
+rem leading zero is refused too, because `set /a` would read it as octal.
+set "sleep_for=!ONEPIPELINE_E2E_MAINTAIN_SLEEP!"
+for /f "delims=0123456789" %%c in ("!sleep_for!") do goto badsleep
+if "!sleep_for:~0,1!"=="0" if not "!sleep_for!"=="0" goto badsleep
+set /a "slept=!sleep_for!"
+:sleeploop
+if !slept! LEQ 0 goto mark
+set /a "slept=slept-1"
+ping -n 2 -w 1000 127.0.0.1 >nul 2>&1
+goto sleeploop
+
+:mark
 echo maintained in %CD%>>maintained.log
 if errorlevel 1 (
   echo maintain: cannot write maintained.log in %CD%; this runs in the slot's worktree, which onevcs cut under ONEVCS_HOME, so check that state root is on a writable mount and that nothing holds the worktree read-only 1>&2
@@ -38,3 +54,7 @@ if defined ONEPIPELINE_E2E_MAINTAIN_EXIT if not "%ONEPIPELINE_E2E_MAINTAIN_EXIT%
   exit /b %ONEPIPELINE_E2E_MAINTAIN_EXIT%
 )
 exit /b 0
+
+:badsleep
+echo maintain: ONEPIPELINE_E2E_MAINTAIN_SLEEP is '!sleep_for!', which is not a whole number of seconds; set it to digits with no leading zero, such as 20, or unset it for no wait 1>&2
+exit /b 64

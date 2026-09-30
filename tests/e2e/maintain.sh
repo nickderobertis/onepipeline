@@ -11,7 +11,10 @@
 # ends as a maintenance that failed rather than one that never ended, which the
 # sibling's own `timeout` would otherwise decide. `ONEPIPELINE_E2E_MAINTAIN_EXIT`
 # names the status it exits with after writing, `0` unset, so a journey can see
-# a command that failed recorded as one.
+# a command that failed recorded as one. `ONEPIPELINE_E2E_MAINTAIN_SLEEP` names
+# a number of whole seconds it spends before writing, unset for none, so a
+# journey can make each identity's maintenance cost a known amount; the marker
+# is written only after it, so a marker is a maintenance that ran to its end.
 set -u
 
 if [ "$#" -gt 1 ]; then
@@ -28,6 +31,19 @@ if [ "$#" -eq 1 ]; then
     fi
     sleep 0.05
   done
+fi
+
+if [ -n "${ONEPIPELINE_E2E_MAINTAIN_SLEEP:-}" ]; then
+  case "$ONEPIPELINE_E2E_MAINTAIN_SLEEP" in
+    *[!0-9]*)
+      echo "maintain: ONEPIPELINE_E2E_MAINTAIN_SLEEP is '$ONEPIPELINE_E2E_MAINTAIN_SLEEP', which is not a whole number of seconds; set it to digits only, such as 20, or unset it for no wait" >&2
+      exit 64
+      ;;
+  esac
+  if ! sleep "$ONEPIPELINE_E2E_MAINTAIN_SLEEP"; then
+    echo "maintain: sleeping $ONEPIPELINE_E2E_MAINTAIN_SLEEP seconds failed, so this maintenance did not take the time the journey asked of it; check that sleep is on PATH" >&2
+    exit 1
+  fi
 fi
 
 if ! printf 'maintained in %s at %s\n' "$(pwd)" "$(date +%s)" >>maintained.log; then

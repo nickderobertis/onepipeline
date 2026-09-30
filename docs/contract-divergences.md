@@ -6,7 +6,7 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94 and 96** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96 and 97** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
@@ -7685,7 +7685,8 @@ retired entry is the report's own, `class` and `proof` as `onevcs` serializes
 `RetirementClass` and `RetirementProof`, and `trigger` the `pass` that library stamps
 `retire_finished` with; a failed entry names the
 branch where one branch's deletion did not finish and omits it where the whole identity's
-pass failed. A failed pass never fails the run.
+pass failed. A failed pass never fails the run. Entry 97 adds the optional `cut_short`, the
+pass a closing driver stopped at an identity boundary.
 
 **A node pinned to a branch a pass retired still dispatches**: `onevcs` cuts the named
 branch fresh from the base.
@@ -7715,7 +7716,7 @@ exclusion is built from.
 {
   "event_kinds": ["branches-superseded", "branches-retired"],
   "branches_superseded_fields": ["node", "landing", "superseded", "failed"],
-  "branches_retired_fields": ["retired", "failed"],
+  "branches_retired_fields": ["retired", "failed", "cut_short"],
   "supersession_labels": ["run", "node", "superseded_by_node"],
   "retired_entry_fields": ["identity", "branch", "class", "proof", "trigger"],
   "verb": "supersessions",
@@ -7975,6 +7976,55 @@ question and a finding about a node still in the graph that stay standing, and t
 through the binary, and
 `tests/contract.rs`'s `a_decision_about_a_removed_node_is_discharged_by_that_edit` holds the
 contract's sentences and this entry's.
+
+## 97. A closing driver waited for its whole maintenance sweep, so a settled run returned late — RESOLVED
+
+**Ruling: a driver closing out stops its idle-maintenance sweep at the next identity boundary,
+and journals the pass it cut short with a `cut_short` key naming the identities it never
+reached; on the ruling of the manager of the plan that carried this change.** Nothing is handed
+to a detached process that outlives the run: a thread cannot outlive its driver process, and a
+detached pass would duplicate the host's own hourly sweep and bring back the overlapping passes
+that sweep's single-flight lock removed. Other drivers' idle passes and the host sweep pick up
+whatever a cut-short pass left due. `docs/contract.md`'s pool-maintenance paragraph carries it
+as "a driver closing out stops it at the next identity boundary".
+
+**What diverged.** The paragraph said "a driver closing out joins it", and the sweep checked
+for nothing between identities, so a run settling during a sweep waited for every remaining
+identity — its pool maintenance, then its retirement pass — before it wrote its result, fired
+its hooks and returned. On one host a run settled its only node at 13:30:59 and wrote its result
+at 13:48:41, with `status` still naming the maintenance started at 13:09:48.
+
+**The behaviour.** The sweep thread shares a stop flag with the driver; `Maintenance::close`
+and the sweep's drop raise it before they join. The maintenance pass and the retirement pass
+read it before beginning each identity, and only there, so the identity in progress runs to
+completion — its `pool_maintain`, or its whole `retire_finished` with every compare-and-delete
+and lease in it — and nothing is interrupted inside a library call. A maintenance pass cut short
+begins no retirement pass. The thread still hands both reports back over the loop's channel,
+`close` drains and journals them, and the marker is taken back. Nothing about when a sweep
+starts moves: not the pacing, not the idle test.
+
+**The record.** Declared once, in `src/payload.rs`, as one optional key on the two existing
+documents, `agent.pipeline.pool-maintenance@2` and `agent.pipeline.branches-retired@2`; no event
+kind is added. `cut_short` is `{"reason", "unreached"}`: `reason` the closed word
+`driver-closing` (`CutReason`), and `unreached` a non-empty array of identity keys, spelled as
+the record's `identity` fields are, in the sorted order the sweep visits — exactly the
+identities that pass never began. The identity in progress is an ordinary entry and never
+unreached. A pass that visited every identity carries no key and is written or withheld as
+before; a pass cut short is written even where it would record nothing otherwise. Where the
+maintenance pass was cut short, `branches-retired` is written with empty `retired` and `failed`
+and every enumerated identity unreached; where the identities could not be enumerated, the
+`error` record is written with no `cut_short`. `results` renders the cut on the
+`pool-maintenance` lines it prints. Reversing this costs one optional key on two documents.
+
+**Where it is held.** `tests/e2e/maintenance.rs`'s
+`a_closing_driver_stops_its_sweep_after_the_identity_in_progress` settles a run inside the
+first of three slow pool maintenances and bounds its result by that one identity;
+`tests/e2e/retirement.rs`'s
+`a_closing_driver_finishes_the_retirement_in_progress_and_begins_no_other` settles a run inside
+one identity's retirement over real origins, and holds that identity's branch fully retired and
+the later identities unreached. `src/maintenance.rs`'s and `src/payload.rs`'s unit tests hold the
+boundary and the documents, and `tests/contract.rs` holds this entry's sentences and the
+contract's.
 
 ## 98. A live watch counted as watching whether or not it could wake anybody, and a run nothing drove owed nothing — OPEN
 

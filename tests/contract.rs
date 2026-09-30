@@ -5409,6 +5409,68 @@ fn a_decision_about_a_removed_node_is_discharged_by_that_edit() {
     );
 }
 
+/// A closing driver stops its maintenance sweep at an identity boundary rather
+/// than joining it, and the contract and entry 97 state the stop and the
+/// `cut_short` key alike. The key's document is held by `src/payload.rs`'s unit
+/// tests, because the payload registry is private; the behaviour is driven by
+/// `tests/e2e/maintenance.rs` and `tests/e2e/retirement.rs`.
+#[test]
+fn a_closing_driver_stops_its_sweep_at_an_identity_boundary() {
+    let contract = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        !contract.contains("a driver closing out joins it"),
+        "the contract still says a closing driver joins its sweep"
+    );
+    for states in [
+        "**a driver closing out stops it at the next identity boundary**",
+        "begins no retirement pass at all once its maintenance was cut short",
+        "the identity in progress runs to completion",
+        "Nothing outlives the driver to finish the pass",
+        "A pass cut short carries the optional key `cut_short`, `{\"reason\": \"driver-closing\", \"unreached\": [...]}`",
+        "`unreached` is the non-empty list of identity keys that pass never began",
+        "The identity in progress when the stop arrived is an ordinary entry and never one of `unreached`",
+        "a pass cut short writes its record even where it would otherwise write nothing",
+        "a pass that visited every identity, or whose identities could not be enumerated, carries no `cut_short`",
+        "where it was cut short says so and names the identities it did not reach",
+    ] {
+        assert!(
+            contract.contains(states),
+            "the contract no longer states: {states}"
+        );
+    }
+
+    let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergence record ships");
+    let record = record.split_whitespace().collect::<Vec<_>>().join(" ");
+    for states in [
+        "## 97. A closing driver waited for its whole maintenance sweep, so a settled run \
+         returned late — RESOLVED",
+        "**Ruling: a driver closing out stops its idle-maintenance sweep at the next identity \
+         boundary",
+        "Nothing is handed to a detached process that outlives the run",
+        "no event kind is added",
+        "`reason` the closed word `driver-closing`",
+    ] {
+        assert!(
+            record.contains(states),
+            "the divergence record no longer states: {states}"
+        );
+    }
+
+    // The README's operator prose is a second copy of the stop and the key.
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+    let readme = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+    for states in [
+        "A driver closing out mid-sweep finishes the identity in progress and begins no other",
+        "its records carry `cut_short` naming the identities it did not reach",
+    ] {
+        assert!(
+            readme.contains(states),
+            "the README no longer states: {states}"
+        );
+    }
+}
+
 #[test]
 fn the_contract_declares_an_open_surface_kind_vocabulary() {
     let check_in: SurfaceKind = serde_json::from_value(json!("check-in")).expect("parses");
@@ -6988,6 +7050,10 @@ const RULINGS: &[(&str, &str)] = &[
     (
         "96.",
         "A decision about a node a committed edit removed is discharged by that edit.",
+    ),
+    (
+        "97.",
+        "a driver closing out stops it at the next identity boundary",
     ),
 ];
 
