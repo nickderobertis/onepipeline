@@ -339,7 +339,7 @@ in every view. A branch that *is* ahead and whose tree the base already carries
 still reaches `onevcs`'s own `NothingToPublish` at publication and settles
 `no-changes` as it always did.
 
-![a finished six-node run's per-node outcomes: design and design-approval done, docs done (change-open) carrying a NOT landed note and the change request's URL, readiness-handoff done (no-changes), release-approval done, and service done with its landing reported UNDECIDED](screenshots/images/results.svg)
+![a finished six-node run's per-node outcomes: design and design-approval done, docs done (change-review-draft) carrying a NOT landed note, the change request's URL, and a detail saying its checks are green and it is kept as a draft for its user's review, readiness-handoff done (no-changes), release-approval done, and service done with its landing reported UNDECIDED](screenshots/images/results.svg)
 
 > Every picture on this page is a capture of the real CLI reading a real run offline — the shipped example plan above, driven end to end, and for the timing view a finished run this repository checks in — [with no model, no network and no credential](screenshots/AGENTS.md). The stills are gated on their content hash by [screencomp](https://github.com/nickderobertis/screencomp), so a change to what a verb prints refreshes them deliberately or fails; the animation above is regenerated from the same run on demand.
 
