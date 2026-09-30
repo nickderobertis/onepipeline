@@ -3949,8 +3949,9 @@ since widened `surface` and made the default `surface` and `node-settled`.
 `--until settled` and `--until nothing-driving` name conditions this verb returns
 on whether or not they were asked for, because a wait that could outlive the run
 it watches is the silence the verb exists to end — so what naming them *adds* is
-nothing, which is precisely why `--until settled` still means "report a blocking
-surface, and wait through it". `--until node-settled` fires on any node of the run
+nothing, which is precisely why `--until settled` still means "report a surface,
+and wait through it" — any unread one since entry 99, which widened what a
+surface is. `--until node-settled` fires on any node of the run
 settling, and `--until node=<ID>` on that node settling; both are read from this
 crate's own `node-settled` records ahead of the watch's cursor, and neither is put
 through the caller's profile — a profile shapes what this reader is *shown*, and
