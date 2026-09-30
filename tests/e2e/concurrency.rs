@@ -158,6 +158,9 @@ fn live_holders_refuse_unless_acknowledged_and_stale_ones_are_reported_or_left_o
     world.release("build.go");
 }
 
+/// The identity every `on_service` node's repository resolves to.
+const IDENTITY: &str = "github.com/owner/service";
+
 /// A lifecycle node on the one repository, waiting on `deps`.
 fn on_service(id: &str, deps: &[&str]) -> Value {
     json!({
@@ -198,7 +201,6 @@ fn a_dependency_on_the_holding_node_acknowledges_that_holder_and_no_other() {
     let _repository = world.repository("local-direct", &[]);
     world.script("build.wait", "hold");
     world.script("ship.wait", "hold");
-    const IDENTITY: &str = "github.com/owner/service";
 
     // The first run holds one node live on the identity.
     let first = world.plan("first", &plan_of("first", vec![on_service("build", &[])]));
@@ -418,11 +420,25 @@ fn a_dependency_on_one_node_of_a_run_does_not_acknowledge_another_of_its_nodes()
             vec![on_service("alpha", &["run:first#build", "run:first#ship"])],
         ),
     );
-    world
-        .run_on(world.cmd(&["start", &both, "--detach"]), "start both")
-        .exited(0)
-        .err_has("run 'first' node 'build' via `run:first#build`")
-        .err_has("run 'first' node 'ship' via `run:first#ship`");
+    let proceeded = world.run_on(world.cmd(&["start", &both, "--detach"]), "start both");
+    proceeded.exited(0);
+    // Every dependency-covered holder is named on the one deferral line, each by
+    // its identity, run, node and the dependency that defers to it.
+    let lines: Vec<&str> = proceeded
+        .stderr
+        .lines()
+        .filter(|line| line.contains("depends on live holder(s)"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{}", proceeded.stderr);
+    for holder in ["build", "ship"] {
+        assert!(
+            lines[0].contains(&format!(
+                "identity '{IDENTITY}' run 'first' node '{holder}' via `run:first#{holder}`"
+            )),
+            "the deferral line does not name holder '{holder}': {}",
+            lines[0]
+        );
+    }
     let deferred = world.events_of("both", "concurrent-deferred");
     let named: Vec<&Value> = deferred[0]["payload"]["holders"]
         .as_array()
