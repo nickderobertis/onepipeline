@@ -1889,6 +1889,127 @@ fn transcript_renders_a_real_dispatched_turns_tools_and_words() {
         .err_has("build");
 }
 
+/// What the agent **said and thought**, read back off every view that renders a
+/// turn — and told apart from the tools it ran, which read exactly as before.
+///
+/// `oneharness` normalizes a turn's `message` and `reasoning` items beside its
+/// tool events, and `oneagentgraph` relays them as `turn-activity` under their
+/// own kind: text under `output`, and no tool name. Read as a tool, each was a
+/// call to nothing with a blank column — `message   ` in the transcript, the
+/// bare kind in `monitor`, and nothing at all in `status`, whose readout kept
+/// naming the last command while the agent was explaining what it had found.
+///
+/// The dispatch is real: the engine launches the real `oneagentgraph`, which
+/// runs the turn through the linked `oneharness_core` against `fake-claude`
+/// streaming a thinking block, a tool call and its answer, and a final text —
+/// so the run itself records all three kinds. The turn is held just after it
+/// reasons and just after it speaks, because `status` reads a node's activity
+/// only while it is running.
+#[test]
+fn the_views_show_what_a_dispatched_agent_said_and_thought_apart_from_its_tools() {
+    const THOUGHT: &str = "The quickest proof is to run it.";
+    const SAID: &str = "Ran what the task asked for.";
+    let world = World::new("real-words");
+    world.write_graphs();
+    world.script("thought.hold", "hold");
+    world.script("said.hold", "hold");
+    let path = world.plan("spoken", &plan_of("spoken", vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&["start", &path, "--detach"])
+        .exited(0);
+    let relayed = |world: &World, kind: &str| {
+        world
+            .events_of("spoken", "turn-activity")
+            .iter()
+            .any(|event| event["payload"]["kind"] == kind)
+    };
+
+    world.until("the turn to reason", |world| relayed(world, "reasoning"));
+    world
+        .run(&["status", "spoken"])
+        .exited(0)
+        .out_has("build: running")
+        .out_has(&format!("now (thinking) {THOUGHT} ("));
+    world.release("thought.go");
+
+    world.until("the turn to speak", |world| relayed(world, "message"));
+    world
+        .run(&["status", "spoken"])
+        .exited(0)
+        .out_has("build: running")
+        .out_has(&format!("now › {SAID} ("));
+    world.release("said.go");
+    world.until("the run to settle", |world| {
+        world.run_file("spoken", "result.json").is_file()
+    });
+
+    // `monitor`: the agent's words on the stream's own line, marked as what
+    // they are, and a tool's activity still the bare kind it always was.
+    // `--all`, because the default profile leaves relayed activity out.
+    let monitor = world.run(&["monitor", "spoken", "--all"]);
+    monitor
+        .exited(0)
+        .out_has(&format!("turn-activity (thinking) {THOUGHT}"))
+        .out_has(&format!("turn-activity › {SAID}"));
+    let activities: Vec<&str> = monitor
+        .stdout
+        .lines()
+        .filter(|line| line.contains("turn-activity"))
+        .collect();
+    assert_eq!(
+        activities
+            .iter()
+            .filter(|line| line.trim_end().ends_with("turn-activity"))
+            .count(),
+        2,
+        "the call and its answer no longer read as the bare kind:\n{}",
+        monitor.stdout
+    );
+
+    // `transcript`: both sources — the store's relayed summaries and the
+    // retained report — draw the words under their marks, and the exchange
+    // exactly as before.
+    let transcript = world.run(&["transcript", "spoken", "build"]);
+    transcript.exited(0);
+    let (from_the_store, from_the_report) = transcript
+        .stdout
+        .split_once("\n  report ")
+        .expect("the transcript renders the store's summaries and then the report");
+    // The call's input reads as each source has always carried it: the store's
+    // relayed summary, and the report's structured input.
+    for (source, text, indent, input) in [
+        ("store", from_the_store, "    ", "echo the turn ran"),
+        (
+            "report",
+            from_the_report,
+            "      ",
+            r#"{"command":"echo the turn ran"}"#,
+        ),
+    ] {
+        let lines: Vec<&str> = text.lines().collect();
+        for expected in [
+            format!("{indent}(thinking) {THOUGHT}"),
+            format!("{indent}tool_call bash  {input}"),
+            format!("{indent}tool_result   the turn ran"),
+            format!("{indent}› {SAID}"),
+        ] {
+            assert!(
+                lines.contains(&expected.as_str()),
+                "the {source} half does not draw {expected:?}:\n{}",
+                transcript.stdout
+            );
+        }
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.trim_start().starts_with("message")
+                    || line.trim_start().starts_with("reasoning")),
+            "the {source} half draws the agent's words as a tool:\n{}",
+            transcript.stdout
+        );
+    }
+}
+
 /// A transcript names the identity that answered, and shows no turn for the ones
 /// the chain stepped past.
 ///

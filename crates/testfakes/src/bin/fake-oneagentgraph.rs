@@ -2903,6 +2903,13 @@ fn report_of(
                         fake::fail(&format!("a published decision is not onejudge's: {error}"))
                     }),
                     reason: decided.reason.clone(),
+                    // What a relayed `judge-decided` does not carry — the judge's
+                    // labels, run, posture and tool events — is left as onejudge
+                    // writes it for a judge that stated none.
+                    labels: std::collections::BTreeMap::new(),
+                    run_id: None,
+                    posture: None,
+                    events: Vec::new(),
                 })
                 .collect(),
         };

@@ -58,7 +58,7 @@ use crate::journal::PipelineKind;
 use crate::ledger::{self, LaunchRecord};
 use crate::projection::{MemberLabel, Refusal, RunState, ServiceRecord};
 use crate::rendercost::Rendered;
-use crate::report::{ToolText, Truncation};
+use crate::report::{ActivityText, Truncation, Voice};
 use crate::sys;
 use crate::vcs::LandingRead;
 use crate::verbs::Grouping;
@@ -3552,6 +3552,19 @@ fn summarize(event: &Envelope) -> String {
             detail.push_str(&format!(" {value}"));
         }
     }
+    // The agent's own words, which name no tool and so said nothing past the
+    // kind: its text or its reasoning, on the one line oneharness draws it on.
+    // A tool's activity is left as the kind alone, as it always was — its
+    // detail is `status`'s readout and the transcript's, not this stream's.
+    if event.kind.0 == "turn-activity" {
+        let field = |key: &str| event.payload.get(key).and_then(serde_json::Value::as_str);
+        if let Some(said) = field("kind")
+            .and_then(Voice::of)
+            .and_then(|voice| voice.line(field("output").unwrap_or_default()))
+        {
+            detail.push_str(&format!(" {said}"));
+        }
+    }
     let stripped: String = detail
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -3930,15 +3943,15 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
                         .get("turn")
                         .map_or_else(|| "-".to_string(), ToString::to_string)
                 )),
-                "turn-activity" => out.push_str(&format!(
-                    "    {} {}  {}\n",
-                    one_line(field("kind")),
-                    one_line(field("name")),
+                "turn-activity" => out.push_str(&activity_lines(
+                    "    ",
+                    field("kind"),
+                    field("name"),
                     // Read out of the payload the same way a retained report's
                     // event is: a result's text is under `output` and it carries
                     // no `detail` at all, so a third column read out of `detail`
                     // was blank on every observation a turn made.
-                    tool_text(&ToolText::of(field("kind"), |key| event.payload.get(key)))
+                    &ActivityText::of(field("kind"), |key| event.payload.get(key)),
                 )),
                 _ => {}
             }
@@ -3972,12 +3985,9 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
                 for line in turn.text.lines() {
                     out.push_str(&format!("      {}\n", one_line(line)));
                 }
-                for tool in turn.tools {
-                    out.push_str(&format!(
-                        "      {} {}  {}\n",
-                        one_line(&tool.kind),
-                        one_line(&tool.name),
-                        tool_text(&tool.text)
+                for item in turn.activity {
+                    out.push_str(&activity_lines(
+                        "      ", &item.kind, &item.name, &item.text,
                     ));
                 }
             }
@@ -4028,6 +4038,66 @@ pub(crate) fn nodes_with_agent_records(view: &RunView, only: Option<&str>) -> Ve
 /// report path it counts out loud.
 const MAX_TOOL_OUTPUT_CHARS: usize = crate::event::MAX_PAYLOAD_TEXT_BYTES;
 
+/// One event of a turn as the transcript lays it out, under `indent`.
+///
+/// A tool's half of an exchange is one line — its kind, its name, and
+/// [`activity_text`], its third column. The agent's own words are not a tool and are not drawn as one:
+/// they are oneharness's own text view of them ([`Voice::block`]), `›` before
+/// what it said and `(thinking)` before what it reasoned, a paragraph laid out
+/// under its mark rather than flattened into a column beside no tool name.
+fn activity_lines(indent: &str, kind: &str, name: &str, text: &ActivityText) -> String {
+    let ActivityText::Spoken {
+        voice,
+        text,
+        truncated,
+    } = text
+    else {
+        return format!(
+            "{indent}{} {}  {}\n",
+            one_line(kind),
+            one_line(name),
+            activity_text(text)
+        );
+    };
+    let whole = text.chars().count();
+    let kept: String = text.chars().take(MAX_TOOL_OUTPUT_CHARS).collect();
+    let Some(block) = voice.block(&kept) else {
+        // Said and empty is still said: the kind alone, rather than nothing a
+        // reader could tell from the event never having arrived.
+        return format!("{indent}{}\n", one_line(kind));
+    };
+    let mut out: String = block
+        .lines()
+        .map(|line| format!("{indent}{line}\n"))
+        .collect();
+    let notes = omissions(whole, *truncated);
+    if !notes.is_empty() {
+        out.insert_str(out.len() - 1, &format!(" … [{}]", notes.join("; ")));
+    }
+    out
+}
+
+/// What a rendered text leaves out, said rather than dropped: how much of it a
+/// reader is looking at when this view cut it, and whether the producer had
+/// already cut it short.
+fn omissions(whole: usize, truncated: Truncation) -> Vec<String> {
+    let mut notes: Vec<String> = Vec::new();
+    if whole > MAX_TOOL_OUTPUT_CHARS {
+        notes.push(format!("{MAX_TOOL_OUTPUT_CHARS} of {whole} characters"));
+    }
+    match truncated {
+        Truncation::Whole => {}
+        Truncation::Cut => notes.push("already cut short by the producer".to_string()),
+        // Not silence, and not `false`: a flag this build cannot read leaves
+        // whether the output is whole unanswered, and a line that said nothing
+        // would be answering it.
+        Truncation::Unreadable => {
+            notes.push("the producer's truncation flag is unreadable".to_string());
+        }
+    }
+    notes
+}
+
 /// The third column of a tool's line: what a call acted on, or what a result
 /// returned.
 ///
@@ -4045,10 +4115,18 @@ const MAX_TOOL_OUTPUT_CHARS: usize = crate::event::MAX_PAYLOAD_TEXT_BYTES;
 /// this verb exists to correct. A result that returned nothing renders as the
 /// empty column it is, and says nothing about what it left out, because it left
 /// nothing out.
-fn tool_text(text: &ToolText) -> String {
+///
+/// The agent's own words are laid out by [`activity_lines`] rather than put in
+/// a column; handed one anyway, this reads it as the text it carries.
+fn activity_text(text: &ActivityText) -> String {
     let (output, truncated) = match text {
-        ToolText::Acted(detail) => return one_line(detail),
-        ToolText::Returned { output, truncated } => (output, *truncated),
+        ActivityText::Acted(detail) => return one_line(detail),
+        ActivityText::Returned { output, truncated }
+        | ActivityText::Spoken {
+            text: output,
+            truncated,
+            ..
+        } => (output, *truncated),
     };
     if output.is_empty() {
         return String::new();
@@ -4056,20 +4134,7 @@ fn tool_text(text: &ToolText) -> String {
     let stripped = one_line(output);
     let whole = stripped.chars().count();
     let mut text: String = stripped.chars().take(MAX_TOOL_OUTPUT_CHARS).collect();
-    let mut notes: Vec<String> = Vec::new();
-    if whole > MAX_TOOL_OUTPUT_CHARS {
-        notes.push(format!("{MAX_TOOL_OUTPUT_CHARS} of {whole} characters"));
-    }
-    match truncated {
-        Truncation::Whole => {}
-        Truncation::Cut => notes.push("already cut short by the producer".to_string()),
-        // Not silence, and not `false`: a flag this build cannot read leaves
-        // whether the output is whole unanswered, and a line that said nothing
-        // would be answering it.
-        Truncation::Unreadable => {
-            notes.push("the producer's truncation flag is unreadable".to_string());
-        }
-    }
+    let notes = omissions(whole, truncated);
     if !notes.is_empty() {
         text.push_str(&format!(" … [{}]", notes.join("; ")));
     }
@@ -6335,7 +6400,7 @@ mod tests {
     /// view's own.
     #[test]
     fn a_control_character_in_an_output_is_stripped_like_every_other_value() {
-        let rendered = tool_text(&ToolText::Returned {
+        let rendered = activity_text(&ActivityText::Returned {
             output: "first\r\nsecond\u{1b}[2K".to_string(),
             truncated: Truncation::Whole,
         });
@@ -6352,7 +6417,7 @@ mod tests {
     #[test]
     fn a_truncation_flag_this_build_cannot_read_is_said_rather_than_assumed() {
         let text = |flag: Option<serde_json::Value>| {
-            tool_text(&ToolText::Returned {
+            activity_text(&ActivityText::Returned {
                 output: "what it returned".to_string(),
                 truncated: Truncation::of(flag.as_ref()),
             })

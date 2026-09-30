@@ -100,18 +100,37 @@ fn a_real_dispatched_turn_relays_every_field_its_producer_publishes() {
 
     // The exchange. A call and the observation that answered it, joined by the
     // harness's own id — which is what makes a pair of them one exchange rather
-    // than two unrelated lines.
+    // than two unrelated lines — between what the agent reasoned before it and
+    // what it said after.
     let activity = relayed(&world, "turns", EventKind::TurnActivity);
     let acts: Vec<TurnActivity> = activity
         .iter()
         .map(|event| payload(event, EventKind::TurnActivity))
         .collect();
-    let [call, result] = &acts[..] else {
+    let [thought, call, result, said] = &acts[..] else {
         panic!(
-            "the turn relayed {} activities, not the call and the answer it is: {activity:?}",
+            "the turn relayed {} activities, not its reasoning, the call, the answer and \
+             its words: {activity:?}",
             acts.len()
         );
     };
+    // The agent's own items are relayed as themselves: their text under
+    // `output`, and nothing that would read them as a tool — no name, no input
+    // summary, no call identity.
+    for (item, kind, text) in [
+        (thought, "reasoning", "The quickest proof is to run it."),
+        (said, "message", "Ran what the task asked for."),
+    ] {
+        assert_eq!(item.kind, kind, "{activity:?}");
+        assert_eq!(item.output.as_deref(), Some(text), "{activity:?}");
+        assert_eq!(item.name, None, "{activity:?}");
+        assert_eq!(item.detail, "", "{activity:?}");
+        assert_eq!(item.tool_call_id, None, "{activity:?}");
+    }
+    assert!(
+        thought.index < call.index && result.index < said.index,
+        "the turn's words are out of order with its exchange: {activity:?}"
+    );
     assert_eq!(call.kind, "tool_call", "{activity:?}");
     assert_eq!(call.name.as_deref(), Some("bash"), "{activity:?}");
     assert_eq!(call.detail, "echo the turn ran", "{activity:?}");

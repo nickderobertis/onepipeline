@@ -59,7 +59,7 @@
 //!
 //! [`NamedVerdict`]: onejudge::NamedVerdict
 
-// llmlint: ignore-file[invalid_states_unrepresentable] `Turn::role` and `Tool::kind` are
+// llmlint: ignore-file[invalid_states_unrepresentable] `Turn::role` and `Activity::kind` are
 // **onejudge's** vocabulary, read out of an artifact that library wrote, and this crate
 // only renders them. Narrowing either into an enum here would re-declare a vocabulary a
 // sibling owns — the re-declaration src/AGENTS.md forbids — and would make a role or a
@@ -627,8 +627,9 @@ pub(crate) struct Turn {
     pub role: String,
     /// What they said.
     pub text: String,
-    /// The tools the turn used, in the order it used them.
-    pub tools: Vec<Tool>,
+    /// What the turn did and said — its tool calls, their answers, and its own
+    /// words — in the order it did them.
+    pub activity: Vec<Activity>,
 }
 
 impl Turn {
@@ -636,7 +637,7 @@ impl Turn {
         Self {
             role: string(message, "role"),
             text: string(message, "content"),
-            tools: Self::tools_of(message),
+            activity: Self::activity_of(message),
         }
     }
 
@@ -658,41 +659,44 @@ impl Turn {
         let turn = Self {
             role: string(result, "harness"),
             text: string(result, "text"),
-            tools: Self::tools_of(result),
+            activity: Self::activity_of(result),
         };
-        let said_something = !turn.text.is_empty() || !turn.tools.is_empty();
+        let said_something = !turn.text.is_empty() || !turn.activity.is_empty();
         (!turn.role.is_empty() && said_something).then_some(turn)
     }
 
-    fn tools_of(value: &Value) -> Vec<Tool> {
+    fn activity_of(value: &Value) -> Vec<Activity> {
         value
             .get("events")
             .and_then(Value::as_array)
-            .map(|events| events.iter().map(Tool::of).collect())
+            .map(|events| events.iter().map(Activity::of).collect())
             .unwrap_or_default()
     }
 }
 
-/// One tool call a turn made, or the observation that answered it.
+/// One tool call a turn made, the observation that answered it, or one of the
+/// agent's own items — its `message` or its `reasoning`.
 ///
-/// Both halves, because a report carries both and a reader shown only the asks
-/// is reading half a turn.
+/// Both halves of an exchange, because a report carries both and a reader shown
+/// only the asks is reading half a turn; and the agent's words beside them,
+/// because they are what says *why* it reached for the tool.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Tool {
-    /// `tool_call` or `tool_result`, as the report names it.
+pub(crate) struct Activity {
+    /// `tool_call`, `tool_result`, `message` or `reasoning`, as the report names
+    /// it.
     pub kind: String,
     /// The tool, where the harness named one.
     pub name: String,
-    /// The one text this half of the exchange carries.
-    pub text: ToolText,
+    /// The one text this event carries.
+    pub text: ActivityText,
 }
 
-impl Tool {
+impl Activity {
     fn of(event: &Value) -> Self {
         let kind = string(event, "kind");
         Self {
             name: string(event, "name"),
-            text: ToolText::of(&kind, |key| event.get(key)),
+            text: ActivityText::of(&kind, |key| event.get(key)),
             kind,
         }
     }
@@ -701,14 +705,14 @@ impl Tool {
 /// The kind a producer gives the half of an exchange that carries an output.
 const TOOL_RESULT: &str = "tool_result";
 
-/// A tool event's own text: what a call acted on, or what the result answering
-/// it returned.
+/// An event's own text: what a call acted on, what the result answering it
+/// returned, or what the agent itself said or thought.
 ///
-/// One or the other and never both. A pair of strings could hold both at once —
-/// a state no producer emits, and one that leaves a renderer choosing between
+/// One of them and never two. A pair of strings could hold both at once — a
+/// state no producer emits, and one that leaves a renderer choosing between
 /// them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ToolText {
+pub(crate) enum ActivityText {
     /// What a call acted on, rendered compactly. Empty where the producer
     /// stated nothing.
     Acted(String),
@@ -721,9 +725,87 @@ pub(crate) enum ToolText {
         /// source for.
         truncated: Truncation,
     },
+    /// The agent's own words, which are no tool's: its text or its reasoning.
+    Spoken {
+        voice: Voice,
+        /// The text, as the producer carried it — newlines and all, because a
+        /// paragraph of reasoning is laid out rather than flattened.
+        text: String,
+        /// As on [`Returned`](Self::Returned): the producer carries the words
+        /// under `output`, and bounds them the same way.
+        truncated: Truncation,
+    },
 }
 
-impl ToolText {
+/// Which of the agent's own items an event is.
+///
+/// `oneharness` normalizes both beside the tool events and `oneagentgraph`
+/// relays both as `turn-activity` under their own kind; neither names a tool,
+/// so read as one each would be a call to nothing with a blank column beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Voice {
+    /// `message` — what the agent said.
+    Message,
+    /// `reasoning` — what it thought on the way.
+    Reasoning,
+}
+
+impl Voice {
+    /// The voice an event of this `kind` speaks in, or `None` for every kind
+    /// that is not the agent's own words.
+    pub(crate) fn of(kind: &str) -> Option<Self> {
+        match kind {
+            MESSAGE => Some(Self::Message),
+            REASONING => Some(Self::Reasoning),
+            _ => None,
+        }
+    }
+
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Message => MESSAGE,
+            Self::Reasoning => REASONING,
+        }
+    }
+
+    /// `text` as oneharness's own text view draws this voice — its mark, then
+    /// the words, continuation lines indented under the first and every control
+    /// character but the newline flattened — or `None` for text with nothing to
+    /// read.
+    ///
+    /// Drawn through that library's `render_event` rather than a copy of its
+    /// marks, so a person reading a run here and one reading the same turn off
+    /// `oneharness run` read the same line.
+    pub(crate) fn block(self, text: &str) -> Option<String> {
+        oneharness_core::domain::render::render_event(
+            &oneharness_core::domain::events::ActionEvent {
+                kind: self.kind().to_string(),
+                name: None,
+                input: None,
+                output: Some(text.to_string()),
+                index: 0,
+                tool_call_id: None,
+                started_at: None,
+                finished_at: None,
+                duration_ms: None,
+                status: None,
+                timing_source: None,
+            },
+        )
+    }
+
+    /// [`block`](Self::block) on one line, at the bound a relayed tool detail is
+    /// held to — what a one-line readout of a live node has room for.
+    pub(crate) fn line(self, text: &str) -> Option<String> {
+        self.block(&onemessagebus::bound_detail(text).0)
+    }
+}
+
+/// The kinds a producer gives the agent's own items.
+const MESSAGE: &str = "message";
+const REASONING: &str = "reasoning";
+
+impl ActivityText {
     /// The text an event of this `kind` carries, read out of the payload by
     /// `field`.
     ///
@@ -738,6 +820,13 @@ impl ToolText {
     /// `input`. That divergence is read in this one place, so the two sources
     /// cannot come to disagree about what a tool did.
     pub(crate) fn of<'a>(kind: &str, field: impl Fn(&str) -> Option<&'a Value>) -> Self {
+        if let Some(voice) = Voice::of(kind) {
+            return Self::Spoken {
+                voice,
+                text: compact(field("output")),
+                truncated: Truncation::of(field("output_truncated")),
+            };
+        }
         if kind == TOOL_RESULT {
             return Self::Returned {
                 output: compact(field("output")),
@@ -989,17 +1078,17 @@ mod tests {
         let turns = turns(&document);
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].role, "user");
-        assert!(turns[0].tools.is_empty());
+        assert!(turns[0].activity.is_empty());
         assert_eq!(turns[1].text, "Ran the gate.");
-        assert_eq!(turns[1].tools[0].name, "bash");
+        assert_eq!(turns[1].activity[0].name, "bash");
         assert!(
-            matches!(&turns[1].tools[0].text, ToolText::Acted(detail) if detail.contains("just check")),
+            matches!(&turns[1].activity[0].text, ActivityText::Acted(detail) if detail.contains("just check")),
             "{:?}",
-            turns[1].tools[0]
+            turns[1].activity[0]
         );
         // A result names no tool, and is not given one.
-        assert_eq!(turns[1].tools[1].kind, "tool_result");
-        assert!(turns[1].tools[1].name.is_empty());
+        assert_eq!(turns[1].activity[1].kind, "tool_result");
+        assert!(turns[1].activity[1].name.is_empty());
     }
 
     /// A single-sided member's report is oneharness's own, and it reads as the
@@ -1027,11 +1116,11 @@ mod tests {
         assert_eq!(turns.len(), 1, "{turns:?}");
         assert_eq!(turns[0].role, "claude-code");
         assert_eq!(turns[0].text, "Ran the gate.");
-        assert_eq!(turns[0].tools[0].name, "bash");
+        assert_eq!(turns[0].activity[0].name, "bash");
         assert!(
-            matches!(&turns[0].tools[0].text, ToolText::Acted(detail) if detail.contains("just check")),
+            matches!(&turns[0].activity[0].text, ActivityText::Acted(detail) if detail.contains("just check")),
             "{:?}",
-            turns[0].tools[0]
+            turns[0].activity[0]
         );
     }
 
