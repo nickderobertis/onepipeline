@@ -706,7 +706,15 @@ fn terms_beside(paths: &RunPaths, lease: &std::path::Path) -> TermsRead {
     let Some(name) = lease.file_name() else {
         return TermsRead::Absent;
     };
-    match std::fs::read_to_string(paths.watch_terms().join(name)) {
+    let directory = paths.watch_terms();
+    // A terms directory that is not a directory is one no watch could have
+    // written into, which is not the absence an older engine leaves. It is asked
+    // about before the read because the read cannot say so everywhere: Unix
+    // reports a path through a file as not a directory, Windows as not found.
+    if std::fs::metadata(&directory).is_ok_and(|found| !found.is_dir()) {
+        return TermsRead::Unreadable(format!("{} is not a directory", directory.display()));
+    }
+    match std::fs::read_to_string(directory.join(name)) {
         Ok(text) => match serde_json::from_str(&text) {
             Ok(terms) => TermsRead::Read(terms),
             Err(error) => TermsRead::Unreadable(error.to_string()),

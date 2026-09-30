@@ -660,6 +660,14 @@ fn a_watch_whose_terms_cannot_be_written_is_an_unknown() {
         &world,
         &["--wake-budget", BUDGET],
         &run,
+        // The reason, not only the verdict, so a host whose read calls a path
+        // through a file "not found" cannot pass it off as an older engine's watch.
+        "watch-terms is not a directory",
+    );
+    unknown(
+        &world,
+        &["--wake-budget", BUDGET],
+        &run,
         "its terms record cannot be read",
     );
     passed(&world, &[]);
