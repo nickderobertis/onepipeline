@@ -312,6 +312,89 @@ fn a_green_branch_landed_on_a_team_repository_reports_the_review_draft_word() {
     }
 }
 
+/// Every `gh` invocation the host has been asked so far.
+fn gh_calls(world: &World) -> usize {
+    world
+        .invocations()
+        .iter()
+        .filter(|call| call["tool"] == "gh")
+        .count()
+}
+
+/// A git bound set to something that is not one is refused **before** a landing
+/// does anything — the refusal `onevcs`'s own command line makes up front, word for
+/// word and at its exit code — for both verbs and both bounds, and the host is
+/// never asked a thing.
+///
+/// Held against the real `onevcs` binary rather than against a copy of its
+/// sentence: the two are run with the same bound over the same world, so a
+/// sibling that rewords or recodes the refusal moves both answers together.
+#[test]
+fn an_unusable_git_bound_is_refused_before_a_landing_touches_the_host() {
+    for (verb, onevcs_verb) in [
+        ("publish-branch", "publish-branch"),
+        ("repo-recover", "recover"),
+    ] {
+        for bound in ["ONEVCS_GIT_TIMEOUT", "ONEVCS_GIT_HOOK_TIMEOUT"] {
+            let world = World::new(&format!("oob-bound-{verb}"));
+            let repository = world.repository("change-open", &[]);
+            if verb == "publish-branch" {
+                branch_with_work(&world, &repository);
+            } else {
+                preserved_branch(&world, &repository);
+            }
+            let asked_before = gh_calls(&world);
+            let checkout = repository.checkout.to_string_lossy().into_owned();
+            let args = [
+                BRANCH,
+                "--no-draft",
+                "--repo",
+                &checkout,
+                "--title",
+                "feat: add the widget",
+            ];
+            let landed = world
+                .cmd(&[&[verb], &args[..]].concat())
+                .env(bound, "soon")
+                .output()
+                .expect("the binary runs");
+            let stderr = String::from_utf8_lossy(&landed.stderr);
+            assert_ne!(landed.status.code(), Some(0), "{verb} {bound}: {stderr}");
+            assert!(
+                stderr.contains(bound) && stderr.contains("\"soon\""),
+                "{verb} {bound}: the refusal does not name the bound and its value: {stderr}"
+            );
+            assert_eq!(
+                gh_calls(&world),
+                asked_before,
+                "{verb} {bound}: the host was asked something before the refusal"
+            );
+            assert!(
+                opened(&world).is_empty(),
+                "{verb} {bound}: {:?}",
+                opened(&world)
+            );
+
+            // Exactly what `onevcs` itself answers, `--no-draft` being this crate's.
+            let mut own = vec![onevcs_verb];
+            own.extend(args.iter().filter(|arg| **arg != "--no-draft"));
+            let sibling = world
+                .cmd_on(&onevcs_binary(), &own)
+                .env(bound, "soon")
+                .output()
+                .expect("onevcs runs");
+            assert_eq!(
+                (landed.status.code(), stderr.as_ref()),
+                (
+                    sibling.status.code(),
+                    String::from_utf8_lossy(&sibling.stderr).as_ref()
+                ),
+                "{verb} {bound}: the refusal is not the one onevcs makes"
+            );
+        }
+    }
+}
+
 /// A `local-direct` identity opens no change request, so there is no description
 /// for a body to be: it lands on its base with no drafting turn spent, even with a
 /// drafting graph named — and with none named it is not refused for the lack.
