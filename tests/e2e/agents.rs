@@ -634,7 +634,7 @@ fn the_verb_reads_past_a_torn_tail_and_a_foreign_line_and_refuses_a_file_it_cann
 /// several project directories, and today's segments already long. The
 /// process tree runs under `strace`, and every open, listing and read that
 /// lands in the store is held to what the history contract permits.
-// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] about 40 seconds for both, and what they guard is which `oneharness-core` the crate links — a `Cargo.lock` move, which only this crate's own project sees — so an edge narrower than this target would drop them out of `nx affected` for exactly the change they exist to catch. Same grounds as the `mod agents` declaration in `main.rs`.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the module and both journeys in it, about 40 seconds together, and what they guard is which `oneharness-core` the crate links — a `Cargo.lock` move, which only this crate's own project sees — so an edge narrower than this target would drop them out of `nx affected` for exactly the change they exist to catch. Same grounds as the `mod agents` declaration in `main.rs`.
 #[cfg(target_os = "linux")]
 mod unscanned {
     use std::collections::{BTreeMap, BTreeSet};
@@ -1217,3 +1217,4 @@ mod unscanned {
         );
     }
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
