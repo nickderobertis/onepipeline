@@ -4205,7 +4205,7 @@ fn a_decision_about_a_node_an_edit_removed_is_discharged_by_that_edit() {
             "a planner update nobody is waiting on any more: finding — {finding}"
         ));
     // A discharged surface ends a watch only while `next` has not consumed it
-    // (divergence entry 97): unread, the answered question still does; read, it
+    // (divergence entry 99): unread, the answered question still does; read, it
     // no longer does.
     world
         .run(&["watch", &run, "--until", "surface", "--timeout", "0"])

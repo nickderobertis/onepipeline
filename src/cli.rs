@@ -836,7 +836,7 @@ pub fn watch_conditions() -> [&'static str; 5] {
 ///
 /// A wait with neither is the one that woke a supervisor on nothing but a
 /// blocking question while non-blocking updates piled up unread; divergence entry
-/// 97 records the ruling that made this the default. An empty `until` on a
+/// 99 records the ruling that made this the default. An empty `until` on a
 /// [`crate::verbs::WatchRequest`] means this set, so the library and the binary
 /// answer a caller who named nothing the same way.
 pub const DEFAULT_WATCH_UNTIL: [WatchUntil; 2] = [WatchUntil::Surface, WatchUntil::NodeSettled];

@@ -6,7 +6,7 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96 and 97** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96, 97 and 99** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
@@ -3863,10 +3863,10 @@ noticed; what eventually surfaced them was the run dying.
 **What this build now does.** `onepipeline watch RUN` blocks. It takes the run
 and the profile selection `monitor` takes — the same `ReadArgs`, so a profile
 this run does not have refuses the command before anything blocks — and four
-more. **Entry 97 records rulings that since moved what ends the wait**: the
+more. **Entry 99 records rulings that since moved what ends the wait**: the
 default set, what `surface` and `node-settled` fire on, a run nothing is driving,
 a sixth ending `run-changed` with exit `7`, and the return record's `blocking` and
-`summary`. What follows states this build as it now stands, and entry 97 is where
+`summary`. What follows states this build as it now stands, and entry 99 is where
 each change is argued:
 
 - `--timeout SECONDS|none` (default 300) bounds the wait. `0` reads once and
@@ -3916,7 +3916,7 @@ waiting" and "this line does not mention what is waiting" read identically.
 **Six terminal conditions, six exit statuses.** The run settled `complete` is
 `0`. Nothing is driving the run is `3`, which is the code this crate already
 assigns to that condition and is reused rather than given a number of its own —
-and, since entry 97, it is the run going from driven to undriven while the watch
+and, since entry 99, it is the run going from driven to undriven while the watch
 waits. A planner surface waiting is `4`, the wait elapsing with the run still live
 is `5`, a node the wait was told to return on settling is `6`, and `run-changed`,
 a run nothing was driving when the watch armed moving under it, is `7` — four new
@@ -3943,7 +3943,7 @@ to wait for. So `--until` is repeatable and its vocabulary is
 returns on the first of them to fire, and the return record's `condition`, `exit`
 and — for the two that name a settlement — `node` say which one did, so a caller
 branches on a status and a field rather than on prose. **The two values that
-predate this kept their meanings exactly** when the selector was added; entry 97
+predate this kept their meanings exactly** when the selector was added; entry 99
 since widened `surface` and made the default `surface` and `node-settled`.
 
 `--until settled` and `--until nothing-driving` name conditions this verb returns
@@ -8020,7 +8020,7 @@ the later identities unreached. `src/maintenance.rs`'s and `src/payload.rs`'s un
 boundary and the documents, and `tests/contract.rs` holds this entry's sentences and the
 contract's.
 
-## 97. A watch could not wake a supervisor on anything but a blocking question — RESOLVED
+## 99. A watch could not wake a supervisor on anything but a blocking question — RESOLVED
 
 **Ruling: what ends `onepipeline watch` is redefined so the default watch is the one a
 supervisor needs — it wakes on every planner surface, keeps waiting on a run nothing is

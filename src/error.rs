@@ -198,7 +198,7 @@ pub const EXIT_NODE_SETTLED: i32 = 6;
 /// on it — a reply applied locally, an `adopt`, a surface consumed — and a
 /// supervisor waiting on such a run is waiting for exactly that, so the move
 /// ends the wait under a status of its own rather than under the deadline's.
-/// Divergence entry 97 records the ruling that added it.
+/// Divergence entry 99 records the ruling that added it.
 pub const EXIT_RUN_CHANGED: i32 = 7;
 
 #[cfg(test)]

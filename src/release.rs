@@ -73,7 +73,7 @@ pub const SURFACE_ENV: &str = "ONEPIPELINE_RELEASE_SURFACE_SECONDS";
 
 /// The interval an unchanged held wait stops doubling at: four hours, which is
 /// the longest a hold nobody has touched goes unrepeated. Fixed by the ruling
-/// divergence entry 97 records, so nothing configures it.
+/// divergence entry 99 records, so nothing configures it.
 pub const SURFACE_CEILING_SECONDS: u64 = 14_400;
 
 /// The environment variable holding how long the asker goes on asking a question
@@ -2541,7 +2541,7 @@ pub(crate) fn surface_every_seconds() -> u64 {
 /// said is news to nobody, so it is queued again only once that last one has
 /// been read, and then no sooner than an interval that starts at
 /// [`surface_every_seconds`], doubles after each unchanged re-queue, and stops
-/// doubling at [`SURFACE_CEILING_SECONDS`]. Divergence entry 97 records the
+/// doubling at [`SURFACE_CEILING_SECONDS`]. Divergence entry 99 records the
 /// ruling: a hold re-surfaced every fifteen minutes woke a supervisor every
 /// fifteen minutes for nothing new.
 ///
@@ -3809,7 +3809,7 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The fixed ceiling is the one divergence entry 97 states and the one the
+    /// The fixed ceiling is the one divergence entry 99 states and the one the
     /// cadence journey climbs to, so a value moved in the code and left in
     /// either fails here.
     #[test]
@@ -3818,8 +3818,8 @@ mod tests {
         let record = std::fs::read_to_string(root.join("docs/contract-divergences.md"))
             .expect("the divergence record ships");
         let ruling = record
-            .split_once("\n## 97.")
-            .expect("the ruling is recorded under entry 97")
+            .split_once("\n## 99.")
+            .expect("the ruling is recorded under entry 99")
             .1
             .split_whitespace()
             .collect::<Vec<_>>()
@@ -3828,7 +3828,7 @@ mod tests {
             ruling.contains(&format!(
                 "stops doubling at {SURFACE_CEILING_SECONDS} seconds. The ceiling is fixed"
             )),
-            "entry 97 does not state the ceiling this build holds"
+            "entry 99 does not state the ceiling this build holds"
         );
         let journey = std::fs::read_to_string(root.join("tests/e2e/adoption.rs"))
             .expect("the adoption journeys ship");

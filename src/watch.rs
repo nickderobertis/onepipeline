@@ -2379,7 +2379,7 @@ mod tests {
     }
 
     /// The summary an elapsed return carries is named, key by key, by the
-    /// README's watch passage and by divergence entry 97, which is where it was
+    /// README's watch passage and by divergence entry 99, which is where it was
     /// ruled; and its human lines say plainly when nothing arrived.
     ///
     /// Read off the serialized form rather than copied, so a key renamed in the
@@ -2393,8 +2393,8 @@ mod tests {
         )
         .expect("the divergence record ships");
         let ruling = record
-            .split_once("\n## 97.")
-            .expect("the ruling is recorded under entry 97")
+            .split_once("\n## 99.")
+            .expect("the ruling is recorded under entry 99")
             .1
             .to_string();
         let passage = readme_watch_passage();
@@ -2421,7 +2421,7 @@ mod tests {
             );
             assert!(
                 ruling.contains(&format!("`{key}`")),
-                "entry 97 does not name `{key}`, which the summary carries"
+                "entry 99 does not name `{key}`, which the summary carries"
             );
         }
         for state in [

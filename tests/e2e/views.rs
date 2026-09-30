@@ -2670,7 +2670,7 @@ fn status_and_watch_judge_a_stopped_run_by_the_driver_that_adopted_it() {
 
     // Stopped and not adopted: the stop is what the run is. `status` says so,
     // and a watch armed on it waits for somebody to act rather than returning
-    // at once — divergence entry 97 — so a short one runs to its deadline.
+    // at once — divergence entry 99 — so a short one runs to its deadline.
     world
         .run(&["status", "readopted"])
         .exited(0)

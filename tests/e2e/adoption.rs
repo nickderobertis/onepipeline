@@ -1583,7 +1583,7 @@ fn watching(name: &str) -> World {
 /// looks at it.
 ///
 /// An unchanged wait is queued again only once the one before it has been read
-/// — divergence entry 97 — so a journey that watches a held node go on waiting
+/// — divergence entry 99 — so a journey that watches a held node go on waiting
 /// reads what it was told, exactly as a person would, rather than counting
 /// repeats nobody read.
 fn read_waits(world: &World, run: &str) {
@@ -6243,7 +6243,7 @@ fn a_cross_dag_squash_commit_is_answered_through_the_upstream_change_request() {
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The interval an unchanged wait stops doubling at, as the ruling in
-/// divergence entry 97 fixes it. Stated here because the crate keeps it in a
+/// divergence entry 99 fixes it. Stated here because the crate keeps it in a
 /// private module; `release::tests::the_ceiling_is_stated_where_it_is_ruled_and_proven`
 /// holds this value to the crate's own constant.
 const CEILING_SECONDS: u64 = 14_400;
@@ -6340,7 +6340,7 @@ fn consumer_waits(world: &World, run: &str) -> Option<Vec<(u64, String)>> {
 /// and measured on the run's own record of when each was queued — and a wait
 /// whose content changes is queued at once, read or not: a dependency's style
 /// appearing as it resolves, a dependency's last answer changing, and the set
-/// of dependencies the node is held on shrinking. Divergence entry 97.
+/// of dependencies the node is held on shrinking. Divergence entry 99.
 #[test]
 fn an_unchanged_release_wait_is_queued_again_only_once_read_and_a_changed_one_at_once() {
     let world = watching("adoption-cadence");

@@ -3574,7 +3574,7 @@ fn a_finding_nobody_read_is_answered_by_the_retry_the_reconciler_commits() {
     // And it stops being a decision without ever having been read off the
     // queue. Unread, it is still a planner surface a watch reports — an
     // answered one, which no longer ends a watch once `next` has consumed it
-    // (divergence entry 97).
+    // (divergence entry 99).
     world
         .run(&["status", &run])
         .exited(0)
@@ -8274,7 +8274,7 @@ fn read_everything(world: &World, run: &str) {
 /// one cadence `tests/e2e/adoption.rs` climbs to its fixed four-hour ceiling.
 /// And an elapsed watch over the same run names
 /// the hold, what settled past its cursor, and when the run last moved.
-/// Divergence entry 97.
+/// Divergence entry 99.
 #[test]
 fn a_workspace_wait_is_queued_again_only_once_read_and_an_elapsed_watch_names_the_hold() {
     let world = World::new("lifecycle-pool-cadence")

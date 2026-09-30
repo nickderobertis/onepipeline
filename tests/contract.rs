@@ -5345,7 +5345,7 @@ fn a_reconciler_finding_that_asks_for_an_edit_is_answered_by_that_edit() {
 /// `WatchEnding`, each exiting the status the paragraph pairs it with, and the
 /// default `until` it names is the one the binary gives a caller who names none.
 ///
-/// Divergence 97 adopted the sentence; a variant added, dropped or renumbered in
+/// Divergence 99 adopted the sentence; a variant added, dropped or renumbered in
 /// the code and left standing in the contract fails here.
 #[test]
 fn the_watch_endings_the_contract_names_are_the_ones_this_build_returns() {
