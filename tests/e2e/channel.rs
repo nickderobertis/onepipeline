@@ -2993,8 +2993,15 @@ fn a_projection_whose_claims_moved_under_an_intact_stamp_is_rebuilt_from_the_log
     )
     .expect("the frame is written");
     stdin.flush().expect("flushed");
-    // The projection is read inside the wait: the server may still be replacing
-    // it by rename, and on Windows a read between the two sees no file at all.
+    // llmlint: ignore-block[tests_mirror_real_usage] the document is edited in
+    // place because nothing this binary does moves a projection's claims under
+    // its stamp — every write it makes seals what it stamps — so a rewrite that
+    // did is one only another writer, an editor, or a failed write can leave.
+    // The stamp is kept exactly as written, which is what a reader trusting the
+    // stamp alone would take as current; everything before and after is driven
+    // through the CLI.
+    // It is read inside the wait: the server may still be replacing it by
+    // rename, and on Windows a read between the two sees no file at all.
     let queue = world.run_file(&run, "channel/queue.json");
     let mut document = Value::Null;
     world.until("the question to be queued", |world| {
@@ -3011,13 +3018,6 @@ fn a_projection_whose_claims_moved_under_an_intact_stamp_is_rebuilt_from_the_log
         true
     });
 
-    // llmlint: ignore-block[tests_mirror_real_usage] the document is edited in
-    // place because nothing this binary does moves a projection's claims under
-    // its stamp — every write it makes seals what it stamps — so a rewrite that
-    // did is one only another writer, an editor, or a failed write can leave.
-    // The stamp is kept exactly as written, which is what a reader trusting the
-    // stamp alone would take as current; everything before and after is driven
-    // through the CLI.
     assert!(
         document["accounted"]
             .as_u64()
