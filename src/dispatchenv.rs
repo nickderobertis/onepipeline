@@ -480,7 +480,7 @@ fn member_config(
     }
     let path = resolve::local_path(reference, graph_dir);
     let start = path.parent().unwrap_or(Path::new("")).to_path_buf();
-    oneharness_core::io::config::load(Some(&path), false, &start)
+    oneharness_core::io::config::load(std::slice::from_ref(&path), false, &start)
         .map(|loaded| loaded.config)
         .map_err(|error| match error {
             oneharness_core::errors::OneharnessError::ConfigRead { .. } => {

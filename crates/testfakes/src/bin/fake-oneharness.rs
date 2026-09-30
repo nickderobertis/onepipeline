@@ -12,11 +12,16 @@
 //! turn, composes both prompts, parses both answers and settles the member.
 //!
 //! The two sides take one argv and answer differently, which is what [`Side`]
-//! decides: the agent side streams (`--events --stream`, NDJSON events then a
-//! terminal result line) and the judge side answers in one buffered report.
-//! Both reports are `oneharness_core`'s own [`RunReport`], serialized by the
-//! library that declares it rather than copied — at the copy **onejudge** links,
-//! which is the pin the workspace manifest explains.
+//! decides: the agent side streams (`--events --stream`, one line per event then
+//! the report) and the judge side answers in one buffered report. Both reports
+//! are `oneharness_core`'s own [`RunReport`], serialized by the library that
+//! declares it rather than copied — at the copy **onejudge** links, which is the
+//! pin the workspace manifest explains.
+//!
+//! What stdout *is* follows the released CLI's `--format`, as [`View`] decides:
+//! the readable text view unless JSON is asked for by name (or by `--compact`),
+//! drawn through the core's own `render_event` and `render_report_text`, the
+//! functions that CLI prints with.
 
 use oneharness_core::domain::capability::{FlagKind, CAPABILITIES};
 use oneharness_core::domain::dialogue::DialogueRefusal;
@@ -25,6 +30,7 @@ use oneharness_core::domain::fallback::{startup_failure_reason, RunWork};
 use oneharness_core::domain::harness::HarnessIdentity;
 use oneharness_core::domain::history::{session_name, HistoryLabels};
 use oneharness_core::domain::mode::PermissionMode;
+use oneharness_core::domain::render::{render_event, render_report_text};
 use oneharness_core::domain::report::{
     FallThrough, FallbackReport, OutputFormat, RunReport, RunResult, RunStreamEnvelope, Status,
     SCHEMA_VERSION,
@@ -206,13 +212,10 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // reads the buffered document everywhere else, so a double that streamed a
     // judgement would put NDJSON where one report was expected.
     let streaming = args.iter().any(|arg| arg == "--stream");
-    // The one report this double renders is the JSON one, so a caller asking for
-    // another view by name would read a document it did not ask for.
-    if let Some(format) = fake::flag(args, "--format").filter(|format| format != "json") {
-        return fake::refuse(&format!(
-            "oneharness run was asked for `--format {format}`, and this double prints only json"
-        ));
-    }
+    let view = match View::of(args) {
+        Ok(view) => view,
+        Err(refusal) => return fake::refuse(&refusal),
+    };
     if (side == Side::Agent) != streaming {
         return fake::refuse(&format!(
             "oneharness run was asked for {side:?} work and {}--stream",
@@ -223,24 +226,34 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // through, and both sides carry one: the judge side names its own, and the
     // agent side's rides the spawn hook the sibling installs. A double that ran
     // without reading it would answer a turn whose launch was prepared against
-    // nothing.
-    let Some(config) = fake::flag(args, "--config") else {
+    // nothing. Repeatable, as the real flag is: each later file is layered over
+    // the ones before it.
+    let configs = fake::flags(args, "--config");
+    if configs.is_empty() {
         return fake::refuse("oneharness run requires --config");
-    };
-    if !std::path::Path::new(&config).is_file() {
-        return fake::refuse(&format!(
-            "oneharness run was given --config {config}, which is not a file"
-        ));
     }
-    let config_text = match std::fs::read_to_string(&config) {
-        Ok(text) => text,
-        Err(error) => return fake::refuse(&format!("cannot read --config {config}: {error}")),
-    };
-    let selection = match selection(&config) {
+    let mut recorded = vec![prompt.clone()];
+    for config in &configs {
+        if !std::path::Path::new(config).is_file() {
+            return fake::refuse(&format!(
+                "oneharness run was given --config {config}, which is not a file"
+            ));
+        }
+        match std::fs::read_to_string(config) {
+            Ok(text) => recorded.push(text),
+            Err(error) => return fake::refuse(&format!("cannot read --config {config}: {error}")),
+        }
+    }
+    let selection = match selection(&configs) {
         Ok(selection) => selection,
-        Err(refusal) => return fake::refuse(&format!("--config {config}: {refusal}")),
+        Err(refusal) => {
+            return fake::refuse(&format!(
+                "--config {}: {refusal}",
+                configs.join(" --config ")
+            ))
+        }
     };
-    fake::record(dir, "oneharness-config", &[prompt.clone(), config_text]);
+    fake::record(dir, "oneharness-config", &recorded);
     // The worktree, which is the agent side's whole working context — a turn that
     // wrote its work anywhere else would leave a publication with nothing to
     // publish. The judge side carries one only when its question is *about* the
@@ -281,9 +294,10 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
                 &cwd,
                 dir,
                 &selection,
-                &config,
+                &configs,
                 history.as_ref(),
                 mode,
+                view,
             ),
             None => fake::refuse("oneharness run requires --cwd for the side that does the work"),
         },
@@ -294,7 +308,90 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
             selection.first(),
             history.as_ref(),
             mode,
+            view,
         ),
+    }
+}
+
+/// What this run's stdout is: the released CLI's `--format` and `--compact`,
+/// read as that CLI reads the pair.
+///
+/// Neither is the **text** view — oneharness 0.20.0 made it the default on a
+/// stream as well as on a report, so a caller that reads the NDJSON protocol
+/// asks for it by name. `--format json`, or `--compact` alone, is the JSON
+/// contract; `--format text` beside `--compact` is a contradiction that CLI
+/// refuses. A stream is drawn one [`render_event`] line per event under the text
+/// view, and as `RunStreamEnvelope` lines under the JSON one.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the CLI's `StdoutFormat` is a
+// private clap type in the `oneharness` binary crate, which publishes no library a double
+// can link, so the four-way table is restated here. Its gate is
+// `tests/e2e/harness.rs`'s `the_harness_double_draws_its_stream_as_the_released_cli_does`,
+// which drives each of the four readings against the compiled double.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum View {
+    Text,
+    Json { compact: bool },
+}
+
+impl View {
+    fn of(args: &[String]) -> Result<Self, String> {
+        let compact = args.iter().any(|arg| arg == "--compact");
+        match (fake::flag(args, "--format").as_deref(), compact) {
+            (Some("text"), true) => Err(
+                "oneharness run was given `--format text` beside `--compact`, which only a JSON \
+                 document takes"
+                    .to_string(),
+            ),
+            (Some("text") | None, false) => Ok(Self::Text),
+            (Some("json"), compact) => Ok(Self::Json { compact }),
+            (None, true) => Ok(Self::Json { compact: true }),
+            (Some(other), _) => Err(format!(
+                "oneharness run was asked for `--format {other}`; it prints `text` or `json`"
+            )),
+        }
+    }
+
+    /// One streamed event, as this view draws it. `Ok(false)` is an event the
+    /// text view deliberately does not draw — a `tool_result`, whose call was
+    /// already drawn.
+    fn event(self, event: &ActionEvent) -> Result<bool, String> {
+        let line = match self {
+            Self::Text => match render_event(event) {
+                Some(line) => line,
+                None => return Ok(false),
+            },
+            Self::Json { .. } => document(&RunStreamEnvelope::Event {
+                event: event.clone(),
+            })?,
+        };
+        println!("{line}");
+        Ok(true)
+    }
+
+    /// The report that closes a stream: the text report, set off by a blank line
+    /// from any event drawn above it, or the terminal `result` envelope.
+    fn closing(self, report: RunReport, drew_any: bool) -> Result<(), String> {
+        match self {
+            Self::Text => {
+                if drew_any {
+                    println!();
+                }
+                print!("{}", render_report_text(&report));
+            }
+            Self::Json { .. } => println!("{}", document(&RunStreamEnvelope::Result { report })?),
+        }
+        Ok(())
+    }
+
+    /// One buffered report, as this view draws it.
+    fn report(self, report: &RunReport) -> Result<String, String> {
+        match self {
+            Self::Text => Ok(render_report_text(report)),
+            Self::Json { compact: true } => document(report),
+            Self::Json { compact: false } => serde_json::to_string_pretty(report)
+                .map(|json| format!("{json}\n"))
+                .map_err(|error| format!("cannot serialize what this turn answers with: {error}")),
+        }
     }
 }
 
@@ -399,7 +496,8 @@ impl Selection {
     }
 }
 
-/// What a turn under the config at `path` selects.
+/// What a turn under the configs at `paths` selects, each later file layered
+/// over the ones before it.
 ///
 /// Read through oneharness's **own** config *loader*, by path and not by text,
 /// for both halves of what the real CLI does with `--config`: a config the
@@ -411,15 +509,18 @@ impl Selection {
 /// turn nothing prepared. The `[harness.<id>]` section is that library's
 /// declaration rather than a copy of it; what makes a chain resolvable at all is
 /// [`Chain`]'s — what is left here is the one case a chain cannot answer.
-fn selection(path: &str) -> Result<Selection, String> {
-    let path = std::path::Path::new(path);
-    let config = oneharness_core::io::config::load(
-        Some(path),
-        false,
-        path.parent().unwrap_or(std::path::Path::new("")),
-    )
-    .map_err(|error| format!("this is not a config oneharness could run: {error}"))?
-    .config;
+fn selection(paths: &[String]) -> Result<Selection, String> {
+    let paths: Vec<std::path::PathBuf> = paths.iter().map(std::path::PathBuf::from).collect();
+    // Explicit files are never discovered, so the start directory is only ever
+    // read for a relative path — the first file's own, as a single one had.
+    let start = paths
+        .first()
+        .and_then(|path| path.parent())
+        .unwrap_or(std::path::Path::new(""))
+        .to_path_buf();
+    let config = oneharness_core::io::config::load(&paths, false, &start)
+        .map_err(|error| format!("this is not a config oneharness could run: {error}"))?
+        .config;
     let chain = match &config.harnesses {
         Some(candidates) => Chain::of(candidates)?,
         // What oneharness does with a config that names no chain: discover one.
@@ -475,11 +576,12 @@ fn agent_turn(
     cwd: &str,
     dir: &std::path::Path,
     selection: &Selection,
-    config: &str,
+    configs: &[String],
     history: Option<&History>,
     mode: PermissionMode,
+    view: View,
 ) -> ExitCode {
-    match work(prompt, cwd, dir, selection, config, history, mode) {
+    match work(prompt, cwd, dir, selection, configs, history, mode, view) {
         Ok(outcome) => outcome.exit_code(),
         Err(refusal) => fake::refuse(&refusal),
     }
@@ -498,9 +600,10 @@ fn work(
     cwd: &str,
     dir: &std::path::Path,
     selection: &Selection,
-    config: &str,
+    configs: &[String],
     history: Option<&History>,
     mode: PermissionMode,
+    view: View,
 ) -> Result<Outcome, String> {
     let ran = chain_step(dir, selection)?;
     // A worker turn that leaves something behind in the worktree it was given.
@@ -535,7 +638,12 @@ fn work(
                 .map_err(|error| format!("cannot name this executable: {error}"))?;
             for extra in script.lines().filter(|line| !line.trim().is_empty()) {
                 let status = std::process::Command::new(&this)
-                    .args(["run", "--format", "json", "--compact", "--config", config])
+                    .args(["run", "--format", "json", "--compact"])
+                    .args(
+                        configs
+                            .iter()
+                            .flat_map(|config| ["--config", config.as_str()]),
+                    )
                     .args(extra.split_whitespace())
                     .args(["--prompt", fake::EVALUATOR_OPENING])
                     .stdin(std::process::Stdio::null())
@@ -576,11 +684,16 @@ fn work(
         Outcome::Answered
     };
 
-    let mut events = vec![call(0, "echo the turn ran"), observation(1)];
+    // What the agent thought before it acted, then the exchange: the order a
+    // real turn reaches them in, and every kind a person watching it reads.
+    let mut events = vec![
+        spoken(0, "reasoning", REASONED),
+        call(1, "echo the turn ran"),
+        observation(2),
+    ];
+    let mut drew_any = false;
     for event in &events {
-        stream(&RunStreamEnvelope::Event {
-            event: event.clone(),
-        })?;
+        drew_any |= view.event(event)?;
     }
     // A worker turn that reports again after a hold: what a live readout of a
     // running dispatch is read against. The first event proves the stream
@@ -589,11 +702,9 @@ fn work(
     // member running the engine verbs, not the one being watched.
     if !observing && dir.join("turn.hold").exists() {
         fake::wait_for(&dir.join("turn.go"));
-        let held = [call(2, "cargo llvm-cov --workspace"), observation(3)];
+        let held = [call(3, "cargo llvm-cov --workspace"), observation(4)];
         for event in &held {
-            stream(&RunStreamEnvelope::Event {
-                event: event.clone(),
-            })?;
+            drew_any |= view.event(event)?;
         }
         events.extend(held);
         // Held again, so the node is *still in flight* when the second reading
@@ -619,6 +730,12 @@ fn work(
             }
         }
     }
+
+    // The agent's own last words close the turn, as a real turn's final
+    // message does: the same text its report answers with.
+    let said = spoken(events.len(), "message", outcome.text());
+    drew_any |= view.event(&said)?;
+    events.push(said);
 
     let mut report = report(outcome.text(), Some(events), outcome, &ran.identity, mode);
     report.results[0].observed_model = ran
@@ -656,7 +773,7 @@ fn work(
         report.history_file =
             Some(history.write(std::path::Path::new(cwd), prompt, mode, &report.results)?);
     }
-    stream(&RunStreamEnvelope::Result { report })?;
+    view.closing(report, drew_any)?;
     Ok(outcome)
 }
 
@@ -904,6 +1021,7 @@ fn judge_turn(
     identity: &Identity,
     history: Option<&History>,
     mode: PermissionMode,
+    view: View,
 ) -> ExitCode {
     let answer = if prompt.contains(SUPERVISOR_OPENING) {
         supervision(dir)
@@ -935,7 +1053,7 @@ fn judge_turn(
             };
             report.history_file = Some(history.write(&project, prompt, mode, &report.results)?);
         }
-        document(&report)
+        view.report(&report)
     });
     match recorded {
         Ok(document) => {
@@ -1227,6 +1345,28 @@ fn call(index: usize, command: &str) -> ActionEvent {
     }
 }
 
+/// What the agent reasoned before it reached for the tool. Recognisable for the
+/// reason [`OBSERVED`] is.
+const REASONED: &str = "The quickest proof is to run it.";
+
+/// One of the agent's own items — its `message` or its `reasoning` — which is
+/// text and nothing else: no tool, no input and no call identity.
+fn spoken(index: usize, kind: &str, text: &str) -> ActionEvent {
+    ActionEvent {
+        kind: kind.into(),
+        name: None,
+        input: None,
+        output: Some(text.into()),
+        index,
+        tool_call_id: None,
+        started_at: None,
+        finished_at: None,
+        duration_ms: None,
+        status: None,
+        timing_source: None,
+    }
+}
+
 /// The observation that answered the call before it, joined to it by the same
 /// call id.
 ///
@@ -1248,11 +1388,6 @@ fn observation(index: usize) -> ActionEvent {
         status: None,
         timing_source: None,
     }
-}
-
-fn stream(envelope: &RunStreamEnvelope) -> Result<(), String> {
-    println!("{}", document(envelope)?);
-    Ok(())
 }
 
 /// One document, serialized by the library that declares it.
