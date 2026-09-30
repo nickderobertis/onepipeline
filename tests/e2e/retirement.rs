@@ -2855,3 +2855,152 @@ fn a_closing_driver_finishes_the_retirement_in_progress_and_begins_no_other() {
         assert!(holds(&world, &later.origin, branch), "{branch}");
     }
 }
+
+/// What `onevcs`'s own finished-branches pass answers for `branch` of `service`,
+/// rehearsed through the verb a person asks it with: `retire-finished --dry-run`,
+/// which moves no ref and deletes nothing.
+///
+/// Its `derivation` says whether the pass reused a verdict recorded under exactly
+/// the inputs it read, or derived one — which it then records itself — so a
+/// rehearsal answering `reused` at a tip is one a pass before it derived there.
+fn rehearsed(world: &World, branch: &str) -> Value {
+    let output = world
+        .cmd_on(
+            &onevcs_binary(),
+            &[
+                "retire-finished",
+                "--repo",
+                "service",
+                "--dry-run",
+                "--json",
+            ],
+        )
+        .output()
+        .expect("onevcs runs");
+    assert!(
+        output.status.success(),
+        "onevcs retire-finished refused: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("the report is JSON");
+    report["examined"]
+        .as_array()
+        .expect("examined")
+        .iter()
+        .find(|entry| entry["branch"] == branch)
+        .cloned()
+        .unwrap_or_else(|| panic!("the pass never examined {branch}: {report}"))
+}
+
+/// A branch whose one commit adds `file` exactly as the base already carries it,
+/// cut from the commit before the base took it: lossless, and cut without moving
+/// the base. Unpublished, in the registered checkout alone.
+fn lossless_behind(world: &World, repo: &Repository, branch: &str, file: &str) {
+    let clone = person(world, repo);
+    let carried = git(world, &clone, &["show", &format!("main:{file}")]);
+    git(world, &clone, &["checkout", "-b", branch, "main~1"]);
+    std::fs::write(clone.join(file), carried).expect("written");
+    git(world, &clone, &["add", "-A"]);
+    git(
+        world,
+        &clone,
+        &["commit", "-m", &format!("chore: work on {branch}")],
+    );
+    git(world, &clone, &["checkout", "main"]);
+    git(
+        world,
+        &repo.checkout,
+        &[
+            "fetch",
+            &clone.to_string_lossy(),
+            &format!("{branch}:{branch}"),
+        ],
+    );
+}
+
+/// An idle driver's retirement pass records the verdict it derives for each
+/// branch, so the pass after it reuses that verdict while the branch and its base
+/// stand where they did — and once the branch moves, the driver's next pass
+/// derives it again, so a reused `keep` is never one the branch's new work outran.
+///
+/// A branch with work beyond its base is what every idle pass meets and keeps: it
+/// is the verdict a host re-proving hundreds of such branches each pass spent its
+/// time on. The run's `branches-retired` says nothing of a branch it kept, so what
+/// the driver's pass recorded is read back through `onevcs`'s own rehearsal of the
+/// same pass: nothing but the driver ran a pass before it, so a rehearsal that
+/// reuses a verdict at the branch's tip reuses the one the driver derived there.
+///
+/// That the driver's pass has run is what the run journals: beside the kept branch
+/// each stage leaves a lossless one, and a pass that retired it examined the kept
+/// branch as it then stood. The second is cut after the kept branch moves and
+/// without moving the base, so the move is the only input that changed.
+#[test]
+fn an_idle_driver_records_the_verdict_the_next_pass_reuses_until_its_branch_moves() {
+    const BRANCH: &str = "kept/work";
+    let world = sweeping_world("retirement-verdicts");
+    let repo = world.repository("local-direct", &[]);
+    pooled(&world);
+    lossless(&world, &repo, "done/first", "first.md");
+    on_the_base(&world, &repo, "second.md", "carried before any branch\n");
+    let first_tip = unique(&world, &repo, BRANCH, "kept.md");
+
+    sweeping(
+        &world,
+        "verdicts",
+        crate::harness::agent("hold", &[]),
+        Vec::new(),
+    );
+    until_retired(&world, "verdicts", &["done/first"]);
+    let before_move = rehearsed(&world, BRANCH);
+    assert_eq!(before_move["tip"], first_tip, "{before_move}");
+    assert_eq!(before_move["outcome"], "kept", "{before_move}");
+    assert_eq!(before_move["class"], "keep", "{before_move}");
+    assert_eq!(
+        before_move["derivation"], "reused",
+        "the driver's pass recorded no verdict the next pass could reuse: {before_move}"
+    );
+
+    // More work on the branch: its tip is an input the recorded verdict was keyed
+    // under, so the driver's next pass proves it again and records that.
+    let clone = person(&world, &repo);
+    git(&world, &clone, &["checkout", BRANCH]);
+    std::fs::write(clone.join("kept.md"), "more work on the branch\n").expect("written");
+    git(&world, &clone, &["commit", "-am", "chore: more work"]);
+    let moved_tip = git(&world, &clone, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    git(&world, &clone, &["checkout", "main"]);
+    git(
+        &world,
+        &repo.checkout,
+        &[
+            "fetch",
+            &clone.to_string_lossy(),
+            &format!("+{BRANCH}:{BRANCH}"),
+        ],
+    );
+    lossless_behind(&world, &repo, "done/second", "second.md");
+    until_retired(&world, "verdicts", &["done/second"]);
+    let after_move = rehearsed(&world, BRANCH);
+    assert_eq!(after_move["tip"], moved_tip, "{after_move}");
+    assert_eq!(after_move["outcome"], "kept", "{after_move}");
+    assert_eq!(
+        after_move["derivation"], "reused",
+        "the driver's pass recorded no verdict for the moved branch: {after_move}"
+    );
+    assert!(
+        holds(&world, &repo.checkout, BRANCH),
+        "{BRANCH} was deleted"
+    );
+    assert!(
+        retired(&world, "verdicts")
+            .iter()
+            .all(|entry| entry["branch"] != BRANCH),
+        "a branch with work beyond its base was journalled as retired"
+    );
+
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file("verdicts", "result.json").is_file()
+    });
+}
