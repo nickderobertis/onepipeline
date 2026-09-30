@@ -113,6 +113,8 @@ pub enum PipelineKind {
     RunStarted,
     /// A launch deliberately proceeded beside live repository holders.
     ConcurrentAcknowledged,
+    /// A launch proceeded beside live repository holders its plan depends on.
+    ConcurrentDeferred,
     /// Every dependency of a node has settled `done`, so it may dispatch now.
     NodeReady,
     /// A node's dispatch was started.
@@ -298,6 +300,7 @@ impl PipelineKind {
         match self {
             Self::RunStarted => "run-started",
             Self::ConcurrentAcknowledged => "concurrent-acknowledged",
+            Self::ConcurrentDeferred => "concurrent-deferred",
             Self::NodeReady => "node-ready",
             Self::NodeDispatched => "node-dispatched",
             Self::NodeSettled => "node-settled",
@@ -364,6 +367,7 @@ impl From<PipelineKind> for EventKind {
 pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::RunStarted,
     PipelineKind::ConcurrentAcknowledged,
+    PipelineKind::ConcurrentDeferred,
     PipelineKind::NodeReady,
     PipelineKind::NodeDispatched,
     PipelineKind::NodeSettled,

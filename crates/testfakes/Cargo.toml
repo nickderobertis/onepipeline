@@ -167,6 +167,15 @@ path = "src/bin/host-channel-server.rs"
 name = "reviewer-bar"
 path = "src/bin/reviewer-bar.rs"
 
+# A live session with no `run`/`node` labels, opened through the linked `onevcs`
+# itself and held by a running process: what the launch interlock calls an
+# unattributed holder. Not a double; see the file's own doc.
+# llmlint: ignore[new_command_or_client_gets_its_own_project] a test program of the
+# e2e suite, like the bins beside it; it is not a command this repository publishes.
+[[bin]]
+name = "session-holder"
+path = "src/bin/session-holder.rs"
+
 [lib]
 name = "onepipeline_testfakes"
 path = "src/lib.rs"

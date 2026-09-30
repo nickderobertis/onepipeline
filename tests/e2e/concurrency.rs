@@ -158,6 +158,392 @@ fn live_holders_refuse_unless_acknowledged_and_stale_ones_are_reported_or_left_o
     world.release("build.go");
 }
 
+/// The identity every `on_service` node's repository resolves to.
+const IDENTITY: &str = "github.com/owner/service";
+
+/// A lifecycle node on the one repository, waiting on `deps`.
+fn on_service(id: &str, deps: &[&str]) -> Value {
+    json!({
+        "id": id,
+        "task": "## What\nBuild.\n\n## Why\nNeeded.\n\n## Acceptance criteria\n- Built.",
+        "persona": "engineer",
+        "repo": "service",
+        "title": "feat: build it",
+        "deps": deps,
+    })
+}
+
+/// The token of the session `run`'s node `node` opened, once it has.
+fn opened_session(world: &World, run: &str, node: &str) -> String {
+    let opened = |world: &World| {
+        world.journal(run).into_iter().find_map(|event| {
+            (event["source"] == "vcs"
+                && event["kind"] == "session-opened"
+                && event["labels"]["node"] == node)
+                .then(|| event["payload"]["token"].as_str().map(str::to_string))
+                .flatten()
+        })
+    };
+    world.until(
+        &format!("run '{run}' node '{node}' to open its session"),
+        |world| opened(world).is_some(),
+    );
+    opened(world).expect("the session was opened")
+}
+
+/// A dependency on the holding node is an acknowledgement of that holder and of
+/// no other: the launch proceeds past exactly the holders every one of its nodes
+/// on the identity waits for, and refuses — naming each other holder, what would
+/// acknowledge it, and when acknowledging is right — on anything less.
+#[test]
+fn a_dependency_on_the_holding_node_acknowledges_that_holder_and_no_other() {
+    let world = World::new("deferred");
+    let _repository = world.repository("local-direct", &[]);
+    world.script("build.wait", "hold");
+    world.script("ship.wait", "hold");
+
+    // The first run holds one node live on the identity.
+    let first = world.plan("first", &plan_of("first", vec![on_service("build", &[])]));
+    let mut first_owner = world.cmd(&["start", &first, "--attach"]);
+    let mut first_owner = first_owner
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the first run's owner starts");
+    let build = opened_session(&world, "first", "build");
+    let owner_pid = first_owner.id();
+    let held = format!("identity '{IDENTITY}' held by session '{build}' (owner_pid {owner_pid})");
+
+    // Every node on the identity reaches `run:first#build`: one directly, one
+    // through an in-plan edge from a node on no identity at all.
+    let covered = world.plan(
+        "covered",
+        &plan_of(
+            "covered",
+            vec![
+                on_service("direct", &["run:first#build"]),
+                json!({"id": "prep", "kind": "human", "task": "Prepare.", "deps": ["run:first#build"]}),
+                on_service("through", &["prep"]),
+            ],
+        ),
+    );
+    let proceeded = world.run_on(world.cmd(&["start", &covered, "--detach"]), "start covered");
+    proceeded
+        .exited(0)
+        .err_has(&format!(
+            "identity '{IDENTITY}' run 'first' node 'build' via `run:first#build`"
+        ))
+        .err_lacks("concurrent project work refused")
+        .err_lacks("proceeding alongside live run");
+    let deferred = world.events_of("covered", "concurrent-deferred");
+    assert_eq!(deferred.len(), 1, "{deferred:?}");
+    assert_eq!(
+        deferred[0]["payload"],
+        json!({
+            "launching": "covered",
+            "holders": [{
+                "identity": IDENTITY,
+                "session": build,
+                "owner_pid": owner_pid,
+                "run": "first",
+                "node": "build",
+                "dependency": "run:first#build",
+                "dependents": ["direct", "through"],
+            }],
+        })
+    );
+    assert!(world
+        .events_of("covered", "concurrent-acknowledged")
+        .is_empty());
+    world.run(&["stop", "covered"]).exited(0);
+
+    // Each way a plan can fall short of that is refused, naming the holder's run
+    // and node, the nodes that do not reach it, and the remedy.
+    for (name, nodes, undeclared) in [
+        ("none", vec![on_service("alpha", &[])], "'alpha'"),
+        (
+            "partial",
+            vec![
+                on_service("alpha", &["run:first#build"]),
+                on_service("beta", &[]),
+            ],
+            "'beta'",
+        ),
+        (
+            "elsewhere",
+            vec![on_service("alpha", &["run:first#later"])],
+            "'alpha'",
+        ),
+    ] {
+        let plan = world.plan(name, &plan_of(name, nodes));
+        world
+            .run_on(world.cmd(&["start", &plan, "--detach"]), name)
+            .exited(2)
+            .err_has(&format!(
+                "concurrent project work refused for run '{name}':"
+            ))
+            .err_has(&format!("{held} for run 'first' node 'build'"))
+            .err_has(&format!("plan node(s) {undeclared} do not depend on it"))
+            .err_has("declare `run:first#build` under `onepipeline.deps`")
+            .err_has("pass --acknowledge-concurrent")
+            .err_has("acknowledge when this work outranks the concurrent run");
+    }
+
+    // A second live holder on the identity — another run's node — which the
+    // plan does not depend on.
+    let rival = world.plan("rival", &plan_of("rival", vec![on_service("ship", &[])]));
+    world
+        .run_on(
+            world.cmd(&["start", &rival, "--detach", "--acknowledge-concurrent"]),
+            "start rival",
+        )
+        .exited(0);
+    let ship = opened_session(&world, "rival", "ship");
+
+    let mixed_nodes = || vec![on_service("alpha", &["run:first#build"])];
+    let mixed = world.plan("mixed", &plan_of("mixed", mixed_nodes()));
+    let refused = world.run_on(world.cmd(&["start", &mixed, "--detach"]), "start mixed");
+    refused
+        .exited(2)
+        .err_has(&format!("session '{ship}'"))
+        .err_has("for run 'rival' node 'ship'; plan node(s) 'alpha' do not depend on it")
+        .err_has("declare `run:rival#ship` under `onepipeline.deps`");
+    assert!(
+        !refused.stderr.contains(&build),
+        "a holder the plan depends on was named as a conflict: {}",
+        refused.stderr
+    );
+
+    // With the flag, every live holder is acknowledged — the covered one
+    // carrying the dependency that also covers it — and the deferral is still
+    // recorded.
+    let acknowledged = world.run_on(
+        world.cmd(&["start", &mixed, "--detach", "--acknowledge-concurrent"]),
+        "start mixed --acknowledge-concurrent",
+    );
+    acknowledged
+        .exited(0)
+        .err_has("proceeding alongside live run")
+        .err_has(&build)
+        .err_has(&ship)
+        .err_has("run 'first' node 'build' via `run:first#build`");
+    let audit = world.events_of("mixed", "concurrent-acknowledged");
+    assert_eq!(audit.len(), 1, "{audit:?}");
+    let audit = &audit[0]["payload"];
+    assert_eq!(audit["shared_identities"], json!([IDENTITY, IDENTITY]));
+    assert_eq!(audit["runs"]["launching"], "mixed");
+    let holding: Vec<&Value> = audit["runs"]["holding_sessions"]
+        .as_array()
+        .expect("the holding sessions")
+        .iter()
+        .collect();
+    assert_eq!(holding.len(), 2);
+    assert!(holding.contains(&&json!(build)) && holding.contains(&&json!(ship)));
+    let holders = audit["holders"].as_array().expect("the holders");
+    let entry = |token: &str| {
+        holders
+            .iter()
+            .find(|holder| holder["session"] == token)
+            .unwrap_or_else(|| panic!("{token} is not among {holders:?}"))
+    };
+    assert_eq!(entry(&build)["owner_pid"], json!(owner_pid));
+    assert_eq!(entry(&build)["dependency"], "run:first#build");
+    assert_eq!(entry(&build)["run"], "first");
+    assert_eq!(entry(&build)["node"], "build");
+    assert_eq!(entry(&ship)["run"], "rival");
+    assert!(entry(&ship).get("dependency").is_none(), "{holders:?}");
+    let deferred = world.events_of("mixed", "concurrent-deferred");
+    assert_eq!(deferred.len(), 1, "{deferred:?}");
+    assert_eq!(
+        deferred[0]["payload"]["holders"][0]["session"],
+        json!(build)
+    );
+    assert_eq!(
+        deferred[0]["payload"]["holders"].as_array().map(Vec::len),
+        Some(1)
+    );
+    world.run(&["stop", "mixed"]).exited(0);
+    world.run(&["stop", "rival"]).exited(0);
+
+    first_owner.kill().expect("the first owner is ended");
+    first_owner.wait().expect("the first owner exits");
+    world.release("build.go");
+    world.release("ship.go");
+}
+
+/// Another node of the same run, live on the identity, is a holder of its own:
+/// a dependency on one node of a run does not acknowledge its sibling, and one
+/// on each does.
+#[test]
+fn a_dependency_on_one_node_of_a_run_does_not_acknowledge_another_of_its_nodes() {
+    let world = World::new("sibling-holders");
+    let _repository = world.repository("local-direct", &[]);
+    world.script("build.wait", "hold");
+    world.script("ship.wait", "hold");
+
+    let first = world.plan(
+        "first",
+        &plan_of(
+            "first",
+            vec![on_service("build", &[]), on_service("ship", &[])],
+        ),
+    );
+    let mut first_owner = world.cmd(&["start", &first, "--attach"]);
+    let mut first_owner = first_owner
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the first run's owner starts");
+    let build = opened_session(&world, "first", "build");
+    let ship = opened_session(&world, "first", "ship");
+
+    let one = world.plan(
+        "one",
+        &plan_of("one", vec![on_service("alpha", &["run:first#build"])]),
+    );
+    let refused = world.run_on(world.cmd(&["start", &one, "--detach"]), "start one");
+    refused
+        .exited(2)
+        .err_has(&format!("session '{ship}'"))
+        .err_has("for run 'first' node 'ship'; plan node(s) 'alpha' do not depend on it")
+        .err_has("declare `run:first#ship` under `onepipeline.deps`");
+    assert!(
+        !refused.stderr.contains(&build),
+        "a holder the plan depends on was named as a conflict: {}",
+        refused.stderr
+    );
+
+    let both = world.plan(
+        "both",
+        &plan_of(
+            "both",
+            vec![on_service("alpha", &["run:first#build", "run:first#ship"])],
+        ),
+    );
+    let proceeded = world.run_on(world.cmd(&["start", &both, "--detach"]), "start both");
+    proceeded.exited(0);
+    // Every dependency-covered holder is named on the one deferral line, each by
+    // its identity, run, node and the dependency that defers to it.
+    let lines: Vec<&str> = proceeded
+        .stderr
+        .lines()
+        .filter(|line| line.contains("depends on live holder(s)"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{}", proceeded.stderr);
+    for holder in ["build", "ship"] {
+        assert!(
+            lines[0].contains(&format!(
+                "identity '{IDENTITY}' run 'first' node '{holder}' via `run:first#{holder}`"
+            )),
+            "the deferral line does not name holder '{holder}': {}",
+            lines[0]
+        );
+    }
+    let deferred = world.events_of("both", "concurrent-deferred");
+    let named: Vec<&Value> = deferred[0]["payload"]["holders"]
+        .as_array()
+        .expect("the deferred holders")
+        .iter()
+        .map(|holder| &holder["dependency"])
+        .collect();
+    assert_eq!(named.len(), 2, "{deferred:?}");
+    assert!(
+        named.contains(&&json!("run:first#build")) && named.contains(&&json!("run:first#ship"))
+    );
+    world.run(&["stop", "both"]).exited(0);
+
+    // A live holder nothing attributes to a run's node: no dependency can name
+    // it, so a plan depending on every attributed holder is still refused over
+    // it, and only the flag passes it.
+    let (mut stranger, unattributed) = unattributed_session(&world);
+    let covered_nodes = || vec![on_service("alpha", &["run:first#build", "run:first#ship"])];
+    let past = world.plan("past", &plan_of("past", covered_nodes()));
+    let refused = world.run_on(world.cmd(&["start", &past, "--detach"]), "start past");
+    refused
+        .exited(2)
+        .err_has("concurrent project work refused for run 'past':")
+        .err_has(&format!(
+            "held by session '{unattributed}' (owner_pid {}), which is not attributable to a run's node",
+            stranger.id()
+        ))
+        .err_has("so only --acknowledge-concurrent passes it")
+        .err_has("To launch, pass --acknowledge-concurrent to proceed deliberately.")
+        .err_has("acknowledge when this work outranks the concurrent run")
+        .err_lacks("declare each dependency");
+    assert!(
+        !refused.stderr.contains(&build) && !refused.stderr.contains(&ship),
+        "a holder the plan depends on was named as a conflict: {}",
+        refused.stderr
+    );
+    world
+        .run_on(
+            world.cmd(&["start", &past, "--detach", "--acknowledge-concurrent"]),
+            "start past --acknowledge-concurrent",
+        )
+        .exited(0)
+        .err_has("proceeding alongside live run")
+        .err_has(&unattributed);
+    let audit = world.events_of("past", "concurrent-acknowledged");
+    let holders = audit[0]["payload"]["holders"]
+        .as_array()
+        .expect("the acknowledged holders");
+    assert_eq!(holders.len(), 3, "{holders:?}");
+    let stranger_entry = holders
+        .iter()
+        .find(|holder| holder["session"] == unattributed.as_str())
+        .expect("the unattributed holder is acknowledged");
+    for absent in ["run", "node", "dependency"] {
+        assert!(stranger_entry.get(absent).is_none(), "{stranger_entry}");
+    }
+    assert!(holders
+        .iter()
+        .filter(|holder| holder["session"] != unattributed.as_str())
+        .all(|holder| holder["dependency"].is_string()));
+    assert_eq!(
+        world.events_of("past", "concurrent-deferred")[0]["payload"]["holders"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+    world.run(&["stop", "past"]).exited(0);
+    drop(stranger.stdin.take());
+    stranger.wait().expect("the unattributed holder exits");
+
+    first_owner.kill().expect("the first owner is ended");
+    first_owner.wait().expect("the first owner exits");
+    world.release("build.go");
+    world.release("ship.go");
+}
+
+/// A live session with no `run`/`node` labels, held open by the
+/// `session-holder` program until its stdin is closed.
+fn unattributed_session(world: &World) -> (std::process::Child, String) {
+    let mut held = Command::new(crate::harness::double("session-holder"))
+        .arg("service")
+        .env("ONEVCS_HOME", world.onevcs_home())
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+        .env("GIT_AUTHOR_NAME", crate::harness::GIT_WHO)
+        .env("GIT_AUTHOR_EMAIL", crate::harness::GIT_EMAIL)
+        .env("GIT_COMMITTER_NAME", crate::harness::GIT_WHO)
+        .env("GIT_COMMITTER_EMAIL", crate::harness::GIT_EMAIL)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("the session holder starts");
+    let mut line = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(held.stdout.as_mut().expect("its stdout")),
+        &mut line,
+    )
+    .expect("the session holder prints its token");
+    assert!(
+        line.trim().starts_with("s-"),
+        "the session holder did not open its session: {line:?}"
+    );
+    (held, line.trim().to_owned())
+}
+
 /// A session opened by a command that has already exited, on a run root nothing
 /// is working inside, whose branch carries nothing — which is what `onevcs` calls
 /// **spent** and leaves out of the answer.

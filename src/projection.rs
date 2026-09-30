@@ -1030,7 +1030,8 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 state.plan = Some(plan);
             }
         }
-        Some(journal::PipelineKind::ConcurrentAcknowledged) => {}
+        Some(journal::PipelineKind::ConcurrentAcknowledged)
+        | Some(journal::PipelineKind::ConcurrentDeferred) => {}
         // A node becoming ready changes nothing about the state: it is derived
         // from the graph and the recorded settlements, and this record is how a
         // reader sees the moment it happened.
