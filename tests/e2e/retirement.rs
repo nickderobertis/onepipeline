@@ -2828,68 +2828,96 @@ fn a_closing_driver_finishes_the_retirement_in_progress_and_begins_no_other() {
     }
 }
 
-/// One pass of the automatic retirement the engine's idle maintenance makes over
-/// `service` — the linked library's own `retire_finished`, called as
-/// `src/maintenance.rs` calls it — answering what it reported for `branch`.
+/// The verdict `onevcs` recorded for `branch` under the world's state root, and when
+/// its file was last written — or `None` while there is none.
 ///
-/// Read as the JSON the report serializes to rather than through its fields, so a
-/// build linking a release without `derivation` answers `null` there and the
-/// journey fails on the assertion that names it rather than on a compile error.
-fn passed_over(world: &World, branch: &str) -> Value {
-    let report = world
-        .on_onevcs(|| {
-            onevcs::retire_finished(
-                &onevcs::Providers::real(),
-                &onevcs::RetirePass {
-                    scope: onevcs::Scope::Repo(SERVICE_IDENTITY.to_owned()),
-                    exclude: Vec::new(),
-                    dry_run: false,
-                },
-            )
-        })
-        .expect("the retirement pass answers");
-    let report = serde_json::to_value(report).expect("the report serializes");
-    report["examined"]
-        .as_array()
-        .expect("examined")
-        .iter()
-        .find(|entry| entry["branch"] == branch)
-        .cloned()
-        .unwrap_or_else(|| panic!("the pass never examined {branch}: {report}"))
+/// Found by the key the record carries rather than by its file name, which is the
+/// sibling's digest of the identity and branch and not this suite's to recompute. A
+/// pass that reuses a verdict leaves its file as it was; one that derives it again
+/// replaces the file whole, so a later write time is a derivation.
+fn recorded_verdict(world: &World, branch: &str) -> Option<(Value, std::time::SystemTime)> {
+    let entries = std::fs::read_dir(world.onevcs_home().join("verdicts")).ok()?;
+    entries.flatten().find_map(|entry| {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            return None;
+        }
+        let record: Value = serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+        (record["key"]["identity"] == SERVICE_IDENTITY && record["key"]["branch"] == branch)
+            .then(|| Some((record, entry.metadata().ok()?.modified().ok()?)))
+            .flatten()
+    })
 }
 
-/// The retirement pass the engine links records each verdict and reuses it while
-/// the branch and its base stand where they did — and derives it again once the
-/// branch moves, so a reused `keep` is never one the branch's new work outran.
+/// The commit the registered checkout's copy of `branch` stands at, as a verdict's
+/// key holds it.
+fn keyed_tip(record: &Value) -> Value {
+    record["key"]["copies"]
+        .as_array()
+        .expect("copies")
+        .iter()
+        .find(|copy| copy["kind"] == "checkout")
+        .map(|copy| copy["tip"].clone())
+        .unwrap_or_else(|| panic!("the key holds no checkout copy: {record}"))
+}
+
+/// Wait until `run`'s driver has begun `n` sweeps, each of which ends with the
+/// retirement pass — so every sweep before the `n`th has run its pass to the end.
+fn until_swept(world: &World, run: &str, n: u64) {
+    world.until(&format!("{run}'s driver to begin sweep {n}"), |world| {
+        crate::harness::reporting(world, run);
+        crate::harness::counts(world, run).maintenance_sweeps >= n
+    });
+}
+
+/// An idle driver's retirement pass records each branch's verdict under the
+/// sibling's state root and, on the sweeps after, reuses it while the branch and
+/// its base stand where they did — and derives it again once the branch moves, so
+/// a reused `keep` is never one the branch's new work outran.
 ///
 /// A branch with work beyond its base is what every idle pass meets and keeps: it
 /// is the verdict a host re-proving hundreds of such branches each pass spent its
-/// time on.
+/// time on. Read off the record the linked `onevcs` leaves — the key it was
+/// derived under and when it was written — since the run's `branches-retired`
+/// says nothing of a branch it kept.
 #[test]
-fn the_linked_retirement_pass_reuses_a_verdict_until_its_branch_moves() {
+fn an_idle_driver_reuses_a_recorded_verdict_until_its_branch_moves() {
     const BRANCH: &str = "kept/work";
-    let world = World::new("retirement-verdicts");
-    let repo = world.repository("change-open", &[]);
+    let world = sweeping_world("retirement-verdicts").with_env(crate::harness::LOOP_STATS_ENV, "1");
+    let repo = world.repository("local-direct", &[]);
+    pooled(&world);
     let first_tip = unique(&world, &repo, BRANCH, "kept.md");
 
-    let derived = passed_over(&world, BRANCH);
-    assert_eq!(derived["outcome"], "kept", "{derived}");
-    assert_eq!(derived["tip"], first_tip, "{derived}");
-    assert_eq!(derived["derivation"], "derived", "{derived}");
-    let verdicts = world.onevcs_home().join("verdicts");
-    let recorded = std::fs::read_dir(&verdicts)
-        .map(|entries| entries.count())
-        .unwrap_or(0);
-    assert!(
-        recorded > 0,
-        "the pass recorded no verdict under {}",
-        verdicts.display()
+    sweeping(
+        &world,
+        "verdicts",
+        crate::harness::agent("hold", &[]),
+        Vec::new(),
+    );
+    world.until("the idle pass to record the branch's verdict", |world| {
+        recorded_verdict(world, BRANCH).is_some()
+    });
+    let (derived, written) = recorded_verdict(&world, BRANCH).expect("a verdict");
+    assert_eq!(keyed_tip(&derived), first_tip, "{derived}");
+    assert_eq!(
+        derived["verdict"]["retirement"]["class"], "keep",
+        "{derived}"
     );
 
-    let reused = passed_over(&world, BRANCH);
-    assert_eq!(reused["derivation"], "reused", "{reused}");
-    assert_eq!(reused["outcome"], "kept", "{reused}");
-    assert_eq!(reused["class"], derived["class"], "{reused}");
+    // Two whole passes more over the same branch and base: the record is the one
+    // the first derivation wrote, untouched.
+    crate::harness::reporting(&world, "verdicts");
+    let swept = crate::harness::counts(&world, "verdicts").maintenance_sweeps;
+    until_swept(&world, "verdicts", swept + 3);
+    let (reused, rewritten) = recorded_verdict(&world, BRANCH).expect("a verdict");
+    assert_eq!(
+        reused, derived,
+        "a pass over an unmoved branch changed its verdict"
+    );
+    assert_eq!(
+        rewritten, written,
+        "a pass over an unmoved branch derived its verdict again rather than reusing it"
+    );
 
     // More work on the branch: its tip is an input the recorded verdict was keyed
     // under, so the next pass proves it again.
@@ -2910,13 +2938,32 @@ fn the_linked_retirement_pass_reuses_a_verdict_until_its_branch_moves() {
             &format!("+{BRANCH}:{BRANCH}"),
         ],
     );
-
-    let rederived = passed_over(&world, BRANCH);
-    assert_eq!(rederived["tip"], moved_tip, "{rederived}");
-    assert_eq!(rederived["derivation"], "derived", "{rederived}");
-    assert_eq!(rederived["outcome"], "kept", "{rederived}");
+    world.until(
+        "the idle pass to derive the moved branch's verdict",
+        |world| {
+            recorded_verdict(world, BRANCH)
+                .is_some_and(|(record, _)| keyed_tip(&record) == moved_tip)
+        },
+    );
+    let (rederived, rederived_at) = recorded_verdict(&world, BRANCH).expect("a verdict");
+    assert!(rederived_at > written, "{rederived}");
+    assert_eq!(
+        rederived["verdict"]["retirement"]["class"], "keep",
+        "{rederived}"
+    );
     assert!(
         holds(&world, &repo.checkout, BRANCH),
         "{BRANCH} was deleted"
     );
+    assert!(
+        retired(&world, "verdicts")
+            .iter()
+            .all(|entry| entry["branch"] != BRANCH),
+        "a branch with work beyond its base was journalled as retired"
+    );
+
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file("verdicts", "result.json").is_file()
+    });
 }
