@@ -762,14 +762,18 @@ onevcs-testing = "0.8.5"
 # lock's whole family to this one release, and fails as well if anything this
 # repository installs as an `onetaskgraph` binary names another.
 #
-# Moved for the host, not for new code here: the host reconciles its own `onetaskgraph`
-# pin against the family this engine links, and the release it adopts is this one, the
-# first carrying both the store's destination-scoped ids for a copied project's tasks and
-# its stricter Python SDK. The linked Rust crates are unchanged from the release before.
-# llmlint: ignore[changed_behavior_has_e2e] the crates this pin links are source-identical to the release before it, which already carried the copy fix (its second half is the Python SDK, linked by nothing here); what a copy writes back is read out of the destination project by `writeback_projections`' and `store`'s journeys, which pass over this lock.
-onetaskgraph-core = "=0.2.51"
-onetaskgraph-plugin-api = "=0.2.51"
-onetaskgraph-local-md = "=0.2.51"
+# Moved for the host: it reconciles its own `onetaskgraph` pin against the family this
+# engine links, and the store CLI it needs is this release's. What it brings the engine:
+# `github-projects` answers text, metadata and origin queries with GitHub's own search, and
+# a copy records `onetaskgraph.copies` on each item it creates a counterpart for and follows
+# that link on later copies. The write-back's copies create only lineages the board lacks, so
+# that link lands on the in-process shadow task — rewritten on the next projection, and read
+# by nothing here — and never on the destination, which `writeback_projections`' store-call
+# assertions hold. The engine's only changes are the store's new fields and its `stale-link`
+# refusal, which the write-back classes by the store's own word.
+onetaskgraph-core = "=0.2.52"
+onetaskgraph-plugin-api = "=0.2.52"
+onetaskgraph-local-md = "=0.2.52"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
