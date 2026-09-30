@@ -436,10 +436,96 @@ fn a_dependency_on_one_node_of_a_run_does_not_acknowledge_another_of_its_nodes()
     );
     world.run(&["stop", "both"]).exited(0);
 
+    // A live holder nothing attributes to a run's node: no dependency can name
+    // it, so a plan depending on every attributed holder is still refused over
+    // it, and only the flag passes it.
+    let (mut stranger, unattributed) = unattributed_session(&world);
+    let covered_nodes = || vec![on_service("alpha", &["run:first#build", "run:first#ship"])];
+    let past = world.plan("past", &plan_of("past", covered_nodes()));
+    let refused = world.run_on(world.cmd(&["start", &past, "--detach"]), "start past");
+    refused
+        .exited(2)
+        .err_has("concurrent project work refused for run 'past':")
+        .err_has(&format!(
+            "held by session '{unattributed}' (owner_pid {}), which is not attributable to a run's node",
+            stranger.id()
+        ))
+        .err_has("so only --acknowledge-concurrent passes it")
+        .err_has("To launch, pass --acknowledge-concurrent to proceed deliberately.")
+        .err_has("acknowledge when this work outranks the concurrent run")
+        .err_lacks("declare each dependency");
+    assert!(
+        !refused.stderr.contains(&build) && !refused.stderr.contains(&ship),
+        "a holder the plan depends on was named as a conflict: {}",
+        refused.stderr
+    );
+    world
+        .run_on(
+            world.cmd(&["start", &past, "--detach", "--acknowledge-concurrent"]),
+            "start past --acknowledge-concurrent",
+        )
+        .exited(0)
+        .err_has("proceeding alongside live run")
+        .err_has(&unattributed);
+    let audit = world.events_of("past", "concurrent-acknowledged");
+    let holders = audit[0]["payload"]["holders"]
+        .as_array()
+        .expect("the acknowledged holders");
+    assert_eq!(holders.len(), 3, "{holders:?}");
+    let stranger_entry = holders
+        .iter()
+        .find(|holder| holder["session"] == unattributed.as_str())
+        .expect("the unattributed holder is acknowledged");
+    for absent in ["run", "node", "dependency"] {
+        assert!(stranger_entry.get(absent).is_none(), "{stranger_entry}");
+    }
+    assert!(holders
+        .iter()
+        .filter(|holder| holder["session"] != unattributed.as_str())
+        .all(|holder| holder["dependency"].is_string()));
+    assert_eq!(
+        world.events_of("past", "concurrent-deferred")[0]["payload"]["holders"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+    world.run(&["stop", "past"]).exited(0);
+    drop(stranger.stdin.take());
+    stranger.wait().expect("the unattributed holder exits");
+
     first_owner.kill().expect("the first owner is ended");
     first_owner.wait().expect("the first owner exits");
     world.release("build.go");
     world.release("ship.go");
+}
+
+/// A live session with no `run`/`node` labels, held open by the
+/// `session-holder` program until its stdin is closed.
+fn unattributed_session(world: &World) -> (std::process::Child, String) {
+    let mut held = Command::new(crate::harness::double("session-holder"))
+        .arg("service")
+        .env("ONEVCS_HOME", world.onevcs_home())
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+        .env("GIT_AUTHOR_NAME", crate::harness::GIT_WHO)
+        .env("GIT_AUTHOR_EMAIL", crate::harness::GIT_EMAIL)
+        .env("GIT_COMMITTER_NAME", crate::harness::GIT_WHO)
+        .env("GIT_COMMITTER_EMAIL", crate::harness::GIT_EMAIL)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("the session holder starts");
+    let mut line = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(held.stdout.as_mut().expect("its stdout")),
+        &mut line,
+    )
+    .expect("the session holder prints its token");
+    assert!(
+        line.trim().starts_with("s-"),
+        "the session holder did not open its session: {line:?}"
+    );
+    (held, line.trim().to_owned())
 }
 
 /// A session opened by a command that has already exited, on a run root nothing
