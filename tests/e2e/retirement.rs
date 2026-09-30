@@ -2864,13 +2864,30 @@ fn rehearsed(world: &World, branch: &str) -> Value {
         .unwrap_or_else(|| panic!("the pass never examined {branch}: {report}"))
 }
 
-/// Wait until `run`'s driver has begun `n` sweeps, each of which ends with the
-/// retirement pass — so every sweep before the `n`th has run its pass to the end.
-fn until_swept(world: &World, run: &str, n: u64) {
-    world.until(&format!("{run}'s driver to begin sweep {n}"), |world| {
-        crate::harness::reporting(world, run);
-        crate::harness::counts(world, run).maintenance_sweeps >= n
-    });
+/// A branch whose one commit adds `file` exactly as the base already carries it,
+/// cut from the commit before the base took it: lossless, and cut without moving
+/// the base. Unpublished, in the registered checkout alone.
+fn lossless_behind(world: &World, repo: &Repository, branch: &str, file: &str) {
+    let clone = person(world, repo);
+    let carried = git(world, &clone, &["show", &format!("main:{file}")]);
+    git(world, &clone, &["checkout", "-b", branch, "main~1"]);
+    std::fs::write(clone.join(file), carried).expect("written");
+    git(world, &clone, &["add", "-A"]);
+    git(
+        world,
+        &clone,
+        &["commit", "-m", &format!("chore: work on {branch}")],
+    );
+    git(world, &clone, &["checkout", "main"]);
+    git(
+        world,
+        &repo.checkout,
+        &[
+            "fetch",
+            &clone.to_string_lossy(),
+            &format!("{branch}:{branch}"),
+        ],
+    );
 }
 
 /// An idle driver's retirement pass records the verdict it derives for each
@@ -2884,12 +2901,19 @@ fn until_swept(world: &World, run: &str, n: u64) {
 /// the driver's pass recorded is read back through `onevcs`'s own rehearsal of the
 /// same pass: nothing but the driver ran a pass before it, so a rehearsal that
 /// reuses a verdict at the branch's tip reuses the one the driver derived there.
+///
+/// That the driver's pass has run is what the run journals: beside the kept branch
+/// each stage leaves a lossless one, and a pass that retired it examined the kept
+/// branch as it then stood. The second is cut after the kept branch moves and
+/// without moving the base, so the move is the only input that changed.
 #[test]
 fn an_idle_driver_records_the_verdict_the_next_pass_reuses_until_its_branch_moves() {
     const BRANCH: &str = "kept/work";
-    let world = sweeping_world("retirement-verdicts").with_env(crate::harness::LOOP_STATS_ENV, "1");
+    let world = sweeping_world("retirement-verdicts");
     let repo = world.repository("local-direct", &[]);
     pooled(&world);
+    lossless(&world, &repo, "done/first", "first.md");
+    on_the_base(&world, &repo, "second.md", "carried before any branch\n");
     let first_tip = unique(&world, &repo, BRANCH, "kept.md");
 
     sweeping(
@@ -2898,14 +2922,14 @@ fn an_idle_driver_records_the_verdict_the_next_pass_reuses_until_its_branch_move
         crate::harness::agent("hold", &[]),
         Vec::new(),
     );
-    until_swept(&world, "verdicts", 2);
-    let reused = rehearsed(&world, BRANCH);
-    assert_eq!(reused["tip"], first_tip, "{reused}");
-    assert_eq!(reused["outcome"], "kept", "{reused}");
-    assert_eq!(reused["class"], "keep", "{reused}");
+    until_retired(&world, "verdicts", &["done/first"]);
+    let before_move = rehearsed(&world, BRANCH);
+    assert_eq!(before_move["tip"], first_tip, "{before_move}");
+    assert_eq!(before_move["outcome"], "kept", "{before_move}");
+    assert_eq!(before_move["class"], "keep", "{before_move}");
     assert_eq!(
-        reused["derivation"], "reused",
-        "the driver's pass recorded no verdict the next pass could reuse: {reused}"
+        before_move["derivation"], "reused",
+        "the driver's pass recorded no verdict the next pass could reuse: {before_move}"
     );
 
     // More work on the branch: its tip is an input the recorded verdict was keyed
@@ -2927,15 +2951,14 @@ fn an_idle_driver_records_the_verdict_the_next_pass_reuses_until_its_branch_move
             &format!("+{BRANCH}:{BRANCH}"),
         ],
     );
-    crate::harness::reporting(&world, "verdicts");
-    let swept = crate::harness::counts(&world, "verdicts").maintenance_sweeps;
-    until_swept(&world, "verdicts", swept + 2);
-    let rederived = rehearsed(&world, BRANCH);
-    assert_eq!(rederived["tip"], moved_tip, "{rederived}");
-    assert_eq!(rederived["outcome"], "kept", "{rederived}");
+    lossless_behind(&world, &repo, "done/second", "second.md");
+    until_retired(&world, "verdicts", &["done/second"]);
+    let after_move = rehearsed(&world, BRANCH);
+    assert_eq!(after_move["tip"], moved_tip, "{after_move}");
+    assert_eq!(after_move["outcome"], "kept", "{after_move}");
     assert_eq!(
-        rederived["derivation"], "reused",
-        "the driver's pass recorded no verdict for the moved branch: {rederived}"
+        after_move["derivation"], "reused",
+        "the driver's pass recorded no verdict for the moved branch: {after_move}"
     );
     assert!(
         holds(&world, &repo.checkout, BRANCH),
