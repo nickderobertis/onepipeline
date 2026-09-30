@@ -6242,6 +6242,12 @@ fn a_cross_dag_squash_commit_is_answered_through_the_upstream_change_request() {
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
+/// The interval an unchanged wait stops doubling at, as the ruling in
+/// divergence entry 97 fixes it. Stated here because the crate keeps it in a
+/// private module; `release::tests::the_ceiling_is_stated_where_it_is_ruled_and_proven`
+/// holds this value to the crate's own constant.
+const CEILING_SECONDS: u64 = 14_400;
+
 /// How many release waits the channel has queued about the consumer, once its
 /// projection has caught up with its log.
 fn unchanged_waits(world: &World, run: &str) -> usize {
@@ -6431,11 +6437,11 @@ fn an_unchanged_release_wait_is_queued_again_only_once_read_and_a_changed_one_at
             |world| unchanged_waits(world, &run) > before,
         );
         measured.push(every);
-        every = (every * 2).min(14_400);
+        every = (every * 2).min(CEILING_SECONDS);
     }
     assert_eq!(
         measured[measured.len() - 3..],
-        [8_192, 14_400, 14_400],
+        [8_192, CEILING_SECONDS, CEILING_SECONDS],
         "the climb did not reach the ceiling where the ruling puts it: {measured:?}"
     );
 

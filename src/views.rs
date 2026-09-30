@@ -3022,6 +3022,7 @@ pub(crate) enum ObserverState {
 /// decision is waiting on the run, and each of those is read off the run's own
 /// lines already. The start is `None` for a record whose stamp this build cannot
 /// read.
+// llmlint: ignore[invalid_states_unrepresentable] the node id is the key of `RunState::holds`, read out of the run's own `node-held` label and handed straight to an elapsed watch's summary to write back out; the crate spells a node id `String` everywhere it reads one off a record, for the reason `watch::Ending::NodeSettled` gives.
 pub(crate) fn holds_of(view: &RunView) -> Vec<(String, HoldKind, Option<u64>)> {
     view.state
         .holds

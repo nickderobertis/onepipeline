@@ -3809,6 +3809,42 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// The fixed ceiling is the one divergence entry 97 states and the one the
+    /// cadence journey climbs to, so a value moved in the code and left in
+    /// either fails here.
+    #[test]
+    fn the_ceiling_is_stated_where_it_is_ruled_and_proven() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let record = std::fs::read_to_string(root.join("docs/contract-divergences.md"))
+            .expect("the divergence record ships");
+        let ruling = record
+            .split_once("\n## 97.")
+            .expect("the ruling is recorded under entry 97")
+            .1
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            ruling.contains(&format!(
+                "stops doubling at {SURFACE_CEILING_SECONDS} seconds. The ceiling is fixed"
+            )),
+            "entry 97 does not state the ceiling this build holds"
+        );
+        let journey = std::fs::read_to_string(root.join("tests/e2e/adoption.rs"))
+            .expect("the adoption journeys ship");
+        let stated: u64 = journey
+            .split_once("const CEILING_SECONDS: u64 = ")
+            .expect("the cadence journey names the ceiling it climbs to")
+            .1
+            .split_once(';')
+            .expect("one statement")
+            .0
+            .replace('_', "")
+            .parse()
+            .expect("a number of seconds");
+        assert_eq!(stated, SURFACE_CEILING_SECONDS);
+    }
+
     /// The two bounds fall back rather than to zero or to no bound at all.
     #[test]
     fn an_unusable_bound_falls_back_to_the_shipped_one() {
