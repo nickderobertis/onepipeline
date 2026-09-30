@@ -8089,9 +8089,10 @@ on `elapsed` and on no other ending:
   from — the start of the journal for a watch given none — each as its `node` and
   `status`;
 - `surfaces_queued_during_wait`: how many planner surfaces were queued after it armed;
-- `held`: every node held on a release or on its workspace — the two holds nothing in
-  the run itself will end — each as its `node`, its `reason` (`release` or `workspace`)
-  and its `waited_seconds`, timed from the `node-held` that opened the hold;
+- `held`: every hold the run records a node under, each as its `node`, its `reason` —
+  the hold's own kind, `dependencies`, `concurrency`, `decision`, `release` or
+  `workspace` — and its `waited_seconds`, timed from the `node-held` that opened that
+  kind of hold; a node held for two reasons at once is two entries;
 - `last_progress_seconds`: seconds since the run's latest `node-dispatched` or
   `node-settled`, or `null` for a run with neither;
 - `observer`: one word, `running`, `dead`, `not-restarted` or `none` — the verdict the

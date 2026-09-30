@@ -498,7 +498,7 @@ pub(crate) struct Summary {
     settled_since_cursor: Vec<SettledSince>,
     /// How many planner surfaces were queued after the watch armed.
     surfaces_queued_during_wait: usize,
-    /// Every node held on a release or on its workspace.
+    /// Every hold the run records a node under, one entry per kind of hold.
     held: Vec<HeldNode>,
     /// Seconds since the run's latest `node-dispatched` or `node-settled`, or
     /// `null` for a run with neither.
@@ -524,7 +524,8 @@ struct SettledSince {
 struct HeldNode {
     // llmlint: ignore[invalid_states_unrepresentable] a node id the run's own `node-held` named, written back out as the crate spells one everywhere else.
     node: String,
-    /// What holds it: `release` or `workspace`, the hold's own kind.
+    /// What holds it: the hold's own kind — `dependencies`, `concurrency`,
+    /// `decision`, `release` or `workspace`.
     reason: views::HoldKind,
     /// How long it has been held, from the record that opened the hold; `null`
     /// for a record whose stamp this build cannot read.
@@ -2433,6 +2434,17 @@ mod tests {
             let word = rendered.as_str().expect("a state is one word");
             assert!(passage.contains(&format!("`{word}`")), "{word}");
             assert!(ruling.contains(&format!("`{word}`")), "{word}");
+        }
+        for kind in [
+            views::HoldKind::Dependencies,
+            views::HoldKind::Concurrency,
+            views::HoldKind::Decision,
+            views::HoldKind::Release,
+            views::HoldKind::Workspace,
+        ] {
+            let rendered = serde_json::to_value(kind).expect("a hold kind serializes");
+            assert_eq!(rendered, serde_json::json!(kind.as_str()));
+            assert!(ruling.contains(&format!("`{}`", kind.as_str())), "{kind:?}");
         }
         assert!(passage.contains(&format!("`{}`", Ending::RunChanged.as_str())));
         assert!(passage.contains(&format!("`{}`", Ending::RunChanged.exit_code())));

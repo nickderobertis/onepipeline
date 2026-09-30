@@ -20,8 +20,8 @@ use std::io::Write;
 use serde_json::{json, Value};
 
 use crate::harness::{
-    agent, ended, human, plan_of, Run, World, NODE_SETTLED, NOTHING_DRIVING, REFUSED,
-    RENDER_COST_ENV, RUN_CHANGED, SURFACE_WAITING, USAGE_ERROR, WATCH_ELAPSED,
+    agent, ended, epoch_seconds, human, plan_of, Run, World, NODE_SETTLED, NOTHING_DRIVING,
+    REFUSED, RENDER_COST_ENV, RUN_CHANGED, SURFACE_WAITING, USAGE_ERROR, WATCH_ELAPSED,
 };
 
 /// A window long enough that the tree before `watch` waited on the bus — which
@@ -3819,6 +3819,95 @@ fn an_elapsed_summary_names_an_observer_nothing_will_restart() {
             .contains("the run's observer graph has stopped and nothing will restart it"),
         "{}",
         watched.stderr
+    );
+
+    world.release("build.go");
+}
+
+/// An elapsed watch's summary names every hold the run records, whatever its
+/// kind: a node behind a dependency still running, and a node the run's
+/// concurrency is keeping back, each with its own reason and with how long the
+/// run's own `node-held` record says it has been held.
+#[test]
+fn an_elapsed_summary_names_every_hold_the_run_records() {
+    let world = World::new("watch-wake-holds");
+    world.script("build.wait", "hold");
+    let run = "watchwakeholds";
+    let mut plan = plan_of(
+        run,
+        vec![
+            agent("build", &[]),
+            agent("check", &["build"]),
+            agent("spare", &[]),
+        ],
+    );
+    plan["concurrency"] = json!(1);
+    let path = world.plan(run, &plan);
+    world.run(&["start", &path, "--detach"]).exited(0);
+    let held_as = |world: &World, node: &str, kind: &str| {
+        world.events_of(run, "node-held").iter().any(|event| {
+            event["labels"]["node"] == json!(node)
+                && event["payload"]["reasons"]
+                    .as_array()
+                    .is_some_and(|reasons| reasons.iter().any(|reason| reason["kind"] == kind))
+        })
+    };
+    world.until("check and spare to be held", |world| {
+        held_as(world, "check", "dependencies") && held_as(world, "spare", "concurrency")
+    });
+
+    let watched = world.run(&[
+        "watch",
+        run,
+        "--until",
+        "settled",
+        "--timeout",
+        "1",
+        "--tick-interval",
+        "0",
+    ]);
+    agreed(&watched, "elapsed", WATCH_ELAPSED);
+    let summary = returned(&watched)["summary"].clone();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_secs();
+    for (node, kind) in [("check", "dependencies"), ("spare", "concurrency")] {
+        let entry = summary["held"]
+            .as_array()
+            .and_then(|held| {
+                held.iter()
+                    .find(|entry| entry["node"] == json!(node) && entry["reason"] == json!(kind))
+            })
+            .unwrap_or_else(|| panic!("the summary does not hold {node} on {kind}: {summary}"));
+        let opened = world
+            .events_of(run, "node-held")
+            .into_iter()
+            .find(|event| event["labels"]["node"] == json!(node))
+            .expect("the hold is recorded");
+        let held_for = now.saturating_sub(epoch_seconds(
+            opened["ts"].as_str().expect("a record is stamped"),
+        ));
+        let waited = entry["waited_seconds"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("no waited_seconds: {entry}"));
+        assert!(
+            waited.abs_diff(held_for) <= 2,
+            "{node}'s waited_seconds is not how long the run has held it: {entry}"
+        );
+        assert!(
+            watched.stderr.contains(&format!("{node} on {kind} for ")),
+            "{}",
+            watched.stderr
+        );
+    }
+    assert!(
+        !summary["held"]
+            .as_array()
+            .expect("held is a list")
+            .iter()
+            .any(|entry| entry["node"] == json!("build")),
+        "the running node was reported held: {summary}"
     );
 
     world.release("build.go");

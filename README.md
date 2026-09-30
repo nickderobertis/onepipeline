@@ -705,8 +705,9 @@ writing nothing to the run, is seen only at the deadline.
 
 **An elapsed wait says what the run did while it waited.** The `return` record's
 `summary` carries `settled_since_cursor` (each `node` and `status` settled past the
-cursor the watch started from), `surfaces_queued_during_wait`, `held` (each node
-held on a release or on its workspace, with its `reason` and `waited_seconds`),
+cursor the watch started from), `surfaces_queued_during_wait`, `held` (each hold
+the run records a node under — its dependencies, the run's concurrency, a
+decision, a release, or its workspace — with its `reason` and `waited_seconds`),
 `last_progress_seconds` (since the latest dispatch or settlement, `null` for a run
 with neither), and `observer` — `running`, `dead`, `not-restarted`, or `none` for a
 run that launched no observer graph. The human form writes the same as a few lines

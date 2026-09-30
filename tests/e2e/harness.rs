@@ -5821,3 +5821,24 @@ fn a_verbatim_windows_path_is_spelled_the_way_the_rest_of_windows_spells_it() {
         PathBuf::from(r"C:\Users\op\runs")
     );
 }
+
+/// Seconds since the epoch of an RFC 3339 UTC stamp as the journal writes one,
+/// `YYYY-MM-DDTHH:MM:SS(.fff)Z`.
+pub fn epoch_seconds(stamp: &str) -> u64 {
+    let number = |range: std::ops::Range<usize>| -> i64 {
+        stamp[range]
+            .parse()
+            .unwrap_or_else(|_| panic!("`{stamp}` is not a journal stamp"))
+    };
+    let (year, month, day) = (number(0..4), number(5..7), number(8..10));
+    let (hour, minute, second) = (number(11..13), number(14..16), number(17..19));
+    // Days from the civil date, by the standard era arithmetic.
+    let shifted = if month <= 2 { year - 1 } else { year };
+    let era = shifted.div_euclid(400);
+    let of_era = shifted - era * 400;
+    let of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let of_cycle = of_era * 365 + of_era / 4 - of_era / 100 + of_year;
+    let days = era * 146_097 + of_cycle - 719_468;
+    u64::try_from(days * 86_400 + hour * 3_600 + minute * 60 + second)
+        .expect("a stamp after the epoch")
+}

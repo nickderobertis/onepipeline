@@ -2978,10 +2978,17 @@ fn held_for_workspace(view: &RunView, id: &str) -> Option<String> {
     ))
 }
 
-/// The two holds an elapsed watch's summary reports, in the words it writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+/// The kinds of hold a run records a node under, in the words its `node-held`
+/// records and an elapsed watch's summary both spell them with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum HoldKind {
+    /// Held until its dependencies settle `done`.
+    Dependencies,
+    /// Held because the run has reached its concurrency.
+    Concurrency,
+    /// Held by a decision point on the subtree it is in.
+    Decision,
     /// Held for releases it adopts.
     Release,
     /// Held for room in its repository identity's workspace.
@@ -2992,6 +2999,9 @@ impl HoldKind {
     /// The word the summary writes for this hold.
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
+            Self::Dependencies => "dependencies",
+            Self::Concurrency => "concurrency",
+            Self::Decision => "decision",
             Self::Release => "release",
             Self::Workspace => "workspace",
         }
@@ -3013,38 +3023,30 @@ pub(crate) enum ObserverState {
     None,
 }
 
-/// Every node the run's own record holds on a release or on its workspace, with
-/// the hold's kind and when it began, read on
-/// [`held_for_release`]'s and [`held_for_workspace`]'s terms.
-///
-/// Those two holds and no other, because they are the waits nothing in the run
-/// itself will end: a node behind its dependencies, the run's concurrency or a
-/// decision is waiting on the run, and each of those is read off the run's own
-/// lines already. The start is `None` for a record whose stamp this build cannot
-/// read.
+/// Every hold the run's own record has a node under: one entry per kind of
+/// hold on it, with when that kind of hold began, each reason read by the
+/// engine's own reader of one. A node held for two reasons at once is two
+/// entries, each timed from its own start. A reason this build cannot read
+/// whole is not reported as some other kind; the start is `None` for a record
+/// whose stamp this build cannot read.
 // llmlint: ignore[invalid_states_unrepresentable] the node id is the key of `RunState::holds`, read out of the run's own `node-held` label and handed straight to an elapsed watch's summary to write back out; the crate spells a node id `String` everywhere it reads one off a record, for the reason `watch::Ending::NodeSettled` gives.
 pub(crate) fn holds_of(view: &RunView) -> Vec<(String, HoldKind, Option<u64>)> {
     view.state
         .holds
-        .keys()
-        .filter_map(|node| {
-            if held_for_release(view, node).is_some() {
-                Some((
-                    node.clone(),
-                    HoldKind::Release,
-                    release_hold_since(&view.events, node),
-                ))
-            } else if held_for_workspace(view, node).is_some() {
-                Some((
-                    node.clone(),
-                    HoldKind::Workspace,
-                    hold_since(&view.events, node, |reason| {
-                        crate::engine::workspace_held(reason).is_some()
-                    }),
-                ))
-            } else {
-                None
-            }
+        .iter()
+        .flat_map(|(node, reasons)| {
+            let mut kinds: Vec<HoldKind> = reasons
+                .iter()
+                .filter_map(crate::engine::hold_kind)
+                .collect();
+            kinds.sort_unstable();
+            kinds.dedup();
+            kinds.into_iter().map(|kind| {
+                let since = hold_since(&view.events, node, |reason| {
+                    crate::engine::hold_kind(reason) == Some(kind)
+                });
+                (node.clone(), kind, since)
+            })
         })
         .collect()
 }
