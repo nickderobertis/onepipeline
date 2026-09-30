@@ -785,7 +785,7 @@ tokio = "1"
 
 [package]
 name = "onepipeline"
-version = "0.53.3"
+version = "0.54.0"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
