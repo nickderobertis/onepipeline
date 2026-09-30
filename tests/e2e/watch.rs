@@ -935,8 +935,12 @@ fn a_watch_armed_on_a_run_nothing_is_driving_waits_and_ends_at_its_deadline() {
 
 /// `nothing-driving` is the run going from driven to undriven **while** the
 /// watch waits, and naming it, or `settled`, returns exactly what that
-/// transition returns; a bare watch over the same moment answers the node
-/// settling first, because a settlement after it armed is in its default set.
+/// transition returns; a bare watch answers the node settling, because a
+/// settlement after it armed is in its default set.
+///
+/// The bare watch is given its own moment: a second node keeps the run driven
+/// after the first settles, so the settlement is not raced by the driver's exit
+/// inside one tick, where `nothing-driving` rightly ranks first.
 #[test]
 fn a_driver_that_dies_during_the_wait_ends_it_nothing_driving() {
     use std::process::Stdio;
@@ -944,7 +948,13 @@ fn a_driver_that_dies_during_the_wait_ends_it_nothing_driving() {
     let world = World::new("watch-nothing-driving");
     world.script("build.wait", "hold");
     world.script("build.fail", "1");
-    let run = running(&world, "watchnothingdriving", vec![agent("build", &[])]);
+    world.script("later.wait", "hold");
+    world.script("later.fail", "1");
+    let run = running(
+        &world,
+        "watchnothingdriving",
+        vec![agent("build", &[]), agent("later", &[])],
+    );
 
     let spawn = |until: &[&str]| {
         let mut args = vec!["watch", run.as_str()];
@@ -957,20 +967,28 @@ fn a_driver_that_dies_during_the_wait_ends_it_nothing_driving() {
             .spawn()
             .expect("the watch starts")
     };
-    let watches = [
+    let bare = spawn(&[]);
+    let transitions = [
         (spawn(&["--until", "nothing-driving"]), "nothing-driving"),
         (spawn(&["--until", "settled"]), "nothing-driving"),
-        (spawn(&[]), "node-settled"),
     ];
-    // Each is armed, and blocking with nothing to say, before the node is let
+    // Each is armed, and blocking with nothing to say, before a node is let
     // go: a watch the run had already left undriven would be the other journey.
     world.until("every watch to be armed", |world| {
-        armed(world, &run) >= watches.len()
+        armed(world, &run) > transitions.len()
     });
     world.release("build.go");
+    let settled = bare.wait_with_output().expect("the bare watch exits");
+    // Only once the bare watch has answered does the run lose its last node.
+    world.release("later.go");
 
-    for (watching, expected) in watches {
-        let finished = watching.wait_with_output().expect("the watch exits");
+    let transitioned = transitions.into_iter().map(|(watching, expected)| {
+        (
+            watching.wait_with_output().expect("the watch exits"),
+            expected,
+        )
+    });
+    for (finished, expected) in std::iter::once((settled, "node-settled")).chain(transitioned) {
         let stdout = String::from_utf8_lossy(&finished.stdout);
         let last: Value = serde_json::from_str(
             stdout
