@@ -579,6 +579,12 @@ resolver = "2"
 # the agent said and thought rather than as tool calls. It requires
 # `oneharness-core` 0.21.0 and `onejudge` 0.17.0 exactly, so the three move as one.
 #
+# `oneagentgraph` 0.5.5 is the floor because it relinks onto the `oneharness-core`
+# 0.24.0 below, whose history recording reads no index and walks no store, so the
+# in-process turn of a `kind: oneharness` member no longer queues behind the
+# store's history lock. Nothing here reads anything new from it; it requires
+# `oneharness-core` 0.24.0 and `onejudge` 0.17.1 exactly, so the three move as one.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -599,7 +605,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.5.4"
+oneagentgraph = "0.5.5"
 onevcs = "0.35.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
@@ -699,7 +705,12 @@ onemessagebus = "0.9.0"
 # it. The one shape this crate builds by hand from it, `JudgeDecision` in
 # `crates/testfakes`'s graph double, gains the four fields a relayed decision
 # does not carry.
-onejudge = "0.17.0"
+#
+# 0.17.1 relinks onto `oneharness-core` 0.24.0, so the spawned side of a two-party
+# member records its history through the core that never scans the store.
+# Nothing here reads anything new from it; `oneagentgraph` 0.5.5 requires exactly
+# it.
+onejudge = "0.17.1"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
@@ -769,7 +780,23 @@ onejudge = "0.17.0"
 # in — which the run views draw those two kinds through, so the marks a person
 # reads are oneharness's and not a copy. `oneagentgraph` 0.5.4 and `onejudge`
 # 0.17.0 each require it exactly.
-oneharness-core = "0.21.0"
+#
+# **0.24.0 indexes history in dated segments** (oneharness `docs/history-index.md`):
+# recording a run appends one line to `<history_dir>/.index.d/runs-<UTC
+# date>.ndjson` (and its events to `events-<date>.ndjson`) after reading at most
+# that segment's last byte, and opens no legacy `.index.jsonl` or
+# `.event-index.jsonl`, takes no `.index.lock`, and lists no directory — so a turn
+# costs the same on a store of any size. `list_sessions` gains a `HistoryWindow`,
+# and the CLI's `history list`, `show <name>` and `--last` read the last 7 UTC
+# days unless `--since` or `--all-time` widens them; `read_pointers`,
+# `HistoryWriter::open` and the session-file format keep their shapes, so
+# `src/agents.rs` reads the pointer file as before. The capability table gains a
+# `FlagKind::Window` binding, which `crates/testfakes`'s `fake-oneharness` reads
+# into its argv grammar. Crossed on the way: 0.22.0 streams readable text unless
+# `--format json` is named, which the double's `View` already follows, and 0.23.0
+# widens the SDK's `history show` entry, which nothing here calls.
+# `oneagentgraph` 0.5.5 and `onejudge` 0.17.1 each require it exactly.
+oneharness-core = "0.24.0"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
 # from one commit, each release of this crate requiring the exact `onevcs` it was
