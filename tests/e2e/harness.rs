@@ -805,6 +805,8 @@ impl World {
                     sources: Vec::new(),
                     filters: onetaskgraph_core::Filters::default(),
                     priorities: Vec::new(),
+                    metadata: Vec::new(),
+                    origin: None,
                     project: onetaskgraph_core::ProjectSelector::Qualified(id.clone()),
                     commented_since: None,
                     paging: onetaskgraph_core::Paging {

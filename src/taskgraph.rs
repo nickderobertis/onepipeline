@@ -706,6 +706,8 @@ impl Reader {
                 sources: Vec::new(),
                 filters: Filters::default(),
                 priorities: Vec::new(),
+                metadata: Vec::new(),
+                origin: None,
                 project: selector.clone(),
                 commented_since: None,
                 paging: Paging {
