@@ -3355,6 +3355,11 @@ fn an_uncursored_watch_counts_only_settlements_after_it_armed() {
     world.until("later to settle cancelled", |world| {
         settled(world, "later") == 1
     });
+    // The cancel reached `later` as a redirection its double keeps on disk, and
+    // a held dispatch ends on that file as it would on its release. Left there,
+    // the requeued dispatch below would pass its hold at once and race `keep`
+    // to the default watch; removed, it holds until `later.go`.
+    world.unscript("later.redirect");
     // The cancellation's own report, read, so what follows is about
     // settlements alone.
     assert!(
