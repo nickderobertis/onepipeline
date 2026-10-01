@@ -829,11 +829,13 @@ onevcs-testing = "0.9.0"
 # repository installs as an `onetaskgraph` binary names another.
 #
 # Moved for the host, which holds its `onetaskgraph` pin to this family: this release
-# answers `github-projects` queries natively and has a copy record `onetaskgraph.copies`.
-# Here that link lands only on the write-back's shadow task, which each projection rewrites.
-onetaskgraph-core = "=0.2.52"
-onetaskgraph-plugin-api = "=0.2.52"
-onetaskgraph-local-md = "=0.2.52"
+# sizes a `github-projects` search's pages to the answer it needs, and a caller's limit
+# bounds what is fetched, on top of the native board queries and the copy record
+# `onetaskgraph.copies` 0.2.52 brought. Here that link lands only on the write-back's
+# shadow task, which each projection rewrites.
+onetaskgraph-core = "=0.2.54"
+onetaskgraph-plugin-api = "=0.2.54"
+onetaskgraph-local-md = "=0.2.54"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
