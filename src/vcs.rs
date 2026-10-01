@@ -1874,6 +1874,12 @@ const OPENED_CONFLICT: &str = "conflict";
 /// for one whose conflict does not read as `onevcs`'s own shape — a session that
 /// did open conflicted is then not counted as one, which errs toward reporting
 /// fewer conflicted dispatches rather than inventing one.
+// llmlint: ignore[changed_behavior_has_e2e] the read every journey reaches — this crate's
+// own opening, carrying a conflict or not — is driven by the conflict journeys in
+// `tests/e2e/lifecycle.rs`. Its two refusals, an envelope another source wrote and a
+// conflict not in the sibling's shape, are reachable only by a producer writing into this
+// run's stream what no producer here writes; `an_opened_conflict_rides_the_session_opened_
+// envelope_and_reads_back` holds both over real envelopes.
 pub(crate) fn conflict_opened_in(envelope: &Envelope) -> Option<onevcs::OpenConflict> {
     if envelope.source != crate::event::Source::Vcs
         || envelope.kind != kind_of(onevcs::EventKind::SessionOpened)
@@ -2604,6 +2610,19 @@ mod tests {
         let clean = ours("s-abc", "feature");
         assert!(!clean.payload.contains_key("conflict"));
         assert_eq!(conflict_opened_in(&clean), None);
+
+        // Another producer's envelope of the same kind is not a session this
+        // crate's executor opened, and a conflict that does not read as the
+        // sibling's shape is not counted as one.
+        let mut elsewhere = opened.clone();
+        elsewhere.source = crate::event::Source::Pipeline;
+        assert_eq!(conflict_opened_in(&elsewhere), None);
+        let mut malformed = opened.clone();
+        malformed.payload.insert(
+            "conflict".to_owned(),
+            serde_json::json!({"paths": "service.md"}),
+        );
+        assert_eq!(conflict_opened_in(&malformed), None);
 
         let mut relabelled = opened;
         relabelled.kind = crate::event::EventKind("session-closed".into());

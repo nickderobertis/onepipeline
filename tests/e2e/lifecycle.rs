@@ -3281,16 +3281,23 @@ fn landed_on_origin(world: &World, repo: &Repository, commit: &str) {
     );
 }
 
-/// Every commit any ref of `repo` reaches whose patch adds a conflict marker.
+/// Every commit any ref of `repo` reaches whose tree holds a line opening or
+/// closing a conflict marker, merge commits included.
 fn commits_carrying_markers(world: &World, repo: &std::path::Path) -> Vec<String> {
-    git(world, repo, &["log", "--all", "-p", "--format=commit %H"])
-        .split("\ncommit ")
+    git(world, repo, &["rev-list", "--all"])
+        .lines()
         .filter(|commit| {
-            commit
-                .lines()
-                .any(|line| line.starts_with("+<<<<<<<") || line.starts_with("+>>>>>>>"))
+            // `git grep` exits 1 for no match, which is the answer wanted here,
+            // so it is asked directly rather than through the refusing helper.
+            let found = std::process::Command::new("git")
+                .args(["grep", "-q", "-E", "^(<<<<<<<|>>>>>>>)( |$)", commit])
+                .current_dir(repo)
+                .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+                .status()
+                .expect("git runs");
+            found.success()
         })
-        .map(|commit| commit.lines().next().unwrap_or_default().to_owned())
+        .map(str::to_owned)
         .collect()
 }
 
