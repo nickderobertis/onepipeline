@@ -623,3 +623,598 @@ fn the_verb_reads_past_a_torn_tail_and_a_foreign_line_and_refuses_a_file_it_cann
     refused.err_has(SESSIONS_FILE);
     refused.out_lacks("no sessions recorded");
 }
+
+/// Recording a turn reads no history index and walks no store, and reading the
+/// run's sessions back opens only what its pointer lines name — the property
+/// `oneharness-core` 0.24.0 is linked for. A turn on a host records through
+/// whichever core the binary under it links, so this drives the real binary on
+/// a plan whose node runs a turn with history on, into a store built to make
+/// any scan observable: legacy `.index.jsonl` and `.event-index.jsonl` present
+/// and unopenable (mode `000`), over a thousand other sessions' files under
+/// several project directories, and today's segments already long. The
+/// process tree runs under `strace`, and every open, listing and read that
+/// lands in the store is held to what the history contract permits.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the module and both journeys in it, about 40 seconds together, and what they guard is which `oneharness-core` the crate links — a `Cargo.lock` move, which only this crate's own project sees — so an edge narrower than this target would drop them out of `nx affected` for exactly the change they exist to catch. Same grounds as the `mod agents` declaration in `main.rs`.
+#[cfg(target_os = "linux")]
+mod unscanned {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::SystemTime;
+
+    use super::{every_line_names, pointers};
+    use crate::harness::{agent, plan_of, World};
+    use oneharness_core::domain::history::HistoryPointer;
+    use oneharness_core::domain::history_index::{
+        HistoryIndexEntry, SegmentKind, UtcDate, INDEX_DIR, LEGACY_EVENT_INDEX_FILE,
+        LEGACY_INDEX_FILE,
+    };
+    use oneharness_core::io::history::read_session;
+    use onepipeline::agents::HISTORY_DIR_ENV;
+
+    /// How many other sessions the store holds before the run, spread over
+    /// [`PROJECTS`] project directories.
+    const OTHER_SESSIONS: usize = 1_200;
+    const PROJECTS: usize = 6;
+    /// What a recording writer may read of a segment through one descriptor:
+    /// its last byte, to close off a torn tail (oneharness
+    /// `docs/history-index.md`).
+    const TRAILING_BYTES: u64 = 1;
+    /// The lock an older core took around its index. The new one never does.
+    const INDEX_LOCK: &str = ".index.lock";
+
+    /// A file's observable state, compared before and after.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Seen {
+        len: u64,
+        modified: SystemTime,
+        mode: u32,
+    }
+
+    fn seen(path: &Path) -> Seen {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::symlink_metadata(path)
+            .unwrap_or_else(|error| panic!("{} does not stat: {error}", path.display()));
+        Seen {
+            len: meta.len(),
+            modified: meta.modified().expect("the platform reports mtimes"),
+            mode: meta.permissions().mode(),
+        }
+    }
+
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .unwrap_or_else(|error| panic!("{} does not chmod: {error}", path.display()));
+    }
+
+    /// The store as a host that has run for a long time leaves it.
+    struct Store {
+        root: PathBuf,
+        /// Every other session's file, with its bytes.
+        others: BTreeMap<PathBuf, (Seen, Vec<u8>)>,
+        /// The legacy indexes, with the bytes written into them.
+        legacy: Vec<(PathBuf, Seen, Vec<u8>)>,
+        /// Today's and tomorrow's segments as they stood before the run.
+        segments: BTreeMap<PathBuf, Vec<u8>>,
+    }
+
+    impl Store {
+        fn build(root: &Path) -> Self {
+            std::fs::create_dir_all(root).expect("the store directory is made");
+            let root = std::fs::canonicalize(root).expect("the store resolves");
+            let mut others = BTreeMap::new();
+            for n in 0..OTHER_SESSIONS {
+                let project = root.join(format!("-srv-other-project-{}", n % PROJECTS));
+                std::fs::create_dir_all(&project).expect("a project directory is made");
+                let file = project.join(format!("other-{n}-20250101T000000Z-{n}.jsonl"));
+                let bytes = format!(
+                    "{{\"schema_version\":\"1.0\",\"session\":\"other-{n}\",\"note\":\"another session's line\"}}\n"
+                )
+                .into_bytes();
+                std::fs::write(&file, &bytes).expect("another session's file is written");
+                others.insert(file, bytes);
+            }
+            let others = others
+                .into_iter()
+                .map(|(file, bytes)| {
+                    let state = seen(&file);
+                    (file, (state, bytes))
+                })
+                .collect();
+            let mut legacy = Vec::new();
+            for name in [LEGACY_INDEX_FILE, LEGACY_EVENT_INDEX_FILE] {
+                let file = root.join(name);
+                let bytes = "{\"legacy\":\"an older core's index line\"}\n"
+                    .repeat(4_096)
+                    .into_bytes();
+                std::fs::write(&file, &bytes).expect("a legacy index is written");
+                chmod(&file, 0o000);
+                let state = seen(&file);
+                legacy.push((file, state, bytes));
+            }
+            // Today's segments (and tomorrow's, for a run that crosses UTC
+            // midnight) already long, so a writer that read one whole reads
+            // far more than its last byte.
+            let today = UtcDate::from_epoch_secs(
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .expect("the clock is past the epoch")
+                    .as_secs()
+                    .try_into()
+                    .expect("the clock fits"),
+            );
+            let dir = root.join(INDEX_DIR);
+            std::fs::create_dir_all(&dir).expect("the segment directory is made");
+            let mut segments = BTreeMap::new();
+            for date in [today, today.add_days(1)] {
+                for kind in [SegmentKind::Runs, SegmentKind::Events] {
+                    let file = dir.join(kind.file_name(date));
+                    let bytes = "{\"filler\":\"an earlier run's entry\"}\n"
+                        .repeat(8_192)
+                        .into_bytes();
+                    std::fs::write(&file, &bytes).expect("a segment is written");
+                    segments.insert(file, bytes);
+                }
+            }
+            assert!(!root.join(INDEX_LOCK).exists());
+            Store {
+                root,
+                others,
+                legacy,
+                segments,
+            }
+        }
+
+        /// Nothing that was here before the run changed: the legacy indexes,
+        /// every other session, no lock, and each segment only grew by
+        /// appended lines.
+        fn untouched(&self) {
+            assert!(
+                !self.root.join(INDEX_LOCK).exists(),
+                "{INDEX_LOCK} was created"
+            );
+            for (file, before, bytes) in &self.legacy {
+                assert_eq!(&seen(file), before, "{} changed", file.display());
+                chmod(file, 0o600);
+                let after = std::fs::read(file).expect("the legacy index reads");
+                chmod(file, 0o000);
+                assert!(&after == bytes, "{}'s bytes changed", file.display());
+            }
+            for (file, (before, bytes)) in &self.others {
+                assert_eq!(&seen(file), before, "{} changed", file.display());
+                let after = std::fs::read(file).expect("another session's file reads");
+                assert!(&after == bytes, "{}'s bytes changed", file.display());
+            }
+            for (file, bytes) in &self.segments {
+                let after = std::fs::read(file).expect("a segment reads");
+                assert!(
+                    after.starts_with(bytes),
+                    "{} was rewritten rather than appended to",
+                    file.display()
+                );
+            }
+        }
+
+        fn under(&self, path: &Path) -> bool {
+            path.starts_with(&self.root)
+        }
+    }
+
+    /// One syscall line of an `strace -y` trace: its name, its arguments, and
+    /// what it returned.
+    struct Call<'a> {
+        name: &'a str,
+        args: &'a str,
+        ret: &'a str,
+    }
+
+    fn parse(line: &str) -> Option<Call<'_>> {
+        let open = line.find('(')?;
+        let name = &line[..open];
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            return None;
+        }
+        let close = line.rfind(") = ")?;
+        Some(Call {
+            name,
+            args: &line[open + 1..close],
+            ret: line[close + 4..].trim(),
+        })
+    }
+
+    /// The path `-y` prints after a descriptor: `5</a/b>` names `/a/b`.
+    fn fd_path(arg: &str) -> Option<PathBuf> {
+        let start = arg.find('<')?;
+        let end = arg.rfind('>')?;
+        (end > start).then(|| PathBuf::from(&arg[start + 1..end]))
+    }
+
+    /// The first quoted argument, unescaped enough for a path.
+    fn quoted(args: &str) -> Option<String> {
+        let (_, rest) = args.split_once('"')?;
+        let (path, _) = rest.split_once('"')?;
+        Some(path.to_owned())
+    }
+
+    /// The path an open names, resolved against its directory descriptor when
+    /// it is relative.
+    fn opened_path(call: &Call<'_>) -> Option<PathBuf> {
+        let path = PathBuf::from(quoted(call.args)?);
+        if path.is_absolute() || call.name == "open" || call.name == "creat" {
+            return Some(path);
+        }
+        let dirfd = call.args.split(',').next().unwrap_or_default();
+        Some(match fd_path(dirfd) {
+            Some(dir) => dir.join(path),
+            None => path,
+        })
+    }
+
+    fn returned(ret: &str) -> Option<u64> {
+        ret.split_whitespace().next()?.parse().ok()
+    }
+
+    /// What the process tree did to the store, off one trace: every path it
+    /// opened (a failed open counts), every store directory it listed, and the
+    /// bytes it read through each descriptor it opened on a segment.
+    #[derive(Default, Debug)]
+    struct Observed {
+        opened: BTreeSet<PathBuf>,
+        listed: BTreeSet<PathBuf>,
+        /// Bytes read per `(pid, open ordinal)` on each segment.
+        segment_reads: Vec<(PathBuf, u64)>,
+        /// Calls that read a store file other than by `read(2)` and friends.
+        unbounded: Vec<String>,
+        /// How many calls the trace recorded at all.
+        calls: usize,
+    }
+
+    fn observe(store: &Store, trace_prefix: &Path) -> Observed {
+        let mut observed = Observed::default();
+        let dir = trace_prefix.parent().expect("the trace has a directory");
+        let stem = trace_prefix
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("the trace prefix is a name");
+        for entry in std::fs::read_dir(dir).expect("the trace directory lists") {
+            let file = entry.expect("a trace file").path();
+            let name = file
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if !name.starts_with(&format!("{stem}.")) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&file).expect("a per-process trace reads");
+            // Per process, so a descriptor number means one file from its
+            // open to its close.
+            let mut live: BTreeMap<String, usize> = BTreeMap::new();
+            for line in text.lines() {
+                let Some(call) = parse(line) else { continue };
+                observed.calls += 1;
+                match call.name {
+                    "open" | "openat" | "openat2" | "creat" | "open_by_handle_at" => {
+                        let Some(path) = opened_path(&call) else {
+                            continue;
+                        };
+                        if store.under(&path) {
+                            observed.opened.insert(path.clone());
+                            if path.parent().is_some_and(|p| p.ends_with(INDEX_DIR)) {
+                                if let Some(fd) = call.ret.split('<').next() {
+                                    observed.segment_reads.push((path, 0));
+                                    live.insert(
+                                        fd.trim().to_owned(),
+                                        observed.segment_reads.len() - 1,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    "getdents" | "getdents64" => {
+                        if let Some(path) = fd_path(call.args.split(',').next().unwrap_or_default())
+                        {
+                            if store.under(&path) {
+                                observed.listed.insert(path);
+                            }
+                        }
+                    }
+                    "read" | "pread64" | "readv" | "preadv" | "preadv2" => {
+                        let first = call.args.split(',').next().unwrap_or_default();
+                        let fd = first.split('<').next().unwrap_or_default().trim();
+                        if let (Some(at), Some(n)) = (live.get(fd), returned(call.ret)) {
+                            observed.segment_reads[*at].1 += n;
+                        }
+                    }
+                    "close" => {
+                        let fd = call.args.split('<').next().unwrap_or_default().trim();
+                        live.remove(fd);
+                    }
+                    "mmap" | "mmap2" | "sendfile" | "sendfile64" | "copy_file_range" | "splice"
+                        if call
+                            .args
+                            .split(',')
+                            .filter_map(fd_path)
+                            .any(|path| store.under(&path)) =>
+                    {
+                        observed.unbounded.push(line.to_owned());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        observed
+    }
+
+    /// The command, run under `strace -f` with one trace file per process.
+    /// Refuses rather than passes where the tracer will not run: an
+    /// observation nobody made is not an observation of nothing.
+    fn traced(inner: &Command, prefix: &Path) -> std::process::Output {
+        let mut traced = Command::new("strace");
+        traced
+            .arg("-ff")
+            .arg("-qq")
+            .arg("-y")
+            .arg("-s")
+            .arg("0")
+            .arg("-e")
+            .arg("trace=%file,%desc,getdents,getdents64")
+            .arg("-o")
+            .arg(prefix)
+            .arg(inner.get_program())
+            .args(inner.get_args())
+            .stdin(std::process::Stdio::null());
+        for (key, value) in inner.get_envs() {
+            match value {
+                Some(value) => traced.env(key, value),
+                None => traced.env_remove(key),
+            };
+        }
+        if let Some(dir) = inner.get_current_dir() {
+            traced.current_dir(dir);
+        }
+        traced.output().unwrap_or_else(|error| {
+            panic!(
+                "this journey's claim is what the process tree did to the history store, \
+                 and the tracer would not run: strace: {error}. Install strace, or run the \
+                 suite where ptrace is permitted."
+            )
+        })
+    }
+
+    /// The segment each pointer's run lands in, and the session files the
+    /// pointers name.
+    fn permitted(pointers: &[HistoryPointer]) -> (BTreeSet<PathBuf>, BTreeSet<PathBuf>) {
+        let mut segments = BTreeSet::new();
+        let mut sessions = BTreeSet::new();
+        for pointer in pointers {
+            let date = UtcDate::of_history_id(pointer.history_id())
+                .expect("a minted history id carries its date");
+            let dir = Path::new(pointer.history_dir()).join(INDEX_DIR);
+            // A run's closing entry goes to its runs segment and each of its
+            // events' entries to its events segment: one segment per append.
+            segments.insert(dir.join(SegmentKind::Runs.file_name(date)));
+            segments.insert(dir.join(SegmentKind::Events.file_name(date)));
+            sessions.insert(PathBuf::from(pointer.history_file()));
+        }
+        (segments, sessions)
+    }
+
+    /// Launch one run of one agent node into `store`, traced, then read its
+    /// sessions back through `onepipeline agents`, traced, and hold both
+    /// traces and the store to the history contract.
+    fn records_and_reads_without_a_scan(world: &World, run: &str) -> Vec<HistoryPointer> {
+        world.script("harness.work", "the worker wrote this\n");
+        let store = Store::build(&world.root.join("long-lived-store"));
+        let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+
+        let traces = world.root.join("traces");
+        std::fs::create_dir_all(&traces).expect("a directory for the traces");
+        let mut start = world.agentgraph_cmd(&["start", &path, "--attach"]);
+        start.env(HISTORY_DIR_ENV, &store.root);
+        let recording = traces.join("record");
+        let launched = traced(&start, &recording);
+        assert!(
+            launched.status.success(),
+            "`start` exited {:?}: {}\n{}",
+            launched.status.code(),
+            String::from_utf8_lossy(&launched.stderr),
+            world.dump()
+        );
+
+        let lines = pointers(world, run);
+        every_line_names(world, run, &lines);
+        let (segments, sessions) = permitted(&lines);
+        let recorded = observe(&store, &recording);
+        assert!(
+            recorded.listed.is_empty(),
+            "recording listed store directories: {:?}",
+            recorded.listed
+        );
+        let strays: Vec<&PathBuf> = recorded
+            .opened
+            .iter()
+            .filter(|path| !segments.contains(*path) && !sessions.contains(*path))
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "recording opened store files other than its own sessions and the segments it \
+             appends to: {strays:?}"
+        );
+        for (segment, read) in &recorded.segment_reads {
+            assert!(
+                *read <= TRAILING_BYTES,
+                "recording read {read} bytes of {} through one descriptor, past the \
+                 {TRAILING_BYTES}-byte trailing bound",
+                segment.display()
+            );
+        }
+        assert!(
+            recorded.unbounded.is_empty(),
+            "recording read a store file by other than read(2): {:?}",
+            recorded.unbounded
+        );
+        // The positive control: the tracer did see the appends it permits.
+        assert!(
+            !recorded.segment_reads.is_empty(),
+            "the tracer saw no append to a segment, so it observed nothing: {recorded:?}"
+        );
+        // And at least one turn emitted an event, so the events segment's
+        // append is among what was traced and bounded, not merely permitted.
+        assert!(
+            recorded.segment_reads.iter().any(|(segment, _)| {
+                segment
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("events-"))
+            }),
+            "no turn appended an event, so the events segment went untested: {recorded:?}"
+        );
+        let evented = lines.iter().any(|pointer| {
+            let date = UtcDate::of_history_id(pointer.history_id()).expect("a dated id");
+            let segment = store
+                .root
+                .join(INDEX_DIR)
+                .join(SegmentKind::Events.file_name(date));
+            std::fs::read_to_string(&segment)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<HistoryIndexEntry>(line).ok())
+                .any(|entry| {
+                    matches!(entry, HistoryIndexEntry::Event(event)
+                        if event.run_id == pointer.history_id())
+                })
+        });
+        assert!(
+            evented,
+            "no run's event landed in the events segment of its date"
+        );
+        for pointer in &lines {
+            assert_eq!(
+                Path::new(pointer.history_dir()),
+                store.root,
+                "a turn recorded somewhere other than the store it was given: {pointer:?}"
+            );
+            // Its session holds its run's record, and its runs segment the
+            // entry pointing at it.
+            let file = Path::new(pointer.history_file());
+            let records = read_session(file)
+                .unwrap_or_else(|error| panic!("{} does not read: {error}", file.display()));
+            assert!(
+                records
+                    .iter()
+                    .any(|record| record.history_id == pointer.history_id()),
+                "{} holds no record of run {}",
+                file.display(),
+                pointer.history_id()
+            );
+            let date = UtcDate::of_history_id(pointer.history_id()).expect("a dated id");
+            let segment = store
+                .root
+                .join(INDEX_DIR)
+                .join(SegmentKind::Runs.file_name(date));
+            let text = std::fs::read_to_string(&segment)
+                .unwrap_or_else(|error| panic!("{} does not read: {error}", segment.display()));
+            let indexed = text
+                .lines()
+                .filter_map(|line| serde_json::from_str::<HistoryIndexEntry>(line).ok())
+                .any(|entry| match entry {
+                    HistoryIndexEntry::Run(entry) => {
+                        entry.history_id == pointer.history_id()
+                            && entry.session_path.under(&store.root) == file
+                    }
+                    HistoryIndexEntry::Event(_) => false,
+                });
+            assert!(
+                indexed,
+                "{} carries no entry for run {} of {}",
+                segment.display(),
+                pointer.history_id(),
+                file.display()
+            );
+        }
+        store.untouched();
+
+        // The read: the verb, traced, lists each session from the store.
+        let reading = traces.join("read");
+        let listed = traced(&world.agentgraph_cmd(&["agents", run]), &reading);
+        let stdout = String::from_utf8_lossy(&listed.stdout);
+        assert!(
+            listed.status.success(),
+            "`agents` exited {:?}: {}",
+            listed.status.code(),
+            String::from_utf8_lossy(&listed.stderr)
+        );
+        for pointer in &lines {
+            for field in [
+                pointer.history_session(),
+                pointer.history_file(),
+                pointer.history_dir(),
+            ] {
+                assert!(
+                    stdout.contains(field),
+                    "`agents` does not name {field}: {stdout}"
+                );
+            }
+            assert!(
+                stdout.contains(&pointer.history_id().to_string()),
+                "`agents` does not name run {}: {stdout}",
+                pointer.history_id()
+            );
+        }
+        let read = observe(&store, &reading);
+        assert!(read.calls > 0, "the tracer saw nothing of the read");
+        assert!(
+            read.listed.is_empty(),
+            "the read listed store directories: {:?}",
+            read.listed
+        );
+        let strays: Vec<&PathBuf> = read
+            .opened
+            .iter()
+            .filter(|path| !sessions.contains(*path))
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "the read opened store files its pointer lines do not name: {strays:?}"
+        );
+        assert!(read.unbounded.is_empty(), "{:?}", read.unbounded);
+        store.untouched();
+        lines
+    }
+
+    /// A two-party member: each turn of both sides is a spawned
+    /// `fake-oneharness`, recording through the linked core's `HistoryWriter`.
+    #[test]
+    fn a_spawned_oneharness_turn_records_and_reads_back_without_scanning_the_store() {
+        let world = World::new("agents-unscanned-spawned");
+        world.write_graphs();
+        world.write_supervised_node_graph();
+        let lines = records_and_reads_without_a_scan(&world, "unscanned-spawned");
+        assert!(
+            world
+                .invocations()
+                .iter()
+                .any(|call| call["tool"] == "oneharness"),
+            "no turn went through the spawned oneharness double: {lines:?}"
+        );
+    }
+
+    /// A single-sided `kind: oneharness` member: its turn is a library call in
+    /// the sibling's own process, recording through the same linked core.
+    #[test]
+    fn an_in_process_oneharness_turn_records_and_reads_back_without_scanning_the_store() {
+        let world = World::new("agents-unscanned-in-process");
+        world.write_graphs();
+        let lines = records_and_reads_without_a_scan(&world, "unscanned-in-process");
+        assert!(
+            !world
+                .invocations()
+                .iter()
+                .any(|call| call["tool"] == "oneharness"),
+            "a turn went through the spawned oneharness double, so the in-process path \
+             was not what recorded: {lines:?}"
+        );
+    }
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

@@ -85,7 +85,7 @@ _crate-bootstrap:
     @just _ensure-onetaskgraph
     @cargo fetch --locked --quiet
 
-# The tracer the Linux-only e2e journeys (`channel.rs`, `listing.rs`,
+# The tracer the Linux-only e2e journeys (`agents.rs`, `channel.rs`, `listing.rs`,
 # `unwatched.rs`) run the binary under, and refuse without. A system package,
 # so it is installed only where the machine is this repository's to provision —
 # a CI runner, which `CI` marks — and named with its install command elsewhere:
@@ -106,7 +106,7 @@ _ensure-strace:
 _strace-preflight:
     @[ "$(uname -s)" = Linux ] || exit 0; \
       command -v strace >/dev/null 2>&1 \
-      || { echo "strace not installed — the Linux-only e2e journeys in tests/e2e/channel.rs, listing.rs and unwatched.rs run the binary under it and refuse without it: sudo apt-get install -y strace (or your distribution's strace package), then re-run" >&2; exit 1; }
+      || { echo "strace not installed — the Linux-only e2e journeys in tests/e2e/agents.rs, channel.rs, listing.rs and unwatched.rs run the binary under it and refuse without it: sudo apt-get install -y strace (or your distribution's strace package), then re-run" >&2; exit 1; }
 
 # The released `onetaskgraph` the template journeys drive, at the release the lock
 # links. Network, so it is installed by `bootstrap` and only asked for by the tiers.

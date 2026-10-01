@@ -144,8 +144,9 @@ impl std::fmt::Display for Role {
     }
 }
 
-/// Where a name resolved: the first of these that supplies it wins, and they are never
-/// merged.
+/// Where a name resolved: the first of these that supplies it wins, and its file may extend
+/// the file a layer under it holds for the same name by that layer's reserved name,
+/// `onepipeline/<layer>/<name>.md.j2`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Layer {
@@ -236,21 +237,36 @@ pub struct NamedSource {
     pub source: String,
 }
 
+/// One file a resolved chain loaded, and the layer that supplied it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChainedFile {
+    /// The name the chain loaded it by.
+    pub name: String,
+    /// The layer whose directory held it, the lower layer a reserved name reaches, or the
+    /// built-in for the embedded base.
+    pub layer: Layer,
+    /// The file, absolute, or null for the embedded base.
+    // llmlint: ignore[invalid_states_unrepresentable] the flat `layer`/`path` wire shape, for the reason stated at `ListedTemplate::path`; `Lookup::find`, the one producer, pairs a file with every layer but the built-in.
+    pub path: Option<PathBuf>,
+}
+
 /// A resolved template, stated as `onetaskgraph`'s loader document (its contract C3b) with
 /// what resolved it beside: what `template resolve --json` prints.
 ///
 /// `reference`, `entry`, `search_path`, `templates` and `digest` are the loader document,
 /// so the output pipes straight into `onetaskgraph ... --template-loader -`; that product
-/// ignores the other four keys.
+/// ignores the other five keys.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedTemplate {
     /// `onepipeline:<name>`: what an item rendered from it records as its provenance.
     pub reference: String,
     /// The name loaded: the resolved file's own name, or [`BASE`] for the built-in.
     pub entry: String,
-    /// The resolved file's own directory, absolute; empty for the built-in.
+    /// The resolved file's own directory, absolute, then the directory of each lower layer
+    /// holding a file of the same name, in layer order; empty for the built-in.
     pub search_path: Vec<PathBuf>,
-    /// The embedded base, registered under [`BASE`].
+    /// The embedded base, registered under [`BASE`], then each lower layer's file under its
+    /// reserved name, `onepipeline/<layer>/<name>.md.j2`, in layer order.
     pub templates: Vec<NamedSource>,
     /// The chain's digest, as `onetaskgraph` computes it over this document.
     pub digest: String,
@@ -263,6 +279,9 @@ pub struct ResolvedTemplate {
     /// The file it resolved to, absolute, or null for the built-in.
     // llmlint: ignore[invalid_states_unrepresentable] the flat `layer`/`path` wire shape, for the reason stated at `ListedTemplate::path`.
     pub path: Option<PathBuf>,
+    /// Every file the chain loaded, in the order `onetaskgraph` loaded them — the order its
+    /// digest is taken in.
+    pub chain: Vec<ChainedFile>,
 }
 
 /// What `template check` is asked about beyond the template itself.
@@ -504,6 +523,97 @@ pub(crate) struct Search<'a> {
 pub(crate) struct Resolution {
     pub stated: ResolvedTemplate,
     pub template: Template,
+    lookup: Lookup,
+}
+
+/// The reserved name by which a layer above `layer` reaches the file `layer` holds for
+/// `name`: `onepipeline/<layer>/<name>.md.j2`.
+fn lower_name(layer: Layer, name: &str) -> String {
+    format!("onepipeline/{layer}/{name}{EXTENSION}")
+}
+
+/// Where a stated loader document finds a name, as `onetaskgraph` searches it: each
+/// `search_path` directory in order, then the registered pairs — the base and each lower
+/// layer's reserved name.
+struct Lookup {
+    /// The search path, each directory with the layer it belongs to.
+    directories: Vec<(Layer, PathBuf)>,
+    /// Each lower layer's file, by its reserved name.
+    lower: Vec<(String, Layer, PathBuf)>,
+}
+
+impl Lookup {
+    /// The layer and file `name` is found at, or `None` where nothing holds it. A name
+    /// spelled to climb out of a directory, or an absolute one, is looked for among the
+    /// registered pairs alone, as `onetaskgraph` looks for it.
+    fn find(&self, name: &str) -> Option<(Layer, Option<PathBuf>)> {
+        let within = !name.is_empty()
+            && Path::new(name)
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)));
+        if within {
+            for (layer, directory) in &self.directories {
+                let candidate = name
+                    .split('/')
+                    .fold(directory.clone(), |path, component| path.join(component));
+                if candidate.is_file() {
+                    return Some((*layer, Some(candidate)));
+                }
+            }
+        }
+        if name == BASE {
+            return Some((Layer::BuiltIn, None));
+        }
+        self.lower
+            .iter()
+            .find(|(reserved, _, _)| reserved == name)
+            .map(|(_, layer, path)| (*layer, Some(path.clone())))
+    }
+}
+
+/// Each layer strictly below `layer` with something at `<name>.md.j2`, in layer order, with
+/// that path and its whole text — or, for one that is there and cannot be read as text, why.
+/// Only an absent file is passed over, so a chain naming an unreadable one is refused for
+/// what it is rather than as a template that is not there.
+fn lower_files(
+    name: &str,
+    layer: Layer,
+    search: Search<'_>,
+) -> Vec<(Layer, PathBuf, std::result::Result<String, String>)> {
+    let below: &[Layer] = match layer {
+        Layer::Explicit => &[Layer::Repository, Layer::Host],
+        Layer::Repository => &[Layer::Host],
+        Layer::Host | Layer::BuiltIn => &[],
+    };
+    let file = format!("{name}{EXTENSION}");
+    below
+        .iter()
+        .filter_map(|lower| {
+            let directory = match lower {
+                Layer::Repository => search.repo.map(repository_dir),
+                _ => search.root.map(Path::to_path_buf),
+            }?;
+            let path = directory.join(&file);
+            // A link whose target is gone reads as NotFound, so the link itself is asked
+            // before the file is taken as absent.
+            let source = match std::fs::read(&path) {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && std::fs::symlink_metadata(&path).is_err() =>
+                {
+                    return None
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Err("it links to a file that does not exist".to_owned())
+                }
+                Err(error) => Err(error.to_string()),
+                Ok(bytes) => {
+                    String::from_utf8(bytes).map_err(|_| "it is not UTF-8 text".to_owned())
+                }
+            };
+            Some((*lower, path, source))
+        })
+        .collect()
 }
 
 impl Resolution {
@@ -564,7 +674,9 @@ fn absolute(path: &Path, base: &Path) -> PathBuf {
 
 /// Resolve `name` through C4's layers, first found wins: explicit, repository, host, and
 /// — for [`BUILT_IN`] only — the embedded base; then load its chain over the resolved file's
-/// own directory and the embedded base, exactly as the stated loader document does.
+/// own directory and each lower layer's directory holding the name, then the embedded base
+/// and each lower layer's file under its reserved name, exactly as the stated loader
+/// document does.
 ///
 /// # Errors
 ///
@@ -579,17 +691,44 @@ pub(crate) fn resolve(registry: &Registry, name: &str, search: Search<'_>) -> Re
         name: BASE.to_owned(),
         source: BASE_SOURCE.to_owned(),
     };
-    let (entry, search_path) = match &path {
+    let (entry, mut directories) = match &path {
         Some(path) => {
             let entry = path
                 .file_name()
                 .map(|file| file.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let directory = path.parent().map(Path::to_path_buf).unwrap_or_default();
-            (entry, vec![directory])
+            (entry, vec![(layer, directory)])
         }
         None => (BASE.to_owned(), Vec::new()),
     };
+    let mut templates = vec![base];
+    let mut lower = Vec::new();
+    let mut unreadable = Vec::new();
+    for (below, file, source) in lower_files(name, layer, search) {
+        let reserved = lower_name(below, name);
+        let source = match source {
+            Ok(source) => source,
+            Err(why) => {
+                unreadable.push((reserved, below, file, why));
+                continue;
+            }
+        };
+        directories.push((
+            below,
+            file.parent().map(Path::to_path_buf).unwrap_or_default(),
+        ));
+        templates.push(NamedSource {
+            name: reserved.clone(),
+            source,
+        });
+        lower.push((reserved, below, file));
+    }
+    let search_path: Vec<PathBuf> = directories
+        .iter()
+        .map(|(_, directory)| directory.clone())
+        .collect();
+    let lookup = Lookup { directories, lower };
     let unloadable = |error: String| {
         Error::Refused(format!(
             "template {name} ({}) does not load: {error}",
@@ -603,9 +742,11 @@ pub(crate) fn resolve(registry: &Registry, name: &str, search: Search<'_>) -> Re
             .with_directory(directory)
             .map_err(|error| unloadable(error.to_string()))?;
     }
-    let document = document
-        .with_template(&base.name, &base.source)
-        .map_err(|error| unloadable(error.to_string()))?;
+    for registered in &templates {
+        document = document
+            .with_template(&registered.name, &registered.source)
+            .map_err(|error| unloadable(error.to_string()))?;
+    }
     let template = document.load().map_err(|error| match &error {
         TemplateError::ChainConflict { variable, .. }
             if variable == CRITERIA_VARIABLE && registered.role == Role::Task =>
@@ -615,21 +756,60 @@ pub(crate) fn resolve(registry: &Registry, name: &str, search: Search<'_>) -> Re
                 whence(layer, path.as_deref())
             ))
         }
+        // A reserved name whose lower file is there and cannot be read is refused as that,
+        // naming the layer and the file, never as a template that is not there.
+        TemplateError::NotFound { name: missing, .. }
+            if unreadable.iter().any(|(reserved, ..)| reserved == missing) =>
+        {
+            let (reserved, below, file, why) = unreadable
+                .iter()
+                .find(|(reserved, ..)| reserved == missing)
+                .expect("the guard found it");
+            unloadable(format!(
+                "{reserved} is {} ({below} layer), which cannot be read as a template: {why}",
+                file.display()
+            ))
+        }
+        // A name a lower file spells is refused naming that file too, not only the one the
+        // name resolved to.
+        TemplateError::NotFound {
+            referenced_from: Some(from),
+            ..
+        } => match lookup.find(from) {
+            Some((named_by, file)) if file != path => unloadable(format!(
+                "{from} ({}) names a template that is not there: {error}",
+                whence(named_by, file.as_deref())
+            )),
+            _ => unloadable(error.to_string()),
+        },
         _ => unloadable(error.to_string()),
     })?;
+    let chain = template
+        .chain()
+        .map(|file| {
+            let (at, path) = lookup.find(file).unwrap_or((layer, None));
+            ChainedFile {
+                name: file.to_owned(),
+                layer: at,
+                path,
+            }
+        })
+        .collect();
     Ok(Resolution {
         stated: ResolvedTemplate {
             reference,
             entry,
             search_path,
-            templates: vec![base],
+            templates,
             digest: template.digest().to_owned(),
             name: name.to_owned(),
             role: registered.role,
             layer,
             path,
+            chain,
         },
         template,
+        lookup,
     })
 }
 
@@ -718,7 +898,9 @@ pub(crate) fn validate(resolution: &Resolution) -> std::result::Result<(), &'sta
     if let Some(path) = &resolution.stated.path {
         // Both: the file's own `extends` reaches the base, and the chain onetaskgraph loaded
         // holds it — so neither a stray mention nor a parent that never loads passes.
-        if !extends_base(path) || !resolution.template.chain().any(|file| file == BASE) {
+        if !extends_base(path, &resolution.lookup)
+            || !resolution.template.chain().any(|file| file == BASE)
+        {
             return Err(RULE_NOT_EXTENDED);
         }
     }
@@ -815,9 +997,9 @@ fn body_of(source: &str) -> &str {
 }
 
 /// Whether the file at `path` reaches [`BASE`] by `extends`, following each parent it
-/// names in its own directory — the search path a stated loader document gives it.
-fn extends_base(path: &Path) -> bool {
-    let directory = path.parent().map(Path::to_path_buf).unwrap_or_default();
+/// names where the stated loader document finds it: in the resolved file's own directory, a
+/// lower layer's directory, or — for a reserved name — into that lower layer's file.
+fn extends_base(path: &Path, lookup: &Lookup) -> bool {
     let mut seen = BTreeSet::new();
     let mut at = path.to_path_buf();
     loop {
@@ -830,17 +1012,13 @@ fn extends_base(path: &Path) -> bool {
         let Some(parent) = extends_literal(body_of(&source)) else {
             return false;
         };
-        let within = Path::new(&parent)
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)));
-        let local = directory.join(&parent);
-        // The directory is searched before the base, so a file of that name there is what
-        // the chain loads.
-        if within && local.is_file() {
-            at = local;
-            continue;
+        // The directories are searched before the base, so a file of that name there is
+        // what the chain loads.
+        match lookup.find(&parent) {
+            Some((_, Some(file))) => at = file,
+            Some((_, None)) => return parent == BASE,
+            None => return false,
         }
-        return parent == BASE;
     }
 }
 
