@@ -23,8 +23,8 @@
 use std::time::{Duration, Instant};
 
 use crate::harness::{
-    agent, counts, human, plan_of, reporting, restored, unreachable, Counts, World, LOOP_STATS_ENV,
-    RENDEZVOUS_SECONDS_ENV,
+    agent, counts, epoch_seconds, human, plan_of, reporting, restored, unreachable, Counts, World,
+    LOOP_STATS_ENV, RENDEZVOUS_SECONDS_ENV,
 };
 use serde_json::{json, Value};
 
@@ -95,31 +95,45 @@ fn recorded(world: &World, run: &str, kind: &str, node: &str) -> bool {
         .any(|event| event["labels"]["node"] == node)
 }
 
-/// When one record was written, in milliseconds.
+/// When one record was written, in milliseconds since the epoch.
 ///
 /// The envelope's own timestamp, which is millisecond-precision UTC — so a
 /// latency between two records the loop wrote is measured off what the run
-/// recorded rather than off what this test process happened to observe.
+/// recorded rather than off what this test process happened to observe. On the
+/// epoch's scale so it compares with the one instant the run keeps as a file's
+/// write time rather than as a record: [`accepted`].
 fn at(event: &Value) -> u64 {
     let ts = event["ts"]
         .as_str()
         .unwrap_or_else(|| panic!("no ts: {event}"));
-    let (date, time) = ts
+    let millis = ts
         .trim_end_matches('Z')
-        .split_once('T')
-        .unwrap_or_else(|| panic!("not an RFC 3339 timestamp: {ts}"));
-    let number = |text: &str| -> u64 {
-        text.parse()
-            .unwrap_or_else(|e| panic!("{text} of {ts} is not a number: {e}"))
-    };
-    let day: Vec<&str> = date.split('-').collect();
-    let clock: Vec<&str> = time.split(':').collect();
-    let (second, millis) = clock[2].split_once('.').unwrap_or((clock[2], "0"));
-    // Days since an arbitrary fixed point, which is all a difference needs.
-    let days = number(day[0]) * 372 + number(day[1]) * 31 + number(day[2]);
-    ((days * 24 + number(clock[0])) * 60 + number(clock[1])) * 60_000
-        + number(second) * 1_000
-        + number(millis)
+        .split_once('.')
+        .map_or(0, |(_, fraction)| {
+            fraction
+                .parse::<u64>()
+                .unwrap_or_else(|e| panic!("{fraction} of {ts} is not a number: {e}"))
+        });
+    epoch_seconds(ts) * 1_000 + millis
+}
+
+/// When the run's channel accepted the edit it was handed, in milliseconds since
+/// the epoch.
+///
+/// The command queue's records carry no timestamp, so the instant an edit was
+/// accepted is the queue's own write time: nothing but a submitted envelope
+/// appends to it, and a run handed one edit wrote it once. That is where the
+/// loop's part of an edit begins — what the verb spends before it, starting a
+/// process and folding the journal to validate the edit, is the caller's host's.
+fn accepted(world: &World, run: &str) -> u64 {
+    let queue = world.run_file(run, "channel/commands.jsonl");
+    let written = std::fs::metadata(&queue)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or_else(|e| panic!("{} has no write time: {e}", queue.display()));
+    let since = written
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a write time after the epoch");
+    u64::try_from(since.as_millis()).expect("milliseconds since the epoch fit")
 }
 
 /// The one record of this kind for this node, for a latency measured off two.
@@ -518,16 +532,21 @@ fn every_answer_the_loop_owes_arrives_inside_a_second() {
         recorded(world, "prompt", "node-dispatched", "build")
     });
 
-    // A settlement is readable in the journal after the dispatch reports it.
-    let released = Instant::now();
+    // A settlement is readable in the journal after the dispatch reports it:
+    // from the dispatch's own report of its member settling, relayed onto the
+    // run's stream with the stamp the dispatch gave it, to the run's settlement.
+    // Not from the test's release of the hold, which also spends the dispatch
+    // noticing the release and saying so — the double's work, and on a loaded
+    // host the larger part of what a clock around it measured.
     world.release("build.go");
     world.until("the settlement to be readable", |world| {
         recorded(world, "prompt", "node-settled", "build")
     });
-    let readable = released.elapsed();
+    let readable = at(&one(&world, "prompt", "node-settled", "build"))
+        - at(&one(&world, "prompt", "member-settled", "build"));
     assert!(
-        readable < Duration::from_secs(1),
-        "a settlement took {readable:?} to become readable"
+        readable < 1_000,
+        "a settlement took {readable}ms to become readable after its dispatch reported it"
     );
 
     // A node whose last dependency settles is dispatched.
@@ -541,14 +560,26 @@ fn every_answer_the_loop_owes_arrives_inside_a_second() {
         "a node waited {waited}ms after its last dependency settled"
     );
 
-    // An edit accepted on the channel has taken effect. The verb waits for the
-    // reconciler's own answer, so what it costs a caller *is* the latency.
-    let asked = Instant::now();
+    // An edit accepted on the channel has taken effect: from the channel taking
+    // the edit to the reconciler committing it. The verb waits for that answer,
+    // so its exit says the edit was taken; what it spends around it, starting a
+    // process and validating the edit against the journal before queueing it,
+    // is the caller's host's and not the loop's.
     world.run(&["attest", "prompt", "approve"]).exited(0);
-    let answered = asked.elapsed();
+    let committed: Vec<Value> = world
+        .events_of("prompt", "edit-committed")
+        .into_iter()
+        .filter(|event| event["payload"]["command"]["ref"] == "approve")
+        .collect();
+    assert_eq!(
+        committed.len(),
+        1,
+        "prompt committed the attest: {committed:?}"
+    );
+    let answered = at(&committed[0]).saturating_sub(accepted(&world, "prompt"));
     assert!(
-        answered < Duration::from_secs(1),
-        "an edit took {answered:?} to be answered"
+        answered < 1_000,
+        "an edit took {answered}ms to be answered after the channel accepted it"
     );
 
     // And the subtree that decision was holding proceeds.
