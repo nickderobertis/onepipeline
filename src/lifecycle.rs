@@ -1389,14 +1389,13 @@ struct Preserved {
 /// base, carried across every attempt of the publication-retry loop.
 #[derive(Debug, Clone, Default)]
 struct Conflicted {
-    /// How many there were.
     dispatches: u32,
-    /// What the last of them was handed.
+    /// The finding names this one's paths: the base may have moved between
+    /// attempts, so an earlier dispatch's conflict can be stale.
     last: Option<onevcs::OpenConflict>,
 }
 
 impl Conflicted {
-    /// Count the attempt that just preserved its branch, where it was one.
     fn read(&mut self, preserved: &Preserved) {
         if let Some(conflict) = &preserved.handed {
             self.dispatches = self.dispatches.saturating_add(1);

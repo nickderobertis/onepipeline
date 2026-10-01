@@ -3247,7 +3247,6 @@ fn the_merge_resolution_criterion_is_what_the_contract_publishes() {
         0,
         "the preamble is more than one sentence: {MERGE_RESOLUTION_PREAMBLE}"
     );
-    // Every value the engine fills in is named by the template.
     for variable in ["{base_commit}", "{branch}", "{paths}"] {
         assert!(
             MERGE_RESOLUTION_CRITERION.contains(variable),
