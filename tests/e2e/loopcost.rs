@@ -23,7 +23,7 @@
 use std::time::{Duration, Instant};
 
 use crate::harness::{
-    agent, counts, epoch_seconds, human, plan_of, reporting, restored, unreachable, Counts, World,
+    agent, counts, epoch_millis, human, plan_of, reporting, restored, unreachable, Counts, World,
     LOOP_STATS_ENV, RENDEZVOUS_SECONDS_ENV,
 };
 use serde_json::{json, Value};
@@ -103,18 +103,11 @@ fn recorded(world: &World, run: &str, kind: &str, node: &str) -> bool {
 /// epoch's scale so it compares with the one instant the run keeps as a file's
 /// write time rather than as a record: [`accepted`].
 fn at(event: &Value) -> u64 {
-    let ts = event["ts"]
-        .as_str()
-        .unwrap_or_else(|| panic!("no ts: {event}"));
-    let millis = ts
-        .trim_end_matches('Z')
-        .split_once('.')
-        .map_or(0, |(_, fraction)| {
-            fraction
-                .parse::<u64>()
-                .unwrap_or_else(|e| panic!("{fraction} of {ts} is not a number: {e}"))
-        });
-    epoch_seconds(ts) * 1_000 + millis
+    epoch_millis(
+        event["ts"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no ts: {event}")),
+    )
 }
 
 /// When the run's channel accepted the edit it was handed, in milliseconds since

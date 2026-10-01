@@ -24,7 +24,7 @@
 use std::path::PathBuf;
 
 use crate::harness::{
-    agent, epoch_seconds, git, hook_script, lifecycle, plan_of, rows, Repository,
+    agent, epoch_millis, git, hook_script, lifecycle, now_millis, plan_of, rows, Repository,
     ReturningHookVerb, World, REFUSED, SURFACE_WAITING, WATCH_ELAPSED,
 };
 use onevcs::provenance::SUBJECT_LIMIT;
@@ -8372,6 +8372,11 @@ fn a_workspace_wait_is_queued_again_only_once_read_and_an_elapsed_watch_names_th
             .iter()
             .any(|event| event["labels"]["node"] == "quick")
     });
+    // The watch reads its own clock once, somewhere inside its run, so what it
+    // reports is bracketed by the clock read either side of that run — rather
+    // than compared with one read after the process had gone, which a loaded
+    // host can leave seconds later.
+    let before = now_millis();
     let watched = world.run(&[
         "watch",
         &run,
@@ -8384,17 +8389,14 @@ fn a_workspace_wait_is_queued_again_only_once_read_and_an_elapsed_watch_names_th
         "--tick-interval",
         "0",
     ]);
+    let after = now_millis();
     watched.exited(WATCH_ELAPSED);
     let last = returned(&watched);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("after the epoch")
-        .as_secs();
     // `first` picks which of a node's records of `kind` to measure from. A hold
     // is measured from the record that opened it: the driver restates it at
     // each reading before the reading settles, and a restatement is not a new
     // wait. `second` is never dispatched here, so its first `node-held` is that.
-    let seconds_since = |kind: &str, node: &str, first: bool| -> u64 {
+    let stamped = |kind: &str, node: &str, first: bool| -> u64 {
         let records = world.events_of(&run, kind);
         let mut of_node = records
             .into_iter()
@@ -8405,8 +8407,17 @@ fn a_workspace_wait_is_queued_again_only_once_read_and_an_elapsed_watch_names_th
             of_node.next_back()
         }
         .unwrap_or_else(|| panic!("no {kind} for {node}"));
-        let at = event["ts"].as_str().expect("a record is stamped");
-        now.saturating_sub(epoch_seconds(at))
+        epoch_millis(event["ts"].as_str().expect("a record is stamped"))
+    };
+    // Whole seconds since `from`, as the watch counts them, at some instant
+    // between the two clock reads: each end of that range is what the watch would
+    // have said had it read its clock at that end.
+    let elapsed_inside = |reported: u64, from: u64| -> bool {
+        let (earliest, latest) = (
+            before.saturating_sub(from) / 1_000,
+            after.saturating_sub(from) / 1_000,
+        );
+        (earliest..=latest).contains(&reported)
     };
     let summary = &last["summary"];
     assert_eq!(
@@ -8420,14 +8431,14 @@ fn a_workspace_wait_is_queued_again_only_once_read_and_an_elapsed_watch_names_th
         .as_u64()
         .unwrap_or_else(|| panic!("the hold carries no waited_seconds: {last}"));
     assert!(
-        held_for.abs_diff(seconds_since("node-held", "second", true)) <= 2,
+        elapsed_inside(held_for, stamped("node-held", "second", true)),
         "the hold's waited_seconds is not how long it has been held: {last}"
     );
     let progress = summary["last_progress_seconds"]
         .as_u64()
         .unwrap_or_else(|| panic!("no last_progress_seconds: {last}"));
     assert!(
-        progress.abs_diff(seconds_since("node-settled", "quick", false)) <= 2,
+        elapsed_inside(progress, stamped("node-settled", "quick", false)),
         "last_progress_seconds is not the latest settlement: {last}"
     );
     assert_eq!(summary["observer"], json!("none"), "{last}");
