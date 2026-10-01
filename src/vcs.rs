@@ -130,7 +130,11 @@ pub fn workspace_capacity(
 /// base moved under work already going and the bounded resolve-and-requeue lost
 /// the race, which another attempt can win — [`Preserving::SyncConflict`]. At
 /// *session open* it is a merge nobody has performed, and opening the session
-/// again reproduces the identical refusal.
+/// again reproduces the identical refusal. That second one is a refusal this
+/// engine no longer asks for: [`request_for`] leaves `refuse_conflicts` unset, so
+/// `onevcs` opens such a session with the merge in progress and the worker it is
+/// dispatched to concludes it — see [`merge_in_progress`]. It is still classified,
+/// for a sibling that refuses anyway, and is not the path a conflict takes.
 ///
 /// An exhausted pool is the other: the identity has no room, which a later open
 /// may find it has again once a session somewhere closes — but not a later
@@ -226,7 +230,48 @@ pub fn publish(
             draft: draft.cloned(),
         },
     )
-    .map_err(refusal)
+    .map_err(publication_refusal)
+}
+
+/// How a refusal this module composed says a publication met a **merge the
+/// session's worker has not concluded**, written at the head of the message.
+///
+/// The third head marker, composed and read exactly as [`SESSION_OPEN_CONFLICT`]
+/// is: `onevcs` refuses to publish a worktree holding an unfinished merge as its
+/// typed [`SyncConflict`](onevcs::Error::SyncConflict), *before* it touches
+/// anything, and this marker carries that classification to the publication's
+/// caller.
+const PUBLICATION_MERGE_UNFINISHED: &str = "the session's merge with its base is unfinished";
+
+/// A publication `onevcs` refused, as this crate's own error — with the one
+/// refusal a further attempt converges on **named**.
+///
+/// A publication of a session that opened with its base's merge in progress, and
+/// whose worker did not conclude it, is refused as a sync conflict before
+/// anything is committed or pushed. That is the conflict the worker was handed,
+/// still standing, on a branch exactly where the session found it — which is
+/// what a further attempt, handed the conflict again, can answer.
+fn publication_refusal(error: onevcs::Error) -> Error {
+    match &error {
+        onevcs::Error::SyncConflict { .. } => {
+            sibling(format!("{PUBLICATION_MERGE_UNFINISHED}: {error}"))
+        }
+        _ => refusal(error),
+    }
+}
+
+/// Whether a publication was refused because its session still holds a merge
+/// nobody concluded.
+///
+/// Asked of the error [`publish`] returned, on [`session_open_conflicted`]'s
+/// terms and for its reason: it routes the node into a re-dispatch, which must
+/// not be reachable from anything a dispatch says about itself.
+pub(crate) fn publication_merge_unfinished(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Sibling { tool, message }
+            if *tool == ONEVCS && message.starts_with(PUBLICATION_MERGE_UNFINISHED)
+    )
 }
 
 /// The session's own change request — the one a publication of it would adopt —
@@ -1805,8 +1850,107 @@ pub fn session_opened_event(session: &Session, labels: &crate::event::Labels) ->
             ("branch", serde_json::json!(session.branch)),
             ("base", serde_json::json!(session.base)),
             ("worktree", serde_json::json!(session.worktree)),
-        ]),
+        ])
+        .into_iter()
+        // The merge the session opened with, where it opened with one, as the
+        // same object and under the same key `onevcs`'s own `session-opened`
+        // carries it — and absent otherwise, so every other opening reads as it
+        // always did. [`conflict_opened_in`] is what reads it back.
+        .chain(session.conflict.as_ref().map(|conflict| {
+            (
+                OPENED_CONFLICT.to_owned(),
+                serde_json::json!(conflict),
+            )
+        }))
+        .collect(),
         artifacts: Vec::new(),
+    }
+}
+
+/// The key a `session-opened` payload carries an open conflict under: `onevcs`'s
+/// own spelling, which this crate's envelope for the same opening repeats.
+const OPENED_CONFLICT: &str = "conflict";
+
+/// The merge a session opened with, read back off a `session-opened` envelope.
+///
+/// `None` for every other envelope, for an opening that carried no conflict, and
+/// for one whose conflict does not read as `onevcs`'s own shape — a session that
+/// did open conflicted is then not counted as one, which errs toward reporting
+/// fewer conflicted dispatches rather than inventing one.
+pub(crate) fn conflict_opened_in(envelope: &Envelope) -> Option<onevcs::OpenConflict> {
+    if envelope.source != crate::event::Source::Vcs
+        || envelope.kind != kind_of(onevcs::EventKind::SessionOpened)
+    {
+        return None;
+    }
+    serde_json::from_value(envelope.payload.get(OPENED_CONFLICT)?.clone()).ok()
+}
+
+/// What a dispatch into `session` is told about the merge it opened with, or
+/// `None` for a session that opened on a clean tree.
+///
+/// `onevcs`'s report plus the base's commits that made the conflict: those
+/// between the branch's tip and the merged base commit that touch an unmerged
+/// path, newest first, at most [`MERGE_COMMITS_LISTED`]. This crate runs git
+/// itself here, read-only, in the worktree the session's own record names and
+/// against the two commits `onevcs` reported — the same grounds
+/// [`level_with_base`] runs it on. A listing git refuses is reported as one that
+/// could not be made rather than as none.
+///
+/// [`MERGE_COMMITS_LISTED`]: crate::plan::MERGE_COMMITS_LISTED
+pub(crate) fn merge_in_progress(session: &Session) -> Option<crate::plan::MergeInProgress> {
+    let conflict = session.conflict.clone()?;
+    let range = format!("{}..{}", conflict.branch_tip, conflict.base_commit);
+    let git = |args: &[&str]| -> Option<String> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .arg("--")
+            .args(&conflict.paths)
+            .current_dir(&session.worktree)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let listed = crate::plan::MERGE_COMMITS_LISTED;
+    let commits = git(&[
+        "log",
+        "--no-merges",
+        "--format=%h %s",
+        &format!("--max-count={listed}"),
+        &range,
+    ])
+    .map(|out| {
+        out.lines()
+            .map(|line| commit_line(line.trim()))
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+    });
+    let unlisted = match &commits {
+        Some(commits) if commits.len() == listed => git(&["rev-list", "--no-merges", "--count", &range])
+            .and_then(|count| count.trim().parse::<usize>().ok())
+            .map_or(0, |count| count.saturating_sub(listed)),
+        _ => 0,
+    };
+    Some(crate::plan::MergeInProgress {
+        base: session.base.clone(),
+        branch: session.branch.clone(),
+        conflict,
+        commits,
+        unlisted,
+    })
+}
+
+/// One commit's line as a conflicted dispatch is shown it: a subject is the
+/// committer's prose, so it is cut where a line in a task stops being one.
+fn commit_line(line: &str) -> String {
+    const LONGEST: usize = 160;
+    match line.char_indices().nth(LONGEST) {
+        Some((at, _)) => format!("{}…", &line[..at]),
+        None => line.to_owned(),
     }
 }
 

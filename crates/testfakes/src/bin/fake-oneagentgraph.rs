@@ -747,6 +747,18 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         write_work(args, &fake::segment(&key), &body);
     }
 
+    // A worker that concludes the merge its session opened with: every path git
+    // left unmerged is written with the scripted body, staged, and the merge
+    // committed — a merge commit on top of the branch whose second parent is the
+    // base, which is what the engine's merge-resolution criterion asks for.
+    // Scripted `<key>.resolves-merge` holding that body; a session that opened
+    // on a clean tree has no merge to conclude and is left as it is, so one
+    // script serves a node whose first attempt opens clean and whose re-dispatch
+    // is handed the conflict.
+    if let Some(body) = fake::node_script(dir, &key, "resolves-merge") {
+        resolve_merge(args, &body);
+    }
+
     // A worker that commits its work and lands it on the base **itself**, with
     // git rather than through the sibling — so the session's branch is left
     // level with a base that already carries what this dispatch committed. The
@@ -1471,6 +1483,51 @@ fn commit_and_land_on_base(args: &[String], name: &str, base: &str) {
     }
 }
 
+/// Conclude the merge a session opened with, where it opened with one.
+///
+/// Real git in the real worktree, on [`commit_on_a_branch_of_its_own`]'s terms:
+/// `MERGE_HEAD` says whether a merge is in progress, `git diff --diff-filter=U`
+/// names the unmerged paths, and `git commit --no-edit` takes git's own merge
+/// message — so what is committed is the merge, with both parents.
+fn resolve_merge(args: &[String], body: &str) {
+    let worktree = session_worktree(args, "concluding a session's merge");
+    let git = |argv: &[&str]| -> std::process::Output {
+        match std::process::Command::new("git")
+            .args(argv)
+            .current_dir(&worktree)
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
+            Ok(ran) => ran,
+            Err(error) => fake::fail(&format!("cannot run `git {}`: {error}", argv.join(" "))),
+        }
+    };
+    if !git(&["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+        .status
+        .success()
+    {
+        return;
+    }
+    let unmerged = git(&["diff", "--name-only", "--diff-filter=U"]);
+    for path in String::from_utf8_lossy(&unmerged.stdout).lines() {
+        let at = worktree.join(path.trim());
+        if let Err(error) = std::fs::write(&at, format!("{body}\n")) {
+            fake::fail(&format!("cannot write {}: {error}", at.display()));
+        }
+    }
+    for argv in [vec!["add", "-A"], vec!["commit", "--no-edit"]] {
+        let ran = git(&argv);
+        if !ran.status.success() {
+            fake::fail(&format!(
+                "`git {}` exited {}: {}",
+                argv.join(" "),
+                ran.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&ran.stderr).trim()
+            ));
+        }
+    }
+}
+
 /// Fast-forward the session's branch onto its base as the origin now has it.
 ///
 /// Real git in the real worktree, on [`commit_on_a_branch_of_its_own`]'s terms,
@@ -1611,6 +1668,7 @@ fn session_records(args: &[String], script: &str) {
             worktree: worktree.clone(),
             branch: named("branch").unwrap_or("onevcs/scripted").to_owned(),
             base: "main".to_owned(),
+            conflict: None,
         };
         let Ok(serde_json::Value::Object(mut payload)) = serde_json::to_value(&session) else {
             fake::fail("a onevcs session no longer renders as an event payload");

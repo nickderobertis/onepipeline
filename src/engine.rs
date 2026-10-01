@@ -511,8 +511,8 @@ pub(crate) enum Message {
     Redispatched(Box<Redispatch>),
     /// A cancellation reached a dispatch, or ran out of patience with one.
     Cancelling(Box<Cancelling>),
-    /// A node's session would not open because its branch and its base conflict,
-    /// which is the one refusal at that boundary no further attempt converges on.
+    /// A node's dispatches were handed its branch's conflict with the base and
+    /// did not conclude it before its publication budget was spent.
     SessionConflicted(Box<SessionConflict>),
     /// A node's session would not open because its identity admits no more
     /// sessions now: the node is handed back to the queue without a settlement.
@@ -4432,6 +4432,10 @@ pub(crate) struct Drained {
     pub session: Option<onevcs::SessionToken>,
     /// The branch that session has checked out.
     pub branch: Option<String>,
+    /// The merge that session opened with left unfinished, which this dispatch
+    /// was handed to conclude. `None` for a session that opened on a clean tree
+    /// and for a dispatch that opened none.
+    pub conflict: Option<onevcs::OpenConflict>,
 }
 
 /// Run a dispatch, asking again for one that produced *nothing*.
@@ -4469,6 +4473,7 @@ pub(crate) fn attempt(
         reached: Reached::NotStarted,
         session: None,
         branch: None,
+        conflict: None,
     };
 
     for attempt in 1..=attempts.get() {
@@ -4518,6 +4523,7 @@ pub(crate) fn attempt(
                         reached: Reached::NotStarted,
                         session: None,
                         branch: None,
+                        conflict: None,
                     }), // llmlint: ignore-end[changed_behavior_has_e2e]
                 };
             }
@@ -4537,6 +4543,7 @@ pub(crate) fn attempt(
                     reached: Reached::NotStarted,
                     session: None,
                     branch: None,
+                    conflict: None,
                 }
             }
         };
@@ -4546,17 +4553,13 @@ pub(crate) fn attempt(
         {
             return Attempted::Drained(drained);
         }
-        // The one refusal at this boundary another attempt provably cannot
-        // answer: the branch and its base disagree about a file, and no dispatch
-        // of this node's gets far enough to touch either. It goes to the
-        // supervisor rather than spending the budget reproducing itself.
+        // A refusal another attempt provably cannot answer: the branch and its
+        // base disagree about a file and the sibling refused to open the session
+        // over it. This engine never asks for that refusal — a session opens with
+        // the merge in progress and the worker concludes it — so this is a
+        // sibling refusing anyway, and asking again seconds later only
+        // reproduces it.
         if conflicted {
-            if let Some(whose) = crate::graph::NodeRef::of(node) {
-                let _ = tx.send(Message::SessionConflicted(Box::new(SessionConflict {
-                    node: whose,
-                    because: drained.settlement.detail.clone().unwrap_or_default(),
-                })));
-            }
             return Attempted::Drained(drained);
         }
         last = drained;
@@ -4592,31 +4595,41 @@ pub(crate) fn attempt(
     Attempted::Drained(last)
 }
 
-/// A node whose session would not open because its branch and its base conflict.
+/// A node whose dispatches were handed its branch's conflict with the base and
+/// did not conclude it before the node's publication budget was spent.
 ///
 /// Handed to the single writer rather than surfaced where it is found, for
 /// [`UndraftedBody`]'s reason: the loop owns this crate's own stream and the
 /// planner's queue, and a dispatch thread reporting into either beside it is a
 /// second writer.
 pub(crate) struct SessionConflict {
-    /// The node whose session was refused.
+    /// The node that settled on it.
     ///
     /// A [`NodeRef`](crate::graph::NodeRef) and not a `String`, for
     /// [`CriterionChecked::node`]'s reason: this crosses a thread boundary, so
     /// what reaches the single writer arrives already being the identity of a
     /// node the graph carries.
     pub node: crate::graph::NodeRef,
-    /// `onevcs`'s own account of the conflict, which names the files, the copy
-    /// of the branch to resolve it on, and the command that lands it as it
-    /// stands.
+    /// How many of the node's dispatches were handed a session that opened with
+    /// the merge in progress.
+    pub dispatched: u32,
+    /// The branch the conflict is on, which a `retry` continues.
+    pub branch: String,
+    /// The paths the last such dispatch was handed unmerged.
+    pub paths: Vec<String>,
+    /// `onevcs`'s own account of the last publication's refusal.
     pub because: String,
 }
 
-/// The decision a session-open conflict puts to the supervisor.
+/// The decision a conflict the node's dispatches did not converge on puts to
+/// the supervisor.
 ///
-/// **Blocking**, because it is a decision rather than a report: nothing in this
-/// run converges on it, and the subtree below the node cannot start until
-/// somebody merges two branches by hand.
+/// Raised only **after** the work was handed back: every session the node
+/// opened over the conflict was dispatched to the worker to conclude, and every
+/// one of those dispatches spent an attempt of the node's publication budget.
+/// What is left is a decision rather than a report — nothing more in this run
+/// converges on it — so it is **blocking**, and what it asks for is a `retry`,
+/// with an amended task where the worker needs direction it did not have.
 ///
 /// It carries a **stable correlation**, because its text asks for a graph edit
 /// and a commands-only envelope answers no question on its own: the `retry` this
@@ -4624,21 +4637,33 @@ pub(crate) struct SessionConflict {
 /// committing it is what answers this finding. Derived from the kind and the
 /// node alone and not from the attempt: the retry that answers it takes the node
 /// out of the graph, so the same finding about the same node is the same
-/// question however often the open is refused.
+/// question however many attempts it took.
 fn session_conflict_surface(conflict: &SessionConflict) -> Surface {
     Surface {
         id: 0,
         kind: crate::channel::SurfaceKind::FINDING.into(),
         message: format!(
-            "node '{node}' cannot open a session: its branch and the base it would be \
-             published into conflict, and no further attempt converges on that — opening \
-             the session again reproduces this exact refusal, because neither side of it \
-             changes on its own.\n\
+            "node '{node}' did not converge on its conflict with the base: the worker was \
+             dispatched into the conflict with the base {dispatched} time{plural}, handed the \
+             unmerged merge to conclude each time, and did not conclude it before the node's \
+             publication budget was spent.\n\
+             Unmerged paths on the last attempt: {paths}. Branch: {branch}.\n\
              onevcs: {because}\n\
-             Resolve the merge on the branch as onevcs describes above, then answer this \
-             with a `retry` of '{node}': the replacement continues that same branch, so it \
-             starts from the resolution rather than from the conflict.",
+             Decide how the node goes on: answer this with a `retry` of '{node}', with an \
+             amended task where the resolution needs direction the worker did not have — the \
+             replacement continues the same branch and is dispatched into the conflict again.",
             node = conflict.node.as_str(),
+            dispatched = conflict.dispatched,
+            plural = if conflict.dispatched == 1 { "" } else { "s" },
+            paths = bounded(
+                &conflict
+                    .paths
+                    .iter()
+                    .map(|path| format!("`{path}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            branch = conflict.branch,
             because = bounded(&crate::views::one_line(&conflict.because)),
         ),
         source: crate::channel::source::RECONCILER.into(),
@@ -4710,10 +4735,17 @@ pub(crate) fn drain(
     let mut chains = ChainRecords::default();
     let mut asked_at: Option<Instant> = None;
     let mut killed = false;
+    // The merge this dispatch's session opened with, read off the opening the
+    // executor relays: the executor composed it into the task, and this is how
+    // the node learns its dispatch was handed one.
+    let mut conflict: Option<onevcs::OpenConflict> = None;
     loop {
         match arriving.recv_timeout(TEARDOWN_TICK) {
             Ok(Ok(envelope)) => {
                 spoke = true;
+                if conflict.is_none() {
+                    conflict = crate::vcs::conflict_opened_in(&envelope);
+                }
                 if let Some(address) = addressed_by(&envelope) {
                     if !addresses.contains(&address) {
                         addresses.push(address);
@@ -4821,6 +4853,7 @@ pub(crate) fn drain(
         },
         session,
         branch,
+        conflict,
     }
 }
 

@@ -291,6 +291,15 @@ impl Executor for LocalExecutor {
                 (session.worktree.clone(), Some(session))
             }
         };
+        // A session that opened with its base's merge left unfinished is the
+        // worker's to conclude, and the task is where it is told so: the
+        // conflict as observed state, and the criterion its judge holds the
+        // resolution to. Composed here because this is where the session opens —
+        // after the task was rendered — and nowhere else learns of it first.
+        let task = match session.as_ref().and_then(crate::vcs::merge_in_progress) {
+            Some(merge) => crate::plan::with_merge_in_progress(&req.task, &merge),
+            None => req.task.clone(),
+        };
         // The session this dispatch works in: the one just opened, or — for every
         // later dispatch of the same node, which names the worktree rather than
         // asking for a session of its own — the one this executor opened there.
@@ -358,7 +367,7 @@ impl Executor for LocalExecutor {
         }
         let mut run = GraphRun::start(&Launch {
             graph: &req.graph.0,
-            task: &req.task,
+            task: &task,
             dir: &dir,
             labels: &req.labels,
             env: &env,

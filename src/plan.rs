@@ -128,6 +128,33 @@ pub const AMENDMENT_PRECEDENCE: &str = "This node's manager amended its bar. Eve
      elsewhere, or an operational note below, the clause here wins and the contradicted \
      one no longer binds.";
 
+/// The heading the engine's own merge-resolution criterion is rendered under.
+///
+/// A **sub-heading of the task's own `## Acceptance criteria`**, for
+/// [`AMENDMENT_HEADING`]'s reason: it is part of the bar the judge reads, and a
+/// bar in two sections is two bars. Rendered after the task's own criteria and
+/// after any amendment, and only into a dispatch whose session opened with a
+/// merge of its base left unfinished — see [`MERGE_RESOLUTION_CRITERION`].
+pub const MERGE_RESOLUTION_HEADING: &str = "### Merge resolution";
+
+/// What the merge-resolution block tells its reader about where it came from.
+///
+/// Deliberately **not** [`AMENDMENT_PRECEDENCE`]: nobody amended this node's bar.
+/// The engine wrote the criterion because of what the session it opened is in,
+/// and the sentence says exactly that and claims no manager's authority.
+pub const MERGE_RESOLUTION_PREAMBLE: &str = "The engine added this criterion because this \
+     dispatch's session opened with an unfinished merge of its base into its branch.";
+
+/// The criterion a dispatch handed a conflicted session is judged against.
+///
+/// A template, filled by [`with_merge_in_progress`]: `{base_commit}` is the full
+/// commit of the base that was merged, `{branch}` the session's branch, and
+/// `{paths}` the unmerged paths, each in backticks and comma-separated.
+pub const MERGE_RESOLUTION_CRITERION: &str = "The merge of `{base_commit}` into `{branch}` is \
+     concluded by a commit on `{branch}` whose parents include `{base_commit}`; no merge is in \
+     progress; no path is unmerged; no conflict marker remains in {paths}; and the checks that \
+     exercise the files the resolution touched are green over the finished tree.";
+
 /// What the manager-notes section tells its reader about its own authority.
 ///
 /// The sentence the amendment block used to open with, kept for the notes
@@ -883,6 +910,182 @@ fn with_notes(task: &str, notes: &[crate::note::RecordedNote]) -> String {
         Some(at) => format!("{}\n\n{block}\n{}", task[..at].trim_end(), &task[at..]),
         None => format!("{}\n\n{block}", task.trim_end()),
     }
+}
+
+/// A merge a session opened with and left unfinished, as the dispatch working in
+/// that session is told about it.
+///
+/// `onevcs` opens a session continuing a branch whose base has moved to conflict
+/// with it **with the merge in progress** and reports it as the session's
+/// [`OpenConflict`](onevcs::OpenConflict); what this adds is the two names the
+/// worker reads it by and the base's commits that made the conflict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MergeInProgress {
+    /// The base's name, which the merge brought in.
+    pub base: String,
+    /// The session's branch, which the merge is into.
+    pub branch: String,
+    /// `onevcs`'s own report: the unmerged paths, the base commit and the tip.
+    pub conflict: onevcs::OpenConflict,
+    /// The base's commits between the branch's tip and the merged base commit
+    /// that touch an unmerged path, newest first, one line each and at most
+    /// [`MERGE_COMMITS_LISTED`] of them. `None` where git could not list them.
+    pub commits: Option<Vec<String>>,
+    /// How many such commits there were beyond the ones listed.
+    pub unlisted: usize,
+}
+
+/// How many of the base's commits a conflicted dispatch is shown, so a base
+/// that moved a long way cannot swallow the task it is composed into.
+pub(crate) const MERGE_COMMITS_LISTED: usize = 20;
+
+/// One task with the merge its session opened with composed into it: the
+/// conflict as observed state under [`PLANNER_CONTEXT_HEADING`], and
+/// [`MERGE_RESOLUTION_CRITERION`] at the end of the task's acceptance criteria.
+///
+/// Composed **into the rendered task** rather than by [`render_task`], because
+/// the conflict exists only once the session is open, and the session is opened
+/// where the dispatch runs — after the task was composed. Every other section is
+/// left exactly as it was rendered, a re-dispatch's diagnosis included.
+pub(crate) fn with_merge_in_progress(task: &str, merge: &MergeInProgress) -> String {
+    with_merge_context(&with_merge_resolution(task, merge), merge)
+}
+
+/// The criterion the judge of a conflicted dispatch reads, filled in.
+pub(crate) fn merge_resolution_criterion(merge: &MergeInProgress) -> String {
+    MERGE_RESOLUTION_CRITERION
+        .replace("{base_commit}", &merge.conflict.base_commit)
+        .replace("{branch}", &merge.branch)
+        .replace("{paths}", &listed_paths(&merge.conflict.paths))
+}
+
+fn listed_paths(paths: &[String]) -> String {
+    paths
+        .iter()
+        .map(|path| format!("`{path}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The task with [`MERGE_RESOLUTION_HEADING`] closing its criteria section —
+/// after the task's own criteria and after any amendment — placed exactly as
+/// [`amended`] places an amendment where the task states no such section.
+fn with_merge_resolution(task: &str, merge: &MergeInProgress) -> String {
+    let block = format!(
+        "{MERGE_RESOLUTION_HEADING}\n{MERGE_RESOLUTION_PREAMBLE}\n\n- {}\n",
+        merge_resolution_criterion(merge)
+    );
+    if let Some(end) = criteria_section_end(task) {
+        let (bar, rest) = task.split_at(end);
+        return if rest.trim().is_empty() {
+            format!("{}\n\n{block}", bar.trim_end())
+        } else {
+            format!("{}\n\n{block}\n{rest}", bar.trim_end())
+        };
+    }
+    let block = format!("{CRITERIA_HEADING}\n\n{block}");
+    match additional_info_at(task) {
+        Some(at) => format!("{}\n\n{block}\n{}", task[..at].trim_end(), &task[at..]),
+        None => format!("{}\n\n{block}", task.trim_end()),
+    }
+}
+
+/// The task with the conflict leading its planner context: first in the section
+/// the task already carries — a re-dispatch's diagnosis stays below it — or in
+/// one of its own, above any cross-repository references, where it carries none.
+fn with_merge_context(task: &str, merge: &MergeInProgress) -> String {
+    let block = merge_context(merge);
+    if let Some(at) = last_line_at(task, PLANNER_CONTEXT_HEADING) {
+        let mut end = at;
+        let mut lines = task[at..].split_inclusive('\n');
+        if let Some(heading) = lines.next() {
+            end += heading.len();
+        }
+        if let Some(said) = lines.next().filter(|line| line.trim_end() == OBSERVED_STATE) {
+            end += said.len();
+        }
+        let (head, rest) = task.split_at(end);
+        let head = if head.ends_with('\n') {
+            head.to_owned()
+        } else {
+            format!("{head}\n")
+        };
+        return format!("{head}\n{block}{rest}");
+    }
+    let section = format!("{PLANNER_CONTEXT_HEADING}\n{OBSERVED_STATE}\n\n{block}");
+    match last_line_at(task, CROSS_REPO_REFERENCES_HEADING) {
+        Some(at) => format!("{}\n\n{section}\n{}", task[..at].trim_end(), &task[at..]),
+        None => format!("{}\n\n{section}", task.trim_end()),
+    }
+}
+
+/// What a conflicted dispatch is told about the merge it is standing in.
+fn merge_context(merge: &MergeInProgress) -> String {
+    let conflict = &merge.conflict;
+    let mut said = format!(
+        "This dispatch's session opened with a merge in progress. Merging the base `{base}` at \
+         `{base_commit}` into this branch, `{branch}` at `{branch_tip}`, stopped on a conflict, \
+         and git left the merge unfinished in the worktree: `MERGE_HEAD` names the base commit \
+         and the unmerged paths below carry conflict markers.\n\nUnmerged paths:\n",
+        base = merge.base,
+        base_commit = conflict.base_commit,
+        branch = merge.branch,
+        branch_tip = conflict.branch_tip,
+    );
+    for path in &conflict.paths {
+        said.push_str(&format!("- `{path}`\n"));
+    }
+    let since = format!(
+        "The base's commits between `{}` and `{}` that touch those paths",
+        conflict.branch_tip, conflict.base_commit
+    );
+    match &merge.commits {
+        None => said.push_str(&format!(
+            "\n{since} could not be listed; `git log {}..{} -- <path>` lists them.\n",
+            conflict.branch_tip, conflict.base_commit
+        )),
+        Some(commits) if commits.is_empty() => {
+            said.push_str(&format!("\n{since}: none touches them by name.\n"));
+        }
+        Some(commits) => {
+            said.push_str(&format!("\n{since}, newest first:\n"));
+            for commit in commits {
+                said.push_str(&format!("- {commit}\n"));
+            }
+            if merge.unlisted > 0 {
+                said.push_str(&format!(
+                    "- … and {} more, not listed here: `git log {}..{} -- <path>` lists them \
+                     all.\n",
+                    merge.unlisted, conflict.branch_tip, conflict.base_commit
+                ));
+            }
+        }
+    }
+    said.push_str(&format!(
+        "\nConcluding this merge comes before anything else: resolve every unmerged path, stage \
+         it, and commit the merge, so the branch gains a merge commit on top of `{branch_tip}` \
+         whose parents include `{base_commit}`. Never abort the merge, and never rebase, squash \
+         or force-push the branch.\n",
+        branch_tip = conflict.branch_tip,
+        base_commit = conflict.base_commit,
+    ));
+    said
+}
+
+/// Where the last line reading exactly `heading` begins, as a byte offset.
+///
+/// The last, because the sections this module renders are appended after the
+/// task's own prose, so a task that quotes the heading itself cannot move them.
+fn last_line_at(task: &str, heading: &str) -> Option<usize> {
+    let mut at = 0;
+    let mut found = None;
+    for line in task.split_inclusive('\n') {
+        if line.trim_end() == heading {
+            found = Some(at);
+        }
+        at += line.len();
+    }
+    found
 }
 
 /// Whose task a note said it was updating, as the section names it.

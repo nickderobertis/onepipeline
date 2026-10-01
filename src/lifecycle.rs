@@ -118,7 +118,8 @@ pub fn execute(
     // `on_remote`: where the branch stands on its remote, which the next attempt
     // is told so that its repair grows that commit rather than rewriting it.
     // `last_preserved`: the failure the attempt before this one preserved, once
-    // there is one.
+    // there is one. `conflicted`: the attempts whose dispatch was handed the
+    // branch's conflict with its base, for the decision a spent budget raises.
     let (
         attempts,
         mut node,
@@ -128,6 +129,7 @@ pub fn execute(
         mut on_remote,
         mut notes,
         mut last_preserved,
+        mut conflicted,
     ) = match resume {
         None => (
             engine::publication_attempts(),
@@ -138,6 +140,7 @@ pub fn execute(
             OnRemote::Never,
             Vec::new(),
             None,
+            Conflicted::default(),
         ),
         Some(continuation) => (
             continuation.attempts,
@@ -148,6 +151,7 @@ pub fn execute(
             continuation.on_remote,
             continuation.notes,
             Some(continuation.preserved),
+            continuation.conflicted,
         ),
     };
     loop {
@@ -182,13 +186,24 @@ pub fn execute(
                         on_remote,
                         notes,
                         preserved,
+                        conflicted,
                     })
                 });
                 return engine::Ending::Exhausted(refusal);
             }
         };
         endings.push(preserved.outcome);
-        if let Some(same) = republished(published.as_deref(), &preserved.tip) {
+        conflicted.read(&preserved);
+        // A dispatch handed an unfinished merge that it did not conclude cannot
+        // move the branch — git commits nothing over unmerged paths — so the same
+        // commit published twice says nothing about whether the refusal is the
+        // branch's. It is: the conflict is the branch's, every attempt is handed
+        // it again, and the budget is what bounds that.
+        let unconcluded = preserved.handed.is_some()
+            && preserved.outcome == crate::vcs::Preserving::SyncConflict;
+        if let Some(same) = republished(published.as_deref(), &preserved.tip)
+            .filter(|_| !unconcluded)
+        {
             return engine::Ending::Settled(republished_the_same_commit(
                 &node.id, &preserved, &endings, &same, attempt,
             ));
@@ -209,6 +224,16 @@ pub fn execute(
         // then settle as the cancellation rather than as the publication failure
         // that is the useful half of what happened.
         if attempt >= attempts || cancel.is_cancelled() {
+            // A budget spent on a conflict the worker was handed and did not
+            // conclude is the one ending here that is a decision rather than a
+            // report: the work went back to the worker every attempt it could,
+            // so what is left is the supervisor's. Not for a cancelled run,
+            // which stopped asking rather than ran out of answers.
+            if !cancel.is_cancelled() {
+                if let Some(unconverged) = conflicted.unconverged(&node, &preserved) {
+                    let _ = tx.send(Message::SessionConflicted(Box::new(unconverged)));
+                }
+            }
             return engine::Ending::Settled(stopped_retrying(&node.id, &preserved, &endings));
         }
         attempt = attempt.saturating_add(1);
@@ -285,6 +310,7 @@ pub(crate) struct Continuation {
     published: Option<String>,
     on_remote: OnRemote,
     preserved: Preserved,
+    conflicted: Conflicted,
 }
 
 impl Continuation {
@@ -413,6 +439,10 @@ fn attempt_once(
     // The steps the preserved branch already carries, plus the ones this attempt
     // adds. Carried forward whole, because the branch a later attempt preserves
     // is the same branch: a step skipped on one attempt is still on it.
+    // The merge this attempt's session opened with, when its dispatch was
+    // handed one: the first step's, since that is the dispatch that opens the
+    // session and every later step works in the same worktree.
+    let mut handed: Option<onevcs::OpenConflict> = None;
     let mut completed: Vec<String> = node
         .resume
         .as_ref()
@@ -524,6 +554,7 @@ fn attempt_once(
         // the branch it left behind.
         session = drained.session.or(session);
         branch = drained.branch.or(branch);
+        handed = drained.conflict.or(handed);
         if stream.is_none() {
             if let Some(token) = &session {
                 let opened = crate::vcs::working_session(token);
@@ -569,7 +600,7 @@ fn attempt_once(
         });
     };
 
-    let attempted = publish(
+    let mut attempted = publish(
         executor,
         paths,
         launch,
@@ -585,6 +616,9 @@ fn attempt_once(
         branch,
         attempt,
     );
+    if let Attempt::Preserving(preserved) = &mut attempted {
+        preserved.handed = handed;
+    }
     // Only where this attempt is the node's answer. A publication that failed
     // leaving the work on its branch is asked again, and reporting a criterion
     // against every attempt of a node that is still being re-dispatched would
@@ -956,6 +990,28 @@ fn publish(
         // it is the same `publication_failed` the outcome arm above takes, which
         // `a_publication_its_merge_path_refuses_settles_the_node_failed_by_name` drives
         // end to end beside an undrafted body.
+        // The one refusal of the call itself that is a preserving ending: the
+        // session opened with its base's merge in progress and the worker did
+        // not conclude it, so `onevcs` refused before committing or pushing
+        // anything. The branch is where the session found it, and the next
+        // attempt is handed the same conflict to conclude — the publication
+        // budget, and nothing else, is what bounds that.
+        Err(error) if crate::vcs::publication_merge_unfinished(&error) => match branch {
+            Some(branch) => Attempt::Preserving(Box::new(Preserved {
+                branch,
+                outcome: crate::vcs::Preserving::SyncConflict,
+                reason: engine::bounded(&crate::views::one_line(&error.to_string())),
+                evidence: crate::vcs::evidence_in(token),
+                body_aside: body_aside.clone(),
+                tip: crate::vcs::session_tip(token),
+                handed: None,
+            })),
+            // llmlint: ignore[changed_behavior_has_e2e] a session that opened with a merge
+            // in progress is one continuing an existing branch, and the dispatch that opened
+            // it named that branch, so no invocation reaches a publication with a merge
+            // unfinished and no branch in hand; it settles as the residual it would be.
+            None => publication_failed(error.to_string()),
+        },
         Err(error) => publication_failed(error.to_string()),
     }
 }
@@ -1315,6 +1371,49 @@ struct Preserved {
     /// [`SessionTip::Unmoved`]: crate::vcs::SessionTip::Unmoved
     /// [`SessionTip::Unknown`]: crate::vcs::SessionTip::Unknown
     tip: crate::vcs::SessionTip,
+    /// The merge this attempt's session opened with, when it opened with one and
+    /// the attempt's dispatch was handed it to conclude.
+    handed: Option<onevcs::OpenConflict>,
+}
+
+/// The dispatches of one node that were handed its branch's conflict with the
+/// base, carried across every attempt of the publication-retry loop.
+#[derive(Debug, Clone, Default)]
+struct Conflicted {
+    /// How many there were.
+    dispatches: u32,
+    /// What the last of them was handed.
+    last: Option<onevcs::OpenConflict>,
+}
+
+impl Conflicted {
+    /// Count the attempt that just preserved its branch, where it was one.
+    fn read(&mut self, preserved: &Preserved) {
+        if let Some(conflict) = &preserved.handed {
+            self.dispatches = self.dispatches.saturating_add(1);
+            self.last = Some(conflict.clone());
+        }
+    }
+
+    /// The decision to put to the supervisor once the budget is spent on a
+    /// conflict the node's dispatches were handed and did not conclude: the
+    /// attempt that stopped the loop ended `sync-conflict`, and at least one of
+    /// the node's dispatches was dispatched into the merge. `None` otherwise — a
+    /// node whose last refusal is about something else is settled under that
+    /// word and asks nothing new.
+    fn unconverged(&self, node: &Node, preserved: &Preserved) -> Option<engine::SessionConflict> {
+        if preserved.outcome != crate::vcs::Preserving::SyncConflict {
+            return None;
+        }
+        let last = self.last.as_ref()?;
+        Some(engine::SessionConflict {
+            node: crate::graph::NodeRef::of(node)?,
+            dispatched: self.dispatches,
+            branch: preserved.branch.clone(),
+            paths: last.paths.clone(),
+            because: preserved.reason.clone(),
+        })
+    }
 }
 
 /// Where a preserved branch stands on its remote, as far as this node's
@@ -1404,6 +1503,9 @@ fn failed_publication(
                 evidence: crate::vcs::evidence_in(token),
                 body_aside,
                 tip: crate::vcs::session_tip(token),
+                // Filled by `attempt_once`, which is what knows what its
+                // dispatch was handed.
+                handed: None,
             }))
         }
         // The host refused, not the work: no edit to the tree installs the tool
@@ -2454,6 +2556,7 @@ mod tests {
             evidence: Vec::new(),
             body_aside: None,
             tip: crate::vcs::SessionTip::Unknown,
+            handed: None,
         };
         let two = std::num::NonZeroU32::new(2).expect("two");
         let three = std::num::NonZeroU32::new(3).expect("three");
@@ -2544,6 +2647,7 @@ mod tests {
             }],
             body_aside: None,
             tip: crate::vcs::SessionTip::Unknown,
+            handed: None,
         };
         let two = std::num::NonZeroU32::new(2).expect("two");
         let three = std::num::NonZeroU32::new(3).expect("three");
