@@ -2029,6 +2029,9 @@ fn attach(
         relay_observer(paths, run, tx)?;
     }
     let mut reported = 0usize;
+    // How long the journal was when the run was last read, so it is read again
+    // only once it has grown.
+    let mut read_at: Option<u64> = None;
     let mut observer_gone = false;
     let mut journal = Journal::open(paths);
     // What the observer's stream says about its members' identity chains, for
@@ -2102,6 +2105,19 @@ fn attach(
             }
         }
 
+        // Read only when there is something new in it. Every line this prints is
+        // a record of the journal, so a journal that has not grown has nothing to
+        // print — and reading the run folds its store past the checkpoint, which
+        // every twentieth of a second for the whole of a run is a cost that grows
+        // with how long the run takes rather than with what it records. On a
+        // loaded host that was most of what the driving process folded. A loop
+        // that has concluded is read regardless: its settlement is read off it.
+        let length = std::fs::metadata(paths.journal()).map_or(0, |about| about.len());
+        if !concluded && read_at == Some(length) {
+            std::thread::sleep(ATTACH_POLL);
+            continue;
+        }
+        read_at = Some(length);
         let view = RunView::open(paths)?;
         // The stream is progress for a person; the settlement below is the one
         // record a caller parses. Keeping them on separate descriptors is what
