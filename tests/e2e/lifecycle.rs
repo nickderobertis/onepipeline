@@ -3605,6 +3605,111 @@ fn a_conflict_the_worker_never_concludes_spends_the_budget_and_then_asks() {
             holding.display()
         );
     }
+
+    // Answering it as it asks: a `retry` continuing the same branch, whose
+    // replacement is dispatched into the conflict again — this time with a
+    // worker that concludes it — and lands.
+    world.script("service-again.resolves-merge", "reconciled on the retry");
+    world
+        .run_with_stdin(
+            &["reply", &run, "--correlation", &key],
+            &json!({
+                "version": 2,
+                "message": "retry it on the same branch",
+                "commands": [{
+                    "op": "retry",
+                    "id": "service",
+                    "node": {
+                        "id": "service-again",
+                        "repo": "service",
+                        "persona": "engineer",
+                        "title": "feat: ship service",
+                        "branch": CONFLICTED,
+                        "task": "## What\nShip service.\n\n## Why\nUsers need it.\n\n\
+                                 ## Acceptance criteria\n- service is published.",
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .exited(0);
+    world.run(&["adopt", &run]).exited(0);
+    let replaced = world
+        .events_of(&run, "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "service-again")
+        .unwrap_or_else(|| panic!("the replacement never settled\n{}", why(&world, &run)));
+    assert_eq!(
+        replaced["payload"]["status"],
+        "done",
+        "{replaced}\n{}",
+        why(&world, &run)
+    );
+    let retried = tasks_dispatched_to(&world, &run, "service-again");
+    assert_eq!(retried.len(), 1, "{retried:#?}");
+    assert_handed_the_conflict(&retried[0], &base, &tip);
+    assert_eq!(
+        git(
+            &world,
+            &repo.origin,
+            &["show", &format!("main:{CONFLICTED_PATH}")]
+        ),
+        "reconciled on the retry\n"
+    );
+}
+
+/// A multi-step node shares the first step's session, and so its merge: the
+/// step that opened the session is handed the conflict, a later step working in
+/// the same worktree concludes it, and only then does the node publish.
+#[test]
+fn a_later_step_concludes_the_merge_the_first_steps_session_opened_with() {
+    let world = World::new("lifecycle-openconflict-steps")
+        .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "1");
+    let repo = world.repository("local-direct", &[]);
+    let (base, tip) = a_branch_its_base_conflicts_with(&world, &repo);
+    world.script(
+        "service.review.resolves-merge",
+        "concluded by the second step",
+    );
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "branch": CONFLICTED,
+        "title": "feat: ship service",
+        "steps": [
+            {"id": "review", "persona": "reviewer", "task": "## What\nreview\n\n## Acceptance criteria\n- service is published.", "deps": ["implement"]},
+            {"id": "implement", "persona": "engineer", "task": "## What\nimplement\n\n## Acceptance criteria\n- service is published."},
+        ],
+    });
+    let run = settle(&world, "openconflictsteps", vec![node]);
+    let result = world.run_json(&run, "result.json");
+    assert_eq!(
+        result["nodes"][0]["status"],
+        "done",
+        "{result}\n{}",
+        why(&world, &run)
+    );
+    // The step that opened the session was handed the conflict.
+    let tasks = tasks_dispatched_to(&world, &run, "service");
+    assert_eq!(tasks.len(), 2, "{tasks:#?}");
+    assert_handed_the_conflict(&tasks[0], &base, &tip);
+    let parents = git(
+        &world,
+        &repo.checkout,
+        &["log", "-1", "--format=%P", CONFLICTED],
+    );
+    assert!(
+        parents.contains(&base) && parents.contains(&tip),
+        "the branch's head is not the merge of {base} onto {tip}: {parents}"
+    );
+    assert_eq!(
+        git(
+            &world,
+            &repo.origin,
+            &["show", &format!("main:{CONFLICTED_PATH}")]
+        ),
+        "concluded by the second step\n"
+    );
 }
 
 /// The same finding, answered by the **reconciler** and never read off the queue.

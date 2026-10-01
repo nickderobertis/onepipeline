@@ -210,15 +210,18 @@ pub fn publish(
     title: Option<&str>,
     body: Option<&str>,
     draft: Option<&DraftReason>,
-) -> Result<Publication> {
+) -> std::result::Result<Publication, PublishRefused> {
     let title = title
         .map(|title| title.parse::<Subject>().map_err(sibling))
-        .transpose()?;
+        .transpose()
+        .map_err(PublishRefused::Refused)?;
     // Held to the sibling's own rule where it is composed rather than where it
     // arrives, for [`Subject`]'s reason: a reason that would not render as itself
     // is refused before a session's work is committed against it.
     if let Some(reason) = draft {
-        reason.checked().map_err(refusal)?;
+        reason
+            .checked()
+            .map_err(|error| PublishRefused::Refused(refusal(error)))?;
     }
     onevcs::publish(
         &providers(),
@@ -233,45 +236,39 @@ pub fn publish(
     .map_err(publication_refusal)
 }
 
-/// How a refusal this module composed says a publication met a **merge the
-/// session's worker has not concluded**, written at the head of the message.
+/// A publication call `onevcs` did not answer with a publication.
 ///
-/// The third head marker, composed and read exactly as [`SESSION_OPEN_CONFLICT`]
-/// is: `onevcs` refuses to publish a worktree holding an unfinished merge as its
-/// typed [`SyncConflict`](onevcs::Error::SyncConflict), *before* it touches
-/// anything, and this marker carries that classification to the publication's
-/// caller.
-const PUBLICATION_MERGE_UNFINISHED: &str = "the session's merge with its base is unfinished";
+/// Typed rather than composed into [`Error`], because one of the two routes the
+/// node into a re-dispatch and the other settles it, and that decision is made
+/// off `onevcs`'s own typed refusal rather than off any wording downstream of it.
+#[derive(Debug)]
+pub(crate) enum PublishRefused {
+    /// The session holds its base's merge unfinished: it opened with the merge in
+    /// progress and the worker did not conclude it. `onevcs` refuses that as a
+    /// [`SyncConflict`](onevcs::Error::SyncConflict) before committing or pushing
+    /// anything, so the branch is where the session found it and the next
+    /// attempt, handed the conflict again, can answer it. Carries the sibling's
+    /// own sentence.
+    MergeUnfinished(String),
+    /// Any other refusal of the call.
+    Refused(Error),
+}
 
-/// A publication `onevcs` refused, as this crate's own error — with the one
-/// refusal a further attempt converges on **named**.
-///
-/// A publication of a session that opened with its base's merge in progress, and
-/// whose worker did not conclude it, is refused as a sync conflict before
-/// anything is committed or pushed. That is the conflict the worker was handed,
-/// still standing, on a branch exactly where the session found it — which is
-/// what a further attempt, handed the conflict again, can answer.
-fn publication_refusal(error: onevcs::Error) -> Error {
-    match &error {
-        onevcs::Error::SyncConflict { .. } => {
-            sibling(format!("{PUBLICATION_MERGE_UNFINISHED}: {error}"))
+impl std::fmt::Display for PublishRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MergeUnfinished(reason) => f.write_str(reason),
+            Self::Refused(error) => error.fmt(f),
         }
-        _ => refusal(error),
     }
 }
 
-/// Whether a publication was refused because its session still holds a merge
-/// nobody concluded.
-///
-/// Asked of the error [`publish`] returned, on [`session_open_conflicted`]'s
-/// terms and for its reason: it routes the node into a re-dispatch, which must
-/// not be reachable from anything a dispatch says about itself.
-pub(crate) fn publication_merge_unfinished(error: &Error) -> bool {
-    matches!(
-        error,
-        Error::Sibling { tool, message }
-            if *tool == ONEVCS && message.starts_with(PUBLICATION_MERGE_UNFINISHED)
-    )
+/// A publication `onevcs` refused, classified off its typed error.
+fn publication_refusal(error: onevcs::Error) -> PublishRefused {
+    match &error {
+        onevcs::Error::SyncConflict { .. } => PublishRefused::MergeUnfinished(error.to_string()),
+        _ => PublishRefused::Refused(refusal(error)),
+    }
 }
 
 /// The session's own change request — the one a publication of it would adopt —

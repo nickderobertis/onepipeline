@@ -1003,11 +1003,11 @@ fn publish(
         // anything. The branch is where the session found it, and the next
         // attempt is handed the same conflict to conclude — the publication
         // budget, and nothing else, is what bounds that.
-        Err(error) if crate::vcs::publication_merge_unfinished(&error) => match branch {
+        Err(crate::vcs::PublishRefused::MergeUnfinished(reason)) => match branch {
             Some(branch) => Attempt::Preserving(Box::new(Preserved {
                 branch,
                 outcome: crate::vcs::Preserving::SyncConflict,
-                reason: engine::bounded(&crate::views::one_line(&error.to_string())),
+                reason: engine::bounded(&crate::views::one_line(&reason)),
                 evidence: crate::vcs::evidence_in(token),
                 body_aside: body_aside.clone(),
                 tip: crate::vcs::session_tip(token),
@@ -1017,9 +1017,9 @@ fn publish(
             // in progress is one continuing an existing branch, and the dispatch that opened
             // it named that branch, so no invocation reaches a publication with a merge
             // unfinished and no branch in hand; it settles as the residual it would be.
-            None => publication_failed(error.to_string()),
+            None => publication_failed(reason),
         },
-        Err(error) => publication_failed(error.to_string()),
+        Err(crate::vcs::PublishRefused::Refused(error)) => publication_failed(error.to_string()),
     }
 }
 
@@ -1208,7 +1208,7 @@ fn finished_detail(
 /// One publication, and how many reads of the merge path it took to answer.
 struct Published {
     /// What the last read answered, which is the publication the node settles on.
-    answered: crate::error::Result<onevcs::Publication>,
+    answered: std::result::Result<onevcs::Publication, crate::vcs::PublishRefused>,
     /// How many reads were made, for the settlement a spent budget writes. One
     /// on every path but the re-read, which is every publication that answered
     /// the first time it was asked.
@@ -1283,7 +1283,9 @@ fn waited(backoff: std::time::Duration, cancel: &crate::executor::CancellationTo
 /// land, and a refusal is the first of those. Nothing about it says a push reached
 /// anything, so re-reading it would ask the host about work that may never have
 /// left this machine. It settles as the residual, exactly as it always did.
-fn still_unread(answered: &crate::error::Result<onevcs::Publication>) -> bool {
+fn still_unread(
+    answered: &std::result::Result<onevcs::Publication, crate::vcs::PublishRefused>,
+) -> bool {
     let Ok(published) = answered else {
         return false;
     };
@@ -1402,6 +1404,12 @@ impl Conflicted {
         }
     }
 
+    // llmlint: ignore[changed_behavior_has_e2e] both answers that raise or withhold the
+    // finding after a spent budget are driven end to end — raised by
+    // `a_conflict_the_worker_never_concludes_spends_the_budget_and_then_asks`, withheld by
+    // `a_publication_conflict_is_redispatched_into_the_merge_and_concluded`; a conflicted
+    // dispatch whose *last* refusal is another word needs a merge path that refuses only
+    // after a conclusion, and is held by `a_spent_budget_asks_only_about_a_conflict_still_standing`.
     /// The decision to put to the supervisor once the budget is spent on a
     /// conflict the node's dispatches were handed and did not conclude: the
     /// attempt that stopped the loop ended `sync-conflict`, and at least one of
@@ -3113,6 +3121,47 @@ mod tests {
             std::num::NonZeroU32::new(45),
             "the step's own budget did not survive the conversion"
         );
+    }
+
+    /// A spent budget asks about the conflict only where the last refusal is that
+    /// conflict and some dispatch was handed it — not where the worker concluded
+    /// it and the publication then failed for something else, and not where no
+    /// dispatch was ever handed one.
+    #[test]
+    fn a_spent_budget_asks_only_about_a_conflict_still_standing() {
+        let node = Node {
+            id: "service".into(),
+            ..Node::default()
+        };
+        let ended = |outcome| Preserved {
+            branch: "feat/service".into(),
+            outcome,
+            reason: "sync conflict".into(),
+            evidence: Vec::new(),
+            body_aside: None,
+            tip: crate::vcs::SessionTip::Unknown,
+            handed: Some(onevcs::OpenConflict {
+                paths: vec!["a.md".into()],
+                base_commit: "b".repeat(40),
+                branch_tip: "t".repeat(40),
+            }),
+        };
+        let mut conflicted = Conflicted::default();
+        let never = conflicted.unconverged(&node, &ended(crate::vcs::Preserving::SyncConflict));
+        assert!(never.is_none(), "nothing was counted yet");
+
+        conflicted.read(&ended(crate::vcs::Preserving::SyncConflict));
+        conflicted.read(&ended(crate::vcs::Preserving::SyncConflict));
+        let asked = conflicted
+            .unconverged(&node, &ended(crate::vcs::Preserving::SyncConflict))
+            .expect("a conflict still standing is asked about");
+        assert_eq!(asked.dispatched, 2);
+        assert_eq!(asked.paths, vec!["a.md".to_owned()]);
+        assert_eq!(asked.branch, "feat/service");
+
+        assert!(conflicted
+            .unconverged(&node, &ended(crate::vcs::Preserving::ChecksFailed))
+            .is_none());
     }
 
     fn step(id: &str, deps: &[&str]) -> Step {

@@ -4561,6 +4561,11 @@ pub(crate) fn attempt(
         // the merge in progress and the worker concludes it — so this is a
         // sibling refusing anyway, and asking again seconds later only
         // reproduces it.
+        // llmlint: ignore[changed_behavior_has_e2e] no invocation reaches this: every
+        // request this engine opens leaves `refuse_conflicts` unset, so `onevcs` opens the
+        // session over the conflict instead — which the conflict journeys in
+        // `tests/e2e/lifecycle.rs` drive. The classification it reads is held by `vcs`'s
+        // `session_open_conflicted` test over the typed refusal.
         if conflicted {
             return Attempted::Drained(Box::new(drained));
         }
