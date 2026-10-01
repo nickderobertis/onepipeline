@@ -283,6 +283,11 @@ pub enum TemplateCommand {
     List(TemplateListArgs),
     /// One name resolved through its layers, stated as the loader document
     /// `onetaskgraph ... --template-loader -` reads.
+    ///
+    /// The first layer holding `<NAME>.md.j2` wins. Its file may extend the file a lower
+    /// layer holds for the same name by the reserved name `onepipeline/<layer>/<NAME>.md.j2`
+    /// — `onepipeline/host/<NAME>.md.j2` from the repository layer — replacing only the
+    /// blocks it overrides.
     Resolve(TemplateResolveArgs),
     /// Validate one resolved template, and optionally a rendering of it or a stored item.
     Check(TemplateCheckArgs),
@@ -331,7 +336,8 @@ pub struct TemplateResolveArgs {
     #[arg(long, value_name = "FILE")]
     pub template: Option<PathBuf>,
     /// Print the loader document — `reference`, `entry`, `search_path`, `templates` and
-    /// `digest`, with `name`, `role`, `layer` and `path` beside — for
+    /// `digest`, with `name`, `role`, `layer`, `path` and `chain` beside, `chain` naming
+    /// every file the digest covers with its layer and path — for
     /// `onetaskgraph ... --template-loader -`.
     #[arg(long)]
     pub json: bool,

@@ -568,6 +568,11 @@ fn every_name_resolves_at_the_first_layer_that_supplies_it_and_says_which() {
     assert_eq!(resolved["path"], Value::Null);
     assert_eq!(resolved["reference"], "onepipeline:plan-task");
     assert_eq!(resolved["entry"], BASE);
+    // Its chain is the base alone, from no file.
+    assert_eq!(
+        resolved["chain"],
+        json!([{"name": BASE, "layer": "built-in", "path": null}])
+    );
 
     for name in [BUILT_IN, "follow-up", "design-doc"] {
         let file = format!("{name}.md.j2");
@@ -610,9 +615,10 @@ fn every_name_resolves_at_the_first_layer_that_supplies_it_and_says_which() {
         .whole();
         assert_eq!(resolved["layer"], "repository", "{name}");
         assert_eq!(resolved["path"], json!(text(&overridden)), "{name}");
+        // The host's file for the name is reachable beneath it, so its directory follows.
         assert_eq!(
             resolved["search_path"],
-            json!([text(overridden.parent().unwrap())])
+            json!([text(overridden.parent().unwrap()), text(&root)])
         );
         // With no `--repo`, the working directory is the checkout.
         let resolved = verb(&world, &repo, &root, &["resolve", name, "--json"]).whole();
@@ -2117,5 +2123,641 @@ fn nothing_in_this_repository_ships_a_template_but_the_plan_task_base() {
         ),
         only_the_base,
         "the published crate"
+    );
+}
+
+/// A host `design-doc` with two blocks: what a repository layer extends and replaces one of.
+const HOSTED_DESIGN: &str = "# Design\n\n{% block summary %}The summary.{% endblock %}\n\n\
+{% block contracts_guidance %}State each contract exactly.{% endblock %}\n";
+
+/// A repository `design-doc` extending [`HOSTED_DESIGN`] and overriding its one block.
+const EXTENDING_DESIGN: &str = "{% extends \"onepipeline/host/design-doc.md.j2\" %}\n\
+{% block contracts_guidance %}This repository's own guidance.{% endblock %}\n";
+
+/// A resolved chain as `(name, layer, path)` triples, to compare against a literal one.
+fn chain_of(resolved: &Value) -> Vec<(String, String, Value)> {
+    resolved["chain"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no chain in {resolved}"))
+        .iter()
+        .map(|file| {
+            (
+                file["name"].as_str().expect("a name").to_owned(),
+                file["layer"].as_str().expect("a layer").to_owned(),
+                file["path"].clone(),
+            )
+        })
+        .collect()
+}
+
+fn link(name: &str, layer: &str, path: Option<&Path>) -> (String, String, Value) {
+    (
+        name.to_owned(),
+        layer.to_owned(),
+        path.map_or(Value::Null, |path| json!(text(path))),
+    )
+}
+
+/// What the released renderer renders `loader` to, with no answers: a document's body.
+fn rendered_document(world: &World, loader: &str) -> String {
+    otg(
+        world,
+        &[
+            "template",
+            "render",
+            "--template-loader",
+            "-",
+            "--no-interactive",
+            "--json",
+        ],
+        Some(loader),
+    )
+    .whole()["body"]
+        .as_str()
+        .expect("a rendered body")
+        .to_owned()
+}
+
+/// A host root holding `design-doc` and a checkout beside it overriding nothing yet: the
+/// root, the host file, the checkout, and its repository layer's directory.
+fn layered(world: &World) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    let root = host(world);
+    let hosted = root.join("design-doc.md.j2");
+    write(&hosted, HOSTED_DESIGN);
+    let repo = world.root.join("repo");
+    let templates = repo.join(".onepipeline").join("templates");
+    std::fs::create_dir_all(&templates).expect("a checkout's repository layer");
+    (root, hosted, repo, templates)
+}
+
+#[test]
+fn a_repository_layer_extends_the_host_s_file_and_replaces_only_the_block_it_overrides() {
+    let world = World::new("templates-extend-host");
+    let (root, hosted, repo, templates) = layered(&world);
+    let dir = world.project.clone();
+    let resolve = |world: &World| {
+        verb(
+            world,
+            &dir,
+            &root,
+            &["resolve", "design-doc", "--repo", &text(&repo), "--json"],
+        )
+        .exited(0)
+        .stdout
+        .clone()
+    };
+    let hosted_loader = resolve(&world);
+    let hosted_body = rendered_document(&world, &hosted_loader);
+    assert!(
+        hosted_body.contains("State each contract exactly."),
+        "{hosted_body}"
+    );
+
+    let overriding = templates.join("design-doc.md.j2");
+    write(&overriding, EXTENDING_DESIGN);
+    let loader = resolve(&world);
+    let resolved: Value = serde_json::from_str(&loader).expect("a loader document");
+    assert_eq!(resolved["layer"], "repository");
+    assert_eq!(resolved["path"], json!(text(&overriding)));
+    assert_eq!(
+        chain_of(&resolved),
+        [
+            link("design-doc.md.j2", "repository", Some(&overriding)),
+            link("onepipeline/host/design-doc.md.j2", "host", Some(&hosted)),
+        ]
+    );
+    // The host's directory follows the repository's, and its file is registered whole under
+    // its reserved name after the base.
+    assert_eq!(
+        resolved["search_path"],
+        json!([text(&templates), text(&root)])
+    );
+    assert_eq!(
+        resolved["templates"],
+        json!([
+            {"name": BASE, "source": onepipeline::templates::BASE_SOURCE},
+            {"name": "onepipeline/host/design-doc.md.j2", "source": HOSTED_DESIGN},
+        ])
+    );
+
+    // The released renderer renders the host's file with only the overridden block replaced.
+    assert_eq!(
+        rendered_document(&world, &loader),
+        hosted_body.replace(
+            "State each contract exactly.",
+            "This repository's own guidance."
+        )
+    );
+    verb(
+        &world,
+        &dir,
+        &root,
+        &["check", "design-doc", "--repo", &text(&repo)],
+    )
+    .exited(0)
+    .out_has("ok (repository layer,");
+
+    // The digest covers the host's file: changing only its text changes the digest.
+    write(
+        &hosted,
+        &HOSTED_DESIGN.replace("The summary.", "A new summary."),
+    );
+    let changed: Value = serde_json::from_str(&resolve(&world)).expect("a loader document");
+    assert_ne!(changed["digest"], resolved["digest"]);
+    assert_eq!(changed["layer"], "repository");
+}
+
+/// The digests the release before lower layers were reachable (v0.55.0, the tag this branch
+/// was cut from) reported for [`unchanged_fixtures`]'s three chains, read off that release's
+/// `template resolve --json` over the same files.
+const HOSTED_DOCUMENT_DIGEST: &str =
+    "sha256:66e17cfbf91be2ca36f06ddd6893015da9768c7c56c4b453f3154530164d89fd";
+const HOSTED_TASK_DIGEST: &str =
+    "sha256:c160ae18e96a77d74c9f953af4959e820fca51e76feeaca44a9865f9009df6bd";
+const REPOSITORY_DOCUMENT_DIGEST: &str =
+    "sha256:e34a0abaf2baa4a342116296efa9ea6a4e2e853abf22325c1316c16375039e75";
+
+#[test]
+fn a_chain_that_loads_no_lower_file_keeps_the_digest_the_release_before_reported() {
+    let world = World::new("templates-extend-digests");
+    let (root, hosted, repo, templates) = layered(&world);
+    let hosted_task = root.join("plan-task.md.j2");
+    write(
+        &hosted_task,
+        "{% extends \"onepipeline/plan-task.md.j2\" %}\n{% block before_criteria %}Hosted \
+         task.\n\n{% endblock %}\n",
+    );
+    let empty = world.root.join("overrides-nothing");
+    std::fs::create_dir_all(&empty).expect("a checkout overriding nothing");
+    let dir = world.project.clone();
+    let resolve = |name: &str, checkout: &Path| {
+        verb(
+            &world,
+            &dir,
+            &root,
+            &["resolve", name, "--repo", &text(checkout), "--json"],
+        )
+        .whole()
+    };
+
+    // A host document extending nothing, and a host task extending the base: the same digest,
+    // search path and registered pairs as that release.
+    for (name, file, digest) in [
+        ("design-doc", &hosted, HOSTED_DOCUMENT_DIGEST),
+        (BUILT_IN, &hosted_task, HOSTED_TASK_DIGEST),
+    ] {
+        let resolved = resolve(name, &empty);
+        assert_eq!(resolved["layer"], "host", "{name}");
+        assert_eq!(resolved["digest"], digest, "{name}");
+        assert_eq!(resolved["search_path"], json!([text(&root)]), "{name}");
+        assert_eq!(
+            resolved["templates"],
+            json!([{"name": BASE, "source": onepipeline::templates::BASE_SOURCE}]),
+            "{name}"
+        );
+        let mut expected = vec![link(&format!("{name}.md.j2"), "host", Some(file))];
+        if name == BUILT_IN {
+            expected.push(link(BASE, "built-in", None));
+        }
+        assert_eq!(chain_of(&resolved), expected, "{name}");
+    }
+
+    // A repository template extending nothing over a host root holding its name: the host's
+    // file is reachable and never loaded, so the digest is that release's.
+    let overriding = templates.join("design-doc.md.j2");
+    write(&overriding, "# Repository design\n\nNo blocks here.\n");
+    let resolved = resolve("design-doc", &repo);
+    assert_eq!(resolved["layer"], "repository");
+    assert_eq!(resolved["digest"], REPOSITORY_DOCUMENT_DIGEST);
+    assert_eq!(
+        chain_of(&resolved),
+        [link("design-doc.md.j2", "repository", Some(&overriding))]
+    );
+}
+
+#[test]
+fn an_explicit_file_reaches_each_lower_layer_and_a_name_no_layer_holds_is_refused() {
+    let world = World::new("templates-extend-explicit");
+    let (root, hosted, repo, templates) = layered(&world);
+    let dir = world.project.clone();
+    let overriding = templates.join("design-doc.md.j2");
+    write(&overriding, EXTENDING_DESIGN);
+    let explicit = world.root.join("explicit").join("design-doc.md.j2");
+    write(
+        &explicit,
+        "{% extends \"onepipeline/repository/design-doc.md.j2\" %}\n{% block summary %}The \
+         explicit summary.{% endblock %}\n",
+    );
+    let resolved = verb(
+        &world,
+        &dir,
+        &root,
+        &[
+            "resolve",
+            "design-doc",
+            "--repo",
+            &text(&repo),
+            "--template",
+            &text(&explicit),
+            "--json",
+        ],
+    )
+    .whole();
+    assert_eq!(resolved["layer"], "explicit");
+    assert_eq!(
+        chain_of(&resolved),
+        [
+            link("design-doc.md.j2", "explicit", Some(&explicit)),
+            link(
+                "onepipeline/repository/design-doc.md.j2",
+                "repository",
+                Some(&overriding)
+            ),
+            link("onepipeline/host/design-doc.md.j2", "host", Some(&hosted)),
+        ]
+    );
+    let body = rendered_document(&world, &serde_json::to_string(&resolved).expect("json"));
+    assert!(
+        body.contains("The explicit summary.") && body.contains("This repository's own guidance."),
+        "{body}"
+    );
+
+    // With the host's file gone, the repository file's reserved name reaches nothing: the
+    // chain does not load, naming the repository layer and its file as what named it.
+    std::fs::remove_file(&hosted).expect("the host's file is removed");
+    verb(
+        &world,
+        &dir,
+        &root,
+        &[
+            "resolve",
+            "design-doc",
+            "--repo",
+            &text(&repo),
+            "--template",
+            &text(&explicit),
+        ],
+    )
+    .exited(REFUSED)
+    .err_has("does not load")
+    .err_has("onepipeline/host/design-doc.md.j2")
+    .err_has(&format!("repository layer, {}", overriding.display()));
+    verb(
+        &world,
+        &dir,
+        &root,
+        &["resolve", "design-doc", "--repo", &text(&repo)],
+    )
+    .exited(REFUSED)
+    .err_has("does not load")
+    .err_has("onepipeline/host/design-doc.md.j2")
+    .err_has(&format!("repository layer, {}", overriding.display()));
+    // The host layer reaches no lower-layer name, not even an alias of the built-in.
+    write(
+        &root.join("plan-task.md.j2"),
+        "{% extends \"onepipeline/built-in/plan-task.md.j2\" %}\n",
+    );
+    verb(&world, &dir, &root, &["resolve", BUILT_IN])
+        .exited(REFUSED)
+        .err_has("does not load")
+        .err_has("onepipeline/built-in/plan-task.md.j2")
+        .err_has(&format!(
+            "host layer, {}",
+            root.join("plan-task.md.j2").display()
+        ));
+}
+
+#[test]
+fn a_lower_file_s_sibling_loads_from_its_own_directory_unless_the_upper_one_holds_it() {
+    let world = World::new("templates-extend-sibling");
+    let (root, hosted, repo, templates) = layered(&world);
+    let dir = world.project.clone();
+    write(
+        &hosted,
+        "# Design\n\n{% block summary %}The summary.{% endblock %}\n\n{% include \
+         \"guidance.md.j2\" %}\n",
+    );
+    let sibling = root.join("guidance.md.j2");
+    write(&sibling, "The host's guidance.\n");
+    let overriding = templates.join("design-doc.md.j2");
+    write(
+        &overriding,
+        "{% extends \"onepipeline/host/design-doc.md.j2\" %}\n{% block summary %}The \
+         repository's summary.{% endblock %}\n",
+    );
+    let resolve = || {
+        verb(
+            &world,
+            &dir,
+            &root,
+            &["resolve", "design-doc", "--repo", &text(&repo), "--json"],
+        )
+        .exited(0)
+        .stdout
+        .clone()
+    };
+
+    // Only the host's directory holds the sibling: it loads from there.
+    let loader = resolve();
+    let resolved: Value = serde_json::from_str(&loader).expect("a loader document");
+    assert_eq!(
+        chain_of(&resolved),
+        [
+            link("design-doc.md.j2", "repository", Some(&overriding)),
+            link("onepipeline/host/design-doc.md.j2", "host", Some(&hosted)),
+            link("guidance.md.j2", "host", Some(&sibling)),
+        ]
+    );
+    let body = rendered_document(&world, &loader);
+    assert!(
+        body.contains("The repository's summary.") && body.contains("The host's guidance."),
+        "{body}"
+    );
+
+    // Both directories hold it: first found wins, so the upper directory's renders.
+    let shadowing = templates.join("guidance.md.j2");
+    write(&shadowing, "The repository's guidance.\n");
+    let loader = resolve();
+    let resolved: Value = serde_json::from_str(&loader).expect("a loader document");
+    assert_eq!(
+        chain_of(&resolved),
+        [
+            link("design-doc.md.j2", "repository", Some(&overriding)),
+            link("onepipeline/host/design-doc.md.j2", "host", Some(&hosted)),
+            link("guidance.md.j2", "repository", Some(&shadowing)),
+        ]
+    );
+    let body = rendered_document(&world, &loader);
+    assert!(
+        body.contains("The repository's guidance.") && !body.contains("The host's guidance."),
+        "{body}"
+    );
+}
+
+#[test]
+fn a_repository_plan_task_reaches_the_base_through_the_host_s_or_is_refused() {
+    let world = World::new("templates-extend-task");
+    let root = host(&world);
+    let dir = world.project.clone();
+    let repo = world.root.join("repo");
+    let hosted = root.join("plan-task.md.j2");
+    let overriding = repo
+        .join(".onepipeline")
+        .join("templates")
+        .join("plan-task.md.j2");
+    write(&hosted, &task_template("host"));
+    write(
+        &overriding,
+        "{% extends \"onepipeline/host/plan-task.md.j2\" %}\n{% block after_criteria %}From \
+         the repository.\n{% endblock %}\n",
+    );
+    verb(
+        &world,
+        &dir,
+        &root,
+        &["check", BUILT_IN, "--repo", &text(&repo)],
+    )
+    .exited(0)
+    .out_has("ok (repository layer,");
+    let resolved = verb(
+        &world,
+        &dir,
+        &root,
+        &["resolve", BUILT_IN, "--repo", &text(&repo), "--json"],
+    )
+    .whole();
+    assert_eq!(
+        chain_of(&resolved),
+        [
+            link("plan-task.md.j2", "repository", Some(&overriding)),
+            link("onepipeline/host/plan-task.md.j2", "host", Some(&hosted)),
+            link(BASE, "built-in", None),
+        ]
+    );
+
+    // The host's file reaches no base: the repository's is refused though it extends one.
+    write(
+        &hosted,
+        "---\nonetaskgraph_template: 1\n---\n# No base here.\n",
+    );
+    verb(
+        &world,
+        &dir,
+        &root,
+        &["check", BUILT_IN, "--repo", &text(&repo)],
+    )
+    .exited(REFUSED)
+    .err_has(RULE_NOT_EXTENDED)
+    .err_has(&text(&overriding));
+}
+
+#[test]
+fn a_document_rendered_through_an_extending_chain_holds_until_the_host_s_file_changes() {
+    let world = World::new("templates-extend-rendered");
+    let (root, hosted, repo, templates) = layered(&world);
+    let dir = world.project.clone();
+    write(&templates.join("design-doc.md.j2"), EXTENDING_DESIGN);
+    let resolved = verb(
+        &world,
+        &dir,
+        &root,
+        &["resolve", "design-doc", "--repo", &text(&repo), "--json"],
+    )
+    .exited(0)
+    .stdout
+    .clone();
+    let rendered_with = serde_json::from_str::<Value>(&resolved).expect("a loader document")
+        ["digest"]
+        .as_str()
+        .expect("a digest")
+        .to_owned();
+    let (_, native) = project(&world, "extended");
+    let made = otg(
+        &world,
+        &[
+            "document",
+            "create",
+            crate::harness::STORE_SOURCE,
+            "--project",
+            &native,
+            "--title",
+            "The design",
+            "--template-loader",
+            "-",
+            "--no-interactive",
+            "--json",
+        ],
+        Some(&resolved),
+    )
+    .whole();
+    let id = made["items"][0]["id"]
+        .as_str()
+        .expect("a created document has an id")
+        .to_owned();
+    let check = || {
+        verb(
+            &world,
+            &dir,
+            &root,
+            &["check", "design-doc", "--repo", &text(&repo), "--item", &id],
+        )
+    };
+    check().exited(0).out_has(&format!("item {id}: ok"));
+
+    // Only the lower file changes, and the item is no longer its template's rendering.
+    write(
+        &hosted,
+        &HOSTED_DESIGN.replace("The summary.", "A new summary."),
+    );
+    let now = verb(
+        &world,
+        &dir,
+        &root,
+        &["resolve", "design-doc", "--repo", &text(&repo), "--json"],
+    )
+    .whole()["digest"]
+        .as_str()
+        .expect("a digest")
+        .to_owned();
+    assert_ne!(now, rendered_with);
+    check()
+        .exited(REFUSED)
+        .err_has(RULE_TEMPLATE_CHANGED)
+        .err_has(&rendered_with)
+        .err_has(&now);
+}
+
+#[test]
+fn a_lower_file_that_is_not_text_is_refused_as_that_and_never_as_not_found() {
+    let world = World::new("templates-extend-unreadable");
+    let (root, hosted, repo, templates) = layered(&world);
+    let dir = world.project.clone();
+    let overriding = templates.join("design-doc.md.j2");
+    let refusal = format!(
+        "onepipeline/host/design-doc.md.j2 is {} (host layer), which cannot be read as a \
+         template: ",
+        hosted.display()
+    );
+
+    // Each way a file can be there and not be text: not UTF-8, a directory, and, where a
+    // test can make a link without a privilege, a link to nothing.
+    #[cfg(unix)]
+    let gone = world.root.join("gone-design-doc.md.j2");
+    #[cfg(unix)]
+    let link: Option<(&str, &dyn Fn(), &str)> = Some((
+        "a link to nothing",
+        &|| std::os::unix::fs::symlink(&gone, &hosted).expect("a link to nothing"),
+        "it links to a file that does not exist",
+    ));
+    #[cfg(not(unix))]
+    let link = None;
+    let cases: [(&str, &dyn Fn(), &str); 2] = [
+        (
+            "not UTF-8",
+            &|| std::fs::write(&hosted, b"# Design\n\n\xff\xfe not UTF-8\n").expect("written"),
+            "it is not UTF-8 text",
+        ),
+        (
+            "a directory",
+            &|| std::fs::create_dir_all(&hosted).expect("a directory where the file goes"),
+            "",
+        ),
+    ];
+    for (case, make, why) in cases.into_iter().chain(link) {
+        match std::fs::symlink_metadata(&hosted) {
+            Ok(held) if held.is_dir() => std::fs::remove_dir_all(&hosted).expect("cleared"),
+            Ok(_) => std::fs::remove_file(&hosted).expect("cleared"),
+            Err(_) => {}
+        }
+        make();
+
+        // A chain that never names the host's file resolves as it did, whatever is there.
+        write(&overriding, "# Repository design\n\nNo blocks here.\n");
+        let resolved = verb(
+            &world,
+            &dir,
+            &root,
+            &["resolve", "design-doc", "--repo", &text(&repo), "--json"],
+        )
+        .whole();
+        assert_eq!(resolved["digest"], REPOSITORY_DOCUMENT_DIGEST, "{case}");
+
+        // One that extends it is refused naming the host layer, the file and why.
+        write(&overriding, EXTENDING_DESIGN);
+        for verb_name in ["resolve", "check"] {
+            let refused = verb(
+                &world,
+                &dir,
+                &root,
+                &[verb_name, "design-doc", "--repo", &text(&repo)],
+            );
+            refused
+                .exited(REFUSED)
+                .err_has("does not load")
+                .err_has(&format!("{refusal}{why}"));
+            assert!(
+                !refused.stderr.contains("was not found"),
+                "`{verb_name}` read {case} as an absent file: {}",
+                refused.stderr
+            );
+        }
+    }
+}
+
+#[test]
+fn a_layer_directory_holding_a_reserved_name_is_found_before_the_lower_layer() {
+    let world = World::new("templates-extend-shadowed");
+    let (root, hosted, repo, templates) = layered(&world);
+    let dir = world.project.clone();
+    let overriding = templates.join("design-doc.md.j2");
+    write(&overriding, EXTENDING_DESIGN);
+    // The hazard C4 names: the `onepipeline/` names are the engine's, and a file at that
+    // relative path in a searched directory is what the chain loads instead.
+    let shadow = templates
+        .join("onepipeline")
+        .join("host")
+        .join("design-doc.md.j2");
+    write(
+        &shadow,
+        "# Shadowed\n\n{% block contracts_guidance %}{% endblock %}\n",
+    );
+    let loader = verb(
+        &world,
+        &dir,
+        &root,
+        &["resolve", "design-doc", "--repo", &text(&repo), "--json"],
+    )
+    .exited(0)
+    .stdout
+    .clone();
+    let resolved: Value = serde_json::from_str(&loader).expect("a loader document");
+    assert_eq!(
+        chain_of(&resolved),
+        [
+            link("design-doc.md.j2", "repository", Some(&overriding)),
+            link(
+                "onepipeline/host/design-doc.md.j2",
+                "repository",
+                Some(&shadow)
+            ),
+        ]
+    );
+    let body = rendered_document(&world, &loader);
+    assert!(
+        body.contains("# Shadowed") && !body.contains("The summary."),
+        "{body}"
+    );
+    // The host's file is still stated, and loads once the shadow is gone.
+    std::fs::remove_file(&shadow).expect("the shadow is removed");
+    let resolved = verb(
+        &world,
+        &dir,
+        &root,
+        &["resolve", "design-doc", "--repo", &text(&repo), "--json"],
+    )
+    .whole();
+    assert_eq!(
+        chain_of(&resolved)[1],
+        link("onepipeline/host/design-doc.md.j2", "host", Some(&hosted))
     );
 }
