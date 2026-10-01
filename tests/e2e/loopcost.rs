@@ -413,10 +413,17 @@ fn the_board_and_the_frontier_are_recomputed_once_per_recorded_state_change() {
 /// Another run's ledger is read on the interval this loop states, whatever rate
 /// its own passes are running at.
 ///
-/// Two consumers of the same upstream, one woken twenty times a second by a
-/// narrating dispatch and one twice a second. Their pass counts are an order of
-/// magnitude apart on an idle host, and what they read out of the upstream is
-/// not on any host.
+/// Two consumers of the same upstream, one woken five times a second by a
+/// narrating dispatch and one every two seconds. The chatty one runs passes at
+/// more than twice the quiet one's rate, and what they read out of the upstream
+/// is the same.
+///
+/// Five a second rather than twenty: every beat a dispatch sends is a record the
+/// loop relays, and a host that relays fewer of them a second than it is sent
+/// never finishes a pass — each one drains a backlog that grew while it ran. A
+/// loaded Windows runner relayed under twenty a second, so the chatty loop ran
+/// eighteen passes in the window, and the premise below failed with every claim
+/// under it intact (run 36666603034).
 ///
 /// Measured over [`WINDOW`], the same minute every other bound here is stated
 /// over: a paced read is a **rate**, and a window of a few seconds bounds it at a
@@ -439,7 +446,7 @@ fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
     );
     world.run(&["start", &upstream, "--attach"]).settled();
 
-    for (run, every) in [("chatty", "50"), ("quiet", "500")] {
+    for (run, every) in [("chatty", "200"), ("quiet", "2000")] {
         world.script(&format!("{run}-hold.wait"), "hold");
         world.script(&format!("{run}-hold.heartbeat"), every);
         let mut consumer = agent("ship", &[]);
