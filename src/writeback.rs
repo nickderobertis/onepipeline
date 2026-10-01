@@ -815,6 +815,12 @@ struct Pending {
 }
 
 impl Pending {
+    /// Whether anything the run published has yet to land: a snapshot the worker has not
+    /// taken, or the attempt it is making.
+    fn unlanded(&self) -> bool {
+        self.latest.is_some() || self.worker == WorkerState::Working
+    }
+
     fn queue(&mut self, snapshot: Snapshot) -> bool {
         if self.latest.as_ref() == Some(&snapshot) {
             return false;
@@ -888,7 +894,7 @@ impl Writeback {
 
     /// The same, for the snapshot a closeout projects: a node that never started is written
     /// `todo`, releasing the claim on every ticket it delivers.
-    pub fn publish_closeout(
+    fn publish_closeout(
         &self,
         paths: &RunPaths,
         launch: &LaunchRecord,
@@ -1005,19 +1011,45 @@ impl Writeback {
             .unwrap_or_default()
     }
 
-    /// Give the active worker a bounded closeout window for the terminal snapshot.
-    pub fn wait_briefly(&self) {
+    /// Close the run out on the board: let the worker take what the run published last, hand
+    /// it the closeout snapshot, and give it one bounded window to land it.
+    ///
+    /// The pass that settles a run's last node publishes that settlement and then, a few
+    /// records later, the closeout. An idle worker that had not yet been scheduled to take the
+    /// first when the second was queued carried both as one attempt, and one that had, as two
+    /// — so what a run's ending cost the store, and what its projection record says of it,
+    /// turned on which of two threads the host ran first. So an idle worker takes what is
+    /// pending before the closeout snapshot is queued, and it is always two.
+    ///
+    /// Only an idle one: a worker inside an attempt, or waiting out a failed one's retry
+    /// interval, has what it is pending superseded by the closeout as it always had, since
+    /// waiting on it is waiting on the store. And inside the one window the landing has, so
+    /// nothing here holds the run's settlement longer than it ever could be held.
+    pub fn close_out(
+        &self,
+        paths: &RunPaths,
+        launch: &LaunchRecord,
+        state: &RunState,
+        statuses: &BTreeMap<String, NodeStatus>,
+    ) {
+        let deadline = Instant::now() + CLOSEOUT_WAIT;
+        self.closing_out_until(deadline, |pending| {
+            pending.latest.is_some() && pending.worker == WorkerState::Idle
+        });
+        self.publish_closeout(paths, launch, state, statuses);
         // Let one already-running real copy reach its own deadline before the process
         // exits. This keeps a completed run from racing a person's next store call,
         // while the hard call limit preserves write-back's latency boundary.
-        let deadline = Instant::now() + CLOSEOUT_WAIT;
+        self.closing_out_until(deadline, Pending::unlanded);
+    }
+
+    /// Enter the closeout phase, and wait until `busy` no longer holds or `deadline` passes.
+    fn closing_out_until(&self, deadline: Instant, busy: impl Fn(&Pending) -> bool) {
         let (lock, ready) = &*self.pending;
         let Ok(mut pending) = lock.lock() else { return };
         pending.phase = RunPhase::ClosingOut;
         ready.notify_all();
-        while (pending.latest.is_some() || pending.worker == WorkerState::Working)
-            && Instant::now() < deadline
-        {
+        while busy(&pending) && Instant::now() < deadline {
             let wait = deadline.saturating_duration_since(Instant::now());
             let Ok((next, _)) = ready.wait_timeout(pending, wait) else {
                 return;
@@ -1235,10 +1267,13 @@ fn worker(
             }
             state.worker = WorkerState::Working;
             state.refused = None;
-            state
+            let taken = state
                 .latest
                 .take()
-                .expect("the worker was woken by a snapshot")
+                .expect("the worker was woken by a snapshot");
+            // A closeout waits for this take before it queues its own snapshot.
+            ready.notify_all();
+            taken
         };
         // Every attempt honours a wait the run's directory keeps — one an earlier process
         // recorded, the driver an adoption displaced or a stop's release, as well as its own —
@@ -4867,7 +4902,7 @@ mod tests {
             pending: Arc::new((Mutex::new(Pending::default()), Condvar::new())),
             per_item: DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
         };
-        writeback.wait_briefly();
+        writeback.closing_out_until(Instant::now() + super::CLOSEOUT_WAIT, Pending::unlanded);
         assert!(
             writeback.pending.0.lock().expect("the state").phase == super::RunPhase::ClosingOut,
             "the close-out did not put the run into its closing-out phase"
