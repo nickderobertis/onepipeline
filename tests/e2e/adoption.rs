@@ -3999,6 +3999,10 @@ fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_m
     // this journey is about is reachable: without the draft the change merges and
     // the node goes green, which is the failure — a success — this closes.
     world.script("gh.merged", "");
+    // And every required check is green, so the only thing standing between the
+    // draft and a lift is the reason it carries: a publication carrying one is
+    // never lifted by green checks.
+    world.script("gh.checks", "lint completed success required");
 
     let mut packager = lifecycle("packager", &[]);
     packager["repo"] = json!("tool");
@@ -4095,6 +4099,16 @@ fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_m
     assert_eq!(drafted[0]["labels"]["node"], json!("consumer"));
     // The release's reason and not the plan's: the field above lost to it.
     assert_eq!(drafted[0]["payload"]["kind"], json!("awaiting-release"));
+    // And the host still holds it as a draft, green checks and all.
+    let id = drafted[0]["payload"]["id"]
+        .as_str()
+        .expect("the record names the change request");
+    assert_eq!(
+        std::fs::read_to_string(world.fakes.join("gh").join(id))
+            .expect("the host recorded the change request's state")
+            .trim(),
+        "draft"
+    );
     assert_eq!(
         drafted[0]["payload"]["awaiting"],
         json!("github.com/owner/engine")
@@ -4294,7 +4308,7 @@ fn a_release_that_arrives_puts_a_worker_back_on_the_same_branch_and_lifts_the_dr
     let settled = settlement_of(&world, &run, "consumer");
     assert_eq!(settled["payload"]["outcome"], json!("merged"), "{settled}");
     assert_eq!(settled["payload"]["landing"], json!("landed"), "{settled}");
-    // And its detail says whose draft the closeout lifted: the first
+    // And its detail says whose draft the publication lifted: the first
     // publication's, not the second worker's — that worker drafted nothing, and
     // a settlement that said it had would send a reader to a transcript for a
     // decision nobody in it made. No drafting graph was named, so the
@@ -4303,7 +4317,8 @@ fn a_release_that_arrives_puts_a_worker_back_on_the_same_branch_and_lifts_the_dr
         settled["payload"]["detail"],
         json!(
             "an earlier publication of this branch left the change request as a draft; the \
-             closeout left the description as the worker left it and marked it ready for review"
+             closeout left the description as the worker left it, and the publication lifted it \
+             out of its draft and merged it"
         ),
         "{settled}"
     );
@@ -4381,17 +4396,9 @@ fn a_fast_node_whose_release_was_already_out_settles_done_with_no_draft() {
         "a node whose release was already out was held anyway: {settled}"
     );
     assert_eq!(settled["payload"]["outcome"], json!("merged"), "{settled}");
-    let calls = gh_calls(&world);
-    assert!(
-        !calls
-            .iter()
-            .any(|call| call.iter().any(|arg| arg == "--draft")),
-        "the host was asked to hold a change whose release is out: {calls:?}"
-    );
-    assert!(
-        world.events_of(&run, "change-drafted").is_empty(),
-        "a draft was recorded for a node that never needed one"
-    );
+    // The only draft is the one every reasonless publication opens while its
+    // checks run, and it was lifted: nothing held it for a release.
+    assert_no_draft_was_held(&world, &run);
     // And it was dispatched exactly once: there was nothing to come back for.
     assert_eq!(tasks_of(&world, "consumer").len(), 1);
 }
@@ -4447,16 +4454,29 @@ fn a_published_node_is_never_held_as_a_draft_and_settles_done_on_its_release() {
         "a published-adoption node settled as a draft at some point: {:?}",
         world.events_of(&run, "node-settled")
     );
+    assert_no_draft_was_held(&world, &run);
+}
+
+/// That no change in `run` was **held** as a draft: every `change-drafted` it
+/// recorded is the draft lifecycle's own, opened while the checks ran and carrying
+/// no reason, and each such draft was lifted rather than kept.
+///
+/// What a draft reason would have recorded instead is a `change-drafted` of kind
+/// `awaiting-release` or `held`, and the host would never have been asked to lift
+/// it: a publication carrying a reason is never lifted by green checks.
+fn assert_no_draft_was_held(world: &World, run: &str) {
+    let drafted = world.events_of(run, "change-drafted");
     assert!(
-        world.events_of(&run, "change-drafted").is_empty(),
-        "a published-adoption node's change was opened as a draft"
-    );
-    let calls = gh_calls(&world);
-    assert!(
-        !calls
+        drafted
             .iter()
-            .any(|call| call.iter().any(|arg| arg == "--draft")),
-        "the host was asked to draft a published-adoption node's change: {calls:?}"
+            .all(|event| event["payload"]["kind"] == json!("awaiting-checks")),
+        "a change was held as a draft with a reason: {drafted:?}"
+    );
+    assert_eq!(
+        world.events_of(run, "draft-lifted").len(),
+        drafted.len(),
+        "a draft the lifecycle opened was never lifted: {:?}",
+        gh_calls(world)
     );
 }
 

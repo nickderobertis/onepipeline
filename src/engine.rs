@@ -7133,6 +7133,7 @@ mod tests {
             PublishOutcome::Merged(onevcs::Sha("abc".into())),
             PublishOutcome::ChangeOpen(url()),
             PublishOutcome::ChangeDraft(url()),
+            PublishOutcome::ChangeReviewDraft(url()),
             PublishOutcome::Queued(url()),
             PublishOutcome::NothingToPublish,
         ]

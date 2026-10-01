@@ -6280,7 +6280,9 @@ fn the_closeout_finishes_a_change_request_the_worker_opened_as_a_draft() {
         "{:?}",
         gh_calls(&world)
     );
-    // And the draft was lifted: the closeout marked it ready for review.
+    // And the draft was lifted — by the publication's draft lifecycle, whose
+    // checks came back green on an identity that needs no approval, and never by
+    // the closeout on the spot.
     assert_eq!(
         gh_pr_calls(&world, "ready").len(),
         1,
@@ -6309,7 +6311,7 @@ fn the_closeout_finishes_a_change_request_the_worker_opened_as_a_draft() {
     assert_eq!(
         settled[0]["payload"]["detail"],
         "the worker opened the change request as a draft; the closeout wrote the drafted \
-         description onto it and marked it ready for review",
+         description onto it, and the publication lifted it out of its draft",
         "{}",
         settled[0]
     );
@@ -6348,7 +6350,7 @@ fn the_closeout_finishes_a_change_request_the_worker_opened_as_a_draft() {
     // The session's own records of what happened to the change request reach
     // the run's journal, in the Review phase, unrewritten and stamped with the
     // node they belong to.
-    for kind in ["change-drafted", "change-described", "draft-lifted"] {
+    for kind in ["change-described", "draft-lifted"] {
         let records = world.events_of(run, kind);
         assert_eq!(
             records.len(),
@@ -6363,10 +6365,17 @@ fn the_closeout_finishes_a_change_request_the_worker_opened_as_a_draft() {
         );
         assert_eq!(records[0]["phase"], "review", "{kind}: {}", records[0]);
     }
-    assert_eq!(
-        world.events_of(run, "change-drafted")[0]["payload"]["kind"],
-        "held"
-    );
+    // Two drafts are recorded: the worker's own, held while it worked, and the
+    // publication adopting it as one awaiting its checks rather than lifting it
+    // on the spot.
+    let drafted = world.events_of(run, "change-drafted");
+    assert_eq!(drafted.len(), 2, "{drafted:?}\n{}", why(&world, run));
+    for record in &drafted {
+        assert_eq!(record["labels"]["node"], "service", "{record}");
+        assert_eq!(record["phase"], "review", "{record}");
+    }
+    assert_eq!(drafted[0]["payload"]["kind"], "held");
+    assert_eq!(drafted[1]["payload"]["kind"], "awaiting-checks");
     let described = &world.events_of(run, "change-described")[0];
     assert_eq!(
         described["payload"]["title"],
@@ -6380,7 +6389,8 @@ fn the_closeout_finishes_a_change_request_the_worker_opened_as_a_draft() {
         .run(&["results", run])
         .exited(0)
         .out_has(url)
-        .out_has("marked it ready for review");
+        .out_has("the publication lifted it out of its draft")
+        .out_lacks("marked it ready for review");
 }
 
 /// The **planner's** body finishes a worker's draft, spending no dispatch.
@@ -6482,7 +6492,7 @@ fn a_node_that_states_its_own_body_writes_it_onto_the_change_request_the_worker_
     assert_eq!(
         events[0]["payload"]["detail"],
         "the worker opened the change request as a draft; the closeout wrote the drafted \
-         description onto it and marked it ready for review",
+         description onto it, and the publication lifted it out of its draft",
         "{}",
         events[0]
     );
@@ -6713,8 +6723,9 @@ fn a_retry_on_a_branch_whose_change_request_is_open_rewrites_its_description() {
     );
 
     // The second drafting dispatch was shown the change request as it stood —
-    // open, not a draft, with the first description — and the first was shown
-    // no change request at all.
+    // still the draft the first publication opened while its checks ran, which
+    // came back red and so was never lifted, with the first description — and
+    // the first was shown no change request at all.
     let first = drafts[0]["payload"]["task"].as_str().expect("a task");
     assert!(
         !first.contains("## Change request"),
@@ -6729,7 +6740,7 @@ fn a_retry_on_a_branch_whose_change_request_is_open_rewrites_its_description() {
         .expect("the publication recorded where the change request is");
     assert!(
         second.contains(&format!(
-            "## Change request\n{url}\nHeld as a draft by the worker: no\n\n\
+            "## Change request\n{url}\nHeld as a draft by the worker: yes\n\n\
              ### Description as the worker left it\n## What\nDrafted from the tree.\ndraft 1"
         )),
         "the second closeout was not shown the change request as it stood:\n{second}"
@@ -6742,8 +6753,9 @@ fn a_retry_on_a_branch_whose_change_request_is_open_rewrites_its_description() {
         .expect("the node settled done");
     assert_eq!(
         settled["payload"]["detail"],
-        "the change request was already open from an earlier publication of this branch; \
-         the closeout wrote the drafted description onto it",
+        "an earlier publication of this branch left the change request as a draft; the \
+         closeout wrote the drafted description onto it, and the publication lifted it out of \
+         its draft and merged it",
         "{settled}"
     );
 }
@@ -7067,8 +7079,8 @@ fn a_description_the_host_refuses_leaves_the_worker_s_and_says_so_on_the_settlem
     assert!(
         detail.starts_with(
             "the worker opened the change request as a draft; the closeout left the description \
-             as the worker left it and marked it ready for review. the drafted description was \
-             not written onto "
+             as the worker left it, and the publication lifted it out of its draft. the drafted \
+             description was not written onto "
         ) && detail.contains(url)
             && detail.contains("Resource not accessible by integration"),
         "the settlement does not say why the description is the worker's: {detail}"
@@ -7125,14 +7137,24 @@ fn a_host_that_cannot_say_whether_the_session_holds_a_change_is_asked_again_by_t
         gh_calls(&world)
     );
     // Nothing was written onto a change request the closeout never learned of,
-    // and the settlement says nothing about one.
+    // and the settlement says nothing about one. The one lift is the draft
+    // lifecycle's own: the publication opened its change request as a draft
+    // while its checks ran, and lifted it once they came back green.
     assert!(
         gh_pr_calls(&world, "edit").is_empty(),
         "{:?}",
         gh_calls(&world)
     );
     assert!(
-        gh_pr_calls(&world, "ready").is_empty(),
+        gh_pr_calls(&world, "create")[0]
+            .iter()
+            .any(|arg| arg == "--draft"),
+        "{:?}",
+        gh_calls(&world)
+    );
+    assert_eq!(
+        gh_pr_calls(&world, "ready").len(),
+        1,
         "{:?}",
         gh_calls(&world)
     );
@@ -7230,7 +7252,8 @@ fn a_draft_whose_record_this_crate_cannot_read_is_finished_as_an_earlier_publica
     assert_eq!(
         settled[0]["payload"]["detail"],
         "an earlier publication of this branch left the change request as a draft; the \
-         closeout wrote the drafted description onto it and marked it ready for review",
+         closeout wrote the drafted description onto it, and the publication lifted it out of \
+         its draft",
         "{}",
         settled[0]
     );

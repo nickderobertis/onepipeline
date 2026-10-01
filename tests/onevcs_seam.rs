@@ -35,9 +35,10 @@
 //! Offline and hermetic: the providers touch nothing but a scratch state root.
 
 use onevcs::registry::Identity;
+use onevcs::rules::Approvals;
 use onevcs::{
-    EventStream, Lifecycle, MergePolicy, Providers, PublishOutcome, PublishRequest, SessionRequest,
-    Vcs,
+    Check, CheckState, EventStream, Lifecycle, MergePolicy, Providers, PublishOutcome,
+    PublishRequest, SessionRequest, Vcs,
 };
 use onevcs_testing::{HostState, MemoryHost, MemoryVcs, VcsState};
 
@@ -65,6 +66,10 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
         // so" has to be proven against. Section 3 narrows to `change-open`, which
         // a per-run policy may do.
         policy: Some(MergePolicy::ChangeAuto),
+        // No approval required, so section 3's green `change-open` publication is
+        // lifted and ends `ChangeOpen`; section 7 is where a team repository keeps
+        // its green draft for review.
+        approvals: Some(Approvals::None),
         ..VcsState::default()
     });
     let host = MemoryHost::seeded(HostState::default());
@@ -246,7 +251,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
         holding.drafts
     );
     assert!(
-        !holding.merges.contains_key(&drafted_id) && holding.made_ready.is_empty(),
+        !holding.merges.contains_key(&drafted_id) && !holding.made_ready.contains(&drafted_id),
         "a change held as a draft was merged or made ready: {:?} {:?}",
         holding.merges,
         holding.made_ready
@@ -315,5 +320,205 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
         "{refused}"
     );
 
+    // 7. `src/vcs.rs::outcome_of` and `src/lifecycle.rs`'s settlement, over the
+    //    draft lifecycle: a reasonless publication opens its change request as a
+    //    draft while the required checks run, and what it ends in is what a node
+    //    settles on. Each identity below is its own scratch state root, because a
+    //    provider numbers its sessions from one.
+    the_draft_lifecycle_answers_what_a_node_settles_on(&root);
+
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// One reasonless publication of a fresh session, on its own state root.
+fn published_through_the_lifecycle(
+    root: &std::path::Path,
+    name: &str,
+    vcs: &MemoryVcs,
+    host: &MemoryHost,
+) -> (onevcs::Publication, Vec<onevcs::Envelope>) {
+    let home = root.join(name);
+    std::fs::create_dir_all(&home).expect("a scratch state root");
+    std::env::set_var("ONEVCS_HOME", &home);
+    let providers = Providers { vcs, hosting: host };
+    let session = vcs
+        .open_session(SessionRequest {
+            repo: "owner/repo".to_owned(),
+            branch: Some(name.to_owned()),
+            branch_name: None,
+            branch_prefix: None,
+            base: Some("main".to_owned()),
+            execution_checkout: None,
+            pool: None,
+            overflow: None,
+            labels: Default::default(),
+        })
+        .expect("the seam opens a session");
+    let published = onevcs::publish(
+        &providers,
+        &session.token,
+        &PublishRequest {
+            policy: None,
+            title: Some("feat: land it".parse().expect("a usable subject")),
+            body: None,
+            draft: None,
+        },
+    )
+    .expect("the seam publishes through the lifecycle");
+    let events = EventStream::open(&session.token)
+        .expect("the seam reads a session's stream")
+        .read()
+        .expect("the publication is on the stream");
+    (published, events)
+}
+
+/// A repository side publishing under `policy` and `approvals`, with `drafts`.
+fn lifecycle_vcs(
+    policy: MergePolicy,
+    approvals: Approvals,
+    drafts: Option<onevcs::rules::Drafts>,
+) -> MemoryVcs {
+    MemoryVcs::seeded(VcsState {
+        identities: vec![Identity {
+            origin: "github.com/owner/repo".to_owned(),
+            gate: "true".to_owned(),
+        }],
+        policy: Some(policy),
+        approvals: Some(approvals),
+        drafts,
+        ..VcsState::default()
+    })
+}
+
+/// One check as a host reports it.
+fn check(name: &str, conclusion: &str, started_at: &str) -> Check {
+    Check {
+        name: name.to_owned(),
+        status: "completed".to_owned(),
+        conclusion: Some(conclusion.to_owned()),
+        required: true,
+        head: None,
+        url: None,
+        started_at: Some(started_at.to_owned()),
+    }
+}
+
+/// The records of one kind a stream carried.
+fn of_kind(events: &[onevcs::Envelope], kind: onevcs::EventKind) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .filter(|envelope| envelope.kind == onemessagebus::Kind::from(kind))
+        .map(|envelope| serde_json::Value::Object(envelope.payload.clone()))
+        .collect()
+}
+
+fn the_draft_lifecycle_answers_what_a_node_settles_on(root: &std::path::Path) {
+    let first = onevcs::ChangeId("1".to_owned());
+
+    // Green on a team repository: kept as a draft for its user's review, which is
+    // its own case — this crate settles it `done` under `change-review-draft`.
+    let host = MemoryHost::seeded(HostState {
+        checks: [(first.clone(), vec![check("lint", "success", "draft")])].into(),
+        ..HostState::default()
+    });
+    let vcs = lifecycle_vcs(MergePolicy::ChangeOpen, Approvals::Required, None);
+    let (published, events) = published_through_the_lifecycle(root, "kept", &vcs, &host);
+    let PublishOutcome::ChangeReviewDraft(url) = &published.outcome else {
+        panic!("a green team change ended as {:?}", published.outcome);
+    };
+    assert!(url.as_str().contains("owner/repo"), "{url}");
+    let held = host.state();
+    assert!(held.awaiting_checks.contains(&first), "{held:?}");
+    assert!(
+        held.made_ready.is_empty() && held.merges.is_empty(),
+        "{held:?}"
+    );
+    let drafted = of_kind(&events, onevcs::EventKind::ChangeDrafted);
+    assert_eq!(drafted.len(), 1, "{events:?}");
+    assert_eq!(drafted[0]["kind"], "awaiting-checks");
+    assert_eq!(
+        of_kind(&events, onevcs::EventKind::DraftKeptForReview).len(),
+        1
+    );
+    assert!(of_kind(&events, onevcs::EventKind::DraftLifted).is_empty());
+
+    // A draft whose required check is skipped has not run: it is lifted early, the
+    // lift says whether it warned, and the run the lift triggered is what settles.
+    let host = MemoryHost::seeded(HostState {
+        checks: [(first.clone(), vec![check("lint", "skipped", "draft")])].into(),
+        checks_after_lift: [(first.clone(), vec![check("lint", "success", "ready")])].into(),
+        ..HostState::default()
+    });
+    let vcs = lifecycle_vcs(MergePolicy::ChangeOpen, Approvals::None, None);
+    let (published, events) = published_through_the_lifecycle(root, "early", &vcs, &host);
+    assert!(
+        matches!(published.outcome, PublishOutcome::ChangeOpen(_)),
+        "{:?}",
+        published.outcome
+    );
+    let early = of_kind(&events, onevcs::EventKind::DraftLiftedEarly);
+    assert_eq!(early.len(), 1, "{events:?}");
+    assert_eq!(early[0]["warned"], true, "{}", early[0]);
+    let settled = of_kind(&events, onevcs::EventKind::ChecksSettled);
+    assert_eq!(settled.len(), 1, "{events:?}");
+    assert_eq!(settled[0]["verdict"], "passed");
+
+    // A ready change whose required check concluded skipped settles as
+    // `passed-with-skipped`, naming it — and every `change-check` carries the state
+    // `onevcs` classified it as, with `skipped` distinct from `passed`.
+    let host = MemoryHost::seeded(HostState {
+        checks: [(
+            first.clone(),
+            vec![
+                check("lint", "skipped", "ready"),
+                check("test", "success", "ready"),
+            ],
+        )]
+        .into(),
+        ..HostState::default()
+    });
+    let vcs = lifecycle_vcs(
+        MergePolicy::ChangeOpen,
+        Approvals::None,
+        Some(onevcs::rules::Drafts {
+            disabled: Some(true),
+            warn_on_early_lift: None,
+        }),
+    );
+    let (published, events) = published_through_the_lifecycle(root, "skipped", &vcs, &host);
+    assert!(
+        matches!(published.outcome, PublishOutcome::ChangeOpen(_)),
+        "{:?}",
+        published.outcome
+    );
+    assert!(of_kind(&events, onevcs::EventKind::ChangeDrafted).is_empty());
+    let settled = of_kind(&events, onevcs::EventKind::ChecksSettled);
+    assert_eq!(settled.len(), 1, "{events:?}");
+    assert_eq!(settled[0]["verdict"], "passed-with-skipped");
+    assert_eq!(settled[0]["skipped"], serde_json::json!(["lint"]));
+    // Every check the host reported is read through `onevcs`'s one classifier, and
+    // its wire spelling — the `state` a relayed `change-check` carries — keeps
+    // `skipped` apart from `passed`. The provider emits no `change-check` of its
+    // own; `tests/e2e/draft_lifecycle.rs` reads the real one off a run's stream.
+    let states: std::collections::BTreeMap<String, serde_json::Value> = host.state().checks[&first]
+        .iter()
+        .map(|check| {
+            (
+                check.name.clone(),
+                serde_json::to_value(check.state()).expect("a state serializes"),
+            )
+        })
+        .collect();
+    assert_eq!(states["lint"], "skipped", "{states:?}");
+    assert_eq!(states["test"], "passed", "{states:?}");
+    assert_eq!(
+        serde_json::to_value(CheckState::Skipped).expect("a state serializes"),
+        "skipped"
+    );
+    assert_ne!(CheckState::Skipped, CheckState::Passed);
+    assert_eq!(
+        check("lint", "skipped", "ready").state(),
+        CheckState::Skipped
+    );
+    assert!(!check("lint", "skipped", "ready").green());
 }

@@ -880,17 +880,36 @@ fn publish(
             let drafted = left_as_draft
                 .then(|| draft.as_ref().map(crate::release::drafted_detail))
                 .flatten();
+            // A green change kept as a draft for its user's review says so, and
+            // how it is lifted, for the same reason: it is what the node settled as.
+            let kept_for_review = matches!(
+                published.outcome,
+                onevcs::PublishOutcome::ChangeReviewDraft(_)
+            )
+            .then(|| review_draft_detail(token));
             // And a change request the session already held says what the
-            // closeout did to it — the one sentence that tells such a node from
-            // one that published afresh, since the outcome word is deliberately
-            // the same.
-            let finished = held
-                .as_ref()
-                .map(|change| finished_detail(change, worker_drafted, described, left_as_draft));
-            let detail: Vec<String> = [drafted, finished, compared]
-                .into_iter()
-                .flatten()
-                .collect();
+            // publication answered for it — the one sentence that tells such a
+            // node from one that published afresh, since the outcome word is
+            // deliberately the same.
+            let finished = held.as_ref().map(|change| {
+                finished_detail(change, worker_drafted, described, &published.outcome)
+            });
+            // What the draft lifecycle recorded on the session's stream that the
+            // outcome word does not carry: a draft lifted before its checks ran,
+            // and required checks that were skipped rather than passed.
+            let lifted_early = crate::vcs::lifted_early_in(token).then(|| LIFTED_EARLY.to_owned());
+            let skipped = skipped_detail(&crate::vcs::skipped_required_in(token));
+            let detail: Vec<String> = [
+                drafted,
+                kept_for_review,
+                finished,
+                lifted_early,
+                skipped,
+                compared,
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
             Attempt::settled(Settlement {
                 // What the node settles on is its publication, exactly as
                 // before; a drafting failure only ever adds words to it.
@@ -1010,6 +1029,10 @@ fn level_branch_settlement(
 /// is: one a release will arrive to lift holds the run, and one the plan asked
 /// to leave for a person holds nothing — nothing in the run will ever lift it,
 /// so the node is `done` and its dependents proceed.
+///
+/// A green change kept as a draft for its user's review is `done`: its work is
+/// finished and verified, and what is left is a person's review, which nothing in
+/// the run waits for.
 fn drafted_status(
     outcome: &onevcs::PublishOutcome,
     reason: Option<&onevcs::DraftReason>,
@@ -1019,7 +1042,53 @@ fn drafted_status(
             onevcs::PublishOutcome::ChangeDraft(_),
             Some(onevcs::DraftReason::AwaitingRelease { .. }),
         ) => NodeStatus::CompleteDraft,
-        _ => NodeStatus::Done,
+        (onevcs::PublishOutcome::ChangeDraft(_), _) => NodeStatus::Done,
+        (onevcs::PublishOutcome::ChangeReviewDraft(_), _) => NodeStatus::Done,
+        (
+            onevcs::PublishOutcome::Merged(_)
+            | onevcs::PublishOutcome::ChangeOpen(_)
+            | onevcs::PublishOutcome::Queued(_)
+            | onevcs::PublishOutcome::NothingToPublish
+            | onevcs::PublishOutcome::Failed { .. },
+            _,
+        ) => NodeStatus::Done,
+    }
+}
+
+/// The sentence a node settled `change-review-draft` carries: its checks are
+/// green, the change request is kept as a draft for its user's review, and how
+/// that user lifts it.
+fn review_draft_detail(token: &onevcs::SessionToken) -> String {
+    format!(
+        "the required checks are green and the change request is kept as a draft for its \
+         user's review: lift it on the host or with `onevcs change ready {}`",
+        token.0
+    )
+}
+
+/// The sentence a node carries when `onevcs` lifted its draft before any required
+/// check had run on it, and said so.
+const LIFTED_EARLY: &str = "the required checks did not start on the draft, so it was lifted \
+                            before its checks were green";
+
+/// The sentence naming the required checks that concluded **skipped** — accepted by
+/// the host's merge path, and never passed — or nothing where none was.
+fn skipped_detail(skipped: &[String]) -> Option<String> {
+    let names: Vec<String> = skipped
+        .iter()
+        .map(|name| format!("`{}`", crate::views::one_line(name)))
+        .collect();
+    match names.as_slice() {
+        [] => None,
+        [one] => Some(format!(
+            "the required check {one} concluded skipped: it did not run, so it is not counted \
+             as passed"
+        )),
+        many => Some(format!(
+            "the required checks {} concluded skipped: they did not run, so they are not \
+             counted as passed",
+            many.join(", ")
+        )),
     }
 }
 
@@ -1029,14 +1098,17 @@ fn drafted_status(
 /// Three facts and no more, each read off what happened rather than off what was
 /// asked: who opened it — this session's worker, as a draft; an earlier
 /// publication of this same branch that left it as one; or one that left it
-/// open — whether the drafted description reached it, and whether it was marked
-/// ready for review or left as the draft the plan asked for. Written once so
-/// `results` and `status` read the same words.
+/// open — whether the drafted description reached it, and what the publication
+/// **answered** for a draft: lifted, lifted and merged, kept as a draft for its
+/// user's review, or left as the draft the plan asked for. The closeout lifts
+/// nothing itself — `onevcs`'s draft lifecycle decides — so the sentence says what
+/// that decided rather than assuming a lift. Written once so `results` and
+/// `status` read the same words.
 fn finished_detail(
     change: &onevcs::SessionChange,
     worker_drafted: bool,
     described: bool,
-    left_as_draft: bool,
+    answered: &onevcs::PublishOutcome,
 ) -> String {
     let opened = match (change.draft, worker_drafted) {
         (true, true) => "the worker opened the change request as a draft",
@@ -1050,10 +1122,22 @@ fn finished_detail(
     } else {
         "the closeout left the description as the worker left it"
     };
-    let lifted = match (change.draft, left_as_draft) {
-        (true, false) => " and marked it ready for review",
-        (true, true) => " and left it as a draft",
+    let lifted = match (change.draft, answered) {
         (false, _) => "",
+        (true, onevcs::PublishOutcome::ChangeDraft(_)) => " and left it as a draft",
+        (true, onevcs::PublishOutcome::ChangeReviewDraft(_)) => {
+            ", and the publication kept it as a draft for its user's review"
+        }
+        (true, onevcs::PublishOutcome::Merged(_)) => {
+            ", and the publication lifted it out of its draft and merged it"
+        }
+        (true, onevcs::PublishOutcome::ChangeOpen(_) | onevcs::PublishOutcome::Queued(_)) => {
+            ", and the publication lifted it out of its draft"
+        }
+        (
+            true,
+            onevcs::PublishOutcome::NothingToPublish | onevcs::PublishOutcome::Failed { .. },
+        ) => "",
     };
     format!("{opened}; {description}{lifted}")
 }
@@ -2218,6 +2302,95 @@ pub fn ordered_steps(node: &Node) -> std::result::Result<Vec<Step>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three drafts a publication can end in are told apart by status as well
+    /// as by word: one awaiting a release holds the run, one the plan asked for and
+    /// one kept green for its user's review do not.
+    #[test]
+    fn a_green_change_kept_for_review_settles_done_and_only_a_release_awaiting_draft_holds() {
+        let url = || onevcs::Url::parse("https://github.com/owner/service/pull/7").expect("a url");
+        let awaiting = onevcs::DraftReason::AwaitingRelease {
+            awaiting: "github.com/owner/engine".to_owned(),
+            target: "crate".parse().expect("a target name"),
+            reference: "onevcs/s-1".to_owned(),
+            because: "pinned to a branch until the engine releases".to_owned(),
+        };
+        let held = crate::release::held_reason("service");
+        assert_eq!(
+            drafted_status(&onevcs::PublishOutcome::ChangeDraft(url()), Some(&awaiting)),
+            NodeStatus::CompleteDraft
+        );
+        assert_eq!(
+            drafted_status(&onevcs::PublishOutcome::ChangeDraft(url()), Some(&held)),
+            NodeStatus::Done
+        );
+        assert_eq!(
+            drafted_status(&onevcs::PublishOutcome::ChangeReviewDraft(url()), None),
+            NodeStatus::Done
+        );
+        assert_eq!(
+            drafted_status(&onevcs::PublishOutcome::ChangeOpen(url()), None),
+            NodeStatus::Done
+        );
+    }
+
+    /// What the closeout says about a draft the session held is what the
+    /// publication **answered**, never a lift it assumed.
+    #[test]
+    fn a_held_draft_is_described_by_what_the_publication_answered() {
+        let url = || onevcs::Url::parse("https://github.com/owner/service/pull/7").expect("a url");
+        let draft = onevcs::SessionChange {
+            url: url(),
+            id: onevcs::ChangeId("7".to_owned()),
+            base: "main".to_owned(),
+            draft: true,
+            title: "wip".to_owned(),
+            body: String::new(),
+        };
+        let said = |outcome: onevcs::PublishOutcome| finished_detail(&draft, true, true, &outcome);
+        let opening = "the worker opened the change request as a draft; the closeout wrote the \
+                       drafted description onto it";
+        assert_eq!(
+            said(onevcs::PublishOutcome::ChangeReviewDraft(url())),
+            format!("{opening}, and the publication kept it as a draft for its user's review")
+        );
+        assert_eq!(
+            said(onevcs::PublishOutcome::ChangeOpen(url())),
+            format!("{opening}, and the publication lifted it out of its draft")
+        );
+        assert_eq!(
+            said(onevcs::PublishOutcome::Merged(onevcs::Sha("abc".into()))),
+            format!("{opening}, and the publication lifted it out of its draft and merged it")
+        );
+        assert_eq!(
+            said(onevcs::PublishOutcome::ChangeDraft(url())),
+            format!("{opening} and left it as a draft")
+        );
+        for outcome in [
+            onevcs::PublishOutcome::ChangeReviewDraft(url()),
+            onevcs::PublishOutcome::ChangeOpen(url()),
+            onevcs::PublishOutcome::Merged(onevcs::Sha("abc".into())),
+        ] {
+            assert!(!said(outcome).contains("marked it ready"));
+        }
+    }
+
+    /// A skipped required check is named, and never as passed.
+    #[test]
+    fn skipped_required_checks_are_named_as_skipped() {
+        assert_eq!(skipped_detail(&[]), None);
+        assert_eq!(
+            skipped_detail(&["lint".to_owned()]).as_deref(),
+            Some("the required check `lint` concluded skipped: it did not run, so it is not counted as passed")
+        );
+        assert_eq!(
+            skipped_detail(&["lint".to_owned(), "test (linux)".to_owned()]).as_deref(),
+            Some(
+                "the required checks `lint`, `test (linux)` concluded skipped: they did not run, \
+                 so they are not counted as passed"
+            )
+        );
+    }
 
     /// What an attempt left the branch at decides whether it republished, and the
     /// three answers are three different things.

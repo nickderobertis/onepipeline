@@ -256,6 +256,197 @@ fn repo_recover_lands_a_preserved_branch_with_the_body_it_was_drafted() {
     assert_eq!(drafting_dispatches(&world).len(), 1);
 }
 
+/// Make the world's identity a team repository: `change-open` with approvals
+/// required, whose green change requests `onevcs` keeps as a draft for their user's
+/// review.
+fn approvals_required(world: &World) {
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 3\nrules: []\ndefault:\n  publication: change-open\n  approvals: required\n",
+    )
+    .expect("the rules file is written");
+}
+
+/// What the host holds change request `number` as: `draft`, `open` or `merged`.
+fn host_holds(world: &World, number: u64) -> String {
+    std::fs::read_to_string(world.fakes.join("gh").join(number.to_string()))
+        .unwrap_or_else(|error| panic!("the host holds no change request {number}: {error}"))
+        .trim()
+        .to_owned()
+}
+
+/// A branch landed by hand onto a team repository whose required checks are green
+/// is kept as a draft for its user's review, and both verbs say so under the word a
+/// node settles on — with the change request's URL — and exit as a success does.
+#[test]
+fn a_green_branch_landed_on_a_team_repository_reports_the_review_draft_word() {
+    for verb in ["publish-branch", "repo-recover"] {
+        let world = World::new(&format!("oob-review-{verb}"));
+        let repository = world.repository("change-open", &[]);
+        approvals_required(&world);
+        world.script("gh.checks", "lint completed success required");
+        if verb == "publish-branch" {
+            branch_with_work(&world, &repository);
+        } else {
+            preserved_branch(&world, &repository);
+        }
+        let checkout = repository.checkout.to_string_lossy().into_owned();
+        let landed = world.run(&[
+            verb,
+            BRANCH,
+            "--no-draft",
+            "--repo",
+            &checkout,
+            "--title",
+            "feat: add the widget",
+        ]);
+        landed
+            .exited(0)
+            .out_has("change-review-draft: https://github.com/owner/service/pull/1: ")
+            .out_has("kept as a draft for its user's review");
+        assert_eq!(host_holds(&world, 1), "draft", "{verb}\n{}", world.dump());
+        assert!(
+            repository.base_file("widget.txt").is_none(),
+            "{verb}: a change kept for review reached its base"
+        );
+    }
+}
+
+/// How many `gh` invocations the host has been asked so far.
+fn gh_call_count(world: &World) -> usize {
+    world
+        .invocations()
+        .iter()
+        .filter(|call| call["tool"] == "gh")
+        .count()
+}
+
+/// Where the origin holds `branch`, or `None` where it holds no such branch.
+fn origin_ref(repository: &Repository, branch: &str) -> Option<String> {
+    let answer = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(&repository.origin)
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .output()
+        .expect("git runs");
+    answer
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&answer.stdout).trim().to_owned())
+}
+
+/// Every bound `onevcs` validates before a publication pushes, each set to
+/// something that is not a number of seconds: the two git bounds its command line
+/// checks up front, and the checks watch's bound, its poll, and the draft
+/// lifecycle's grace window, which the library itself refuses before anything is
+/// pushed.
+const BOUNDS: [&str; 5] = [
+    "ONEVCS_GIT_TIMEOUT",
+    "ONEVCS_GIT_HOOK_TIMEOUT",
+    "ONEVCS_CHECKS_TIMEOUT_SECONDS",
+    "ONEVCS_CHECKS_POLL_SECONDS",
+    "ONEVCS_DRAFT_CHECKS_GRACE_SECONDS",
+];
+
+/// A bound set to something that is not one is refused, naming it, **before** a
+/// landing pushes anything or asks the host anything — for both verbs and every
+/// bound — and the refusal is word for word and code for code what `onevcs`'s own
+/// command line makes.
+///
+/// Held against the real `onevcs` binary rather than against a copy of its
+/// sentence: the two are run with the same bound over the same world, so a
+/// sibling that rewords or recodes the refusal moves both answers together. The
+/// validation is `onevcs`'s own — this crate calls the verbs' library forms, which
+/// check these bounds before their push — so nothing here restates it.
+#[test]
+fn an_unusable_bound_is_refused_before_a_landing_pushes_or_touches_the_host() {
+    for (verb, onevcs_verb) in [
+        ("publish-branch", "publish-branch"),
+        ("repo-recover", "recover"),
+    ] {
+        // A world holding the branch this verb lands, as an operator leaves it.
+        let prepared = || {
+            let world = World::new(&format!("oob-bound-{verb}"));
+            let repository = world.repository("change-open", &[]);
+            if verb == "publish-branch" {
+                branch_with_work(&world, &repository);
+            } else {
+                preserved_branch(&world, &repository);
+            }
+            (world, repository)
+        };
+        for bound in BOUNDS {
+            let (world, repository) = prepared();
+            let asked_before = gh_call_count(&world);
+            let pushed_before = origin_ref(&repository, BRANCH);
+            let checkout = repository.checkout.to_string_lossy().into_owned();
+            let args = [
+                BRANCH,
+                "--no-draft",
+                "--repo",
+                &checkout,
+                "--title",
+                "feat: add the widget",
+            ];
+            let landed = world
+                .cmd(&[&[verb], &args[..]].concat())
+                .env(bound, "soon")
+                .output()
+                .expect("the binary runs");
+            let stderr = String::from_utf8_lossy(&landed.stderr);
+            assert_ne!(landed.status.code(), Some(0), "{verb} {bound}: {stderr}");
+            assert!(
+                stderr.contains(bound) && stderr.contains("\"soon\""),
+                "{verb} {bound}: the refusal does not name the bound and its value: {stderr}"
+            );
+            assert_eq!(
+                gh_call_count(&world),
+                asked_before,
+                "{verb} {bound}: the host was asked something before the refusal"
+            );
+            assert_eq!(
+                origin_ref(&repository, BRANCH),
+                pushed_before,
+                "{verb} {bound}: the branch was pushed before the refusal"
+            );
+            assert!(
+                opened(&world).is_empty(),
+                "{verb} {bound}: {:?}",
+                opened(&world)
+            );
+
+            // Exactly what `onevcs` itself answers, `--no-draft` being this crate's,
+            // over a world of its own: `recover` attests the branch before the
+            // bound is refused, on either path, so a second landing in the first
+            // world would meet a branch already attested.
+            let (apart, apart_repository) = prepared();
+            let apart_checkout = apart_repository.checkout.to_string_lossy().into_owned();
+            let own = [
+                onevcs_verb,
+                BRANCH,
+                "--repo",
+                &apart_checkout,
+                "--title",
+                "feat: add the widget",
+            ];
+            let sibling = apart
+                .cmd_on(&onevcs_binary(), &own)
+                .env(bound, "soon")
+                .output()
+                .expect("onevcs runs");
+            assert_eq!(
+                (landed.status.code(), stderr.as_ref()),
+                (
+                    sibling.status.code(),
+                    String::from_utf8_lossy(&sibling.stderr).as_ref()
+                ),
+                "{verb} {bound}: the refusal is not the one onevcs makes"
+            );
+        }
+    }
+}
+
 /// A `local-direct` identity opens no change request, so there is no description
 /// for a body to be: it lands on its base with no drafting turn spent, even with a
 /// drafting graph named — and with none named it is not refused for the lack.

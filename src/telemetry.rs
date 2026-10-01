@@ -336,6 +336,21 @@ impl Phase {
             // verifier emits either.
             "gate-verdict" | "push" | "change-opened" | "change-check" | "merge-queued"
             | "change-merged" | "merge-completed" | "sync-conflict" => Some(Self::Publication),
+            // The draft lifecycle's own records: a draft opened while the checks
+            // run, the watch settling them, and the lift or keep that follows. Each
+            // is the publication waiting on its host, as a `change-check` is.
+            // `tests::the_draft_lifecycle_is_publication_waiting` holds these words
+            // to `onevcs::EventKind`'s own wire spelling.
+            // llmlint: ignore[changed_behavior_has_e2e] through the binary these arms
+            // cannot change a reported bucket: `onevcs` writes `change-opened`, a
+            // publication kind, before any of them on every stream, so a run reports
+            // the same `publication-wait` with or without them. The fold where they
+            // decide the bucket is driven by that unit test instead.
+            "change-drafted"
+            | "checks-settled"
+            | "draft-lifted"
+            | "draft-lifted-early"
+            | "draft-kept-for-review" => Some(Self::Publication),
             _ => None,
         }
     }
@@ -1003,6 +1018,61 @@ mod tests {
             Some(10_000)
         );
         assert_eq!(bucket_of(&telemetry, BucketName::Scheduling), Some(10_000));
+    }
+
+    /// The draft lifecycle's records are the publication waiting on its host: a
+    /// draft opened while the checks run, the watch settling them, and the keep
+    /// that ends it are all charged to `publication-wait`, never to setup.
+    #[test]
+    fn the_draft_lifecycle_is_publication_waiting() {
+        // Spelled through `onevcs`'s own kinds, so a word that library renames
+        // fails here rather than silently falling out of the bucket.
+        for kind in [
+            onevcs::EventKind::ChangeDrafted,
+            onevcs::EventKind::ChecksSettled,
+            onevcs::EventKind::DraftLifted,
+            onevcs::EventKind::DraftLiftedEarly,
+            onevcs::EventKind::DraftKeptForReview,
+        ] {
+            let wire = onemessagebus::Kind::from(kind);
+            assert_eq!(
+                Phase::of(wire.as_str()),
+                Some(Phase::Publication),
+                "{wire:?}"
+            );
+        }
+        let events = vec![
+            started(),
+            at(
+                10,
+                journal::PipelineKind::NodeDispatched,
+                Some("service"),
+                &[],
+            ),
+            session(10, "session-opened", Some("service")),
+            session(20, "change-drafted", Some("service")),
+            session(50, "checks-settled", Some("service")),
+            session(60, "draft-kept-for-review", Some("service")),
+            session(70, "session-closed", Some("service")),
+            at(
+                70,
+                journal::PipelineKind::NodeSettled,
+                Some("service"),
+                &[("status", json!("done"))],
+            ),
+        ];
+        let telemetry = of_run(&paths(), &events);
+        assert_eq!(
+            summed(&telemetry),
+            telemetry.wall_ms,
+            "{:?}",
+            telemetry.buckets
+        );
+        assert_eq!(
+            bucket_of(&telemetry, BucketName::PublicationWait),
+            Some(50_000)
+        );
+        assert_eq!(bucket_of(&telemetry, BucketName::Setup), Some(10_000));
     }
 
     /// A node holds more than one session — its steps' and the one its change

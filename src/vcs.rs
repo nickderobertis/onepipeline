@@ -290,6 +290,16 @@ pub fn describe_change(
 /// pin become permanent in a base branch in the first place.
 pub const DRAFTED: &str = "change-draft";
 
+/// The word a node settles on when its change request's required checks came back
+/// green and it is **kept as a draft for its own user's review** — what `onevcs`'s
+/// draft lifecycle answers under `change-open` with approvals required.
+///
+/// Its own word beside [`DRAFTED`] rather than a shade of it, because a reader acts
+/// on the difference: this work is done — green, and waiting for the person who
+/// dispatched it — where a `change-draft` is held back by a reason, and a
+/// `change-open` is already asking the team for review.
+pub const REVIEW_DRAFTED: &str = "change-review-draft";
+
 /// How a publication settles the node that made it.
 ///
 /// This crate's own outcome vocabulary, which a plan's readers and `results`
@@ -303,6 +313,8 @@ pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
         // Its own word and not `change-open`'s, because the two differ in the one
         // thing a reader acts on: a draft cannot land. See [`DRAFTED`].
         PublishOutcome::ChangeDraft(_) => DRAFTED,
+        // Green and done, but not yet lifted: see [`REVIEW_DRAFTED`].
+        PublishOutcome::ChangeReviewDraft(_) => REVIEW_DRAFTED,
         PublishOutcome::Queued(_) => "queued",
         PublishOutcome::NothingToPublish => "no-changes",
         PublishOutcome::Failed { kind, .. } => failure_of(*kind).outcome(),
@@ -548,6 +560,7 @@ pub fn landing_of(outcome: &PublishOutcome) -> Option<crate::graph::Landing> {
         PublishOutcome::Merged(_) => Some(Landing::Landed),
         PublishOutcome::ChangeOpen(_)
         | PublishOutcome::ChangeDraft(_)
+        | PublishOutcome::ChangeReviewDraft(_)
         | PublishOutcome::Queued(_) => Some(Landing::Unlanded),
         PublishOutcome::NothingToPublish | PublishOutcome::Failed { .. } => None,
     }
@@ -805,8 +818,11 @@ pub fn change_url(outcome: &PublishOutcome) -> Option<String> {
     match outcome {
         PublishOutcome::ChangeOpen(url)
         | PublishOutcome::ChangeDraft(url)
+        | PublishOutcome::ChangeReviewDraft(url)
         | PublishOutcome::Queued(url) => Some(url.to_string()),
-        _ => None,
+        PublishOutcome::Merged(_)
+        | PublishOutcome::NothingToPublish
+        | PublishOutcome::Failed { .. } => None,
     }
 }
 
@@ -1327,6 +1343,54 @@ pub fn change_drafted_in(token: &SessionToken) -> bool {
     events(token, None)
         .iter()
         .any(|envelope| envelope.kind == drafted)
+}
+
+/// Whether **this session's** publication lifted its draft before any required
+/// check had run on it, **and warned** that it did — `draft-lifted-early` with
+/// `warned: true`.
+///
+/// Read off the session's own stream for [`change_drafted_in`]'s reason. An identity
+/// whose rules say `drafts: {warn_on_early_lift: false}` records the lift with
+/// `warned: false`, and that is the operator having asked not to be told, so it
+/// answers `false` here too. `false` as well where the stream cannot be read.
+pub fn lifted_early_in(token: &SessionToken) -> bool {
+    let early = kind_of(onevcs::EventKind::DraftLiftedEarly);
+    events(token, None).iter().any(|envelope| {
+        envelope.kind == early
+            && envelope
+                .payload
+                .get("warned")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+    })
+}
+
+/// The required checks **this session's** publication settled with as skipped —
+/// the names a `checks-settled` whose `verdict` is `passed-with-skipped` carries.
+///
+/// A skipped check is one the host's merge path accepted without it having run, so
+/// it is never read as passed: the node's settlement names it. Empty where no such
+/// record was written, where its `verdict` is `passed`, and where the stream cannot
+/// be read; a name that is not a string is not a name and is left out.
+pub fn skipped_required_in(token: &SessionToken) -> Vec<String> {
+    let settled = kind_of(onevcs::EventKind::ChecksSettled);
+    let mut skipped: Vec<String> = events(token, None)
+        .iter()
+        .filter(|envelope| {
+            envelope.kind == settled
+                && envelope
+                    .payload
+                    .get("verdict")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("passed-with-skipped")
+        })
+        .filter_map(|envelope| envelope.payload.get("skipped")?.as_array().cloned())
+        .flatten()
+        .filter_map(|name| name.as_str().map(str::to_owned))
+        .collect();
+    skipped.sort();
+    skipped.dedup();
+    skipped
 }
 
 /// The sessions holding one repository's workspaces, as `onevcs` reports them.
@@ -2568,6 +2632,11 @@ mod tests {
             outcome_of(&PublishOutcome::ChangeDraft(url.clone())),
             "change-draft"
         );
+        assert_eq!(
+            outcome_of(&PublishOutcome::ChangeReviewDraft(url.clone())),
+            "change-review-draft"
+        );
+        assert_eq!(REVIEW_DRAFTED, "change-review-draft");
         assert_eq!(outcome_of(&PublishOutcome::Queued(url)), "queued");
         assert_eq!(outcome_of(&PublishOutcome::NothingToPublish), "no-changes");
         // A failed publication settles under the word its **kind** earns, which
@@ -2603,6 +2672,45 @@ mod tests {
         );
     }
 
+    /// The green team draft's word is the one entry 100 of the divergence record
+    /// names, and the contract and the README name it too.
+    #[test]
+    fn the_review_draft_word_is_what_the_divergence_record_names() {
+        let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+        let record = std::fs::read_to_string(docs.join("contract-divergences.md"))
+            .expect("the divergence record ships");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("100."))
+            .expect("the record carries entry 100");
+        let block: serde_json::Value = entry
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .and_then(|block| serde_json::from_str(block).ok())
+            .expect("entry 100 carries the json block this test drives");
+        assert_eq!(block["outcomes"], serde_json::json!([REVIEW_DRAFTED]));
+        assert_eq!(block["status"], "done");
+        let contract =
+            std::fs::read_to_string(docs.join("contract.md")).expect("the contract ships");
+        assert!(
+            contract.contains(&format!("`{REVIEW_DRAFTED}`")),
+            "docs/contract.md does not name {REVIEW_DRAFTED}"
+        );
+        // And the README's account of it says the same status and word.
+        let readme = std::fs::read_to_string(docs.join("../README.md"))
+            .expect("the README ships")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            readme.contains(&format!(
+                "settles `done` with outcome `{REVIEW_DRAFTED}`, unlanded"
+            )),
+            "README.md does not say a green team draft settles done as {REVIEW_DRAFTED}"
+        );
+    }
+
     /// Which endings this crate is willing to call landed.
     ///
     /// Exactly one: the case `onevcs` produces holding the commit the change
@@ -2631,6 +2739,12 @@ mod tests {
             landing_of(&PublishOutcome::ChangeDraft(url.clone())),
             Some(Landing::Unlanded)
         );
+        // Green and kept as a draft for its user's review is done, and still not
+        // on its base: nothing merged it.
+        assert_eq!(
+            landing_of(&PublishOutcome::ChangeReviewDraft(url.clone())),
+            Some(Landing::Unlanded)
+        );
         assert_eq!(
             landing_of(&PublishOutcome::Queued(url)),
             Some(Landing::Unlanded)
@@ -2654,6 +2768,10 @@ mod tests {
         let url: onevcs::Url = "https://example.invalid/pull/7".parse().expect("a URL");
         assert_eq!(
             change_url(&PublishOutcome::ChangeOpen(url.clone())).as_deref(),
+            Some("https://example.invalid/pull/7")
+        );
+        assert_eq!(
+            change_url(&PublishOutcome::ChangeReviewDraft(url.clone())).as_deref(),
             Some("https://example.invalid/pull/7")
         );
         assert_eq!(

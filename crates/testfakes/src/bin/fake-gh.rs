@@ -115,6 +115,7 @@ fn main() -> ExitCode {
         args.get(1).map(String::as_str),
     ) {
         (Some("api"), Some("user")) => user(&args),
+        (Some("api"), Some(path)) if path.starts_with("repos/") => protection(&args, &dir, path),
         (Some("pr"), Some("create")) => create(&args, &dir),
         (Some("pr"), Some("list")) => list(&args, &dir),
         (Some("pr"), Some("view")) => view(&args, &dir),
@@ -261,6 +262,100 @@ fn user(args: &[String]) -> ExitCode {
     }
     println!("{WHO}");
     ExitCode::SUCCESS
+}
+
+/// `gh api repos/R/rules/branches/B` and
+/// `gh api repos/R/branches/B/protection/required_status_checks`
+///
+/// Which checks the base's merge path **declares** required, which `onevcs` 0.36.0
+/// reads before it watches a draft: a draft's green is every declared check passed
+/// on it, and a host that declares nothing is green at once. The rulesets name every
+/// check any scripted rollup marks `required`, so the declaration and the rollup
+/// cannot disagree; classic protection answers the way an unprotected branch does,
+/// which is an answer — the source was consulted and names nothing — and so the
+/// declaration is complete.
+fn protection(args: &[String], dir: &Path, path: &str) -> ExitCode {
+    if args.len() != 2 {
+        return fake::refuse(&format!("gh api {path} takes no flags here: {args:?}"));
+    }
+    let segments: Vec<&str> = path.split('/').collect();
+    // An empty owner, repository or branch is a path GitHub would not answer, so
+    // it is refused here rather than read as a declaration for nobody's branch.
+    if segments.iter().any(|segment| segment.is_empty()) {
+        return fake::refuse(&format!("gh api path '{path}' has an empty segment"));
+    }
+    match segments.as_slice() {
+        // GitHub's own ruleset shape. What reads it is `onevcs`'s `GitHub::required_on`,
+        // which refuses a shape it cannot read rather than reading it as "nothing
+        // required", so a drift here fails every draft journey loudly instead of
+        // passing one silently.
+        ["repos", _, _, "rules", "branches", _] => {
+            let mut required: Vec<String> = declared_required(dir);
+            required.sort();
+            required.dedup();
+            let rules = if required.is_empty() {
+                serde_json::json!([])
+            } else {
+                serde_json::json!([{
+                    "type": "required_status_checks",
+                    "parameters": {
+                        "required_status_checks": required
+                            .iter()
+                            .map(|name| serde_json::json!({"context": name}))
+                            .collect::<Vec<_>>(),
+                    },
+                }])
+            };
+            println!("{rules}");
+            ExitCode::SUCCESS
+        }
+        ["repos", _, _, "branches", _, "protection", "required_status_checks"] => {
+            eprintln!("gh: Branch not protected (HTTP 404)");
+            ExitCode::from(1)
+        }
+        _ => fake::refuse(&format!("unknown gh api path '{path}'")),
+    }
+}
+
+/// Every check name any scripted rollup marks `required`: `gh.checks`,
+/// `gh.checks.draft`, and each `gh.checks.<NUMBER>`.
+///
+/// A script directory or a check script that cannot be read is a broken fixture
+/// and fatal, for [`read_if_present`]'s reason: answering it as "nothing required"
+/// would be this host declaring a merge path nobody wrote.
+fn declared_required(dir: &Path) -> Vec<String> {
+    let entries = std::fs::read_dir(dir).unwrap_or_else(|error| {
+        fake::fail(&format!("{} could not be listed: {error}", dir.display()))
+    });
+    entries
+        .map(|entry| {
+            entry.unwrap_or_else(|error| {
+                fake::fail(&format!("{} could not be listed: {error}", dir.display()))
+            })
+        })
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name == "gh.checks" || name.starts_with("gh.checks.")
+        })
+        .map(|entry| {
+            std::fs::read_to_string(entry.path()).unwrap_or_else(|error| {
+                fake::fail(&format!(
+                    "{} could not be read: {error}",
+                    entry.path().display()
+                ))
+            })
+        })
+        .flat_map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(|line| Check::parse(line).unwrap_or_else(|why| fake::fail(&why)))
+                .filter(|check| check.blocks == Blocks::Required)
+                .map(|check| check.name)
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// `gh run view --repo R --log --job N [--allow-escape-sequences]`
@@ -718,7 +813,7 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
     let id = opened.number.to_string();
     let state = state_of_opened(dir, &opened);
     let merged = state == Change::Merged;
-    let reported = scripted_checks(dir, &id);
+    let reported = scripted_checks(dir, &id, state);
     let head = head_of(dir, &opened);
     println!(
         "{}",
@@ -742,7 +837,7 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
             // repository whose only bar is the `command:` gate its rules name.
             "statusCheckRollup": reported
                 .iter()
-                .map(Check::rollup_entry)
+                .map(|check| check.rollup_entry(state))
                 .collect::<Vec<_>>(),
         })
     );
@@ -914,8 +1009,20 @@ impl Check {
     /// `conclusion` is **absent** rather than null while a check is running,
     /// which is what the real rollup does and what `onevcs` reads as "the host
     /// cannot know yet".
-    fn rollup_entry(&self) -> serde_json::Value {
+    ///
+    /// A check that has started carries `startedAt`, and the run a draft reported is
+    /// a different run from the one a ready change reports: a workflow re-runs on
+    /// `ready_for_review`, and `onevcs` 0.36.0 tells a run attached after a lift from
+    /// the draft's by that start alone.
+    fn rollup_entry(&self, change: Change) -> serde_json::Value {
         let mut entry = serde_json::json!({"name": self.name, "status": self.state.status()});
+        if self.state != State::Queued {
+            entry["startedAt"] = serde_json::json!(if change == Change::Draft {
+                DRAFT_RUN_STARTED
+            } else {
+                READY_RUN_STARTED
+            });
+        }
         if let State::Settled(conclusion) = self.state {
             entry["conclusion"] = serde_json::json!(conclusion.wire());
         }
@@ -923,16 +1030,28 @@ impl Check {
     }
 }
 
+/// When the run a draft reported started.
+const DRAFT_RUN_STARTED: &str = "2026-01-01T00:00:00Z";
+
+/// When the run a ready change reported started — a later run than the draft's.
+const READY_RUN_STARTED: &str = "2026-01-01T00:05:00Z";
+
 /// What this host reports about one change request's checks.
 ///
 /// Scripted `gh.checks`, one check per line, with `gh.checks.<NUMBER>` beside it
 /// for a journey that has more than one change request open at once and needs
-/// this host to answer differently about each.
+/// this host to answer differently about each. `gh.checks.draft`, where scripted,
+/// is what the host reports **while the change is a draft**, over both: the
+/// repository whose workflows skip a draft, whose checks run only once it is
+/// lifted.
 ///
 /// A line this program cannot read is **fatal**, not skipped: a journey scripting
 /// a check this host quietly dropped would assert against a rollup nobody wrote.
-fn scripted_checks(dir: &Path, id: &str) -> Vec<Check> {
-    let text = fake::node_script(dir, "gh", &format!("checks.{}", fake::segment(id)))
+fn scripted_checks(dir: &Path, id: &str, change: Change) -> Vec<Check> {
+    let text = (change == Change::Draft)
+        .then(|| fake::node_script(dir, "gh", "checks.draft"))
+        .flatten()
+        .or_else(|| fake::node_script(dir, "gh", &format!("checks.{}", fake::segment(id))))
         .or_else(|| fake::node_script(dir, "gh", "checks"));
     let Some(text) = text else {
         return Vec::new();
@@ -969,7 +1088,11 @@ fn checks(args: &[String], dir: &Path) -> ExitCode {
         Ok(opened) => opened,
         Err(refusal) => return refusal,
     };
-    let reported = scripted_checks(dir, &opened.number.to_string());
+    let reported = scripted_checks(
+        dir,
+        &opened.number.to_string(),
+        state_of_opened(dir, &opened),
+    );
     if required_only {
         let required: Vec<&Check> = reported
             .iter()
