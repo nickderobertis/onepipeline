@@ -8,6 +8,8 @@
 // the real compiled binary over the real run store it wrote; `harness.rs` carries the
 // same suppression and the full rationale.
 
+use std::time::Duration;
+
 use crate::harness::{agent, counts, plan_of, reporting, World, LOOP_STATS_ENV};
 use serde_json::{json, Value};
 
@@ -497,6 +499,63 @@ fn the_reconcile_loop_folds_what_the_store_grew_by_rather_than_the_whole_journal
          {} — the saving this claims is not there: {did:?}",
         did.records_folded,
         changes * records
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// An attached launch folds nothing while its run records nothing.
+///
+/// The launch streams its run's records as they arrive, and it looked for them by
+/// reading the whole run every twentieth of a second — each read folding the store past
+/// its checkpoint — so what the driving process folded grew with how long its run took
+/// rather than with what the run recorded. On a loaded Windows runner that was most of
+/// what the journey above counted (run 36692817087). A journal that has not grown has
+/// no line to stream, so it is not read again until it has.
+// llmlint: ignore-block[tests_mirror_real_usage] how many records a real driver folded out
+// of a real run store is reported by no CLI output, and a read that folds nothing new
+// prints nothing either way. The launch, plan and dispatch are the real ones, attached as
+// a person attaches.
+#[test]
+fn an_attached_launch_folds_nothing_while_its_run_records_nothing() {
+    let world = World::new("checkpoint-attached-idle").with_env(LOOP_STATS_ENV, "1");
+    world.script("hold.wait", "hold");
+    let plan = world.plan("idle", &plan_of("idle", vec![agent("hold", &[])]));
+    // Its settlement is the one thing read off it, and only once it has ended; what it
+    // streams on the way is not this journey's, and a pipe nobody reads would hold it.
+    let launch = world
+        .cmd(&["start", &plan, "--attach"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the attached launch starts");
+    world.until("the dispatch to start", |world| {
+        !world.events_of("idle", "node-dispatched").is_empty()
+    });
+    reporting(&world, "idle");
+    // The launch's own records are behind the window before it opens.
+    std::thread::sleep(Duration::from_secs(2));
+
+    let wrote = world.journal("idle").len();
+    let before = counts(&world, "idle");
+    std::thread::sleep(Duration::from_secs(3));
+    let did = counts(&world, "idle").since(before);
+    assert_eq!(
+        world.journal("idle").len(),
+        wrote,
+        "the run recorded something inside the window this claim is about"
+    );
+    assert_eq!(
+        did.records_folded, 0,
+        "an attached launch folded records of a run that recorded none: {did:?}"
+    );
+    world.release("hold.go");
+    let ended = launch.wait_with_output().expect("the attached launch ends");
+    let said = String::from_utf8_lossy(&ended.stdout);
+    assert!(
+        ended.status.success() && said.contains("\"complete\""),
+        "the attached launch did not settle its run complete ({}): {said}",
+        ended.status
     );
 }
 // llmlint: ignore-end[tests_mirror_real_usage]

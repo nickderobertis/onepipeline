@@ -1799,8 +1799,7 @@ fn close_out_and_drain(
         // A node that never started is released at closeout, so another reader may take up
         // what this run claimed and did not begin. A driver that goes on driving after an
         // edit found here publishes it `queued` again on its next pass.
-        writeback.publish_closeout(paths, launch, state, final_statuses);
-        writeback.wait_briefly();
+        writeback.close_out(paths, launch, state, final_statuses);
         // The last thing this loop does, and the reason it is here rather than
         // only at the top: a run whose *terminal* projection failed is exactly
         // the run that settles and is read as the record of what happened, so

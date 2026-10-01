@@ -868,9 +868,19 @@ fn an_adoption_whose_every_read_matches_reads_each_item_once_and_copies_nothing(
     });
     world.release("done.go");
     cancelled(&world, run, "parked");
+    // Each with its settlement beside it, which is the last thing either node's item takes:
+    // the cancel parks `parked` on the board at once and settles it a projection later, so a
+    // board that already reads `parked` can still be one write short of what the adopting
+    // driver reads it against. And with no attempt in flight is not enough to say there is
+    // none to come: a projection the run has published and not yet opened the store for is
+    // invisible to it, and the `stop` below ends that one before it lands.
     projected_until(&world, run, &project, "the board to say it all", |tasks| {
         board_word(tasks, "done").as_deref() == Some("done")
+            && board_task(tasks, "done")["item"]["metadata"]["onepipeline.settlement"]["status"]
+                == "done"
             && board_task(tasks, "parked")["item"]["status"]["name"] == "parked"
+            && board_task(tasks, "parked")["item"]["metadata"]["onepipeline.settlement"]["status"]
+                == "cancelled"
     });
     world.run(&["stop", run]).exited(0);
     let path = world.run_file(run, &in_run_dir(&landed_block()["file"]));

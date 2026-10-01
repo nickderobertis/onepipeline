@@ -6070,3 +6070,26 @@ pub fn epoch_seconds(stamp: &str) -> u64 {
     u64::try_from(days * 86_400 + hour * 3_600 + minute * 60 + second)
         .expect("a stamp after the epoch")
 }
+
+/// Milliseconds since the epoch of a journal stamp, on the scale of
+/// [`now_millis`] — so an instant the run recorded and one this process read off
+/// its clock are compared directly.
+pub fn epoch_millis(stamp: &str) -> u64 {
+    let millis = stamp
+        .trim_end_matches('Z')
+        .split_once('.')
+        .map_or(0, |(_, fraction)| {
+            fraction
+                .parse::<u64>()
+                .unwrap_or_else(|_| panic!("`{stamp}` is not a journal stamp"))
+        });
+    epoch_seconds(stamp) * 1_000 + millis
+}
+
+/// This process's clock, in milliseconds since the epoch.
+pub fn now_millis() -> u64 {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock after the epoch");
+    u64::try_from(since.as_millis()).expect("milliseconds since the epoch fit")
+}

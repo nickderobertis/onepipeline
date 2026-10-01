@@ -3654,7 +3654,9 @@ fn a_run_whose_unfinished_work_is_parked_is_told_to_requeue_before_adopting() {
     world.until("the driver to close the run out", |world| {
         world.run_file("parkedrun", "result.json").is_file()
     });
-    world.until("the driver to read as dead", |world| {
+    // Each look starts a process, so it yields between looks rather than taking
+    // the host from the exit it is waiting on (`tests/AGENTS.md`).
+    world.until_store("the driver to read as dead", |world| {
         world.run(&["runs"]).stdout.contains("DRIVER DEAD")
     });
 

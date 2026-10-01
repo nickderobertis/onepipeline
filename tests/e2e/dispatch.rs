@@ -1371,8 +1371,15 @@ fn status_says_what_a_live_dispatch_is_doing_and_the_readout_advances() {
         .run_on_agentgraph(&["start", &path, "--detach"])
         .exited(0);
 
-    world.until("the dispatch to report a turn", |world| {
-        !world.events_of("watched", "turn-activity").is_empty()
+    // Its first **call**, not its first activity: a turn reasons before it acts,
+    // and each arrives on the stream as its own record. A reading taken between
+    // the two says the agent is thinking — true, and not the call this reading is
+    // about — which a host that relays them a moment apart produces.
+    world.until("the dispatch to report its first tool call", |world| {
+        world
+            .events_of("watched", "turn-activity")
+            .iter()
+            .any(|event| event["payload"]["kind"] == "tool_call")
     });
     // Read through the ordinary view wiring: `status` only reads the merged
     // store, so the sibling behind it is the health probe's and nothing else.

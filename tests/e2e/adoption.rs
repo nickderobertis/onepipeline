@@ -3502,7 +3502,7 @@ const SHIPPED_POLL_SECONDS: u64 = 60;
 ///
 /// A probe is a subprocess, so what a held run costs its host is the number of
 /// them — and a run held for days is held while its loop is woken by everything
-/// else it is doing. Two runs held on the same real release, one woken twenty
+/// else it is doing. Two runs held on the same real release, one woken five
 /// times a second by a narrating dispatch and one every two seconds: their pass
 /// counts are an order of magnitude apart, and what they spend on the release is
 /// the same one ask a minute the shipped interval allows.
@@ -3529,11 +3529,14 @@ fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs(
     releases_at(&answer, "0.1.0");
 
     let runs = ["pacing-chatty", "pacing-quiet"];
-    // Forty times apart rather than ten: a pass costs what the host charges for it,
-    // and on a slow runner the chatty loop is held to a handful a second by that
-    // cost rather than by its clock, so a quiet loop at two a second reached half
-    // of it and the pass-rate premise below failed with the claim under it intact.
-    for (run, every) in runs.iter().zip(["50", "2000"]) {
+    // Ten times apart, and neither faster than a slow host can keep up with. A
+    // pass costs what the host charges for it, so on a slow runner a quiet loop at
+    // two a second reached half the chatty one's and the pass-rate premise below
+    // failed with the claim under it intact. And every beat is a record the loop
+    // relays, so a host that relays fewer a second than it is sent never finishes
+    // a pass — each drains a backlog that grew while it ran — which is what twenty
+    // a second did to the chatty loop on a loaded Windows runner.
+    for (run, every) in runs.iter().zip(["200", "2000"]) {
         // The dispatch that wakes the loop: held open throughout, beating on the
         // clock this run's rate is set by.
         let hold = format!("{run}-hold");
