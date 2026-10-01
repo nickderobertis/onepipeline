@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.56.0](https://github.com/nickderobertis/onepipeline/compare/v0.55.0...v0.56.0) - 2026-10-01
+
+### Added
+
+- *(templates)* let a template layer extend the same name in a lower layer ([#614](https://github.com/nickderobertis/onepipeline/pull/614))
+
+### Fixed
+
+- *(deps)* link the harness stack whose history never scans ([#613](https://github.com/nickderobertis/onepipeline/pull/613))
+
 ## [0.55.0](https://github.com/nickderobertis/onepipeline/compare/v0.54.0...v0.55.0) - 2026-09-30
 
 ### Added
