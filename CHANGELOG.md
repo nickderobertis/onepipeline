@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.57.1](https://github.com/nickderobertis/onepipeline/compare/v0.57.0...v0.57.1) - 2026-10-01
+
+### Fixed
+
+- *(tests)* keep wall-clock tests from failing the Windows leg on scheduler latency ([#634](https://github.com/nickderobertis/onepipeline/pull/634))
+
 ## [0.57.0](https://github.com/nickderobertis/onepipeline/compare/v0.56.0...v0.57.0) - 2026-10-01
 
 ### Added
