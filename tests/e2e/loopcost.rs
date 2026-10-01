@@ -110,6 +110,13 @@ fn at(event: &Value) -> u64 {
     )
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] the instant a run's channel accepted an
+// edit is recorded nowhere a user can read it — the queue's records carry no timestamp
+// and no verb reports one — so its write time is the only account of that instant there
+// is. What a user-facing reading has instead is the clock around the verb's process,
+// which is what this replaced: on a loaded Windows runner it measured the process
+// starting and folding the journal, and failed correct work at 1.4s. The verb itself is
+// still driven as a user runs it, and its exit is still asserted.
 /// When the run's channel accepted the edit it was handed, in milliseconds since
 /// the epoch.
 ///
@@ -128,6 +135,7 @@ fn accepted(world: &World, run: &str) -> u64 {
         .expect("a write time after the epoch");
     u64::try_from(since.as_millis()).expect("milliseconds since the epoch fit")
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// The one record of this kind for this node, for a latency measured off two.
 fn one(world: &World, run: &str, kind: &str, node: &str) -> Value {
@@ -576,11 +584,15 @@ fn every_answer_the_loop_owes_arrives_inside_a_second() {
         1,
         "prompt committed the attest: {committed:?}"
     );
+    // llmlint: ignore-block[tests_mirror_real_usage] measured from the channel queue's own
+    // write time, for the reason `accepted` gives: no user-facing surface records when an
+    // edit was accepted, and the clock around the verb's process is the race this replaced.
     let answered = at(&committed[0]).saturating_sub(accepted(&world, "prompt"));
     assert!(
         answered < 1_000,
         "an edit took {answered}ms to be answered after the channel accepted it"
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     // And the subtree that decision was holding proceeds.
     world.until("the held subtree to start", |world| {
