@@ -2638,10 +2638,20 @@ fn a_lower_file_that_is_not_text_is_refused_as_that_and_never_as_not_found() {
          template: ",
         hosted.display()
     );
-    let gone = world.root.join("gone-design-doc.md.j2");
 
-    // Each way a file can be there and not be text: not UTF-8, a directory, a link to nothing.
-    let cases: [(&str, &dyn Fn(), &str); 3] = [
+    // Each way a file can be there and not be text: not UTF-8, a directory, and, where a
+    // test can make a link without a privilege, a link to nothing.
+    #[cfg(unix)]
+    let gone = world.root.join("gone-design-doc.md.j2");
+    #[cfg(unix)]
+    let link: Option<(&str, &dyn Fn(), &str)> = Some((
+        "a link to nothing",
+        &|| std::os::unix::fs::symlink(&gone, &hosted).expect("a link to nothing"),
+        "it links to a file that does not exist",
+    ));
+    #[cfg(not(unix))]
+    let link = None;
+    let cases: [(&str, &dyn Fn(), &str); 2] = [
         (
             "not UTF-8",
             &|| std::fs::write(&hosted, b"# Design\n\n\xff\xfe not UTF-8\n").expect("written"),
@@ -2652,13 +2662,8 @@ fn a_lower_file_that_is_not_text_is_refused_as_that_and_never_as_not_found() {
             &|| std::fs::create_dir_all(&hosted).expect("a directory where the file goes"),
             "",
         ),
-        (
-            "a link to nothing",
-            &|| std::os::unix::fs::symlink(&gone, &hosted).expect("a link to nothing"),
-            "it links to a file that does not exist",
-        ),
     ];
-    for (case, make, why) in cases {
+    for (case, make, why) in cases.into_iter().chain(link) {
         match std::fs::symlink_metadata(&hosted) {
             Ok(held) if held.is_dir() => std::fs::remove_dir_all(&hosted).expect("cleared"),
             Ok(_) => std::fs::remove_file(&hosted).expect("cleared"),
