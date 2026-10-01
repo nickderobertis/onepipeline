@@ -1508,9 +1508,21 @@ fn resolve_merge(args: &[String], body: &str) {
     {
         return;
     }
-    let unmerged = git(&["diff", "--name-only", "--diff-filter=U"]);
-    for path in String::from_utf8_lossy(&unmerged.stdout).lines() {
-        let at = worktree.join(path.trim());
+    // NUL-separated, so a path git would otherwise quote or that carries a
+    // newline is read as exactly the name it is.
+    let unmerged = git(&["diff", "-z", "--name-only", "--diff-filter=U"]);
+    if !unmerged.status.success() {
+        fake::fail(&format!(
+            "`git diff --diff-filter=U` exited {}: {}",
+            unmerged.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&unmerged.stderr).trim()
+        ));
+    }
+    for path in String::from_utf8_lossy(&unmerged.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+    {
+        let at = worktree.join(path);
         if let Err(error) = std::fs::write(&at, format!("{body}\n")) {
             fake::fail(&format!("cannot write {}: {error}", at.display()));
         }
