@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.57.0](https://github.com/nickderobertis/onepipeline/compare/v0.56.0...v0.57.0) - 2026-10-01
+
+### Added
+
+- *(lifecycle)* [**breaking**] settle a green change request kept as a draft for its user's review as done ([#612](https://github.com/nickderobertis/onepipeline/pull/612))
+
 ## [0.56.0](https://github.com/nickderobertis/onepipeline/compare/v0.55.0...v0.56.0) - 2026-10-01
 
 ### Added
