@@ -1502,11 +1502,17 @@ fn resolve_merge(args: &[String], body: &str) {
             Err(error) => fake::fail(&format!("cannot run `git {}`: {error}", argv.join(" "))),
         }
     };
-    if !git(&["rev-parse", "-q", "--verify", "MERGE_HEAD"])
-        .status
-        .success()
-    {
-        return;
+    // `--verify -q` exits 1, silently, for exactly one answer: no such ref. Any
+    // other failure is git unable to say, which is not a clean session.
+    let merging = git(&["rev-parse", "-q", "--verify", "MERGE_HEAD"]);
+    match merging.status.code() {
+        Some(0) => {}
+        Some(1) => return,
+        code => fake::fail(&format!(
+            "`git rev-parse --verify MERGE_HEAD` exited {}: {}",
+            code.unwrap_or(-1),
+            String::from_utf8_lossy(&merging.stderr).trim()
+        )),
     }
     // NUL-separated, so a path git would otherwise quote or that carries a
     // newline is read as exactly the name it is.
@@ -1518,10 +1524,13 @@ fn resolve_merge(args: &[String], body: &str) {
             String::from_utf8_lossy(&unmerged.stderr).trim()
         ));
     }
-    for path in String::from_utf8_lossy(&unmerged.stdout)
-        .split('\0')
-        .filter(|path| !path.is_empty())
-    {
+    // A name that is not UTF-8 is refused rather than read lossily, which would
+    // write a different file than the one git left unmerged.
+    let listed = match std::str::from_utf8(&unmerged.stdout) {
+        Ok(listed) => listed,
+        Err(error) => fake::fail(&format!("an unmerged path is not UTF-8: {error}")),
+    };
+    for path in listed.split('\0').filter(|path| !path.is_empty()) {
         let at = worktree.join(path);
         if let Err(error) = std::fs::write(&at, format!("{body}\n")) {
             fake::fail(&format!("cannot write {}: {error}", at.display()));
