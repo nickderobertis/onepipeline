@@ -2081,6 +2081,10 @@ pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
         // Stamped where the session opens, which is where the run, the node and
         // the launch that owns it are known: see `executor::SESSION_RUN_LABEL`.
         labels: std::collections::BTreeMap::new(),
+        // A continued branch that conflicts with its moved base opens with the
+        // merge in progress, and the worker it is dispatched to concludes it:
+        // see `lifecycle::merge_resolution`.
+        refuse_conflicts: false,
     })
 }
 
@@ -2413,6 +2417,7 @@ mod tests {
                 worktree: std::path::PathBuf::from("/tmp/worktree"),
                 branch: branch.to_owned(),
                 base: "main".to_owned(),
+                conflict: None,
             },
             &crate::event::Labels::default(),
         )

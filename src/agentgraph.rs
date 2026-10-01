@@ -3295,6 +3295,7 @@ mod tests {
             pool: None,
             overflow: None,
             labels: Default::default(),
+            refuse_conflicts: false,
         };
         let opened = crate::vcs::session_open(&request).expect("a session opens on the checkout");
 

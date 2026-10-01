@@ -989,6 +989,7 @@ mod tests {
                 pool: None,
                 overflow: None,
                 labels: Default::default(),
+                refuse_conflicts: false,
             }),
             cancel: CancellationToken::new(),
             attempt: NonZeroU32::MIN,

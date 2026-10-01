@@ -7349,6 +7349,7 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
                 pool: None,
                 overflow: None,
                 labels: Default::default(),
+                refuse_conflicts: false,
             })
             .expect("a session opens on the unread identity");
         let root = session

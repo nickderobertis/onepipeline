@@ -617,6 +617,7 @@ mod tests {
             pool: None,
             overflow: None,
             labels: Default::default(),
+            refuse_conflicts: false,
         };
         // Held on the refusal's reading, with no read made: the request names
         // an identity no registry holds, which a read would have refused.
