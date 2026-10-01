@@ -1,8 +1,9 @@
 //! What a reconciler finding asks the planner to commit, and what answers it.
 //!
 //! A finding the reconciler raises is a report until it asks for something. The
-//! ones that ask — today the session-open conflict, whose text asks for a
-//! `retry` of the node whose branch will not open — used to be unanswerable: a
+//! ones that ask — today the session conflict, whose text asks for a `retry` of
+//! the node whose dispatches did not conclude its branch's conflict with the
+//! base — used to be unanswerable: a
 //! commands-only envelope is the command path's alone and answers no *question*
 //! (`docs/contract.md`'s Channel paragraph), so the manager committed exactly
 //! the retry the finding asked for and the finding stayed pending for the life
@@ -50,8 +51,9 @@ pub(crate) const REQUESTS_FILE: &str = "finding-requests.json";
 /// `the_key_is_derived_from_what_the_contract_states_it_is` is what would notice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FindingKind {
-    /// A session this run cannot open, because the node's branch and its base
-    /// conflict. Answered by a `retry` of that node.
+    /// A conflict between the node's branch and its base that the node's
+    /// dispatches were handed and did not conclude before its publication budget
+    /// was spent. Answered by a `retry` of that node.
     SessionConflict,
 }
 
@@ -366,7 +368,7 @@ mod tests {
                 .push(Surface {
                     id: 0,
                     kind: SurfaceKind::FINDING.into(),
-                    message: format!("node '{node}' cannot open a session; answer with a `retry`"),
+                    message: format!("node '{node}' did not converge on its conflict with the base; answer with a `retry`"),
                     source: source::RECONCILER.into(),
                     blocking: true,
                     queued_at: crate::sys::now_millis(),

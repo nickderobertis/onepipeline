@@ -3181,15 +3181,27 @@ fn a_branch_its_base_conflicts_with(world: &World, repo: &Repository) -> (String
     git(world, &repo.checkout, &["checkout", "-b", CONFLICTED]);
     std::fs::write(&file, "the branch wrote this\n").expect("the branch's version");
     git(world, &repo.checkout, &["add", "-A"]);
-    git(world, &repo.checkout, &["commit", "-m", "feat: take the file one way"]);
+    git(
+        world,
+        &repo.checkout,
+        &["commit", "-m", "feat: take the file one way"],
+    );
     git(world, &repo.checkout, &["push", "origin", CONFLICTED]);
-    let tip = git(world, &repo.checkout, &["rev-parse", "HEAD"]).trim().to_owned();
+    let tip = git(world, &repo.checkout, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
     git(world, &repo.checkout, &["checkout", "main"]);
     std::fs::write(&file, "the base wrote this instead\n").expect("the base's version");
     git(world, &repo.checkout, &["add", "-A"]);
-    git(world, &repo.checkout, &["commit", "-m", "feat: take the file another way"]);
+    git(
+        world,
+        &repo.checkout,
+        &["commit", "-m", "feat: take the file another way"],
+    );
     git(world, &repo.checkout, &["push", "origin", "main"]);
-    let base = git(world, &repo.checkout, &["rev-parse", "HEAD"]).trim().to_owned();
+    let base = git(world, &repo.checkout, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
     (base, tip)
 }
 
@@ -3231,7 +3243,9 @@ fn assert_handed_the_conflict(task: &str, base: &str, tip: &str) {
         .find(onepipeline::plan::MERGE_RESOLUTION_HEADING)
         .unwrap_or_else(|| panic!("no merge-resolution criterion in the criteria:\n{criteria}"));
     assert!(
-        criteria.find("- service is published.").is_some_and(|own| own < resolution),
+        criteria
+            .find("- service is published.")
+            .is_some_and(|own| own < resolution),
         "the merge-resolution criterion is not after the task's own:\n{criteria}"
     );
     let criterion = onepipeline::plan::MERGE_RESOLUTION_CRITERION
@@ -3259,7 +3273,11 @@ fn landed_on_origin(world: &World, repo: &Repository, commit: &str) {
     assert!(
         ancestor.success(),
         "the origin's main does not carry {commit}:\n{}",
-        git(world, &repo.origin, &["log", "--graph", "--format=%H %P %s", "--all"])
+        git(
+            world,
+            &repo.origin,
+            &["log", "--graph", "--format=%H %P %s", "--all"]
+        )
     );
 }
 
@@ -3283,11 +3301,14 @@ fn commits_carrying_markers(world: &World, repo: &std::path::Path) -> Vec<String
 /// node publishes.
 #[test]
 fn a_session_that_opens_conflicted_is_dispatched_to_the_worker_to_conclude() {
-    let world = World::new("lifecycle-openconflict")
-        .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    let world =
+        World::new("lifecycle-openconflict").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
     let repo = world.repository("local-direct", &[]);
     let (base, tip) = a_branch_its_base_conflicts_with(&world, &repo);
-    world.script("service.resolves-merge", "the branch and the base, reconciled");
+    world.script(
+        "service.resolves-merge",
+        "the branch and the base, reconciled",
+    );
 
     let mut node = lifecycle("service", &[]);
     node["branch"] = json!(CONFLICTED);
@@ -3295,7 +3316,12 @@ fn a_session_that_opens_conflicted_is_dispatched_to_the_worker_to_conclude() {
     let result = world.run_json(&run, "result.json");
     let settled = result["nodes"][0].clone();
     assert_eq!(settled["status"], "done", "{result}\n{}", why(&world, &run));
-    assert_eq!(settled["outcome"], "merged", "{result}\n{}", why(&world, &run));
+    assert_eq!(
+        settled["outcome"],
+        "merged",
+        "{result}\n{}",
+        why(&world, &run)
+    );
 
     // Dispatched once, and never settled as a session the sibling refused.
     assert_eq!(
@@ -3338,11 +3364,19 @@ fn a_session_that_opens_conflicted_is_dispatched_to_the_worker_to_conclude() {
     assert!(
         parents.contains(&base) && parents.contains(&tip),
         "the branch's head is not the merge of {base} onto {tip}: {parents}\n{}",
-        git(&world, &repo.checkout, &["log", "--graph", "--format=%H %P %s", "--all"])
+        git(
+            &world,
+            &repo.checkout,
+            &["log", "--graph", "--format=%H %P %s", "--all"]
+        )
     );
     landed_on_origin(&world, &repo, &base);
     assert_eq!(
-        git(&world, &repo.origin, &["show", &format!("main:{CONFLICTED_PATH}")]),
+        git(
+            &world,
+            &repo.origin,
+            &["show", &format!("main:{CONFLICTED_PATH}")]
+        ),
         "the branch and the base, reconciled\n"
     );
     // And nothing asked a person to merge anything.
@@ -3362,15 +3396,18 @@ fn a_session_that_opens_conflicted_is_dispatched_to_the_worker_to_conclude() {
 /// the publication's diagnosis beside it.
 #[test]
 fn a_publication_conflict_is_redispatched_into_the_merge_and_concluded() {
-    let world = World::new("lifecycle-syncconflict")
-        .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    let world =
+        World::new("lifecycle-syncconflict").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
     let repo = world.repository("local-direct", &[]);
     // The worker holds until this test releases it, which is the window the base
     // moves in. What it writes is the file the base is about to take a different
     // version of; the re-dispatch concludes the merge that conflict leaves.
     world.script("service.work", "the worker wrote this\n");
     world.script("service.wait", "");
-    world.script("service.resolves-merge", "the worker's and the base's, reconciled");
+    world.script(
+        "service.resolves-merge",
+        "the worker's and the base's, reconciled",
+    );
 
     let path = world.plan(
         "syncconflict",
@@ -3388,9 +3425,15 @@ fn a_publication_conflict_is_redispatched_into_the_merge_and_concluded() {
     let work = repo.checkout.join(CONFLICTED_PATH);
     std::fs::write(&work, "somebody else wrote this instead\n").expect("the base change");
     git(&world, &repo.checkout, &["add", "-A"]);
-    git(&world, &repo.checkout, &["commit", "-m", "feat: take the file another way"]);
+    git(
+        &world,
+        &repo.checkout,
+        &["commit", "-m", "feat: take the file another way"],
+    );
     git(&world, &repo.checkout, &["push", "origin", "main"]);
-    let base = git(&world, &repo.checkout, &["rev-parse", "HEAD"]).trim().to_owned();
+    let base = git(&world, &repo.checkout, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
     world.release("service.go");
 
     world.until("the run to settle", |world| {
@@ -3426,6 +3469,9 @@ fn a_publication_conflict_is_redispatched_into_the_merge_and_concluded() {
         "opened with a merge in progress",
         "The previous attempt's publication failed",
         "`sync-conflict`",
+        // Refused before anything reached the remote, so no commit of it is
+        // known to be there.
+        "No attempt so far is known to have published this branch",
         &format!("`{CONFLICTED_PATH}`"),
         &base,
         branch,
@@ -3443,7 +3489,11 @@ fn a_publication_conflict_is_redispatched_into_the_merge_and_concluded() {
 
     landed_on_origin(&world, &repo, &base);
     assert_eq!(
-        git(&world, &repo.origin, &["show", &format!("main:{CONFLICTED_PATH}")]),
+        git(
+            &world,
+            &repo.origin,
+            &["show", &format!("main:{CONFLICTED_PATH}")]
+        ),
         "the worker's and the base's, reconciled\n"
     );
     assert!(
@@ -3473,7 +3523,12 @@ fn a_conflict_the_worker_never_concludes_spends_the_budget_and_then_asks() {
     let run = settle(&world, "unconverged", vec![node]);
     let result = world.run_json(&run, "result.json");
     let settled = result["nodes"][0].clone();
-    assert_eq!(settled["status"], "failed", "{result}\n{}", why(&world, &run));
+    assert_eq!(
+        settled["status"],
+        "failed",
+        "{result}\n{}",
+        why(&world, &run)
+    );
     assert_eq!(
         settled["outcome"],
         "sync-conflict",
@@ -3500,12 +3555,7 @@ fn a_conflict_the_worker_never_concludes_spends_the_budget_and_then_asks() {
         .iter()
         .filter(|event| event["payload"]["blocking"] == json!(true))
         .collect();
-    assert_eq!(
-        decisions.len(),
-        1,
-        "{queued:#?}\n{}",
-        why(&world, &run)
-    );
+    assert_eq!(decisions.len(), 1, "{queued:#?}\n{}", why(&world, &run));
     let said = decisions[0]["payload"]["message"]
         .as_str()
         .expect("the decision says something");
@@ -3532,7 +3582,10 @@ fn a_conflict_the_worker_never_concludes_spends_the_budget_and_then_asks() {
         key.contains("session-conflict") && key.contains("service"),
         "the decision is not raised under its finding's key: {key}"
     );
-    world.run(&["status", &run]).exited(0).out_has("(1 finding)");
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("(1 finding)");
 
     // Nothing the worker left unconcluded was ever committed.
     for holding in [&repo.checkout, &repo.origin] {

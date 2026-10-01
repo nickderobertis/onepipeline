@@ -1856,12 +1856,12 @@ pub fn session_opened_event(session: &Session, labels: &crate::event::Labels) ->
         // same object and under the same key `onevcs`'s own `session-opened`
         // carries it — and absent otherwise, so every other opening reads as it
         // always did. [`conflict_opened_in`] is what reads it back.
-        .chain(session.conflict.as_ref().map(|conflict| {
-            (
-                OPENED_CONFLICT.to_owned(),
-                serde_json::json!(conflict),
-            )
-        }))
+        .chain(
+            session
+                .conflict
+                .as_ref()
+                .map(|conflict| (OPENED_CONFLICT.to_owned(), serde_json::json!(conflict))),
+        )
         .collect(),
         artifacts: Vec::new(),
     }
@@ -1930,14 +1930,16 @@ pub(crate) fn merge_in_progress(session: &Session) -> Option<crate::plan::MergeI
             .collect::<Vec<_>>()
     });
     let unlisted = match &commits {
-        Some(commits) if commits.len() == listed => git(&["rev-list", "--no-merges", "--count", &range])
-            .and_then(|count| count.trim().parse::<usize>().ok())
-            .map_or(0, |count| count.saturating_sub(listed)),
+        Some(commits) if commits.len() == listed => {
+            git(&["rev-list", "--no-merges", "--count", &range])
+                .and_then(|count| count.trim().parse::<usize>().ok())
+                .map_or(0, |count| count.saturating_sub(listed))
+        }
         _ => 0,
     };
     Some(crate::plan::MergeInProgress {
-        base: session.base.clone(),
-        branch: session.branch.clone(),
+        base_name: session.base.clone(),
+        branch_name: session.branch.clone(),
         conflict,
         commits,
         unlisted,
@@ -2567,6 +2569,44 @@ mod tests {
         )
     }
 
+    /// The conflict a session opened with rides its `session-opened` envelope in
+    /// `onevcs`'s own shape and reads back off it; an opening without one carries
+    /// no `conflict` key at all, and no other envelope answers one.
+    #[test]
+    fn an_opened_conflict_rides_the_session_opened_envelope_and_reads_back() {
+        let conflict = onevcs::OpenConflict {
+            paths: vec!["service.md".to_owned()],
+            base_commit: "b".repeat(40),
+            branch_tip: "t".repeat(40),
+        };
+        let opened = session_opened_event(
+            &Session {
+                conflict: Some(conflict.clone()),
+                ..Session {
+                    token: SessionToken("s-abc".to_owned()),
+                    worktree: std::path::PathBuf::from("/tmp/worktree"),
+                    branch: "feature".to_owned(),
+                    base: "main".to_owned(),
+                    conflict: None,
+                }
+            },
+            &crate::event::Labels::default(),
+        );
+        assert_eq!(
+            opened.payload.get("conflict"),
+            Some(&serde_json::json!(conflict))
+        );
+        assert_eq!(conflict_opened_in(&opened), Some(conflict));
+
+        let clean = ours("s-abc", "feature");
+        assert!(!clean.payload.contains_key("conflict"));
+        assert_eq!(conflict_opened_in(&clean), None);
+
+        let mut relabelled = opened;
+        relabelled.kind = crate::event::EventKind("session-closed".into());
+        assert_eq!(conflict_opened_in(&relabelled), None);
+    }
+
     /// What a session record is read for, and what is refused instead of read.
     ///
     /// The refusals are the point. This record is the only pointer a manager has
@@ -2971,7 +3011,8 @@ mod tests {
         assert_eq!(event.payload["landing"], serde_json::Value::Null);
     }
 
-    /// What reads as a session-open conflict, and what deliberately does not.
+    /// What reads as a session-open conflict — a refusal this engine no longer
+    /// asks for, still classified — and what deliberately does not.
     ///
     /// The decision this drives stops a node retrying and blocks the subtree
     /// under it until a person answers, so the only thing that may reach it is

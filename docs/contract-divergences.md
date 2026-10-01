@@ -1488,8 +1488,10 @@ and only a reply releases the subtree a decision is holding.
 
 **Beside it, and not a divergence: a finding that asks for an edit is answered by
 that edit.** The reconciler raises one finding of its own under this kind — the
-session-open conflict, whose text asks the manager to answer it "with a `retry`
-of '<node>'" — and a commands-only envelope answers no question, so the manager
+session conflict, whose text asks the manager to answer it "with a `retry`
+of '<node>'" (raised at a session open when this was written, and since once a
+node's dispatches were handed the conflict and did not conclude it) — and a
+commands-only envelope answers no question, so the manager
 committed exactly the retry the finding named and the finding stayed pending for
 the life of the run: `status` reported a planner decision while the replacement
 worked, `watch --until surface` returned on it every time it was asked, and the

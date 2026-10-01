@@ -199,10 +199,10 @@ pub fn execute(
         // commit published twice says nothing about whether the refusal is the
         // branch's. It is: the conflict is the branch's, every attempt is handed
         // it again, and the budget is what bounds that.
-        let unconcluded = preserved.handed.is_some()
-            && preserved.outcome == crate::vcs::Preserving::SyncConflict;
-        if let Some(same) = republished(published.as_deref(), &preserved.tip)
-            .filter(|_| !unconcluded)
+        let unconcluded =
+            preserved.handed.is_some() && preserved.outcome == crate::vcs::Preserving::SyncConflict;
+        if let Some(same) =
+            republished(published.as_deref(), &preserved.tip).filter(|_| !unconcluded)
         {
             return engine::Ending::Settled(republished_the_same_commit(
                 &node.id, &preserved, &endings, &same, attempt,
@@ -546,7 +546,7 @@ fn attempt_once(
             crate::vcs::wait_out_the_second(began);
         }
         let drained = match engine::attempt(executor, node, cancel, tx, &build, ended, attempt) {
-            engine::Attempted::Drained(drained) => drained,
+            engine::Attempted::Drained(drained) => *drained,
             engine::Attempted::Exhausted(refusal) => return Attempt::Exhausted(Box::new(refusal)),
         };
         // The session the dispatch opened is what publication needs, whether or
@@ -554,7 +554,7 @@ fn attempt_once(
         // the branch it left behind.
         session = drained.session.or(session);
         branch = drained.branch.or(branch);
-        handed = drained.conflict.or(handed);
+        handed = drained.conflict.map(|conflict| *conflict).or(handed);
         if stream.is_none() {
             if let Some(token) = &session {
                 let opened = crate::vcs::working_session(token);
@@ -1447,13 +1447,11 @@ impl OnRemote {
             // Refused before anything reached the remote, which still holds
             // whatever an earlier attempt pushed.
             //
-            // llmlint: ignore[changed_behavior_has_e2e] `sync-conflict` shares this arm with
-            // `push-rejected`, which
-            // `a_redispatch_after_a_refused_push_is_told_the_commit_the_remote_still_holds`
-            // drives. The one journey that ends a publication `sync-conflict`,
-            // `a_session_open_conflict_raises_a_decision_where_a_publication_conflict_retries`,
-            // cannot show the diagnosis: its re-dispatch meets the same conflict at session
-            // open, so no worker is ever handed the task the diagnosis is composed into.
+            // `push-rejected` is driven by
+            // `a_redispatch_after_a_refused_push_is_told_the_commit_the_remote_still_holds`,
+            // and `sync-conflict` by
+            // `a_publication_conflict_is_redispatched_into_the_merge_and_concluded`, whose
+            // re-dispatch is handed the diagnosis beside the conflict it opens with.
             crate::vcs::Preserving::PushRejected | crate::vcs::Preserving::SyncConflict => self,
         }
     }

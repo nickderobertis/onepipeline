@@ -48,6 +48,7 @@ use onepipeline::plan::{
     adoption_instructions, arrival_note, CrossRepoReference, Node, NodeKind, Plan, RepoType,
     Resume, Step, TaskRecord, Workflow, ADOPTION_INSTRUCTION_VARIABLES, AMENDMENT_HEADING,
     AMENDMENT_PRECEDENCE, CROSS_REPO_REFERENCES_HEADING, DEFAULT_ADOPTION_INSTRUCTION,
+    MERGE_RESOLUTION_CRITERION, MERGE_RESOLUTION_HEADING, MERGE_RESOLUTION_PREAMBLE,
     OBSERVED_STATE, PLANNER_CONTEXT_HEADING, PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
 };
 use onepipeline::report::{
@@ -3211,6 +3212,50 @@ fn the_amendment_and_validator_surface_is_what_the_divergence_record_names() {
     );
 }
 
+/// The criterion the engine writes into a dispatch whose session opened with its
+/// base's merge unfinished is exactly what the contract publishes.
+///
+/// `ai-orchestrator`'s drift gate quotes the three constants, so the contract's
+/// block and this crate's constants are one statement: the sub-heading the
+/// criterion sits under, the sentence saying the engine added it — which is not
+/// the amendment's precedence, because nobody amended the bar — and the template
+/// filled in per dispatch.
+#[test]
+fn the_merge_resolution_criterion_is_what_the_contract_publishes() {
+    let block: Value =
+        serde_json::from_str(&fenced_block_naming("json", "\"merge_resolution\": {"))
+            .expect("the merge-resolution block is JSON");
+    let stated = &block["merge_resolution"];
+    assert_eq!(stated["heading"].as_str(), Some(MERGE_RESOLUTION_HEADING));
+    assert_eq!(stated["preamble"].as_str(), Some(MERGE_RESOLUTION_PREAMBLE));
+    assert_eq!(
+        stated["criterion"].as_str(),
+        Some(MERGE_RESOLUTION_CRITERION)
+    );
+
+    // A sub-heading of the criteria section, as the amendment's is, and never
+    // the amendment's own heading or authority.
+    assert!(MERGE_RESOLUTION_HEADING.starts_with("### "));
+    assert_ne!(MERGE_RESOLUTION_HEADING, AMENDMENT_HEADING);
+    assert_ne!(MERGE_RESOLUTION_PREAMBLE, AMENDMENT_PRECEDENCE);
+    assert!(
+        !MERGE_RESOLUTION_PREAMBLE.contains("manager"),
+        "the preamble claims a manager's authority: {MERGE_RESOLUTION_PREAMBLE}"
+    );
+    assert_eq!(
+        MERGE_RESOLUTION_PREAMBLE.matches(". ").count(),
+        0,
+        "the preamble is more than one sentence: {MERGE_RESOLUTION_PREAMBLE}"
+    );
+    // Every value the engine fills in is named by the template.
+    for variable in ["{base_commit}", "{branch}", "{paths}"] {
+        assert!(
+            MERGE_RESOLUTION_CRITERION.contains(variable),
+            "the criterion template names no {variable}"
+        );
+    }
+}
+
 /// The envelope reviewer this build carries **beyond** the contract.
 ///
 /// The contract is committed as approved and names none of it, so entry 45 is
@@ -5312,7 +5357,7 @@ fn a_reconciler_finding_that_asks_for_an_edit_is_answered_by_that_edit() {
     let raised = json!({
         "id": 4,
         "kind": "finding",
-        "message": "node 'service' cannot open a session; answer this with a `retry` of 'service'",
+        "message": "node 'service' did not converge on its conflict with the base: the worker was dispatched into the conflict with the base 3 times, handed the unmerged merge to conclude each time, and did not conclude it before the node's publication budget was spent.\nUnmerged paths on the last attempt: `service.md`. Branch: onevcs/service.\nonevcs: sync conflict: service.md still unmerged\nDecide how the node goes on: answer this with a `retry` of 'service', with an amended task where the resolution needs direction the worker did not have — the replacement continues the same branch and is dispatched into the conflict again.",
         "source": "reconciler",
         "blocking": true,
         "queued_at": 1,

@@ -4372,8 +4372,9 @@ pub(crate) enum Ending {
 
 /// One attempt's ending: drained, or handed back before anything began.
 pub(crate) enum Attempted {
-    /// It ran, or failed to, and this is how the node settles on it.
-    Drained(Drained),
+    /// It ran, or failed to, and this is how the node settles on it. Boxed,
+    /// because it is much the larger of the two.
+    Drained(Box<Drained>),
     /// The identity admitted no session. Ended at once — no backoff, no
     /// boundary attempt spent, no `no-agent-progress` and no
     /// `infrastructure-failure` — because none of the refusal is the node's,
@@ -4434,8 +4435,9 @@ pub(crate) struct Drained {
     pub branch: Option<String>,
     /// The merge that session opened with left unfinished, which this dispatch
     /// was handed to conclude. `None` for a session that opened on a clean tree
-    /// and for a dispatch that opened none.
-    pub conflict: Option<onevcs::OpenConflict>,
+    /// and for a dispatch that opened none. Boxed, because it is the rare case
+    /// and every attempt's ending carries this value by move.
+    pub conflict: Option<Box<onevcs::OpenConflict>>,
 }
 
 /// Run a dispatch, asking again for one that produced *nothing*.
@@ -4515,7 +4517,7 @@ pub(crate) fn attempt(
                     // dispatched has an identity by construction, so no invocation
                     // reaches this arm; it settles as the refusal it is rather than
                     // panicking a dispatch thread.
-                    None => Attempted::Drained(Drained {
+                    None => Attempted::Drained(Box::new(Drained {
                         settlement: Settlement {
                             detail: Some(error.to_string()),
                             ..failed(id, INFRASTRUCTURE_FAILURE)
@@ -4524,7 +4526,7 @@ pub(crate) fn attempt(
                         session: None,
                         branch: None,
                         conflict: None,
-                    }), // llmlint: ignore-end[changed_behavior_has_e2e]
+                    })), // llmlint: ignore-end[changed_behavior_has_e2e]
                 };
             }
             Err(error) => {
@@ -4551,7 +4553,7 @@ pub(crate) fn attempt(
             || drained.reached == Reached::Speech
             || cancel.is_cancelled()
         {
-            return Attempted::Drained(drained);
+            return Attempted::Drained(Box::new(drained));
         }
         // A refusal another attempt provably cannot answer: the branch and its
         // base disagree about a file and the sibling refused to open the session
@@ -4560,7 +4562,7 @@ pub(crate) fn attempt(
         // sibling refusing anyway, and asking again seconds later only
         // reproduces it.
         if conflicted {
-            return Attempted::Drained(drained);
+            return Attempted::Drained(Box::new(drained));
         }
         last = drained;
         if attempt == attempts.get() {
@@ -4592,7 +4594,7 @@ pub(crate) fn attempt(
             carried: Vec::new(),
         })));
     }
-    Attempted::Drained(last)
+    Attempted::Drained(Box::new(last))
 }
 
 /// A node whose dispatches were handed its branch's conflict with the base and
@@ -4738,13 +4740,13 @@ pub(crate) fn drain(
     // The merge this dispatch's session opened with, read off the opening the
     // executor relays: the executor composed it into the task, and this is how
     // the node learns its dispatch was handed one.
-    let mut conflict: Option<onevcs::OpenConflict> = None;
+    let mut conflict: Option<Box<onevcs::OpenConflict>> = None;
     loop {
         match arriving.recv_timeout(TEARDOWN_TICK) {
             Ok(Ok(envelope)) => {
                 spoke = true;
                 if conflict.is_none() {
-                    conflict = crate::vcs::conflict_opened_in(&envelope);
+                    conflict = crate::vcs::conflict_opened_in(&envelope).map(Box::new);
                 }
                 if let Some(address) = addressed_by(&envelope) {
                     if !addresses.contains(&address) {
