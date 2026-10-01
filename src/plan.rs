@@ -147,7 +147,7 @@ pub const MERGE_RESOLUTION_PREAMBLE: &str = "The engine added this criterion bec
 
 /// The criterion a dispatch handed a conflicted session is judged against.
 ///
-/// A template, filled by [`with_merge_in_progress`]: `{base_commit}` is the full
+/// A template the engine fills when it composes the task: `{base_commit}` is the full
 /// commit of the base that was merged, `{branch}` the session's branch, and
 /// `{paths}` the unmerged paths, each in backticks and comma-separated.
 pub const MERGE_RESOLUTION_CRITERION: &str = "The merge of `{base_commit}` into `{branch}` is \
