@@ -868,9 +868,20 @@ fn an_adoption_whose_every_read_matches_reads_each_item_once_and_copies_nothing(
     });
     world.release("done.go");
     cancelled(&world, run, "parked");
+    let settlement = world
+        .events_of(run, "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "parked")
+        .expect("the cancelled dispatch settled")["payload"]
+        .clone();
+    // The cancel parks the node before its dispatch settles. A projection of that park can
+    // land before the settlement metadata, so the status alone does not mean the board says
+    // everything the adopting driver will write.
     projected_until(&world, run, &project, "the board to say it all", |tasks| {
         board_word(tasks, "done").as_deref() == Some("done")
             && board_task(tasks, "parked")["item"]["status"]["name"] == "parked"
+            && board_task(tasks, "parked")["item"]["metadata"]["onepipeline.settlement"]
+                == settlement
     });
     world.run(&["stop", run]).exited(0);
     let path = world.run_file(run, &in_run_dir(&landed_block()["file"]));
