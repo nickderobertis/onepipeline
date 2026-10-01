@@ -100,9 +100,19 @@ fn grammar(flag: &str) -> Option<(Takes, Occurs)> {
         .filter(|capability| capability.argv == ["run"]);
     let mut found: Option<(Takes, Occurs)> = None;
     for row in rows {
-        for binding in row.bindings.iter().filter(|binding| binding.flag() == flag) {
+        for binding in row
+            .bindings
+            .iter()
+            .filter(|binding| binding.kind.spellings().contains(&flag))
+        {
             let (takes, occurs) = match binding.kind {
                 FlagKind::Switch(_) => (Takes::Nothing, Occurs::Once),
+                // A history window renders exactly one of its three spellings:
+                // `--all-time` alone, or `--days` / `--since` with a value.
+                FlagKind::Window(window) if flag == window.all_time => {
+                    (Takes::Nothing, Occurs::Once)
+                }
+                FlagKind::Window(_) => (Takes::AValue, Occurs::Once),
                 FlagKind::Value(_) => (Takes::AValue, Occurs::Once),
                 FlagKind::Repeated(_) | FlagKind::KeyValue(_) => {
                     (Takes::AValue, Occurs::Repeatedly)
