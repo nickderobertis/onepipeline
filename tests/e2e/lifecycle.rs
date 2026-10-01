@@ -3338,15 +3338,24 @@ fn a_session_that_opens_conflicted_is_dispatched_to_the_worker_to_conclude() {
         "the conflicted session settled as a refusal\n{}",
         why(&world, &run)
     );
-    // The opening says what it opened with, in the sibling's own shape.
+    // The opening says what it opened with — in the record this crate writes and
+    // in `onevcs`'s own, under the same key and as the same object, so the key
+    // this crate reads back cannot drift from the sibling's.
     let opened = world.events_of(&run, "session-opened");
-    assert!(
-        opened.iter().any(|event| {
-            event["payload"]["conflict"]["paths"] == json!([CONFLICTED_PATH])
-                && event["payload"]["conflict"]["base_commit"] == json!(base)
-                && event["payload"]["conflict"]["branch_tip"] == json!(tip)
-        }),
-        "no session-opened record carries the conflict: {opened:#?}"
+    let carried: Vec<&serde_json::Value> = opened
+        .iter()
+        .map(|event| &event["payload"]["conflict"])
+        .filter(|conflict| !conflict.is_null())
+        .collect();
+    assert_eq!(
+        carried.len(),
+        2,
+        "both openings carry the conflict: {opened:#?}"
+    );
+    assert_eq!(carried[0], carried[1], "{opened:#?}");
+    assert_eq!(
+        carried[0],
+        &json!({"paths": [CONFLICTED_PATH], "base_commit": base, "branch_tip": tip})
     );
 
     let tasks = tasks_dispatched_to(&world, &run, "service");

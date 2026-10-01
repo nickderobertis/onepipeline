@@ -967,6 +967,14 @@ fn listed_paths(paths: &[String]) -> String {
         .join(", ")
 }
 
+// llmlint: ignore-block[changed_behavior_has_e2e] the placement a real task meets — after
+// its own criteria, into the planner context a re-dispatch's diagnosis already opened — is
+// driven end to end by `tests/e2e/lifecycle.rs`'s three conflict journeys, which read the
+// task the worker was handed. The other arms place into a task with no criteria section,
+// no planner context or an amendment, and no plan reaches a dispatch that way through a
+// journey: a task without criteria is refused at plan load (C6b), and an amended
+// conflicted node needs a manager's edit timed into a live conflict. Both are held by
+// `a_merge_in_progress_*` in this module's tests, over the same function.
 /// The task with [`MERGE_RESOLUTION_HEADING`] closing its criteria section —
 /// after the task's own criteria and after any amendment — placed exactly as
 /// [`amended`] places an amendment where the task states no such section.
@@ -1030,6 +1038,8 @@ fn with_merge_context(task: &str, merge: &MergeInProgress) -> String {
         None => format!("{}\n\n{section}", task.trim_end()),
     }
 }
+
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// What a conflicted dispatch is told about the merge it is standing in.
 fn merge_context(merge: &MergeInProgress) -> String {

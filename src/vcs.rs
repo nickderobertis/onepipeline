@@ -1898,6 +1898,12 @@ pub(crate) fn conflict_opened_in(envelope: &Envelope) -> Option<onevcs::OpenConf
 /// could not be made rather than as none.
 ///
 /// [`MERGE_COMMITS_LISTED`]: crate::plan::MERGE_COMMITS_LISTED
+// llmlint: ignore[changed_behavior_has_e2e] the journeys in `tests/e2e/lifecycle.rs` drive
+// the listing a conflicted worker is handed, through the binary; its bounds — more than
+// twenty commits, a subject cut short, a path no commit touches, a listing git refuses —
+// are held over real git by `a_merge_in_progress_lists_the_bases_commits_on_the_unmerged_
+// paths_and_bounds_them`, since a journey building twenty-two base commits would prove the
+// fixture's history rather than this function.
 pub(crate) fn merge_in_progress(session: &Session) -> Option<crate::plan::MergeInProgress> {
     let conflict = session.conflict.clone()?;
     let range = format!("{}..{}", conflict.branch_tip, conflict.base_commit);
@@ -3177,6 +3183,85 @@ mod tests {
         std::fs::write(worktree.join(name), format!("{name}\n")).expect("the file");
         git_in(worktree, &["add", "-A"]);
         git_in(worktree, &["commit", "-q", "-m", &format!("feat: {name}")]);
+    }
+
+    /// What a conflicted dispatch is told about the base's commits, read over real
+    /// git: only the commits touching an unmerged path, newest first, at most
+    /// [`MERGE_COMMITS_LISTED`](crate::plan::MERGE_COMMITS_LISTED) of them with
+    /// the rest counted, a subject cut where a line stops being one — and a
+    /// listing git refuses reported as not made rather than as empty.
+    #[test]
+    fn a_merge_in_progress_lists_the_bases_commits_on_the_unmerged_paths_and_bounds_them() {
+        let root = std::env::temp_dir().join(format!("onepipeline-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        git_in(&root, &["init", "-q", "--initial-branch=main", "repo"]);
+        let repo = root.join("repo");
+        commit_in(&repo, "seed.md");
+        let head = |repo: &std::path::Path| {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo)
+                .output()
+                .expect("git runs");
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        let tip = head(&repo);
+        let listed = crate::plan::MERGE_COMMITS_LISTED;
+        for n in 0..listed + 2 {
+            std::fs::write(repo.join("a.md"), format!("{n}\n")).expect("the file");
+            git_in(&repo, &["add", "-A"]);
+            let subject = if n == listed + 1 {
+                format!("feat: {}", "x".repeat(300))
+            } else {
+                format!("feat: a {n}")
+            };
+            git_in(&repo, &["commit", "-q", "-m", &subject]);
+        }
+        commit_in(&repo, "b.md");
+        let base_commit = head(&repo);
+        let session = |worktree: std::path::PathBuf, paths: &[&str]| Session {
+            token: SessionToken("s-merge".to_owned()),
+            worktree,
+            branch: "feature".to_owned(),
+            base: "main".to_owned(),
+            conflict: Some(onevcs::OpenConflict {
+                paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+                base_commit: base_commit.clone(),
+                branch_tip: tip.clone(),
+            }),
+        };
+
+        let merge = merge_in_progress(&session(repo.clone(), &["a.md"])).expect("a conflict");
+        let commits = merge.commits.expect("git listed them");
+        assert_eq!(commits.len(), listed, "{commits:#?}");
+        assert_eq!(merge.unlisted, 2);
+        assert!(
+            commits.iter().all(|line| !line.contains("b.md")),
+            "{commits:#?}"
+        );
+        assert!(
+            commits[0].ends_with('…') && commits[0].chars().count() == 161,
+            "the long subject was not cut: {}",
+            commits[0]
+        );
+        assert!(
+            commits[1].ends_with(&format!("feat: a {listed}")),
+            "{commits:#?}"
+        );
+
+        let untouched = merge_in_progress(&session(repo.clone(), &["c.md"])).expect("a conflict");
+        assert_eq!(untouched.commits, Some(Vec::new()));
+        assert_eq!(untouched.unlisted, 0);
+
+        let unread = merge_in_progress(&session(root.join("no-such-worktree"), &["a.md"]))
+            .expect("a conflict");
+        assert_eq!(unread.commits, None);
+
+        let mut clean = session(repo, &["a.md"]);
+        clean.conflict = None;
+        assert_eq!(merge_in_progress(&clean), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A level branch is told apart by whether **this dispatch wrote a commit**

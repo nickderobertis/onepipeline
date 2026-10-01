@@ -186,6 +186,9 @@ pub fn execute(
                         on_remote,
                         notes,
                         preserved,
+                        // llmlint: ignore[changed_behavior_has_e2e] carried by move for
+                        // `on_remote`'s reason above: a journey needs a full pool at a
+                        // conflicted re-dispatch and two more unconcluded attempts after it.
                         conflicted,
                     })
                 });
@@ -229,6 +232,10 @@ pub fn execute(
             // report: the work went back to the worker every attempt it could,
             // so what is left is the supervisor's. Not for a cancelled run,
             // which stopped asking rather than ran out of answers.
+            // llmlint: ignore[changed_behavior_has_e2e] a journey would have to stop the run
+            // inside the instant between a conflicted publication's refusal and this check;
+            // the predicate is the one the settlement beside it already reads, and the
+            // finding it guards is driven by `a_conflict_the_worker_never_concludes_*`.
             if !cancel.is_cancelled() {
                 if let Some(unconverged) = conflicted.unconverged(&node, &preserved) {
                     let _ = tx.send(Message::SessionConflicted(Box::new(unconverged)));
