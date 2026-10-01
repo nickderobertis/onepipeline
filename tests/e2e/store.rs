@@ -1193,10 +1193,7 @@ fn noted(world: &World, run: &str, node: &str, text: &str) {
 fn the_line_reported(world: &World, run: &str) -> String {
     let log = std::fs::read_to_string(world.run_file(run, "driver.log"))
         .expect("the driver log is readable");
-    let said: Vec<&str> = log
-        .lines()
-        .filter(|line| line.contains("onetaskgraph write-back failed"))
-        .collect();
+    let said = failures_said(&log);
     assert_eq!(
         said.len(),
         1,
@@ -1224,22 +1221,34 @@ const REFUSAL_WINDOW: Duration = Duration::from_secs(8);
 /// Nothing asks the store again for `run` across `window`, read off the connection every
 /// attempt opens. `midway` runs halfway through, for a journey that puts the store right
 /// while it watches.
+///
+/// Two halves, each watched for its whole span from where it began, with `midway` between
+/// them: so `midway` runs however long one look takes, and the store is watched for half
+/// the window after it. A single loop that ran `midway` when it next saw the halfway mark
+/// skipped it outright when one look straddled both marks — a test thread descheduled for
+/// four seconds on a loaded runner — and the journey went on to wait for a store that was
+/// never put right.
 fn asked_nothing_more(world: &World, run: &str, window: Duration, midway: impl FnOnce()) {
     let asked = attempts_opened(world);
+    unasked_across(world, run, asked, window / 2);
+    midway();
+    unasked_across(world, run, asked, window - window / 2);
+}
+
+/// The store has been opened `asked` times and no more, from now until `span` has passed —
+/// looked at once more after the span ends, so the last stretch of it is watched too.
+fn unasked_across(world: &World, run: &str, asked: usize, span: Duration) {
     let watched = Instant::now();
-    let mut midway = Some(midway);
-    while watched.elapsed() < window {
-        if watched.elapsed() >= window / 2 {
-            if let Some(midway) = midway.take() {
-                midway();
-            }
-        }
+    loop {
         assert_eq!(
             attempts_opened(world),
             asked,
             "the store was asked again {:?} after it refused {run}'s projection",
             watched.elapsed()
         );
+        if watched.elapsed() >= span {
+            return;
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
 }
@@ -2244,8 +2253,24 @@ fn outages_raised(world: &World, run: &str) -> usize {
 
 fn streaks_reported(world: &World, run: &str) -> usize {
     std::fs::read_to_string(world.run_file(run, "driver.log"))
-        .map(|log| log.matches("onetaskgraph write-back failed").count())
+        .map(|log| failures_said(&log).len())
         .unwrap_or_default()
+}
+
+/// The lines of a driver's log that say a projection failed — the **whole** lines, each
+/// read once its newline is there.
+///
+/// The driver's stderr is unbuffered, so one line reaches its log as several writes, and a
+/// read between two of them finds `onetaskgraph write-back failed for '` and nothing after
+/// it. That is a line still being said rather than one said short, so it is not counted
+/// until it ends: a loaded runner read one at exactly that point and failed a journey on
+/// the half of a sentence the driver was still writing.
+fn failures_said(log: &str) -> Vec<&str> {
+    log.split_inclusive('\n')
+        .filter(|line| line.ends_with('\n'))
+        .map(str::trim_end)
+        .filter(|line| line.contains("onetaskgraph write-back failed"))
+        .collect()
 }
 
 /// The intervals the worker waited before each of the next `count` retries of a projection
@@ -2348,10 +2373,7 @@ fn a_projection_that_keeps_failing_is_retried_further_and_further_apart() {
 
     let log = std::fs::read_to_string(world.run_file(run, "driver.log"))
         .expect("the driver log is readable");
-    let said: Vec<&str> = log
-        .lines()
-        .filter(|line| line.contains("onetaskgraph write-back failed"))
-        .collect();
+    let said = failures_said(&log);
     assert_eq!(
         said.len(),
         1,
