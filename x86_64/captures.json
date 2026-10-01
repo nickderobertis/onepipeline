@@ -10,13 +10,13 @@
     {
       "name": "monitor",
       "toggles": {},
-      "hash": "508509001993041b583d683956288c81fba186c6698cec9416758bbf608c1f78",
+      "hash": "4039ac76b76ebce400ec385e5a4250c5a0b9318f74645b74c76ab0f844a6344a",
       "image": "monitor.svg"
     },
     {
       "name": "results",
       "toggles": {},
-      "hash": "352e03097169f80fed5bdfa902ff51d3dfea9903f93820709bb02baae4c1acc0",
+      "hash": "79769dd4b94a69829df47b4a2e795830b48331f5b378a68cf3285b6b54f07cc0",
       "image": "results.svg"
     },
     {
@@ -40,7 +40,7 @@
     {
       "name": "watch",
       "toggles": {},
-      "hash": "8be9d86f906fbb1166ec080107da3dc35eaa659d71ff4f6a75a5f73a500674c0",
+      "hash": "9a60736c01aef7b48494f19bfdd8394e1ee1a1b7b3b02707126bd8c40c506054",
       "image": "watch.svg"
     }
   ]
