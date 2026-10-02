@@ -34,10 +34,18 @@ jobs:
           echo "hw.ncpu=$(sysctl -n hw.ncpu) hw.physicalcpu=$(sysctl -n hw.physicalcpu)"
       - name: The scheduling condition, forced at five threads
         run: cargo nextest run --locked -E 'binary(nextest_runs) and test(/strands|unrun/)'
-      - name: The whole offline suite, as the cross leg runs it
+      # The condition job 110417653725 met: more test threads than the e2e
+      # group's cap of 4 (that host ran at least five tests at once; this one
+      # has hw.ncpu=3, where the group's queue is never used). --no-fail-fast so
+      # an unrelated failure cannot leave tests unrun for its own reason.
+      - name: The whole offline suite at five test threads
         id: gate
         timeout-minutes: 90
-        run: just test-quick 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
+        run: |
+          just _strace-preflight
+          just _onetaskgraph-preflight
+          bash scripts/nextest-run.sh cargo nextest run --locked --no-fail-fast --test-threads 5 \
+            -E "$(just --evaluate offline-tiers)" 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
       - name: Does each failed test fail again on this build
         if: failure() && steps.gate.outcome == 'failure'
         continue-on-error: true
