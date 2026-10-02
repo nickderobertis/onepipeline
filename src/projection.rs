@@ -2365,6 +2365,7 @@ mod tests {
                 crate::channel::Command::Drop {
                     id: "engine".into(),
                     dependents: crate::channel::Dependents::Detach,
+                    reason: None,
                 },
                 Vec::new(),
             ),
