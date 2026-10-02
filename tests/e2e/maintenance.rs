@@ -143,6 +143,7 @@ pub(crate) fn cut_a_slot(world: &World, checkout: &Path) {
                 pool: None,
                 overflow: None,
                 labels: Default::default(),
+                refuse_conflicts: false,
             })
             .expect("a session opens on the pooled identity");
         vcs.close_session(&session.token)
@@ -1459,6 +1460,7 @@ fn a_sweep_answered_in_use_no_slots_and_no_command_journals_nothing() {
                 pool: None,
                 overflow: None,
                 labels: Default::default(),
+                refuse_conflicts: false,
             })
             .expect("a session opens into the slot")
             .token

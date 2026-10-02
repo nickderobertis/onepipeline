@@ -2796,6 +2796,7 @@ mod tests {
             worktree: std::path::PathBuf::from("/tmp/worktree"),
             branch: branch.into(),
             base: "main".into(),
+            conflict: None,
         };
         Envelope {
             seq,
