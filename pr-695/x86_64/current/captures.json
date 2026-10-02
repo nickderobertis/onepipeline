@@ -10,7 +10,7 @@
     {
       "name": "monitor",
       "toggles": {},
-      "hash": "4039ac76b76ebce400ec385e5a4250c5a0b9318f74645b74c76ab0f844a6344a",
+      "hash": "754a3bb3b76c03f4824dfd8cc65b8903eb0b790d2060db1acf809c0e545c9450",
       "image": "monitor.svg"
     },
     {
@@ -28,7 +28,7 @@
     {
       "name": "status",
       "toggles": {},
-      "hash": "eb070ac2d9e14eee542dc55bf7b2e259b81495d2d55646266b0dc6cf6f11d94c",
+      "hash": "79219160efd18ec94d0a5a3ff24c305f759dce39f9bfe20b9c42a23693fbf355",
       "image": "status.svg"
     },
     {
