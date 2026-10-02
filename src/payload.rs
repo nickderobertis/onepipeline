@@ -1637,7 +1637,7 @@ mod tests {
     /// returns plus `error`, and refuses a payload that disagrees with it, which
     /// is what a debug build of the binary checks every emitted record against.
     #[test]
-    fn the_driver_exited_document_requires_every_key_and_admits_only_its_words() {
+    fn the_driver_exited_document_declares_every_key_and_admits_only_its_words() {
         let id = schema_of(PipelineKind::DriverExited);
         assert_eq!(id.to_string(), "agent.pipeline.driver-exited@2");
         let document = registry().schema(&id).expect("registered").clone();
@@ -1705,6 +1705,76 @@ mod tests {
                 "{id} admitted a payload without {key}"
             );
         }
+    }
+
+    /// The `driver-exited` payload `docs/contract.md` states is the one this
+    /// crate registers and writes: the same keys as the document declares, and the
+    /// same settlement words as the type that writes them — every word the
+    /// contract lists is admitted, and every word the type can write is listed.
+    #[test]
+    fn the_contracts_driver_exited_payload_is_the_registered_document() {
+        let contract = include_str!("../docs/contract.md");
+        let stated = contract
+            .split("**`driver-exited`**")
+            .nth(1)
+            .and_then(|rest| rest.split("Its payload is `").nth(1))
+            .and_then(|rest| rest.split('`').next())
+            .expect("the contract states the driver-exited payload");
+        let mut keys = Vec::new();
+        let mut words = Vec::new();
+        for (index, quoted) in stated.split('"').enumerate() {
+            if index % 2 == 0 {
+                continue;
+            }
+            // A quoted token followed by a colon is a key; any other is a word.
+            let after = stated
+                .split(&format!("\"{quoted}\""))
+                .nth(1)
+                .unwrap_or_default();
+            if after.starts_with(':') {
+                keys.push(quoted.to_string());
+            } else {
+                words.push(quoted.to_string());
+            }
+        }
+        let id = schema_of(PipelineKind::DriverExited);
+        let document = registry().schema(&id).expect("registered").clone();
+        let mut declared: Vec<String> = document["properties"]
+            .as_object()
+            .expect("the document declares properties")
+            .keys()
+            .cloned()
+            .collect();
+        declared.sort_unstable();
+        keys.sort_unstable();
+        assert_eq!(keys, declared, "the contract and {id} name different keys");
+
+        for word in &words {
+            let payload = serde_json::json!({"pid": 1, "settlement": word});
+            registry()
+                .check(&id, &payload)
+                .unwrap_or_else(|refusal| panic!("the contract's `{word}` is refused: {refusal}"));
+        }
+        // Every word the writer has, by a match that stops compiling when it grows.
+        let every = |word: ExitSettlementWord| match word {
+            ExitSettlementWord::Complete
+            | ExitSettlementWord::AwaitingPlanner
+            | ExitSettlementWord::Unattended
+            | ExitSettlementWord::Error => word.as_str().to_string(),
+        };
+        let written: Vec<String> = [
+            ExitSettlementWord::Complete,
+            ExitSettlementWord::AwaitingPlanner,
+            ExitSettlementWord::Unattended,
+            ExitSettlementWord::Error,
+        ]
+        .into_iter()
+        .map(every)
+        .collect();
+        assert_eq!(
+            written, words,
+            "the contract and the writer list different words"
+        );
     }
 
     /// A `concurrent-acknowledged` holder written before a holder could say

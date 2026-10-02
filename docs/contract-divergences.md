@@ -8472,7 +8472,11 @@ kind it does not know.
 complete, paused on a waiting human node, nothing left to drive, a reported error —
 and reads one record each, after the last outcome line, before the hook, and already
 there when a reader outside the driver finds the ownership lock released; a driver
-killed by a signal leaves none, and `status` names a claimed envelope a killed driver
-never answered. `engine::tests` holds the panic half and the let-go's ordering,
-`projection::tests` that the fold is unchanged by it, and `payload::tests` its
-document.
+that cannot hand the run on still writes one and leaves its claim; a driver killed by
+a signal leaves none, and its adopter's names none of the edits the killed driver
+answered; and `status` reads the latest of several, says one it cannot read could not
+be read, and names the one claimed envelope a killed driver never answered — not the
+one it answered, nor the one still behind the cursor. `engine::tests` holds the panic
+half and the let-go's ordering, `projection::tests` that the fold is unchanged by it,
+and `payload::tests` its document and that the payload `docs/contract.md` states is
+that document.
