@@ -90,6 +90,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             pool: None,
             overflow: None,
             labels: Default::default(),
+            refuse_conflicts: false,
         })
         .expect("the seam opens a session");
     assert_eq!(session.branch, "feature");
@@ -215,6 +216,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             pool: None,
             overflow: None,
             labels: Default::default(),
+            refuse_conflicts: false,
         })
         .expect("the seam opens a second session");
     let reason = onevcs::DraftReason::AwaitingRelease {
@@ -299,6 +301,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             pool: None,
             overflow: None,
             labels: Default::default(),
+            refuse_conflicts: false,
         })
         .expect("the seam cuts a session at a proposed name");
     assert_eq!(cut.branch, "ENG-123/build");
@@ -313,6 +316,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             pool: None,
             overflow: None,
             labels: Default::default(),
+            refuse_conflicts: false,
         })
         .expect_err("a request naming a branch to continue and a name to cut is refused");
     assert!(
@@ -352,6 +356,7 @@ fn published_through_the_lifecycle(
             pool: None,
             overflow: None,
             labels: Default::default(),
+            refuse_conflicts: false,
         })
         .expect("the seam opens a session");
     let published = onevcs::publish(
