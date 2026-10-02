@@ -8641,3 +8641,57 @@ one it answered, nor the one still behind the cursor. `engine::tests` holds the 
 half's unwinding and the let-go's ordering, `projection::tests` that the fold is unchanged by it,
 and `payload::tests` its document and that the payload `docs/contract.md` states is
 that document.
+
+## 105. A run that an adoption carried to complete after its failure hook fired fired no success hook — RESOLVED
+
+**Ruling: adopting a live graph starts a new run-end hook epoch, when the marker it
+carries was fired over a live graph. The planner who owns the contract ruled this in
+ai-orchestrator's plan `run-ending-liveness-2026-10-01` (node
+`op-hook-epoch-after-adoption`), and `docs/contract.md`'s run-end hooks paragraph
+states it.** onepipeline#626 is this entry's.
+
+**What was wrong.** A marker was retired only at an `edit-committed` that changed what
+the graph had ended at. A `retry` committed *before* the failure hook fired is not that
+edit. A driver can let go over that retry's replacement still `ready`: its last drain
+of the command queue applies a `retry` and dispatches nothing. When it does, it fires
+the failure hook as `unfinished`, and no later edit changes the ending. The adoption
+that then dispatched the replacement and carried the run to complete fired nothing.
+That happened on run `harness-layered-config-and-text-stream`: it read `SETTLED 16/16`,
+`hooks/` held only `failure.log`, and its follow-up run was launched by hand.
+
+**The rule.** An adoption starts a new epoch when **both** of these hold:
+
+- the graph judged at adoption is live, read by `hooks::verdict`, the same verdict the
+  views read a run's ending from. It is live when that verdict reads no ending, or when
+  a node can still move.
+- the standing marker was fired over a graph that was itself still live.
+
+The adopting driver then retires the marker before anything is dispatched, and records
+`"hook_epoch": true` on its own `driver-adopted`. The field is omitted on every other
+adoption, so a record an earlier build wrote reads as starting no epoch. The run's next
+ending fires its own hook once, and `results` reads a hook from before the adoption as
+superseded by it.
+
+**What it excludes.** A marker fired over a graph that *had* ended stands through an
+adoption that finds the graph live again. A cross-DAG upstream arriving made it live,
+and nobody edited it, so liveness alone is still not an epoch. Adopting a run whose
+graph has already ended, at the ending its marker fired for, fires nothing and retires
+nothing, however often it is adopted. A fold that has lost a record recognises no
+epoch here either. The edit rule is unchanged.
+
+**Where it is held.** `tests/e2e/run_end_hooks.rs` holds each half. In
+`a_run_adopted_live_after_its_failure_hook_fired_fires_success_once_it_completes`, a
+`retry` puts an agent replacement on the graph before any hook has fired, and `stop`
+fires the failure hook over that replacement while it is still `ready`. Then the
+adoption records the epoch before its first `node-dispatched`, and the success hook
+fires exactly once. In
+`a_run_adopted_live_after_its_failure_hook_fired_fires_failure_again_once_if_it_fails`, the
+same replacement fails, and the failure hook fires a second time, once, naming it. In
+`adopting_an_ended_run_twice_fires_nothing_new_and_retires_nothing`,
+an ended run is adopted twice and neither adoption records an epoch.
+`a_run_made_live_by_something_nobody_edited_leaves_its_marker_standing` holds the
+cross-DAG exclusion, unchanged.
+
+The planner accepted `stop` as the way to fire that hook. A driver lets go over a
+`ready` node only inside a window of milliseconds between its last pass and its release,
+which no command can hold it in.

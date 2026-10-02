@@ -10,7 +10,8 @@
 //!
 //! The paragraph's idempotency **epoch** is two of those halves: [`fired`] holds
 //! the marker against it, and [`ending`] is the predicate the rule's "live again"
-//! and "a different ending" are both measured by.
+//! and "a different ending" are both measured by. An adoption of a live graph
+//! starts an epoch too, decided by [`adoption_starts_epoch`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -512,16 +513,59 @@ fn mark(paths: &RunPaths, firing: &Firing, command: &str) -> Result<bool> {
 /// only for an edit arriving while a marker stands, so a run that has never fired
 /// pays for none of it.
 fn fired(paths: &RunPaths) -> bool {
-    epochs(&journal::read(&paths.journal())).fired
+    epochs(&journal::read(&paths.journal())).marker.is_some()
+}
+
+/// Whether a driver adopting the run, about to drive `state`, starts a new hook
+/// epoch: a marker stands that was fired over a graph still live, and the graph
+/// the adoption is about to drive is **live** too — the shared [`verdict`] reads
+/// no ending, or a node can still move.
+///
+/// The case the edit rule cannot see: a `retry` committed *before* the failure
+/// hook fired leaves its replacement live behind that firing, and no edit after
+/// the marker ever changes the ending — so without this, the success the
+/// adoption then carries the run to would fire nothing. An adoption of a graph
+/// that has ended fires nothing new and retires nothing, however often it is
+/// adopted: the ending it finds is the one the marker was fired for, or one an
+/// edit already retired it over.
+///
+/// A marker fired over a graph that **had** ended stands through an adoption
+/// that finds it live again, because nothing edited made it so — a cross-DAG
+/// upstream arriving is the contract's own example — and liveness alone is not
+/// an epoch. A fold that has lost a record retires nothing, for the reason
+/// [`fired`] gives an edit beside one.
+pub(crate) fn adoption_starts_epoch(state: &RunState, paths: &RunPaths) -> bool {
+    let standing = epochs(&journal::read(&paths.journal()));
+    if !state.strict || standing.marker != Some(FiredOver::Live) {
+        return false;
+    }
+    let statuses = state.statuses();
+    let present = statuses.values().copied().collect();
+    let ended = matches!(
+        verdict(&present, || views::decision_outstanding(state, paths)),
+        Verdict::Success | Verdict::Failure(_)
+    );
+    !ended || live(&statuses)
 }
 
 /// The run's idempotency epochs, as one walk of its journal.
 struct Epochs {
-    /// Whether the epoch the run is now in carries a marker.
-    fired: bool,
-    /// Where in the journal each edit that retired a marker is, in order: each
-    /// one ended the epoch every record before it belongs to.
+    /// The marker the epoch the run is now in carries, if it carries one.
+    marker: Option<FiredOver>,
+    /// Where in the journal each edit or adoption that retired a marker is, in
+    /// order: each one ended the epoch every record before it belongs to.
     ended_by: Vec<usize>,
+}
+
+/// What the graph was at when a standing marker was fired, which is what
+/// [`adoption_starts_epoch`] asks of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FiredOver {
+    /// Work was left that could still move: the hook fired over a run that had
+    /// not ended, which only an adoption then carries on.
+    Live,
+    /// The graph had ended.
+    Ended,
 }
 
 /// Walk a journal the way [`fired`] reads it — the one rule, so the epoch
@@ -531,27 +575,43 @@ fn epochs(events: &[Envelope]) -> Epochs {
         strict: true,
         ..RunState::default()
     };
-    let mut fired = false;
+    let mut marker = None;
     let mut ended_by = Vec::new();
     for (at, event) in events.iter().enumerate() {
         let kind = PipelineKind::from_wire(&event.kind);
         // The ending in front of an edit arriving while a marker stands, and
         // nothing otherwise: an edit that found the run live changed no ending,
         // whatever it left behind.
-        let before = (kind == Some(PipelineKind::EditCommitted) && fired)
+        let before = (kind == Some(PipelineKind::EditCommitted) && marker.is_some())
             .then(|| ending(&state))
             .flatten();
         crate::projection::fold_one(&mut state, event);
+        // An adoption that started an epoch says so on its own record: it was
+        // decided by [`adoption_starts_epoch`] on the graph the adoption drove,
+        // and is read back rather than derived a second time.
+        let adopted_live = kind == Some(PipelineKind::DriverAdopted)
+            && marker.is_some()
+            && journal::starts_hook_epoch(&event.payload);
         match before {
             Some(before) if state.strict && ending(&state) != Some(before) => {
-                fired = false;
+                marker = None;
                 ended_by.push(at);
             }
-            _ if kind == Some(PipelineKind::RunHookFired) => fired = true,
+            _ if adopted_live => {
+                marker = None;
+                ended_by.push(at);
+            }
+            _ if kind == Some(PipelineKind::RunHookFired) => {
+                marker = Some(if ending(&state).is_none() {
+                    FiredOver::Live
+                } else {
+                    FiredOver::Ended
+                });
+            }
             _ => {}
         }
     }
-    Epochs { fired, ended_by }
+    Epochs { marker, ended_by }
 }
 
 /// The two ways a graph has ended, as the epoch rule tells them apart: which hook
@@ -624,6 +684,9 @@ fn edit_named(edit: &Envelope) -> String {
     // that wrote it, and every process replying to a run writes its own, so the
     // time is what tells one edit from another to a reader.
     let at = views::one_line(&edit.ts);
+    if PipelineKind::from_wire(&edit.kind) == Some(PipelineKind::DriverAdopted) {
+        return format!("the adoption recorded at {at}");
+    }
     let Ok(read) = serde_json::from_value::<CommittedEdit>(Value::from(edit.payload.clone()))
     else {
         return format!("an edit committed at {at} whose record this build cannot read");
@@ -1127,6 +1190,66 @@ mod tests {
                 .collect(),
             ..RunState::default()
         }
+    }
+
+    /// A fold that has lost a record starts no epoch at adoption, even over a
+    /// marker fired while the graph was live and a graph still live now.
+    ///
+    /// The one arm of the adoption's rule no journey reaches: no verb this build
+    /// ships writes a record its own fold loses, and the plan that ruled this
+    /// rule in has its journeys write no run record by hand. The marker and the
+    /// graph are this crate's own records, emitted the way a driver emits them.
+    #[test]
+    fn a_fold_that_lost_a_record_starts_no_epoch_at_adoption() {
+        let root = scratch("lossy-adoption");
+        let paths = RunPaths::under(&root, "demo");
+        std::fs::create_dir_all(&paths.dir).expect("a run directory");
+        let build = holding(&[("build", NodeStatus::Ready)]);
+        let plan = crate::plan::Plan {
+            schema_version: crate::plan::PLAN_SCHEMA_VERSION,
+            goal: None,
+            name: Some("demo".into()),
+            concurrency: 4,
+            tasks: build.graph.iter().cloned().collect(),
+        };
+        let mut journal = Journal::open(&paths);
+        for (kind, fields) in [
+            (PipelineKind::RunStarted, vec![("plan", json!(plan))]),
+            (
+                PipelineKind::RunHookFired,
+                vec![
+                    ("hook", json!("failure")),
+                    ("command", json!("hook")),
+                    ("reason", json!({"kind": "stopped", "nodes": []})),
+                ],
+            ),
+        ] {
+            journal
+                .emit(
+                    kind,
+                    journal::labels("demo", None),
+                    journal::payload(&fields),
+                )
+                .expect("the record is written");
+        }
+
+        let strict = RunState {
+            strict: true,
+            ..build.clone()
+        };
+        assert!(
+            adoption_starts_epoch(&strict, &paths),
+            "a marker fired over live work, adopted live, started no epoch"
+        );
+        let lossy = RunState {
+            strict: false,
+            ..build
+        };
+        assert!(
+            !adoption_starts_epoch(&lossy, &paths),
+            "a fold that lost a record started an epoch"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A draft waiting on a release has not ended, whatever else the graph holds —

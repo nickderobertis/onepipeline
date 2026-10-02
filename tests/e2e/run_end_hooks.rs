@@ -1993,6 +1993,202 @@ fn once_a_hook_has_fired_only_an_edit_that_reopens_the_run_lets_another_fire() {
     assert_eq!(fired[1]["payload"]["reason"], Value::Null);
 }
 
+fn first_of(world: &World, run: &str, kind: &str) -> usize {
+    world
+        .kinds(run)
+        .iter()
+        .position(|recorded| recorded == kind)
+        .unwrap_or_else(|| panic!("run '{run}' journaled no {kind}: {}", world.dump()))
+}
+
+/// A run whose `retry` was committed while nothing had fired, and whose failure
+/// hook then fired over that retry's agent replacement while it was still
+/// `ready` — the marker #626 left standing.
+///
+/// The failure fires through `stop`, the one way to fire a hook over a `ready`
+/// node that no race decides. A driver lets go over one only when a `retry`
+/// reaches its queue after its last pass and before its release, which is the
+/// incident's own sequence and a window of milliseconds.
+fn failed_over_a_live_retry(world: &World, run: &str) {
+    let hook = hook(world);
+    attached(
+        world,
+        run,
+        vec![human("approve", &[])],
+        &both_hooks_under_timeout(&hook),
+    )
+    .exited(0)
+    .out_has("\"settlement\":\"awaiting-planner\"");
+
+    // The retry, committed while nothing has fired: its replacement is an agent
+    // node, `ready` and never dispatched.
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "settle", "id": "approve", "outcome": "failed",
+                 "evidence": "the approver asked for the change to be made instead"},
+                {"op": "retry", "id": "approve", "node": agent("build", &[])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    assert!(hook_kinds(world, run)
+        .iter()
+        .all(|kind| kind != "run-hook-fired"));
+
+    world.run(&["stop", run]).exited(0);
+    assert_eq!(invocations(world, run), ["failure"]);
+    assert_eq!(
+        world.events_of(run, "run-hook-fired")[0]["payload"]["reason"]["nodes"],
+        json!([{"id": "build", "status": "ready", "outcome": null}]),
+        "the failure did not fire over the replacement still ready"
+    );
+}
+
+/// The epoch the edit rule cannot see (#626): a `retry` committed **before** the
+/// failure hook fired leaves its replacement live behind that firing, so no edit
+/// after the marker ever changes the ending. The adoption that drives the
+/// replacement is what starts the new epoch: its `driver-adopted` retires the
+/// marker before anything is dispatched, and the success the run then reaches
+/// fires once.
+#[test]
+fn a_run_adopted_live_after_its_failure_hook_fired_fires_success_once_it_completes() {
+    let world = hooked_world("hooks-adopted-epoch");
+    let run = "recovered";
+    failed_over_a_live_retry(&world, run);
+
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+
+    assert_eq!(
+        invocations(&world, run),
+        ["failure", "success"],
+        "the run completed after an adoption and fired no success hook: {}",
+        world.dump()
+    );
+    let adopted = world.events_of(run, "driver-adopted");
+    assert_eq!(adopted.len(), 1);
+    assert_eq!(adopted[0]["payload"]["hook_epoch"], json!(true));
+    assert!(
+        first_of(&world, run, "driver-adopted") < first_of(&world, run, "node-dispatched"),
+        "the adoption's epoch was recorded after something was dispatched: {:?}",
+        world.kinds(run)
+    );
+    let fired = world.events_of(run, "run-hook-fired");
+    assert_eq!(fired.len(), 2);
+    assert_eq!(fired[1]["payload"]["hook"], "success");
+
+    // `results` reads the failure as belonging to the epoch the adoption ended.
+    let results = world.run(&["results", run]);
+    results.exited(0);
+    assert!(
+        names_committed_at(
+            &results.stdout,
+            "failure hook fired — superseded: the adoption recorded at ",
+            " reopened the run after it — reason:"
+        ),
+        "`results` does not name the adoption that ended the failure's epoch:\n{}",
+        results.stdout
+    );
+
+    // And the success it fired is that ending's own: adopting the complete run
+    // again fires nothing and starts no epoch.
+    world.run(&["adopt", run]).exited(0);
+    assert_eq!(invocations(&world, run), ["failure", "success"]);
+    assert_eq!(
+        world.events_of(run, "driver-adopted")[1]["payload"].get("hook_epoch"),
+        None
+    );
+}
+
+/// The other half of the adoption's epoch: a replacement the adoption dispatches
+/// that fails in its turn is a new ending, so the failure hook fires a second
+/// time — once, naming the replacement — rather than standing on the marker the
+/// first failure left.
+#[test]
+fn a_run_adopted_live_after_its_failure_hook_fired_fires_failure_again_once_if_it_fails() {
+    let world = hooked_world("hooks-adopted-epoch-failure");
+    world.script("build.fail", "1");
+    let run = "refailed-after-adoption";
+    failed_over_a_live_retry(&world, run);
+
+    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+    assert_eq!(
+        invocations(&world, run),
+        ["failure", "failure"],
+        "the replacement failed after an adoption and no second failure hook fired: {}",
+        world.dump()
+    );
+    assert_eq!(
+        world.events_of(run, "driver-adopted")[0]["payload"]["hook_epoch"],
+        json!(true)
+    );
+    let fired = world.events_of(run, "run-hook-fired");
+    assert_eq!(fired.len(), 2);
+    assert_eq!(
+        fired[1]["payload"]["reason"],
+        json!({"kind": "nodes",
+               "nodes": [{"id": "build", "status": "failed", "outcome": "task-failed"}]})
+    );
+
+    // That failure is the new ending's own: adopting it again fires nothing.
+    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure", "failure"]);
+}
+
+/// Adopting a run whose graph has **already ended**, at the ending its standing
+/// marker fired for, is not an epoch, however many times it is adopted: each
+/// adoption fires nothing and retires nothing.
+#[test]
+fn adopting_an_ended_run_twice_fires_nothing_new_and_retires_nothing() {
+    let world = hooked_world("hooks-adopted-ended");
+    let hook = hook(&world);
+    world.script("build.fail", "1");
+    let run = "ended";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[]), agent("after", &["build"])],
+        &both_hooks_under_timeout(&hook),
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
+
+    for _ in 0..2 {
+        world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+    }
+
+    assert_eq!(
+        invocations(&world, run),
+        ["failure"],
+        "adopting an ended run fired again: {}",
+        world.dump()
+    );
+    assert_eq!(
+        hook_kinds(&world, run),
+        ["run-hook-fired", "run-hook-finished"]
+    );
+    let adopted = world.events_of(run, "driver-adopted");
+    assert_eq!(adopted.len(), 2);
+    for adoption in &adopted {
+        assert_eq!(
+            adoption["payload"].get("hook_epoch"),
+            None,
+            "an adoption of an ended run recorded an epoch: {adoption}"
+        );
+    }
+    let results = world.run(&["results", run]);
+    results.exited(0);
+    assert!(
+        !results.stdout.contains("superseded"),
+        "`results` reads the standing failure as superseded:\n{}",
+        results.stdout
+    );
+}
+
 /// A detached driver judges and fires exactly as an attached one does — and while
 /// its hook runs, the run reads as nothing driving it, through the binary's own
 /// views, and an `adopt` takes the run over without ending the process awaiting

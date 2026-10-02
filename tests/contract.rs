@@ -7193,6 +7193,12 @@ const RULINGS: &[(&str, &str)] = &[
         "**the absence of a `driver-exited` after the last `driver-adopted`, on a driver proved \
          over, is how a crash reads**",
     ),
+    // The run-end hooks paragraph's adoption epoch, with both of its conditions.
+    (
+        "105.",
+        "**Adopting a live graph starts a new epoch when the hook it carries was fired over a \
+         live graph**",
+    ),
 ];
 
 #[test]
