@@ -334,11 +334,13 @@ fn every_envelope_the_reconciler_cannot_decode_is_answered_and_nothing_of_it_app
     );
 }
 
-/// The corners of a record's own fields, which the planner channel's layout
-/// refuses and so only reach the queue beneath it: an author that is not a
-/// string is answered as the planner's, a command that is not an object is
-/// journalled inside an `unreadable` placeholder, and an empty command list
+/// The corners of a record's own fields, each of which the planner channel's
+/// layout refuses and so only reaches the queue beneath it: a command that is
+/// not an object is journalled inside an `unreadable` placeholder, an author
+/// that is not a string is answered as the planner's, and an empty command list
 /// journals nothing — yet each record still gets its outcome line and surface.
+/// An empty list alone decodes, so its record also carries a non-string author,
+/// which is what makes it undecodable and what the bus refuses it for.
 #[test]
 fn a_record_the_layout_refuses_is_answered_from_whatever_of_it_reads() {
     let world = World::new("malformed-corners");
@@ -351,8 +353,9 @@ fn a_record_the_layout_refuses_is_answered_from_whatever_of_it_reads() {
     );
     let undecodable_drop = json!({"op": "drop", "id": "sign-off"});
     let records = [
-        json!({"id": 0, "author": 7, "commands": ["drop sign-off", undecodable_drop]}),
-        json!({"id": 1, "author": ["monitor"], "commands": []}),
+        json!({"id": 0, "commands": ["drop sign-off", undecodable_drop]}),
+        json!({"id": 1, "author": 7, "commands": [undecodable_drop]}),
+        json!({"id": 2, "author": ["monitor"], "commands": []}),
     ];
     for record in &records {
         let mut envelope = record.clone();
@@ -375,11 +378,11 @@ fn a_record_the_layout_refuses_is_answered_from_whatever_of_it_reads() {
         .err_lacks("panicked");
 
     let outcomes = world.command_outcomes(run);
-    assert_eq!(outcomes.len(), 2, "{outcomes:?}");
-    assert_eq!(cursor(&world, run), 2);
+    assert_eq!(outcomes.len(), records.len(), "{outcomes:?}");
+    assert_eq!(cursor(&world, run), 3);
     let reasons: Vec<&str> = outcomes
         .iter()
-        .zip([0, 1])
+        .zip([0, 1, 2])
         .map(|(outcome, id)| {
             assert_eq!(outcome["id"], json!(id), "{outcome}");
             assert_eq!(outcome["applied"], json!(false), "{outcome}");
@@ -401,11 +404,12 @@ fn a_record_the_layout_refuses_is_answered_from_whatever_of_it_reads() {
             json!({"author": "planner", "command": {"op": "unreadable", "value": "drop sign-off"},
                    "reason": reasons[0]}),
             json!({"author": "planner", "command": undecodable_drop, "reason": reasons[0]}),
+            json!({"author": "planner", "command": undecodable_drop, "reason": reasons[1]}),
         ]
     );
 
     let surfaces = rejected_surfaces(&world, run);
-    assert_eq!(surfaces.len(), 2, "{surfaces:?}");
+    assert_eq!(surfaces.len(), records.len(), "{surfaces:?}");
     for (id, reason) in reasons.iter().enumerate() {
         assert!(
             surfaces.iter().any(|surface| surface["message"]
