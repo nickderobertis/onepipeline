@@ -1192,6 +1192,66 @@ mod tests {
         }
     }
 
+    /// A fold that has lost a record starts no epoch at adoption, even over a
+    /// marker fired while the graph was live and a graph still live now.
+    ///
+    /// The one arm of the adoption's rule no journey reaches: no verb this build
+    /// ships writes a record its own fold loses, and the plan that ruled this
+    /// rule in has its journeys write no run record by hand. The marker and the
+    /// graph are this crate's own records, emitted the way a driver emits them.
+    #[test]
+    fn a_fold_that_lost_a_record_starts_no_epoch_at_adoption() {
+        let root = scratch("lossy-adoption");
+        let paths = RunPaths::under(&root, "demo");
+        std::fs::create_dir_all(&paths.dir).expect("a run directory");
+        let build = holding(&[("build", NodeStatus::Ready)]);
+        let plan = crate::plan::Plan {
+            schema_version: crate::plan::PLAN_SCHEMA_VERSION,
+            goal: None,
+            name: Some("demo".into()),
+            concurrency: 4,
+            tasks: build.graph.iter().cloned().collect(),
+        };
+        let mut journal = Journal::open(&paths);
+        for (kind, fields) in [
+            (PipelineKind::RunStarted, vec![("plan", json!(plan))]),
+            (
+                PipelineKind::RunHookFired,
+                vec![
+                    ("hook", json!("failure")),
+                    ("command", json!("hook")),
+                    ("reason", json!({"kind": "stopped", "nodes": []})),
+                ],
+            ),
+        ] {
+            journal
+                .emit(
+                    kind,
+                    journal::labels("demo", None),
+                    journal::payload(&fields),
+                )
+                .expect("the record is written");
+        }
+
+        let strict = RunState {
+            strict: true,
+            ..build.clone()
+        };
+        assert!(
+            adoption_starts_epoch(&strict, &paths),
+            "a marker fired over live work, adopted live, started no epoch"
+        );
+        let lossy = RunState {
+            strict: false,
+            ..build
+        };
+        assert!(
+            !adoption_starts_epoch(&lossy, &paths),
+            "a fold that lost a record started an epoch"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A draft waiting on a release has not ended, whatever else the graph holds —
     /// and a graph with no nodes has not begun.
     ///
