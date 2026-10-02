@@ -2318,9 +2318,13 @@ and a second offer is a second bill for one question. The submission check is
 also the only place a refusal can still be **whole**: the reconciler applies an
 envelope's commands one at a time and stops at the first refusal, so a reviewer
 consulted there would be answering about edits already committed. And it is the
-one door — every envelope carrying commands reaches the durable queue through
-that check — so once there is once per envelope rather than once per path. The
-code records this reasoning where it makes the choice.
+one door `reply` and the library's submission share — every envelope either of them
+queues passes that check — so once there is once per envelope rather than once per
+path. It is not the only door to the durable queue: the bus appends what the planner
+channel's layout passes, so an envelope sent with `onemessagebus send` reaches the
+queue without this check and without `reply`'s decoding, and what the reconciler
+does with one it cannot decode is entry 104's. The code records this reasoning where
+it makes the choice.
 
 It is nameable three ways, in the order entry 41 states and for the same reason:
 the flag, then the environment variable, then the launch config field, then the
@@ -8494,3 +8498,46 @@ to complete as well.
 
 `tests/e2e/wake_budget.rs` drives each case through the compiled binary, over
 questions raised through the bus's own library server.
+
+## 104. An envelope the reconciler could not decode was claimed and discarded without an answer — RESOLVED
+
+**Ruling: every record the reconciler claims from the command queue is answered,
+applied or refused by name — decided by the planner who owns the contract in
+ai-orchestrator's plan `run-ending-liveness-2026-10-01`.** `docs/contract.md`
+already promised every command "applied-or-rejected-with-reason"; this is the code
+brought to it, and the contract now says how a record that does not decode is
+answered. onepipeline#455 is this entry's.
+
+**What was wrong.** `reply` decodes an envelope before anything is queued, so a
+`drop` without `dependents` or a `settle` at `cancelled` is refused at the command
+line. The bus does not: the planner channel's layout reads only each command's
+`op`, so `onemessagebus send replies` appends any shape. The reconciler's claim
+advanced the queue's cursor and then kept only the records that decoded, so one
+that did not vanished — every other command of its envelope with it, a valid
+`note` included — with no outcome line, no journal record and no surface. A driver
+letting go asked the same question the same way, so it never stayed for one either.
+
+**The rule.** A claimed record that does not decode as this build's envelope is
+refused whole at the claim: one `command-outcomes.jsonl` line
+`{"id": <its id as an unsigned integer, else 0>, "applied": false, "reason":
+"refused: the envelope is malformed: <the decoder's message>"}` with no `results`;
+one `edit-rejected` per command it carried — `author` the record's own (else
+`planner`), `command` the command exactly as sent (`{"op": "unreadable", "value":
+<the command>}` for one that is not an object, since the record's `command` is
+one), `reason` the same, and none for an empty list — or, for a record with no
+readable `commands` list, one whose `command` is `{"op": "unreadable", "value":
+<the record>}`; and one non-blocking `edit-rejected`
+surface naming the envelope's id and the reason. Nothing of it applies, and the
+driver neither panics nor exits over it. The queue's outstanding work counts such
+a record, so a driver holding the run — one adopted onto a run whose graph has
+already settled included — answers it before it lets go.
+
+Beside it, `drop` takes an optional `reason`, carried in `edit-committed`'s
+`command` and refused when blank, and `cancel` on a `waiting` node is refused
+naming `attest` and `drop` — the two edits that put a waiting human action down.
+`settle` keeps the outcomes `done` and `failed`. The claim and its answer are still
+two writes, so a driver that dies between them loses the answer; making them one is
+not part of this ruling.
+
+`tests/e2e/malformed_envelopes.rs` drives each case through the compiled binary,
+over envelopes sent through the planner channel's own bus.

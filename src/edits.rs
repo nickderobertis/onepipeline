@@ -1357,7 +1357,11 @@ fn compile_into(
             Ok(vec![Operation::RunNodeSetsReplaced { sets: sets.clone() }])
         }
         Command::Add { node } => compile_add(graph, node),
-        Command::Drop { id, dependents } => compile_drop(graph, frontier, id, *dependents),
+        Command::Drop {
+            id,
+            dependents,
+            reason,
+        } => compile_drop(graph, frontier, id, *dependents, reason.as_deref()),
         Command::Reparent { id, deps } => compile_reparent(graph, frontier, id, deps),
         Command::Retry { id, node } => compile_retry(graph, frontier, id, node),
         Command::Cancel { id, reason } => {
@@ -1517,7 +1521,17 @@ fn compile_drop(
     frontier: &Frontier,
     id: &str,
     dependents: Dependents,
+    reason: Option<&str>,
 ) -> Result<Vec<Operation>> {
+    // Absent, the drop states no reason, which is every drop written before the
+    // field existed. Present and blank is a reason the planner meant to give and
+    // did not, so it is refused rather than journalled as nothing, as `cancel`'s is.
+    if reason.is_some_and(|reason| reason.trim().is_empty()) {
+        return Err(refuse(format!(
+            "drop: node '{id}' would be dropped stating an empty reason; say why it is \
+             being retired, or state no reason at all"
+        )));
+    }
     let Some(target) = graph.get(id).cloned() else {
         return Err(refuse(format!("drop: no node '{id}'")));
     };
@@ -1799,6 +1813,15 @@ fn compile_cancel(
     }
     match frontier.recorded.get(id) {
         None | Some(NodeStatus::Running) => {}
+        // A waiting node is a human action, and parking it is not how one is put
+        // down: the refusal names the two edits that are.
+        Some(NodeStatus::Waiting) => {
+            return Err(refuse(format!(
+                "cancel: node '{id}' is waiting, not pending or running: a waiting human \
+                 action is completed with `attest`, or retired with `drop` (its \
+                 `dependents` `detach` or `drop`, and an optional `reason`)"
+            )))
+        }
         Some(status) => {
             return Err(refuse(format!(
                 "cancel: node '{id}' is {}, not pending or running",
@@ -2784,6 +2807,7 @@ mod tests {
             &Command::Drop {
                 id: "a".into(),
                 dependents: Dependents::Detach,
+                reason: None,
             },
         )
         .expect("detaching is legal");
@@ -2802,10 +2826,45 @@ mod tests {
             &Command::Drop {
                 id: "a".into(),
                 dependents: Dependents::Drop,
+                reason: None,
             },
         )
         .expect("recursive dropping is legal");
         assert!(graph.is_empty(), "the dependents were not dropped too");
+
+        // A stated reason drops it the same way; a blank one is refused by name
+        // and leaves the graph as it was.
+        let mut graph = graph_of(vec![agent("a", &[]), agent("b", &["a"])]);
+        compile(
+            &mut graph,
+            &frontier(&[("a", NodeStatus::Waiting)]),
+            &Command::Drop {
+                id: "a".into(),
+                dependents: Dependents::Detach,
+                reason: Some("superseded".into()),
+            },
+        )
+        .expect("a reason is legal");
+        assert!(!graph.contains("a"));
+        assert!(graph.get("b").expect("b").deps.is_empty());
+
+        let mut graph = graph_of(vec![agent("a", &[])]);
+        let message = compile(
+            &mut graph,
+            &Frontier::default(),
+            &Command::Drop {
+                id: "a".into(),
+                dependents: Dependents::Detach,
+                reason: Some("  ".into()),
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains("drop: node 'a' would be dropped stating an empty reason"),
+            "{message}"
+        );
+        assert!(graph.contains("a"));
     }
 
     #[test]
@@ -2824,6 +2883,7 @@ mod tests {
             &Command::Drop {
                 id: "anchor".into(),
                 dependents: Dependents::Detach,
+                reason: None,
             },
         )
         .unwrap_err()
@@ -2843,6 +2903,7 @@ mod tests {
             &Command::Drop {
                 id: "anchor".into(),
                 dependents: Dependents::Detach,
+                reason: None,
             },
         )
         .expect("a settled alternative anchor allows the drop");
@@ -3017,7 +3078,33 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(message.contains("not pending or running"), "{message}");
+        assert!(
+            message.ends_with("cancel: node 'done' is done, not pending or running"),
+            "{message}"
+        );
+
+        // A waiting human action is refused naming the two edits that put one
+        // down, and is left where it was.
+        let mut graph = graph_of(vec![agent("sign-off", &[])]);
+        let message = compile(
+            &mut graph,
+            &frontier(&[("sign-off", NodeStatus::Waiting)]),
+            &Command::Cancel {
+                id: "sign-off".into(),
+                reason: None,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.ends_with(
+                "cancel: node 'sign-off' is waiting, not pending or running: a waiting human \
+                 action is completed with `attest`, or retired with `drop` (its `dependents` \
+                 `detach` or `drop`, and an optional `reason`)"
+            ),
+            "{message}"
+        );
+        assert!(!graph.get("sign-off").expect("still in the graph").parked);
 
         assert!(compile(
             &mut graph,
@@ -4601,6 +4688,7 @@ mod tests {
             Command::Drop {
                 id: "build".into(),
                 dependents: Dependents::Detach,
+                reason: None,
             },
         ];
         let graph = graph_of(vec![agent("fresh", &[])]);
@@ -4662,6 +4750,7 @@ mod tests {
             Command::Drop {
                 id: "build".into(),
                 dependents: Dependents::Detach,
+                reason: None,
             },
         ];
         let graph = graph_of(vec![agent("fresh", &[])]);
@@ -4808,6 +4897,7 @@ mod tests {
             Command::Drop {
                 id: "c".into(),
                 dependents: Dependents::Detach,
+                reason: None,
             },
         ] {
             let operations =
@@ -5157,6 +5247,7 @@ mod tests {
             &Command::Drop {
                 id: "engine".into(),
                 dependents: Dependents::Detach,
+                reason: None,
             },
         )
         .expect("a node another node consumes detaches");
