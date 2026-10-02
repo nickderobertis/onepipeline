@@ -130,7 +130,11 @@ pub fn workspace_capacity(
 /// base moved under work already going and the bounded resolve-and-requeue lost
 /// the race, which another attempt can win — [`Preserving::SyncConflict`]. At
 /// *session open* it is a merge nobody has performed, and opening the session
-/// again reproduces the identical refusal.
+/// again reproduces the identical refusal. That second one is a refusal this
+/// engine no longer asks for: [`request_for`] leaves `refuse_conflicts` unset, so
+/// `onevcs` opens such a session with the merge in progress and the worker it is
+/// dispatched to concludes it — see [`merge_in_progress`]. It is still classified,
+/// for a sibling that refuses anyway, and is not the path a conflict takes.
 ///
 /// An exhausted pool is the other: the identity has no room, which a later open
 /// may find it has again once a session somewhere closes — but not a later
@@ -206,15 +210,18 @@ pub fn publish(
     title: Option<&str>,
     body: Option<&str>,
     draft: Option<&DraftReason>,
-) -> Result<Publication> {
+) -> std::result::Result<Publication, PublishRefused> {
     let title = title
         .map(|title| title.parse::<Subject>().map_err(sibling))
-        .transpose()?;
+        .transpose()
+        .map_err(PublishRefused::Refused)?;
     // Held to the sibling's own rule where it is composed rather than where it
     // arrives, for [`Subject`]'s reason: a reason that would not render as itself
     // is refused before a session's work is committed against it.
     if let Some(reason) = draft {
-        reason.checked().map_err(refusal)?;
+        reason
+            .checked()
+            .map_err(|error| PublishRefused::Refused(refusal(error)))?;
     }
     onevcs::publish(
         &providers(),
@@ -226,7 +233,42 @@ pub fn publish(
             draft: draft.cloned(),
         },
     )
-    .map_err(refusal)
+    .map_err(publication_refusal)
+}
+
+/// A publication call `onevcs` did not answer with a publication.
+///
+/// Typed rather than composed into [`Error`], because one of the two routes the
+/// node into a re-dispatch and the other settles it, and that decision is made
+/// off `onevcs`'s own typed refusal rather than off any wording downstream of it.
+#[derive(Debug)]
+pub(crate) enum PublishRefused {
+    /// The session holds its base's merge unfinished: it opened with the merge in
+    /// progress and the worker did not conclude it. `onevcs` refuses that as a
+    /// [`SyncConflict`](onevcs::Error::SyncConflict) before committing or pushing
+    /// anything, so the branch is where the session found it and the next
+    /// attempt, handed the conflict again, can answer it. Carries the sibling's
+    /// own sentence.
+    MergeUnfinished(String),
+    /// Any other refusal of the call.
+    Refused(Error),
+}
+
+impl std::fmt::Display for PublishRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MergeUnfinished(reason) => f.write_str(reason),
+            Self::Refused(error) => error.fmt(f),
+        }
+    }
+}
+
+/// A publication `onevcs` refused, classified off its typed error.
+fn publication_refusal(error: onevcs::Error) -> PublishRefused {
+    match &error {
+        onevcs::Error::SyncConflict { .. } => PublishRefused::MergeUnfinished(error.to_string()),
+        _ => PublishRefused::Refused(refusal(error)),
+    }
 }
 
 /// The session's own change request — the one a publication of it would adopt —
@@ -1805,8 +1847,121 @@ pub fn session_opened_event(session: &Session, labels: &crate::event::Labels) ->
             ("branch", serde_json::json!(session.branch)),
             ("base", serde_json::json!(session.base)),
             ("worktree", serde_json::json!(session.worktree)),
-        ]),
+        ])
+        .into_iter()
+        // The merge the session opened with, where it opened with one, as the
+        // same object and under the same key `onevcs`'s own `session-opened`
+        // carries it — and absent otherwise, so every other opening reads as it
+        // always did. [`conflict_opened_in`] is what reads it back.
+        .chain(
+            session
+                .conflict
+                .as_ref()
+                .map(|conflict| (OPENED_CONFLICT.to_owned(), serde_json::json!(conflict))),
+        )
+        .collect(),
         artifacts: Vec::new(),
+    }
+}
+
+/// The key a `session-opened` payload carries an open conflict under: `onevcs`'s
+/// own spelling, which this crate's envelope for the same opening repeats.
+const OPENED_CONFLICT: &str = "conflict";
+
+/// The merge a session opened with, read back off a `session-opened` envelope.
+///
+/// `None` for every other envelope, for an opening that carried no conflict, and
+/// for one whose conflict does not read as `onevcs`'s own shape — a session that
+/// did open conflicted is then not counted as one, which errs toward reporting
+/// fewer conflicted dispatches rather than inventing one.
+// llmlint: ignore[changed_behavior_has_e2e] the read every journey reaches — this crate's
+// own opening, carrying a conflict or not — is driven by the conflict journeys in
+// `tests/e2e/lifecycle.rs`. Its two refusals, an envelope another source wrote and a
+// conflict not in the sibling's shape, are reachable only by a producer writing into this
+// run's stream what no producer here writes; `an_opened_conflict_rides_the_session_opened_
+// envelope_and_reads_back` holds both over real envelopes.
+pub(crate) fn conflict_opened_in(envelope: &Envelope) -> Option<onevcs::OpenConflict> {
+    if envelope.source != crate::event::Source::Vcs
+        || envelope.kind != kind_of(onevcs::EventKind::SessionOpened)
+    {
+        return None;
+    }
+    serde_json::from_value(envelope.payload.get(OPENED_CONFLICT)?.clone()).ok()
+}
+
+/// What a dispatch into `session` is told about the merge it opened with, or
+/// `None` for a session that opened on a clean tree.
+///
+/// `onevcs`'s report plus the base's commits that made the conflict: those
+/// between the branch's tip and the merged base commit that touch an unmerged
+/// path, newest first, at most [`MERGE_COMMITS_LISTED`]. This crate runs git
+/// itself here, read-only, in the worktree the session's own record names and
+/// against the two commits `onevcs` reported — the same grounds
+/// [`level_with_base`] runs it on. A listing git refuses is reported as one that
+/// could not be made rather than as none.
+///
+/// [`MERGE_COMMITS_LISTED`]: crate::plan::MERGE_COMMITS_LISTED
+// llmlint: ignore[changed_behavior_has_e2e] the journeys in `tests/e2e/lifecycle.rs` drive
+// the listing a conflicted worker is handed, through the binary; its bounds — more than
+// twenty commits, a subject cut short, a path no commit touches, a listing git refuses —
+// are held over real git by `a_merge_in_progress_lists_the_bases_commits_on_the_unmerged_
+// paths_and_bounds_them`, since a journey building twenty-two base commits would prove the
+// fixture's history rather than this function.
+pub(crate) fn merge_in_progress(session: &Session) -> Option<crate::plan::MergeInProgress> {
+    let conflict = session.conflict.clone()?;
+    let range = format!("{}..{}", conflict.branch_tip, conflict.base_commit);
+    let git = |args: &[&str]| -> Option<String> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .arg("--")
+            .args(&conflict.paths)
+            .current_dir(&session.worktree)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let listed = crate::plan::MERGE_COMMITS_LISTED;
+    let commits = git(&[
+        "log",
+        "--no-merges",
+        "--format=%h %s",
+        &format!("--max-count={listed}"),
+        &range,
+    ])
+    .map(|out| {
+        out.lines()
+            .map(|line| commit_line(line.trim()))
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+    });
+    let unlisted = match &commits {
+        Some(commits) if commits.len() == listed => {
+            git(&["rev-list", "--no-merges", "--count", &range])
+                .and_then(|count| count.trim().parse::<usize>().ok())
+                .map_or(0, |count| count.saturating_sub(listed))
+        }
+        _ => 0,
+    };
+    Some(crate::plan::MergeInProgress {
+        base_name: session.base.clone(),
+        branch_name: session.branch.clone(),
+        conflict,
+        commits,
+        unlisted,
+    })
+}
+
+/// One commit's line as a conflicted dispatch is shown it: a subject is the
+/// committer's prose, so it is cut where a line in a task stops being one.
+fn commit_line(line: &str) -> String {
+    const LONGEST: usize = 160;
+    match line.char_indices().nth(LONGEST) {
+        Some((at, _)) => format!("{}…", &line[..at]),
+        None => line.to_owned(),
     }
 }
 
@@ -2081,6 +2236,10 @@ pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
         // Stamped where the session opens, which is where the run, the node and
         // the launch that owns it are known: see `executor::SESSION_RUN_LABEL`.
         labels: std::collections::BTreeMap::new(),
+        // A continued branch that conflicts with its moved base opens with the
+        // merge in progress, and the worker it is dispatched to concludes it:
+        // see `lifecycle::merge_resolution`.
+        refuse_conflicts: false,
     })
 }
 
@@ -2413,9 +2572,61 @@ mod tests {
                 worktree: std::path::PathBuf::from("/tmp/worktree"),
                 branch: branch.to_owned(),
                 base: "main".to_owned(),
+                conflict: None,
             },
             &crate::event::Labels::default(),
         )
+    }
+
+    /// The conflict a session opened with rides its `session-opened` envelope in
+    /// `onevcs`'s own shape and reads back off it; an opening without one carries
+    /// no `conflict` key at all, and no other envelope answers one.
+    #[test]
+    fn an_opened_conflict_rides_the_session_opened_envelope_and_reads_back() {
+        let conflict = onevcs::OpenConflict {
+            paths: vec!["service.md".to_owned()],
+            base_commit: "b".repeat(40),
+            branch_tip: "t".repeat(40),
+        };
+        let opened = session_opened_event(
+            &Session {
+                conflict: Some(conflict.clone()),
+                ..Session {
+                    token: SessionToken("s-abc".to_owned()),
+                    worktree: std::path::PathBuf::from("/tmp/worktree"),
+                    branch: "feature".to_owned(),
+                    base: "main".to_owned(),
+                    conflict: None,
+                }
+            },
+            &crate::event::Labels::default(),
+        );
+        assert_eq!(
+            opened.payload.get("conflict"),
+            Some(&serde_json::json!(conflict))
+        );
+        assert_eq!(conflict_opened_in(&opened), Some(conflict));
+
+        let clean = ours("s-abc", "feature");
+        assert!(!clean.payload.contains_key("conflict"));
+        assert_eq!(conflict_opened_in(&clean), None);
+
+        // Another producer's envelope of the same kind is not a session this
+        // crate's executor opened, and a conflict that does not read as the
+        // sibling's shape is not counted as one.
+        let mut elsewhere = opened.clone();
+        elsewhere.source = crate::event::Source::Pipeline;
+        assert_eq!(conflict_opened_in(&elsewhere), None);
+        let mut malformed = opened.clone();
+        malformed.payload.insert(
+            "conflict".to_owned(),
+            serde_json::json!({"paths": "service.md"}),
+        );
+        assert_eq!(conflict_opened_in(&malformed), None);
+
+        let mut relabelled = opened;
+        relabelled.kind = crate::event::EventKind("session-closed".into());
+        assert_eq!(conflict_opened_in(&relabelled), None);
     }
 
     /// What a session record is read for, and what is refused instead of read.
@@ -2822,7 +3033,8 @@ mod tests {
         assert_eq!(event.payload["landing"], serde_json::Value::Null);
     }
 
-    /// What reads as a session-open conflict, and what deliberately does not.
+    /// What reads as a session-open conflict — a refusal this engine no longer
+    /// asks for, still classified — and what deliberately does not.
     ///
     /// The decision this drives stops a node retrying and blocks the subtree
     /// under it until a person answers, so the only thing that may reach it is
@@ -2987,6 +3199,85 @@ mod tests {
         std::fs::write(worktree.join(name), format!("{name}\n")).expect("the file");
         git_in(worktree, &["add", "-A"]);
         git_in(worktree, &["commit", "-q", "-m", &format!("feat: {name}")]);
+    }
+
+    /// What a conflicted dispatch is told about the base's commits, read over real
+    /// git: only the commits touching an unmerged path, newest first, at most
+    /// [`MERGE_COMMITS_LISTED`](crate::plan::MERGE_COMMITS_LISTED) of them with
+    /// the rest counted, a subject cut where a line stops being one — and a
+    /// listing git refuses reported as not made rather than as empty.
+    #[test]
+    fn a_merge_in_progress_lists_the_bases_commits_on_the_unmerged_paths_and_bounds_them() {
+        let root = std::env::temp_dir().join(format!("onepipeline-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        git_in(&root, &["init", "-q", "--initial-branch=main", "repo"]);
+        let repo = root.join("repo");
+        commit_in(&repo, "seed.md");
+        let head = |repo: &std::path::Path| {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo)
+                .output()
+                .expect("git runs");
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        let tip = head(&repo);
+        let listed = crate::plan::MERGE_COMMITS_LISTED;
+        for n in 0..listed + 2 {
+            std::fs::write(repo.join("a.md"), format!("{n}\n")).expect("the file");
+            git_in(&repo, &["add", "-A"]);
+            let subject = if n == listed + 1 {
+                format!("feat: {}", "x".repeat(300))
+            } else {
+                format!("feat: a {n}")
+            };
+            git_in(&repo, &["commit", "-q", "-m", &subject]);
+        }
+        commit_in(&repo, "b.md");
+        let base_commit = head(&repo);
+        let session = |worktree: std::path::PathBuf, paths: &[&str]| Session {
+            token: SessionToken("s-merge".to_owned()),
+            worktree,
+            branch: "feature".to_owned(),
+            base: "main".to_owned(),
+            conflict: Some(onevcs::OpenConflict {
+                paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+                base_commit: base_commit.clone(),
+                branch_tip: tip.clone(),
+            }),
+        };
+
+        let merge = merge_in_progress(&session(repo.clone(), &["a.md"])).expect("a conflict");
+        let commits = merge.commits.expect("git listed them");
+        assert_eq!(commits.len(), listed, "{commits:#?}");
+        assert_eq!(merge.unlisted, 2);
+        assert!(
+            commits.iter().all(|line| !line.contains("b.md")),
+            "{commits:#?}"
+        );
+        assert!(
+            commits[0].ends_with('…') && commits[0].chars().count() == 161,
+            "the long subject was not cut: {}",
+            commits[0]
+        );
+        assert!(
+            commits[1].ends_with(&format!("feat: a {listed}")),
+            "{commits:#?}"
+        );
+
+        let untouched = merge_in_progress(&session(repo.clone(), &["c.md"])).expect("a conflict");
+        assert_eq!(untouched.commits, Some(Vec::new()));
+        assert_eq!(untouched.unlisted, 0);
+
+        let unread = merge_in_progress(&session(root.join("no-such-worktree"), &["a.md"]))
+            .expect("a conflict");
+        assert_eq!(unread.commits, None);
+
+        let mut clean = session(repo, &["a.md"]);
+        clean.conflict = None;
+        assert_eq!(merge_in_progress(&clean), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A level branch is told apart by whether **this dispatch wrote a commit**

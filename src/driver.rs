@@ -3068,7 +3068,16 @@ fn last_note_delivered(
 /// is the same ruling as one that arrived alone, and a journal that recorded only
 /// the second would leave the run's own account of why it stopped waiting missing
 /// for exactly the envelopes that did the most.
-fn journal_verdict(paths: &RunPaths, envelope: &Reply) -> Result<()> {
+///
+/// A verdict naming its question with a `correlation` is that question's ruling,
+/// delivered to whoever asked it, and never the run asking to complete: its
+/// `completion` answers the asker, so it raises no completion request however it
+/// is spelled. A `complete` *command* beside it still does, on the command path.
+fn journal_verdict(
+    paths: &RunPaths,
+    correlation: Option<&onemessagebus::Correlation>,
+    envelope: &Reply,
+) -> Result<()> {
     let mut journal = Journal::open(paths);
     journal.emit(
         journal::PipelineKind::PlannerReplied,
@@ -3079,7 +3088,7 @@ fn journal_verdict(paths: &RunPaths, envelope: &Reply) -> Result<()> {
             ("reason", json!(envelope.reason)),
         ]),
     )?;
-    if let Some(reason) = &envelope.reason {
+    if let (Some(reason), None) = (&envelope.reason, correlation) {
         if envelope.completion == Some(true) {
             journal.emit(
                 journal::PipelineKind::CompletionRequested,
@@ -3124,7 +3133,7 @@ fn deliver_verdict_half(
         named => channel.answer_if_verdict_bound(envelope, named)?,
     }
     if envelope.carries_verdict() {
-        journal_verdict(paths, envelope)?;
+        journal_verdict(paths, correlation, envelope)?;
     }
     Ok(())
 }
@@ -3169,6 +3178,18 @@ pub(crate) fn submit_envelope(
     channel.allows_completion(envelope.author.clone(), envelope.completion)?;
 
     if envelope.commands.is_empty() {
+        // A verdict naming its question goes to that question's asker, through
+        // the bus's own binding, whether the run is live or settled and whether
+        // or not a driver holds it: the answer is a bus append rather than a
+        // write to the run, so it takes no ownership lock. Which questions can
+        // still be named is the bus's rule — one never raised here, or already
+        // answered, is refused naming it, with nothing appended.
+        if let Some(named) = correlation {
+            channel.judge_reply(envelope, None::<edits::EnvelopeReview>)?;
+            let id = channel.answer_bound(envelope, Some(named))?;
+            journal_verdict(paths, correlation, envelope)?;
+            return Ok(Submitted::Answered { reply: id });
+        }
         // A settled run has no reader left, now or later, so queuing a reply to
         // it would park it where nothing drains it. A surface still awaiting an
         // answer outranks that: the run asked for the reply.
@@ -3188,7 +3209,7 @@ pub(crate) fn submit_envelope(
             if envelope.completion == Some(true) && envelope.reason.is_some() {
                 channel.judge_reply(envelope, None::<edits::EnvelopeReview>)?;
                 if let Some(lock) = engine::take_if_undriven(paths)? {
-                    journal_verdict(paths, envelope)?;
+                    journal_verdict(paths, None, envelope)?;
                     drop(lock);
                     // A verdict with no commands, delivered to the run's own record
                     // rather than to a queue, so there is no id to name: `0`, the
@@ -3206,11 +3227,8 @@ pub(crate) fn submit_envelope(
         // queue as an edit envelope is, so a validator the run's configuration
         // names refuses it whole.
         channel.judge_reply(envelope, None::<edits::EnvelopeReview>)?;
-        let id = match correlation {
-            None => channel.answer(envelope)?,
-            named => channel.answer_bound(envelope, named)?,
-        };
-        journal_verdict(paths, envelope)?;
+        let id = channel.answer(envelope)?;
+        journal_verdict(paths, None, envelope)?;
         return Ok(Submitted::Answered { reply: id });
     }
 

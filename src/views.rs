@@ -4952,7 +4952,8 @@ mod tests {
             .push(crate::channel::Surface {
                 id: 0,
                 kind: "finding".into(),
-                message: "node 'build' cannot open a session; answer with a `retry`".into(),
+                message: "node 'build' did not converge on its conflict with the base; answer with a `retry`"
+                    .into(),
                 source: "reconciler".into(),
                 blocking: true,
                 queued_at: sys::now_millis(),
