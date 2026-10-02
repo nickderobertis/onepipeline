@@ -7295,6 +7295,49 @@ fn workspace_hold_of(world: &World, run: &str, node: &str) -> Option<serde_json:
         .cloned()
 }
 
+/// The `workspace` reason on the **first** `node-held` naming `node` — the hold
+/// the pass both nodes were ready in decided — if that hold carries one.
+///
+/// Not the newest: the record is written on every change of reason or reading,
+/// so a later pass can replace that hold a moment after it is written — with the
+/// host's room once the host fills, or with a reading taken after a session
+/// opened — and a wait that reads only the newest misses the pass it is about.
+fn first_workspace_hold_of(world: &World, run: &str, node: &str) -> Option<serde_json::Value> {
+    world
+        .events_of(run, "node-held")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == node)?["payload"]["reasons"]
+        .as_array()?
+        .iter()
+        .find(|reason| reason["kind"] == "workspace")
+        .cloned()
+}
+
+/// Every hold `node` was put under and later let go of, counted from its own
+/// `node-held` and `node-unheld` records in stream order: a `node-held` opens
+/// one only where `node` was not already held, since a change of reason or
+/// reading is recorded as another `node-held` on the same hold.
+fn hold_spans(world: &World, run: &str, node: &str) -> (usize, usize) {
+    let (mut opened, mut released, mut holding) = (0usize, 0usize, false);
+    for event in world.journal(run) {
+        if event["labels"]["node"] != node {
+            continue;
+        }
+        match event["kind"].as_str() {
+            Some("node-held") if !holding => {
+                opened += 1;
+                holding = true;
+            }
+            Some("node-unheld") => {
+                released += 1;
+                holding = false;
+            }
+            _ => {}
+        }
+    }
+    (opened, released)
+}
+
 /// The stream position of the first event of `kind` labelled `node`.
 fn first_seq(world: &World, run: &str, kind: &str, node: &str) -> u64 {
     world
@@ -7405,9 +7448,9 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
     let run = "poolheld".to_string();
 
     world.until("the second node to be held for its workspace", |world| {
-        workspace_hold_of(world, &run, "second").is_some()
+        first_workspace_hold_of(world, &run, "second").is_some()
     });
-    let hold = workspace_hold_of(&world, &run, "second").expect("held");
+    let hold = first_workspace_hold_of(&world, &run, "second").expect("held");
     assert_eq!(hold["identity"], SERVICE_IDENTITY, "{hold}");
     assert_eq!(hold["pool"], 1, "{hold}");
     assert_eq!(hold["overflow"], 0, "{hold}");
@@ -7636,11 +7679,24 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
         .filter(|event| event["labels"]["node"] == "second")
         .collect();
     // Released once per time it was held: once for the slot the first handed
-    // back, and once more for each open the identity refused after admitting it.
+    // back, and once more for each open the identity refused after admitting it
+    // that the next pass still held. Not for every refusal: a refusal holds the
+    // node only until the paced re-read comes due, so a pass that reaches it
+    // after that reads the identity afresh and — the first's slot returned by
+    // then — dispatches it without holding it again. On Windows the loop can be
+    // that late, and was.
+    let (held_spans, released_spans) = hold_spans(&world, &run, "second");
     assert_eq!(
-        unheld.len(),
-        1 + requeued.len(),
-        "{unheld:#?}\n{}",
+        released_spans,
+        held_spans,
+        "a hold of the second was not released exactly once\n{unheld:#?}\n{}",
+        why(&world, &run)
+    );
+    assert!(
+        (1..=1 + requeued.len()).contains(&held_spans),
+        "the second was held {held_spans} time(s) over {} refusal(s): each hold past \
+         the first is a refusal's\n{unheld:#?}\n{}",
+        requeued.len(),
         why(&world, &run)
     );
     for release in &unheld {
@@ -7723,9 +7779,9 @@ fn a_workspace_held_node_reads_as_held_for_concurrency_while_the_host_is_full_an
     // for it, and the other started behind the held node — which is what fills
     // the host, so the same pass's record names both reasons.
     world.until("the second node to be held for its workspace", |world| {
-        workspace_hold_of(world, &run, "second").is_some()
+        first_workspace_hold_of(world, &run, "second").is_some()
     });
-    let hold = workspace_hold_of(&world, &run, "second").expect("held");
+    let hold = first_workspace_hold_of(&world, &run, "second").expect("held");
     assert_eq!(hold["identity"], SERVICE_IDENTITY, "{hold}");
     for node in ["first", "other"] {
         assert_eq!(
