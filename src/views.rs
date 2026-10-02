@@ -278,15 +278,15 @@ pub fn reading(view: &RunView) -> RunReading {
     let liveness = view.liveness();
     let statuses = view.state.statuses();
     let standing = Standing::of_parts(view, liveness, &statuses);
-    let (ending, paused) = match standing.reached {
+    let (ending, paused) = match &standing.reached {
         Reached::Ended(kind) => (
             Some(Ending {
-                kind,
+                kind: *kind,
                 nodes: crate::hooks::unsettled(&view.state, &statuses),
             }),
             None,
         ),
-        Reached::Paused => (None, standing.decision.clone()),
+        Reached::Paused(paused) => (None, Some(paused.clone())),
         Reached::Neither => (None, None),
     };
     RunReading {
@@ -311,12 +311,12 @@ fn waiting_nodes(statuses: &BTreeMap<String, NodeStatus>) -> Vec<String> {
 }
 
 /// What a run nothing drives has reached: an ending, a pause, or neither.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Reached {
     /// It ended, this way.
     Ended(EndingKind),
-    /// It is paused on a decision.
-    Paused,
+    /// It is paused on this decision.
+    Paused(Paused),
     /// It is driven, or its driver went while it had work it could move — or it
     /// has no graph.
     Neither,
@@ -330,11 +330,14 @@ impl Reached {
     /// else it holds, unless the graph is complete; and a node that is ready,
     /// running or a draft is work the driver went while it could still move — a
     /// crash, not an ending and not a pause.
+    ///
+    /// `decision` names what a paused run is held on, and is asked only of one.
     fn of(
         driven: bool,
         present: &std::collections::BTreeSet<NodeStatus>,
         stop_recorded: bool,
         decision_outstanding: impl FnOnce() -> bool,
+        decision: impl FnOnce() -> Paused,
     ) -> Self {
         if driven {
             return Self::Neither;
@@ -350,7 +353,7 @@ impl Reached {
             crate::hooks::Verdict::Success => Self::Ended(EndingKind::Complete),
             _ if stop_recorded => Self::Ended(crate::hooks::ReasonKind::Stopped.ending()),
             _ if movable => Self::Neither,
-            crate::hooks::Verdict::Paused => Self::Paused,
+            crate::hooks::Verdict::Paused => Self::Paused(decision()),
             crate::hooks::Verdict::NotEnded => Self::Neither,
             crate::hooks::Verdict::Failure(kind) => Self::Ended(kind.ending()),
         }
@@ -1484,10 +1487,9 @@ fn nothing_to_report(survey: &Survey) -> String {
 struct Standing {
     /// How the run is being driven.
     liveness: DriverLiveness,
-    /// Whether the run, if nothing drives it, has ended or is paused.
+    /// Whether the run, if nothing drives it, has ended or is paused — and on
+    /// what, which the advice under a paused run names.
     reached: Reached,
-    /// The decision a paused run is held on, named for the advice under it.
-    decision: Option<Paused>,
     /// Whether every node of the graph is `done`, driven or not.
     complete: bool,
     /// Whether the loop has anything left to converge.
@@ -1613,14 +1615,14 @@ impl Standing {
             &statuses.values().copied().collect(),
             view.state.stop_recorded(),
             || decision_outstanding(&view.state, &view.paths),
+            || Paused {
+                human_actions: waiting_nodes(statuses),
+                blocking_surface: blocking_surface(&view.paths),
+            },
         );
         Self {
             liveness,
             reached,
-            decision: (reached == Reached::Paused).then(|| Paused {
-                human_actions: waiting_nodes(statuses),
-                blocking_surface: blocking_surface(&view.paths),
-            }),
             complete: graph == GraphStanding::Complete,
             convergence: Convergence::of(graph.converged()),
         }
@@ -1651,15 +1653,15 @@ impl Standing {
                 &present,
                 row.summary.stop_recorded,
                 || row.summary.awaiting_human_action || blocking_surface(&row.paths),
+                || Paused {
+                    human_actions: row.summary.waiting.clone(),
+                    blocking_surface: blocking_surface(&row.paths),
+                },
             )
         });
         Self {
             liveness,
             reached,
-            decision: (reached == Reached::Paused).then(|| Paused {
-                human_actions: row.summary.waiting.clone(),
-                blocking_surface: blocking_surface(&row.paths),
-            }),
             complete: graph == GraphStanding::Complete,
             convergence: Convergence::of(graph.converged()),
         }
@@ -1667,9 +1669,9 @@ impl Standing {
 
     /// The word a view prints for how the run is being driven, or how it ended.
     fn word(&self) -> &'static str {
-        match self.reached {
+        match &self.reached {
             Reached::Ended(kind) => kind.word(),
-            Reached::Paused => PAUSED_WORD,
+            Reached::Paused(_) => PAUSED_WORD,
             Reached::Neither if self.complete => EndingKind::Complete.word(),
             Reached::Neither => self.liveness.as_str(),
         }
@@ -1686,9 +1688,9 @@ impl Standing {
         if !self.liveness.is_undriven() {
             return None;
         }
-        match self.reached {
+        match &self.reached {
             Reached::Ended(_) => None,
-            Reached::Paused => self.decision.as_ref().map(Intervention::Decide),
+            Reached::Paused(decision) => Some(Intervention::Decide(decision)),
             Reached::Neither => Some(Intervention::Adopt),
         }
     }
@@ -6750,8 +6752,12 @@ mod tests {
         let holding = |statuses: &[NodeStatus]| -> BTreeSet<NodeStatus> {
             statuses.iter().copied().collect()
         };
+        let decided = || Paused {
+            human_actions: vec!["approve".into()],
+            blocking_surface: false,
+        };
         let undriven = |statuses: &[NodeStatus], stopped: bool, decision: bool| {
-            Reached::of(false, &holding(statuses), stopped, || decision)
+            Reached::of(false, &holding(statuses), stopped, || decision, decided)
         };
         use NodeStatus::{
             Blocked, CompleteDraft, Done, Failed, Parked, Ready, Running, Skipped, Waiting,
@@ -6773,7 +6779,10 @@ mod tests {
         for movable in [Ready, Running, CompleteDraft] {
             assert_eq!(undriven(&[Failed, movable], false, true), Reached::Neither);
         }
-        assert_eq!(undriven(&[Failed, Waiting], false, true), Reached::Paused);
+        assert_eq!(
+            undriven(&[Failed, Waiting], false, true),
+            Reached::Paused(decided())
+        );
         assert_eq!(
             undriven(&[Done, Skipped], false, false),
             Reached::Ended(EndingKind::Failed)
@@ -6785,7 +6794,7 @@ mod tests {
         assert_eq!(undriven(&[], false, false), Reached::Neither);
         // Driven, whatever the graph holds.
         assert_eq!(
-            Reached::of(true, &holding(&[Done]), true, || true),
+            Reached::of(true, &holding(&[Done]), true, || true, decided),
             Reached::Neither
         );
     }
