@@ -2021,9 +2021,13 @@ fn a_detached_driver_fires_as_an_attached_one_does_and_its_run_is_undriven_while
     world
         .run(&["status", run])
         .exited(0)
-        .out_has("DRIVER DEAD")
+        .out_has("ENDED failed")
         .out_lacks("ACTIVE");
     world.run(&["runs"]).exited(0).out_lacks("ACTIVE");
+    assert_eq!(
+        world.run(&["status", run, "--json"]).json()["driven"],
+        false
+    );
     assert!(world.events_of(run, "run-hook-finished").is_empty());
     world
         .run(&["results", run])

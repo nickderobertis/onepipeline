@@ -530,11 +530,13 @@ fn an_adoption_ends_a_cancellation_the_driver_it_replaced_was_waiting_on() {
 
     // The dispatch it is waiting on is held open and silent, so the driver has
     // nothing left to write and the run becomes adoptable.
+    // Read off the run's liveness rather than its word: with its only node parked
+    // and its driver parked, the run reads as ended `unfinished`.
     world.until("the run to be reported parked", |world| {
-        let mut status = world.cmd(&["status", &run]);
+        let mut status = world.cmd(&["status", &run, "--json"]);
         status.env(PARKED_AFTER_ENV, "1");
         let out = status.output().expect("the binary runs");
-        String::from_utf8_lossy(&out.stdout).contains("PARKED")
+        String::from_utf8_lossy(&out.stdout).contains("\"liveness\":\"PARKED\"")
     });
     let mut adopt = world.cmd(&["adopt", &run]);
     adopt.env(PARKED_AFTER_ENV, "1");

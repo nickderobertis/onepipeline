@@ -127,6 +127,248 @@ pub fn liveness_of(summary: &RunSummary) -> DriverLiveness {
     Row::of(&ledger::runs_root(), summary).liveness()
 }
 
+/// The word `runs` prints for one run, read over its **bounded** summary document.
+///
+/// The listing's own row word, published: `SETTLED`, a run's `ENDED` ending or
+/// `PAUSED`, or else the [`DriverLiveness`] word — decided by the same reading
+/// [`liveness_word`] makes over a fold, so the two give one word for one run. It
+/// costs what [`liveness_of`] costs, and reads the run's channel under the runs
+/// root this process reads, the way that does.
+pub fn standing_word_of(summary: &RunSummary) -> &'static str {
+    summary_standing_word(&ledger::runs_root(), summary)
+}
+
+/// How a run ended: the run-end hook judge's own verdict, read back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum EndingKind {
+    /// Every node is `done`: the success hook's ending.
+    Complete,
+    /// A node is `failed` or `skipped`: the failure hook's `nodes` reason.
+    Failed,
+    /// A node is not `done`, none failed or skipped, and nothing is left to
+    /// decide: the failure hook's `unfinished` reason.
+    Unfinished,
+    /// A `stop` was recorded and no driver has adopted the run since: the
+    /// failure hook's `stopped` reason.
+    Stopped,
+}
+
+impl EndingKind {
+    /// The word a view prints for a run that ended this way.
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            Self::Complete => "SETTLED",
+            Self::Failed => "ENDED failed",
+            Self::Unfinished => "ENDED unfinished",
+            Self::Stopped => "ENDED stopped",
+        }
+    }
+}
+
+/// One node that was not `done` when a run ended — as a failure hook is handed it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+pub struct EndedNode {
+    /// The node's id.
+    pub id: String,
+    // llmlint: ignore-block[invalid_states_unrepresentable] the status is a word rather than
+    // a type because the type it would be, `graph::NodeStatus`, is engine-private, and
+    // `docs/contract.md` names `EndedNode { id, status, outcome }` as the whole published
+    // surface here — a public status enum would be vocabulary the contract did not ask for.
+    // The only constructor is `hooks::unsettled`, which writes `NodeStatus::as_str`, and
+    // `graph::tests::the_run_readings_schema_names_every_status_but_done` holds the words
+    // below to that enum.
+    /// The node's status word.
+    #[schemars(extend("enum" = [
+        "pending", "ready", "running", "waiting", "blocked", "parked", "cancelled",
+        "complete-but-draft", "failed", "skipped"
+    ]))]
+    pub status: &'static str,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// The outcome its settlement recorded, or `null` for a node that recorded none.
+    pub outcome: Option<String>,
+}
+
+// llmlint: ignore-block[invalid_states_unrepresentable] `Ending { kind, nodes }` and
+// `Paused { human_actions, blocking_surface }` are the published types exactly as the
+// approved contract names them, and their fields are the `--json` document's `ending` and
+// `paused` objects that the onepipeline-ui relink and the host's `scripts/follow-ups.sh`
+// read; a variant per ending or per decision form would change that wire shape. The only
+// constructors are `reading` and `Standing`, which build `nodes` from `hooks::unsettled`
+// (empty when every node is `done`) and a `Paused` only where `hooks::verdict` found a
+// decision outstanding — a waiting human action or a blocking surface.
+/// How a run ended, and every node not `done` when it did.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+pub struct Ending {
+    /// Which ending: the run-end hook judge's verdict.
+    pub kind: EndingKind,
+    /// Every node not `done`, in plan order — the list a failure hook is handed,
+    /// and empty for `complete`.
+    pub nodes: Vec<EndedNode>,
+}
+
+/// The decision a run nothing is driving is paused on.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+pub struct Paused {
+    /// Each waiting human action, by node id: completed with `attest`, or
+    /// retired with a `drop`.
+    pub human_actions: Vec<String>,
+    /// Whether a blocking planner question is outstanding, answered with `reply`.
+    pub blocking_surface: bool,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// The word a view prints for a run nothing drives that is paused on a decision.
+const PAUSED_WORD: &str = "PAUSED";
+
+/// The version of the document `status <RUN> --json` prints.
+const RUN_READING_SCHEMA_VERSION: u32 = 1;
+
+/// Whether a run is driven or ended, as one document a script reads:
+/// `onepipeline status <RUN> --json`.
+///
+/// `ending` and `paused` are never both set, and both are `null` while the run is
+/// driven. `schemas/run-reading.schema.json` states the document.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+#[schemars(
+    title = "RunReading",
+    extend("allOf" = [
+        {
+            "if": {"properties": {"driven": {"const": true}}},
+            "then": {"properties": {"ending": {"type": "null"}, "paused": {"type": "null"}}}
+        },
+        {
+            "anyOf": [
+                {"properties": {"ending": {"type": "null"}}},
+                {"properties": {"paused": {"type": "null"}}}
+            ]
+        }
+    ])
+)]
+pub struct RunReading {
+    /// The version of this document.
+    #[schemars(extend("const" = 1))]
+    pub schema_version: u32,
+    /// The run.
+    pub run_id: String,
+    // llmlint: ignore-block[invalid_states_unrepresentable] these five fields are the
+    // `status <RUN> --json` document exactly as the approved contract fixes it — `word` and
+    // `liveness` as the printed words, and `driven`, `ending` and `paused` as three fields
+    // whose invariants the contract states and `schemas/run-reading.schema.json` encodes —
+    // and the onepipeline-ui relink and the host's `scripts/follow-ups.sh` are written
+    // against that shape. A discriminated state or new public word enums would change the
+    // published surface the contract names. `reading` is the only constructor, building
+    // every field from `Standing` and `DriverLiveness`, and
+    // `the_run_readings_schema_allows_every_word_this_build_prints` holds the words.
+    /// The word `status` and `runs` print for the run.
+    #[schemars(extend("enum" = [
+        "SETTLED", "ENDED failed", "ENDED unfinished", "ENDED stopped", "PAUSED",
+        "ACTIVE", "PARKED", "DRIVER DEAD", "UNDRIVEN"
+    ]))]
+    pub word: &'static str,
+    /// How the run is being driven: the driver-liveness word.
+    #[schemars(extend("enum" = ["ACTIVE", "PARKED", "DRIVER DEAD", "UNDRIVEN"]))]
+    pub liveness: &'static str,
+    /// Whether anything is driving the run.
+    pub driven: bool,
+    /// How the run ended, or `null` for a run that has not.
+    pub ending: Option<Ending>,
+    /// The decision the run is paused on, or `null` for a run that is not.
+    pub paused: Option<Paused>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+}
+
+/// Read one run's ending, its pause, or neither, off its fold.
+///
+/// The run-end hook judge's own verdict — `hooks::verdict` is
+/// the one function the hook and this reading both call — for a run nothing is
+/// driving, and nothing for one that is.
+pub fn reading(view: &RunView) -> RunReading {
+    let liveness = view.liveness();
+    let statuses = view.state.statuses();
+    let standing = Standing::of_parts(view, liveness, &statuses);
+    let (ending, paused) = match &standing.reached {
+        Reached::Ended(kind) => (
+            Some(Ending {
+                kind: *kind,
+                nodes: crate::hooks::unsettled(&view.state, &statuses),
+            }),
+            None,
+        ),
+        Reached::Paused(paused) => (None, Some(paused.clone())),
+        Reached::Neither => (None, None),
+    };
+    RunReading {
+        schema_version: RUN_READING_SCHEMA_VERSION,
+        run_id: view.paths.run.clone(),
+        word: standing.word(),
+        liveness: liveness.as_str(),
+        driven: !liveness.is_undriven(),
+        ending,
+        paused,
+    }
+}
+
+/// Ordered by id, as the summary document records them, so a fold and a listing
+/// row name a paused run's actions in one order.
+fn waiting_nodes(statuses: &BTreeMap<String, NodeStatus>) -> Vec<String> {
+    statuses
+        .iter()
+        .filter(|(_, status)| **status == NodeStatus::Waiting)
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+/// What a run nothing drives has reached: an ending, a pause, or neither.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Reached {
+    /// It ended, this way.
+    Ended(EndingKind),
+    /// It is paused on this decision.
+    Paused(Paused),
+    /// It is driven, or its driver went while it had work it could move — or it
+    /// has no graph.
+    Neither,
+}
+
+impl Reached {
+    /// Read off the statuses a graph holds, for a run driven or not.
+    ///
+    /// The run-end hook judge's [`verdict`](crate::hooks::verdict), behind the
+    /// two things only a reader asks: a recorded stop is the run's ending whatever
+    /// else it holds, unless the graph is complete; and a node that is ready,
+    /// running or a draft is work the driver went while it could still move — a
+    /// crash, not an ending and not a pause.
+    ///
+    /// `decision` names what a paused run is held on, and is asked only of one.
+    fn of(
+        driven: bool,
+        present: &std::collections::BTreeSet<NodeStatus>,
+        stop_recorded: bool,
+        decision_outstanding: impl FnOnce() -> bool,
+        decision: impl FnOnce() -> Paused,
+    ) -> Self {
+        if driven {
+            return Self::Neither;
+        }
+        let verdict = crate::hooks::verdict(present, decision_outstanding);
+        let movable = present.iter().any(|status| {
+            matches!(
+                status,
+                NodeStatus::Ready | NodeStatus::Running | NodeStatus::CompleteDraft
+            )
+        });
+        match verdict {
+            crate::hooks::Verdict::Success => Self::Ended(EndingKind::Complete),
+            _ if stop_recorded => Self::Ended(crate::hooks::ReasonKind::Stopped.ending()),
+            _ if movable => Self::Neither,
+            crate::hooks::Verdict::Paused => Self::Paused(decision()),
+            crate::hooks::Verdict::NotEnded => Self::Neither,
+            crate::hooks::Verdict::Failure(kind) => Self::Ended(kind.ending()),
+        }
+    }
+}
+
 /// What says a run is being **watched**, and what a reader makes of it now.
 ///
 /// Re-exported where the views are, because deciding whether anything is watching
@@ -1243,8 +1485,8 @@ fn nothing_to_report(survey: &Survey) -> String {
 }
 // llmlint: ignore-end[cli_output_contract]
 
-/// Where a run stands: what is left for a driver to do, and whether anything is
-/// doing it.
+/// Where a run stands: whether anything is driving it, and if not, whether it
+/// ended, is paused on a decision, or was left with work it could still move.
 ///
 /// One reading behind both halves of what a view says about a run — the word on
 /// its row and the advice beneath it — so no combination of graph state and
@@ -1254,15 +1496,17 @@ fn nothing_to_report(survey: &Survey) -> String {
 struct Standing {
     /// How the run is being driven.
     liveness: DriverLiveness,
-    /// What remains for a driver or planner to do.
-    work: WorkStanding,
+    /// Whether the run, if nothing drives it, has ended or is paused — and on
+    /// what, which the advice under a paused run names.
+    reached: Reached,
+    /// Whether every node of the graph is `done`, driven or not.
+    complete: bool,
     /// Whether the loop has anything left to converge.
     ///
-    /// Carried beside [`work`](Self::work) rather than read off it, because the
-    /// two answer different questions and one of the readings is not a function
-    /// of the other: a converged run holding a ready human action is
-    /// [`WorkStanding::Outstanding`] — an `attest` moves it — and it has still
-    /// settled, its driver having written its result and gone.
+    /// Carried beside [`reached`](Self::reached) rather than read off it, because
+    /// the two answer different questions: a converged run holding a waiting
+    /// human action is paused — an `attest` moves it — and it has still settled,
+    /// its driver having written its result and gone.
     convergence: Convergence,
 }
 
@@ -1292,118 +1536,6 @@ impl Convergence {
     }
 }
 
-/// One or more nodes an operator has to act on before a driver can move the run.
-///
-/// The invariant is the advice itself: a standing that says work is held names
-/// the work it means, and a list that could be empty would put a prescription
-/// naming nothing on an operator's screen.
-struct HeldNodes(Vec<String>);
-
-impl HeldNodes {
-    /// The nodes, or `None` where there are none — and so no standing to report.
-    fn of(nodes: Vec<String>) -> Option<Self> {
-        (!nodes.is_empty()).then_some(Self(nodes))
-    }
-
-    fn named(&self) -> String {
-        self.0.join(", ")
-    }
-}
-
-/// The readings of the graph behind a run's word and advice.
-enum WorkStanding {
-    /// Every node completed successfully.
-    Complete,
-    /// The graph converged without completing and has no work an operator can
-    /// return to the frontier, as for a failed run.
-    Settled,
-    /// Something is ready, running, waiting, or blocked and a fresh driver can
-    /// pick it up now or when its gate opens.
-    Outstanding,
-    /// Work no driver moves on its own, which is what the run is told about.
-    Held(HeldWork),
-}
-
-/// The work a converged run holds that no driver moves on its own.
-///
-/// Three inhabited cases and no fourth. A run can hold both kinds at once and
-/// they are different facts about it — parked work returns to the frontier on a
-/// `requeue`, and a node its judge rejected does not return on anything a driver
-/// does — so both are carried, and [`ranked`](Self::ranked) decides which is
-/// said rather than the reading throwing one away to decide.
-enum HeldWork {
-    /// Nodes a `requeue` returns to the frontier.
-    Parked(HeldNodes),
-    /// Nodes a judge rejected, which nothing dispatches as they stand.
-    Rejected(HeldNodes),
-    /// Both, on the one run.
-    Both {
-        /// The parked half, which is the half that has an answer a driver acts on.
-        parked: HeldNodes,
-        /// The judged half, still true of the run and still unanswered by that.
-        rejected: HeldNodes,
-    },
-}
-
-impl HeldWork {
-    /// What a converged run holds, or `None` where it holds neither kind — which
-    /// is also the run that has no held standing to report.
-    fn of(parked: Vec<String>, rejected: Vec<String>) -> Option<Self> {
-        match (HeldNodes::of(parked), HeldNodes::of(rejected)) {
-            (Some(parked), Some(rejected)) => Some(Self::Both { parked, rejected }),
-            (Some(parked), None) => Some(Self::Parked(parked)),
-            (None, Some(rejected)) => Some(Self::Rejected(rejected)),
-            (None, None) => None,
-        }
-    }
-
-    /// Every prescription this held work carries, most urgent first.
-    ///
-    /// The order is the ranking and the head is the answer: a `requeue` is the
-    /// one of the two an operator can act on now — it returns work to the
-    /// frontier and a driver dispatches it — so a run holding both is told to
-    /// requeue, and meets the judgement on the read after that work has moved.
-    /// One run is given one answer, because [`Standing::intervention`] takes the
-    /// head; what the ranking does not do is decide by discarding the other
-    /// half.
-    fn ranked(&self) -> impl Iterator<Item = Intervention<'_>> {
-        let (parked, rejected) = match self {
-            Self::Parked(parked) => (Some(parked), None),
-            Self::Rejected(rejected) => (None, Some(rejected)),
-            Self::Both { parked, rejected } => (Some(parked), Some(rejected)),
-        };
-        parked
-            .map(Intervention::RequeueThenAdopt)
-            .into_iter()
-            .chain(rejected.map(Intervention::ReviewThenSupersede))
-    }
-}
-
-/// The nodes of a converged run whose work a judge rejected.
-///
-/// **Two records, because either alone names the wrong nodes.** The outcome says
-/// the dispatch ended on the *task's* own verdict rather than on the machinery
-/// or on a publication, which is the settlement a judgement produces; the failed
-/// verdict is the judgement itself, and without one a node that simply failed
-/// its task would be reported as judged by a judge that never scored it. Both
-/// are read off records these views already hold — the run's folded outcomes and
-/// the verdicts `oneagentgraph` copies onto the settlement — so nothing is
-/// opened to answer the question.
-fn rejected_by_a_judge(view: &RunView, statuses: &BTreeMap<String, NodeStatus>) -> Vec<String> {
-    statuses
-        .iter()
-        .filter(|(_, status)| **status == NodeStatus::Failed)
-        .filter(|(id, _)| {
-            matches!(
-                view.state.outcomes.get(*id).map(String::as_str),
-                Some(crate::engine::TASK_FAILED | crate::engine::TASK_FAILED_CHANGE_OPEN)
-            )
-        })
-        .filter(|(id, _)| !crate::report::failed_verdicts(&view.events, id).is_empty())
-        .map(|(id, _)| id.clone())
-        .collect()
-}
-
 /// Where a run's **graph** has got to, as one answer rather than as the several
 /// questions it is read from.
 ///
@@ -1425,11 +1557,8 @@ enum GraphStanding {
     Moving,
     /// Every node settled, and every one of them is `done`.
     Complete,
-    /// Every node settled, and something is waiting on a person or blocked
-    /// behind one.
-    ConvergedWaiting,
-    /// Every node settled, and nothing is waiting on anybody.
-    ConvergedStill,
+    /// Every node settled, and not every one of them is `done`.
+    Converged,
 }
 
 impl GraphStanding {
@@ -1448,13 +1577,7 @@ impl GraphStanding {
         if graph::state_of(statuses) == graph::GraphState::Complete {
             return Self::Complete;
         }
-        if statuses
-            .values()
-            .any(|status| matches!(status, NodeStatus::Waiting | NodeStatus::Blocked))
-        {
-            return Self::ConvergedWaiting;
-        }
-        Self::ConvergedStill
+        Self::Converged
     }
 
     /// The same reading off a summary document: the same words, counted.
@@ -1472,80 +1595,44 @@ impl GraphStanding {
         if counts.keys().all(|word| word == NodeStatus::Done.as_str()) {
             return Self::Complete;
         }
-        if counts.contains_key(NodeStatus::Waiting.as_str())
-            || counts.contains_key(NodeStatus::Blocked.as_str())
-        {
-            return Self::ConvergedWaiting;
-        }
-        Self::ConvergedStill
+        Self::Converged
     }
 
     /// Whether the loop has anything left to converge.
     fn converged(self) -> bool {
-        matches!(
-            self,
-            Self::Complete | Self::ConvergedWaiting | Self::ConvergedStill
-        )
-    }
-
-    /// The nodes a converged run holds, and nothing for one still moving.
-    ///
-    /// A run with a node still ready, running, or pending has work a fresh driver
-    /// moves, whatever else is parked or a judge rejected, and `adopt` is the
-    /// whole of what it needs. Held work is the reading for the frontier that
-    /// cannot move.
-    ///
-    /// The nodes are named by a closure rather than passed, because one of the
-    /// two callers reads them out of the run's whole event store: a moving run
-    /// must not pay for an answer this would discard.
-    fn holding(self, named: impl FnOnce() -> Vec<String>) -> Vec<String> {
-        if self.converged() {
-            named()
-        } else {
-            Vec::new()
-        }
-    }
-}
-
-impl WorkStanding {
-    /// What a graph leaves for somebody to do.
-    ///
-    /// One derivation, because two readers reach it: the folding views read the
-    /// graph off a run's whole store and the bounded listing reads it off that
-    /// run's summary document, and the reading — not the reader — is what decides
-    /// the word on the row and the advice under it.
-    fn of(graph: GraphStanding, parked: Vec<String>, rejected: Vec<String>) -> Self {
-        if graph == GraphStanding::Complete {
-            return Self::Complete;
-        }
-        if let Some(held) = HeldWork::of(parked, rejected) {
-            return Self::Held(held);
-        }
-        match graph {
-            GraphStanding::ConvergedStill => Self::Settled,
-            _ => Self::Outstanding,
-        }
+        matches!(self, Self::Complete | Self::Converged)
     }
 }
 
 impl Standing {
     /// Read one run's standing, once.
     fn of(view: &RunView) -> Self {
-        let statuses = view.state.statuses();
-        let graph = GraphStanding::of_statuses(&statuses);
+        Self::of_parts(view, view.liveness(), &view.state.statuses())
+    }
+
+    /// The same standing, over a liveness and a status map the caller already
+    /// read — so a reading that reports the liveness beside the word asks the
+    /// host once, and the two cannot disagree.
+    fn of_parts(
+        view: &RunView,
+        liveness: DriverLiveness,
+        statuses: &BTreeMap<String, NodeStatus>,
+    ) -> Self {
+        let graph = GraphStanding::of_statuses(statuses);
+        let reached = Reached::of(
+            !liveness.is_undriven(),
+            &statuses.values().copied().collect(),
+            view.state.stop_recorded(),
+            || decision_outstanding(&view.state, &view.paths),
+            || Paused {
+                human_actions: waiting_nodes(statuses),
+                blocking_surface: blocking_surface(&view.paths),
+            },
+        );
         Self {
-            liveness: view.liveness(),
-            work: WorkStanding::of(
-                graph,
-                graph.holding(|| {
-                    statuses
-                        .iter()
-                        .filter(|(_, status)| **status == NodeStatus::Parked)
-                        .map(|(id, _)| id.clone())
-                        .collect()
-                }),
-                graph.holding(|| rejected_by_a_judge(view, &statuses)),
-            ),
+            liveness,
+            reached,
+            complete: graph == GraphStanding::Complete,
             convergence: Convergence::of(graph.converged()),
         }
     }
@@ -1553,46 +1640,67 @@ impl Standing {
     /// The same standing, off one row of a bounded listing.
     ///
     /// The graph is read off the document's own status counts rather than off a
-    /// status map, in the same words and by the same reading. What a count cannot
-    /// answer, the document names outright: which nodes are parked, and which a
-    /// judge turned down.
+    /// status map, in the same words and by the same reading. Whether the run
+    /// ended or is paused is the fold's own reading over the statuses the document
+    /// counts, its recorded stop, and the decision the run's channel and the
+    /// document's waiting nodes hold — so a row and a fold of one run give one
+    /// word. A count under a word this build does not read is a graph it cannot
+    /// judge, and reads as neither.
     fn of_row(row: &Row<'_>) -> Self {
         let graph = GraphStanding::of_counts(&row.summary.node_counts, row.summary.graph_complete);
+        let liveness = row.liveness();
+        let present: Option<std::collections::BTreeSet<NodeStatus>> = row
+            .summary
+            .node_counts
+            .iter()
+            .filter(|(_, count)| **count > 0)
+            .map(|(word, _)| NodeStatus::parse(word))
+            .collect();
+        let reached = present.map_or(Reached::Neither, |present| {
+            Reached::of(
+                !liveness.is_undriven(),
+                &present,
+                row.summary.stop_recorded,
+                || row.summary.awaiting_human_action || blocking_surface(&row.paths),
+                || Paused {
+                    human_actions: row.summary.waiting.clone(),
+                    blocking_surface: blocking_surface(&row.paths),
+                },
+            )
+        });
         Self {
-            liveness: row.liveness(),
-            work: WorkStanding::of(
-                graph,
-                graph.holding(|| row.summary.parked.clone()),
-                graph.holding(|| row.summary.judge_rejected.clone()),
-            ),
+            liveness,
+            reached,
+            complete: graph == GraphStanding::Complete,
             convergence: Convergence::of(graph.converged()),
         }
     }
 
-    /// The word a view prints for how the run is being driven.
+    /// The word a view prints for how the run is being driven, or how it ended.
     fn word(&self) -> &'static str {
-        if matches!(&self.work, WorkStanding::Complete) {
-            "SETTLED"
-        } else {
-            self.liveness.as_str()
+        match &self.reached {
+            Reached::Ended(kind) => kind.word(),
+            Reached::Paused(_) => PAUSED_WORD,
+            Reached::Neither if self.complete => EndingKind::Complete.word(),
+            Reached::Neither => self.liveness.as_str(),
         }
     }
 
     /// What this run needs before it can move again, where it needs anything.
     ///
-    /// `None` is the third answer and the one the advice used not to have: a run
-    /// whose work is over needs nothing, and a driver attached to it settles it
-    /// again in no time at all having dispatched nothing.
+    /// `None` for a run something drives, and for one that ended: its ending is
+    /// its whole reading, and a driver attached to it settles it again having
+    /// moved nothing. A paused run needs its decision settled, and is told how.
+    /// What is left is a run whose driver went while it had work it could still
+    /// move — the run `adopt` exists for.
     fn intervention(&self) -> Option<Intervention<'_>> {
         if !self.liveness.is_undriven() {
             return None;
         }
-        match &self.work {
-            WorkStanding::Outstanding => Some(Intervention::Adopt),
-            // The head of the ranking, which held work always has: `HeldWork::of`
-            // answers `None` rather than build one holding nothing.
-            WorkStanding::Held(held) => held.ranked().next(),
-            WorkStanding::Complete | WorkStanding::Settled => None,
+        match &self.reached {
+            Reached::Ended(_) => None,
+            Reached::Paused(decision) => Some(Intervention::Decide(decision)),
+            Reached::Neither => Some(Intervention::Adopt),
         }
     }
 }
@@ -1601,46 +1709,30 @@ impl Standing {
 enum Intervention<'a> {
     /// A fresh driver, and nothing else: work is waiting on the frontier for it.
     Adopt,
-    /// The parked work returned to the frontier, and *then* a driver.
-    RequeueThenAdopt(&'a HeldNodes),
-    /// The judge's verdict read, and the node it rejected superseded. A driver
-    /// is not the first step here and on its own is not a step at all.
-    ReviewThenSupersede(&'a HeldNodes),
+    /// The decision a paused run is held on, settled — or the run stopped.
+    Decide(&'a Paused),
 }
 
-/// The prescription for a run nothing is driving whose unfinished work is
-/// parked, phrased once for both views that give it.
-///
-/// The order is the whole content. A parked node is held out of every reconcile
-/// pass until a `requeue`, so a driver adopted first derives an empty frontier
-/// and returns at exit 0 having dispatched nothing — which is what an advice
-/// line naming only `adopt` cost the operator who followed it, twice.
-fn requeue_then_adopt(run: &str, parked: &HeldNodes) -> String {
-    format!(
-        "its unfinished work is parked, and no driver dispatches a parked node: return {} \
-         to the frontier with a `requeue` on: onepipeline reply {run} — and only then \
-         attach a fresh driver with: onepipeline adopt {run}",
-        parked.named()
-    )
-}
-
-/// The prescription for a run nothing is driving whose unfinished work is held
-/// up by nodes a judge rejected, phrased once for both views that give it.
-///
-/// **The judgement is the content.** A rejection is deliberately outside the
-/// publication attempt budget — asking again repeats the same work against the
-/// same bar — so nothing dispatches the node as it stands, and a driver attached
-/// here settles having moved nothing, which is what the `adopt` this replaces
-/// cost an operator twice. What moves the run is the verdict, and then the
-/// planner's own `amend` and `retry`.
-fn review_then_supersede(run: &str, rejected: &HeldNodes) -> String {
-    format!(
-        "its unfinished work is held up by {}, whose work a judge rejected, and no driver \
-         dispatches a rejected node as it stands: read the verdict with: onepipeline \
-         results {run} — and decide from it, most likely amending the task and superseding \
-         the node with an `amend` and a `retry` on: onepipeline reply {run}",
-        rejected.named()
-    )
+/// The prescription for a paused run, phrased once for both views that give it:
+/// each way its decision is settled, and the one way to end it instead.
+fn settle_or_stop(run: &str, decision: &Paused) -> String {
+    let mut ways: Vec<String> = decision
+        .human_actions
+        .iter()
+        .map(|node| {
+            format!(
+                "complete the waiting human action {node} with: onepipeline attest {run} \
+                 {node} — or retire it with a `drop` on: onepipeline reply {run}"
+            )
+        })
+        .collect();
+    if decision.blocking_surface {
+        ways.push(format!(
+            "answer the blocking planner question with: onepipeline reply {run}"
+        ));
+    }
+    ways.push(format!("or end the run with: onepipeline stop {run}"));
+    format!("it is paused on a decision: {}", ways.join("; "))
 }
 
 /// The word a view prints for how a run is being driven.
@@ -2072,15 +2164,10 @@ fn runs_row(root: &Path, summary: &RunSummary, session: &str) -> String {
                 standing.word(),
                 summary.run_id
             ),
-            Intervention::RequeueThenAdopt(parked) => format!(
-                "    {} — its ledger is intact; {}\n",
+            Intervention::Decide(decision) => format!(
+                "    {} — {}\n",
                 standing.word(),
-                requeue_then_adopt(&summary.run_id, parked)
-            ),
-            Intervention::ReviewThenSupersede(rejected) => format!(
-                "    {} — its ledger is intact; {}\n",
-                standing.word(),
-                review_then_supersede(&summary.run_id, rejected)
+                settle_or_stop(&summary.run_id, decision)
             ),
         });
         return out;
@@ -2165,15 +2252,10 @@ fn status_run_lines(
                 "  {}: nothing is driving this run; adopt it or stop it\n",
                 standing.word()
             ),
-            Intervention::RequeueThenAdopt(parked) => format!(
+            Intervention::Decide(decision) => format!(
                 "  {}: nothing is driving this run and {}\n",
                 standing.word(),
-                requeue_then_adopt(run, parked)
-            ),
-            Intervention::ReviewThenSupersede(rejected) => format!(
-                "  {}: nothing is driving this run and {}\n",
-                standing.word(),
-                review_then_supersede(run, rejected)
+                settle_or_stop(run, decision)
             ),
         });
     }
@@ -5865,17 +5947,16 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The advice for a run nothing is driving names the nodes a judge
-    /// **rejected**, and no other node that failed.
+    /// A run nothing drives that ended over a failed node reads `ENDED failed`,
+    /// with its unfinished nodes in plan order, and is given no advice — whether
+    /// a judge failed the node or its own task did.
     ///
-    /// Two records make a rejection, and this drives the run either one alone
-    /// would misname: a node that failed its own task with no judge verdict
-    /// against it is not a node a judge rejected, and reported as one it would
-    /// send a planner to read a verdict nobody wrote. The journey the operator
-    /// took is in `tests/e2e/views.rs`; what is held here is the discrimination.
+    /// The run-end hook judge's verdict is the reading: the failure hook's `nodes`
+    /// reason is this ending. The journeys an operator takes are in
+    /// `tests/e2e/run_ending.rs`; what is held here is the reading over a fold.
     #[test]
-    fn only_a_node_a_judge_rejected_is_named_as_one() {
-        let root = scratch("rejected-advice");
+    fn a_run_that_ended_over_a_failed_node_reads_its_ending_and_is_given_no_advice() {
+        let root = scratch("ended-advice");
         let failing = |node: &str, verdicts: Option<serde_json::Value>| {
             let mut events = vec![event(
                 crate::journal::PipelineKind::NodeDispatched,
@@ -5931,41 +6012,50 @@ mod tests {
         }
 
         let listing = runs(&root, false, "session-a");
-        let status_of = |run: &str| {
-            let paths = RunPaths::under(&root, run);
-            status(&Survey {
+        for run in ["judged", "brokeoff"] {
+            let view = RunView::open(&RunPaths::under(&root, run)).expect("the run reads back");
+            let rendered = status(&Survey {
                 root: root.clone(),
-                views: vec![RunView::open(&paths).expect("the run reads back")],
+                views: vec![RunView::open(&view.paths).expect("the run reads back")],
                 skipped: Vec::new(),
-            })
-        };
-        let judged = status_of("judged");
-        for rendered in [&listing, &judged] {
+            });
             assert!(
-                rendered.contains("build, whose work a judge rejected"),
-                "the rejected node is not named as one a judge rejected:\n{rendered}"
+                rendered.starts_with(&format!("{run}  ENDED failed")),
+                "a run that ended over a failed node does not read as ended:\n{rendered}"
             );
-            assert!(
-                rendered.contains("onepipeline results judged"),
-                "the verdict a planner has to read is not named:\n{rendered}"
-            );
-            assert!(
-                rendered.contains("superseding the node"),
-                "the step that moves the run is not named:\n{rendered}"
+            // The ending is the whole reading: no driver is prescribed for it, and
+            // no judgement either, whether a judge failed the node or its own task
+            // did.
+            for rendered in [&listing, &rendered] {
+                for advice in ["adopt", "a judge rejected", "superseding the node"] {
+                    assert!(
+                        !rendered.contains(advice),
+                        "an ended run was given advice naming `{advice}`:\n{rendered}"
+                    );
+                }
+            }
+            let reading = reading(&view);
+            assert_eq!(reading.word, "ENDED failed");
+            assert!(!reading.driven);
+            assert_eq!(reading.paused, None);
+            let ending = reading.ending.expect("the run ended");
+            assert_eq!(ending.kind, EndingKind::Failed);
+            assert_eq!(
+                ending
+                    .nodes
+                    .iter()
+                    .map(|node| (node.id.as_str(), node.status, node.outcome.as_deref()))
+                    .collect::<Vec<_>>(),
+                [
+                    ("build", "failed", Some(crate::engine::TASK_FAILED)),
+                    ("later", "skipped", None)
+                ]
             );
         }
-        assert!(
-            !judged.contains("adopt"),
-            "a driver is prescribed for a frontier it cannot move:\n{judged}"
-        );
-        let broke = status_of("brokeoff");
-        assert!(
-            !broke.contains("a judge rejected"),
-            "a node that failed its own task was reported as judged:\n{broke}"
-        );
-        assert!(
-            !listing.contains("onepipeline results brokeoff"),
-            "a run nothing judged was given the judgement's advice:\n{listing}"
+        assert_eq!(
+            listing.matches("ENDED failed").count(),
+            2,
+            "the listing does not read both ended runs as ended:\n{listing}"
         );
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6719,5 +6809,162 @@ mod tests {
         assert_eq!(DriverLiveness::DriverDead.as_str(), "DRIVER DEAD");
         assert_eq!(DriverLiveness::Parked.as_str(), "PARKED");
         assert_eq!(DriverLiveness::Undriven.as_str(), "UNDRIVEN");
+    }
+
+    /// What a run nothing drives has reached, in the contract's order: complete
+    /// outranks a stop, a stop outranks a pending decision, work the driver could
+    /// still move outranks a decision, and a driven run has reached neither.
+    ///
+    /// `tests/e2e/run_ending.rs` drives each of those through the binary but two,
+    /// which no run reaches there and are held here instead: a stop over a graph
+    /// with no nodes, because a launch refuses a plan with none before any run
+    /// exists; and a `complete-but-draft` node as the movable work, because a
+    /// draft is only ever held by a live driver awaiting a release — the run
+    /// whose driver dies with one is the `ready` arm the journey drives.
+    #[test]
+    fn a_run_nothing_drives_is_read_in_the_contracts_order() {
+        use std::collections::BTreeSet;
+        let holding = |statuses: &[NodeStatus]| -> BTreeSet<NodeStatus> {
+            statuses.iter().copied().collect()
+        };
+        let decided = || Paused {
+            human_actions: vec!["approve".into()],
+            blocking_surface: false,
+        };
+        let undriven = |statuses: &[NodeStatus], stopped: bool, decision: bool| {
+            Reached::of(false, &holding(statuses), stopped, || decision, decided)
+        };
+        use NodeStatus::{
+            Blocked, CompleteDraft, Done, Failed, Parked, Ready, Running, Skipped, Waiting,
+        };
+
+        assert_eq!(
+            undriven(&[Done], true, true),
+            Reached::Ended(EndingKind::Complete)
+        );
+        assert_eq!(
+            undriven(&[Done, Waiting], true, true),
+            Reached::Ended(EndingKind::Stopped)
+        );
+        // A stop recorded over a graph nothing recorded is still the run's ending.
+        assert_eq!(
+            undriven(&[], true, false),
+            Reached::Ended(EndingKind::Stopped)
+        );
+        for movable in [Ready, Running, CompleteDraft] {
+            assert_eq!(undriven(&[Failed, movable], false, true), Reached::Neither);
+        }
+        assert_eq!(
+            undriven(&[Failed, Waiting], false, true),
+            Reached::Paused(decided())
+        );
+        assert_eq!(
+            undriven(&[Done, Skipped], false, false),
+            Reached::Ended(EndingKind::Failed)
+        );
+        assert_eq!(
+            undriven(&[Done, Parked, Blocked], false, false),
+            Reached::Ended(EndingKind::Unfinished)
+        );
+        assert_eq!(undriven(&[], false, false), Reached::Neither);
+        // Driven, whatever the graph holds.
+        assert_eq!(
+            Reached::of(true, &holding(&[Done]), true, || true, decided),
+            Reached::Neither
+        );
+    }
+
+    /// The run reading's schema allows exactly the words this build prints: every
+    /// liveness word for `liveness`, and for `word` those, every ending's, and
+    /// `PAUSED`.
+    ///
+    /// The schema is generated from `RunReading`, and the words it allows are
+    /// written on that type for the generator to read; this holds them to the
+    /// types they restate. Each list is **walked** by an exhaustive `match`, so a
+    /// verdict or an ending this build grows has to be named here to compile.
+    #[test]
+    fn the_run_readings_schema_allows_every_word_this_build_prints() {
+        fn liveness_after(liveness: DriverLiveness) -> Option<DriverLiveness> {
+            match liveness {
+                DriverLiveness::Driving => Some(DriverLiveness::DriverDead),
+                DriverLiveness::DriverDead => Some(DriverLiveness::Parked),
+                DriverLiveness::Parked => Some(DriverLiveness::Undriven),
+                DriverLiveness::Undriven => None,
+            }
+        }
+        fn ending_after(kind: EndingKind) -> Option<EndingKind> {
+            match kind {
+                EndingKind::Complete => Some(EndingKind::Failed),
+                EndingKind::Failed => Some(EndingKind::Unfinished),
+                EndingKind::Unfinished => Some(EndingKind::Stopped),
+                EndingKind::Stopped => None,
+            }
+        }
+        let liveness: std::collections::BTreeSet<String> =
+            std::iter::successors(Some(DriverLiveness::Driving), |at| liveness_after(*at))
+                .map(|liveness| liveness.as_str().to_string())
+                .collect();
+        let mut word = liveness.clone();
+        word.extend(
+            std::iter::successors(Some(EndingKind::Complete), |at| ending_after(*at))
+                .map(|kind| kind.word().to_string()),
+        );
+        word.insert(PAUSED_WORD.to_string());
+
+        let schema = schemars::generate::SchemaSettings::draft2020_12()
+            .for_serialize()
+            .into_generator()
+            .into_root_schema_for::<RunReading>()
+            .to_value();
+        let allowed = |field: &str| -> std::collections::BTreeSet<String> {
+            serde_json::from_value(schema["properties"][field]["enum"].clone())
+                .unwrap_or_else(|_| panic!("the schema names the words `{field}` takes"))
+        };
+        assert_eq!(allowed("liveness"), liveness);
+        assert_eq!(allowed("word"), word);
+    }
+
+    /// A listing row whose document counts a status word this build cannot read
+    /// is a graph it cannot judge: it reads as neither ended nor paused, so its
+    /// word is the liveness verdict and its advice the one that verdict gives.
+    ///
+    /// Held here rather than driven, because no verb writes such a document: a
+    /// summary at another schema version is refused and refolded, and this build
+    /// counts only the words `NodeStatus::as_str` spells. The same document with
+    /// its words intact reads as the ending it records, so the fallback is what
+    /// moves the word.
+    #[test]
+    fn a_row_counting_a_status_word_this_build_cannot_read_is_judged_by_its_driver_alone() {
+        let root = scratch("unknown-status-word");
+        let summary: RunSummary =
+            serde_json::from_str(include_str!("../tests/golden/run-summary-v9.json"))
+                .expect("the summary golden reads");
+        // Quiet since long before now, naming no driver this host can prove gone:
+        // a driver parked, and nothing outstanding to hold that verdict off.
+        assert_eq!(summary_standing_word(&root, &summary), "ENDED failed");
+
+        let mut unreadable = summary.clone();
+        let failed = unreadable
+            .node_counts
+            .remove("failed")
+            .expect("the golden counts a failed node");
+        unreadable
+            .node_counts
+            .insert("reviewing".to_string(), failed);
+        let row = Row::of(&root, &unreadable);
+        let standing = Standing::of_row(&row);
+        assert_eq!(standing.reached, Reached::Neither);
+        assert_eq!(standing.word(), DriverLiveness::Parked.as_str());
+        assert!(matches!(standing.intervention(), Some(Intervention::Adopt)));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Each ending prints the word the contract fixes for it.
+    #[test]
+    fn every_ending_has_the_word_the_contract_fixes() {
+        assert_eq!(EndingKind::Complete.word(), "SETTLED");
+        assert_eq!(EndingKind::Failed.word(), "ENDED failed");
+        assert_eq!(EndingKind::Unfinished.word(), "ENDED unfinished");
+        assert_eq!(EndingKind::Stopped.word(), "ENDED stopped");
     }
 }

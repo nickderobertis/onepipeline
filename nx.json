@@ -20,6 +20,7 @@
       "{workspaceRoot}/src/**/*",
       "{workspaceRoot}/tests/**/*",
       "{workspaceRoot}/docs/contract.md",
+      "{workspaceRoot}/schemas/**/*",
       "{workspaceRoot}/release-targets.toml",
       "{workspaceRoot}/Cargo.toml",
       "{workspaceRoot}/Cargo.lock",

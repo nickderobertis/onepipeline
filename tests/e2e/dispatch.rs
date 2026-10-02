@@ -2163,7 +2163,7 @@ fn an_adoption_the_graph_refuses_fails_rather_than_leaving_the_run_undriven() {
         world
             .run_on_agentgraph(&["status", "orphaned"])
             .stdout
-            .contains("DRIVER DEAD")
+            .contains("PAUSED")
     });
 
     // The graph the launch record names goes away under it, so the relaunch the

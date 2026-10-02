@@ -210,6 +210,16 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         }
         Verb::Status(args) => {
             let status = verbs::status(&ledger::runs_root(), args.run.as_deref())?;
+            // `--json` requires a run, which the parser enforces, so the status
+            // here is that run's folded detail.
+            if let (true, verbs::Status::Run(detail)) = (args.json, &status) {
+                let reading =
+                    serde_json::to_string(&crate::views::reading(&detail.view)).map_err(|e| {
+                        Error::Invalid(format!("the run's reading could not be rendered: {e}"))
+                    })?;
+                println!("{reading}");
+                return Ok(EXIT_SUCCESS);
+            }
             if args.no_providers {
                 print!("{}", status.render_without_providers());
             } else {

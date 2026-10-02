@@ -902,7 +902,10 @@ fn a_watch_armed_on_a_run_nothing_is_driving_waits_and_ends_at_its_deadline() {
     let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
     world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the run to stop being driven", |world| {
-        world.run(&["status", run]).stdout.contains("DRIVER DEAD")
+        world
+            .run(&["status", run, "--json"])
+            .stdout
+            .contains("\"driven\":false")
     });
 
     let began = std::time::Instant::now();
@@ -2831,9 +2834,9 @@ fn a_logged_watch_answers_every_ending_as_an_unlogged_one_does() {
     world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the run to stop being driven", |world| {
         world
-            .run(&["status", undriven])
+            .run(&["status", undriven, "--json"])
             .stdout
-            .contains("DRIVER DEAD")
+            .contains("\"driven\":false")
     });
     let waited = logged_alike(
         &world,
@@ -3505,7 +3508,10 @@ fn undriven(world: &World, run: &str) {
     let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
     world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the run to stop being driven", |world| {
-        world.run(&["status", run]).stdout.contains("DRIVER DEAD")
+        world
+            .run(&["status", run, "--json"])
+            .stdout
+            .contains("\"driven\":false")
     });
 }
 

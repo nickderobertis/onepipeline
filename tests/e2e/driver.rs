@@ -170,7 +170,7 @@ fn the_launched_graphs_task_names_the_run_and_its_goal_at_start_and_at_adoption(
     }
 
     world.until("the driver to exit", |world| {
-        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+        world.run(&["status", &run]).stdout.contains("PAUSED")
     });
     // Counted with that driver gone, so what follows is the adoption's own.
     let before = dag_launch_tasks(&world).len();
@@ -1014,14 +1014,20 @@ fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
         .exited(0);
     let run = "orphaned".to_string();
     world.until("the driver to exit", |world| {
-        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+        world.run(&["status", &run]).stdout.contains("PAUSED")
     });
 
+    // Waiting on a person, so its word is `PAUSED` and its advice is the action;
+    // the verdict on its driver is still `DRIVER DEAD`.
     world
         .run(&["runs"])
         .exited(0)
-        .out_has("DRIVER DEAD")
-        .out_has("onepipeline adopt orphaned");
+        .out_has("PAUSED")
+        .out_has("onepipeline attest orphaned approve");
+    assert_eq!(
+        world.run(&["status", &run, "--json"]).json()["liveness"],
+        "DRIVER DEAD"
+    );
 
     // The ledger is intact, so a fresh driver takes it over.
     let launches_before = world
@@ -1182,7 +1188,7 @@ fn a_detached_adoption_whose_driver_dies_is_refused_with_what_that_driver_said()
     let world = World::new("driver-adopt-detached-refused");
     let run = start_detached(&world, "half-written", vec![human("approve", &[])]);
     world.until("the driver to exit", |world| {
-        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+        world.run(&["status", &run]).stdout.contains("PAUSED")
     });
     let died = world.run_json(&run, "launch.json")["pid"].clone();
 
@@ -1213,7 +1219,7 @@ fn a_detached_adoption_whose_driver_dies_is_refused_with_what_that_driver_said()
     );
     assert_eq!(record["adoptions"], json!(0));
     assert!(
-        world.run(&["status", &run]).stdout.contains("DRIVER DEAD"),
+        world.run(&["status", &run]).stdout.contains("PAUSED"),
         "a run whose adoption was refused is not reported as one nothing is driving:\n{}",
         world.dump()
     );
@@ -1229,7 +1235,7 @@ fn a_detached_adoption_reports_an_observer_that_refuses_to_relaunch() {
     let world = World::new("driver-adopt-observer-refused");
     let run = start_detached_observed(&world, "observer-refused", vec![human("approve", &[])]);
     world.until("the driver to exit", |world| {
-        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+        world.run(&["status", &run]).stdout.contains("PAUSED")
     });
     let mut record = world.run_json(&run, "launch.json");
     record["dir"] = json!(world.run_file(&run, "missing-observer-directory"));
@@ -1257,7 +1263,7 @@ fn a_detached_adoption_refuses_when_the_prior_launch_record_cannot_be_preserved(
     let world = World::new("driver-adopt-backup-refused");
     let run = start_detached(&world, "backup-refused", vec![human("approve", &[])]);
     world.until("the driver to exit", |world| {
-        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+        world.run(&["status", &run]).stdout.contains("PAUSED")
     });
     std::fs::create_dir(world.run_file(&run, "launch.pre-adopt-1.json"))
         .expect("the backup destination is occupied by a directory");
@@ -1283,7 +1289,7 @@ fn adopt_takes_the_attach_detach_pair_start_takes() {
     let world = World::new("driver-adopt-flags");
     let run = start_detached(&world, "either-way", vec![human("approve", &[])]);
     world.until("the driver to exit", |world| {
-        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+        world.run(&["status", &run]).stdout.contains("PAUSED")
     });
 
     let both = world.run(&["adopt", &run, "--attach", "--detach"]);
@@ -1345,7 +1351,7 @@ fn start_and_adopt_give_the_sibling_the_same_directory_for_one_run() {
     world.run_on(start, "start relocated").exited(0);
     let run = "relocated".to_string();
     world.until("the driver to exit", |world| {
-        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+        world.run(&["status", &run]).stdout.contains("PAUSED")
     });
 
     // Somewhere else entirely, which is the ordinary case: an operator adopts a
@@ -1447,7 +1453,7 @@ fn a_launch_records_the_directory_the_process_resolves_not_the_route_to_it() {
     world.run_on(start, "start routed").exited(0);
     let run = "routed".to_string();
     world.until("the driver to exit", |world| {
-        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+        world.run(&["status", &run]).stdout.contains("PAUSED")
     });
 
     assert_eq!(
@@ -1487,7 +1493,7 @@ fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
     let world = World::new("driver-legacy-dir");
     let run = start_detached_observed(&world, "legacy", vec![human("approve", &[])]);
     world.until("the driver to exit", |world| {
-        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+        world.run(&["status", &run]).stdout.contains("PAUSED")
     });
 
     let rewrite = |record: &mut serde_json::Value| {
@@ -1564,7 +1570,7 @@ fn a_legacy_unqualified_project_does_not_prevent_adoption() {
     let world = World::new("driver-legacy-project");
     let run = start_detached_observed(&world, "legacy-project", vec![human("approve", &[])]);
     world.until("the driver to exit", |world| {
-        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+        world.run(&["status", &run]).stdout.contains("PAUSED")
     });
 
     let mut record = world.run_json(&run, "launch.json");
@@ -1594,7 +1600,7 @@ fn adoption_re_addresses_the_clock_reset_at_the_graph_run_now_driving() {
     let world = World::new("driver-adopt-clock-reset");
     let run = start_detached_observed(&world, "readdressed", vec![human("approve", &[])]);
     world.until("the driver to exit", |world| {
-        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+        world.run(&["status", &run]).stdout.contains("PAUSED")
     });
     let before = world.run_json(&run, "launch.json")["graph_run"]
         .as_str()
@@ -1714,7 +1720,7 @@ fn adopt_refuses_another_sessions_run_and_has_no_force() {
     let world = World::new("driver-adopt-owner");
     let run = start_detached(&world, "someone-elses", vec![human("approve", &[])]);
     world.until("the driver to exit", |world| {
-        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+        world.run(&["status", &run]).stdout.contains("PAUSED")
     });
 
     let stranger = world.as_session("session-other");
@@ -1853,7 +1859,7 @@ fn the_owner_stops_its_own_run_without_force() {
     // way — `status` reads `run-stopped` and reports the run undriven without
     // ever looking at a process — so the ledger cannot be the evidence here.
     let status = world.run(&["status", &run]);
-    status.exited(0).out_has("nothing is driving this run");
+    status.exited(0).out_has(&format!("{run}  ENDED stopped"));
 
     // And what became of the work in flight is said, in both views that report
     // it. A stop ends the run's whole dispatch tree, and the process that would
@@ -3448,8 +3454,8 @@ fn a_linux_process_identity_survives_wall_clock_start_time_drift() {
 }
 
 /// A pid the host has given to another process is not a driver: a run whose
-/// record still names it reads `DRIVER DEAD`, is adoptable, and the stranger is
-/// left alone.
+/// record still names it reads as undriven — its liveness `DRIVER DEAD` — is
+/// adoptable, and the stranger is left alone.
 ///
 /// The other readers of the launch record's pid — the run's own view, the
 /// bounded listing, and the adoption, whose displacement of a driver it has
@@ -3478,7 +3484,7 @@ fn a_pid_the_host_has_given_to_another_process_is_never_read_as_the_driver() {
     let run = "reissued".to_string();
     world.run(&["start", &plan, "--detach"]).exited(0);
     world.until("the driver to exit", |world| {
-        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+        world.run(&["status", &run]).stdout.contains("PAUSED")
     });
 
     // The stranger the host handed the pid to: a real process, started by this
@@ -3508,12 +3514,16 @@ fn a_pid_the_host_has_given_to_another_process_is_never_read_as_the_driver() {
     // Both views read the stamp: the driver that exited is dead, whoever holds
     // its pid now — where the pid alone said a live driver was waiting on the
     // person.
-    world.run(&["runs"]).exited(0).out_has("DRIVER DEAD");
+    world.run(&["runs"]).exited(0).out_has("PAUSED");
     world
         .run(&["status", &run])
         .exited(0)
-        .out_has("DRIVER DEAD")
+        .out_has("PAUSED")
         .out_lacks("ACTIVE");
+    assert_eq!(
+        world.run(&["status", &run, "--json"]).json()["liveness"],
+        "DRIVER DEAD"
+    );
 
     // And the way back a dead driver offers is open: the run is adopted rather
     // than refused, and nothing was signalled to make it so.
