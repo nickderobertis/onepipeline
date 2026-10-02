@@ -16,6 +16,16 @@
 // compiled binary; the hook is the operator's own command, and this suite supplies a real
 // one. `harness.rs` carries the same suppression and the full rationale.
 
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
+// assumed: the eight journeys here took about 205 seconds summed and 54 on the wall under
+// nextest's parallelism on a loaded host, each starting real drivers, real run-end hooks and
+// real dispatches. What they exercise is one reading across `views`, `hooks`, `summary`,
+// `unwatched` and the `status` verb in `driver` together, through the compiled binary, so
+// the narrowest edge they can honestly sit behind is the crate itself, which is this
+// target's; the note-journey dependency is this binary's own, shared by every module in it.
+// `mod run_ending` in `main.rs` carries the same reason, because that declaration is the
+// other site the rule reads.
+
 use serde_json::{json, Value};
 
 use crate::harness::{
@@ -236,7 +246,8 @@ fn advised_to_settle_or_stop(world: &World, run: &str, actions: &[&str], blockin
 
 /// An undriven run waiting on a person reads `PAUSED`, naming the action and how
 /// to settle it; once it is attested and adopted, every node is `done`, the success
-/// hook fires, and the run reads `SETTLED` with ending `complete`.
+/// hook fires, and the run reads `SETTLED` with ending `complete` — and still does
+/// once a stop is recorded over it.
 #[test]
 fn a_run_paused_on_a_human_action_reads_paused_and_once_attested_reads_settled() {
     let world = ending_world("ending-paused-human");
@@ -267,6 +278,13 @@ fn a_run_paused_on_a_human_action_reads_paused_and_once_attested_reads_settled()
     assert_eq!(reading["driven"], false);
     assert_eq!(reading["paused"], Value::Null);
     assert_eq!(reading["ending"], json!({"kind": "complete", "nodes": []}));
+    ending_is_the_hook_it_fired(&world, run, &reading);
+
+    // A stop recorded over a complete run changes nothing it reads: complete
+    // outranks a stop, and the ending is still the success hook it fired.
+    world.run(&["stop", run]).exited(0);
+    assert_eq!(world.events_of(run, "run-stopped").len(), 1);
+    assert_eq!(read_as(&world, run, "SETTLED"), reading);
     ending_is_the_hook_it_fired(&world, run, &reading);
 }
 

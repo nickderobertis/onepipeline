@@ -6746,6 +6746,13 @@ mod tests {
     /// What a run nothing drives has reached, in the contract's order: complete
     /// outranks a stop, a stop outranks a pending decision, work the driver could
     /// still move outranks a decision, and a driven run has reached neither.
+    ///
+    /// `tests/e2e/run_ending.rs` drives each of those through the binary but two,
+    /// which no run reaches there and are held here instead: a stop over a graph
+    /// with no nodes, because a launch refuses a plan with none before any run
+    /// exists; and a `complete-but-draft` node as the movable work, because a
+    /// draft is only ever held by a live driver awaiting a release — the run
+    /// whose driver dies with one is the `ready` arm the journey drives.
     #[test]
     fn a_run_nothing_drives_is_read_in_the_contracts_order() {
         use std::collections::BTreeSet;
@@ -6847,6 +6854,41 @@ mod tests {
         };
         assert_eq!(allowed("liveness"), liveness);
         assert_eq!(allowed("word"), word);
+    }
+
+    /// A listing row whose document counts a status word this build cannot read
+    /// is a graph it cannot judge: it reads as neither ended nor paused, so its
+    /// word is the liveness verdict and its advice the one that verdict gives.
+    ///
+    /// Held here rather than driven, because no verb writes such a document: a
+    /// summary at another schema version is refused and refolded, and this build
+    /// counts only the words `NodeStatus::as_str` spells. The same document with
+    /// its words intact reads as the ending it records, so the fallback is what
+    /// moves the word.
+    #[test]
+    fn a_row_counting_a_status_word_this_build_cannot_read_is_judged_by_its_driver_alone() {
+        let root = scratch("unknown-status-word");
+        let summary: RunSummary =
+            serde_json::from_str(include_str!("../tests/golden/run-summary-v9.json"))
+                .expect("the summary golden reads");
+        // Quiet since long before now, naming no driver this host can prove gone:
+        // a driver parked, and nothing outstanding to hold that verdict off.
+        assert_eq!(summary_standing_word(&root, &summary), "ENDED failed");
+
+        let mut unreadable = summary.clone();
+        let failed = unreadable
+            .node_counts
+            .remove("failed")
+            .expect("the golden counts a failed node");
+        unreadable
+            .node_counts
+            .insert("reviewing".to_string(), failed);
+        let row = Row::of(&root, &unreadable);
+        let standing = Standing::of_row(&row);
+        assert_eq!(standing.reached, Reached::Neither);
+        assert_eq!(standing.word(), DriverLiveness::Parked.as_str());
+        assert!(matches!(standing.intervention(), Some(Intervention::Adopt)));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Each ending prints the word the contract fixes for it.
