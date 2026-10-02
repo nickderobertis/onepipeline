@@ -521,13 +521,16 @@ fn a_baseline_item_in_a_routed_source_with_no_member_there_is_refused() {
         "the plan has a member, so the routed source is not one it lacks"
     );
 
-    // llmlint: ignore[tests_mirror_real_usage] no invocation of this build writes a baseline naming a source the run has no member in, which is the point: a file naming one is what the read-back must refuse, and writing it is the only way to hand the driver one.
     let path = world.run_file(name, "writeback-landed.json");
+    let stray = format!("{MEMBERS}:{}/001-ship", project_id(name));
+    // llmlint: ignore-block[tests_mirror_real_usage] no invocation of this build writes a
+    // baseline naming a source the run has no member in, which is the point: a file naming one
+    // is what the read-back must refuse, and writing it is the only way to hand the driver one.
     let mut landed: Value =
         serde_json::from_str(&std::fs::read_to_string(&path).expect("the baseline")).expect("JSON");
-    let stray = format!("{MEMBERS}:{}/001-ship", project_id(name));
     landed["items"]["ship"]["destination"] = json!(stray);
     std::fs::write(&path, landed.to_string()).expect("the baseline is rewritten");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     let mark = records(&world, name).len();
     world.run(&["adopt", name, "--detach"]).exited(0);
@@ -617,4 +620,51 @@ fn an_adoption_with_no_baseline_reads_a_member_task_by_its_id_in_its_own_source(
     let held = |source: &str| -> Vec<String> { source_nodes(&world, source).into_keys().collect() };
     assert_eq!(held(STORE_SOURCE), ["core", "ship"]);
     assert_eq!(held(MEMBERS), ["adopt"]);
+}
+
+/// A home whose `onetaskgraph.members` breaks the store's rule for the list — not a list, an
+/// entry that is no qualified id, a member in the home's own source, two in one source — is a
+/// plan this build cannot read: the launch refuses it naming the home and why, and mints no
+/// run, rather than running the plan as though it had fewer members.
+#[test]
+fn a_home_whose_member_list_breaks_the_stores_rule_is_not_launched() {
+    let world = a_routed_world("multi-source-malformed");
+    let name = "malformed";
+    let home = filed(&world, name, &plan_of(name, vec![on(HOME, "core", &[])]));
+    let document = world
+        .store()
+        .join("projects")
+        .join(format!("{}.md", project_id(name)));
+    let authored = std::fs::read_to_string(&document).expect("the home's document");
+    for (members, why) in [
+        ("members:board", "is not a list"),
+        ("[bare]", "which is not a qualified id"),
+        ("[\"plans:other\"]", "a second project in plans"),
+        (
+            "[\"members:a\", \"members:b\"]",
+            "a second project in members",
+        ),
+    ] {
+        // llmlint: ignore-block[tests_mirror_real_usage] a `local-md` home *is* its Markdown
+        // document, and a member list a person or another tool wrote wrongly is exactly these
+        // bytes; the store's routed writes never produce one, so writing it is the only way to
+        // hand a launch one.
+        let edited = authored.replacen(
+            "metadata:\n",
+            &format!("metadata:\n  onetaskgraph.members: {members}\n"),
+            1,
+        );
+        assert_ne!(edited, authored, "the home's document holds no metadata");
+        std::fs::write(&document, edited).expect("the home's document is rewritten");
+        // llmlint: ignore-end[tests_mirror_real_usage]
+        world
+            .run(&["start", &home, "--detach"])
+            .exited(2)
+            .err_has(&home)
+            .err_has(why);
+        assert!(
+            !world.run_file(name, "launch.json").exists(),
+            "a run was minted over the member list {members}"
+        );
+    }
 }
