@@ -284,6 +284,7 @@ _crate-coverage-clean dir=llvm-cov-target-dir:
 _crate-test-rest:
     @just _strace-preflight
     @just _onetaskgraph-preflight
+    @[ -z "${ONEPIPELINE_TEST_ARCHIVE:-}" ] || RUSTFLAGS="-D warnings" cargo llvm-cov --no-report nextest-archive --locked --archive-file "$ONEPIPELINE_TEST_ARCHIVE"
     @RUSTFLAGS="-D warnings" cargo llvm-cov --no-report nextest --locked -E '{{rest-tier}}' --final-status-level fail
 
 # `--failure-mode all` is load-bearing, and belongs here rather than on either
@@ -326,10 +327,53 @@ _note-test:
 # Coverage instrumentation is measured on Linux only, so the cross-platform CI
 # legs run the same suite through this instead of `test`.
 # The offline suite without coverage instrumentation.
+# llmlint: ignore-block[diagnostics_error_or_absent] the archive line has to build
+# exactly what the run line after it builds, so that the run finds it fresh and
+# the archive is the build the step tested; the run sets no RUSTFLAGS, so neither
+# can the archive. Warnings are denied by `just lint`, which `check-cross` runs
+# before this.
 test-quick:
     @just _strace-preflight
     @just _onetaskgraph-preflight
-    @cargo nextest run --locked -E '{{offline-tiers}}'
+    @[ -z "${ONEPIPELINE_TEST_ARCHIVE:-}" ] || cargo nextest archive --locked --archive-file "$ONEPIPELINE_TEST_ARCHIVE"
+    @bash scripts/nextest-run.sh cargo nextest run --locked -E '{{offline-tiers}}'
+# llmlint: ignore-end[diagnostics_error_or_absent]
+
+# `ONEPIPELINE_TEST_ARCHIVE` (CI sets it; nothing local does) makes `test-quick`
+# and `_crate-test-rest` archive the build they are about to run, with nextest's
+# own archive command, before running it. The run then finds that build fresh,
+# so the archive is the build the step tested. `rerun-failed` re-runs from that
+# archive and nothing else: nextest refuses cargo's build options beside
+# `--archive-file`, so a re-run cannot compile.
+
+# How many times `rerun-failed` re-runs each test a failed CI test step failed.
+# Three tells "fails every time" from "fails some of the time" and stays bounded.
+# A test that hangs every time is ended at `.config/nextest.toml`'s 360-second
+# `terminate-after`, and each re-run first extracts the archive, allowed two
+# minutes. Three of those are 24 minutes, inside the 25 `ci.yml` gives the step.
+rerun-times := "3"
+
+# What CI runs once a test step has failed: why any tests went unrun, then how
+# often each failed test fails again on the build that step archived. Reports
+# only; it never turns a failed run green. `scripts/known-flakes.txt` annotates
+# and excuses nothing.
+# Re-run a failed step's failed tests from the build it archived, given its LOG and ARCHIVE.
+rerun-failed log archive:
+    @bash scripts/rerun-failed.sh --log "$1" --archive "$2" --times {{rerun-times}} --known-flakes scripts/known-flakes.txt -- cargo nextest run
+
+# The same for the gate's instrumented suite, whose archive `_crate-test-rest`
+# makes with cargo-llvm-cov so the re-runs run under its coverage environment.
+# cargo-llvm-cov extracts an archive into its own target directory every time,
+# so each re-run after the first overwrites the one before.
+# llmlint: ignore-block[changed_behavior_has_e2e] the script behind this recipe is
+# driven end to end by tests/nextest_runs.rs; what only this recipe adds is the
+# instrumented runner. A test of that needs cargo-llvm-cov, which the cross legs
+# that run every test do not install, so it could only pass there by skipping.
+# The gate job runs this recipe for real whenever one of its tests fails.
+# Re-run a failed gate step's failed tests from its instrumented archive, given its LOG and ARCHIVE.
+rerun-failed-coverage log archive:
+    @RUSTFLAGS="-D warnings" bash scripts/rerun-failed.sh --log "$1" --archive "$2" --times {{rerun-times}} --known-flakes scripts/known-flakes.txt -- cargo llvm-cov --no-report nextest --extract-overwrite
+# llmlint: ignore-end[changed_behavior_has_e2e]
 
 # The one journey that is not offline: the real `onevcs`, real git against a real
 # remote, and the real GitHub API opening and merging a pull request on a scratch

@@ -1,0 +1,22 @@
+# Tests known to fail intermittently, each tracked by an open GitHub issue.
+#
+# Read by `scripts/rerun-failed.sh` (`just rerun-failed`) for one thing only: when
+# a listed test fails, its line in that step's report is annotated
+# "known flake, issue <url>". Nothing reads this file to skip, ignore, retry or
+# excuse a test, and a listed test that fails still fails the job.
+#
+# One entry per line, three fields separated by spaces:
+#
+#   <binary-id> <test-name> <issue-url>
+#
+# - <binary-id> and <test-name> are written exactly as nextest prints them on a
+#   test's status line, e.g. `onepipeline::e2e` and `adoption::a_journey_name`.
+# - <issue-url> is the open issue tracking the flake, in the form
+#   https://github.com/<owner>/<repo>/issues/<number>. Remove the entry when the
+#   issue closes.
+#
+# Blank lines and text after `#` are ignored. A line in any other shape is
+# refused, and the report is not produced until it is fixed.
+#
+# Example (not an entry):
+#   onepipeline::e2e adoption::a_journey_name https://github.com/nickderobertis/onepipeline/issues/1

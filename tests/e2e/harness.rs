@@ -4638,14 +4638,43 @@ fn build(selection: &[&str]) -> PathBuf {
     let target = debug
         .parent()
         .expect("the profile directory is inside a target directory");
-    let built = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+    let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    cargo
         .args(["build", "--offline"])
         .args(selection)
         .arg("--target-dir")
         .arg(target)
-        .current_dir(repo_file("."))
-        .output()
-        .expect("cargo builds the subprocess doubles");
+        .current_dir(repo_file("."));
+    // llmlint: ignore-block[changed_behavior_has_e2e] a test of this would run
+    // cargo over the suite's own target directory from inside the suite, which is
+    // the nesting this scrub exists to make harmless. A regression shows itself
+    // as the next top-level build after any e2e run compiling from `ring` up.
+    // What cargo sets for a running test is not the environment a build runs
+    // in. Dependency build scripts track some of it (`ring`'s reads
+    // `CARGO_MANIFEST_DIR` and `CARGO_PKG_NAME`), so a nested build carrying it
+    // re-runs them and leaves the shared target directory stale for every
+    // top-level build after it, which then recompiles from `ring` up.
+    for (name, _) in std::env::vars_os() {
+        let name = name.to_string_lossy();
+        if name.starts_with("CARGO_PKG_")
+            || name.starts_with("CARGO_BIN_EXE_")
+            || [
+                "CARGO_MANIFEST_DIR",
+                "CARGO_MANIFEST_PATH",
+                "CARGO_CRATE_NAME",
+                "CARGO_BIN_NAME",
+                "CARGO_PRIMARY_PACKAGE",
+                "CARGO_TARGET_TMPDIR",
+                "CARGO_RUSTC_CURRENT_DIR",
+                "OUT_DIR",
+            ]
+            .contains(&name.as_ref())
+        {
+            cargo.env_remove(name.as_ref());
+        }
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    let built = cargo.output().expect("cargo builds the subprocess doubles");
     assert!(
         built.status.success(),
         "{selection:?} did not build: {}",
