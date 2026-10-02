@@ -753,8 +753,9 @@ fn a_log_with_no_failed_test_reruns_nothing_and_never_reads_as_a_pass() {
     assert_eq!(output.status.code(), Some(1), "{report}");
     assert!(report.contains("verdict stays failed"), "{report}");
 
+    // The NUL is what a step's output can carry and grep then calls binary.
     let (output, report) = rerun(
-        "     Summary [   1.000s] 1/2 tests run: 1 passed\nwarning: 1/2 tests were not run\nerror: test run failed\n",
+        "\0 a byte a test printed\n     Summary [   1.000s] 1/2 tests run: 1 passed\nwarning: 1/2 tests were not run\nerror: test run failed\n",
     );
     assert_eq!(output.status.code(), Some(1), "{report}");
     assert!(

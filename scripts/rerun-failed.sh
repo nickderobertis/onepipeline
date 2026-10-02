@@ -115,7 +115,9 @@ while IFS= read -r warning; do
       fi
       ;;
   esac
-done < <(grep -E 'warning: [0-9]+/[0-9]+ tests? (were|was) not run' "$work/step.log")
+# `-a` throughout: a step's output can carry a byte that makes grep call the
+# whole log binary and print nothing it matched.
+done < <(grep -aE 'warning: [0-9]+/[0-9]+ tests? (were|was) not run' "$work/step.log")
 
 failed=()
 while IFS= read -r test; do
@@ -129,7 +131,7 @@ while IFS= read -r test; do
 done < <(tests_matching "$failed_re" "$work/step.log")
 
 if [ "${#failed[@]}" -eq 0 ]; then
-  if [ "$unrun" -eq 1 ] || grep -qE '^error: test run failed' "$work/step.log"; then
+  if [ "$unrun" -eq 1 ] || grep -aqE '^error: test run failed' "$work/step.log"; then
     warn "the test run failed and names no failed test, so there is nothing to re-run. The job's verdict stays failed: what ended the run is in the step's output above, and a line above names it when it is tests left unrun."
     exit 1
   fi
