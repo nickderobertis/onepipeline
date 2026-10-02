@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.57.4](https://github.com/nickderobertis/onepipeline/compare/v0.57.3...v0.57.4) - 2026-10-02
+
+### Fixed
+
+- *(tests)* remove the races behind the driver, session and pool flakes ([#673](https://github.com/nickderobertis/onepipeline/pull/673))
+
 ## [0.57.3](https://github.com/nickderobertis/onepipeline/compare/v0.57.2...v0.57.3) - 2026-10-02
 
 ### Added
