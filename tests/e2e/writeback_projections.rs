@@ -947,9 +947,19 @@ fn a_lineage_read_cold_with_edges_is_carried_and_its_edges_put_right() {
         world.events_of(run, "node-dispatched").len() >= 2
     });
     cancelled(&world, run, "second");
+    // Each with its settlement beside it, as in the journey above: the cancel's settlement is
+    // the last write `second`'s item takes, a projection after the park. A board that read
+    // `parked` let the `stop` below land while that projection had opened the store and not
+    // yet recorded itself — the stop ends the driver mid-attempt — so the store was opened
+    // once more than any record says, and the wait for the adopted driver's projection never
+    // ended (Windows, run 36924701088).
     projected_until(&world, run, &project, "the board to say it all", |tasks| {
         board_word(tasks, "first").as_deref() == Some("done")
+            && board_task(tasks, "first")["item"]["metadata"]["onepipeline.settlement"]["status"]
+                == "done"
             && board_task(tasks, "second")["item"]["status"]["name"] == "parked"
+            && board_task(tasks, "second")["item"]["metadata"]["onepipeline.settlement"]["status"]
+                == "cancelled"
     });
     world.run(&["stop", run]).exited(0);
 
