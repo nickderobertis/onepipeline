@@ -1418,9 +1418,10 @@ pub struct TaskRecord {
     /// The source the task's own item is in, where that is not the launched project's: a
     /// task of one of the home's member projects. Absent for a task of the home itself,
     /// which is every task of a plan read from one source — so a record written before a
-    /// plan could span sources reads exactly as it did.
+    /// plan could span sources reads exactly as it did. A name no source could carry is
+    /// refused where the record is read, by the store's own name type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
+    pub source: Option<onetaskgraph_plugin_api::SourceName>,
 }
 
 /// Whether a repository is one person's or a team's — the vocabulary a schema-3
@@ -1665,14 +1666,20 @@ mod tests {
         );
 
         let member = TaskRecord {
-            source: Some("linear".to_owned()),
+            source: Some(onetaskgraph_plugin_api::SourceName::new("linear").expect("a name")),
             ..record
         };
         let carried = serde_json::to_value(&member).expect("a record serializes");
         assert_eq!(carried["source"], "linear");
         assert_eq!(
-            serde_json::from_value::<TaskRecord>(carried).expect("a record parses"),
+            serde_json::from_value::<TaskRecord>(carried.clone()).expect("a record parses"),
             member
+        );
+        let mut misnamed = carried;
+        misnamed["source"] = serde_json::json!("Not A Source");
+        assert!(
+            serde_json::from_value::<TaskRecord>(misnamed).is_err(),
+            "a record naming no source a store could carry was read"
         );
     }
 

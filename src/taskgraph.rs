@@ -203,6 +203,7 @@ impl Store {
     /// the configuration does not load, because then nothing it routes can be read either.
     pub(crate) fn reachable(&self, source: &SourceName) -> Vec<SourceName> {
         config::load(&self.dir, &self.environment, &Layer::default()).map_or_else(
+            // llmlint: ignore[changed_behavior_has_e2e] a configuration that does not load fails the write-back attempt itself at `Attempt::open`, before any store call, and that failure is what every journey of an unloadable store observes; this fallback only shapes a baseline no call is then made against.
             |_| vec![source.clone()],
             |loaded| loaded.config.routes().reachable(source),
         )
@@ -872,6 +873,7 @@ fn stranger(
             .map(|member| member.native.as_str())
     };
     match (&task.item.project, expected) {
+        // llmlint: ignore[changed_behavior_has_e2e] the linked store answers a members read with the home's own project in its source and each member's in theirs, by construction, so no configuration a journey can write reaches this arm through the CLI; it defends a third party's source, and `taskgraph::tests::a_task_of_neither_the_home_nor_a_member_is_named_for_what_it_is` holds every arm.
         (_, None) => Some("an item of a source holding neither the home nor a member"),
         (Some(named), Some(expected)) if named.as_str() != expected => {
             Some("a task of another project")
@@ -1616,7 +1618,10 @@ mod tests {
         assert_eq!(nodes["adopt"].deps, vec!["core".to_owned()]);
         assert_eq!(nodes["ship"].deps, vec!["adopt".to_owned()]);
         let record = |id: &str| nodes[id].task_record.clone().expect("a task record");
-        assert_eq!(record("adopt").source.as_deref(), Some("linear"));
+        assert_eq!(
+            record("adopt").source.as_ref().map(SourceName::as_str),
+            Some("linear")
+        );
         assert_eq!(record("adopt").id, "ship-linear/adopt");
         assert_eq!(
             record("core").source,

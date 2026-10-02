@@ -2492,7 +2492,7 @@ fn known_id(snapshot: &Snapshot, lineages: &Lineages, root: &str) -> Option<Glob
     recorded.or_else(|| {
         let record = snapshot.nodes.get(root)?.task_record.as_ref()?;
         let source = match &record.source {
-            Some(source) => SourceName::new(source.as_str()).ok()?,
+            Some(source) => source.clone(),
             None => home,
         };
         Some(GlobalId::new(source, NativeId::from(record.id.as_str())))
@@ -2511,8 +2511,7 @@ fn plan_sources(store: &Store, snapshot: &Snapshot) -> BTreeSet<SourceName> {
         snapshot
             .nodes
             .values()
-            .filter_map(|node| node.task_record.as_ref()?.source.as_deref())
-            .filter_map(|source| SourceName::new(source).ok()),
+            .filter_map(|node| node.task_record.as_ref()?.source.clone()),
     );
     sources
 }
@@ -6480,7 +6479,7 @@ mod tests {
             .get_mut("build")
             .and_then(|node| node.task_record.as_mut())
             .expect("a record")
-            .source = Some("linear".to_owned());
+            .source = Some(onetaskgraph_plugin_api::SourceName::new("linear").expect("a name"));
         let snapshot = fixture.snapshot.clone();
         assert_eq!(
             super::known_id(&snapshot, &lineages, "build").map(|id| id.to_string()),

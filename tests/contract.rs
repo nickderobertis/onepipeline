@@ -7246,7 +7246,10 @@ fn a_member_tasks_record_names_its_source_as_the_contract_spells_it() {
     };
     assert_eq!(parsed("home_task_record").source, None);
     assert_eq!(
-        parsed("member_task_record").source.as_deref(),
+        parsed("member_task_record")
+            .source
+            .as_ref()
+            .map(onetaskgraph_plugin_api::SourceName::as_str),
         Some(member_source)
     );
     let tokens = backticked();
