@@ -295,7 +295,6 @@ fn a_seven_item_copy_held_at_eleven_seconds_per_item_lands_inside_its_deadline()
 /// retained budget more than a field: a fresh driver from a shell naming a
 /// thousand seconds per item would, re-reading its environment, allow this copy
 /// a thousand seconds and never cancel it inside the wait below.
-#[cfg(unix)]
 #[test]
 fn an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithmetic() {
     let floor = number("floor_seconds");
@@ -480,7 +479,6 @@ fn a_creating_copy_held_past_a_tiny_budget_is_cancelled_and_the_next_attempt_cre
 /// cancel every copy; reading it as the environment's would let the shell that
 /// adopted decide what the launch had. What the worker does with it is only
 /// observable on a copy it actually bounds, so this holds one past the floor.
-#[cfg(unix)]
 #[test]
 fn a_record_an_older_build_wrote_is_adopted_and_its_update_runs_under_the_shipped_default() {
     let floor = number("floor_seconds");
@@ -585,9 +583,6 @@ fn a_hold_the_scripted_source_cannot_read_fails_the_write_by_the_scripts_name() 
 
 /// Give a run something new to project: a note for one node, which the next copy writes onto
 /// that node's item.
-///
-/// Gated as the two journeys reading it are, which end a driver by pid to adopt its run.
-#[cfg(unix)]
 fn noted(world: &World, run: &str, node: &str, text: &str) {
     world
         .run_with_stdin(

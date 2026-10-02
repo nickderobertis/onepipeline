@@ -24,9 +24,6 @@ use crate::harness::{agent, plan_of, World, CANCEL_GRACE_ENV, REFUSED};
 // The crate's own constant, because `views` is part of the published surface:
 // the threshold a run is reported parked past is what makes that verdict
 // reachable inside a test's patience, and a copy here could go stale silently.
-// Gated as the one journey reading it is, which ends a driver by pid: an
-// unconditional import is unused, so a warning, on a Windows target.
-#[cfg(unix)]
 use onepipeline::views::PARKED_AFTER_ENV;
 use serde_json::{json, Value};
 
@@ -522,7 +519,6 @@ fn a_node_whose_cancellation_is_still_in_flight_renders_as_cancelling() {
 /// The park itself is the planner's own idle and outlives any driver: what the
 /// node comes back through is still a `requeue`, and it is accepted here for the
 /// ordinary reason — nothing is in flight for the node any more.
-#[cfg(unix)]
 #[test]
 fn an_adoption_ends_a_cancellation_the_driver_it_replaced_was_waiting_on() {
     let world = World::new("cancel-adopted");

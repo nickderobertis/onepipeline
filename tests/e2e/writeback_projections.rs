@@ -247,7 +247,6 @@ fn edit(world: &World, run: &str, command: Value) {
 ///
 /// Ended by pid, because a live driver that has merely gone quiet is still driving
 /// and an adoption refuses it.
-#[cfg(unix)]
 fn adopted(world: &World, run: &str) {
     crate::harness::end_driver(world, run);
     world.run(&["adopt", run, "--detach"]).exited(0);
@@ -452,29 +451,25 @@ fn a_runs_first_projection_carries_its_claim_by_member_and_a_later_transition_th
     }
 
     // A second driver compares against the file the first one left, so `work`, whose item
-    // already says it is done, is not carried again. Unix-only, because the first driver is
-    // ended by pid for the adoption.
-    #[cfg(unix)]
-    {
-        let recorded_before = records(&world, run).len();
-        adopted(&world, run);
-        world.until("the adopted driver's first projection", |world| {
-            records(world, run).len() > recorded_before
-        });
-        let adopted_first = &records(&world, run)[recorded_before];
-        assert_eq!(adopted_first["scope"], "members", "{adopted_first}");
-        assert_eq!(
-            adopted_first["whole_because"],
-            Value::Null,
-            "{adopted_first}"
-        );
-        assert!(
-            adopted_first["items"]
-                .as_array()
-                .is_some_and(|items| !items.contains(&json!("work"))),
-            "the adopted driver carried a lineage the previous driver had landed: {adopted_first}"
-        );
-    }
+    // already says it is done, is not carried again.
+    let recorded_before = records(&world, run).len();
+    adopted(&world, run);
+    world.until("the adopted driver's first projection", |world| {
+        records(world, run).len() > recorded_before
+    });
+    let adopted_first = &records(&world, run)[recorded_before];
+    assert_eq!(adopted_first["scope"], "members", "{adopted_first}");
+    assert_eq!(
+        adopted_first["whole_because"],
+        Value::Null,
+        "{adopted_first}"
+    );
+    assert!(
+        adopted_first["items"]
+            .as_array()
+            .is_some_and(|items| !items.contains(&json!("work"))),
+        "the adopted driver carried a lineage the previous driver had landed: {adopted_first}"
+    );
     no_record_is_whole_or_reads_a_page_of_tasks(&world, run);
 }
 
@@ -1314,7 +1309,6 @@ fn the_record_carries_exactly_what_the_update_said_it_wrote_and_spent() {
 /// driver's first projection carries its members as every driver's does, and the change after
 /// it is carried as members — never whole for `store-lacks-members`, which this build reads on
 /// an older line and never gives.
-#[cfg(unix)]
 #[test]
 fn a_run_directory_holding_an_older_engines_store_record_adopts_and_projects_by_member() {
     let run = "projections-older-record";

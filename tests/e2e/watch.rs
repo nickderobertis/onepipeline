@@ -3612,33 +3612,29 @@ fn a_watch_armed_on_a_run_nothing_is_driving_ends_when_the_run_moves() {
     // A driver that died holding a dispatch open, which is a run nothing is
     // driving with work still in flight. A verdict for the next listener lands in
     // the channel's reply queue — a record that is not a surface — and the run
-    // journals that it was replied to. Unix-only, because the driver is ended by
-    // pid; a live driver that has merely gone quiet is `PARKED`, still driven,
-    // and is the journey after this one.
-    #[cfg(unix)]
-    {
-        world.script("hold.wait", "hold");
-        let orphaned = running(&world, "watchwakeorphaned", vec![agent("hold", &[])]);
-        crate::harness::end_driver(&world, &orphaned);
-        let replies = length(&world, &orphaned, "channel/replies.jsonl");
-        let watching = armed_watch(&world, &orphaned, &default);
-        world
-            .run_with_stdin(
-                &["reply", &orphaned],
-                r#"{"message": "carry on when you can"}"#,
-            )
-            .exited(0);
-        let (code, last, said) = finished(watching);
-        assert_eq!(code, RUN_CHANGED, "{last}\n{said}");
-        assert_eq!(last["condition"], json!("run-changed"), "{last}");
-        assert!(last.get("summary").is_none(), "{last}");
-        assert!(said.contains("run-changed"), "{said}");
-        assert!(
-            length(&world, &orphaned, "channel/replies.jsonl") > replies,
-            "the reply queue did not move, so this was not the move under test"
-        );
-        world.release("hold.go");
-    }
+    // journals that it was replied to. A live driver that has merely gone quiet
+    // is `PARKED`, still driven, and is the journey after this one.
+    world.script("hold.wait", "hold");
+    let orphaned = running(&world, "watchwakeorphaned", vec![agent("hold", &[])]);
+    crate::harness::end_driver(&world, &orphaned);
+    let replies = length(&world, &orphaned, "channel/replies.jsonl");
+    let watching = armed_watch(&world, &orphaned, &default);
+    world
+        .run_with_stdin(
+            &["reply", &orphaned],
+            r#"{"message": "carry on when you can"}"#,
+        )
+        .exited(0);
+    let (code, last, said) = finished(watching);
+    assert_eq!(code, RUN_CHANGED, "{last}\n{said}");
+    assert_eq!(last["condition"], json!("run-changed"), "{last}");
+    assert!(last.get("summary").is_none(), "{last}");
+    assert!(said.contains("run-changed"), "{said}");
+    assert!(
+        length(&world, &orphaned, "channel/replies.jsonl") > replies,
+        "the reply queue did not move, so this was not the move under test"
+    );
+    world.release("hold.go");
 
     // A driver that failed its one node and exited.
     let run = "watchwakeundriven";

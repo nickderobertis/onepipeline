@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::dispatch::OBSERVER_RESTARTS_ENV;
-use crate::harness::{agent, human, plan_of, rows, World, NOTHING_DRIVING, REFUSED};
+use crate::harness::{agent, end_driver, human, plan_of, rows, World, NOTHING_DRIVING, REFUSED};
 // The journeys that end a process, and those that assert against a process table,
 // are `#[cfg(unix)]`, so what only they reach for is imported on the same terms.
 // Both names have to be: `end_process` is `#[cfg(unix)]` in `harness.rs`, so an
@@ -1053,7 +1053,6 @@ fn a_quiet_driver_holding_a_decision_point_reads_as_active_rather_than_parked() 
 
 /// A driver that died with a dispatch held open reads `DRIVER DEAD`, and the
 /// adoption that status offers takes the run over and finishes the work.
-#[cfg(unix)]
 #[test]
 fn a_driver_that_died_mid_dispatch_is_adoptable_and_the_fresh_one_finishes_it() {
     let world = World::new("driver-adopt-dead-mid-dispatch");
@@ -1062,7 +1061,7 @@ fn a_driver_that_died_mid_dispatch_is_adoptable_and_the_fresh_one_finishes_it() 
     world.until("a node to be in flight", |world| {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
-    end_process(pid);
+    assert_eq!(end_driver(&world, &run), pid);
     world
         .run(&["status", &run])
         .out_has("DRIVER DEAD: nothing is driving this run; adopt it or stop it");
@@ -1176,7 +1175,6 @@ fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
 ///
 /// The driver it takes the run from is ended by pid first: one alive and only
 /// quiet is `PARKED`, still driving, and refused.
-#[cfg(unix)]
 #[test]
 fn a_detached_adoption_leaves_a_driver_holding_the_run_its_record_names() {
     let world = World::new("driver-adopt-detached");
@@ -1190,7 +1188,7 @@ fn a_detached_adoption_leaves_a_driver_holding_the_run_its_record_names() {
     world.until("the held node to be dispatched", |world| {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
-    end_process(displaced);
+    assert_eq!(end_driver(&world, &run), displaced);
 
     let adopted = world.run(&["adopt", &run, "--detach"]);
     adopted.exited(0);

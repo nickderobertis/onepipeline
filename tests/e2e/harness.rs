@@ -4553,14 +4553,93 @@ pub fn end_process(pid: u32) {
 /// A live driver that has merely gone quiet is `PARKED`, and still driving, so
 /// an adoption refuses it; a journey that needs the run taken over ends the
 /// driver first, as an operator's `stop` or a crash would.
-#[cfg(unix)]
+///
+/// Only ever **this run's own driver**: the pid is the one the run's launch
+/// record names under this world's own runs root, and it has to be the pid
+/// holding that run's ownership lock too, so a record naming a stale or reissued
+/// pid is refused rather than signalled. Several suites share a host, and a pid
+/// that is not provably this run's driver belongs to somebody.
 pub fn end_driver(world: &World, run: &str) -> u32 {
-    let pid = world.run_json(run, "launch.json")["pid"]
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
+    let pid_of = |file: &str| {
+        world.run_json(run, file)["pid"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
+    };
+    let pid = pid_of("launch.json")
         .unwrap_or_else(|| panic!("the launch record of {run} names no driver"));
-    end_process(pid);
+    assert_eq!(
+        pid_of("owner.lock"),
+        Some(pid),
+        "the driver {run}'s launch record names is not the one holding its lock; \
+         refusing to end pid {pid}"
+    );
+    end_driver_process(pid);
     pid
+}
+
+#[cfg(unix)]
+fn end_driver_process(pid: u32) {
+    end_process(pid);
+}
+
+/// The Windows spelling of [`end_process`], for a driver alone.
+///
+/// `taskkill /F` without `/T`: the driver and nothing under it, which is the
+/// state an adoption recovers from — a driver gone with its dispatches left in
+/// flight. Forcefully, because a console process ignores the polite ask (the
+/// crate's own `sys` says why). And only once `tasklist` has said the process at
+/// that pid is this suite's own binary, so a pid the host has handed on is
+/// refused rather than ended.
+#[cfg(windows)]
+fn end_driver_process(pid: u32) {
+    let image = binary()
+        .file_name()
+        .expect("the binary has a file name")
+        .to_string_lossy()
+        .into_owned();
+    let found = listed_image(pid).unwrap_or_else(|| panic!("pid {pid} is not running"));
+    assert!(
+        found.eq_ignore_ascii_case(&image),
+        "pid {pid} is {found}, not this suite's {image}; refusing to end it"
+    );
+    let ended = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("this host ends a process it owns");
+    assert!(ended.success(), "taskkill could not end pid {pid}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        if listed_image(pid).is_none() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("pid {pid} outlived a forced taskkill");
+}
+
+/// The image name `tasklist` reports at `pid`, or nothing for no such process.
+///
+/// Read from the CSV form, whose first two fields are the image and the pid;
+/// the row is matched on the pid field itself, so the informational line
+/// `tasklist` prints when nothing matches is never read as a process.
+#[cfg(windows)]
+fn listed_image(pid: u32) -> Option<String> {
+    let listing = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .expect("this host lists its processes");
+    let wanted = pid.to_string();
+    String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .find_map(|row| {
+            let mut fields = row
+                .split("\",\"")
+                .map(|field| field.trim().trim_matches('"'));
+            let image = fields.next()?;
+            (fields.next()? == wanted).then(|| image.to_string())
+        })
 }
 
 /// This host's own `ps`, found the way a shell finds it.
