@@ -320,12 +320,13 @@ fn a_driver_that_reports_an_error_records_it_while_it_still_holds_the_run() {
     });
     let reader = LockReader::of(&world, run);
 
-    // llmlint: ignore[tests_mirror_real_usage] a queue log that stops being a file under a
-    // live driver is a storage fault, and no verb writes one; it is the narrowest fault that
-    // makes the compiled driver's own pass fail and report it, and the driver, its journal,
-    // its lock and its hooks around it are all the real ones.
+    // llmlint: ignore-block[tests_mirror_real_usage] a queue log that stops being a file
+    // under a live driver is a storage fault, and no verb writes one; it is the narrowest
+    // fault that makes the compiled driver's own pass fail and report it, and the driver, its
+    // journal, its lock and its hooks around it are all the real ones.
     std::fs::create_dir_all(world.run_file(run, "channel/commands.jsonl"))
         .expect("the queue log is replaced by a directory");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.release("build.go");
     world.until("the driver to record its error", |world| {
         !world.events_of(run, "driver-exited").is_empty()
@@ -541,12 +542,13 @@ fn a_driver_that_cannot_hand_the_run_on_still_records_its_exit_and_leaves_the_cl
     world.until("the held node to be dispatched", |world| {
         !world.events_of(run, "node-dispatched").is_empty()
     });
-    // llmlint: ignore[tests_mirror_real_usage] a handover gate whose place is taken by
-    // something that is not a directory is a run store an operator has been in, or a
+    // llmlint: ignore-block[tests_mirror_real_usage] a handover gate whose place is taken
+    // by something that is not a directory is a run store an operator has been in, or a
     // filesystem that ran out; no verb makes one, and it is the narrowest fault that reaches
     // the let-go that cannot hand over through the compiled driver.
     std::fs::write(world.run_file(run, "channel/handover"), "not a directory")
         .expect("the gate's place is taken");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.release("build.go");
     world.until("the driver to record its exit", |world| {
         !world.events_of(run, "driver-exited").is_empty()
@@ -623,6 +625,102 @@ fn status_reads_the_last_driver_exit_when_a_run_has_had_several() {
     assert!(said[0].ends_with("settled complete"), "{}", said[0]);
 }
 
+/// Append one record to a run's journal, as a newer build writing into this
+/// runs root would.
+fn append_to_journal(world: &World, run: &str, record: &Value) {
+    // llmlint: ignore-block[tests_mirror_real_usage] what a newer build appends to a runs
+    // root this one reads: no verb of this build writes a settlement word it does not have,
+    // and the journal is the one place such a record reaches a reader.
+    let mut journal = std::fs::OpenOptions::new()
+        .append(true)
+        .open(world.run_file(run, "events.jsonl"))
+        .expect("the journal opens");
+    std::io::Write::write_all(&mut journal, format!("{record}\n").as_bytes())
+        .expect("the record is appended");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+}
+
+/// What a reader is shown of a run, through every view that reads its fold —
+/// `status` without the lines this record adds or that measure the host, then
+/// `results`, `runs` and a bounded `watch` — so two runs' readings compare
+/// line for line.
+fn readings(world: &World, run: &str) -> Vec<String> {
+    let status = world.run(&["status", run]);
+    status.exited(0);
+    let mut read: Vec<String> = status
+        .stdout
+        .lines()
+        .filter(|line| {
+            !line.contains("driver exited")
+                && !line.contains("free space")
+                && !line.contains("providers:")
+        })
+        .map(str::to_string)
+        .collect();
+    for args in [vec!["results", run], vec!["runs"]] {
+        let shown = world.run(&args);
+        shown.exited(0);
+        read.extend(shown.stdout.lines().map(str::to_string));
+    }
+    let watched = world.run(&["watch", run, "--timeout", "1"]);
+    read.push(format!("watch exited {}", watched.code));
+    read
+}
+
+/// **The record changes no reading.** The same run read with its
+/// `driver-exited`, with a later one beside it, and with none — `status` apart
+/// from its own line, `results`, the listing, and `watch` — reads the same.
+/// Nothing folds it, not even as a write: a listing sorts by when each run last
+/// wrote, and a `driver-exited` stamped after a second run's every record still
+/// leaves that second run listed first.
+#[test]
+fn a_run_reads_the_same_with_its_driver_exit_as_without_it() {
+    let world = hooked_world("exit-inert");
+    let run = "inert";
+    start_attached(
+        &world,
+        run,
+        vec![agent("build", &[]), human("approve", &[])],
+    )
+    .exited(0)
+    .out_has("\"settlement\":\"awaiting-planner\"");
+    // A second run that writes after this one, so the listing has an order that
+    // when each run last wrote decides.
+    start_attached(&world, "later", vec![agent("ship", &[])])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+    let with = readings(&world, run);
+    let ours = the_exit(&world, run);
+
+    // A later driver's record, stamped a year after anything either run wrote.
+    let last = the_exit(&world, "later")["ts"]
+        .as_str()
+        .expect("a time")
+        .to_string();
+    let year: u32 = last[..4].parse().expect("an RFC 3339 year");
+    let mut later = ours.clone();
+    later["ts"] = json!(format!("{}{}", year + 1, &last[4..]));
+    later["stream"] = json!("~a-later-driver");
+    append_to_journal(&world, run, &later);
+    assert_eq!(world.events_of(run, "driver-exited").len(), 2);
+    assert_eq!(readings(&world, run), with);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the run as an older build, which never
+    // wrote the kind, would have left it: no verb removes a record, and taking it out of the
+    // store is the only way to read one run both ways through the compiled binary.
+    let journal = world.run_file(run, "events.jsonl");
+    let kept: String = std::fs::read_to_string(&journal)
+        .expect("the journal reads")
+        .lines()
+        .filter(|line| !line.contains("\"kind\":\"driver-exited\""))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(&journal, kept).expect("the journal is rewritten");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    assert!(world.events_of(run, "driver-exited").is_empty());
+    assert_eq!(readings(&world, run), with);
+}
+
 /// **A record this build cannot read.** A `driver-exited` a newer build wrote,
 /// with a settlement word this one does not know, is still a driver that exited
 /// at that time: `status` says so and says the rest could not be read, rather
@@ -638,27 +736,16 @@ fn status_says_a_driver_exit_it_cannot_read_could_not_be_read() {
     // after it, so it is the last one in the store's merge order.
     let ours = the_exit(&world, run);
     let at = ours["ts"].as_str().expect("a time").to_string();
-    // llmlint: ignore[tests_mirror_real_usage] what a newer build appends to a runs root this
-    // one reads: no verb of this build writes a settlement word it does not have, and the
-    // journal is the one place such a record reaches a reader.
-    let mut journal = std::fs::OpenOptions::new()
-        .append(true)
-        .open(world.run_file(run, "events.jsonl"))
-        .expect("the journal opens");
-    std::io::Write::write_all(
-        &mut journal,
-        format!(
-            "{}\n",
-            json!({"v": 2, "ts": at, "stream": "~newer-build", "seq": 0,
-                   "source": "pipeline", "kind": "driver-exited",
-                   "labels": {"run_id": run},
-                   "payload": {"pid": 1, "settlement": "handed-elsewhere", "reason": null,
-                               "last_answered_command": null},
-                   "artifacts": []})
-        )
-        .as_bytes(),
-    )
-    .expect("the record is appended");
+    append_to_journal(
+        &world,
+        run,
+        &json!({"v": 2, "ts": at, "stream": "~newer-build", "seq": 0,
+                "source": "pipeline", "kind": "driver-exited",
+                "labels": {"run_id": run},
+                "payload": {"pid": 1, "settlement": "handed-elsewhere", "reason": null,
+                            "last_answered_command": null},
+                "artifacts": []}),
+    );
 
     world
         .run(&["status", run])

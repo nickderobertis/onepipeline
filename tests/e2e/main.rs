@@ -93,7 +93,15 @@ mod dispatch_env_hook;
 mod draft_lifecycle;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod driver;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
+// exercise is how a driver lets go of a run — `engine`, `driver`, `channel`, `projection`,
+// `views` and `hooks` together, through the compiled binary — so the narrowest edge they can
+// honestly sit behind is the crate itself, which is this target's; a project edged narrower
+// would drop them out of `nx affected` for the very changes they exist to catch. The unrelated
+// dependency the target carries is the shared target's, and `mod driver` and `mod
+// run_end_hooks`, whose ground these extend, already run under it.
 mod driver_exit;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod envelope_reviewer;
 mod filter;
 mod holds;
