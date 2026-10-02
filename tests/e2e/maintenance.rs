@@ -1154,8 +1154,15 @@ fn a_slot_another_process_holds_is_busy_and_one_whose_worktree_is_gone_is_broken
     // cleaned out, a clone that never finished — so the next sweep that finds the
     // slot due finds it unusable and says broken rather than busy. Nothing waiting
     // clears this one, which is what the two words are for.
-    std::fs::remove_dir_all(Path::new(&run_root).join("worktree"))
-        .expect("the slot's worktree is removed");
+    //
+    // The schedule is every second, so a later sweep may be running its command
+    // inside the worktree at this moment. Windows refuses to remove a directory a
+    // live process has open, where Linux unlinks it under the process, so the
+    // removal is retried until no sweep holds it rather than taken once.
+    let worktree = Path::new(&run_root).join("worktree");
+    world.until("the slot's worktree to be removed", |_| {
+        std::fs::remove_dir_all(&worktree).is_ok() || !worktree.exists()
+    });
     let broke = |record: &Value| {
         record["payload"]["identities"][0]["outcome"]["slots"][0]["outcome"]
             .get("broken")

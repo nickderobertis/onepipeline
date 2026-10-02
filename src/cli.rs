@@ -1292,6 +1292,11 @@ pub struct StatusArgs {
     /// no allowlist can approve as one simple command.
     #[arg(long)]
     pub no_providers: bool,
+    /// Print the run's reading — its word, whether it is driven, and how it ended
+    /// or what it is paused on — as one JSON object on one line, rather than lines.
+    /// Requires a run.
+    #[arg(long, requires = "run")]
+    pub json: bool,
 }
 
 /// `onepipeline reply`.

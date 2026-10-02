@@ -2884,6 +2884,7 @@ fn summary_fields() -> BTreeSet<String> {
         timing: serde_json::from_str::<RunTelemetry>(include_str!("golden/telemetry-v2.json"))
             .expect("the telemetry golden reads back into the types"),
         parked: vec!["idle".into()],
+        waiting: vec!["approve".into()],
         judge_rejected: vec!["publish".into()],
         landings: [(
             "publish".to_string(),
@@ -7177,6 +7178,10 @@ const RULINGS: &[(&str, &str)] = &[
         "101.",
         "`--correlation C` binds it to the question `C` names",
     ),
+    (
+        "103.",
+        "A run nothing drives reads as ended, paused, or left with work it could move",
+    ),
     // The channel paragraph's claim-time refusal: a record the reconciler cannot
     // decode is answered by name rather than discarded.
     (
@@ -8612,7 +8617,7 @@ fn the_grouped_listing_is_what_the_contract_states() {
     // Rows over the checked-in golden document, so a row here is a document this
     // build reads rather than one assembled by hand.
     let golden: RunSummary =
-        serde_json::from_str(include_str!("golden/run-summary-v8.json")).expect("the golden reads");
+        serde_json::from_str(include_str!("golden/run-summary-v9.json")).expect("the golden reads");
     let row = |run: &str, project: &str, name: Option<&str>, at: Option<u64>| RunSummary {
         run_id: run.into(),
         project: project.into(),
@@ -9367,4 +9372,127 @@ fn the_supervision_flags_are_what_divergence_95_and_the_readme_name() {
             "entry 95 does not state exit `{code}`"
         );
     }
+}
+
+/// The run reading `status <RUN> --json` prints is the document
+/// `schemas/run-reading.schema.json` states, and the contract names it and the
+/// SDK items behind it.
+///
+/// The committed schema is held equal to the one generated from
+/// `views::RunReading` itself, so a field, a word or an invariant the type gains
+/// or loses and the file does not fails here — and the contract's own example is
+/// held to the type's fields and to the schema's words.
+#[test]
+fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
+    use onepipeline::views::{EndedNode, Ending, EndingKind, Paused, RunReading, RunView};
+
+    // For serialization: the document is what the type writes, so a field it
+    // always writes is required, and an `Option` is written as `null`.
+    let generated = schemars::generate::SchemaSettings::draft2020_12()
+        .for_serialize()
+        .into_generator()
+        .into_root_schema_for::<RunReading>()
+        .to_value();
+    let committed: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("schemas/run-reading.schema.json"))
+            .expect("schemas/run-reading.schema.json ships"),
+    )
+    .expect("the committed schema is JSON");
+    assert_eq!(
+        committed,
+        generated,
+        "schemas/run-reading.schema.json is not the schema of views::RunReading; if the \
+         document changed deliberately, regenerate it from the type:\n{}",
+        serde_json::to_string_pretty(&generated).expect("a schema renders")
+    );
+
+    // The contract's example has exactly the type's fields, and every word it
+    // uses is one the schema allows.
+    let example: Value = serde_json::from_str(&fenced_block_naming("json", "\"liveness\""))
+        .expect("the contract's run reading example is JSON");
+    let reading = RunReading {
+        schema_version: 1,
+        run_id: "demo-1".into(),
+        word: "ENDED failed",
+        liveness: "DRIVER DEAD",
+        driven: false,
+        ending: Some(Ending {
+            kind: EndingKind::Failed,
+            nodes: vec![EndedNode {
+                id: "sign-off".into(),
+                status: "failed",
+                outcome: Some("settled-from-evidence".into()),
+            }],
+        }),
+        paused: None,
+    };
+    assert_eq!(
+        example,
+        serde_json::to_value(&reading).expect("a reading serialises"),
+        "the contract's example is not what the type writes"
+    );
+    let paused = serde_json::to_value(Paused {
+        human_actions: vec!["approve".into()],
+        blocking_surface: false,
+    })
+    .expect("a pause serialises");
+    assert_eq!(
+        paused,
+        json!({"human_actions": ["approve"], "blocking_surface": false})
+    );
+    let words = |field: &str| -> BTreeSet<String> {
+        serde_json::from_value(generated["properties"][field]["enum"].clone())
+            .unwrap_or_else(|_| panic!("the schema states the words `{field}` takes"))
+    };
+    let liveness: BTreeSet<String> = ["ACTIVE", "PARKED", "DRIVER DEAD", "UNDRIVEN"]
+        .map(str::to_owned)
+        .into();
+    assert_eq!(words("liveness"), liveness);
+    let mut word = liveness;
+    word.extend(
+        [
+            "SETTLED",
+            "ENDED failed",
+            "ENDED unfinished",
+            "ENDED stopped",
+            "PAUSED",
+        ]
+        .map(str::to_owned),
+    );
+    assert_eq!(words("word"), word);
+    for kind in [
+        EndingKind::Complete,
+        EndingKind::Failed,
+        EndingKind::Unfinished,
+        EndingKind::Stopped,
+    ] {
+        let wire = serde_json::to_value(kind).expect("a kind serialises");
+        assert!(
+            generated.to_string().contains(&wire.to_string()),
+            "the schema does not name the ending `{wire}`"
+        );
+    }
+
+    let _: fn(&RunView) -> RunReading = onepipeline::views::reading;
+    let _: fn(&RunSummary) -> &'static str = onepipeline::views::standing_word_of;
+    assert_contract_names(
+        "run reading's",
+        &[
+            "`onepipeline status <RUN> --json`",
+            "`schemas/run-reading.schema.json`",
+            "`RunReading`",
+            "`EndingKind { Complete, Failed, Unfinished, Stopped }`",
+            "`Ending { kind, nodes: Vec<EndedNode> }`",
+            "`EndedNode { id, status, outcome }`",
+            "`Paused { human_actions: Vec<String>, blocking_surface: bool }`",
+            "`reading(&RunView) -> RunReading`",
+            "`standing_word_of(&RunSummary) -> &'static str`",
+            "`views::liveness_word`",
+            "`SETTLED`",
+            "`ENDED failed`",
+            "`ENDED unfinished`",
+            "`ENDED stopped`",
+            "`PAUSED`",
+        ],
+    );
 }
