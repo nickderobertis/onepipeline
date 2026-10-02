@@ -753,8 +753,9 @@ fn a_log_with_no_failed_test_reruns_nothing_and_never_reads_as_a_pass() {
     assert_eq!(output.status.code(), Some(1), "{report}");
     assert!(report.contains("verdict stays failed"), "{report}");
 
+    // The NUL is what a step's output can carry and grep then calls binary.
     let (output, report) = rerun(
-        "     Summary [   1.000s] 1/2 tests run: 1 passed\nwarning: 1/2 tests were not run\nerror: test run failed\n",
+        "\0 a byte a test printed\n     Summary [   1.000s] 1/2 tests run: 1 passed\nwarning: 1/2 tests were not run\nerror: test run failed\n",
     );
     assert_eq!(output.status.code(), Some(1), "{report}");
     assert!(
@@ -836,7 +837,27 @@ fn the_scripts_refuse_what_they_cannot_run() {
     let no_list = fixture.path("no-such-list.txt");
     let a_directory = fixture.path("a-directory");
     fs::create_dir_all(&a_directory).expect("a directory is made");
-    let no_tmp = fixture.path("no-such-tmp");
+    // A `mktemp` that cannot make a directory, first on PATH. A TMPDIR that does
+    // not exist is no way to fail it: BSD `mktemp -d` falls back past one.
+    let bin = fixture.path("bin");
+    fs::create_dir_all(&bin).expect("a directory for the stand-in");
+    let stand_in = bin.join("mktemp");
+    fs::write(
+        &stand_in,
+        "#!/bin/sh\necho 'mktemp: cannot make a directory' >&2\nexit 1\n",
+    )
+    .expect("the stand-in is written");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755))
+            .expect("the stand-in is executable");
+    }
+    let failing_path = std::env::join_paths(std::iter::once(bin.clone()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .expect("a PATH");
+    let failing_path = failing_path.to_str().expect("a UTF-8 PATH");
     for (args, env, says) in [
         (
             [
@@ -870,7 +891,7 @@ fn the_scripts_refuse_what_they_cannot_run() {
         ),
         (
             ["--log", log, "--known-flakes", flakes],
-            vec![("TMPDIR", no_tmp.to_str().expect("a UTF-8 path"))],
+            vec![("PATH", failing_path)],
             "point TMPDIR at a writable directory",
         ),
     ] {
