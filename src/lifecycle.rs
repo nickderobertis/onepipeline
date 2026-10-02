@@ -55,6 +55,9 @@ pub struct Launch {
     /// template — or why the run's records could not say. `None` proposes no
     /// name, and `onevcs` derives one.
     pub branch_naming: Option<crate::branchname::RunNaming>,
+    /// The note deliveries the loop has handed off and not yet recorded, which
+    /// a re-dispatch waits for before it reads the notes it is composed with.
+    pub(crate) notes_in_flight: engine::DeliveriesInFlight,
 }
 
 /// Run one lifecycle node to settlement, re-dispatching it while its
@@ -250,10 +253,13 @@ pub fn execute(
         // ruling issued during one attempt is in the hands of the judge that
         // rules on the next. Read here, once, and handed to both the record and
         // the composition, so the two cannot name different notes.
-        notes = match crate::note::standing_for(paths, &node.id)
-            .and_then(|standing| crate::note::drain_carried(paths, &node.id, standing))
-        {
-            Ok(standing) => standing.notes(),
+        notes = match carried_into_redispatch(
+            paths,
+            &node.id,
+            &launch.notes_in_flight,
+            engine::DELIVERY_RECORD_PATIENCE,
+        ) {
+            Ok(notes) => notes,
             // A record this build cannot read is refused rather than read past:
             // continuing without the notes would compose the very dispatch this
             // fold exists to prevent, and saying so is the one honest answer.
@@ -288,6 +294,32 @@ pub fn execute(
         ));
         last_preserved = Some(*preserved);
     }
+}
+
+/// The notes a re-dispatch of `node` is composed with, read off the run's record
+/// once no note delivery to `node` is still on its way there — or, after
+/// `patience`, from the record as it stands, saying so on the driver's output.
+///
+/// The conversation that just ended answered every note it was offered before it
+/// ended, but the loop journals each answer on its own thread and in its own
+/// time: read before that, the record lacks a note the worker had already read,
+/// and the attempt that continues its work starts without it.
+fn carried_into_redispatch(
+    paths: &RunPaths,
+    node: &str,
+    notes_in_flight: &engine::DeliveriesInFlight,
+    patience: Duration,
+) -> crate::error::Result<Vec<crate::note::RecordedNote>> {
+    if !notes_in_flight.recorded_for(node, patience) {
+        eprintln!(
+            "onepipeline: node '{node}': a note delivered to it was still not on the run's \
+             record after {}s, so its re-dispatch is composed from the record as it stands",
+            patience.as_secs()
+        );
+    }
+    crate::note::standing_for(paths, node)
+        .and_then(|standing| crate::note::drain_carried(paths, node, standing))
+        .map(|standing| standing.notes())
 }
 
 /// Where a lifecycle node's execution stood when its identity refused the
@@ -2420,6 +2452,107 @@ pub fn ordered_steps(node: &Node) -> std::result::Result<Vec<Step>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run directory of this test's own, emptied first.
+    fn redispatch_scratch(name: &str) -> RunPaths {
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-redispatch-{name}-{}",
+            crate::sys::pid()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        paths
+    }
+
+    /// The commit the loop journals once a conversation answered the note it
+    /// was offered.
+    fn record_delivery(paths: &RunPaths, text: &str) {
+        let reached = crate::note::Reached::Worker;
+        crate::journal::Journal::open(paths)
+            .emit(
+                crate::journal::PipelineKind::EditCommitted,
+                crate::journal::labels(&paths.run, None),
+                crate::journal::payload(&[(
+                    "operations",
+                    serde_json::json!([crate::edits::Operation::NoteDelivered {
+                        node: "build".into(),
+                        addressee: crate::note::Addressee::Worker,
+                        text: text.parse().expect("a usable note"),
+                        criterion: None,
+                        shown_to: reached.shown_at_delivery().to_vec(),
+                        routed_to: reached.routed_to().to_vec(),
+                        reached,
+                    }]),
+                )]),
+            )
+            .expect("the delivery is journalled");
+    }
+
+    /// A re-dispatch is composed only once a delivery to its node that is still
+    /// on its way to the record has arrived there.
+    ///
+    /// The order a busy loop produces, by construction: the conversation has
+    /// answered — the delivery is outstanding — and the commit is not written
+    /// until the composing thread has been started and left to run. Composed
+    /// from the record as it stood, the attempt would carry nothing.
+    #[test]
+    fn a_redispatch_waits_for_an_answered_delivery_to_reach_the_record() {
+        let paths = redispatch_scratch("waits");
+        let in_flight = engine::DeliveriesInFlight::default();
+        let pending = in_flight.begin(&BTreeSet::from(["build".to_owned()]));
+        let carried = std::thread::scope(|scope| {
+            let composing = scope.spawn(|| {
+                carried_into_redispatch(&paths, "build", &in_flight, Duration::from_secs(30))
+            });
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(
+                !composing.is_finished(),
+                "the re-dispatch was composed while a delivery to its node was still on its \
+                 way to the record"
+            );
+            record_delivery(&paths, "stop editing src/old.rs");
+            drop(pending);
+            composing.join().expect("the composition returns")
+        })
+        .expect("the record reads");
+        assert_eq!(
+            carried
+                .iter()
+                .map(|note| note.text.as_str())
+                .collect::<Vec<_>>(),
+            ["stop editing src/old.rs"],
+            "the re-dispatch did not carry the note its node's conversation read"
+        );
+        let _ = std::fs::remove_dir_all(paths.dir.parent().expect("the runs root"));
+    }
+
+    /// A delivery that never reaches the record costs a re-dispatch its patience
+    /// and no more: it is then composed from the record as it stands.
+    #[test]
+    fn a_redispatch_whose_delivery_never_arrives_is_composed_from_the_record_after_its_patience() {
+        let paths = redispatch_scratch("patience");
+        record_delivery(&paths, "an earlier ruling");
+        let in_flight = engine::DeliveriesInFlight::default();
+        let _never_answered = in_flight.begin(&BTreeSet::from(["build".to_owned()]));
+        let began = Instant::now();
+        let carried =
+            carried_into_redispatch(&paths, "build", &in_flight, Duration::from_millis(100))
+                .expect("the record reads");
+        assert!(
+            began.elapsed() >= Duration::from_millis(100),
+            "the re-dispatch did not wait for the delivery at all"
+        );
+        assert_eq!(
+            carried
+                .iter()
+                .map(|note| note.text.as_str())
+                .collect::<Vec<_>>(),
+            ["an earlier ruling"],
+            "the re-dispatch was not composed from the record as it stands"
+        );
+        let _ = std::fs::remove_dir_all(paths.dir.parent().expect("the runs root"));
+    }
 
     /// The three drafts a publication can end in are told apart by status as well
     /// as by word: one awaiting a release holds the run, one the plan asked for and

@@ -1066,8 +1066,10 @@ fn converge(
     let rules = executor_rules()?;
     let (tx, rx): (Sender<Message>, Receiver<Message>) = mpsc::channel();
     // Where a note waits for its conversation, so this loop does not: see
-    // [`NoteDeliveries`].
-    let mut deliveries = NoteDeliveries::start(&tx);
+    // [`NoteDeliveries`]. What it holds outstanding is shared with every
+    // dispatch this loop starts, which is what lets a re-dispatch wait for it.
+    let notes_in_flight = DeliveriesInFlight::default();
+    let mut deliveries = NoteDeliveries::start(&tx, &notes_in_flight);
     let mut in_flight: BTreeMap<String, Dispatch> = BTreeMap::new();
     let stall_after = Duration::from_secs(stall_after_seconds());
     let mut upstreams = crate::crossdag::Observer::of_run(paths, state);
@@ -1311,6 +1313,7 @@ fn converge(
             &paused,
             &releases,
             &mut workspaces,
+            &notes_in_flight,
         )?;
         if started_here {
             derived = None;
@@ -1707,7 +1710,10 @@ fn converge(
                 // what it records is what an inline delivery would have — and the
                 // envelopes claimed behind it are judged on the next pass.
                 Message::NoteAnswered(answer) => {
-                    let witnessed = deliveries
+                    // Held until the delivery is on the record — and released
+                    // however this arm ends — so a re-dispatch waiting on it
+                    // reads the record with the delivery in it.
+                    let (witnessed, _recording) = deliveries
                         .as_mut()
                         .map(NoteDeliveries::answered)
                         .unwrap_or_default();
@@ -3031,6 +3037,8 @@ struct Handed {
 /// is [`reconcile_edits`]'s to say.
 pub(crate) struct NoteDeliveries {
     handing: Sender<Handed>,
+    /// What every dispatch thread reads the outstanding delivery's nodes from.
+    in_flight: DeliveriesInFlight,
     /// The envelope the thread holds, from the moment it is handed until its
     /// answer is recorded.
     outstanding: Option<Outstanding>,
@@ -3042,6 +3050,100 @@ struct Outstanding {
     nodes: BTreeSet<String>,
     /// What the stream relayed of those nodes' addressed conversations meanwhile.
     witnessed: Vec<Envelope>,
+    /// Those nodes, as every dispatch thread sees them outstanding: released
+    /// when this is dropped, which is after the answer is recorded or when the
+    /// loop that owns it has gone.
+    pending: PendingDelivery,
+}
+
+/// How long a re-dispatch waits for a note delivery to its node to reach the
+/// run's record before it is composed from the record as it stands.
+///
+/// A delivery is outstanding from the moment the loop hands it to the delivery
+/// thread until the loop has journalled the conversation's answer; a
+/// conversation that has ended has already answered, so what is left is the
+/// loop's own turn to write it. Long enough for a loop busy with a pass, and
+/// bounded so a delivery thread that never answers costs a re-dispatch this
+/// much and no more.
+pub(crate) const DELIVERY_RECORD_PATIENCE: Duration = Duration::from_secs(30);
+
+/// The nodes a note delivery is outstanding for, shared between the loop that
+/// alone adds and removes them and the dispatch threads that compose a
+/// re-dispatch from the run's record.
+///
+/// A note the conversation answered is journalled by the loop, and the attempt
+/// after it is composed on the dispatch's own thread from the journal: nothing
+/// else orders the two, and a re-dispatch composed first starts without a note
+/// the worker had already read.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DeliveriesInFlight(std::sync::Arc<InFlight>);
+
+/// Each node with a delivery outstanding — how many, and since when — and the
+/// signal a waiting re-dispatch is woken by when one ends.
+#[derive(Debug, Default)]
+struct InFlight {
+    held: std::sync::Mutex<BTreeMap<String, (usize, Instant)>>,
+    ended: std::sync::Condvar,
+}
+
+impl DeliveriesInFlight {
+    fn held(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, (usize, Instant)>> {
+        self.0
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Mark `nodes` outstanding until the answer this returns is dropped.
+    pub(crate) fn begin(&self, nodes: &BTreeSet<String>) -> PendingDelivery {
+        let mut held = self.held();
+        for node in nodes {
+            held.entry(node.clone()).or_insert((0, Instant::now())).0 += 1;
+        }
+        PendingDelivery {
+            in_flight: self.clone(),
+            nodes: nodes.clone(),
+        }
+    }
+
+    /// Since when a delivery to `node` has been outstanding, if one is.
+    pub(crate) fn outstanding_since(&self, node: &str) -> Option<Instant> {
+        self.held().get(node).map(|(_, since)| *since)
+    }
+
+    /// Wait until no delivery to `node` is outstanding, for at most `patience`:
+    /// `true` once none is, `false` where one still was when it ran out.
+    pub(crate) fn recorded_for(&self, node: &str, patience: Duration) -> bool {
+        let (held, _) = self
+            .0
+            .ended
+            .wait_timeout_while(self.held(), patience, |held| held.contains_key(node))
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !held.contains_key(node)
+    }
+}
+
+/// One delivery's nodes, outstanding until this is dropped.
+#[derive(Debug)]
+pub(crate) struct PendingDelivery {
+    in_flight: DeliveriesInFlight,
+    nodes: BTreeSet<String>,
+}
+
+impl Drop for PendingDelivery {
+    fn drop(&mut self) {
+        let mut held = self.in_flight.held();
+        for node in &self.nodes {
+            if let Some((count, _)) = held.get_mut(node) {
+                *count -= 1;
+                if *count == 0 {
+                    held.remove(node);
+                }
+            }
+        }
+        drop(held);
+        self.in_flight.0.ended.notify_all();
+    }
 }
 
 impl NoteDeliveries {
@@ -3049,7 +3151,7 @@ impl NoteDeliveries {
     ///
     /// `None` where the host refuses this process a thread, and the loop then
     /// delivers inline — slower to journal, and recording the same thing.
-    fn start(tx: &Sender<Message>) -> Option<Self> {
+    fn start(tx: &Sender<Message>, in_flight: &DeliveriesInFlight) -> Option<Self> {
         let (handing, handed) = mpsc::channel::<Handed>();
         let tx = tx.clone();
         // llmlint: ignore-block[changed_behavior_has_e2e] the `None` this answers is a host
@@ -3085,6 +3187,7 @@ impl NoteDeliveries {
         // llmlint: ignore-end[changed_behavior_has_e2e]
         Some(Self {
             handing,
+            in_flight: in_flight.clone(),
             outstanding: None,
             behind: std::collections::VecDeque::new(),
         })
@@ -3121,9 +3224,11 @@ impl NoteDeliveries {
             offered_at,
         }) {
             Ok(()) => {
+                let pending = self.in_flight.begin(&nodes);
                 self.outstanding = Some(Outstanding {
                     nodes,
                     witnessed: Vec::new(),
+                    pending,
                 });
                 Ok(())
             }
@@ -3151,10 +3256,12 @@ impl NoteDeliveries {
         }
     }
 
-    fn answered(&mut self) -> Vec<Envelope> {
+    /// What the stream relayed while the answer was on its way, and the
+    /// delivery's nodes, still outstanding until the caller has recorded it.
+    fn answered(&mut self) -> (Vec<Envelope>, Option<PendingDelivery>) {
         self.outstanding
             .take()
-            .map(|outstanding| outstanding.witnessed)
+            .map(|outstanding| (outstanding.witnessed, Some(outstanding.pending)))
             .unwrap_or_default()
     }
 }
@@ -3942,6 +4049,7 @@ fn start_ready(
     paused: &BTreeSet<String>,
     releases: &crate::release::Watch,
     workspaces: &mut crate::pool::Workspaces,
+    notes_in_flight: &DeliveriesInFlight,
 ) -> Result<bool> {
     // Nothing new starts once this run's shutdown has begun. Asked here rather
     // than left to the teardown that is coming: the driver goes on scheduling
@@ -4009,6 +4117,27 @@ fn start_ready(
         // the same attempt, pinned to the preserved branch — so it is that
         // request, and not the plan node's, the identity is asked about.
         let mut resume = workspaces.resuming(&node.id);
+        // A resumed re-dispatch is composed below from what the record says the
+        // node holds, and a note the attempt before it read may still be on its
+        // way there — answered, and waiting for this loop to journal it. This
+        // loop is the writer it would wait for, so it waits by leaving the node
+        // for a later pass rather than by blocking, for as long as a dispatch
+        // thread would.
+        if resume.is_some() {
+            if let Some(since) = notes_in_flight.outstanding_since(&node.id) {
+                if since.elapsed() < DELIVERY_RECORD_PATIENCE {
+                    workspaces.keep_resuming(&node.id, resume);
+                    continue;
+                }
+                eprintln!(
+                    "onepipeline: node '{}': a note delivered to it was still not on the run's \
+                     record after {}s, so its resumed re-dispatch is composed from the record \
+                     as it stands",
+                    node.id,
+                    DELIVERY_RECORD_PATIENCE.as_secs()
+                );
+            }
+        }
         let opens = resume
             .as_deref()
             .map_or(&node, |continuation| &continuation.node);
@@ -4094,6 +4223,7 @@ fn start_ready(
             cancel.clone(),
             tx.clone(),
             resume,
+            notes_in_flight,
         )?;
         let now = Instant::now();
         in_flight.insert(
@@ -4214,6 +4344,7 @@ fn spawn(
     cancel: CancellationToken,
     tx: Sender<Message>,
     resume: Option<Box<crate::lifecycle::Continuation>>,
+    notes_in_flight: &DeliveriesInFlight,
 ) -> Result<()> {
     // The labels a `node_label` rule selects on. An executor is chosen once per
     // node, before its steps run, so a node's own labels are what exists here.
@@ -4251,6 +4382,7 @@ fn spawn(
             .repo
             .as_ref()
             .and_then(|_| crate::branchname::Naming::of_run(&paths, launch)),
+        notes_in_flight: notes_in_flight.clone(),
     };
     std::thread::Builder::new()
         .name(format!("dispatch-{}", node.id))
@@ -9514,6 +9646,58 @@ mod tests {
         );
     }
 
+    /// A delivery's nodes stop being outstanding on every path that ends it: once
+    /// its answer — a delivery or a refusal — has been recorded, and when the
+    /// loop that owned it has gone with the answer never recorded.
+    ///
+    /// Either way a re-dispatch waiting on its node is woken, rather than left to
+    /// wait out its patience on an entry nothing will remove.
+    #[test]
+    fn a_delivery_stops_being_outstanding_once_recorded_or_abandoned() {
+        let nodes = BTreeSet::from(["build".to_owned()]);
+        let held = |in_flight: &DeliveriesInFlight| NoteDeliveries {
+            handing: mpsc::channel().0,
+            in_flight: in_flight.clone(),
+            outstanding: Some(Outstanding {
+                nodes: nodes.clone(),
+                witnessed: Vec::new(),
+                pending: in_flight.begin(&nodes),
+            }),
+            behind: std::collections::VecDeque::new(),
+        };
+
+        // Answered: outstanding until the caller has recorded the answer, which
+        // is when it lets go of what `answered` handed it.
+        let in_flight = DeliveriesInFlight::default();
+        let mut deliveries = held(&in_flight);
+        let (_, recording) = deliveries.answered();
+        assert!(
+            in_flight.outstanding_since("build").is_some(),
+            "the delivery stopped being outstanding before its answer was recorded"
+        );
+        std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| in_flight.recorded_for("build", Duration::from_secs(30)));
+            std::thread::sleep(LONG_ENOUGH_TO_HAVE_RUN);
+            assert!(!waiting.is_finished(), "the wait ended before the record");
+            drop(recording);
+            assert!(
+                waiting.join().expect("the wait returns"),
+                "the wait ran out rather than seeing the answer recorded"
+            );
+        });
+
+        // Abandoned: the loop has gone with the answer outstanding.
+        let in_flight = DeliveriesInFlight::default();
+        let deliveries = held(&in_flight);
+        assert!(in_flight.outstanding_since("build").is_some());
+        drop(deliveries);
+        assert!(
+            in_flight.outstanding_since("build").is_none(),
+            "a delivery the loop abandoned is still outstanding"
+        );
+        assert!(in_flight.recorded_for("build", Duration::ZERO));
+    }
+
     /// Envelopes held behind an outstanding note survive a queue that refuses the
     /// next claim, and are judged, in order, once the queue answers again.
     ///
@@ -9578,6 +9762,7 @@ mod tests {
         let (handing, _handed) = mpsc::channel();
         let mut deliveries = NoteDeliveries {
             handing,
+            in_flight: DeliveriesInFlight::default(),
             outstanding: None,
             behind: channel
                 .claim_commands()
