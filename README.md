@@ -605,7 +605,7 @@ Anything nothing in the stack measures is reported absent, never as a zero.
 ask `oneagentgraph` for it; every other line is the one `status` prints without the
 flag, so a watch that used to cut the view with a shell filter is one plain command.
 
-![a live run's state: ACTIVE, NO OBSERVER, 2 of 6 nodes done, then one line each for docs and service saying how long it has been running, how many events it has produced and how long ago the last one was, then the free space on the filesystem holding the runs root and a provider-health line](screenshots/images/status.svg)
+![a live run's state: ACTIVE, NO OBSERVER, 2 of 6 nodes done, then a line saying its previous driver exited 2s ago settled awaiting-planner, then one line each for docs and service saying how long it has been running, how many events it has produced and how long ago the last one was, then the free space on the filesystem holding the runs root and a provider-health line](screenshots/images/status.svg)
 
 Where a run's wall clock went, and what each party spent, is its own view:
 
@@ -671,7 +671,7 @@ would refuse (malformed, another run's, past the journal's end, or inside a
 record) is refused the same way, exiting `2` with the reason on stderr and nothing
 on stdout.
 
-![a run's whole event document: one line per event carrying its timestamp, its stream and its kind — run-started, node-ready, node-dispatched, node-held, decision-pending, human-attested, node-settled, driver-adopted — closed by a status trailer and a resume line reading -- cursor 1:tracked-release:48219](screenshots/images/monitor.svg)
+![a run's whole event document: one line per event carrying its timestamp, its stream and its kind — run-started, node-ready, node-dispatched, node-held, decision-pending, human-attested, node-settled, driver-exited, driver-adopted — closed by a status trailer and a resume line reading -- cursor 1:tracked-release:48219](screenshots/images/monitor.svg)
 
 `onepipeline watch RUN` is the bounded wait a supervisor puts in a wake loop, and
 it takes the same `--filter NAME|SPEC` / `--all` profile selection `monitor` does.
