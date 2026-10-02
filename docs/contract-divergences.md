@@ -819,7 +819,7 @@ ruling confirmed, and the driver contract now states the conjunction outright.
 
 ## 27. `adopt` now ends the parked driver it is taking the run over from — RESOLVED
 
-*Narrowed by entry 105: a `PARKED` run is a live driver and is refused; the taking-over
+*Narrowed by entry 106: a `PARKED` run is a live driver and is refused; the taking-over
 below stands only for a run the verdict calls undriven.*
 
 **Ruling: confirmed. `adopt` may politely end a driver the liveness verdict has
@@ -8645,7 +8645,7 @@ half's unwinding and the let-go's ordering, `projection::tests` that the fold is
 and `payload::tests` its document and that the payload `docs/contract.md` states is
 that document.
 
-## 105. A live driver that had gone quiet read as a run nothing was driving — RESOLVED
+## 106. A live driver that had gone quiet read as a run nothing was driving — RESOLVED
 
 **Ruling: the user accepted onepipeline#528 and ruled it into the plan
 `run-ending-liveness-2026-10-01` (node `op-parked-liveness`), which fixes the contract

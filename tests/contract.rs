@@ -7120,7 +7120,7 @@ const RULINGS: &[(&str, &str)] = &[
     ("24.", "NodeControls"),
     ("25.", "drive-run RUN"),
     ("26.", "nothing else able to move"),
-    // Narrowed by entry 105: the taking-over stands for an undriven run, and a
+    // Narrowed by entry 106: the taking-over stands for an undriven run, and a
     // `PARKED` one is refused.
     (
         "27.",
@@ -7199,7 +7199,7 @@ const RULINGS: &[(&str, &str)] = &[
          over, is how a crash reads**",
     ),
     // onepipeline#528: a live driver gone quiet is still driving the run.
-    ("105.", "**`PARKED` is a live driver, and is driven.**"),
+    ("106.", "**`PARKED` is a live driver, and is driven.**"),
 ];
 
 #[test]
