@@ -1080,7 +1080,6 @@ impl Asked {
     }
 }
 
-/// How many records the run's reply log holds.
 fn replies_on(world: &World, run: &str) -> usize {
     std::fs::read_to_string(world.run_file(run, "channel/replies.jsonl"))
         .unwrap_or_default()
@@ -1089,8 +1088,8 @@ fn replies_on(world: &World, run: &str) -> usize {
 }
 
 /// Answer `asked` with `envelope` by its correlation, and hold the answer to
-/// entry 64's delivered receipt, the asker's ruling, and a journal that gained
-/// `planner-replied` and never `completion-requested`.
+/// entry 64's receipt with its verdict delivered, the asker's ruling, and a
+/// journal that gained `planner-replied` and never `completion-requested`.
 fn ruled(world: &World, run: &str, asked: Asked, envelope: &Value) -> Value {
     let replied = world.events_of(run, "planner-replied").len();
     let answered = world.run_with_stdin(
@@ -1099,14 +1098,23 @@ fn ruled(world: &World, run: &str, asked: Asked, envelope: &Value) -> Value {
     );
     answered.exited(0);
     let receipt = answered.json();
-    assert_eq!(
-        keys(&receipt),
-        ["reply", "state", "verdict"],
-        "the receipt is not entry 64's: {receipt}"
-    );
     assert!(receipt["reply"].as_u64().is_some(), "{receipt}");
-    assert_eq!(receipt["state"], json!("delivered"), "{receipt}");
     assert_eq!(receipt["verdict"], json!("delivered"), "{receipt}");
+    if envelope.get("commands").is_some() {
+        assert_eq!(
+            keys(&receipt),
+            ["commands", "reply", "state", "verdict"],
+            "the receipt is not entry 64's: {receipt}"
+        );
+        assert_eq!(receipt["commands"], receipt["state"], "{receipt}");
+    } else {
+        assert_eq!(
+            keys(&receipt),
+            ["reply", "state", "verdict"],
+            "the receipt is not entry 64's: {receipt}"
+        );
+        assert_eq!(receipt["state"], json!("delivered"), "{receipt}");
+    }
     let ruling = asked.ruling();
     for field in ["completion", "reason", "message"] {
         assert_eq!(
@@ -1178,7 +1186,6 @@ fn a_correlated_ruling_on_a_settled_run_reaches_its_asker_and_leaves_the_run_owe
     assert_eq!(replies_on(&owed, &run), replies, "the refusal was queued");
     assert_eq!(owed.kinds(&run), journal, "the refusal was journalled");
 
-    // A correlation never raised here is refused by name.
     refused_by_name(&owed, &run, "c-never-raised-here");
 
     let answered = met.correlation.clone();
@@ -1294,6 +1301,35 @@ fn a_correlated_ruling_on_a_live_run_reaches_its_asker_and_never_completes_the_r
     assert!(
         !world.run_file(&run, "result.json").is_file(),
         "a question's ruling settled the run"
+    );
+    world.release("build.go");
+}
+
+/// A correlated ruling beside commands is the same ruling: the commands take
+/// their own path, and the verdict half reaches its asker without being
+/// journalled as the run asking to complete.
+#[test]
+fn a_correlated_ruling_beside_commands_reaches_its_asker_and_never_completes_the_run() {
+    let world = World::new("wake-correlated-commands");
+    let run = held(&world, "correlatedcommands", "build");
+    let asked = Asked::on(&world, &run, "is the bar met?", false);
+
+    ruled(
+        &world,
+        &run,
+        asked,
+        &json!({
+            "version": onepipeline::channel::REPLY_ENVELOPE_VERSION,
+            "completion": true,
+            "reason": "the bar is met",
+            "commands": [{"op": "note", "id": "build", "addressee": "worker",
+                          "text": "the bar is met", "deliver": "next"}],
+        }),
+    );
+    assert!(
+        !world.events_of(&run, "edit-committed").is_empty(),
+        "the commands beside the ruling were not committed: {:?}",
+        world.kinds(&run)
     );
     world.release("build.go");
 }
