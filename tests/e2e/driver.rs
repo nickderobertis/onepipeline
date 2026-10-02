@@ -889,6 +889,18 @@ fn a_live_driver_that_has_stopped_writing_reads_parked_driven_and_not_adoptable(
         world.run_on(command, &argv.join(" "))
     };
 
+    // An update nobody has read, which is no decision: the run still goes quiet,
+    // and its live driver will read the update, so `runs` keeps saying so.
+    world
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "finding",
+            "--message",
+            "the gate is slow",
+        ])
+        .exited(0);
     world.until("the run to be reported parked", |_| {
         parked(&["status", &run]).stdout.contains("PARKED")
     });
@@ -908,6 +920,10 @@ fn a_live_driver_that_has_stopped_writing_reads_parked_driven_and_not_adoptable(
             rendered.stdout
         );
     }
+
+    parked(&["runs"])
+        .out_has("1 planner update(s) waiting (1 finding)")
+        .out_has("onepipeline next quiet");
 
     let reading = parked(&["status", &run, "--json"]).json();
     assert_eq!(reading["liveness"], "PARKED", "{reading}");
@@ -1761,10 +1777,11 @@ fn adopt_refuses_a_run_something_is_still_driving() {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
 
+    let pid = world.run_json(&run, "launch.json")["pid"].clone();
     world
         .run(&["adopt", &run, "--detach"])
         .exited(REFUSED)
-        .err_has("still being driven")
+        .err_has(&format!("still being driven by driver pid {pid} (ACTIVE)"))
         .err_has("onepipeline stop still-live");
     world.release("build.go");
 }

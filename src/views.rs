@@ -5067,6 +5067,27 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// A quiet run whose record names no pid — what an older build left — is
+    /// still `PARKED`, and its advice says its driver is alive without inventing
+    /// a pid, and still offers `stop` rather than `adopt`.
+    #[test]
+    fn a_quiet_run_whose_record_names_no_pid_is_advised_without_one() {
+        let root = scratch("quiet-no-pid");
+        let paths = quiet_run(&root, "demo");
+        without(&paths, &["pid", "started"]);
+        let view = RunView::open(&paths).expect("the run reads");
+        assert_eq!(view.liveness(), DriverLiveness::Parked);
+        let rendered = status(&Survey::of(&root));
+        assert!(
+            rendered.contains("PARKED: its driver is alive and its journal has been quiet for "),
+            "{rendered}"
+        );
+        assert!(rendered.contains("onepipeline stop demo"), "{rendered}");
+        assert!(!rendered.contains("driver pid"), "{rendered}");
+        assert!(!rendered.contains("adopt"), "{rendered}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// The same silence, with a blocking surface nobody has answered.
     ///
     /// A decision point takes two forms, and `settlement_of` already reports this
