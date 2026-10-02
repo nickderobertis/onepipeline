@@ -380,9 +380,12 @@ mod tests {
         ledger("passes");
     }
 
+    /// Prints what cargo prints when it builds: inside a test's output that is
+    /// no rebuild, and the report must not read it as one.
     #[test]
     fn fails() {
         ledger("fails");
+        println!("   Compiling impostor v0.0.0");
         panic!("deliberately failing");
     }
 
