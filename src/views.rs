@@ -716,6 +716,7 @@ impl DriverLiveness {
     /// never [`Parked`](Self::Parked): a quiet driver that is still alive is still
     /// driving, and `adopt` is the way back only from the two that are not.
     pub fn is_undriven(self) -> bool {
+        // llmlint: ignore[changed_behavior_has_e2e] no verb can produce `Undriven`: nothing in this crate constructs it as a run's verdict, so no journey through the binary reaches this arm, and it exists for a consumer of the published enum — which is why `driver::tests::an_undriven_run_is_the_settlement_a_planner_must_intervene_in` holds it through that public API. The `Parked` and `DriverDead` arms are driven end to end in `tests/e2e/driver.rs`, `cancellation.rs` and `watch.rs`.
         matches!(self, Self::DriverDead | Self::Undriven)
     }
 }
