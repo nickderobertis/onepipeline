@@ -197,18 +197,6 @@ impl Store {
         })
     }
 
-    /// Every source an item written to `source` can land in under this configuration's
-    /// `routes`: `source` itself first, then each source it routes an item to — which is
-    /// every source a routed write can put a home's member project in. Only `source` where
-    /// the configuration does not load, because then nothing it routes can be read either.
-    pub(crate) fn reachable(&self, source: &SourceName) -> Vec<SourceName> {
-        config::load(&self.dir, &self.environment, &Layer::default()).map_or_else(
-            // llmlint: ignore[changed_behavior_has_e2e] a configuration that does not load fails the write-back attempt itself at `Attempt::open`, before any store call, and that failure is what every journey of an unloadable store observes; this fallback only shapes a baseline no call is then made against.
-            |_| vec![source.clone()],
-            |loaded| loaded.config.routes().reachable(source),
-        )
-    }
-
     /// Read one qualified project id as the plan it holds, keeping what a checker and the
     /// write-back need beside it.
     ///
@@ -742,7 +730,9 @@ impl Reader {
                 origin: None,
                 project: selector.clone(),
                 commented_since: None,
-                include_members: true,
+                // Asked only of a home that names members: the store learns them by reading the
+                // home again, and a plan of one source needs no second read of it.
+                include_members: !members.is_empty(),
                 paging: Paging {
                     limit: self.page,
                     token,

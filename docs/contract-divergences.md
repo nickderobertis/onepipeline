@@ -8714,7 +8714,9 @@ consuming it, tracked in two systems, could only be two disconnected plans.
 
 **The read.** The store is `onetaskgraph` 0.2.57, the release that carries `routes`,
 `TaskRequest.include_members` and the Linear plugin's `status_mapping`. `Reader::tasks`
-(`src/taskgraph.rs`) reads the launched project with `include_members`. A task is a node
+(`src/taskgraph.rs`) reads the launched project with `include_members` wherever the home
+names members. A home naming none is read as before, with no second read of it, so a
+plan of one source costs what it did. A task is a node
 of the plan when it is a task of the home's project in the home's source, or of a
 member's project in that member's source; any other is refused, naming it, as before. A
 blocking edge between tasks of two of the plan's sources is a dependency, resolved
@@ -8731,11 +8733,15 @@ adopted by an engine older than this release**.
 **The write-back.** `known_id` builds a lineage's item id in the source its task record
 names, else in the home's. A shadow origin it reads is still taken only in the home's
 source: only a build older than member projects records one, and none of those named a
-member. `LandedBaseline::checked` accepts a destination in the sources this run's items
-can be in, and refuses any other. That set is the home's source, every member task's
-own, and every source the home's source routes to under the configuration the launch
-directory discovers. Routes are the one way a member project comes to exist mid-run, so
-the set is read from the snapshot and the configuration alone, never from a source.
+member. `LandedBaseline::checked` accepts a destination only in the home's source or in
+the source of one of the run's actual member projects, and refuses any other. The run
+knows the home's source and each member task's own from its snapshot. A member created
+after the launch, the one a routed live `add` lands in, is known only to the store, so
+where the file names an item in neither, the read-back asks the store once for the
+home's `onetaskgraph.members`, under the floor deadline, and only then. A source the
+home's source routes to but holds no member in is not one of the run's, and an item
+there is refused. Where the home cannot be read, that is said, and the item is refused.
+A stop reads the baseline only after it has served any wait the store asked for.
 `create` still copies through the store with `CopyScope::Members` and `destination` the
 home's source; the store's routing places each item, and the engine never chooses a
 source. `writeback-landed.json` and `writeback-projections.jsonl` keep their schemas and
@@ -8754,9 +8760,13 @@ holds the read, the order across both sources, the `queued` claim and the settle
 words. `a_live_add_routed_to_the_second_source_lands_in_a_member_project_created_for_it`
 holds the routed `add`, and
 `a_stop_releases_and_an_adoption_reclaims_the_unstarted_items_of_both_sources` holds
-the release and the baseline read back by another process.
+the release and the baseline read back by another process; the `add` journey also
+stops and adopts after the add, so the member the store created vouches for its item.
+`a_baseline_item_in_a_routed_source_with_no_member_there_is_refused` holds the refusal
+of a source the plan source only routes to.
 `an_adoption_with_no_baseline_reads_a_member_task_by_its_id_in_its_own_source` holds
 `known_id` for a member task, in a run whose baseline is gone. `taskgraph::tests` holds
-the refusals, and `writeback::tests` holds `known_id` and `checked`.
+the refusals, and `writeback::tests` holds `known_id`, `checked`, and when the store is
+asked for the members.
 `plan::tests::an_older_ledgers_task_record_loads_and_writes_back_unchanged`
 holds the older ledger.

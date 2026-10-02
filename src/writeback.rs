@@ -1153,11 +1153,6 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     let Some(snapshot) = snapshot_of(paths, launch, &state, &statuses, Claim::Released) else {
         return;
     };
-    let mut baseline = Baseline::load(
-        &paths.dir,
-        &snapshot.project,
-        &plan_sources(&store, &snapshot),
-    );
     // A rate limit the driver was waiting out binds this process too: the release asks the store
     // nothing before the wait the store named has passed. It waits that out where the wait ends
     // inside the release's own deadline, and otherwise leaves the claim standing and says so,
@@ -1197,6 +1192,13 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
         std::thread::sleep(left);
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
+    // Read once the wait is served, because reading it can ask the store for the home's members.
+    let mut baseline = Baseline::load(
+        &paths.dir,
+        &snapshot.project,
+        &plan_sources(&snapshot),
+        || member_sources(&store, &snapshot.project),
+    );
     let at = crate::sys::now_rfc3339();
     let started = Instant::now();
     // llmlint: ignore-block[changed_behavior_has_e2e] a stop whose release outlasts its deadline
@@ -1315,7 +1317,8 @@ fn worker(
             Baseline::load(
                 &run_dir,
                 &snapshot.project,
-                &plan_sources(&store, &snapshot),
+                &plan_sources(&snapshot),
+                || member_sources(&store, &snapshot.project),
             )
         });
         let at = crate::sys::now_rfc3339();
@@ -2499,14 +2502,11 @@ fn known_id(snapshot: &Snapshot, lineages: &Lineages, root: &str) -> Option<Glob
     })
 }
 
-/// The sources this run's items can be in: the home project's, each member task's own as the
-/// launch read it, and every source the home's source routes an item to — the one way a
-/// member project comes to exist mid-run, a live `add` whose repository routes elsewhere.
-/// Read from the snapshot and the configuration alone, never from a source.
-fn plan_sources(store: &Store, snapshot: &Snapshot) -> BTreeSet<SourceName> {
-    let home = snapshot.project.global().source;
-    let mut sources: BTreeSet<SourceName> = store.reachable(&home).into_iter().collect();
-    sources.insert(home);
+/// The sources the run itself knows its items are in: the home project's, and each member
+/// task's own as the launch read it. A member project created after the launch — the one a
+/// routed live `add` lands in — is the store's to name; see [`member_sources`].
+fn plan_sources(snapshot: &Snapshot) -> BTreeSet<SourceName> {
+    let mut sources = BTreeSet::from([snapshot.project.global().source]);
     sources.extend(
         snapshot
             .nodes
@@ -2514,6 +2514,55 @@ fn plan_sources(store: &Store, snapshot: &Snapshot) -> BTreeSet<SourceName> {
             .filter_map(|node| node.task_record.as_ref()?.source.clone()),
     );
     sources
+}
+
+/// The sources of the member projects the home records at `onetaskgraph.members` — the store's
+/// own list of the members it has created for this plan — read by one `project show` of the
+/// home under the floor deadline. A source a route merely could send an item to is not one of
+/// them until the store has created a member there. Empty, and said on standard error, where
+/// the home cannot be read: the items it would have vouched for are then read by their ids.
+fn member_sources(store: &Store, project: &QualifiedId) -> Vec<SourceName> {
+    let home = project.global();
+    let read = || -> Result<Vec<SourceName>, Failed> {
+        let built = opened_within(store, Layer::default(), Deadline::Floor)?.map_err(|error| {
+            Failed::classed(
+                format!("the store's configuration cannot be read: {error}"),
+                Classified::of_config(&error),
+            )
+        })?;
+        let runtime = crate::taskgraph::runtime()
+            .map_err(|error| format!("the store cannot be called: {error}"))?;
+        let answer = runtime
+            .block_on(async {
+                tokio::time::timeout(Deadline::Floor.within(), built.engine.project(&home)).await
+            })
+            .map_err(|_| Failed::from(Deadline::Floor.refusal(PROJECT_SHOW)))?
+            .map_err(|error| Failed::engine(PROJECT_SHOW, &error))?;
+        let held = shown(PROJECT_SHOW, &home, answer)?;
+        Ok(held
+            .item
+            .metadata
+            .get(MetadataKey::MEMBERS_KEY)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|member| member.as_str()?.parse::<GlobalId>().ok())
+            .map(|member| member.source)
+            .collect())
+    };
+    // llmlint: ignore-block[changed_behavior_has_e2e] a home that cannot be read here is a store
+    // that fails a `project show` between two drivers of one run; what follows is the same empty
+    // baseline any refused file takes, which `writeback_projections` drives end to end, and
+    // `multi_source` drives this read answering.
+    read().unwrap_or_else(|failed| {
+        eprintln!(
+            "onetaskgraph write-back could not read the members of '{project}': {}; an item the \
+             landed baseline names outside the run's own sources is not taken as the run's",
+            failed.said()
+        );
+        Vec::new()
+    })
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 /// The destination item a shadow document names as its origin: `None` where there is no such
@@ -2632,17 +2681,32 @@ struct Baseline {
 }
 
 impl Baseline {
-    /// The run's baseline, read as one whose items are in `sources` — see [`plan_sources`] — or
-    /// an empty one where its directory holds none — a run an older
+    /// The run's baseline, read as one whose items are in `known` — see [`plan_sources`] — or
+    /// in a source `members` names, which is asked only where an item is in none of `known` —
+    /// or an empty one where its directory holds none — a run an older
     /// build started — or holds one this build cannot read, which is said on standard error:
     /// either way every lineage is then read once by its own id rather than trusted.
-    fn load(run_dir: &Path, project: &QualifiedId, sources: &BTreeSet<SourceName>) -> Self {
+    fn load(
+        run_dir: &Path,
+        project: &QualifiedId,
+        known: &BTreeSet<SourceName>,
+        members: impl FnOnce() -> Vec<SourceName>,
+    ) -> Self {
         let path = run_dir.join(WRITEBACK_LANDED_FILE);
         let landed = match std::fs::read_to_string(&path) {
             Ok(text) => match serde_json::from_str::<LandedBaseline>(&text)
                 .map_err(|error| error.to_string())
-                .and_then(|landed| landed.checked(project, sources).map(|()| landed))
-            {
+                .and_then(|landed| {
+                    let mut sources = known.clone();
+                    if landed.items.values().any(|item| {
+                        item.destination
+                            .parse::<GlobalId>()
+                            .is_ok_and(|id| !known.contains(&id.source))
+                    }) {
+                        sources.extend(members());
+                    }
+                    landed.checked(project, &sources).map(|()| landed)
+                }) {
                 Ok(landed) => landed,
                 Err(why) => {
                     eprintln!(
@@ -2791,7 +2855,7 @@ impl LandedBaseline {
 
     /// Refuse a file this build did not write for this run: another version, another project,
     /// a destination that is not a qualified id or is in none of `sources` — the home's and its
-    /// members', see [`plan_sources`] — a digest that is not one, or a key the engine does not
+    /// members', see [`plan_sources`] and [`member_sources`] — a digest that is not one, or a key the engine does not
     /// own.
     // llmlint: ignore-block[changed_behavior_has_e2e] every refusal below is one arm of this one
     // function, and they share one consequence, which is the only behaviour a driver shows: the
@@ -6459,6 +6523,76 @@ mod tests {
         );
     }
 
+    /// A baseline item outside the home's source and the member tasks' own is the run's only
+    /// where the home's own member list names that source: a source a route could send an item
+    /// to, with no member there, is refused. The store is asked only where such an item exists.
+    #[test]
+    fn a_baseline_item_in_a_source_no_member_is_in_is_refused() {
+        let fixture = Fixture::new("baseline-members");
+        let snapshot = fixture.snapshot.clone();
+        let mut written = landed_as(&snapshot);
+        let path = fixture.dir.join(crate::cli::WRITEBACK_LANDED_FILE);
+        written.path = path.clone();
+        written.save();
+        let asked = std::cell::Cell::new(0);
+        let members = |named: Vec<&'static str>| {
+            let asked = &asked;
+            move || {
+                asked.set(asked.get() + 1);
+                named
+                    .into_iter()
+                    .map(|source| onetaskgraph_plugin_api::SourceName::new(source).expect("a name"))
+                    .collect()
+            }
+        };
+        let read = super::Baseline::load(
+            &fixture.dir,
+            &snapshot.project,
+            &home(&snapshot),
+            members(vec!["linear"]),
+        );
+        assert_eq!(
+            read.landed, written.landed,
+            "a home-only baseline was not read"
+        );
+        assert_eq!(
+            asked.get(),
+            0,
+            "the store was asked about a baseline it vouches nothing in"
+        );
+
+        let root = written.landed.items.keys().next().expect("an item").clone();
+        written
+            .landed
+            .items
+            .get_mut(&root)
+            .expect("the item")
+            .destination = "linear:board/routed".to_owned();
+        written.save();
+        let unvouched = super::Baseline::load(
+            &fixture.dir,
+            &snapshot.project,
+            &home(&snapshot),
+            members(vec![]),
+        );
+        assert!(
+            unvouched.landed.items.is_empty(),
+            "an item in a source with no member was taken as the run's"
+        );
+        assert_eq!(asked.get(), 1);
+        let vouched = super::Baseline::load(
+            &fixture.dir,
+            &snapshot.project,
+            &home(&snapshot),
+            members(vec!["linear"]),
+        );
+        assert_eq!(
+            vouched.landed, written.landed,
+            "a member's item was refused"
+        );
+        assert_eq!(asked.get(), 2);
+    }
+
     /// A member task's item is in its own source: the id the run knows for it with no shadow
     /// document is the task it was read out of, in the source its record names.
     #[test]
@@ -7034,7 +7168,8 @@ mod tests {
             .dir
             .join(std::ffi::OsStr::from_bytes(b"shadow-\xff"));
         let store = crate::taskgraph::Store::at(fixture.dir.to_path_buf());
-        let mut baseline = super::Baseline::load(&fixture.dir, &snapshot.project, &home(&snapshot));
+        let mut baseline =
+            super::Baseline::load(&fixture.dir, &snapshot.project, &home(&snapshot), Vec::new);
         let attempted = super::project(
             &store,
             DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,

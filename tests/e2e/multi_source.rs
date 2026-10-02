@@ -365,8 +365,21 @@ fn a_live_add_routed_to_the_second_source_lands_in_a_member_project_created_for_
         )
         .exited(0);
     world.until_store("the added task to land in the second source", |world| {
-        source_nodes(world, MEMBERS).contains_key("adopt")
+        words(world, &home).get("adopt").map(String::as_str) == Some("queued")
     });
+    // A stop reads the landed baseline back in a process of its own. The added item is in a
+    // source the launch read no task from, so only the home's member list, which now names the
+    // member the store created, makes it the run's: read whole, it is released where it lives.
+    world
+        .run(&["stop", name])
+        .exited(0)
+        .err_lacks("write-back cannot read");
+    assert_eq!(
+        words(&world, &home).get("adopt").map(String::as_str),
+        Some("todo"),
+        "the stop did not release the added item in the member's source"
+    );
+    world.run(&["adopt", name, "--detach"]).exited(0);
     world.release("core.go");
     world.until("the run to settle", |world| {
         world.run_file(name, "result.json").is_file()
@@ -476,6 +489,64 @@ fn records(world: &World, run: &str) -> Vec<Value> {
         .lines()
         .map(|line| serde_json::from_str(line).expect("a record line is JSON"))
         .collect()
+}
+
+/// A route the plan's source declares is not a member of the plan until the store has created
+/// one there. A landed baseline naming an item in a source the plan source routes to, but where
+/// the home has no member, is refused when a driver reads it back, and each item is read by its
+/// own id instead.
+#[test]
+fn a_baseline_item_in_a_routed_source_with_no_member_there_is_refused() {
+    let world = a_routed_world("multi-source-unvouched");
+    let _service = world.repository("local-direct", &[]);
+    world.script("core.wait", "hold");
+    let name = "unvouched";
+    let home = filed(
+        &world,
+        name,
+        &plan_of(
+            name,
+            vec![on(HOME, "core", &[]), on(HOME, "ship", &["core"])],
+        ),
+    );
+    world.run(&["start", &home, "--detach"]).exited(0);
+    world.until_store("the run's claim to reach the board", |world| {
+        words(world, &home).get("ship").map(String::as_str) == Some("queued")
+    });
+    world.run(&["stop", name]).exited(0);
+    assert!(
+        world.store_project(&home)["items"][0]["item"]["metadata"]
+            .get("onetaskgraph.members")
+            .is_none(),
+        "the plan has a member, so the routed source is not one it lacks"
+    );
+
+    // llmlint: ignore[tests_mirror_real_usage] no invocation of this build writes a baseline naming a source the run has no member in, which is the point: a file naming one is what the read-back must refuse, and writing it is the only way to hand the driver one.
+    let path = world.run_file(name, "writeback-landed.json");
+    let mut landed: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("the baseline")).expect("JSON");
+    let stray = format!("{MEMBERS}:{}/001-ship", project_id(name));
+    landed["items"]["ship"]["destination"] = json!(stray);
+    std::fs::write(&path, landed.to_string()).expect("the baseline is rewritten");
+
+    let mark = records(&world, name).len();
+    world.run(&["adopt", name, "--detach"]).exited(0);
+    world.until("the adopted driver's first projection", |world| {
+        records(world, name).len() > mark
+    });
+    let log = std::fs::read_to_string(world.run_file(name, "driver.log")).expect("the log");
+    assert!(
+        log.contains(&format!("cannot read {}", path.display()))
+            && log.contains(&format!(
+                "`destination` '{stray}' is not an item of this run's destination"
+            )),
+        "the driver took an item in a source with no member as the run's:\n{log}"
+    );
+    world.run(&["stop", name]).exited(0);
+    assert!(
+        source_nodes(&world, MEMBERS).is_empty(),
+        "the routed source holds an item of a plan with no member there"
+    );
 }
 
 /// A run an older build started holds no landed baseline, so an adopting driver reads each
