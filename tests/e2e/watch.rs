@@ -1011,6 +1011,71 @@ fn a_driver_that_dies_during_the_wait_ends_it_nothing_driving() {
     }
 }
 
+/// A live driver that goes quiet while a watch waits is still driving the run:
+/// a watch armed while the run read `ACTIVE` does not end `nothing-driving` when
+/// the run turns `PARKED`, and runs out its own bound instead.
+///
+/// A quiet journal is not a stopped driver — a relay blocked on a slow dispatch
+/// reads exactly like this and then writes again — and a watch that ended
+/// `nothing-driving` here sent a supervisor to adopt live work
+/// (onepipeline#528).
+#[test]
+fn a_driver_that_goes_quiet_during_the_wait_does_not_end_it_nothing_driving() {
+    use std::process::Stdio;
+
+    let world = World::new("watch-quiet-driver");
+    world.script("build.wait", "hold");
+    let run = running(&world, "watchquietdriver", vec![agent("build", &[])]);
+    let parked_after = ("ONEPIPELINE_PARKED_AFTER_SECONDS", "3");
+    let read = |world: &World| {
+        let mut status = world.cmd(&["status", &run, "--json"]);
+        status.env(parked_after.0, parked_after.1);
+        world.run_on(status, "status --json").json()
+    };
+
+    // A reply lands in the run's journal just before the watch arms, so the run
+    // is freshly written — `ACTIVE` — when it does.
+    world
+        .run_with_stdin(&["reply", &run], r#"{"message": "keep going"}"#)
+        .exited(0);
+    let watching = world
+        .cmd(&[
+            "watch",
+            &run,
+            "--until",
+            "nothing-driving",
+            "--timeout",
+            "20",
+            "--tick-interval",
+            "1",
+        ])
+        .env(parked_after.0, parked_after.1)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the watch starts");
+    world.until("the watch to arm", |world| armed(world, &run) > 0);
+    assert_eq!(
+        read(&world)["liveness"],
+        "ACTIVE",
+        "the run was not active when the watch armed, so this is not the transition under test"
+    );
+
+    // The held dispatch keeps the driver alive and the journal silent, so the run
+    // turns `PARKED` while the watch waits — and is still driven.
+    world.until("the run to turn parked", |world| {
+        read(world)["liveness"] == "PARKED"
+    });
+
+    let (code, last, said) = finished(watching);
+    assert_eq!(code, WATCH_ELAPSED, "{last}\n{said}");
+    assert_eq!(last["condition"], json!("elapsed"), "{last}");
+    let reading = read(&world);
+    assert_eq!(reading["liveness"], "PARKED", "{reading}");
+    assert_eq!(reading["driven"], true, "{reading}");
+    world.release("build.go");
+}
+
 /// What happens **while** the watch is already blocking reaches it as it happens.
 ///
 /// This is the verb working rather than the verb reporting: every journey above
@@ -3533,38 +3598,36 @@ fn a_watch_armed_on_a_run_nothing_is_driving_ends_when_the_run_moves() {
     let world = World::new("watch-wake-undriven");
     let default = ["--timeout", "120", "--tick-interval", "0"];
 
-    // Parked: a live driver holding a dispatch open that has written nothing
-    // for longer than the bound the watch reads it by, which is a run nothing
-    // is driving. A verdict for the next listener lands in the channel's reply
-    // queue — a record that is not a surface — and the run journals that it
-    // was replied to.
-    let parked_after = [("ONEPIPELINE_PARKED_AFTER_SECONDS", "1")];
-    world.script("hold.wait", "hold");
-    let quiet = running(&world, "watchwakeparked", vec![agent("hold", &[])]);
-    world.until("the run to read as parked", |world| {
-        let mut status = world.cmd(&["status", &quiet]);
-        status.env(parked_after[0].0, parked_after[0].1);
-        let out = status.output().expect("the binary runs");
-        String::from_utf8_lossy(&out.stdout).contains("PARKED")
-    });
-    let replies = length(&world, &quiet, "channel/replies.jsonl");
-    let watching = armed_watch_with(&world, &quiet, &default, &parked_after);
-    world
-        .run_with_stdin(
-            &["reply", &quiet],
-            r#"{"message": "carry on when you can"}"#,
-        )
-        .exited(0);
-    let (code, last, said) = finished(watching);
-    assert_eq!(code, RUN_CHANGED, "{last}\n{said}");
-    assert_eq!(last["condition"], json!("run-changed"), "{last}");
-    assert!(last.get("summary").is_none(), "{last}");
-    assert!(said.contains("run-changed"), "{said}");
-    assert!(
-        length(&world, &quiet, "channel/replies.jsonl") > replies,
-        "the reply queue did not move, so this was not the move under test"
-    );
-    world.release("hold.go");
+    // A driver that died holding a dispatch open, which is a run nothing is
+    // driving with work still in flight. A verdict for the next listener lands in
+    // the channel's reply queue — a record that is not a surface — and the run
+    // journals that it was replied to. Unix-only, because the driver is ended by
+    // pid; a live driver that has merely gone quiet is `PARKED`, still driven,
+    // and is the journey after this one.
+    #[cfg(unix)]
+    {
+        world.script("hold.wait", "hold");
+        let orphaned = running(&world, "watchwakeorphaned", vec![agent("hold", &[])]);
+        crate::harness::end_driver(&world, &orphaned);
+        let replies = length(&world, &orphaned, "channel/replies.jsonl");
+        let watching = armed_watch(&world, &orphaned, &default);
+        world
+            .run_with_stdin(
+                &["reply", &orphaned],
+                r#"{"message": "carry on when you can"}"#,
+            )
+            .exited(0);
+        let (code, last, said) = finished(watching);
+        assert_eq!(code, RUN_CHANGED, "{last}\n{said}");
+        assert_eq!(last["condition"], json!("run-changed"), "{last}");
+        assert!(last.get("summary").is_none(), "{last}");
+        assert!(said.contains("run-changed"), "{said}");
+        assert!(
+            length(&world, &orphaned, "channel/replies.jsonl") > replies,
+            "the reply queue did not move, so this was not the move under test"
+        );
+        world.release("hold.go");
+    }
 
     // A driver that failed its one node and exited.
     let run = "watchwakeundriven";

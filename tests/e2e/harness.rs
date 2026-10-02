@@ -4546,6 +4546,23 @@ pub fn end_process(pid: u32) {
     panic!("pid {pid} outlived the one ask no process can ignore");
 }
 
+/// End the driver a run's launch record names, and wait until it is gone: the
+/// state an adoption recovers from, and the one way a journey makes a run whose
+/// driver is alive into one nothing is driving.
+///
+/// A live driver that has merely gone quiet is `PARKED`, and still driving, so
+/// an adoption refuses it; a journey that needs the run taken over ends the
+/// driver first, as an operator's `stop` or a crash would.
+#[cfg(unix)]
+pub fn end_driver(world: &World, run: &str) -> u32 {
+    let pid = world.run_json(run, "launch.json")["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .unwrap_or_else(|| panic!("the launch record of {run} names no driver"));
+    end_process(pid);
+    pid
+}
+
 /// This host's own `ps`, found the way a shell finds it.
 ///
 /// Resolved here rather than written down, because it is `/bin/ps` on some hosts
