@@ -3418,7 +3418,7 @@ contract's vocabulary has nowhere to put one. So this crate now ships:
   because a version-7 document carries no answer to whether its run was driven
   under that rule rather than a run that was not. It moved to version 9 when the
   row grew `waiting` — the human actions a `PAUSED` run is held on, which `runs`
-  names in the advice under that word (entry 101) — because a version-8 document
+  names in the advice under that word (entry 103) — because a version-8 document
   carries no answer to which nodes wait rather than none.
 - **`views::{RunTelemetry, Bucket, BucketName, Party, Usage}`**, re-exported
   because `RunSummary::timing` **is** the telemetry document whose shape the
@@ -5179,7 +5179,7 @@ person.
   line at all. Before this change such a stale-stamped document was reported
   `SETTLED`; under the amended rule it is named on standard error instead. The
   words a reported run carries are `runs`' own: `ACTIVE`, `PARKED`, `DRIVER DEAD`
-  or `UNDRIVEN`, and — since entry 101 — `ENDED failed`, `ENDED unfinished`,
+  or `UNDRIVEN`, and — since entry 103 — `ENDED failed`, `ENDED unfinished`,
   `ENDED stopped` or `PAUSED` for a run nothing drives that ended or is paused on a
   decision.
 - **Exit statuses.** `0` when no run is reported, and `EXIT_RUNS_UNWATCHED` when at
@@ -7912,7 +7912,7 @@ release the lock links, over a real `local-md` store.
 entry 58's `watch` takes `--log PATH`, and the verbs paragraph names
 `Status::render_without_providers` beside `render_status`.** Neither flag changes a byte of
 either verb's output when it is not given. `--json`, which requires a run, joined the line with
-entry 101 and is stated in the contract itself.
+entry 103 and is stated in the contract itself.
 
 Why: a supervisor approves the commands it runs against an allowlist, and both harnesses it
 runs under — Claude Code and Codex — match a rule only against a command they can parse as
@@ -8439,7 +8439,7 @@ through the compiled binary.
 }
 ```
 
-## 101. A run that ended with a node not `done` read `DRIVER DEAD` forever, and nothing said in a form a script reads whether a run was driven — RESOLVED
+## 103. A run that ended with a node not `done` read `DRIVER DEAD` forever, and nothing said in a form a script reads whether a run was driven — RESOLVED
 
 **Ruling: the plan `run-ending-liveness-2026-10-01` (node `op-run-ending-reading`) adds
 the paragraph "A run nothing drives reads as ended, paused, or left with work it could
