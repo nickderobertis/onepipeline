@@ -249,6 +249,7 @@ pub fn execute(
             attempts,
             reason: format!("{}: {}", preserved.outcome.outcome(), preserved.reason),
             carried: notes.clone(),
+            composed_at: crate::sys::now_millis(),
         })));
         node = std::borrow::Cow::Owned(continued(
             launched, &preserved, &on_remote, attempt, attempts, &endings,
@@ -306,6 +307,9 @@ impl Continuation {
                 self.preserved.reason
             ),
             carried: self.notes.clone(),
+            // Made again by the loop just before it spawns the dispatch, so
+            // this is the instant the resumed attempt is composed.
+            composed_at: crate::sys::now_millis(),
         }
     }
 }

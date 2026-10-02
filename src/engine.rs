@@ -684,6 +684,24 @@ pub(crate) struct Redispatch {
     /// it replaces was shown, carried into the task it recomposes. Empty for an
     /// attempt composed with none, and omitted from the record then.
     pub carried: Vec<crate::note::RecordedNote>,
+    /// When the dispatch thread composed this attempt, in epoch milliseconds:
+    /// before its conversation was launched, so no turn of that conversation
+    /// opened ahead of it. Stamped there rather than where the loop applies the
+    /// message, which can be after the attempt's opening turn has started.
+    pub composed_at: u64,
+}
+
+/// Watch for the presentations a re-asked dispatch's carried notes are owed,
+/// from the moment the attempt was composed.
+///
+/// The composition's own instant and not this loop's: a loop busy with a pass
+/// applies the message after the new conversation's opening turn has started,
+/// and a watch opened then would read that turn as one from before the note and
+/// record the note the attempt was composed with as never shown.
+fn watch_carried(presentations: &mut crate::note::Presentations, again: &Redispatch) {
+    for note in &again.carried {
+        presentations.composed_into_the_task(note.clone(), again.composed_at);
+    }
 }
 
 /// The `node-dispatched` a re-asked dispatch is recorded as.
@@ -1551,12 +1569,7 @@ fn converge(
                     // its opening worker turn and by every supervisor turn after,
                     // and the stream says when each happens.
                     if let Some(dispatch) = in_flight.get_mut(&again.node) {
-                        let at = sys::now_millis();
-                        for note in &again.carried {
-                            dispatch
-                                .presentations
-                                .composed_into_the_task(note.clone(), at);
-                        }
+                        watch_carried(&mut dispatch.presentations, &again);
                     }
                     journal.emit(
                         journal::PipelineKind::NodeDispatched,
@@ -4587,6 +4600,7 @@ pub(crate) fn attempt(
             // An attempt that produced nothing opened no conversation, so no
             // note was read by it: the next one is composed exactly as it was.
             carried: Vec::new(),
+            composed_at: sys::now_millis(),
         })));
     }
     Attempted::Drained(last)
@@ -9384,6 +9398,80 @@ mod tests {
         assert_eq!(shown.payload["party"], json!("worker"));
         assert_eq!(shown.payload["turn"], json!(3));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A note carried into a re-dispatch is shown by that attempt's opening turn
+    /// and the judge's answer to it even where the loop applies the re-dispatch
+    /// only after the turn has started.
+    ///
+    /// The order a busy driver produces, by construction rather than by timing:
+    /// the attempt is composed at 1 000 ms past the epoch, its conversation opens
+    /// at 1 100 and 1 200, and the message is applied now — decades later — which
+    /// is after both. A watch opened at the moment of applying reads both turns
+    /// as from before the note, and records nothing.
+    #[test]
+    fn a_note_carried_into_a_redispatch_is_shown_by_turns_that_opened_before_the_loop_applied_it() {
+        let again = Redispatch {
+            node: "build".into(),
+            attempt: NonZeroU32::MIN.saturating_add(1),
+            attempts: NonZeroU32::MIN.saturating_add(1),
+            reason: "checks-failed: llmlint".into(),
+            carried: vec![crate::note::RecordedNote {
+                addressee: crate::note::Addressee::Both,
+                text: "stop editing src/old.rs".parse().expect("a usable note"),
+                criterion: None,
+                reached: crate::note::Reached::Worker,
+            }],
+            composed_at: 1_000,
+        };
+        let opened = |at: u64, role: &str, origin: Option<&str>| {
+            let mut payload = journal::payload(&[
+                ("turn", json!(1)),
+                ("role", json!(role)),
+                (
+                    "instruction",
+                    json!("## Manager notes\n\nstop editing src/old.rs"),
+                ),
+                ("started_at", json!(sys::rfc3339_from_millis(at))),
+            ]);
+            if let Some(origin) = origin {
+                payload.insert("origin".into(), json!(origin));
+            }
+            Envelope {
+                v: 1,
+                ts: sys::rfc3339_from_millis(at),
+                stream: "node-scope-2".into(),
+                seq: at,
+                source: crate::event::Source::Agentgraph,
+                kind: crate::event::EventKind(
+                    oneagentgraph::event::EventKind::TurnStarted.as_str().into(),
+                ),
+                dimensions: Default::default(),
+                labels: journal::labels("demo", Some("build")),
+                payload,
+                artifacts: Vec::new(),
+            }
+        };
+        let worker = opened(1_100, "assistant", Some("task"));
+        let judge = opened(1_200, "user", None);
+        assert!(
+            sys::now_millis() > 1_200,
+            "the message is not applied after the turns opened"
+        );
+
+        let mut presentations = crate::note::Presentations::default();
+        watch_carried(&mut presentations, &again);
+
+        let shown: Vec<_> = [worker, judge]
+            .iter()
+            .flat_map(|turn| presentations.observe(turn))
+            .map(|shown| shown.payload()["party"].clone())
+            .collect();
+        assert_eq!(
+            shown,
+            vec![json!("worker"), json!("supervisor")],
+            "the re-dispatch's carried note was not shown by the turns that opened on it"
+        );
     }
 
     /// Envelopes held behind an outstanding note survive a queue that refuses the
