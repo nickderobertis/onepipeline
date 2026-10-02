@@ -363,6 +363,8 @@ rerun-failed log archive:
 
 # The same for the gate's instrumented suite, whose archive `_crate-test-rest`
 # makes with cargo-llvm-cov so the re-runs run under its coverage environment.
+# cargo-llvm-cov extracts an archive into its own target directory every time,
+# so each re-run after the first overwrites the one before.
 # llmlint: ignore-block[changed_behavior_has_e2e] the script behind this recipe is
 # driven end to end by tests/nextest_runs.rs; what only this recipe adds is the
 # instrumented runner. A test of that needs cargo-llvm-cov, which the cross legs
@@ -370,7 +372,7 @@ rerun-failed log archive:
 # The proof is the gate job itself, on the demonstration run #670 records.
 # Re-run a failed gate step's failed tests from its instrumented archive, given its LOG and ARCHIVE.
 rerun-failed-coverage log archive:
-    @RUSTFLAGS="-D warnings" bash scripts/rerun-failed.sh --log "$1" --archive "$2" --times {{rerun-times}} --known-flakes scripts/known-flakes.txt -- cargo llvm-cov --no-report nextest
+    @RUSTFLAGS="-D warnings" bash scripts/rerun-failed.sh --log "$1" --archive "$2" --times {{rerun-times}} --known-flakes scripts/known-flakes.txt -- cargo llvm-cov --no-report nextest --extract-overwrite
 # llmlint: ignore-end[changed_behavior_has_e2e]
 
 # The one journey that is not offline: the real `onevcs`, real git against a real

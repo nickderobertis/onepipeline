@@ -83,7 +83,8 @@ impl Fixture {
     /// `program args...` from the fixture's root, in an environment holding
     /// nothing of the run this test is part of. Without the scrub, the outer
     /// run's `NEXTEST_PROFILE` (CI's `ci`) names a profile the fixture does not
-    /// have, and coverage's `RUSTFLAGS` would instrument the fixture.
+    /// have, and coverage's rustc wrapper (`RUSTC_WRAPPER`, which reads its
+    /// `__CARGO_LLVM_COV_*` settings) would build the fixture through itself.
     fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
         let mut command = Command::new(program);
         command.current_dir(&self.0);
@@ -91,8 +92,10 @@ impl Fixture {
             let name = name.to_string_lossy();
             if name.starts_with("NEXTEST")
                 || name.starts_with("__NEXTEST")
-                || name.starts_with("CARGO_LLVM_COV")
+                || name.contains("CARGO_LLVM_COV")
                 || name.starts_with("LLVM_PROFILE")
+                || name.starts_with("RUSTC_WRAPPER")
+                || name.starts_with("RUSTC_WORKSPACE_WRAPPER")
                 || name.contains("RUSTFLAGS")
             {
                 command.env_remove(name.as_ref());
