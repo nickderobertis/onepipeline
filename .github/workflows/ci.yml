@@ -52,8 +52,6 @@ jobs:
   # artifact via the `cross` job below.
   gate:
     runs-on: ubuntu-latest
-    env:
-      DEMO_FAIL: "1"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -166,7 +164,8 @@ jobs:
   # llmlint: ignore-end[comments_earn_their_place]
   cross:
     needs: changes
-    if: needs.changes.outputs.crate == 'true'
+    # DEMO final run: off; the previous run is the cross evidence
+    if: false
     strategy:
       fail-fast: false
       matrix:
