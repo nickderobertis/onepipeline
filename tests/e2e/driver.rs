@@ -1098,6 +1098,10 @@ fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
 /// of the writing on behalf of the process that will actually drive. So the
 /// three claims are read back here: the record's pid, the lock's, and what the
 /// adoption moved aside.
+///
+/// The driver it takes the run from is ended by pid first: one alive and only
+/// quiet is `PARKED`, still driving, and refused.
+#[cfg(unix)]
 #[test]
 fn a_detached_adoption_leaves_a_driver_holding_the_run_its_record_names() {
     let world = World::new("driver-adopt-detached");
@@ -1106,31 +1110,18 @@ fn a_detached_adoption_leaves_a_driver_holding_the_run_its_record_names() {
     world.script("build.wait", "hold");
     let (run, displaced) =
         start_detached_announcing(&world, "handed-over", vec![agent("build", &[])]);
-    // Parked only says the driver has written nothing for the bound, which a
-    // slow driver also reads as between `node-ready` and its dispatch. An
-    // adoption then would displace a driver that never dispatched, and the
-    // re-dispatch below would be the only one.
+    // Ended only once it has dispatched: a driver ended between `node-ready`
+    // and its dispatch would leave the re-dispatch below the only one.
     world.until("the held node to be dispatched", |world| {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
-    world.until("the run to be reported parked", |world| {
-        let mut status = world.cmd(&["status", &run]);
-        status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-        let out = status.output().expect("the binary runs");
-        String::from_utf8_lossy(&out.stdout).contains("PARKED")
-    });
+    end_process(displaced);
 
-    let mut adopt = world.cmd(&["adopt", &run, "--detach"]);
-    adopt.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-    let adopted = world.run_on(adopt, "adopt --detach");
+    let adopted = world.run(&["adopt", &run, "--detach"]);
     adopted.exited(0);
-    // The parked driver was ended by the process the operator is watching, so
-    // the reason a run was taken over is on the terminal that took it over and
-    // not in a log nobody is reading.
-    adopted.err_has("ending it to adopt the run");
 
-    // The launch record a detached launch prints, for the same reason: an
-    // operator who detached has to be told what to address.
+    // The launch record a detached launch prints: an operator who detached has
+    // to be told what to address.
     let announced: serde_json::Value =
         serde_json::from_str(adopted.stdout.trim()).unwrap_or_else(|error| {
             panic!(

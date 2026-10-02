@@ -1026,7 +1026,10 @@ fn a_driver_that_goes_quiet_during_the_wait_does_not_end_it_nothing_driving() {
     let world = World::new("watch-quiet-driver");
     world.script("build.wait", "hold");
     let run = running(&world, "watchquietdriver", vec![agent("build", &[])]);
-    let parked_after = ("ONEPIPELINE_PARKED_AFTER_SECONDS", "3");
+    // The shortest threshold the arming below can still beat, and a bound a few
+    // seconds past it: the run turns `PARKED` inside the wait, and the wait then
+    // runs out.
+    let parked_after = ("ONEPIPELINE_PARKED_AFTER_SECONDS", "2");
     let read = |world: &World| {
         let mut status = world.cmd(&["status", &run, "--json"]);
         status.env(parked_after.0, parked_after.1);
@@ -1045,7 +1048,7 @@ fn a_driver_that_goes_quiet_during_the_wait_does_not_end_it_nothing_driving() {
             "--until",
             "nothing-driving",
             "--timeout",
-            "20",
+            "8",
             "--tick-interval",
             "1",
         ])
