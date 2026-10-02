@@ -705,6 +705,20 @@ pub const ADOPTED_ABANDONED: &str = "abandoned";
 /// under. Entry 98 of `docs/contract-divergences.md` states both rules.
 pub const OWED_UNTIL_CLOSED: &str = "owed_until_closed";
 
+/// The `driver-adopted` payload field saying the adoption started a new run-end
+/// hook epoch: it found a fired hook's marker standing over a graph that is
+/// still live, and retired it before dispatching anything.
+///
+/// `true` wherever it is written, and absent from every other adoption — an
+/// adoption of an ended run, of a run that never fired, and every adoption an
+/// earlier build recorded. `hooks` decides it, and reads it back as the epoch.
+pub const ADOPTED_HOOK_EPOCH: &str = "hook_epoch";
+
+/// Whether one `driver-adopted` payload carries [`ADOPTED_HOOK_EPOCH`].
+pub(crate) fn starts_hook_epoch(payload: &Map<String, Value>) -> bool {
+    payload.get(ADOPTED_HOOK_EPOCH).and_then(Value::as_bool) == Some(true)
+}
+
 /// Whether one `run-started` or `driver-adopted` payload carries
 /// [`OWED_UNTIL_CLOSED`].
 pub(crate) fn owed_until_closed(payload: &Map<String, Value>) -> bool {

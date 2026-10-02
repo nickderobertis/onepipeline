@@ -10,7 +10,8 @@
 //!
 //! The paragraph's idempotency **epoch** is two of those halves: [`fired`] holds
 //! the marker against it, and [`ending`] is the predicate the rule's "live again"
-//! and "a different ending" are both measured by.
+//! and "a different ending" are both measured by. An adoption of a live graph
+//! starts an epoch too, decided by [`adoption_starts_epoch`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -515,12 +516,47 @@ fn fired(paths: &RunPaths) -> bool {
     epochs(&journal::read(&paths.journal())).fired
 }
 
+/// Whether a driver adopting the run, about to drive `state`, starts a new hook
+/// epoch: a marker stands that was fired over a graph still live, and the graph
+/// the adoption is about to drive is **live** too — the shared [`verdict`] reads
+/// no ending, or a node can still move.
+///
+/// The case the edit rule cannot see: a `retry` committed *before* the failure
+/// hook fired leaves its replacement live behind that firing, and no edit after
+/// the marker ever changes the ending — so without this, the success the
+/// adoption then carries the run to would fire nothing. An adoption of a graph
+/// that has ended fires nothing new and retires nothing, however often it is
+/// adopted: the ending it finds is the one the marker was fired for, or one an
+/// edit already retired it over.
+///
+/// A marker fired over a graph that **had** ended stands through an adoption
+/// that finds it live again, because nothing edited made it so — a cross-DAG
+/// upstream arriving is the contract's own example — and liveness alone is not
+/// an epoch. A fold that has lost a record retires nothing, for the reason
+/// [`fired`] gives an edit beside one.
+pub(crate) fn adoption_starts_epoch(state: &RunState, paths: &RunPaths) -> bool {
+    let standing = epochs(&journal::read(&paths.journal()));
+    if !state.strict || !standing.fired || !standing.fired_live {
+        return false;
+    }
+    let statuses = state.statuses();
+    let present = statuses.values().copied().collect();
+    let ended = matches!(
+        verdict(&present, || views::decision_outstanding(state, paths)),
+        Verdict::Success | Verdict::Failure(_)
+    );
+    !ended || live(&statuses)
+}
+
 /// The run's idempotency epochs, as one walk of its journal.
 struct Epochs {
     /// Whether the epoch the run is now in carries a marker.
     fired: bool,
-    /// Where in the journal each edit that retired a marker is, in order: each
-    /// one ended the epoch every record before it belongs to.
+    /// Whether that marker was fired over a graph that was still live — work
+    /// left that could move, which only an adoption then carries on.
+    fired_live: bool,
+    /// Where in the journal each edit or adoption that retired a marker is, in
+    /// order: each one ended the epoch every record before it belongs to.
     ended_by: Vec<usize>,
 }
 
@@ -532,6 +568,7 @@ fn epochs(events: &[Envelope]) -> Epochs {
         ..RunState::default()
     };
     let mut fired = false;
+    let mut fired_live = false;
     let mut ended_by = Vec::new();
     for (at, event) in events.iter().enumerate() {
         let kind = PipelineKind::from_wire(&event.kind);
@@ -542,16 +579,33 @@ fn epochs(events: &[Envelope]) -> Epochs {
             .then(|| ending(&state))
             .flatten();
         crate::projection::fold_one(&mut state, event);
+        // An adoption that started an epoch says so on its own record: it was
+        // decided by [`adoption_starts_epoch`] on the graph the adoption drove,
+        // and is read back rather than derived a second time.
+        let adopted_live = kind == Some(PipelineKind::DriverAdopted)
+            && fired
+            && journal::starts_hook_epoch(&event.payload);
         match before {
             Some(before) if state.strict && ending(&state) != Some(before) => {
                 fired = false;
                 ended_by.push(at);
             }
-            _ if kind == Some(PipelineKind::RunHookFired) => fired = true,
+            _ if adopted_live => {
+                fired = false;
+                ended_by.push(at);
+            }
+            _ if kind == Some(PipelineKind::RunHookFired) => {
+                fired = true;
+                fired_live = ending(&state).is_none();
+            }
             _ => {}
         }
     }
-    Epochs { fired, ended_by }
+    Epochs {
+        fired,
+        fired_live,
+        ended_by,
+    }
 }
 
 /// The two ways a graph has ended, as the epoch rule tells them apart: which hook
@@ -624,6 +678,9 @@ fn edit_named(edit: &Envelope) -> String {
     // that wrote it, and every process replying to a run writes its own, so the
     // time is what tells one edit from another to a reader.
     let at = views::one_line(&edit.ts);
+    if PipelineKind::from_wire(&edit.kind) == Some(PipelineKind::DriverAdopted) {
+        return format!("the adoption recorded at {at}");
+    }
     let Ok(read) = serde_json::from_value::<CommittedEdit>(Value::from(edit.payload.clone()))
     else {
         return format!("an edit committed at {at} whose record this build cannot read");

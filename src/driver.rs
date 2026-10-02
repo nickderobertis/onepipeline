@@ -2389,6 +2389,12 @@ fn report_and_journal_adoption(
         ("pid", json!(record.pid)),
         (journal::OWED_UNTIL_CLOSED, json!(true)),
     ];
+    // Decided here, on the graph this adoption is about to drive, so the marker
+    // is retired by the same record that says the run is being driven again —
+    // before anything is dispatched.
+    if crate::hooks::adoption_starts_epoch(&view.state, paths) {
+        adopted.push((journal::ADOPTED_HOOK_EPOCH, json!(true)));
+    }
     if !abandoned.is_empty() {
         adopted.push((
             journal::ADOPTED_ABANDONED,

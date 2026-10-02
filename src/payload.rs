@@ -305,6 +305,39 @@ impl JsonSchema for Owed {
     }
 }
 
+/// The adoption's run-end hook epoch, `journal::ADOPTED_HOOK_EPOCH`: `true`
+/// where it is written and absent where it is not, for the reason [`Owed`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HookEpoch;
+
+impl Serialize for HookEpoch {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(true)
+    }
+}
+
+impl<'de> Deserialize<'de> for HookEpoch {
+    fn deserialize<D: serde::Deserializer<'de>>(reader: D) -> Result<Self, D::Error> {
+        if bool::deserialize(reader)? {
+            Ok(Self)
+        } else {
+            Err(serde::de::Error::custom(
+                "hook_epoch is written `true` or not at all",
+            ))
+        }
+    }
+}
+
+impl JsonSchema for HookEpoch {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "HookEpoch".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"const": true})
+    }
+}
+
 /// `run-started`: the plan the run was launched with, and how it is driven.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct RunStarted {
@@ -607,6 +640,10 @@ pub(crate) struct DriverAdopted {
     /// absent from a record an earlier build wrote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) owed_until_closed: Option<Owed>,
+    /// `true` where the adoption started a new run-end hook epoch, retiring the
+    /// marker that stood over the live graph it adopted; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) hook_epoch: Option<HookEpoch>,
 }
 
 /// One dispatch a previous driver left behind.
