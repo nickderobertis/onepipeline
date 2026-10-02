@@ -171,12 +171,20 @@ impl EndingKind {
 pub struct EndedNode {
     /// The node's id.
     pub id: String,
+    // llmlint: ignore-block[invalid_states_unrepresentable] the status is a word rather than
+    // a type because the type it would be, `graph::NodeStatus`, is engine-private, and
+    // `docs/contract.md` names `EndedNode { id, status, outcome }` as the whole published
+    // surface here — a public status enum would be vocabulary the contract did not ask for.
+    // The only constructor is `hooks::unsettled`, which writes `NodeStatus::as_str`, and
+    // `graph::tests::the_run_readings_schema_names_every_status_but_done` holds the words
+    // below to that enum.
     /// The node's status word.
     #[schemars(extend("enum" = [
         "pending", "ready", "running", "waiting", "blocked", "parked", "cancelled",
         "complete-but-draft", "failed", "skipped"
     ]))]
     pub status: &'static str,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// The outcome its settlement recorded, or `null` for a node that recorded none.
     pub outcome: Option<String>,
 }
@@ -200,6 +208,9 @@ pub struct Paused {
     /// Whether a blocking planner question is outstanding, answered with `reply`.
     pub blocking_surface: bool,
 }
+
+/// The word a view prints for a run nothing drives that is paused on a decision.
+const PAUSED_WORD: &str = "PAUSED";
 
 /// The version of the document `status <RUN> --json` prints.
 const RUN_READING_SCHEMA_VERSION: u32 = 1;
@@ -231,6 +242,15 @@ pub struct RunReading {
     pub schema_version: u32,
     /// The run.
     pub run_id: String,
+    // llmlint: ignore-block[invalid_states_unrepresentable] these five fields are the
+    // `status <RUN> --json` document exactly as the approved contract fixes it — `word` and
+    // `liveness` as the printed words, and `driven`, `ending` and `paused` as three fields
+    // whose invariants the contract states and `schemas/run-reading.schema.json` encodes —
+    // and the onepipeline-ui relink and the host's `scripts/follow-ups.sh` are written
+    // against that shape. A discriminated state or new public word enums would change the
+    // published surface the contract names. `reading` is the only constructor, building
+    // every field from `Standing` and `DriverLiveness`, and
+    // `the_run_readings_schema_allows_every_word_this_build_prints` holds the words.
     /// The word `status` and `runs` print for the run.
     #[schemars(extend("enum" = [
         "SETTLED", "ENDED failed", "ENDED unfinished", "ENDED stopped", "PAUSED",
@@ -246,6 +266,7 @@ pub struct RunReading {
     pub ending: Option<Ending>,
     /// The decision the run is paused on, or `null` for a run that is not.
     pub paused: Option<Paused>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// Read one run's ending, its pause, or neither, off its fold.
@@ -1647,7 +1668,7 @@ impl Standing {
     fn word(&self) -> &'static str {
         match self.reached {
             Reached::Ended(kind) => kind.word(),
-            Reached::Paused => "PAUSED",
+            Reached::Paused => PAUSED_WORD,
             Reached::Neither if self.complete => EndingKind::Complete.word(),
             Reached::Neither => self.liveness.as_str(),
         }
@@ -6766,6 +6787,56 @@ mod tests {
             Reached::of(true, &holding(&[Done]), true, || true),
             Reached::Neither
         );
+    }
+
+    /// The run reading's schema allows exactly the words this build prints: every
+    /// liveness word for `liveness`, and for `word` those, every ending's, and
+    /// `PAUSED`.
+    ///
+    /// The schema is generated from `RunReading`, and the words it allows are
+    /// written on that type for the generator to read; this holds them to the
+    /// types they restate. Each list is **walked** by an exhaustive `match`, so a
+    /// verdict or an ending this build grows has to be named here to compile.
+    #[test]
+    fn the_run_readings_schema_allows_every_word_this_build_prints() {
+        fn liveness_after(liveness: DriverLiveness) -> Option<DriverLiveness> {
+            match liveness {
+                DriverLiveness::Driving => Some(DriverLiveness::DriverDead),
+                DriverLiveness::DriverDead => Some(DriverLiveness::Parked),
+                DriverLiveness::Parked => Some(DriverLiveness::Undriven),
+                DriverLiveness::Undriven => None,
+            }
+        }
+        fn ending_after(kind: EndingKind) -> Option<EndingKind> {
+            match kind {
+                EndingKind::Complete => Some(EndingKind::Failed),
+                EndingKind::Failed => Some(EndingKind::Unfinished),
+                EndingKind::Unfinished => Some(EndingKind::Stopped),
+                EndingKind::Stopped => None,
+            }
+        }
+        let liveness: std::collections::BTreeSet<String> =
+            std::iter::successors(Some(DriverLiveness::Driving), |at| liveness_after(*at))
+                .map(|liveness| liveness.as_str().to_string())
+                .collect();
+        let mut word = liveness.clone();
+        word.extend(
+            std::iter::successors(Some(EndingKind::Complete), |at| ending_after(*at))
+                .map(|kind| kind.word().to_string()),
+        );
+        word.insert(PAUSED_WORD.to_string());
+
+        let schema = schemars::generate::SchemaSettings::draft2020_12()
+            .for_serialize()
+            .into_generator()
+            .into_root_schema_for::<RunReading>()
+            .to_value();
+        let allowed = |field: &str| -> std::collections::BTreeSet<String> {
+            serde_json::from_value(schema["properties"][field]["enum"].clone())
+                .unwrap_or_else(|_| panic!("the schema names the words `{field}` takes"))
+        };
+        assert_eq!(allowed("liveness"), liveness);
+        assert_eq!(allowed("word"), word);
     }
 
     /// Each ending prints the word the contract fixes for it.

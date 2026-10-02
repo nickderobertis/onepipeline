@@ -18,7 +18,9 @@
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, human, plan_of, rows, World, NOTHING_DRIVING, USAGE_ERROR};
+use crate::harness::{
+    agent, human, plan_of, rows, World, NOTHING_DRIVING, RUNS_UNWATCHED, USAGE_ERROR,
+};
 use crate::run_end_hooks::{hook, invocations, records, HOOK_TIMEOUT, RECORD_ENV};
 
 /// A world whose hook fixture records into the world's own scratch, and whose
@@ -171,6 +173,22 @@ fn read_as(world: &World, run: &str, word: &str) -> Value {
     reading
 }
 
+/// `unwatched` reports a run of this session's that nothing watches with the word
+/// `runs` gives it: its line names the run and carries `word`.
+fn unwatched_reads_as(world: &World, run: &str, word: &str) {
+    let asked = world.run(&["unwatched"]);
+    asked.exited(RUNS_UNWATCHED);
+    let line = asked
+        .stdout
+        .lines()
+        .find(|line| line.split_whitespace().next() == Some(run))
+        .unwrap_or_else(|| panic!("`unwatched` does not report {run}:\n{}", asked.stdout));
+    assert!(
+        line.contains(&format!(" {word} ")),
+        "`unwatched` does not report {run} as `{word}`: {line}"
+    );
+}
+
 /// The ending the run-end hook a run fired names, in the reading's own words.
 fn fired_ending(world: &World, run: &str) -> (Value, Value) {
     let fired = world.events_of(run, "run-hook-fired");
@@ -243,6 +261,7 @@ fn a_run_paused_on_a_human_action_reads_paused_and_once_attested_reads_settled()
     );
     advised_to_settle_or_stop(&world, run, &["approve"], false);
     assert!(invocations(&world, run).is_empty());
+    unwatched_reads_as(&world, run, "PAUSED");
 
     world.run(&["attest", run, "approve"]).exited(0);
     world
@@ -303,6 +322,7 @@ fn a_human_node_settled_failed_from_evidence_ends_the_run_failed() {
         "{reading}"
     );
     ending_is_the_hook_it_fired(&world, run, &reading);
+    unwatched_reads_as(&world, run, "ENDED failed");
 
     // Adopting it again settles at once and changes nothing about the reading.
     world.run(&["adopt", run]).exited(NOTHING_DRIVING);

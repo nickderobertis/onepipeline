@@ -1535,6 +1535,32 @@ mod tests {
         every
     }
 
+    /// The run reading's schema names, for a node an ended run lists, every status
+    /// this build carries but `done` — the walk above's statuses, in its order.
+    ///
+    /// The schema is generated from `views::RunReading`, and the words it allows a
+    /// listed node are written on that type for the generator to read; this is
+    /// what holds them to the enum they restate, so a status this build grows is
+    /// one the published document allows.
+    #[test]
+    fn the_run_readings_schema_names_every_status_but_done() {
+        let schema = schemars::generate::SchemaSettings::draft2020_12()
+            .for_serialize()
+            .into_generator()
+            .into_root_schema_for::<crate::views::RunReading>()
+            .to_value();
+        let named: Vec<String> = serde_json::from_value(
+            schema["$defs"]["EndedNode"]["properties"]["status"]["enum"].clone(),
+        )
+        .expect("the schema names the statuses a listed node may have");
+        let every: Vec<String> = every_status()
+            .into_iter()
+            .filter(|status| *status != NodeStatus::Done)
+            .map(|status| status.as_str().to_string())
+            .collect();
+        assert_eq!(named, every);
+    }
+
     /// The draft settlement vocabulary this build carries is exactly what the
     /// divergence record proposes, and `docs/contract.md` names all of it.
     ///
