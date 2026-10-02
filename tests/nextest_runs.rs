@@ -328,13 +328,16 @@ const RERUN_MANIFEST: &str =
     "[package]\nname = \"rerun-fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n";
 
 /// A two-second ceiling so the timing-out test is ended quickly, and one retry
-/// for `fails`, so its last status line reads `TRY 2 FAIL`.
-const RERUN_CONFIG: &str = "[profile.default]\nslow-timeout = { period = \"1s\", terminate-after = 2 }\n\n[[profile.default.overrides]]\nfilter = 'test(=tests::fails)'\nretries = 1\n";
+/// for `fails` and `flaky_on_rerun`, so their last status lines read
+/// `TRY 2 FAIL` and `FLAKY 2/2`.
+const RERUN_CONFIG: &str = "[profile.default]\nslow-timeout = { period = \"1s\", terminate-after = 2 }\n\n[[profile.default.overrides]]\nfilter = 'test(=tests::fails) or test(=tests::flaky_on_rerun)'\nretries = 1\n";
 
 /// A deliberately passing test, and one failing test in each way nextest
 /// reports a failure here: every time, the first time only, every other time,
-/// by timing out, and by aborting. Each writes its name to a ledger every time
-/// it runs, which is what says which tests ran again.
+/// by timing out, and by aborting. Two more fail in the step and then pass the
+/// two other ways nextest reports a pass: leaking a child, and on a retry. Each
+/// writes to a ledger every time it runs, which is what says which tests ran
+/// again.
 const RERUN_TESTS: &str = r#"
 #[cfg(test)]
 mod tests {
@@ -382,6 +385,32 @@ mod tests {
     }
 
     #[test]
+    fn flaky_on_rerun() {
+        let run = ledger("flaky_on_rerun");
+        if run <= 2 || run % 2 == 1 {
+            panic!("fails both attempts in the step, then the first attempt of each re-run");
+        }
+    }
+
+    /// Passes, once it has failed, by returning while a child it started still
+    /// holds its output: nextest reports that as `LEAK`.
+    #[test]
+    fn leaks_after_failing_once() {
+        if std::env::var_os("FIXTURE_LEAK_CHILD").is_some() {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            return;
+        }
+        if ledger("leaks_after_failing_once") == 1 {
+            panic!("fails the first time only");
+        }
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::leaks_after_failing_once"])
+            .env("FIXTURE_LEAK_CHILD", "1")
+            .spawn()
+            .unwrap();
+    }
+
+    #[test]
     fn times_out() {
         ledger("times_out");
         std::thread::sleep(std::time::Duration::from_secs(60));
@@ -395,13 +424,18 @@ mod tests {
 }
 "#;
 
-const FAILING: [&str; 5] = [
+const FAILING: [&str; 7] = [
     "fails",
     "fails_once",
     "fails_alternately",
+    "flaky_on_rerun",
+    "leaks_after_failing_once",
     "times_out",
     "aborts",
 ];
+
+/// The tests with a retry, which run twice each time they fail.
+const RETRIED: [&str; 2] = ["fails", "flaky_on_rerun"];
 
 fn rerun_fixture(case: &str) -> Fixture {
     Fixture::new(
@@ -423,7 +457,7 @@ fn failed_step(case: &str) -> Fixture {
     for test in FAILING {
         assert_eq!(
             runs_of(&fixture, test),
-            if test == "fails" { 2 } else { 1 },
+            if RETRIED.contains(&test) { 2 } else { 1 },
             "{log}"
         );
     }
@@ -468,9 +502,20 @@ fn only_the_failed_tests_run_again_and_each_ones_failures_are_counted() {
         "the passing test ran again:\n{report}"
     );
     assert_eq!(runs_of(&fixture, "fails"), 2 * (1 + times), "{report}");
-    for test in ["fails_once", "fails_alternately", "times_out", "aborts"] {
+    for test in [
+        "fails_once",
+        "fails_alternately",
+        "leaks_after_failing_once",
+        "times_out",
+        "aborts",
+    ] {
         assert_eq!(runs_of(&fixture, test), 1 + times, "{test}:\n{report}");
     }
+    assert_eq!(
+        runs_of(&fixture, "flaky_on_rerun"),
+        2 + 2 * times,
+        "{report}"
+    );
 
     let every_time = |test: &str| {
         format!(
@@ -480,12 +525,19 @@ fn only_the_failed_tests_run_again_and_each_ones_failures_are_counted() {
     for test in ["fails", "times_out", "aborts"] {
         assert_eq!(summary_line(&report, test), every_time(test));
     }
-    assert_eq!(
-        summary_line(&report, "fails_once"),
-        format!(
-            "  rerun-fixture tests::fails_once: failed 0 of {times} re-runs; did not fail again, which reads as a flake: fix it, or open an issue and list it in scripts/known-flakes.txt"
-        )
-    );
+    for test in ["fails_once", "flaky_on_rerun", "leaks_after_failing_once"] {
+        assert_eq!(
+            summary_line(&report, test),
+            format!(
+                "  rerun-fixture tests::{test}: failed 0 of {times} re-runs; did not fail again, which reads as a flake: fix it, or open an issue and list it in scripts/known-flakes.txt"
+            )
+        );
+    }
+    let re_runs = report
+        .lines()
+        .filter(|line| line.starts_with("rerun-failed: re-run 1 of "))
+        .count();
+    assert_eq!(re_runs, FAILING.len(), "{report}");
     let alternate_failures = (2..=1 + times).filter(|run| run % 2 == 1).count();
     assert_eq!(
         summary_line(&report, "fails_alternately"),
@@ -548,16 +600,25 @@ fn a_known_flake_is_annotated_and_its_failure_still_stands() {
 fn a_known_flake_entry_in_any_other_shape_is_refused_before_anything_runs() {
     let fixture = failed_step("rerun-malformed-list");
     let flakes = fixture.path("known-flakes.txt");
-    fs::write(&flakes, "rerun-fixture tests::fails not-an-issue-url\n")
-        .expect("the list is written");
-    let (output, report) = fixture.rerun_failed(&flakes);
-
-    assert_eq!(output.status.code(), Some(2), "{report}");
-    assert!(report.contains("known-flakes.txt:1 is not"), "{report}");
+    let issue = "https://github.com/nickderobertis/onepipeline/issues/1";
+    for entry in [
+        "rerun-fixture tests::fails not-an-issue-url".to_owned(),
+        format!("rerun-fixture tests::fails {issue} extra"),
+        format!("rerun-fixture {issue}"),
+        format!("rerun-fixture tests::f$ils {issue}"),
+    ] {
+        fs::write(&flakes, format!("# a comment\n{entry}\n")).expect("the list is written");
+        let (output, report) = fixture.rerun_failed(&flakes);
+        assert_eq!(output.status.code(), Some(2), "{entry}: {report}");
+        assert!(
+            report.contains("known-flakes.txt:2 is not"),
+            "{entry}: {report}"
+        );
+    }
     assert_eq!(
         runs_of(&fixture, "fails"),
         2,
-        "a test re-ran past the refusal:\n{report}"
+        "a test re-ran past a refusal"
     );
 }
 
@@ -594,6 +655,35 @@ fn a_rerun_that_compiles_or_cannot_run_says_so_and_still_reports_failure() {
         )),
         "{report}"
     );
+
+    // A runner that refuses its second call: one re-run of every test is lost,
+    // and each test is judged on the ones that ran.
+    fs::write(
+        fixture.path("runner.sh"),
+        "n=$(cat calls 2>/dev/null || echo 0); n=$((n + 1)); echo \"$n\" > calls\n\
+         if [ \"$n\" -eq 2 ]; then echo 'this runner refuses its second call'; exit 3; fi\n\
+         exec cargo nextest run \"$@\"\n",
+    )
+    .expect("the runner is written");
+    let runner = fixture.path("runner.sh");
+    let (output, report) = fixture.rerun_failed_with(
+        &known_flakes(),
+        &["bash", runner.to_str().expect("a UTF-8 path")],
+    );
+    assert_eq!(output.status.code(), Some(1), "{report}");
+    assert!(
+        report.contains(&format!(
+            "re-run 2 of {times}: rerun-fixture tests::fails did not run (the re-run exited with status 3"
+        )),
+        "{report}"
+    );
+    assert!(
+        summary_line(&report, "fails").starts_with(&format!(
+            "  rerun-fixture tests::fails: failed {} of {times} re-runs (1 did not run); fails every time",
+            times - 1
+        )),
+        "{report}"
+    );
 }
 
 #[test]
@@ -610,7 +700,12 @@ fn tests_a_cancelled_run_left_unrun_are_reported_with_nextests_reason() {
                 && line.contains(" not run due to test failure")
         })
         .unwrap_or_else(|| panic!("the report relays nextest's reason:\n{report}"));
-    assert!(reason.contains("/6 tests not run"), "{reason}");
+    // Every failing test, and the one that passes.
+    let tests = FAILING.len() + 1;
+    assert!(
+        reason.contains(&format!("/{tests} tests not run")),
+        "{reason}"
+    );
 }
 
 #[test]
@@ -641,6 +736,24 @@ fn a_log_with_no_failed_test_reruns_nothing_and_never_reads_as_a_pass() {
         report.contains("nextest left 1/2 tests not run and gave no reason, and its exit status is not in this log"),
         "{report}"
     );
+}
+
+#[test]
+fn a_failed_test_whose_name_cannot_become_a_filter_is_named_and_not_rerun() {
+    let fixture = Fixture::new("rerun-unusable-name", RERUN_MANIFEST, &[]);
+    fs::write(
+        fixture.path("step.log"),
+        "        FAIL [   0.010s] (1/1) rerun-fixture tests::we$ird\nerror: test run failed\n",
+    )
+    .expect("the log is written");
+    let (output, report) = fixture.rerun_failed_with(&known_flakes(), &["false"]);
+    assert_eq!(output.status.code(), Some(1), "{report}");
+    assert!(
+        report.contains("not re-running 'rerun-fixture tests::we$ird'")
+            && report.contains("widen id_shape"),
+        "{report}"
+    );
+    assert!(!report.contains("re-run 1 of"), "{report}");
 }
 
 #[test]
@@ -690,6 +803,47 @@ fn the_scripts_refuse_what_they_cannot_run() {
         let (output, report) = fixture.script("rerun-failed.sh", &args, "refusal.log");
         assert_eq!(output.status.code(), Some(2), "{args:?}: {report}");
         assert!(report.contains(says), "{args:?}: {report}");
+    }
+
+    fs::write(fixture.path("step.log"), "error: test run failed\n").expect("the log is written");
+    let log = fixture.path("step.log");
+    let log = log.to_str().expect("a UTF-8 path");
+    let no_list = fixture.path("no-such-list.txt");
+    let a_directory = fixture.path("a-directory");
+    fs::create_dir_all(&a_directory).expect("a directory is made");
+    let no_tmp = fixture.path("no-such-tmp");
+    for (args, env, says) in [
+        (
+            [
+                "--log",
+                log,
+                "--known-flakes",
+                no_list.to_str().expect("a UTF-8 path"),
+            ],
+            vec![],
+            "restore it from git",
+        ),
+        (
+            [
+                "--log",
+                a_directory.to_str().expect("a UTF-8 path"),
+                "--known-flakes",
+                flakes,
+            ],
+            vec![],
+            "pass the file the failed step's output was teed into",
+        ),
+        (
+            ["--log", log, "--known-flakes", flakes],
+            vec![("TMPDIR", no_tmp.to_str().expect("a UTF-8 path"))],
+            "point TMPDIR at a writable directory",
+        ),
+    ] {
+        let mut argv = args.to_vec();
+        argv.extend(["--times", "3", "--", "true"]);
+        let (output, report) = fixture.script_in("rerun-failed.sh", &argv, "refusal.log", &env);
+        assert_eq!(output.status.code(), Some(2), "{argv:?}: {report}");
+        assert!(report.contains(says), "{argv:?}: {report}");
     }
 }
 

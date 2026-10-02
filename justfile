@@ -349,9 +349,16 @@ rerun-failed log:
 # The same for the gate's instrumented suite: re-running through the command
 # `_crate-test-rest` and `_note-test` built it with is what keeps cargo from
 # compiling a second, uninstrumented tree.
+# llmlint: ignore-block[changed_behavior_has_e2e] the script behind this recipe is
+# driven end to end by tests/nextest_runs.rs; what only this recipe adds is the
+# instrumented runner. A test of that needs cargo-llvm-cov, which the cross legs
+# that run every test do not install, so it could only pass there by skipping.
+# The proof is the gate job itself: its re-run step prints a warning naming any
+# crate a re-run had to compile.
 # Re-run a failed gate step's failed tests against its coverage build.
 rerun-failed-coverage log:
     @RUSTFLAGS="-D warnings" bash scripts/rerun-failed.sh --log "$1" --times {{rerun-times}} --known-flakes scripts/known-flakes.txt -- cargo llvm-cov --no-report nextest --locked
+# llmlint: ignore-end[changed_behavior_has_e2e]
 
 # The one journey that is not offline: the real `onevcs`, real git against a real
 # remote, and the real GitHub API opening and merging a pull request on a scratch

@@ -44,7 +44,7 @@ case "$times" in
   *) refuse "--times must be a whole number from 1 to 10, not '$times'" ;;
 esac
 [ -r "$log" ] || refuse "cannot read the failed step's log at '$log'; capture the step's output there (ci.yml tees it)"
-[ -r "$flakes" ] || refuse "cannot read the known-flake list at '$flakes'"
+[ -r "$flakes" ] || refuse "cannot read the known-flake list at '$flakes'; restore it from git (scripts/known-flakes.txt) or pass the right path"
 runner=("$@")
 
 # Binary ids and test names come out of a log and go into a nextest filter, so
@@ -68,24 +68,27 @@ while IFS= read -r line || [ -n "$line" ]; do
   flake_urls+=("${fields[2]}")
 done <"$flakes"
 
-work="$(mktemp -d 2>/dev/null)" && [ -d "$work" ] || refuse "cannot make a scratch directory (mktemp -d failed)"
+work="$(mktemp -d)" && [ -d "$work" ] \
+  || refuse "cannot make a scratch directory with mktemp -d (its error is above); point TMPDIR at a writable directory"
 trap 'rm -rf "$work"' EXIT
 
 esc="$(printf '\033')"
 plain() { sed "s/${esc}\[[0-9;]*[A-Za-z]//g" "$1" | tr -d '\r'; }
-plain "$log" >"$work/step.log" || refuse "cannot read '$log' into $work"
+plain "$log" >"$work/step.log" \
+  || refuse "cannot read '$log' as text (the error is above); pass the file the failed step's output was teed into"
 
 # A status line: `   FAIL [   0.012s] (  3/120) <binary-id> <test-name>`. The
 # failing spellings are the ones this repository's configuration can produce,
 # and tests/nextest_runs.rs drives real nextest to each of them: a failure, a
 # retried failure, a timeout, and an abort (a signal name on Unix, ABORT on
-# Windows). Leaks pass here (no `leak-timeout` result is set), so LEAK-FAIL
-# cannot occur.
+# Windows). The passing ones too: a pass, a leaky pass, and a retried pass
+# (`TRY 2 PASS`; the re-runs print no final `FLAKY` line). Leaks pass here (no
+# `leak-timeout` result is set), so LEAK-FAIL cannot occur.
 status_line() {
   echo "^[[:space:]]*(TRY [0-9]+ )?($1) \[[[:space:]]*[0-9.]+s\] (\([[:space:]]*[0-9]+/[[:space:]]*[0-9]+\) )?([^[:space:]]+) ([^[:space:]]+)[[:space:]]*\$"
 }
 failed_re="$(status_line 'FAIL|TIMEOUT|ABORT|SIG[A-Z0-9]+')"
-passed_re="$(status_line 'PASS|LEAK|FLAKY [0-9]+/[0-9]+')"
+passed_re="$(status_line 'PASS|LEAK')"
 tests_matching() { sed -nE "s#$1#\\4 \\5#p" "$2" | sort -u; }
 
 say() { echo "rerun-failed: $*"; }
