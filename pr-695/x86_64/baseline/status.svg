@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.0//EN" "http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd">
-<svg width="1054.00" height="167.00" xmlns="http://www.w3.org/2000/svg">
+<svg width="1054.00" height="184.00" xmlns="http://www.w3.org/2000/svg">
 <style>
 @font-face {
 	font-family: &apos;JetBrains Mono&apos;;
@@ -8,8 +8,8 @@
 	font-weight: normal;
 	font-style: normal;
 }
-</style><rect width="1054.00" height="167.00" fill="#0d1117" rx="8.00" ry="8.00" x="0.00px" y="0.00px"/>
+</style><rect width="1054.00" height="184.00" fill="#0d1117" rx="8.00" ry="8.00" x="0.00px" y="0.00px"/>
 <g font-family="JetBrains Mono" font-size="14.00px" fill="#c4c4c4" clip-path="url(#terminalMask)">
-<text x="30.00px" y="51.80px" xml:space="preserve"><tspan xml:space="preserve">tracked-release  ACTIVE  NO OBSERVER  2/6 done</tspan></text><text x="30.00px" y="68.60px" xml:space="preserve"><tspan xml:space="preserve">  docs: running for 8s — 3 event(s), 2s ago</tspan></text><text x="30.00px" y="85.40px" xml:space="preserve"><tspan xml:space="preserve">  service: running for 8s — 3 event(s), 2s ago</tspan></text><text x="30.00px" y="102.20px" xml:space="preserve"><tspan xml:space="preserve">  free space: 184.2 GiB of 460.0 GiB (40% free) on the filesystem holding the runs root /home/you/onepipeline/runs and</tspan></text><text x="30.00px" y="119.00px" xml:space="preserve"><tspan xml:space="preserve">the lifecycle workspaces under /home/you/.onevcs/workspaces</tspan></text><text x="30.00px" y="135.80px" xml:space="preserve"><tspan xml:space="preserve">  providers: fake-provider: 1 identity bound, 0% utilized</tspan></text>
+<text x="30.00px" y="51.80px" xml:space="preserve"><tspan xml:space="preserve">tracked-release  ACTIVE  NO OBSERVER  2/6 done</tspan></text><text x="30.00px" y="68.60px" xml:space="preserve"><tspan xml:space="preserve">  driver exited 2s ago (2026-05-04T11:20:00.000Z): settled awaiting-planner</tspan></text><text x="30.00px" y="85.40px" xml:space="preserve"><tspan xml:space="preserve">  docs: running for 8s — 3 event(s), 2s ago</tspan></text><text x="30.00px" y="102.20px" xml:space="preserve"><tspan xml:space="preserve">  service: running for 8s — 3 event(s), 2s ago</tspan></text><text x="30.00px" y="119.00px" xml:space="preserve"><tspan xml:space="preserve">  free space: 184.2 GiB of 460.0 GiB (40% free) on the filesystem holding the runs root /home/you/onepipeline/runs and</tspan></text><text x="30.00px" y="135.80px" xml:space="preserve"><tspan xml:space="preserve">the lifecycle workspaces under /home/you/.onevcs/workspaces</tspan></text><text x="30.00px" y="152.60px" xml:space="preserve"><tspan xml:space="preserve">  providers: fake-provider: 1 identity bound, 0% utilized</tspan></text>
 </g>
-<svg x="0.00px" y="0.00px"><circle cx="13.50" cy="12.00" r="5.50" fill="#FF5A54"/><circle cx="32.50" cy="12.00" r="5.50" fill="#E6BF29"/><circle cx="51.50" cy="12.00" r="5.50" fill="#52C12B"/></svg><defs><clipPath id="terminalMask"><rect x="0.00" y="0.00" width="1054.00" height="147.00"/></clipPath></defs></svg>
+<svg x="0.00px" y="0.00px"><circle cx="13.50" cy="12.00" r="5.50" fill="#FF5A54"/><circle cx="32.50" cy="12.00" r="5.50" fill="#E6BF29"/><circle cx="51.50" cy="12.00" r="5.50" fill="#52C12B"/></svg><defs><clipPath id="terminalMask"><rect x="0.00" y="0.00" width="1054.00" height="164.00"/></clipPath></defs></svg>
