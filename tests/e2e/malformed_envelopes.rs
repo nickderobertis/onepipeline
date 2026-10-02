@@ -89,13 +89,17 @@ fn sent_through(config: Config, envelope: &Value) {
 }
 
 fn offered(config: Config, envelope: &Value) -> Result<(), BusError> {
+    offered_to(config, REPLIES, envelope)
+}
+
+fn offered_to(config: Config, to: &str, envelope: &Value) -> Result<(), BusError> {
     let bus = config
         .resolve(
             &Layouts::new().with(Arc::new(PlannerChannel)),
             &TransportKinds::builtin(),
         )
         .expect("the planner channel's bus resolves over the run's channel");
-    bus.send(&queue(REPLIES), envelope.clone()).map(drop)
+    bus.send(&queue(to), envelope.clone()).map(drop)
 }
 
 /// Append one record to the command queue as the channel's transport does,
@@ -334,13 +338,13 @@ fn every_envelope_the_reconciler_cannot_decode_is_answered_and_nothing_of_it_app
     );
 }
 
-/// The corners of a record's own fields, each of which the planner channel's
-/// layout refuses and so only reaches the queue beneath it: a command that is
-/// not an object is journalled inside an `unreadable` placeholder, an author
-/// that is not a string is answered as the planner's, and an empty command list
-/// journals nothing — yet each record still gets its outcome line and surface.
-/// An empty list alone decodes, so its record also carries a non-string author,
-/// which is what makes it undecodable and what the bus refuses it for.
+/// The corners of a record's own fields, which the planner channel's layout
+/// refuses and so only reach the queue beneath it: a command that is not an
+/// object is journalled inside an `unreadable` placeholder, and an author that
+/// is not a string is answered as the planner's — beside an empty command list,
+/// which journals nothing — yet each record still gets its outcome line and
+/// surface. An empty list alone is no corner: the bus queues a well-formed
+/// command envelope carrying one, and it is answered with one outcome line.
 #[test]
 fn a_record_the_layout_refuses_is_answered_from_whatever_of_it_reads() {
     let world = World::new("malformed-corners");
@@ -354,8 +358,7 @@ fn a_record_the_layout_refuses_is_answered_from_whatever_of_it_reads() {
     let undecodable_drop = json!({"op": "drop", "id": "sign-off"});
     let records = [
         json!({"id": 0, "commands": ["drop sign-off", undecodable_drop]}),
-        json!({"id": 1, "author": 7, "commands": [undecodable_drop]}),
-        json!({"id": 2, "author": ["monitor"], "commands": []}),
+        json!({"id": 1, "author": ["monitor"], "commands": []}),
     ];
     for record in &records {
         let mut envelope = record.clone();
@@ -370,6 +373,22 @@ fn a_record_the_layout_refuses_is_answered_from_whatever_of_it_reads() {
         );
         appended_beneath_the_layout(&world, run, record);
     }
+    // Offered to `replies`, a well-formed envelope with an empty command list
+    // carries nothing for the command queue: the layout files it as a reply.
+    sent_through_the_bus(&world, run, &json!({"version": 3, "commands": []}));
+    assert_eq!(queued(&world, run).len(), records.len());
+    // Offered to `commands` itself, the bus queues it, and it is answered.
+    offered_to(
+        Config::local(world.run_file(run, "channel"), Some(PLANNER_CHANNEL)),
+        COMMANDS,
+        &json!({"author": "planner", "commands": []}),
+    )
+    .expect("the bus queues a well-formed command envelope with an empty list");
+    let empty = queued(&world, run)
+        .pop()
+        .expect("the bus queued the empty envelope");
+    assert_eq!(empty["id"], json!(2), "{empty}");
+    assert_eq!(empty["commands"], json!([]), "{empty}");
 
     world
         .run(&["adopt", run])
@@ -378,11 +397,12 @@ fn a_record_the_layout_refuses_is_answered_from_whatever_of_it_reads() {
         .err_lacks("panicked");
 
     let outcomes = world.command_outcomes(run);
-    assert_eq!(outcomes.len(), records.len(), "{outcomes:?}");
+    assert_eq!(outcomes.len(), 3, "{outcomes:?}");
     assert_eq!(cursor(&world, run), 3);
-    let reasons: Vec<&str> = outcomes
+    assert_eq!(outcomes[2], json!({"id": 2, "applied": true}));
+    let reasons: Vec<&str> = outcomes[..2]
         .iter()
-        .zip([0, 1, 2])
+        .zip([0, 1])
         .map(|(outcome, id)| {
             assert_eq!(outcome["id"], json!(id), "{outcome}");
             assert_eq!(outcome["applied"], json!(false), "{outcome}");
@@ -404,7 +424,6 @@ fn a_record_the_layout_refuses_is_answered_from_whatever_of_it_reads() {
             json!({"author": "planner", "command": {"op": "unreadable", "value": "drop sign-off"},
                    "reason": reasons[0]}),
             json!({"author": "planner", "command": undecodable_drop, "reason": reasons[0]}),
-            json!({"author": "planner", "command": undecodable_drop, "reason": reasons[1]}),
         ]
     );
 
