@@ -1140,3 +1140,13 @@ fn the_instrumented_suite_archives_the_build_it_runs_before_running_it() {
         body[archive]
     );
 } // llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// DEMONSTRATION BRANCH ONLY: fails whenever `DEMO_FAIL` is set, so a CI leg
+/// carrying it shows the re-run step on a real failure.
+#[test]
+fn demonstration_only_fails_when_asked() {
+    assert!(
+        std::env::var_os("DEMO_FAIL").is_none(),
+        "deliberately failing: demonstration branch only"
+    );
+}
