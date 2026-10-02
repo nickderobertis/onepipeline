@@ -137,6 +137,7 @@ mod loopcost;
 // project edged narrower would drop them out of `nx affected` for the very changes they
 // exist to catch. Same grounds as `mod dispatch_env_hook` above.
 mod maintenance;
+mod malformed_envelopes;
 mod node_validator;
 mod older_launch_record;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys

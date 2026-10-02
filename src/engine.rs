@@ -6815,6 +6815,38 @@ mod tests {
         .expect("the submission is answered")
     }
 
+    /// A record on the queue that this build cannot decode is still work: it is
+    /// owed its refusal, so an owner about to let go stays to answer it rather
+    /// than leaving it on a queue nothing will claim.
+    #[test]
+    fn an_undecodable_record_on_the_queue_keeps_the_owner_to_answer_it() {
+        let paths = handover_scratch("undecodable-kept");
+        let held = OwnershipLock::acquire(&paths, "drive").expect("the run is driven");
+        let transport =
+            onemessagebus::LocalTransport::open(paths.channel_dir()).expect("the channel opens");
+        onemessagebus::Transport::append(
+            &transport,
+            &crate::channel::layout::COMMANDS
+                .parse()
+                .expect("the command queue's name"),
+            json!({"id": 0, "commands": [{"op": "drop", "id": "sign-off"}]})
+                .to_string()
+                .as_bytes(),
+        )
+        .expect("the record is appended");
+        let claimable = ChannelState::new(&paths).claimable_commands();
+        assert!(claimable.envelopes.is_empty());
+        assert_eq!(claimable.undecodable, 1);
+        assert!(
+            matches!(
+                letting_go_under_the_handover(&paths, held),
+                LettingGo::QueueMoved(_)
+            ),
+            "the owner let go of a run with an unanswered record on its queue"
+        );
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
     /// Long enough that a section of two file operations would have finished
     /// several times over, and short enough to pay twice in a unit test.
     const LONG_ENOUGH_TO_HAVE_RUN: Duration = Duration::from_millis(200);
