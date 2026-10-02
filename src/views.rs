@@ -5068,6 +5068,42 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// A live driver gone quiet after every node of its graph settled is still
+    /// driving: it has written no ending, so a run that would read ended were
+    /// nothing driving it reads neither ended nor paused while it does.
+    #[test]
+    fn a_live_quiet_driver_whose_every_node_settled_is_driven_and_not_ended() {
+        for status in ["done", "failed"] {
+            let root = scratch(&format!("quiet-settled-{status}"));
+            let events = [
+                event(
+                    crate::journal::PipelineKind::RunStarted,
+                    None,
+                    &[("plan", json!(plan()))],
+                ),
+                event(
+                    crate::journal::PipelineKind::NodeSettled,
+                    Some("build"),
+                    &[("status", json!(status))],
+                ),
+            ]
+            .map(|mut stale| {
+                // As `quiet_run`'s: far older than the threshold's default.
+                stale.ts = "2020-01-01T00:00:00Z".into();
+                stale
+            });
+            let paths = write_run(&root, "demo", sys::pid(), &events);
+            let view = RunView::open(&paths).expect("the run reads");
+            assert_eq!(view.liveness(), DriverLiveness::Parked, "{status}");
+            let read = reading(&view);
+            assert_eq!(read.liveness, "PARKED", "{status}");
+            assert!(read.driven, "{status}");
+            assert_eq!(read.ending, None, "{status}");
+            assert_eq!(read.paused, None, "{status}");
+            std::fs::remove_dir_all(&root).ok();
+        }
+    }
+
     /// A quiet run whose record names no pid — what an older build left — is
     /// still `PARKED`, and its advice says its driver is alive without inventing
     /// a pid, and still offers `stop` rather than `adopt`.
