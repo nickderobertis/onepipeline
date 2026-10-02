@@ -723,6 +723,7 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
                         .expect("a source name"),
                     match_by: None,
                     recreate: false,
+                    create: false,
                     dry_run: false,
                 })
                 .await

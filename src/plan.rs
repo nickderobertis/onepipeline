@@ -1415,6 +1415,12 @@ pub struct TaskRecord {
     pub key: Option<String>,
     /// The task's own title.
     pub title: String,
+    /// The source the task's own item is in, where that is not the launched project's: a
+    /// task of one of the home's member projects. Absent for a task of the home itself,
+    /// which is every task of a plan read from one source — so a record written before a
+    /// plan could span sources reads exactly as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// Whether a repository is one person's or a team's — the vocabulary a schema-3
@@ -1628,6 +1634,47 @@ fn cell(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run's `plan.json` as a build before plans could span sources wrote it — every task
+    /// record naming no source — reads through the ledger's own reader and writes back as the
+    /// same document; a member task's record carries its source and round-trips with it.
+    #[test]
+    fn a_ledger_plan_written_before_task_records_named_a_source_reads_and_writes_back_unchanged() {
+        let older = serde_json::json!({
+            "schema_version": PLAN_SCHEMA_VERSION,
+            "name": "older",
+            "tasks": [{
+                "id": "build", "persona": "engineer", "title": "feat: build it",
+                "task": "## What\nBuild it.\n\n## Acceptance criteria\n- It is built.",
+                "task_record": {"id": "board/000-build", "key": "ENG-1", "title": "feat: build it"},
+            }],
+        });
+        let dir =
+            std::env::temp_dir().join(format!("onepipeline-older-plan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("plan.json");
+        std::fs::write(&path, older.to_string()).expect("the older ledger plan is written");
+        let read: Plan = crate::ledger::read_json(&path).expect("the older ledger plan loads");
+        std::fs::remove_dir_all(&dir).ok();
+        let record = read.tasks[0].task_record.clone().expect("a task record");
+        assert_eq!(record.source, None);
+        let written = serde_json::to_value(&read).expect("a plan serializes");
+        assert_eq!(
+            written["tasks"][0]["task_record"], older["tasks"][0]["task_record"],
+            "the record was written back otherwise than the older build wrote it"
+        );
+
+        let member = TaskRecord {
+            source: Some("linear".to_owned()),
+            ..record
+        };
+        let carried = serde_json::to_value(&member).expect("a record serializes");
+        assert_eq!(carried["source"], "linear");
+        assert_eq!(
+            serde_json::from_value::<TaskRecord>(carried).expect("a record parses"),
+            member
+        );
+    }
 
     /// C6b, called directly: each rule is refused by its own name, in order, and
     /// a section that ends the body or is followed by further sections passes

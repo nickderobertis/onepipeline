@@ -1618,6 +1618,7 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
             id: "t-1".into(),
             key: Some("ENG-1".into()),
             title: "feat: x".into(),
+            source: None,
         }),
     })
     .expect("a node serialises");
@@ -7198,6 +7199,12 @@ const RULINGS: &[(&str, &str)] = &[
         "105.",
         "**Adopting a live graph starts a new epoch when the hook it carries was fired over a \
          live graph**",
+    ),
+    // Where a plan lives, when it spans sources: a home project and its members.
+    (
+        "106.",
+        "**A plan spanning sources is a home project plus the member projects its \
+         `onetaskgraph.members` names**",
     ),
 ];
 

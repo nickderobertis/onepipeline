@@ -6,7 +6,7 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96, 97, 99, 100 and 102** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96, 97, 99, 100, 102 and 106** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
@@ -8695,3 +8695,65 @@ cross-DAG exclusion, unchanged.
 The planner accepted `stop` as the way to fire that hook. A driver lets go over a
 `ready` node only inside a window of milliseconds between its last pass and its release,
 which no command can hold it in.
+
+## 106. A plan could not span sources: a task of a second source was refused, and every settlement was written to the launched project's — RESOLVED
+
+**Ruling: a plan spanning sources is a home project plus the member projects its
+`onetaskgraph.members` names, read as one graph, driven as one run, and written back
+where each task lives. The planner who owns the contract ruled this in
+ai-orchestrator's multi-source plans (node `op-multi-source-plans`), and
+`docs/contract.md`'s "Where a plan lives, when it spans sources" paragraph states it.**
+A home lands in a routed source only when every task routes there, so the launched id
+may be a home in either source, and a live `add` may create a member project in the
+source the home is not in.
+
+**What was wrong.** A plan was one project of one source. The read refused any task of
+another source, and the write-back rebuilt every item's id in the launched project's
+source and refused a landed baseline naming any other. A library change and the change
+consuming it, tracked in two systems, could only be two disconnected plans.
+
+**The read.** The store is `onetaskgraph` 0.2.57, the release that carries `routes`,
+`TaskRequest.include_members` and the Linear plugin's `status_mapping`. `Reader::tasks`
+(`src/taskgraph.rs`) reads the launched project with `include_members`. A task is a node
+of the plan when it is a task of the home's project in the home's source, or of a
+member's project in that member's source; any other is refused, naming it, as before. A
+blocking edge between tasks of two of the plan's sources is a dependency, resolved
+through the far task's `onepipeline.id`; a far end outside the plan is refused as
+before. Every per-task check, `require_rendered` among them, reads a member's tasks as
+it reads the home's, and a node's `repo` is still its task's first `repositories` entry.
+
+**The stored task record.** `TaskRecord` (`src/plan.rs`) gains `source`, written only
+for a member task, as the source its item is in, and omitted where it is the launched
+project's. Every ledger and journal written before reads and writes back unchanged.
+`TaskRecord` refuses unknown fields, so a run journalled with the field **cannot be
+adopted by an engine older than this release**.
+
+**The write-back.** `known_id` builds a lineage's item id in the source its task record
+names, else in the home's, and takes a recorded shadow origin in any source this run's
+items can be in. That set is the home's source, every member task's own, and every
+source the home's source routes to under the configuration the launch directory
+discovers. Routes are the one way a member project comes to exist mid-run, so the set
+is read from the snapshot and the configuration alone, never from a source.
+`LandedBaseline::checked` accepts a destination in that set and refuses any other.
+`create` still copies through the store with `CopyScope::Members` and `destination` the
+home's source; the store's routing places each item, and the engine never chooses a
+source. `writeback-landed.json` and `writeback-projections.jsonl` keep their schemas and
+their versions; each item's qualified destination names its own source. The words, the
+`queued` claim, the closeout release and `delivers` are unchanged, now for every item
+of the plan in whichever source it lives.
+
+**A live `add`.** An `add` whose node names a `repo` the home's source routes elsewhere
+lands in that source's member project, through the same routed `Members` copy, created
+if the plan had none there. The engine's own compile of the edit is unchanged.
+
+**Where it is held.** `tests/e2e/multi_source.rs` runs each journey over two `local-md`
+sources, the plan source routing one repository to the second.
+`a_plan_spanning_two_sources_runs_as_one_graph_and_settles_each_task_where_it_lives`
+holds the read, the order across both sources, the `queued` claim and the settled
+words. `a_live_add_routed_to_the_second_source_lands_in_a_member_project_created_for_it`
+holds the routed `add`, and
+`a_stop_releases_and_an_adoption_reclaims_the_unstarted_items_of_both_sources` holds
+the release and the baseline read back by another process. `taskgraph::tests` holds
+the refusals, and `writeback::tests` holds `known_id` and `checked`.
+`plan::tests::a_ledger_plan_written_before_task_records_named_a_source_reads_and_writes_back_unchanged`
+holds the older ledger.

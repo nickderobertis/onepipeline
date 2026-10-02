@@ -5148,6 +5148,7 @@ mod tests {
             id: "tasks/build.md".into(),
             key: Some("ENG-7".into()),
             title: "Build it".into(),
+            source: None,
         };
         let mut read = agent("build", &[]);
         read.task_record = Some(record.clone());
@@ -5176,6 +5177,7 @@ mod tests {
             id: "invented".into(),
             key: Some("ENG-999".into()),
             title: "Not this task".into(),
+            source: None,
         };
         let claiming = |id: &str| {
             let mut node = agent(id, &[]);

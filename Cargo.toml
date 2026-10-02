@@ -838,14 +838,14 @@ onevcs-testing = "0.10.0"
 # lock's whole family to this one release, and fails as well if anything this
 # repository installs as an `onetaskgraph` binary names another.
 #
-# Moved for the host, which holds its `onetaskgraph` pin to this family: this release
-# sizes a `github-projects` search's pages to the answer it needs, and a caller's limit
-# bounds what is fetched, on top of the native board queries and the copy record
-# `onetaskgraph.copies` 0.2.52 brought. Here that link lands only on the write-back's
-# shadow task, which each projection rewrites.
-onetaskgraph-core = "=0.2.54"
-onetaskgraph-plugin-api = "=0.2.54"
-onetaskgraph-local-md = "=0.2.54"
+# Moved for a plan spanning sources: this release routes an item to another source by
+# its `repositories` (`routes`), places a routed task in its home's member project, and
+# reads a home with its members (`include_members`); `src/taskgraph.rs` reads a plan
+# that way. It also carries the Linear plugin's `status_mapping`, which a write-back to
+# a Linear source needs.
+onetaskgraph-core = "=0.2.57"
+onetaskgraph-plugin-api = "=0.2.57"
+onetaskgraph-local-md = "=0.2.57"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
