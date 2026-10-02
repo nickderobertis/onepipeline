@@ -4511,6 +4511,54 @@ pub fn reaped_pid() -> u32 {
     pid
 }
 
+/// Whether this host can show that `pid` has ended — the moment a **detached**
+/// driver hands back, which nothing in its run store marks: it lets go of the run
+/// and then still has its closeout to write, so the last file it touches is not a
+/// signal that it has finished touching them.
+///
+/// A process that has ended but not yet been reaped counts as ended, because the
+/// question is whether it can still write, and a zombie cannot. Every other answer
+/// this host cannot give reads as still running, so a wait on this outlives the
+/// process rather than stopping short of it.
+#[cfg(unix)]
+pub fn process_ended(pid: u32) -> bool {
+    let Ok(raw) = i32::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 delivers nothing and touches no memory this call owns.
+    if unsafe { libc::kill(raw, 0) } != 0 {
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    }
+    // The state field follows the command name's closing parenthesis.
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(')')
+            .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+    })
+}
+
+/// The same question on Windows, where a process handle is signalled once — and
+/// only once — the process has terminated.
+#[cfg(windows)]
+pub fn process_ended(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+    // SAFETY: `OpenProcess` returns null on failure and otherwise a handle closed
+    // below; no borrowed memory crosses the boundary.
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if handle.is_null() {
+        // No such process any more: its pid names nothing this host can open.
+        return std::io::Error::last_os_error().raw_os_error()
+            == Some(ERROR_INVALID_PARAMETER as i32);
+    }
+    // SAFETY: `handle` is live, and a zero timeout returns at once.
+    let waited = unsafe { WaitForSingleObject(handle, 0) };
+    // SAFETY: the handle came from `OpenProcess` above and is closed once.
+    unsafe { CloseHandle(handle) };
+    waited == WAIT_OBJECT_0
+}
+
 /// End one process this suite is entitled to end, and wait until it is gone.
 ///
 /// Forcefully, because both things it is used on are processes a polite ask does
