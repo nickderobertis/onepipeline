@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::agentgraph::{self, Interrupted, TurnAddress};
-use crate::channel::{ChannelState, Command, CommandOutcome, Surface};
+use crate::channel::{ChannelState, Claimed, Command, CommandOutcome, Surface, Undecodable};
 use crate::checkpoint::Projected;
 use crate::edits::{self, Frontier};
 use crate::error::{Error, Result};
@@ -2560,12 +2560,19 @@ fn reconcile_edits(
     }
     // Claimed before the held envelopes are taken, so a queue that refuses the
     // claim leaves them held for the next pass rather than dropped with the error.
-    let fresh = channel.claim_commands()?;
+    let fresh = channel.claim_commands_answering()?;
     let mut claimed = deliveries
         .as_deref_mut()
         .map(|deliveries| std::mem::take(&mut deliveries.behind))
         .unwrap_or_default();
-    claimed.extend(fresh);
+    for record in fresh {
+        match record {
+            Claimed::Envelope(envelope) => claimed.push_back(envelope),
+            // Refused as it is claimed rather than in its turn: nothing of it is
+            // applied, so no envelope behind it is judged against anything it did.
+            Claimed::Undecodable(record) => refuse_undecodable(paths, journal, channel, &record)?,
+        }
+    }
     while let Some(envelope) = claimed.pop_front() {
         let author = envelope.author.clone();
         let commands = &envelope.commands;
@@ -3431,6 +3438,59 @@ pub(crate) fn record_rejection(
             correlation: None,
         },
     )
+}
+
+/// Refuse, whole, a claimed record that does not decode as this build's envelope.
+///
+/// The claim has already moved the queue's cursor past it, so this is the only
+/// answer it gets: one outcome line carrying its id and the decoder's message and
+/// no per-command results, because nothing of it was judged; an `edit-rejected`
+/// for each command it carried, as sent, under its own author; and one surface,
+/// so nobody has to go looking for it. Nothing of the envelope applies — a
+/// command in it that would decode on its own included — exactly as an envelope
+/// one of whose commands is refused applies nothing.
+fn refuse_undecodable(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    channel: &ChannelState,
+    record: &Undecodable,
+) -> Result<()> {
+    for command in &record.commands {
+        journal.emit(
+            journal::PipelineKind::EditRejected,
+            journal::labels(&paths.run, None),
+            journal::payload(&[
+                ("author", json!(record.author)),
+                ("command", command.clone()),
+                ("reason", json!(record.reason)),
+            ]),
+        )?;
+    }
+    raise(
+        paths,
+        journal,
+        Surface {
+            id: 0,
+            kind: "edit-rejected".into(),
+            message: format!(
+                "reconciler: rejected envelope {} — {}",
+                record.id, record.reason
+            ),
+            source: crate::channel::source::RECONCILER.into(),
+            blocking: false,
+            queued_at: sys::now_millis(),
+            abandoned: false,
+            asker: None,
+            workstream: None,
+            correlation: None,
+        },
+    )?;
+    channel.answer_commands(&CommandOutcome {
+        id: record.id,
+        applied: false,
+        reason: Some(record.reason.clone()),
+        results: Vec::new(),
+    })
 }
 
 /// One note as it is offered: the note itself, and where it may land.
@@ -9329,7 +9389,8 @@ mod tests {
         assert_eq!(
             cancelled_by(&Command::Drop {
                 id: "a".into(),
-                dependents: crate::channel::Dependents::Detach
+                dependents: crate::channel::Dependents::Detach,
+                reason: None
             }),
             vec!["a".to_string()]
         );

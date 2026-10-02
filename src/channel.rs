@@ -365,6 +365,11 @@ pub enum Command {
         id: String,
         /// The dependents' fate. Stating it is required.
         dependents: Dependents,
+        /// Why the node is retired — a superseded human action, say — carried
+        /// into the `edit-committed` record's `command`. Optional, so a drop that
+        /// states none is the drop it always was; stated blank, it is refused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// Replace an unstarted node's dependencies.
     Reparent {
@@ -926,6 +931,91 @@ pub struct QueuedCommands {
     pub author: Author,
     /// The commands, reconciled in order.
     pub commands: Vec<Command>,
+}
+
+/// What the command queue holds that a reconciler has not claimed yet.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Claimable {
+    /// The records that decode as this build's envelope, in queue order.
+    pub(crate) envelopes: Vec<QueuedCommands>,
+    /// How many records do not, each of which is owed a refusal.
+    pub(crate) undecodable: usize,
+}
+
+impl Claimable {
+    /// Whether a reconciler would find nothing at all to answer.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.envelopes.is_empty() && self.undecodable == 0
+    }
+}
+
+/// One record claimed from the command queue.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Claimed {
+    /// An envelope of this build's commands, for the reconciler to judge.
+    Envelope(QueuedCommands),
+    /// A record that does not decode as one, for the reconciler to refuse whole.
+    Undecodable(Undecodable),
+}
+
+impl Claimed {
+    /// Read one claimed record.
+    ///
+    /// The bus appends what the planner channel's layout passes, and the layout
+    /// reads only each command's `op`, so a record reaching here may hold a
+    /// command no build decodes — a `drop` with no `dependents`, a `settle` at an
+    /// outcome that is not one. Such a record is kept, never discarded: the
+    /// queue's cursor has already moved past it.
+    fn of(record: Value) -> Self {
+        match serde_json::from_value::<QueuedCommands>(record.clone()) {
+            Ok(envelope) => Self::Envelope(envelope),
+            Err(error) => Self::Undecodable(Undecodable::of(record, &error)),
+        }
+    }
+}
+
+/// A claimed record that does not decode as this build's envelope, as much of it
+/// as its refusal needs.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Undecodable {
+    /// The record's `id` where it is an unsigned integer, else `0`.
+    pub(crate) id: u64,
+    /// The record's `author` where it is one this build reads, else the planner.
+    pub(crate) author: Author,
+    /// Each command the record carried, exactly as sent — or, for a record with
+    /// no readable `commands` array, the one placeholder that carries the record.
+    pub(crate) commands: Vec<Value>,
+    /// What the submitter is told: the decoder's own message, after the words
+    /// that say the whole envelope was refused.
+    pub(crate) reason: String,
+}
+
+impl Undecodable {
+    fn of(record: Value, error: &serde_json::Error) -> Self {
+        let unreadable = |value: Value| serde_json::json!({"op": "unreadable", "value": value});
+        let commands = match record.get("commands") {
+            Some(Value::Array(commands)) if !commands.is_empty() => commands
+                .iter()
+                .map(|command| {
+                    if command.is_object() {
+                        command.clone()
+                    } else {
+                        unreadable(command.clone())
+                    }
+                })
+                .collect(),
+            _ => vec![unreadable(record.clone())],
+        };
+        Self {
+            id: record.get("id").and_then(Value::as_u64).unwrap_or_default(),
+            author: record
+                .get("author")
+                .and_then(|author| serde_json::from_value(author.clone()).ok())
+                .unwrap_or_else(Author::planner),
+            commands,
+            reason: format!("refused: the envelope is malformed: {error}"),
+        }
+    }
 }
 
 /// The one layout a run's channel is kept under.
@@ -1903,41 +1993,60 @@ impl ChannelState {
             .unwrap_or_default())
     }
 
-    /// Exactly what [`claim_commands`](Self::claim_commands) would take,
-    /// **without** taking it.
+    /// Exactly what [`claim_commands_answering`](Self::claim_commands_answering)
+    /// would take, **without** taking it.
     ///
     /// What a writer about to let go of the run asks: whether there is anything
     /// left for a reconciler to do. Claiming to find out would take envelopes
-    /// off the queue this process is not going to apply.
-    // llmlint: ignore-block[changed_behavior_has_e2e] the leniency here is not this
-    // function's own: it reads the queue exactly as `claim_commands` does, because the
-    // question it answers is what that call would take. A record no build can read is
-    // passed over by both, and a writer that stayed for one would be waiting on work
-    // nothing will ever claim — which is the state that has no way out.
-    pub(crate) fn claimable_commands(&self) -> Vec<QueuedCommands> {
+    /// off the queue this process is not going to apply. A record this build
+    /// cannot decode is work as well — it is owed its refusal — so it is counted,
+    /// and a writer that found one stays to answer it.
+    pub(crate) fn claimable_commands(&self) -> Claimable {
         let Ok(commands) = self.plain(COMMANDS) else {
-            return Vec::new();
+            return Claimable::default();
         };
-        commands
-            .waiting()
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|record| serde_json::from_value(record).ok())
-            .collect()
+        let mut claimable = Claimable::default();
+        for record in commands.waiting().unwrap_or_default() {
+            match serde_json::from_value(record) {
+                Ok(envelope) => claimable.envelopes.push(envelope),
+                Err(_) => claimable.undecodable += 1,
+            }
+        }
+        claimable
     }
-    // llmlint: ignore-end[changed_behavior_has_e2e]
 
     /// Claim the command envelopes the reconciler has not drained yet.
+    ///
+    /// Only the records that decode as this build's envelope: one that does not
+    /// is claimed and passed over. The reconciler claims through
+    /// [`claim_commands_answering`](Self::claim_commands_answering) instead,
+    /// which hands it every record so that it can refuse the ones that do not.
     pub fn claim_commands(&self) -> crate::Result<Vec<QueuedCommands>> {
+        Ok(self
+            .claim_commands_answering()?
+            .into_iter()
+            .filter_map(|claimed| match claimed {
+                Claimed::Envelope(envelope) => Some(envelope),
+                Claimed::Undecodable(_) => None,
+            })
+            .collect())
+    }
+
+    /// Claim every record the reconciler has not drained yet, in queue order:
+    /// each one that decodes as its envelope, and each one that does not as what
+    /// its refusal needs.
+    ///
+    /// The claim advances the cursor whatever the record holds, so a record this
+    /// returned is one nothing will claim again: what it is owed is answered by
+    /// the caller or by nobody.
+    pub(crate) fn claim_commands_answering(&self) -> crate::Result<Vec<Claimed>> {
         let commands = self.plain(COMMANDS)?;
         let mut claimed = Vec::new();
         while let Some(envelope) = commands
             .claim(&ConsumerName::default_consumer())
             .map_err(queue_failure)?
         {
-            if let Ok(envelope) = serde_json::from_value(envelope.record) {
-                claimed.push(envelope);
-            }
+            claimed.push(Claimed::of(envelope.record));
         }
         Ok(claimed)
     }
@@ -2505,5 +2614,99 @@ mod tests {
         std::fs::remove_dir_all(&channel).expect("the channel directory is removed");
         assert_eq!(scratch.channel.queue(), Queue::default());
         assert!(!channel.exists(), "a read made the channel directory");
+    }
+
+    /// A `drop` states an optional `reason`: the version-3 document admits it,
+    /// the typed envelope reads it and writes it back, a drop that states none
+    /// writes no key, and `dependents` is still required with or without one.
+    #[test]
+    fn a_drop_reads_an_optional_reason_and_still_requires_its_dependents() {
+        let with = json!({"version": 3, "commands": [
+            {"op": "drop", "id": "sign-off", "dependents": "detach", "reason": "superseded"}
+        ]});
+        registry()
+            .check(&SchemaId::literal("agent", "reply-envelope", 3), &with)
+            .expect("the version-3 document admits a drop's reason");
+        let reply: Reply = serde_json::from_value(with.clone()).expect("a drop with a reason");
+        assert_eq!(
+            reply.commands,
+            [Command::Drop {
+                id: "sign-off".into(),
+                dependents: Dependents::Detach,
+                reason: Some("superseded".into()),
+            }]
+        );
+        assert_eq!(
+            serde_json::to_value(&reply.commands[0]).expect("serialises"),
+            with["commands"][0]
+        );
+
+        let without = Command::Drop {
+            id: "sign-off".into(),
+            dependents: Dependents::Drop,
+            reason: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&without).expect("serialises"),
+            json!({"op": "drop", "id": "sign-off", "dependents": "drop"})
+        );
+
+        let refused = serde_json::from_value::<Command>(
+            json!({"op": "drop", "id": "sign-off", "reason": "superseded"}),
+        )
+        .expect_err("a drop stating no dependents is refused, reason or not");
+        assert!(
+            refused.to_string().contains("missing field `dependents`"),
+            "{refused}"
+        );
+    }
+
+    /// A record that does not decode keeps what its refusal needs: its own id and
+    /// author where it carries readable ones, each command exactly as sent, and
+    /// the record itself where it has no command list to carry.
+    #[test]
+    fn an_undecodable_record_keeps_its_id_author_and_commands_as_sent() {
+        let Claimed::Undecodable(refused) = Claimed::of(json!({"id": 7, "author": "monitor",
+            "commands": [{"op": "note", "id": "a", "text": "t"}, {"op": "drop", "id": "a"}, 3]}))
+        else {
+            panic!("a drop with no dependents decoded");
+        };
+        assert_eq!(refused.id, 7);
+        assert_eq!(refused.author.as_str(), "monitor");
+        assert_eq!(
+            refused.commands,
+            [
+                json!({"op": "note", "id": "a", "text": "t"}),
+                json!({"op": "drop", "id": "a"}),
+                json!({"op": "unreadable", "value": 3}),
+            ]
+        );
+        assert!(
+            refused
+                .reason
+                .starts_with("refused: the envelope is malformed: "),
+            "{}",
+            refused.reason
+        );
+
+        for record in [
+            json!({"id": "x", "author": 4, "commands": "drop a"}),
+            json!({"author": "", "commands": [], "extra": true}),
+        ] {
+            let Claimed::Undecodable(refused) = Claimed::of(record.clone()) else {
+                panic!("{record} decoded");
+            };
+            assert_eq!(refused.id, 0, "{record}");
+            assert_eq!(refused.author, Author::planner(), "{record}");
+            assert_eq!(
+                refused.commands,
+                [json!({"op": "unreadable", "value": record})]
+            );
+        }
+
+        assert!(matches!(
+            Claimed::of(json!({"id": 2, "commands": []})),
+            Claimed::Envelope(QueuedCommands { id: 2, .. })
+        ));
     }
 }
