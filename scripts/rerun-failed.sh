@@ -162,7 +162,10 @@ for run in $(seq 1 "$times"); do
   grouped && echo "::endgroup::"
   cat "$out.stdout" "$out.stderr" >"$out"
   plain "$out" >"$out.plain"
-  rebuilt="$(sed -nE 's/^[[:space:]]*Compiling ([^ ]+).*/\1/p' "$out.plain" | tr '\n' ' ')"
+  # Cargo's own lines come before nextest starts the tests; after that, a
+  # `Compiling` line is some test's output.
+  rebuilt="$(sed -n '/^[[:space:]]*Starting [0-9]/q;p' "$out.plain" \
+    | sed -nE 's/^[[:space:]]*Compiling ([^ ]+).*/\1/p' | tr '\n' ' ')"
   if [ -n "$rebuilt" ]; then
     warn "re-run $run of $times compiled ${rebuilt}first, so it ran a new build of those rather than the failed step's. Re-run with the command the step built with (just rerun-failed after test-quick, just rerun-failed-coverage after the instrumented gate)."
   fi
