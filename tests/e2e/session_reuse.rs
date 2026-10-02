@@ -981,10 +981,20 @@ fn every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base() {
     )
     .expect("the finished work is written");
     git(&world, &finished.worktree, &["add", "-A"]);
+    // Without git's own housekeeping: since git 2.47 a commit ends by starting
+    // `git maintenance run --auto --detach`, which daemonizes *inside this
+    // worktree* before it decides whether there is anything to do — and the
+    // close below rightly refuses a run root a process is still working in.
     git(
         &world,
         &finished.worktree,
-        &["commit", "-m", "feat: what the closed session did"],
+        &[
+            "-c",
+            "maintenance.auto=false",
+            "commit",
+            "-m",
+            "feat: what the closed session did",
+        ],
     );
     onevcs(&world, &["session", "close", &finished.token.0]);
     let (settled, session) = dispatched(&world, "closed", Some("feature/closed"));
