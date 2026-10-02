@@ -503,7 +503,14 @@ fn an_undecodable_envelope_arriving_while_the_driver_is_leaving_is_answered_befo
     world.until("the run to dispatch something", |world| {
         !world.events_of(run, "node-dispatched").is_empty()
     });
+    // llmlint: ignore-block[tests_mirror_real_usage] a write-back shadow store that cannot
+    // be written is a state a host produces on its own — a full disk, a permission change —
+    // and `driver.rs`'s `an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go`
+    // holds its close-out open the same way. It is here because the close-out has to stay
+    // open long enough for an envelope to arrive in it, and how long a store takes to refuse
+    // is not something the CLI exposes an input for.
     crate::driver::unwritable_shadow_store(&world, run);
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.release("work.go");
     world.until("the only node to settle", |world| {
         !world.events_of(run, "node-settled").is_empty()

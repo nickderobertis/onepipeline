@@ -137,7 +137,14 @@ mod loopcost;
 // project edged narrower would drop them out of `nx affected` for the very changes they
 // exist to catch. Same grounds as `mod dispatch_env_hook` above.
 mod maintenance;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the
+// head of the leaving-driver journey in `tests/e2e/malformed_envelopes.rs` and is not
+// restated here; this declaration is the other site the rule reads, and what it adds is
+// only that the module belongs to this binary for the same reason `mod listing` does: its
+// journeys are of the crate's own command queue and handover gate, which any change under
+// `src/` can move.
 mod malformed_envelopes;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod node_validator;
 mod older_launch_record;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
