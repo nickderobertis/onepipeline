@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.58.0](https://github.com/nickderobertis/onepipeline/compare/v0.57.4...v0.58.0) - 2026-10-02
+
+### Fixed
+
+- *(channel)* refuse an envelope that does not decode instead of discarding it ([#685](https://github.com/nickderobertis/onepipeline/pull/685))
+
 ## [0.57.4](https://github.com/nickderobertis/onepipeline/compare/v0.57.3...v0.57.4) - 2026-10-02
 
 ### Fixed
