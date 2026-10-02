@@ -1636,11 +1636,12 @@ fn cell(value: &str) -> String {
 mod tests {
     use super::*;
 
-    /// A run's `plan.json` as a build before plans could span sources wrote it — every task
-    /// record naming no source — reads through the ledger's own reader and writes back as the
-    /// same document; a member task's record carries its source and round-trips with it.
+    /// A run's `plan.json` as a build before plans could span sources wrote it — its task
+    /// record naming no source — loads through the ledger's own reader, and that task record is
+    /// written back exactly as the older build wrote it; a member task's record carries its
+    /// source, round-trips with it, and is refused naming a source no store could carry.
     #[test]
-    fn a_ledger_plan_written_before_task_records_named_a_source_reads_and_writes_back_unchanged() {
+    fn an_older_ledgers_task_record_loads_and_writes_back_unchanged() {
         let older = serde_json::json!({
             "schema_version": PLAN_SCHEMA_VERSION,
             "name": "older",

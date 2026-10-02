@@ -8758,5 +8758,5 @@ the release and the baseline read back by another process.
 `an_adoption_with_no_baseline_reads_a_member_task_by_its_id_in_its_own_source` holds
 `known_id` for a member task, in a run whose baseline is gone. `taskgraph::tests` holds
 the refusals, and `writeback::tests` holds `known_id` and `checked`.
-`plan::tests::a_ledger_plan_written_before_task_records_named_a_source_reads_and_writes_back_unchanged`
+`plan::tests::an_older_ledgers_task_record_loads_and_writes_back_unchanged`
 holds the older ledger.
