@@ -459,3 +459,57 @@ fn a_superseded_human_action_is_retired_with_a_drop_that_states_why() {
     );
     assert_eq!(invocations(&world, run), ["success"]);
 }
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] same grounds as
+// `driver.rs`'s `an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go`,
+// whose window this journey uses: it is of the crate's own ownership lock, handover gate and
+// command queue, which any change under `src/` can move.
+/// A record no build decodes that reaches a run while its driver is **on its way
+/// out** is answered by that driver before it lets go — it is work the driver
+/// owes, not something it may leave on a queue nothing will claim.
+///
+/// The window is the run's write-back close-out, held open by a shadow store the
+/// worker cannot write, exactly as the driver journey that proves the same of a
+/// well-formed edit holds it.
+#[test]
+fn an_undecodable_envelope_arriving_while_the_driver_is_leaving_is_answered_before_it_lets_go() {
+    let world = World::new("malformed-leaving");
+    world.script("work.wait", "hold");
+    let run = "leaving";
+    let path = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the run to dispatch something", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+    crate::driver::unwritable_shadow_store(&world, run);
+    world.release("work.go");
+    world.until("the only node to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+
+    sent_through_the_bus(
+        &world,
+        run,
+        &json!({"version": 3, "commands": [{"op": "drop", "id": "work"}]}),
+    );
+    world.until("the leaving driver to answer the envelope", |world| {
+        !world.command_outcomes(run).is_empty()
+    });
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+
+    let outcomes = world.command_outcomes(run);
+    assert_eq!(
+        outcomes,
+        [json!({"id": queued(&world, run)[0]["id"], "applied": false,
+                "reason": format!("{MALFORMED}missing field `dependents`")})]
+    );
+    assert_eq!(cursor(&world, run), 1);
+    assert_eq!(world.events_of(run, "edit-rejected").len(), 1);
+    assert!(
+        world.events_of(run, "driver-adopted").is_empty(),
+        "a second driver answered what the first one left"
+    );
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
