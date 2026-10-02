@@ -186,16 +186,25 @@ fn every_envelope_the_reconciler_cannot_decode_is_answered_and_nothing_of_it_app
         sent_through_the_bus(&world, run, &json!({"version": 3, "commands": commands}));
     }
     // The bus stamps every record it queues with an id, and refuses a command
-    // list that is not a list, so these two only reach the queue beneath it.
+    // list that is not a list — so that record, and the first, only reach the
+    // queue beneath it. It refuses the reconciler's other corners as well — an
+    // author that is not a string, a command that is not an object — which is
+    // why `channel::tests` holds those rather than this journey.
     let not_a_list = json!({"op": "drop", "id": "sign-off", "dependents": "detach"});
-    assert!(
-        offered(
-            Config::local(world.run_file(run, "channel"), Some(PLANNER_CHANNEL)),
-            &json!({"version": 3, "commands": not_a_list}),
-        )
-        .is_err(),
-        "the planner channel's layout queued a command list that is not a list"
-    );
+    for refused in [
+        json!({"version": 3, "commands": not_a_list}),
+        json!({"version": 3, "author": 7, "commands": [undecodable_drop]}),
+        json!({"version": 3, "commands": ["drop sign-off", undecodable_drop]}),
+    ] {
+        assert!(
+            offered(
+                Config::local(world.run_file(run, "channel"), Some(PLANNER_CHANNEL)),
+                &refused,
+            )
+            .is_err(),
+            "the planner channel's layout queued {refused}"
+        );
+    }
     let next = u64::try_from(queued(&world, run).len()).expect("a queue length");
     appended_beneath_the_layout(&world, run, &json!({"id": next, "commands": not_a_list}));
     sent_by_the_monitor(
