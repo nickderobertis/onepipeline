@@ -7116,7 +7116,7 @@ mod tests {
         assert_eq!(claimable.undecodable, 1);
         assert!(
             matches!(
-                letting_go_under_the_handover(&paths, held),
+                letting_go_under_the_handover(&paths, held, || {}),
                 LettingGo::QueueMoved(_)
             ),
             "the owner let go of a run with an unanswered record on its queue"
