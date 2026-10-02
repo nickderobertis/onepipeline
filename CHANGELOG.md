@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.59.0](https://github.com/nickderobertis/onepipeline/compare/v0.58.0...v0.59.0) - 2026-10-02
+
+### Added
+
+- *(views)* read a run's ending from its hook verdict and print it as JSON ([#694](https://github.com/nickderobertis/onepipeline/pull/694))
+- *(journal)* record every driver's ending with its settlement and last answered command ([#691](https://github.com/nickderobertis/onepipeline/pull/691))
+
+### Fixed
+
+- *(unwatched)* keep a detached driver's run document current with its journal at handback ([#702](https://github.com/nickderobertis/onepipeline/pull/702))
+- *(hooks)* start a new hook epoch when an adoption finds the graph live ([#699](https://github.com/nickderobertis/onepipeline/pull/699))
+- *(tests)* remove the races behind the write-back and summary flakes ([#683](https://github.com/nickderobertis/onepipeline/pull/683))
+- *(ci)* name why a test leg stopped and whether a failed test reproduces ([#670](https://github.com/nickderobertis/onepipeline/pull/670))
+
 ## [0.58.0](https://github.com/nickderobertis/onepipeline/compare/v0.57.4...v0.58.0) - 2026-10-02
 
 ### Fixed
