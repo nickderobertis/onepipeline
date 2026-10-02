@@ -1,6 +1,7 @@
-# DEMONSTRATION BRANCH ONLY — never merged. The whole offline suite on macOS,
-# as the cross leg runs it, against the `priority` fix.
-name: DEMO macOS full suite
+# DEMONSTRATION BRANCH ONLY — never merged. Attempt 4: the new tests on both
+# cross-platform runners, under CI's colour and profile, with rust-cache's post
+# step to show the fixtures no longer sit in the tree it cleans.
+name: DEMO nextest_runs on both cross runners
 
 on: pull_request
 
@@ -8,9 +9,13 @@ permissions:
   contents: read
 
 jobs:
-  macos-full:
-    runs-on: macos-latest
-    timeout-minutes: 125
+  nextest-runs:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     env:
       NEXTEST_PROFILE: ci
       CARGO_TERM_COLOR: always
@@ -20,34 +25,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
       - uses: taiki-e/install-action@v2
         with:
-          tool: just,nextest
-      - name: Bootstrap
-        run: just bootstrap
-      - name: What nextest runs with here
-        run: |
-          cargo nextest --version
-          echo "hw.ncpu=$(sysctl -n hw.ncpu) hw.physicalcpu=$(sysctl -n hw.physicalcpu)"
-      - name: The scheduling condition, forced at five threads
-        run: cargo nextest run --locked -E 'binary(nextest_runs) and test(/strands|unrun/)'
-      # The condition job 110417653725 met: more test threads than the e2e
-      # group's cap of 4 (that host ran at least five tests at once; this one
-      # has hw.ncpu=3, where the group's queue is never used). --no-fail-fast so
-      # an unrelated failure cannot leave tests unrun for its own reason.
-      - name: The whole offline suite at five test threads
-        id: gate
-        timeout-minutes: 90
-        run: |
-          just _strace-preflight
-          just _onetaskgraph-preflight
-          bash scripts/nextest-run.sh cargo nextest run --locked --no-fail-fast --test-threads 5 \
-            -E "$(just --evaluate offline-tiers)" 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
-      - name: Does each failed test fail again on this build
-        if: failure() && steps.gate.outcome == 'failure'
-        continue-on-error: true
-        timeout-minutes: 20
-        run: just rerun-failed "$RUNNER_TEMP/quality-gate.log"
+          tool: nextest
+      - name: The new tests, as the suite runs them
+        run: cargo nextest run --locked -E 'binary(nextest_runs) and not test(demonstration)'

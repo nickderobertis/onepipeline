@@ -1,9 +1,8 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  # DEMO attempt 4: off; attempt 3's runs are the evidence for these jobs
+  workflow_dispatch:
 
 # Least privilege: most jobs only need to read the repo.
 permissions:
