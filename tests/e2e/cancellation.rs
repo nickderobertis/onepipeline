@@ -511,10 +511,12 @@ fn a_node_whose_cancellation_is_still_in_flight_renders_as_cancelling() {
 /// converging on for as long as the run exists, which is the same lie the
 /// rendering was added to stop telling.
 ///
-/// Before that, the driver is alive and waiting, and quiet: every node of the
-/// graph has settled — its only one is parked — and the run reads `PARKED`,
-/// still driven, neither ended nor paused, and an `adopt` refuses it. Only a
-/// driver this host has proved gone is taken over.
+/// Before that, the driver is alive and waiting, and quiet: the graph's only
+/// node is parked, with the dispatch it is cancelling still in flight, and the
+/// run reads `PARKED`, still driven, neither ended nor paused, and an `adopt`
+/// refuses it. Only a driver this host has proved gone is taken over. A quiet
+/// driver over a graph whose every node has *settled* is
+/// `driver::a_live_driver_quiet_over_a_settled_graph_reads_parked_driven_and_not_ended`.
 ///
 /// The park itself is the planner's own idle and outlives any driver: what the
 /// node comes back through is still a `requeue`, and it is accepted here for the
@@ -534,8 +536,7 @@ fn an_adoption_ends_a_cancellation_the_driver_it_replaced_was_waiting_on() {
     });
 
     // The dispatch it is waiting on is held open and silent, so the driver has
-    // nothing left to write: a live driver gone quiet over a graph whose every
-    // node has settled.
+    // nothing left to write: a live driver gone quiet over a parked node.
     let quiet = |argv: &[&str]| {
         let mut command = world.cmd(argv);
         command.env(PARKED_AFTER_ENV, "1");
