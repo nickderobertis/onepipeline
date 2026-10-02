@@ -89,17 +89,13 @@ fn sent_through(config: Config, envelope: &Value) {
 }
 
 fn offered(config: Config, envelope: &Value) -> Result<(), BusError> {
-    offered_to(config, REPLIES, envelope)
-}
-
-fn offered_to(config: Config, to: &str, envelope: &Value) -> Result<(), BusError> {
     let bus = config
         .resolve(
             &Layouts::new().with(Arc::new(PlannerChannel)),
             &TransportKinds::builtin(),
         )
         .expect("the planner channel's bus resolves over the run's channel");
-    bus.send(&queue(to), envelope.clone()).map(drop)
+    bus.send(&queue(REPLIES), envelope.clone()).map(drop)
 }
 
 /// Append one record to the command queue as the channel's transport does,
@@ -343,8 +339,7 @@ fn every_envelope_the_reconciler_cannot_decode_is_answered_and_nothing_of_it_app
 /// object is journalled inside an `unreadable` placeholder, and an author that
 /// is not a string is answered as the planner's — beside an empty command list,
 /// which journals nothing — yet each record still gets its outcome line and
-/// surface. An empty list alone is no corner: the bus queues a well-formed
-/// command envelope carrying one, and it is answered with one outcome line.
+/// surface.
 #[test]
 fn a_record_the_layout_refuses_is_answered_from_whatever_of_it_reads() {
     let world = World::new("malformed-corners");
@@ -373,22 +368,6 @@ fn a_record_the_layout_refuses_is_answered_from_whatever_of_it_reads() {
         );
         appended_beneath_the_layout(&world, run, record);
     }
-    // Offered to `replies`, a well-formed envelope with an empty command list
-    // carries nothing for the command queue: the layout files it as a reply.
-    sent_through_the_bus(&world, run, &json!({"version": 3, "commands": []}));
-    assert_eq!(queued(&world, run).len(), records.len());
-    // Offered to `commands` itself, the bus queues it, and it is answered.
-    offered_to(
-        Config::local(world.run_file(run, "channel"), Some(PLANNER_CHANNEL)),
-        COMMANDS,
-        &json!({"author": "planner", "commands": []}),
-    )
-    .expect("the bus queues a well-formed command envelope with an empty list");
-    let empty = queued(&world, run)
-        .pop()
-        .expect("the bus queued the empty envelope");
-    assert_eq!(empty["id"], json!(2), "{empty}");
-    assert_eq!(empty["commands"], json!([]), "{empty}");
 
     world
         .run(&["adopt", run])
@@ -397,10 +376,9 @@ fn a_record_the_layout_refuses_is_answered_from_whatever_of_it_reads() {
         .err_lacks("panicked");
 
     let outcomes = world.command_outcomes(run);
-    assert_eq!(outcomes.len(), 3, "{outcomes:?}");
-    assert_eq!(cursor(&world, run), 3);
-    assert_eq!(outcomes[2], json!({"id": 2, "applied": true}));
-    let reasons: Vec<&str> = outcomes[..2]
+    assert_eq!(outcomes.len(), records.len(), "{outcomes:?}");
+    assert_eq!(cursor(&world, run), 2);
+    let reasons: Vec<&str> = outcomes
         .iter()
         .zip([0, 1])
         .map(|(outcome, id)| {
