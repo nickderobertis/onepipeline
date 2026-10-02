@@ -4554,27 +4554,105 @@ pub fn end_process(pid: u32) {
 /// an adoption refuses it; a journey that needs the run taken over ends the
 /// driver first, as an operator's `stop` or a crash would.
 ///
-/// Only ever **this run's own driver**: the pid is the one the run's launch
-/// record names under this world's own runs root, and it has to be the pid
-/// holding that run's ownership lock too, so a record naming a stale or reissued
-/// pid is refused rather than signalled. Several suites share a host, and a pid
-/// that is not provably this run's driver belongs to somebody.
+/// Only ever **this run's own driver**: the pid the run's launch record names
+/// under this world's own runs root, holding that run's ownership lock, and —
+/// what tells it from a stranger handed the same pid — a process whose start
+/// this host reports with the very stamp the record was written with. A pid
+/// whose process started at any other moment is refused rather than signalled.
+/// Several suites share a host, and a pid that is not provably this run's driver
+/// belongs to somebody. What is left is the instant between that proof and the
+/// signal, inside which the driver would have to exit and its pid be reissued.
 pub fn end_driver(world: &World, run: &str) -> u32 {
-    let pid_of = |file: &str| {
-        world.run_json(run, file)["pid"]
+    let launch = world.run_json(run, "launch.json");
+    let pid_of = |record: &Value| {
+        record["pid"]
             .as_u64()
             .and_then(|pid| u32::try_from(pid).ok())
     };
-    let pid = pid_of("launch.json")
-        .unwrap_or_else(|| panic!("the launch record of {run} names no driver"));
+    let pid =
+        pid_of(&launch).unwrap_or_else(|| panic!("the launch record of {run} names no driver"));
     assert_eq!(
-        pid_of("owner.lock"),
+        pid_of(&world.run_json(run, "owner.lock")),
         Some(pid),
         "the driver {run}'s launch record names is not the one holding its lock; \
          refusing to end pid {pid}"
     );
+    let started = launch["started"]
+        .as_str()
+        .filter(|started| !started.is_empty())
+        .unwrap_or_else(|| panic!("the launch record of {run} stamps no start for pid {pid}"));
+    assert_eq!(
+        start_stamp(pid).as_deref(),
+        Some(started),
+        "pid {pid} is not the process {run}'s launch record started; refusing to end it"
+    );
     end_driver_process(pid);
     pid
+}
+
+/// When the process at `pid` started, spelled the way the engine stamps a launch
+/// record, or nothing for no such process.
+///
+/// Linux reads field 22 of `/proc/<pid>/stat`, the start in clock ticks after
+/// boot, parsed from after the command's closing parenthesis because the command
+/// may itself hold one.
+#[cfg(target_os = "linux")]
+fn start_stamp(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let ticks = stat.rsplit_once(')')?.1.split_whitespace().nth(19)?;
+    Some(format!("linux-proc-stat:{}", ticks.parse::<u64>().ok()?))
+}
+
+/// The other Unix hosts have no procfs, and the engine stamps `ps`'s `lstart`,
+/// read in UTC under the C locale so the spelling does not follow the reader's.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn start_stamp(pid: u32) -> Option<String> {
+    let listed = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .env("TZ", "UTC")
+        .env("LC_ALL", "C")
+        .stderr(Stdio::null())
+        .output()
+        .expect("this host answers about its processes");
+    let answer = String::from_utf8_lossy(&listed.stdout).trim().to_string();
+    (listed.status.success() && !answer.is_empty()).then_some(answer)
+}
+
+/// Windows stamps the process's creation `FILETIME` as `high:low`.
+#[cfg(windows)]
+fn start_stamp(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: `OpenProcess` returns a null handle on failure and a handle this
+    // function closes on success; no borrowed memory crosses the boundary.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    let mut created = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut exited = created;
+    let mut kernel = created;
+    let mut user = created;
+    // SAFETY: `handle` is a live handle and every out-parameter is a `FILETIME`
+    // this frame owns for the duration of the call.
+    let read = unsafe {
+        GetProcessTimes(
+            handle,
+            &raw mut created,
+            &raw mut exited,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    };
+    // SAFETY: the handle came from `OpenProcess` above and is closed once.
+    unsafe { CloseHandle(handle) };
+    (read != 0).then(|| format!("{}:{}", created.dwHighDateTime, created.dwLowDateTime))
 }
 
 #[cfg(unix)]
@@ -4587,21 +4665,10 @@ fn end_driver_process(pid: u32) {
 /// `taskkill /F` without `/T`: the driver and nothing under it, which is the
 /// state an adoption recovers from — a driver gone with its dispatches left in
 /// flight. Forcefully, because a console process ignores the polite ask (the
-/// crate's own `sys` says why). And only once `tasklist` has said the process at
-/// that pid is this suite's own binary, so a pid the host has handed on is
-/// refused rather than ended.
+/// crate's own `sys` says why). Which process that is, [`end_driver`] has
+/// already proved by its start.
 #[cfg(windows)]
 fn end_driver_process(pid: u32) {
-    let image = binary()
-        .file_name()
-        .expect("the binary has a file name")
-        .to_string_lossy()
-        .into_owned();
-    let found = listed_image(pid).unwrap_or_else(|| panic!("pid {pid} is not running"));
-    assert!(
-        found.eq_ignore_ascii_case(&image),
-        "pid {pid} is {found}, not this suite's {image}; refusing to end it"
-    );
     let ended = std::process::Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/F"])
         .stdout(Stdio::null())
