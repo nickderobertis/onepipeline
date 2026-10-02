@@ -2708,6 +2708,12 @@ fn a_launch_record_the_driver_cannot_write_does_not_end_a_working_observer() {
     world.script("build.wait", "hold");
     world.script("observer.wait", "hold");
     let run = start_detached_observed(&world, "unwritable", vec![agent("build", &[])]);
+    // In flight **on the record**, and not only invoked: the dispatch's registry
+    // entry is written through a temporary in the run's directory once the launch
+    // has returned, so a double that has recorded its invocation can be a moment
+    // ahead of it — and a directory closed in that moment refuses the dispatch
+    // itself, which settles the only node and ends the run before any observer is
+    // restarted.
     world.until(
         "the observer to be watching and the node to be in flight",
         |world| {
@@ -2716,6 +2722,7 @@ fn a_launch_record_the_driver_cannot_write_does_not_end_a_working_observer() {
                     "oneagentgraph",
                     &["run", "--label", "onepipeline.node=build"],
                 )
+                && !world.dispatch_records(&run).is_empty()
         },
     );
 
@@ -4769,6 +4776,12 @@ fn a_registry_entry_from_another_build_is_read_and_its_work_is_still_stopped() {
         !dispatches(driver).is_empty()
     });
     let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
+    // Recorded, and not only running: the entry is written once the launch has
+    // returned, so the dispatch can be below the driver a moment before its entry
+    // is in place — and an entry read in that moment is no entry at all.
+    world.until("the dispatch to be recorded in the registry", |world| {
+        tree[1..].iter().all(|pid| world.registered(&run, *pid))
+    });
 
     let registry = world.run_file(&run, "dispatches");
     let entries: Vec<std::path::PathBuf> = std::fs::read_dir(&registry)
