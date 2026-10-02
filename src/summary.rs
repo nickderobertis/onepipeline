@@ -1287,6 +1287,48 @@ mod tests {
         paths
     }
 
+    /// The same store as [`recorded`], without a summary rewrite and sync per record,
+    /// which cost a Windows runner minutes at ten thousand: the records between the
+    /// first and the last arrive in one append, and the real writer appends the last
+    /// and writes the summary over all of them.
+    fn recorded_in_bulk(root: &Path, run: &str, records: usize) -> RunPaths {
+        use std::io::Write as _;
+        let paths = a_run(root, run);
+        Journal::open(&paths)
+            .emit(
+                PipelineKind::RunStarted,
+                crate::journal::labels(run, None),
+                crate::journal::payload(&[("plan", json!(plan(&["build", "ship"])))]),
+            )
+            .expect("appended");
+        let node = |nth: usize| {
+            if nth.is_multiple_of(2) {
+                "build"
+            } else {
+                "ship"
+            }
+        };
+        let mut bulk = String::new();
+        for nth in 0..records - 1 {
+            let mut record = event(PipelineKind::NodeReady, run, "bulk-appender", nth as u64);
+            record.labels.node = Some(node(nth).into());
+            bulk.push_str(&serde_json::to_string(&record).expect("a record serializes"));
+            bulk.push('\n');
+        }
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(paths.journal())
+            .and_then(|mut journal| journal.write_all(bulk.as_bytes()))
+            .expect("the records are appended");
+        emit(
+            &mut Journal::open(&paths),
+            PipelineKind::NodeReady,
+            Some(node(records - 1)),
+            run,
+        );
+        paths
+    }
+
     /// What one read of a run's summary cost, in bytes off the ledger.
     fn cost_of(paths: &RunPaths) -> (RunSummary, u64) {
         let before = ledger::bytes_read();
@@ -1334,8 +1376,8 @@ mod tests {
     #[test]
     fn a_summary_read_is_bounded_and_the_fold_it_replaces_is_not() {
         let root = scratch("bounded");
-        let small = recorded(&root, "small", 10);
-        let large = recorded(&root, "large", 10_000);
+        let small = recorded_in_bulk(&root, "small", 10);
+        let large = recorded_in_bulk(&root, "large", 10_000);
         assert!(
             std::fs::metadata(large.journal()).expect("a store").len()
                 > 100 * std::fs::metadata(small.journal()).expect("a store").len(),
