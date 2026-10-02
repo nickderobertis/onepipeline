@@ -334,7 +334,12 @@ impl Reader {
 
     fn load(&self, project: &QualifiedId) -> std::result::Result<Read, Load> {
         let held = self.project(project)?;
-        let tasks = self.tasks(project, &members(&held.item))?;
+        let members = members_of(&held.id, &held.item.metadata.clone().into_iter().collect())
+            .map_err(|why| Error::Sibling {
+                tool: STORE,
+                message: why,
+            })?;
+        let tasks = self.tasks(project, &members)?;
 
         let mut document = Map::new();
         for (key, value) in &held.item.metadata {
@@ -873,18 +878,45 @@ fn stranger(
     }
 }
 
-/// The member projects a home names at `onetaskgraph.members`, each a qualified id.
+/// The member projects the home `home` names at `onetaskgraph.members`: none where it names
+/// no such key.
 ///
-/// The store keeps that list and refuses a read of a home whose list it cannot read, so an
-/// entry that is not a qualified id is passed over here rather than refused a second time.
-fn members(home: &Project) -> Vec<GlobalId> {
-    home.metadata
-        .get(MetadataKey::MEMBERS_KEY)
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.as_str()?.parse::<GlobalId>().ok())
-        .collect()
+/// External input, held to the store's own rule for the list rather than trimmed to what
+/// parses: a list of qualified project ids, none in the home's source and at most one per
+/// source. A list that breaks it is refused naming the home and why, because a plan read as
+/// though it had fewer members than it does would leave a member's tasks out silently.
+pub(crate) fn members_of(
+    home: &GlobalId,
+    metadata: &BTreeMap<String, Value>,
+) -> std::result::Result<Vec<GlobalId>, String> {
+    let key = MetadataKey::MEMBERS_KEY;
+    let Some(value) = metadata.get(key) else {
+        return Ok(Vec::new());
+    };
+    let refuse = |why: String| {
+        format!(
+            "{home} records {key} as {value}, which {why}; a home's member list is a list of \
+             qualified project ids, at most one per source and none in the home's own"
+        )
+    };
+    let Value::Array(entries) = value else {
+        return Err(refuse("is not a list".to_owned()));
+    };
+    let mut members: Vec<GlobalId> = Vec::new();
+    for entry in entries {
+        let member = entry
+            .as_str()
+            .and_then(|entry| entry.parse::<GlobalId>().ok())
+            .ok_or_else(|| refuse(format!("holds {entry}, which is not a qualified id")))?;
+        if member.source == home.source || members.iter().any(|kept| kept.source == member.source) {
+            return Err(refuse(format!(
+                "names {member}, a second project in {}",
+                member.source
+            )));
+        }
+        members.push(member);
+    }
+    Ok(members)
 }
 
 /// What one end of a dependency edge names, as a refusal says it.
@@ -1639,6 +1671,52 @@ mod tests {
             refused.contains("node 'core' depends on 'stray', which is not in the plan"),
             "{refused}"
         );
+    }
+
+    /// A home's member list is held to the store's own rule: a list of qualified ids, none in
+    /// the home's source and at most one per source. Anything else is refused naming the home,
+    /// and a plan read over it is unreadable rather than a plan with fewer members.
+    #[test]
+    fn a_member_list_breaking_the_stores_rule_is_refused() {
+        let home: GlobalId = "plans:ship".parse().expect("an id");
+        let listing = |value: Value| BTreeMap::from([(MetadataKey::MEMBERS_KEY.to_owned(), value)]);
+        assert_eq!(members_of(&home, &BTreeMap::new()), Ok(Vec::new()));
+        assert_eq!(
+            members_of(&home, &listing(json!(["linear:ship-linear"]))),
+            Ok(vec!["linear:ship-linear"
+                .parse::<GlobalId>()
+                .expect("an id")])
+        );
+        for (value, why) in [
+            (json!("linear:ship-linear"), "is not a list"),
+            (json!(["bare"]), "which is not a qualified id"),
+            (json!([7]), "which is not a qualified id"),
+            (json!(["plans:other"]), "a second project in plans"),
+            (
+                json!(["linear:a", "linear:b"]),
+                "a second project in linear",
+            ),
+        ] {
+            let refused = members_of(&home, &listing(value.clone()))
+                .expect_err(&format!("{value} was read as a member list"));
+            assert!(
+                refused.contains(why) && refused.contains("plans:ship"),
+                "{refused}"
+            );
+        }
+
+        let unreadable = load(store(
+            json!({MetadataKey::MEMBERS_KEY: "linear:ship-linear"}),
+            vec![task("t-a", node("a"), json!({}))],
+            vec![],
+        ));
+        match unreadable {
+            Err(Load::Unreadable(error)) => {
+                assert!(error.to_string().contains("is not a list"), "{error}");
+            }
+            Err(Load::Refused(refusal)) => panic!("refused: {}", Error::from(refusal)),
+            Ok(_) => panic!("a plan was read over a member list the store's rule refuses"),
+        }
     }
 
     /// A task the store answers with is the plan's only where it is a task of the home's

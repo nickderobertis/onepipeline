@@ -8716,7 +8716,10 @@ consuming it, tracked in two systems, could only be two disconnected plans.
 `TaskRequest.include_members` and the Linear plugin's `status_mapping`. `Reader::tasks`
 (`src/taskgraph.rs`) reads the launched project with `include_members` wherever the home
 names members. A home naming none is read as before, with no second read of it, so a
-plan of one source costs what it did. A task is a node
+plan of one source costs what it did. The member list is held to the store's own rule, a list of
+qualified project ids with none in the home's source and at most one per source. A
+list that breaks it makes the plan unreadable, naming the home, rather than a plan with
+fewer members. The write-back's member read applies the same rule. A task is a node
 of the plan when it is a task of the home's project in the home's source, or of a
 member's project in that member's source; any other is refused, naming it, as before. A
 blocking edge between tasks of two of the plan's sources is a dependency, resolved

@@ -2539,14 +2539,9 @@ fn member_sources(store: &Store, project: &QualifiedId) -> Vec<SourceName> {
             .map_err(|_| Failed::from(Deadline::Floor.refusal(PROJECT_SHOW)))?
             .map_err(|error| Failed::engine(PROJECT_SHOW, &error))?;
         let held = shown(PROJECT_SHOW, &home, answer)?;
-        Ok(held
-            .item
-            .metadata
-            .get(MetadataKey::MEMBERS_KEY)
-            .and_then(Value::as_array)
+        let metadata = held.item.metadata.into_iter().collect();
+        Ok(crate::taskgraph::members_of(&home, &metadata)?
             .into_iter()
-            .flatten()
-            .filter_map(|member| member.as_str()?.parse::<GlobalId>().ok())
             .map(|member| member.source)
             .collect())
     };
