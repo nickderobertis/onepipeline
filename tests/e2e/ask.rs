@@ -416,6 +416,9 @@ fn the_reply_window_is_the_flags_then_the_launch_records_then_the_buss_own() {
 
 /// A wait that elapses is not a ruling: the question stands on the channel,
 /// marked abandoned, and the asker exits `1` with the bus's own word for it.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] its one-second wait is the
+// behaviour under test, and the reply it ends on goes through `driver`'s reply path — the
+// reason `mod ask` gives in `tests/e2e/main.rs` for the crate being its narrowest edge.
 #[test]
 fn an_elapsed_wait_answers_timeout_at_exit_one_and_leaves_the_question_standing() {
     let world = World::new("ask-timeout");
@@ -473,6 +476,7 @@ fn an_elapsed_wait_answers_timeout_at_exit_one_and_leaves_the_question_standing(
     assert_eq!(reply["correlation"], surface["correlation"], "{reply}");
     assert_eq!(reply["reply"]["message"], json!("here now"), "{reply}");
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// An elapsed question that cannot be marked abandoned is still `timeout` at
 /// exit `1` — the wait did elapse — and the advice says the mark failed rather

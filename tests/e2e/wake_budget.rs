@@ -24,7 +24,7 @@ use std::process::Child;
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, plan_of, World, REFUSED, RUNS_UNWATCHED, WATCH_ELAPSED};
+use crate::harness::{agent, double, plan_of, World, REFUSED, RUNS_UNWATCHED, WATCH_ELAPSED};
 
 use onepipeline::cli::WAKE_BUDGET_ENV;
 use onepipeline::views::{
@@ -1020,6 +1020,10 @@ fn a_complete_verdict_closes_a_settled_run_and_a_stop_closes_any() {
     drop((completing, stopping));
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys answer
+// questions through `driver`'s reply path, `channel` and the bus at once, and read closure
+// through `unwatched` — the reason `mod wake_budget` gives in `tests/e2e/main.rs` for the
+// crate being the narrowest edge they can honestly sit behind, and not restated here.
 /// A question raised on a run's surfaces queue through the bus's own library
 /// server, its asker still listening for the ruling.
 struct Asked {
@@ -1333,6 +1337,92 @@ fn a_correlated_ruling_beside_commands_reaches_its_asker_and_never_completes_the
     );
     world.release("build.go");
 }
+
+/// The same ruling beside commands this process applies itself, on a settled
+/// run nothing drives: the commands are applied here, and the verdict half
+/// still reaches its asker without being journalled as the run asking to
+/// complete.
+#[test]
+fn a_correlated_ruling_beside_commands_applied_here_never_completes_the_run() {
+    let world = World::new("wake-correlated-applied");
+    world.script("build.work", "the worker wrote this\n");
+    let run = settled(&world, "correlatedapplied", "build", &[]);
+    let asked = Asked::on(&world, &run, "is the bar met?", false);
+
+    ruled(
+        &world,
+        &run,
+        asked,
+        &json!({
+            "version": onepipeline::channel::REPLY_ENVELOPE_VERSION,
+            "completion": true,
+            "reason": "the bar is met",
+            "commands": [{"op": "finding", "message": "the bar was met at settlement"}],
+        }),
+    );
+    assert!(
+        !world.events_of(&run, "command-accepted").is_empty(),
+        "the commands beside the ruling were not applied: {:?}",
+        world.kinds(&run)
+    );
+}
+
+/// A correlated ruling the run's reply validator refuses is refused in its
+/// words, with nothing appended to the channel and nothing journalled — and the
+/// question still stands, so the ruling the validator accepts reaches its asker.
+#[test]
+fn a_correlated_ruling_the_reply_validator_refuses_leaves_the_question_standing() {
+    let world = World::new("wake-correlated-validated");
+    let validator = double("bus-validator").to_string_lossy().into_owned();
+    let config = world.root.join("onemessagebus.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "version: 1\ntransport: {{kind: local}}\nvalidators:\n  \
+             - {{on: replies, kind: command, command: [{validator:?}]}}\n"
+        ),
+    )
+    .expect("the bus configuration is written");
+    world.script("build.work", "the worker wrote this\n");
+    let run = settled(
+        &world,
+        "correlatedvalidated",
+        "build",
+        &["--bus-config", &config.to_string_lossy()],
+    );
+    let asked = Asked::on(&world, &run, "is the bar met?", false);
+
+    let reason = "this ruling names no evidence the run holds";
+    world.script("bus-validator.refuse", reason);
+    let replies = replies_on(&world, &run);
+    let journal = world.kinds(&run);
+    world
+        .run_with_stdin(
+            &["reply", &run, "--correlation", &asked.correlation],
+            r#"{"completion":true,"reason":"the bar is met"}"#,
+        )
+        .exited(REFUSED)
+        .err_has(reason);
+    assert_eq!(
+        replies_on(&world, &run),
+        replies,
+        "a refused ruling reached the channel"
+    );
+    assert_eq!(
+        world.kinds(&run),
+        journal,
+        "a refused ruling was journalled"
+    );
+
+    std::fs::remove_file(world.fakes.join("bus-validator.refuse")).expect("the refusal is lifted");
+    ruled(
+        &world,
+        &run,
+        asked,
+        &json!({"completion": true, "reason": "the bar is met, with evidence"}),
+    );
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Strip the closure rule's marker from a run's journal, and fold it afresh:
 /// the run as an engine before this release leaves it.
