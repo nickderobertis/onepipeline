@@ -87,7 +87,6 @@ fn appended_beneath_the_layout(world: &World, run: &str, record: &Value) {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// Every record on the run's command queue, in queue order.
 fn queued(world: &World, run: &str) -> Vec<Value> {
     std::fs::read_to_string(world.run_file(run, "channel/commands.jsonl"))
         .expect("the command queue is there")
@@ -105,7 +104,6 @@ fn cursor(world: &World, run: &str) -> u64 {
         .expect("the cursor is a number")
 }
 
-/// The `edit-rejected` surfaces the run raised, as the journal records them.
 fn rejected_surfaces(world: &World, run: &str) -> Vec<Value> {
     world
         .events_of(run, "planner-surface-queued")
@@ -126,8 +124,9 @@ fn paused(world: &World, run: &str, nodes: Vec<Value>, extra: &[&str]) {
         .out_has("\"settlement\":\"awaiting-planner\"");
 }
 
-/// Six envelopes no build decodes reach a run with a waiting human node by the
-/// bus's path, and the adopting driver answers each one: one outcome line under
+/// Eight records no build decodes reach a run with a waiting human node — three
+/// through the bus's own layout, and five beneath it in shapes the layout would
+/// turn away — and the adopting driver answers each one: one outcome line under
 /// its own id, an `edit-rejected` per command under its own author, one surface —
 /// and nothing of any of them applies, the valid note beside a malformed drop
 /// included.
