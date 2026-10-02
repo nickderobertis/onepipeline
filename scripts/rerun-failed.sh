@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # After a test step has failed: say why any of its tests went unrun, then re-run
-# each test it failed a fixed number of times against the build that already
-# exists, and report how many of those re-runs failed.
+# each test it failed a fixed number of times from the build that step archived,
+# and report how many of those re-runs failed.
 #
-#   rerun-failed.sh --log FILE --times N --known-flakes FILE -- RUNNER...
+#   rerun-failed.sh --log FILE --archive ARCHIVE --times N --known-flakes FILE -- RUNNER...
 #
-# FILE is the failed step's output. RUNNER is the nextest command that step ran
-# its suite with, minus its filter (`cargo nextest run --locked`). Each re-run is
-# that command narrowed to the failed tests, so cargo finds the step's build
-# fresh and compiles nothing. A re-run that did compile says so.
+# FILE is the failed step's output, and ARCHIVE the nextest archive of the build
+# it ran (`cargo nextest archive`). RUNNER is the nextest run command with no
+# build options (`cargo nextest run`). Each re-run is that command given
+# `--archive-file ARCHIVE --workspace-remap .`, narrowed to the failed tests.
+# nextest refuses cargo's build options beside an archive and never invokes a
+# build for one, so no re-run can compile.
 #
 # This only reports. It never re-runs a test until it passes and never excuses
 # a failure. The report (each re-run's result and the summary) goes to stdout,
@@ -20,7 +22,7 @@
 set -uo pipefail
 
 usage() {
-  echo "usage: rerun-failed.sh --log FILE --times N --known-flakes FILE -- RUNNER..." >&2
+  echo "usage: rerun-failed.sh --log FILE --archive ARCHIVE --times N --known-flakes FILE -- RUNNER..." >&2
   exit 2
 }
 refuse() {
@@ -28,17 +30,18 @@ refuse() {
   exit 2
 }
 
-log="" times="" flakes=""
+log="" archive="" times="" flakes=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --log) [ "$#" -ge 2 ] || usage; log="$2"; shift 2 ;;
+    --archive) [ "$#" -ge 2 ] || usage; archive="$2"; shift 2 ;;
     --times) [ "$#" -ge 2 ] || usage; times="$2"; shift 2 ;;
     --known-flakes) [ "$#" -ge 2 ] || usage; flakes="$2"; shift 2 ;;
     --) shift; break ;;
     *) echo "rerun-failed: unknown argument '$1'" >&2; usage ;;
   esac
 done
-[ -n "$log" ] && [ -n "$times" ] && [ -n "$flakes" ] && [ "$#" -gt 0 ] || usage
+[ -n "$log" ] && [ -n "$archive" ] && [ -n "$times" ] && [ -n "$flakes" ] && [ "$#" -gt 0 ] || usage
 case "$times" in
   [1-9] | 10) ;;
   *) refuse "--times must be a whole number from 1 to 10, not '$times'" ;;
@@ -139,7 +142,12 @@ if [ "${#failed[@]}" -eq 0 ]; then
   exit 0
 fi
 
-say "the test run failed. Re-running each of its ${#failed[@]} failed test(s) $times time(s) against this build to tell a new flake from a regression."
+# Asked only now: a step that failed before its tests ran has no archive, and
+# nothing to re-run either.
+[ -f "$archive" ] && [ -r "$archive" ] \
+  || refuse "no readable archive of the failed step's build at '$archive', so its tests cannot be re-run without building them again; the step makes one when ONEPIPELINE_TEST_ARCHIVE names this path"
+
+say "the test run failed. Re-running each of its ${#failed[@]} failed test(s) $times time(s) from the build the step archived, to tell a new flake from a regression."
 say "This step only reports: the job's verdict stays failed whatever the re-runs show."
 
 filter=""
@@ -156,21 +164,14 @@ grouped() { [ "${GITHUB_ACTIONS:-}" = "true" ]; }
 for run in $(seq 1 "$times"); do
   out="$work/rerun-$run.log"
   grouped && echo "::group::re-run $run of $times: nextest output"
-  CARGO_TERM_QUIET=false "${runner[@]}" --no-fail-fast --status-level pass \
-    --final-status-level none -E "$filter" >"$out.stdout" 2>"$out.stderr"
+  "${runner[@]}" --archive-file "$archive" --workspace-remap . --no-fail-fast \
+    --status-level pass --final-status-level none -E "$filter" >"$out.stdout" 2>"$out.stderr"
   exited=$?
   cat "$out.stdout"
   cat "$out.stderr" >&2
   grouped && echo "::endgroup::"
   cat "$out.stdout" "$out.stderr" >"$out"
   plain "$out" >"$out.plain"
-  # Cargo's own lines come before nextest starts the tests; after that, a
-  # `Compiling` line is some test's output.
-  rebuilt="$(sed -n '/^[[:space:]]*Starting [0-9]/q;p' "$out.plain" \
-    | sed -nE 's/^[[:space:]]*Compiling ([^ ]+).*/\1/p' | tr '\n' ' ')"
-  if [ -n "$rebuilt" ]; then
-    warn "re-run $run of $times compiled ${rebuilt}first, so it ran a new build of those rather than the failed step's. Re-run with the command the step built with (just rerun-failed after test-quick, just rerun-failed-coverage after the instrumented gate)."
-  fi
   tests_matching "$failed_re" "$out.plain" >"$out.failed"
   tests_matching "$passed_re" "$out.plain" >"$out.passed"
   i=0
@@ -182,7 +183,7 @@ for run in $(seq 1 "$times"); do
       say "re-run $run of $times: $test passed"
     else
       unran[i]=$((unran[i] + 1))
-      say "re-run $run of $times: $test did not run (the re-run exited with status $exited; its output above says why, and ${runner[*]} -E '$filter' repeats it)"
+      say "re-run $run of $times: $test did not run (the re-run exited with status $exited; its output above says why, and ${runner[*]} --archive-file $archive --workspace-remap . -E '$filter' repeats it)"
     fi
     i=$((i + 1))
   done
@@ -195,7 +196,7 @@ for test in "${failed[@]}"; do
   count="${fails[i]}"
   ran=$((times - unran[i]))
   if [ "$ran" -eq 0 ]; then
-    reading="did not run in any re-run, so this says nothing about it: fix what the re-runs' output above names, then run ${runner[*]} -E 'binary_id(=$binary) and test(=$name)'"
+    reading="did not run in any re-run, so this says nothing about it: fix what the re-runs' output above names, then run ${runner[*]} --archive-file $archive --workspace-remap . -E 'binary_id(=$binary) and test(=$name)'"
   elif [ "$count" -eq "$ran" ]; then
     reading="fails every time on this build, which reads as a regression: reproduce it with cargo nextest run -E 'binary_id(=$binary) and test(=$name)' and fix it"
   elif [ "$count" -eq 0 ]; then

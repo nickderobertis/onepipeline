@@ -17,6 +17,6 @@ fi
 status=$?
 if [ "$status" -ne 0 ]; then
   echo "nextest-run: nextest exited with status $status" >&2
-  echo "nextest-run: 'just rerun-failed <this output>' re-runs the tests it failed and explains any it left unrun" >&2
+  echo "nextest-run: 'just rerun-failed <this output> <its archive>' re-runs the tests it failed and explains any it left unrun" >&2
 fi
 exit "$status"

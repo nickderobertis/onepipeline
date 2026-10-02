@@ -161,9 +161,12 @@ impl Fixture {
     ) -> (Output, String) {
         let log = self.path("step.log");
         let times = rerun_times().to_string();
+        let archive = self.path(ARCHIVE);
         let mut args = vec![
             "--log",
             log.to_str().expect("a UTF-8 path"),
+            "--archive",
+            archive.to_str().expect("a UTF-8 path"),
             "--times",
             &times,
             "--known-flakes",
@@ -174,6 +177,10 @@ impl Fixture {
         self.script_in("rerun-failed.sh", &args, "rerun.log", env)
     }
 }
+
+/// Where a fixture's step archives its build, as `ONEPIPELINE_TEST_ARCHIVE`
+/// makes `just test-quick` do in CI.
+const ARCHIVE: &str = "suite.tar.zst";
 
 /// How many times the repository re-runs a failed test: the justfile's own
 /// `rerun-times`, so these tests hold the number CI uses.
@@ -328,7 +335,7 @@ fn a_run_ended_with_tests_unrun_and_no_reason_is_named_by_nextests_exit_status()
     assert!(
         wrapper_said.contains("nextest-run: nextest exited with status 100\n")
             && wrapper_said.contains(
-                "nextest-run: 'just rerun-failed <this output>' re-runs the tests it failed"
+                "nextest-run: 'just rerun-failed <this output> <its archive>' re-runs the tests it failed"
             ),
         "the wrapper names nextest's exit status and the next step on stderr:\n{log}"
     );
@@ -392,12 +399,9 @@ mod tests {
         ledger("passes");
     }
 
-    /// Prints what cargo prints when it builds: inside a test's output that is
-    /// no rebuild, and the report must not read it as one.
     #[test]
     fn fails() {
         ledger("fails");
-        println!("   Compiling impostor v0.0.0");
         panic!("deliberately failing");
     }
 
@@ -481,8 +485,24 @@ fn rerun_fixture(case: &str) -> Fixture {
 
 /// The fixture's first run, failed: what a CI test step leaves behind, colour
 /// escapes included, as a runner with `CARGO_TERM_COLOR=always` writes them.
+/// The justfile's `test-quick` line, run as CI runs it: the build is archived
+/// before the run.
+fn archive(fixture: &Fixture) {
+    let archived = fixture
+        .command(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args(["nextest", "archive", "--archive-file", ARCHIVE])
+        .output()
+        .expect("cargo nextest archive runs");
+    assert!(
+        archived.status.success(),
+        "the fixture's build is archived: {}",
+        String::from_utf8_lossy(&archived.stderr)
+    );
+}
+
 fn failed_step(case: &str) -> Fixture {
     let fixture = rerun_fixture(case);
+    archive(&fixture);
     let (output, log) = fixture.nextest_run(&["--no-fail-fast", "--color", "always"]);
     assert!(!output.status.success(), "the fixture's run failed:\n{log}");
     for test in FAILING {
@@ -661,21 +681,41 @@ fn a_known_flake_entry_in_any_other_shape_is_refused_before_anything_runs() {
 }
 
 #[test]
-fn a_rerun_that_compiles_or_cannot_run_says_so_and_still_reports_failure() {
-    let fixture = failed_step("rerun-rebuilt");
+fn a_rerun_runs_the_archived_build_and_cannot_compile() {
+    let fixture = failed_step("rerun-archived");
     let times = rerun_times();
-    // A source edit after the step: cargo now has to build before it can run.
+    // After the step, the source no longer fails `fails` and no longer matches
+    // what was built. A re-run that built would compile it and see `fails` pass.
     let source = fixture.path("src/lib.rs");
-    let edited = format!(
-        "{}\n// edited after the step\n",
-        fs::read_to_string(&source).expect("the source reads")
-    );
+    let edited = fs::read_to_string(&source)
+        .expect("the source reads")
+        .replace("panic!(\"deliberately failing\");", "");
     fs::write(&source, edited).expect("the source is edited");
-    let (output, report) = fixture.rerun_failed(&known_flakes());
+    let cargo_speaks = [("CARGO_TERM_QUIET", "false")];
+    let (output, report) =
+        fixture.rerun_failed_in(&known_flakes(), &["cargo", "nextest", "run"], &cargo_speaks);
     assert_eq!(output.status.code(), Some(1), "{report}");
     assert!(
-        report.contains("re-run 1 of ") && report.contains("compiled rerun-fixture first"),
-        "the re-run that built says it did not run the step's build:\n{report}"
+        !report.contains("Compiling"),
+        "a re-run started a compilation:\n{report}"
+    );
+    assert!(
+        summary_line(&report, "fails").starts_with(&format!(
+            "  rerun-fixture tests::fails: failed {times} of {times} re-runs; fails every time"
+        )),
+        "the re-runs ran the archived build, not the edited source:\n{report}"
+    );
+
+    // A build option beside the archive is refused by nextest, not obeyed.
+    let (output, report) =
+        fixture.rerun_failed_with(&known_flakes(), &["cargo", "nextest", "run", "--locked"]);
+    assert_eq!(output.status.code(), Some(1), "{report}");
+    assert!(
+        !report.contains("Compiling")
+            && report.contains(&format!(
+                "re-run 1 of {times}: rerun-fixture tests::fails did not run (the re-run exited with status "
+            )),
+        "{report}"
     );
 
     let (output, report) = fixture.rerun_failed_with(
@@ -727,6 +767,7 @@ fn a_rerun_that_compiles_or_cannot_run_says_so_and_still_reports_failure() {
 #[test]
 fn tests_a_cancelled_run_left_unrun_are_reported_with_nextests_reason() {
     let fixture = rerun_fixture("rerun-fail-fast");
+    archive(&fixture);
     let (output, log) = fixture.nextest_run(&["--test-threads", "1"]);
     assert!(!output.status.success(), "{log}");
     let (output, report) = fixture.rerun_failed(&known_flakes());
@@ -777,6 +818,24 @@ fn a_log_with_no_failed_test_reruns_nothing_and_never_reads_as_a_pass() {
 }
 
 #[test]
+fn a_failed_test_with_no_archive_of_its_build_is_refused_rather_than_built_again() {
+    let fixture = Fixture::new("rerun-no-archive", RERUN_MANIFEST, &[]);
+    fs::write(
+        fixture.path("step.log"),
+        "        FAIL [   0.010s] (1/1) rerun-fixture tests::fails\nerror: test run failed\n",
+    )
+    .expect("the log is written");
+    let (output, report) = fixture.rerun_failed(&known_flakes());
+    assert_eq!(output.status.code(), Some(2), "{report}");
+    assert!(
+        report.contains("no readable archive of the failed step's build")
+            && report.contains("ONEPIPELINE_TEST_ARCHIVE"),
+        "{report}"
+    );
+    assert!(!report.contains("re-run 1 of"), "{report}");
+}
+
+#[test]
 fn a_failed_test_whose_name_cannot_become_a_filter_is_named_and_not_rerun() {
     let fixture = Fixture::new("rerun-unusable-name", RERUN_MANIFEST, &[]);
     fs::write(
@@ -807,12 +866,23 @@ fn the_scripts_refuse_what_they_cannot_run() {
     let missing = missing.to_str().expect("a UTF-8 path");
     for (args, says) in [
         (
-            vec!["--log", missing, "--times", "3", "--known-flakes", flakes],
+            vec![
+                "--log",
+                missing,
+                "--archive",
+                missing,
+                "--times",
+                "3",
+                "--known-flakes",
+                flakes,
+            ],
             "usage:",
         ),
         (
             vec![
                 "--log",
+                missing,
+                "--archive",
                 missing,
                 "--times",
                 "0",
@@ -826,6 +896,8 @@ fn the_scripts_refuse_what_they_cannot_run() {
         (
             vec![
                 "--log",
+                missing,
+                "--archive",
                 missing,
                 "--times",
                 "3",
@@ -908,17 +980,19 @@ fn the_scripts_refuse_what_they_cannot_run() {
         ),
     ] {
         let mut argv = args.to_vec();
-        argv.extend(["--times", "3", "--", "true"]);
+        argv.extend(["--archive", log, "--times", "3", "--", "true"]);
         let (output, report) = fixture.script_in("rerun-failed.sh", &argv, "refusal.log", &env);
         assert_eq!(output.status.code(), Some(2), "{argv:?}: {report}");
         assert!(report.contains(says), "{argv:?}: {report}");
     }
 }
 
-/// The steps that run `just rerun-failed` hold the three things the workflow
+/// The steps that run `just rerun-failed` hold the four things the workflow
 /// promises about them: they run only after their job's test step failed, they
-/// cannot change the job's verdict, and their timeout covers every re-run of a
-/// test that hangs until nextest ends it.
+/// cannot change the job's verdict, they re-run from the archive their job's
+/// test step made, and their timeout covers every re-run of a test that hangs
+/// until nextest ends it, each after the two minutes the justfile allows for
+/// extracting the archive.
 // llmlint: ignore-block[changed_behavior_has_e2e] a workflow's `if:` and
 // `continue-on-error` are evaluated by GitHub's runner and by nothing on this
 // host, so no test here can execute them. What can be is held here, and the
@@ -939,7 +1013,22 @@ fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
         .as_integer()
         .and_then(|count| u64::try_from(count).ok())
         .expect("slow-timeout has terminate-after");
-    let hung_reruns_minutes = (rerun_times() as u64 * period * terminate_after).div_ceil(60);
+    const EXTRACTION_MINUTES: u64 = 2;
+    let hung_reruns_minutes = (rerun_times() as u64 * period * terminate_after).div_ceil(60)
+        + rerun_times() as u64 * EXTRACTION_MINUTES;
+    let archive = "\"$RUNNER_TEMP/tests.tar.zst\"";
+    let archived_runs = workflow
+        .lines()
+        .filter(|line| {
+            line.trim().starts_with(&format!(
+                "run: ONEPIPELINE_TEST_ARCHIVE={archive} just check"
+            ))
+        })
+        .count();
+    assert_eq!(
+        archived_runs, 3,
+        "both gate steps and the cross step archive their build"
+    );
 
     let steps: Vec<&str> = workflow
         .split("      - name: ")
@@ -955,13 +1044,17 @@ fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
         };
         assert!(field("if:").starts_with("failure() && "), "{step}");
         assert_eq!(field("continue-on-error:"), "true", "{step}");
-        assert!(field("run:").starts_with("just rerun-failed"), "{step}");
+        assert!(
+            field("run:").starts_with("just rerun-failed")
+                && field("run:").ends_with(&format!(" {archive}")),
+            "the step re-runs from its test step's archive:\n{step}"
+        );
         let minutes: u64 = field("timeout-minutes:")
             .parse()
             .expect("a whole number of minutes");
         assert!(
             minutes >= hung_reruns_minutes,
-            "{minutes} minutes cannot hold {} re-runs of a test nextest ends after {}s:\n{step}",
+            "{minutes} minutes cannot hold {} re-runs, each extracting the archive, of a test nextest ends after {}s:\n{step}",
             rerun_times(),
             period * terminate_after
         );
