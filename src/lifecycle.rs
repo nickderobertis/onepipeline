@@ -310,6 +310,14 @@ fn carried_into_redispatch(
     notes_in_flight: &engine::DeliveriesInFlight,
     patience: Duration,
 ) -> crate::error::Result<Vec<crate::note::RecordedNote>> {
+    // llmlint: ignore-block[changed_behavior_has_e2e] what this closes is an ordering of two threads'
+    // scheduling, which no CLI journey can force. `tests/note`'s
+    // `a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node` drives this
+    // path end to end through the binary, and failed through it under CPU contention
+    // before this change;
+    // `a_redispatch_waits_for_an_answered_delivery_to_reach_the_record` and
+    // `a_redispatch_whose_delivery_never_arrives_is_composed_from_the_record_after_its_patience`
+    // force the wait and its patience by construction.
     if !notes_in_flight.recorded_for(node, patience) {
         eprintln!(
             "onepipeline: node '{node}': a note delivered to it was still not on the run's \
@@ -317,6 +325,7 @@ fn carried_into_redispatch(
             patience.as_secs()
         );
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     crate::note::standing_for(paths, node)
         .and_then(|standing| crate::note::drain_carried(paths, node, standing))
         .map(|standing| standing.notes())
@@ -2453,7 +2462,6 @@ pub fn ordered_steps(node: &Node) -> std::result::Result<Vec<Step>, String> {
 mod tests {
     use super::*;
 
-    /// A run directory of this test's own, emptied first.
     fn redispatch_scratch(name: &str) -> RunPaths {
         let root = std::env::temp_dir().join(format!(
             "onepipeline-redispatch-{name}-{}",

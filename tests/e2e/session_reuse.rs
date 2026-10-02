@@ -981,6 +981,11 @@ fn every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base() {
     )
     .expect("the finished work is written");
     git(&world, &finished.worktree, &["add", "-A"]);
+    // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this diff changes only how an existing
+    // journey waits, not where it lives. It drives the session the engine opens and closes through `onevcs` under `src/`, and
+    // `nx.json`'s `noteJourneySource` — the one separately edged test project's input —
+    // itself begins `{workspaceRoot}/src/**/*`, so a narrower edge would drop it out of
+    // `nx affected` for the changes it exists to catch.
     // Without git's own housekeeping: since git 2.47 a commit ends by starting
     // `git maintenance run --auto --detach`, which daemonizes *inside this
     // worktree* before it decides whether there is anything to do — and the
@@ -996,6 +1001,7 @@ fn every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base() {
             "feat: what the closed session did",
         ],
     );
+    // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
     onevcs(&world, &["session", "close", &finished.token.0]);
     let (settled, session) = dispatched(&world, "closed", Some("feature/closed"));
     assert_eq!(

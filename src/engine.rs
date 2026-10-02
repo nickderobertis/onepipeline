@@ -1571,9 +1571,17 @@ fn converge(
                     // The notes the new attempt's task carries are presented by
                     // its opening worker turn and by every supervisor turn after,
                     // and the stream says when each happens.
+                    // llmlint: ignore-block[changed_behavior_has_e2e] what this closes is an ordering of two threads'
+                    // scheduling, which no CLI journey can force. `tests/note`'s
+                    // `a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node` drives this
+                    // path end to end through the binary, and failed through it under CPU contention
+                    // before this change;
+                    // `a_note_carried_into_a_redispatch_is_shown_by_turns_that_opened_before_the_loop_applied_it`
+                    // forces the late application by construction.
                     if let Some(dispatch) = in_flight.get_mut(&again.node) {
                         watch_carried(&mut dispatch.presentations, &again);
                     }
+                    // llmlint: ignore-end[changed_behavior_has_e2e]
                     journal.emit(
                         journal::PipelineKind::NodeDispatched,
                         journal::labels(&paths.run, Some(&again.node)),
@@ -1710,6 +1718,13 @@ fn converge(
                 // what it records is what an inline delivery would have — and the
                 // envelopes claimed behind it are judged on the next pass.
                 Message::NoteAnswered(answer) => {
+                    // llmlint: ignore-block[changed_behavior_has_e2e] what this closes is an ordering of two threads'
+                    // scheduling, which no CLI journey can force. `tests/note`'s
+                    // `a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node` drives this
+                    // path end to end through the binary, and failed through it under CPU contention
+                    // before this change;
+                    // `a_delivery_stops_being_outstanding_once_recorded_or_abandoned` forces both
+                    // endings of the hold by construction.
                     // Held until the delivery is on the record — and released
                     // however this arm ends — so a re-dispatch waiting on it
                     // reads the record with the delivery in it.
@@ -1717,6 +1732,7 @@ fn converge(
                         .as_mut()
                         .map(NoteDeliveries::answered)
                         .unwrap_or_default();
+                    // llmlint: ignore-end[changed_behavior_has_e2e]
                     if record_delivered(
                         paths,
                         journal,
@@ -3224,7 +3240,15 @@ impl NoteDeliveries {
             offered_at,
         }) {
             Ok(()) => {
+                // llmlint: ignore-block[changed_behavior_has_e2e] what this closes is an ordering of two threads'
+                // scheduling, which no CLI journey can force. `tests/note`'s
+                // `a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node` drives this
+                // path end to end through the binary, and failed through it under CPU contention
+                // before this change;
+                // `a_redispatch_waits_for_an_answered_delivery_to_reach_the_record` forces the
+                // answered-but-unrecorded delivery by construction.
                 let pending = self.in_flight.begin(&nodes);
+                // llmlint: ignore-end[changed_behavior_has_e2e]
                 self.outstanding = Some(Outstanding {
                     nodes,
                     witnessed: Vec::new(),
@@ -4117,6 +4141,11 @@ fn start_ready(
         // the same attempt, pinned to the preserved branch — so it is that
         // request, and not the plan node's, the identity is asked about.
         let mut resume = workspaces.resuming(&node.id);
+        // llmlint: ignore-block[changed_behavior_has_e2e] a resumed re-dispatch meets an outstanding delivery only
+        // when a workspace refusal lands between a conversation's answer and the loop recording
+        // it, an ordering of three threads no CLI journey can force. The refusal and resume are
+        // driven by `lifecycle.rs`'s exhausted-refusal journeys, and what decides the hold is the
+        // outstanding set `a_delivery_stops_being_outstanding_once_recorded_or_abandoned` drives.
         // A resumed re-dispatch is composed below from what the record says the
         // node holds, and a note the attempt before it read may still be on its
         // way there — answered, and waiting for this loop to journal it. This
@@ -4138,6 +4167,7 @@ fn start_ready(
                 );
             }
         }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         let opens = resume
             .as_deref()
             .map_or(&node, |continuation| &continuation.node);

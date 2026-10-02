@@ -7755,10 +7755,16 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
     world.run(&["start", &path, "--detach"]).exited(0);
     let run = "poolheld".to_string();
 
+    // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this diff changes only how an existing
+    // journey waits, not where it lives. It drives the engine's workspace holds over the linked `onevcs` pool under `src/`, and
+    // `nx.json`'s `noteJourneySource` — the one separately edged test project's input —
+    // itself begins `{workspaceRoot}/src/**/*`, so a narrower edge would drop it out of
+    // `nx affected` for the changes it exists to catch.
     world.until("the second node to be held for its workspace", |world| {
         first_workspace_hold_of(world, &run, "second").is_some()
     });
     let hold = first_workspace_hold_of(&world, &run, "second").expect("held");
+    // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
     assert_eq!(hold["identity"], SERVICE_IDENTITY, "{hold}");
     assert_eq!(hold["pool"], 1, "{hold}");
     assert_eq!(hold["overflow"], 0, "{hold}");
@@ -7986,6 +7992,11 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
         .into_iter()
         .filter(|event| event["labels"]["node"] == "second")
         .collect();
+    // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this diff changes only how an existing
+    // journey waits, not where it lives. It drives the engine's workspace holds over the linked `onevcs` pool under `src/`, and
+    // `nx.json`'s `noteJourneySource` — the one separately edged test project's input —
+    // itself begins `{workspaceRoot}/src/**/*`, so a narrower edge would drop it out of
+    // `nx affected` for the changes it exists to catch.
     // Released once per time it was held: once for the slot the first handed
     // back, and once more for each open the identity refused after admitting it
     // that the next pass still held. Not for every refusal: a refusal holds the
@@ -8007,6 +8018,7 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
         requeued.len(),
         why(&world, &run)
     );
+    // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
     for release in &unheld {
         assert!(
             release["payload"]["released"]
@@ -8086,10 +8098,16 @@ fn a_workspace_held_node_reads_as_held_for_concurrency_while_the_host_is_full_an
     // The pass both were ready in: the first took the slot, the second was held
     // for it, and the other started behind the held node — which is what fills
     // the host, so the same pass's record names both reasons.
+    // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this diff changes only how an existing
+    // journey waits, not where it lives. It drives the engine's concurrency and workspace holds under `src/`, and
+    // `nx.json`'s `noteJourneySource` — the one separately edged test project's input —
+    // itself begins `{workspaceRoot}/src/**/*`, so a narrower edge would drop it out of
+    // `nx affected` for the changes it exists to catch.
     world.until("the second node to be held for its workspace", |world| {
         first_workspace_hold_of(world, &run, "second").is_some()
     });
     let hold = first_workspace_hold_of(&world, &run, "second").expect("held");
+    // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
     assert_eq!(hold["identity"], SERVICE_IDENTITY, "{hold}");
     for node in ["first", "other"] {
         assert_eq!(
