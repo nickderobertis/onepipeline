@@ -1013,26 +1013,37 @@ fn a_parked_run_whose_record_names_no_pid_is_advised_and_refused_without_one() {
 /// graph is an ending, and calling it one while its driver works is what lets a
 /// follow-up race the driver (onepipeline#528).
 ///
-/// What keeps the driver alive and quiet is a real one: the write-back of the
-/// node's settlement, which the driver waits on at close-out before it ends the
-/// run, held open at the store. Each write-back attempt's first targeted update
-/// meets this journey; the ones before the node settles are let go, and the one
-/// after is held.
+/// What keeps the driver alive and quiet is a real step of its own close-out: it
+/// has written its result and waits at the run's handover gate to journal its
+/// `driver-exited` and let go, and this journey holds that gate — as
+/// `unwatched.rs`'s detached handback journey does. That wait is bounded by the
+/// gate's thirty-second patience rather than by the 2.25-second close-out wait
+/// on a write-back, which is what a held settlement write-back would give: a
+/// window a loaded host spent before the journey's reads were done.
 #[test]
 fn a_live_driver_quiet_over_a_settled_graph_reads_parked_driven_and_not_ended() {
     let world = World::new("driver-parked-settled");
-    let meeting = world.store_holds("update_task");
-    let world = world.through_scripted_source();
-    let run = start_detached(&world, "settledquiet", vec![agent("build", &[])]);
+    world.script("build.wait", "hold");
+    let (run, driver) =
+        start_detached_announcing(&world, "settledquiet", vec![agent("build", &[])]);
+    world.until("the node to be dispatched", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
 
-    let held = loop {
-        let arrival = meeting.arrived();
-        if world.events_of(&run, "node-settled").is_empty() {
-            arrival.release();
-        } else {
-            break arrival;
-        }
-    };
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb holds a run's handover gate
+    // past its own two file operations, so none can stop a driver between its result and
+    // its last append; an entry naming this live test process is a holder the driver
+    // cannot show has gone, and it waits for it exactly as it waits for a submitter.
+    let gate = world.run_file(&run, "channel/handover");
+    std::fs::create_dir_all(&gate).expect("the gate is there");
+    let held = gate.join(format!("{:020}", 1));
+    std::fs::write(&held, format!("{} e2e-gate-holder", std::process::id()))
+        .expect("the gate is held");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.release("build.go");
+    world.until("the driver to write its result", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
 
     let parked = |argv: &[&str]| {
         let mut command = world.cmd(argv);
@@ -1046,21 +1057,21 @@ fn a_live_driver_quiet_over_a_settled_graph_reads_parked_driven_and_not_ended() 
     assert_eq!(reading["driven"], true, "{reading}");
     assert_eq!(reading["ending"], Value::Null, "{reading}");
     assert_eq!(reading["paused"], Value::Null, "{reading}");
-    assert!(
-        !world.run_file(&run, "result.json").is_file(),
-        "the driver ended the run before the journey read it"
-    );
-    let driver = &world.run_json(&run, "launch.json")["pid"];
     parked(&["adopt", &run]).exited(REFUSED).err_has(&format!(
         "still being driven by driver pid {driver} (PARKED)"
     ));
     assert!(world.events_of(&run, "driver-adopted").is_empty());
-
-    held.release();
-    world.until(
-        "the driver it refused to displace to end the run",
-        |world| world.run_file(&run, "result.json").is_file(),
+    assert!(
+        world.events_of(&run, "driver-exited").is_empty(),
+        "the driver let go of the run before the journey read it"
     );
+
+    std::fs::remove_file(&held).expect("the gate is let go");
+    world.until("the driver it refused to displace to hand back", |_| {
+        crate::harness::process_ended(driver)
+    });
+    assert_eq!(world.events_of(&run, "driver-exited").len(), 1);
+    assert!(world.events_of(&run, "driver-adopted").is_empty());
 }
 
 /// The same silence, with a decision point outstanding, is *not* parked.
