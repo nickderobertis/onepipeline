@@ -114,6 +114,12 @@ fn recorded_run(world: &World, name: &str) -> String {
     world.until("the run to settle", |world| {
         world.run_file(name, "result.json").is_file()
     });
+    // A settling driver journals its `driver-exited` after `result.json` is
+    // written, so the recording waits for it: a journal read in between would
+    // carry the record on one machine and not on another.
+    world.until("the driver to journal its exit", |world| {
+        !world.events_of(name, "driver-exited").is_empty()
+    });
     name.to_string()
 }
 
@@ -487,8 +493,19 @@ fn a_reader_from_before_the_change_reads_a_journal_this_build_writes() {
     let root = world.fakes.join("both-versions-root");
     run_of(&root, "written-at-2", &journal);
     run_of(&root, "written-at-1", FIXTURE);
+    // The one line the two may differ by is `status`'s reading of the
+    // `driver-exited` record this build writes and the fixture predates: it is
+    // held present here, and every other line has to match.
+    let written_at_2 = views_of(&world, &root, "written-at-2").replace("written-at-2", "run");
+    let (exited, rest): (Vec<&str>, Vec<&str>) = written_at_2
+        .split_inclusive('\n')
+        .partition(|line| line.starts_with("  driver exited "));
+    assert!(
+        exited.len() == 1 && exited[0].contains(": settled complete"),
+        "`status` does not report the driver's ending this build journalled: {written_at_2}"
+    );
     assert_eq!(
-        views_of(&world, &root, "written-at-2").replace("written-at-2", "run"),
+        rest.concat(),
         views_of(&world, &root, "written-at-1").replace("written-at-1", "run"),
         "the same run written at the two versions this build reads renders differently"
     );

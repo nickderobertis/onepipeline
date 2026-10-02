@@ -2148,6 +2148,75 @@ impl ChannelState {
             .filter_map(|(record, _)| serde_json::from_value::<CommandOutcome>(record).ok())
             .find(|outcome| outcome.id == id)
     }
+
+    /// How many outcome lines the reconciler has written so far: the mark a
+    /// driver takes as it starts, so the lines after it are the ones it wrote.
+    pub(crate) fn outcomes_mark(&self) -> usize {
+        self.outcome_lines().map_or(0, |lines| lines.len())
+    }
+
+    /// The highest envelope id among the outcome lines written after `mark`, or
+    /// `None` where none was.
+    ///
+    /// What a driver holding the run's ownership lock since `mark` answered:
+    /// nothing else writes an outcome line while it holds the lock.
+    pub(crate) fn highest_answered_after(&self, mark: usize) -> Option<u64> {
+        self.outcome_lines()?
+            .iter()
+            .skip(mark)
+            .filter_map(|(record, _)| record.get("id").and_then(Value::as_u64))
+            .max()
+    }
+
+    /// Every command envelope the reconciler claimed — each at or below the
+    /// queue's cursor — that has no outcome line, in claim order.
+    ///
+    /// An envelope taken off the queue and never answered is one whose submitter
+    /// was told nothing, and one no later writer claims again: the cursor is
+    /// already past it. Read leniently, as every view of the channel is: a
+    /// channel this reader cannot open names nothing, and neither does one whose
+    /// outcome log it cannot read — that would name every envelope ever answered.
+    pub(crate) fn claimed_unanswered(&self) -> Vec<u64> {
+        if !self.paths.channel_dir().is_dir() {
+            return Vec::new();
+        }
+        let Ok(commands) = self.plain(COMMANDS) else {
+            return Vec::new();
+        };
+        let Ok(Some(cursor)) = commands
+            .transport()
+            .cursor(commands.name(), &ConsumerName::default_consumer())
+        else {
+            return Vec::new();
+        };
+        let mut claimed = Vec::new();
+        for (record, after) in commands.log(None).unwrap_or_default() {
+            if let Some(id) = record.get("id").and_then(Value::as_u64) {
+                claimed.push(id);
+            }
+            if after == cursor {
+                break;
+            }
+        }
+        let Some(outcomes) = self.outcome_lines() else {
+            return Vec::new();
+        };
+        let answered: BTreeSet<u64> = outcomes
+            .iter()
+            .filter_map(|(record, _)| record.get("id").and_then(Value::as_u64))
+            .collect();
+        claimed.retain(|id| !answered.contains(id));
+        claimed
+    }
+
+    /// Every outcome line, raw — none for a run with no channel yet — or `None`
+    /// for an outcome log this reader cannot read.
+    fn outcome_lines(&self) -> Option<Vec<(Value, onemessagebus::Position)>> {
+        if !self.paths.channel_dir().is_dir() {
+            return Some(Vec::new());
+        }
+        self.plain(COMMAND_OUTCOMES).ok()?.log(None).ok()
+    }
 }
 
 #[cfg(test)]
