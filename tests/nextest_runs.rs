@@ -823,6 +823,16 @@ fn the_scripts_refuse_what_they_cannot_run() {
         (
             [
                 "--log",
+                log,
+                "--known-flakes",
+                a_directory.to_str().expect("a UTF-8 path"),
+            ],
+            vec![],
+            "restore it from git",
+        ),
+        (
+            [
+                "--log",
                 a_directory.to_str().expect("a UTF-8 path"),
                 "--known-flakes",
                 flakes,
