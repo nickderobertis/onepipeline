@@ -11,14 +11,20 @@
 # fresh and compiles nothing. A re-run that did compile says so.
 #
 # This only reports. It never re-runs a test until it passes and never excuses
-# a failure. It exits 1 whenever the log names a failed or unrun test, whatever
-# the re-runs show, because the run it reports on failed. It exits 0 only when
-# the log names no test failure (the step failed somewhere else), and 2 for a
-# usage error or a malformed known-flake list.
+# a failure. The report (each re-run's result and the summary) goes to stdout,
+# and what is wrong goes to stderr. Exit status:
+#   0  the log names no test failure (the step failed somewhere else)
+#   1  the log names a failed or unrun test, whatever the re-runs show, because
+#      the run it reports on failed
+#   2  a usage error, an unreadable input, or a malformed known-flake list
 set -uo pipefail
 
 usage() {
   echo "usage: rerun-failed.sh --log FILE --times N --known-flakes FILE -- RUNNER..." >&2
+  exit 2
+}
+refuse() {
+  echo "rerun-failed: $*" >&2
   exit 2
 }
 
@@ -35,10 +41,10 @@ done
 [ -n "$log" ] && [ -n "$times" ] && [ -n "$flakes" ] && [ "$#" -gt 0 ] || usage
 case "$times" in
   [1-9] | 10) ;;
-  *) echo "rerun-failed: --times must be a whole number from 1 to 10, not '$times'" >&2; exit 2 ;;
+  *) refuse "--times must be a whole number from 1 to 10, not '$times'" ;;
 esac
-[ -f "$log" ] || { echo "rerun-failed: no log at '$log'; the failed step's output was not captured" >&2; exit 2; }
-[ -f "$flakes" ] || { echo "rerun-failed: no known-flake list at '$flakes'" >&2; exit 2; }
+[ -r "$log" ] || refuse "cannot read the failed step's log at '$log'; capture the step's output there (ci.yml tees it)"
+[ -r "$flakes" ] || refuse "cannot read the known-flake list at '$flakes'"
 runner=("$@")
 
 # Binary ids and test names come out of a log and go into a nextest filter, so
@@ -56,46 +62,50 @@ while IFS= read -r line || [ -n "$line" ]; do
   [ "${#fields[@]}" -eq 0 ] && continue
   if [ "${#fields[@]}" -ne 3 ] || ! [[ ${fields[0]} =~ $id_shape ]] \
     || ! [[ ${fields[1]} =~ $id_shape ]] || ! [[ ${fields[2]} =~ $issue_shape ]]; then
-    echo "rerun-failed: $flakes:$lineno is not '<binary-id> <test-name> <issue-url>' with a GitHub issue URL: $line" >&2
-    exit 2
+    refuse "$flakes:$lineno is not '<binary-id> <test-name> <issue-url>' with a GitHub issue URL; fix or remove it: $line"
   fi
   flake_ids+=("${fields[0]} ${fields[1]}")
   flake_urls+=("${fields[2]}")
 done <"$flakes"
 
-work="$(mktemp -d)"
+work="$(mktemp -d 2>/dev/null)" && [ -d "$work" ] || refuse "cannot make a scratch directory (mktemp -d failed)"
 trap 'rm -rf "$work"' EXIT
 
-# The log as plain text: no colour escapes, no carriage returns.
 esc="$(printf '\033')"
 plain() { sed "s/${esc}\[[0-9;]*[A-Za-z]//g" "$1" | tr -d '\r'; }
-plain "$log" >"$work/step.log"
+plain "$log" >"$work/step.log" || refuse "cannot read '$log' into $work"
 
-# A status line: `   FAIL [   0.012s] (  3/120) <binary-id> <test-name>`.
+# A status line: `   FAIL [   0.012s] (  3/120) <binary-id> <test-name>`. The
+# failing spellings are the ones this repository's configuration can produce,
+# and tests/nextest_runs.rs drives real nextest to each of them: a failure, a
+# retried failure, a timeout, and an abort (a signal name on Unix, ABORT on
+# Windows). Leaks pass here (no `leak-timeout` result is set), so LEAK-FAIL
+# cannot occur.
 status_line() {
   echo "^[[:space:]]*(TRY [0-9]+ )?($1) \[[[:space:]]*[0-9.]+s\] (\([[:space:]]*[0-9]+/[[:space:]]*[0-9]+\) )?([^[:space:]]+) ([^[:space:]]+)[[:space:]]*\$"
 }
-failed_re="$(status_line 'FAIL|TIMEOUT|LEAK-FAIL|XFAIL|ABORT|SIG[A-Z0-9]+|SIG [0-9]+')"
+failed_re="$(status_line 'FAIL|TIMEOUT|ABORT|SIG[A-Z0-9]+')"
 passed_re="$(status_line 'PASS|LEAK|FLAKY [0-9]+/[0-9]+')"
 tests_matching() { sed -nE "s#$1#\\4 \\5#p" "$2" | sort -u; }
 
 say() { echo "rerun-failed: $*"; }
+warn() { echo "rerun-failed: $*" >&2; }
 
-# Why tests went unrun. nextest names a reason ("due to test failure") whenever
-# it cancels; a run it ends with tests unrun and no reason is the case this
-# exists to make visible, so that one names nextest's own exit status.
+# nextest names a reason ("due to test failure") whenever it cancels. A run it
+# ends with tests unrun and no reason is the case this exists to make visible,
+# so that one names nextest's own exit status.
 unrun=0
 status="$(sed -nE 's/^nextest-run: nextest exited with status ([0-9]+)$/\1/p' "$work/step.log" | tail -n 1)"
 while IFS= read -r warning; do
   unrun=1
   counts="$(sed -nE 's/.*warning: ([0-9]+\/[0-9]+) tests? (were|was) not run.*/\1/p' <<<"$warning")"
   case "$warning" in
-    *" due to "*) say "nextest left $counts tests not run ${warning#* not run }" ;;
+    *" due to "*) warn "nextest left $counts tests not run ${warning#* not run }" ;;
     *)
       if [ -n "$status" ]; then
-        say "nextest exited with status $status and left $counts tests not run, and gave no reason: no test failed, timed out or was cancelled. See the 'priority' note in .config/nextest.toml for the one cause known here."
+        warn "nextest exited with status $status and left $counts tests not run, and gave no reason: no test failed, timed out or was cancelled. See the 'priority' note in .config/nextest.toml for the one cause known here; a run that strands tests for another reason needs that cause found and fixed."
       else
-        say "nextest left $counts tests not run and gave no reason, and its exit status is not in this log. See the 'priority' note in .config/nextest.toml for the one cause known here."
+        warn "nextest left $counts tests not run and gave no reason, and its exit status is not in this log (run the suite through scripts/nextest-run.sh to record it). See the 'priority' note in .config/nextest.toml for the one cause known here."
       fi
       ;;
   esac
@@ -106,7 +116,7 @@ while IFS= read -r test; do
   [ -n "$test" ] || continue
   read -r binary name <<<"$test"
   if ! [[ $binary =~ $id_shape ]] || ! [[ $name =~ $id_shape ]]; then
-    say "skipping a failed-test line this cannot turn into a filter: $test"
+    warn "not re-running '$test': it has characters a nextest filter is not built from here. If nextest now names tests that way, widen id_shape in scripts/rerun-failed.sh."
     continue
   fi
   failed+=("$test")
@@ -114,10 +124,10 @@ done < <(tests_matching "$failed_re" "$work/step.log")
 
 if [ "${#failed[@]}" -eq 0 ]; then
   if [ "$unrun" -eq 1 ] || grep -qE '^error: test run failed' "$work/step.log"; then
-    say "the test run failed, and no test in it failed, so there is nothing to re-run. The job's verdict stays failed."
+    warn "the test run failed and names no failed test, so there is nothing to re-run. The job's verdict stays failed."
     exit 1
   fi
-  say "$log names no failed test, so there is nothing to re-run (the step failed outside the test run)."
+  say "$log names no failed test, so there is nothing to re-run (the step failed outside the test run; its own output above says where)."
   exit 0
 fi
 
@@ -140,11 +150,12 @@ for run in $(seq 1 "$times"); do
   grouped && echo "::group::re-run $run of $times: nextest output"
   CARGO_TERM_QUIET=false "${runner[@]}" --no-fail-fast --status-level pass \
     --final-status-level none -E "$filter" 2>&1 | tee "$out"
+  exited="${PIPESTATUS[0]}"
   grouped && echo "::endgroup::"
   plain "$out" >"$out.plain"
   rebuilt="$(sed -nE 's/^[[:space:]]*Compiling ([^ ]+).*/\1/p' "$out.plain" | tr '\n' ' ')"
   if [ -n "$rebuilt" ]; then
-    say "re-run $run of $times compiled ${rebuilt}before running, so it ran a fresh build of those, not the failed step's"
+    warn "re-run $run of $times compiled ${rebuilt}first, so it ran a new build of those rather than the failed step's. Re-run with the command the step built with (just rerun-failed after test-quick, just rerun-failed-coverage after the instrumented gate)."
   fi
   tests_matching "$failed_re" "$out.plain" >"$out.failed"
   tests_matching "$passed_re" "$out.plain" >"$out.passed"
@@ -157,7 +168,7 @@ for run in $(seq 1 "$times"); do
       say "re-run $run of $times: $test passed"
     else
       unran[i]=$((unran[i] + 1))
-      say "re-run $run of $times: $test did not run"
+      say "re-run $run of $times: $test did not run (the re-run exited with status $exited; its output is above)"
     fi
     i=$((i + 1))
   done
@@ -166,16 +177,17 @@ done
 say "summary: how often each failed test failed again on this build"
 i=0
 for test in "${failed[@]}"; do
+  read -r binary name <<<"$test"
   count="${fails[i]}"
   ran=$((times - unran[i]))
   if [ "$ran" -eq 0 ]; then
-    reading="did not run in any re-run, so this says nothing about it"
+    reading="did not run in any re-run, so this says nothing about it; the re-runs' output above says why"
   elif [ "$count" -eq "$ran" ]; then
-    reading="fails every time on this build, which reads as a regression"
+    reading="fails every time on this build, which reads as a regression: reproduce it with cargo nextest run -E 'binary_id(=$binary) and test(=$name)' and fix it"
   elif [ "$count" -eq 0 ]; then
-    reading="did not fail again, which reads as a flake"
+    reading="did not fail again, which reads as a flake: fix it, or open an issue and list it in scripts/known-flakes.txt"
   else
-    reading="fails some of the time on this build, which reads as a flake"
+    reading="fails some of the time on this build, which reads as a flake: fix it, or open an issue and list it in scripts/known-flakes.txt"
   fi
   line="  $test: failed $count of $times re-runs"
   [ "${unran[i]}" -gt 0 ] && line="$line (${unran[i]} did not run)"
@@ -190,5 +202,5 @@ for test in "${failed[@]}"; do
   echo "$line"
   i=$((i + 1))
 done
-say "the test step failed, and that verdict stands."
+warn "the test step failed, and that verdict stands."
 exit 1

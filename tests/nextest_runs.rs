@@ -7,14 +7,11 @@
 //!
 //! The macOS leg of run 36876601588 (job 110417653725) passed 1097 of 2247
 //! tests, printed `warning: 1150/2247 tests were not run`, and named nothing
-//! that failed. nextest's scheduler re-reads a test group's queue only when a
-//! member of that group finishes, so a queued four-thread test that does not fit
-//! when the last member ends is never started, and the run ends without it.
-//! `.config/nextest.toml` avoids that by scheduling every test that needs more
-//! than one thread first. The fixture here carries **that file, verbatim**, with
-//! binaries named as the file's filters name them. It sets up the condition the
-//! leg hit: the group's one-thread tests finish while tests outside the group
-//! hold the slots a queued four-thread test needs.
+//! that failed. The `priority` note in `.config/nextest.toml` says why. The
+//! fixture here carries **that file, verbatim**, with binaries named as its
+//! filters name them, and sets up the condition the leg hit: the group's
+//! one-thread tests finish while tests outside the group hold the slots a queued
+//! four-thread test needs.
 //!
 //! # After a failure
 //!
@@ -92,15 +89,28 @@ impl Fixture {
             }
         }
         command.env("CARGO_TARGET_DIR", self.path("target"));
+        // Set by every CI runner, and it changes what the report prints.
+        command.env_remove("GITHUB_ACTIONS");
         command
     }
 
     /// A repository script, run with its output captured into one file the way
     /// a CI step's log captures both streams.
     fn script(&self, script: &str, args: &[&str], log: &str) -> (Output, String) {
+        self.script_in(script, args, log, &[])
+    }
+
+    fn script_in(
+        &self,
+        script: &str,
+        args: &[&str],
+        log: &str,
+        env: &[(&str, &str)],
+    ) -> (Output, String) {
         let file = fs::File::create(self.path(log)).expect("the log file is made");
         let output = self
             .command(bash())
+            .envs(env.iter().copied())
             .arg(repo_root().join("scripts").join(script))
             .args(args)
             .stdout(file.try_clone().expect("the log file is shared"))
@@ -121,23 +131,32 @@ impl Fixture {
     }
 
     fn rerun_failed(&self, known_flakes: &Path) -> (Output, String) {
+        self.rerun_failed_with(known_flakes, &["cargo", "nextest", "run"])
+    }
+
+    fn rerun_failed_with(&self, known_flakes: &Path, runner: &[&str]) -> (Output, String) {
+        self.rerun_failed_in(known_flakes, runner, &[])
+    }
+
+    fn rerun_failed_in(
+        &self,
+        known_flakes: &Path,
+        runner: &[&str],
+        env: &[(&str, &str)],
+    ) -> (Output, String) {
         let log = self.path("step.log");
-        self.script(
-            "rerun-failed.sh",
-            &[
-                "--log",
-                log.to_str().expect("a UTF-8 path"),
-                "--times",
-                &rerun_times().to_string(),
-                "--known-flakes",
-                known_flakes.to_str().expect("a UTF-8 path"),
-                "--",
-                "cargo",
-                "nextest",
-                "run",
-            ],
-            "rerun.log",
-        )
+        let times = rerun_times().to_string();
+        let mut args = vec![
+            "--log",
+            log.to_str().expect("a UTF-8 path"),
+            "--times",
+            &times,
+            "--known-flakes",
+            known_flakes.to_str().expect("a UTF-8 path"),
+            "--",
+        ];
+        args.extend_from_slice(runner);
+        self.script_in("rerun-failed.sh", &args, "rerun.log", env)
     }
 }
 
@@ -308,24 +327,33 @@ fn a_run_ended_with_tests_unrun_and_no_reason_is_named_by_nextests_exit_status()
 const RERUN_MANIFEST: &str =
     "[package]\nname = \"rerun-fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n";
 
-/// A deliberately passing test, a deliberately failing one, and one that fails
-/// only the first time it runs. Each writes its name to a ledger every time it
-/// runs, which is what says which tests ran again.
+/// A two-second ceiling so the timing-out test is ended quickly, and one retry
+/// for `fails`, so its last status line reads `TRY 2 FAIL`.
+const RERUN_CONFIG: &str = "[profile.default]\nslow-timeout = { period = \"1s\", terminate-after = 2 }\n\n[[profile.default.overrides]]\nfilter = 'test(=tests::fails)'\nretries = 1\n";
+
+/// A deliberately passing test, and one failing test in each way nextest
+/// reports a failure here: every time, the first time only, every other time,
+/// by timing out, and by aborting. Each writes its name to a ledger every time
+/// it runs, which is what says which tests ran again.
 const RERUN_TESTS: &str = r#"
 #[cfg(test)]
 mod tests {
     use std::io::Write;
 
-    fn ledger(name: &str) -> std::path::PathBuf {
+    /// Records this run of `name` and answers how many runs it has had: one
+    /// byte per run, in a file of its own, so no two tests write one file.
+    fn ledger(name: &str) -> u64 {
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ledger");
         std::fs::create_dir_all(&dir).unwrap();
-        let mut file = std::fs::OpenOptions::new()
+        let path = dir.join(name);
+        std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(dir.join("ran"))
+            .open(&path)
+            .unwrap()
+            .write_all(b".")
             .unwrap();
-        writeln!(file, "{name}").unwrap();
-        dir
+        std::fs::metadata(&path).unwrap().len()
     }
 
     #[test]
@@ -341,32 +369,75 @@ mod tests {
 
     #[test]
     fn fails_once() {
-        let dir = ledger("fails_once");
-        if std::fs::create_dir(dir.join("failed-once")).is_ok() {
+        if ledger("fails_once") == 1 {
             panic!("fails the first time only");
         }
+    }
+
+    #[test]
+    fn fails_alternately() {
+        if ledger("fails_alternately") % 2 == 1 {
+            panic!("fails every other time");
+        }
+    }
+
+    #[test]
+    fn times_out() {
+        ledger("times_out");
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn aborts() {
+        ledger("aborts");
+        std::process::abort();
     }
 }
 "#;
 
-/// The fixture's first run, failed: what a CI test step leaves behind.
+const FAILING: [&str; 5] = [
+    "fails",
+    "fails_once",
+    "fails_alternately",
+    "times_out",
+    "aborts",
+];
+
+fn rerun_fixture(case: &str) -> Fixture {
+    Fixture::new(
+        case,
+        RERUN_MANIFEST,
+        &[
+            ("src/lib.rs", RERUN_TESTS),
+            (".config/nextest.toml", RERUN_CONFIG),
+        ],
+    )
+}
+
+/// The fixture's first run, failed: what a CI test step leaves behind, colour
+/// escapes included, as a runner with `CARGO_TERM_COLOR=always` writes them.
 fn failed_step(case: &str) -> Fixture {
-    let fixture = Fixture::new(case, RERUN_MANIFEST, &[("src/lib.rs", RERUN_TESTS)]);
-    let (output, log) = fixture.nextest_run(&["--no-fail-fast"]);
+    let fixture = rerun_fixture(case);
+    let (output, log) = fixture.nextest_run(&["--no-fail-fast", "--color", "always"]);
     assert!(!output.status.success(), "the fixture's run failed:\n{log}");
+    for test in FAILING {
+        assert_eq!(
+            runs_of(&fixture, test),
+            if test == "fails" { 2 } else { 1 },
+            "{log}"
+        );
+    }
     assert!(
-        log.contains("3 tests run: 1 passed, 2 failed"),
-        "the fixture's run failed the two tests it means to:\n{log}"
+        log.contains('\u{1b}'),
+        "the step's log carries colour escapes:\n{log}"
     );
     fixture
 }
 
 fn runs_of(fixture: &Fixture, test: &str) -> usize {
-    fs::read_to_string(fixture.path("ledger/ran"))
-        .expect("the ledger reads")
-        .lines()
-        .filter(|line| *line == test)
-        .count()
+    fs::metadata(fixture.path("ledger").join(test)).map_or(0, |ledger| {
+        usize::try_from(ledger.len()).expect("a run count fits")
+    })
 }
 
 fn summary_line<'a>(report: &'a str, test: &str) -> &'a str {
@@ -376,11 +447,15 @@ fn summary_line<'a>(report: &'a str, test: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no summary line for {test}:\n{report}"))
 }
 
+fn known_flakes() -> PathBuf {
+    repo_root().join("scripts/known-flakes.txt")
+}
+
 #[test]
 fn only_the_failed_tests_run_again_and_each_ones_failures_are_counted() {
     let fixture = failed_step("rerun-counted");
     let times = rerun_times();
-    let (output, report) = fixture.rerun_failed(&repo_root().join("scripts/known-flakes.txt"));
+    let (output, report) = fixture.rerun_failed(&known_flakes());
 
     assert_eq!(
         output.status.code(),
@@ -392,19 +467,30 @@ fn only_the_failed_tests_run_again_and_each_ones_failures_are_counted() {
         1,
         "the passing test ran again:\n{report}"
     );
-    assert_eq!(runs_of(&fixture, "fails"), 1 + times, "{report}");
-    assert_eq!(runs_of(&fixture, "fails_once"), 1 + times, "{report}");
+    assert_eq!(runs_of(&fixture, "fails"), 2 * (1 + times), "{report}");
+    for test in ["fails_once", "fails_alternately", "times_out", "aborts"] {
+        assert_eq!(runs_of(&fixture, test), 1 + times, "{test}:\n{report}");
+    }
 
-    assert_eq!(
-        summary_line(&report, "fails"),
+    let every_time = |test: &str| {
         format!(
-            "  rerun-fixture tests::fails: failed {times} of {times} re-runs; fails every time on this build, which reads as a regression"
+            "  rerun-fixture tests::{test}: failed {times} of {times} re-runs; fails every time on this build, which reads as a regression: reproduce it with cargo nextest run -E 'binary_id(=rerun-fixture) and test(=tests::{test})' and fix it"
         )
-    );
+    };
+    for test in ["fails", "times_out", "aborts"] {
+        assert_eq!(summary_line(&report, test), every_time(test));
+    }
     assert_eq!(
         summary_line(&report, "fails_once"),
         format!(
-            "  rerun-fixture tests::fails_once: failed 0 of {times} re-runs; did not fail again, which reads as a flake"
+            "  rerun-fixture tests::fails_once: failed 0 of {times} re-runs; did not fail again, which reads as a flake: fix it, or open an issue and list it in scripts/known-flakes.txt"
+        )
+    );
+    let alternate_failures = (2..=1 + times).filter(|run| run % 2 == 1).count();
+    assert_eq!(
+        summary_line(&report, "fails_alternately"),
+        format!(
+            "  rerun-fixture tests::fails_alternately: failed {alternate_failures} of {times} re-runs; fails some of the time on this build, which reads as a flake: fix it, or open an issue and list it in scripts/known-flakes.txt"
         )
     );
     assert!(
@@ -425,26 +511,36 @@ fn a_known_flake_is_annotated_and_its_failure_still_stands() {
     let flakes = fixture.path("known-flakes.txt");
     fs::write(
         &flakes,
-        format!("# one entry\nrerun-fixture tests::fails {issue}\n"),
+        format!("# one entry\r\n\r\nrerun-fixture tests::fails {issue} # tracked\r\n"),
     )
     .expect("the list is written");
-    let (output, report) = fixture.rerun_failed(&flakes);
+    let (output, report) = fixture.rerun_failed_in(
+        &flakes,
+        &["cargo", "nextest", "run"],
+        &[("GITHUB_ACTIONS", "true")],
+    );
 
     assert_eq!(
         output.status.code(),
         Some(1),
         "a known flake excused the run:\n{report}"
     );
-    assert_eq!(runs_of(&fixture, "fails"), 1 + times, "{report}");
-    assert_eq!(
-        summary_line(&report, "fails"),
-        format!(
-            "  rerun-fixture tests::fails: failed {times} of {times} re-runs; fails every time on this build, which reads as a regression (known flake, issue {issue})"
-        )
+    assert_eq!(runs_of(&fixture, "fails"), 2 * (1 + times), "{report}");
+    let fails = summary_line(&report, "fails");
+    assert!(
+        fails.starts_with(&format!(
+            "  rerun-fixture tests::fails: failed {times} of {times} re-runs; fails every time"
+        )) && fails.ends_with(&format!(" (known flake, issue {issue})")),
+        "{report}"
     );
     assert!(
         !summary_line(&report, "fails_once").contains("known flake"),
         "{report}"
+    );
+    assert!(
+        report.contains(&format!("::group::re-run 1 of {times}: nextest output"))
+            && report.contains("::endgroup::"),
+        "on a GitHub runner each re-run's output is folded into a group:\n{report}"
     );
 }
 
@@ -460,7 +556,187 @@ fn a_known_flake_entry_in_any_other_shape_is_refused_before_anything_runs() {
     assert!(report.contains("known-flakes.txt:1 is not"), "{report}");
     assert_eq!(
         runs_of(&fixture, "fails"),
-        1,
+        2,
         "a test re-ran past the refusal:\n{report}"
     );
+}
+
+#[test]
+fn a_rerun_that_compiles_or_cannot_run_says_so_and_still_reports_failure() {
+    let fixture = failed_step("rerun-rebuilt");
+    let times = rerun_times();
+    // A source edit after the step: cargo now has to build before it can run.
+    let source = fixture.path("src/lib.rs");
+    let edited = format!(
+        "{}\n// edited after the step\n",
+        fs::read_to_string(&source).expect("the source reads")
+    );
+    fs::write(&source, edited).expect("the source is edited");
+    let (output, report) = fixture.rerun_failed(&known_flakes());
+    assert_eq!(output.status.code(), Some(1), "{report}");
+    assert!(
+        report.contains("re-run 1 of ") && report.contains("compiled rerun-fixture first"),
+        "the re-run that built says it did not run the step's build:\n{report}"
+    );
+
+    let (output, report) = fixture.rerun_failed_with(
+        &known_flakes(),
+        &["cargo", "nextest", "run", "--no-such-flag"],
+    );
+    assert_eq!(output.status.code(), Some(1), "{report}");
+    assert!(
+        report.contains(&format!("re-run 1 of {times}: rerun-fixture tests::fails did not run (the re-run exited with status ")),
+        "{report}"
+    );
+    assert!(
+        summary_line(&report, "fails").starts_with(&format!(
+            "  rerun-fixture tests::fails: failed 0 of {times} re-runs ({times} did not run); did not run in any re-run"
+        )),
+        "{report}"
+    );
+}
+
+#[test]
+fn tests_a_cancelled_run_left_unrun_are_reported_with_nextests_reason() {
+    let fixture = rerun_fixture("rerun-fail-fast");
+    let (output, log) = fixture.nextest_run(&["--test-threads", "1"]);
+    assert!(!output.status.success(), "{log}");
+    let (output, report) = fixture.rerun_failed(&known_flakes());
+    assert_eq!(output.status.code(), Some(1), "{report}");
+    let reason = report
+        .lines()
+        .find(|line| {
+            line.starts_with("rerun-failed: nextest left ")
+                && line.contains(" not run due to test failure")
+        })
+        .unwrap_or_else(|| panic!("the report relays nextest's reason:\n{report}"));
+    assert!(reason.contains("/6 tests not run"), "{reason}");
+}
+
+#[test]
+fn a_log_with_no_failed_test_reruns_nothing_and_never_reads_as_a_pass() {
+    let fixture = Fixture::new("rerun-no-tests", RERUN_MANIFEST, &[]);
+    let rerun = |log: &str| {
+        fs::write(fixture.path("step.log"), log).expect("the log is written");
+        fixture.rerun_failed(&known_flakes())
+    };
+
+    let (output, report) = rerun("error: could not compile `onepipeline`\n");
+    assert_eq!(output.status.code(), Some(0), "{report}");
+    assert!(
+        report.contains("names no failed test, so there is nothing to re-run"),
+        "{report}"
+    );
+
+    let (output, report) =
+        rerun("     Summary [   1.000s] 1 test run: 1 passed\nerror: test run failed\n");
+    assert_eq!(output.status.code(), Some(1), "{report}");
+    assert!(report.contains("verdict stays failed"), "{report}");
+
+    let (output, report) = rerun(
+        "     Summary [   1.000s] 1/2 tests run: 1 passed\nwarning: 1/2 tests were not run\nerror: test run failed\n",
+    );
+    assert_eq!(output.status.code(), Some(1), "{report}");
+    assert!(
+        report.contains("nextest left 1/2 tests not run and gave no reason, and its exit status is not in this log"),
+        "{report}"
+    );
+}
+
+#[test]
+fn the_scripts_refuse_what_they_cannot_run() {
+    let fixture = Fixture::new("rerun-refusals", RERUN_MANIFEST, &[]);
+    let (output, report) = fixture.script("nextest-run.sh", &[], "wrapper.log");
+    assert_eq!(output.status.code(), Some(2), "{report}");
+    assert!(report.starts_with("usage: nextest-run.sh"), "{report}");
+
+    let flakes = known_flakes();
+    let flakes = flakes.to_str().expect("a UTF-8 path");
+    let missing = fixture.path("no-such.log");
+    let missing = missing.to_str().expect("a UTF-8 path");
+    for (args, says) in [
+        (
+            vec!["--log", missing, "--times", "3", "--known-flakes", flakes],
+            "usage:",
+        ),
+        (
+            vec![
+                "--log",
+                missing,
+                "--times",
+                "0",
+                "--known-flakes",
+                flakes,
+                "--",
+                "true",
+            ],
+            "--times must be a whole number from 1 to 10",
+        ),
+        (
+            vec![
+                "--log",
+                missing,
+                "--times",
+                "3",
+                "--known-flakes",
+                flakes,
+                "--",
+                "true",
+            ],
+            "cannot read the failed step's log",
+        ),
+        (vec!["--bogus"], "unknown argument '--bogus'"),
+    ] {
+        let (output, report) = fixture.script("rerun-failed.sh", &args, "refusal.log");
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {report}");
+        assert!(report.contains(says), "{args:?}: {report}");
+    }
+}
+
+/// The steps that run `just rerun-failed` hold the three things the workflow
+/// promises about them: they run only after their job's test step failed, they
+/// cannot change the job's verdict, and their timeout covers every re-run of a
+/// test that hangs until nextest ends it.
+#[test]
+fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
+    let workflow = fs::read_to_string(repo_root().join(".github/workflows/ci.yml"))
+        .expect("the workflow reads");
+    let config: toml::Value = toml::from_str(&repository_config()).expect("the config parses");
+    let slow = &config["profile"]["default"]["slow-timeout"];
+    let period: u64 = slow["period"]
+        .as_str()
+        .and_then(|period| period.strip_suffix('s'))
+        .and_then(|seconds| seconds.parse().ok())
+        .expect("slow-timeout's period is in seconds");
+    let terminate_after = slow["terminate-after"]
+        .as_integer()
+        .and_then(|count| u64::try_from(count).ok())
+        .expect("slow-timeout has terminate-after");
+    let hung_reruns_minutes = (rerun_times() as u64 * period * terminate_after).div_ceil(60);
+
+    let steps: Vec<&str> = workflow
+        .split("      - name: ")
+        .filter(|step| step.starts_with("Does each failed test fail again on this build"))
+        .collect();
+    assert_eq!(steps.len(), 2, "one rerun step each in gate and cross");
+    for step in steps {
+        let field = |key: &str| {
+            step.lines()
+                .find_map(|line| line.trim().strip_prefix(key))
+                .map(str::trim)
+                .unwrap_or_else(|| panic!("the step sets {key}:\n{step}"))
+        };
+        assert!(field("if:").starts_with("failure() && "), "{step}");
+        assert_eq!(field("continue-on-error:"), "true", "{step}");
+        assert!(field("run:").starts_with("just rerun-failed"), "{step}");
+        let minutes: u64 = field("timeout-minutes:")
+            .parse()
+            .expect("a whole number of minutes");
+        assert!(
+            minutes >= hung_reruns_minutes,
+            "{minutes} minutes cannot hold {} re-runs of a test nextest ends after {}s:\n{step}",
+            rerun_times(),
+            period * terminate_after
+        );
+    }
 }
