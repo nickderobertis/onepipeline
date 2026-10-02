@@ -3416,7 +3416,10 @@ contract's vocabulary has nowhere to put one. So this crate now ships:
   It moved to version 8 when the row grew the closure rule's three facts —
   `owed_until_closed`, `completion_requested` and `reopened_at` (entry 98) —
   because a version-7 document carries no answer to whether its run was driven
-  under that rule rather than a run that was not.
+  under that rule rather than a run that was not. It moved to version 9 when the
+  row grew `waiting` — the human actions a `PAUSED` run is held on, which `runs`
+  names in the advice under that word (entry 101) — because a version-8 document
+  carries no answer to which nodes wait rather than none.
 - **`views::{RunTelemetry, Bucket, BucketName, Party, Usage}`**, re-exported
   because `RunSummary::timing` **is** the telemetry document whose shape the
   Views paragraph already fixes — eight buckets that sum exactly, per-party
@@ -3433,7 +3436,7 @@ cannot go on describing a document the build stopped writing:
 
 ```json
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "fields": [
     "schema_version",
     "run_id",
@@ -3461,6 +3464,7 @@ cannot go on describing a document the build stopped writing:
     "reopened_at",
     "timing",
     "parked",
+    "waiting",
     "judge_rejected",
     "landings",
     "oneharness_sessions",
@@ -5168,14 +5172,16 @@ person.
   Everything unresolved goes on standard error, never on standard output, and
   nothing at all is written on either stream when there is nothing to say.
 - **The standing word is the listing's own**, reached rather than reimplemented —
-  `views`' `Standing::of_row`, which is what `runs` prints for the same run. Every
-  run this verb reports is `ACTIVE`, `PARKED`, `DRIVER DEAD` or `UNDRIVEN`: a run
+  `views`' `Standing::of_row`, which is what `runs` prints for the same run. A run
   whose document says its graph is complete or its stop was recorded is either
   excluded (its stamp is current) or **undecidable** (its stamp is stale, **this
-  change**), so a document recording settlement never reaches the reported line at
-  all. Before this change such a stale-stamped document was reported `SETTLED`;
-  under the amended rule it is named on standard error instead, and the four words
-  above are the whole set a reported run carries.
+  change**), so a stale document recording settlement never reaches the reported
+  line at all. Before this change such a stale-stamped document was reported
+  `SETTLED`; under the amended rule it is named on standard error instead. The
+  words a reported run carries are `runs`' own: `ACTIVE`, `PARKED`, `DRIVER DEAD`
+  or `UNDRIVEN`, and — since entry 101 — `ENDED failed`, `ENDED unfinished`,
+  `ENDED stopped` or `PAUSED` for a run nothing drives that ended or is paused on a
+  decision.
 - **Exit statuses.** `0` when no run is reported, and `EXIT_RUNS_UNWATCHED` when at
   least one is — a status of its own rather than the refused `2`, because a caller
   has to tell "runs are unwatched" from "this verb could not answer". Its value is
@@ -7902,10 +7908,11 @@ release the lock links, over a real `local-md` store.
 
 ## 95. A supervisor's two most frequent reads needed a shell filter and a redirect to be one command — OPEN
 
-**Proposal (for the planner who owns the contract): the views line reads `status [--no-providers]`,
+**Proposal (for the planner who owns the contract): the views line reads `status [--no-providers] [--json]`,
 entry 58's `watch` takes `--log PATH`, and the verbs paragraph names
 `Status::render_without_providers` beside `render_status`.** Neither flag changes a byte of
-either verb's output when it is not given.
+either verb's output when it is not given. `--json`, which requires a run, joined the line with
+entry 101 and is stated in the contract itself.
 
 Why: a supervisor approves the commands it runs against an allowlist, and both harnesses it
 runs under — Claude Code and Codex — match a rule only against a command they can parse as
@@ -8431,3 +8438,46 @@ through the compiled binary.
   "status": "done"
 }
 ```
+
+## 101. A run that ended with a node not `done` read `DRIVER DEAD` forever, and nothing said in a form a script reads whether a run was driven — RESOLVED
+
+**Ruling: the plan `run-ending-liveness-2026-10-01` (node `op-run-ending-reading`) adds
+the paragraph "A run nothing drives reads as ended, paused, or left with work it could
+move" to the contract, verbatim as the manager approved it and the user approved it
+through that plan's design document.** It adds two kinds of run word, `ENDED <kind>` and
+`PAUSED`, and the machine-readable read onepipeline#625 asked for, `status <RUN> --json`.
+
+**Why the words were added.** The run-end hook judge already decided that a run ended —
+`hooks::judge` and `at_stop` fired the failure hook for a failed, unfinished or stopped
+run — and the views never asked it. A view printed `SETTLED` only for a graph whose every
+node was `done`, and the driver-liveness word for everything else, so every run that
+ended with a failed, cancelled, parked or stopped node read `DRIVER DEAD` for ever, under
+an invitation to `adopt` it that exits at once having moved nothing. Read on one host,
+43 of its 177 runs read so: 34 had ended failed, 8 stopped and 1 unfinished. A follow-up
+loop that waits for a run to end before verifying its drafts could not tell any of them
+from a run whose driver had crashed with work still to do, so it refused all of them.
+
+**What moved.** One function, `hooks::verdict`, is the run-end rule over the statuses a
+graph holds; the hook judge fires what it names, and the views read the same answer back
+as a run's ending, so a run cannot fire one hook and read as another ending. The words
+this record enumerates for `runs`, `status` and `unwatched` — "`ACTIVE`, `PARKED`,
+`DRIVER DEAD` or `UNDRIVEN`" — gain `ENDED failed`, `ENDED unfinished`, `ENDED stopped`
+and `PAUSED`, and `DRIVER DEAD` is left meaning what it always meant to an operator: a
+run whose driver went while it still had work it could move. Because a converged run
+nothing drives is now always ended or paused, the two prescriptions that were given to
+one — return parked work with a `requeue` and then `adopt`, and read a judge's verdict
+and supersede the node it rejected — are retired with it: an ended run's ending is its
+whole reading, and the manager ruled that no hint naming `adopt` survives under it. A
+`PAUSED` run is told how to settle its decision instead — each waiting human action with
+`attest` or a `drop`, a blocking question with `reply` — or to `stop`. The summary
+document moved to version 9 to carry the waiting nodes that advice names (entry 56).
+`DriverLiveness` and its words, `liveness_of`, `RunView::liveness`, what `adopt`
+accepts, `watch` and its exit statuses, and `stop-guard` are unchanged.
+
+**What this build does.** `onepipeline::views` publishes `RunReading`, `EndingKind`,
+`Ending`, `EndedNode`, `Paused`, `reading` and `standing_word_of`;
+`schemas/run-reading.schema.json` is generated from `RunReading` and
+`tests/contract.rs`'s `the_run_reading_is_the_committed_schema_and_what_the_contract_names`
+holds the two equal. `tests/e2e/run_ending.rs` drives a real run into each state through
+the compiled binary and reads its `status` word, its `runs` row and its `--json`
+document, and the run-end hook it fired, from the same run.

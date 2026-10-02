@@ -1008,7 +1008,7 @@ pub(crate) mod tests {
             serde_json::from_value(block["summary_fields"].clone()).expect("entry 98 names them");
         // Read off the checked-in golden, which pins every field present.
         let golden: RunSummary =
-            serde_json::from_str(include_str!("../tests/golden/run-summary-v8.json"))
+            serde_json::from_str(include_str!("../tests/golden/run-summary-v9.json"))
                 .expect("the summary golden reads");
         let carried = keys_of(&golden);
         for field in &summary {

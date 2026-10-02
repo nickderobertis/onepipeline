@@ -12,7 +12,7 @@
 //! the marker against it, and [`ending`] is the predicate the rule's "live again"
 //! and "a different ending" are both measured by.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
@@ -31,7 +31,7 @@ use crate::ledger::{self, LaunchRecord, RunPaths};
 use crate::projection::RunState;
 use crate::report;
 use crate::sys;
-use crate::views::{self, RunView};
+use crate::views::{self, EndedNode, EndingKind, RunView};
 
 /// The version of the document a hook reads on its stdin.
 const DOCUMENT_VERSION: u32 = 1;
@@ -122,20 +122,23 @@ pub(crate) enum ReasonKind {
     Stopped,
 }
 
-/// One node that was not `done` when a hook was judged.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct Unsettled {
-    id: String,
-    status: &'static str,
-    /// Written as `null` rather than omitted: the document states the field.
-    outcome: Option<String>,
+impl ReasonKind {
+    /// The ending a view reads a run that fired the failure hook for this reason
+    /// as — the one place the hook's word and the view's are paired.
+    pub(crate) fn ending(self) -> EndingKind {
+        match self {
+            Self::Nodes => EndingKind::Failed,
+            Self::Unfinished => EndingKind::Unfinished,
+            Self::Stopped => EndingKind::Stopped,
+        }
+    }
 }
 
 /// Why the failure hook fired, and every node not `done` when it was judged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct Reason {
     kind: ReasonKind,
-    nodes: Vec<Unsettled>,
+    nodes: Vec<EndedNode>,
 }
 
 /// Which hook fires, and why: a success carries no reason and a failure always
@@ -222,46 +225,80 @@ pub(crate) enum Relay {
     Quiet,
 }
 
-/// Judge a run a driver has let go of, on the graph as it now stands.
+/// What the run-end rule makes of a graph, before anything is fired or printed.
 ///
-/// In the contract's order, which is also the settlement line's: a complete graph
-/// is success, an outstanding decision is a pause, a draft waiting on a release is
-/// a run still going, and anything else not `done` is a failure — `nodes` where
-/// something failed or was skipped, `unfinished` otherwise.
-pub(crate) fn judge(state: &RunState, paths: &RunPaths) -> Judged {
-    let statuses = state.statuses();
-    // A graph with no nodes has not started, which is not an ending.
-    if statuses.is_empty() {
-        return Judged::NotEnded;
-    }
-    if statuses.values().all(|status| *status == NodeStatus::Done) {
-        return Judged::Fire(Firing::Success);
-    }
-    if views::decision_outstanding(state, paths) {
-        return Judged::Withhold;
-    }
-    if statuses
-        .values()
-        .any(|status| *status == NodeStatus::CompleteDraft)
-    {
-        return Judged::NotEnded;
-    }
-    let kind = if statuses
-        .values()
-        .any(|status| matches!(status, NodeStatus::Failed | NodeStatus::Skipped))
-    {
-        ReasonKind::Nodes
-    } else {
-        ReasonKind::Unfinished
-    };
-    Judged::Fire(Firing::Failure(Reason {
-        kind,
-        nodes: unsettled(state, &statuses),
-    }))
+/// The **one** derivation of whether a run ended and how: [`judge`] fires the
+/// hook it names when a driver lets go, and `views` reads the same answer as the
+/// run's ending — so a run cannot fire one hook and read as another ending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    /// The graph has not begun, or a `complete-but-draft` node is waiting on a
+    /// release: the run has not ended, and it is not paused on a decision either.
+    NotEnded,
+    /// A decision is outstanding: the run is paused, not ended.
+    Paused,
+    /// Every node settled `done`.
+    Success,
+    /// The run ended any other way, for this reason.
+    Failure(ReasonKind),
 }
 
-/// Every node not `done`, in plan order, as a hook is handed it.
-fn unsettled(state: &RunState, statuses: &BTreeMap<String, NodeStatus>) -> Vec<Unsettled> {
+/// The run-end rule over the statuses a graph holds, in the contract's order —
+/// which is also the settlement line's: a complete graph is success, an
+/// outstanding decision is a pause, a draft waiting on a release is a run still
+/// going, and anything else not `done` is a failure — `nodes` where something
+/// failed or was skipped, `unfinished` otherwise.
+///
+/// Over the **set** of statuses present rather than a node map, because that is
+/// all the rule reads, and it is what both a fold and a run's bounded summary
+/// document hold. `decision_outstanding` is asked only once the graph is known
+/// not to be complete, so a finished run reads no channel for it.
+pub(crate) fn verdict(
+    present: &BTreeSet<NodeStatus>,
+    decision_outstanding: impl FnOnce() -> bool,
+) -> Verdict {
+    // A graph with no nodes has not started, which is not an ending.
+    if present.is_empty() {
+        return Verdict::NotEnded;
+    }
+    if present.iter().all(|status| *status == NodeStatus::Done) {
+        return Verdict::Success;
+    }
+    if decision_outstanding() {
+        return Verdict::Paused;
+    }
+    if present.contains(&NodeStatus::CompleteDraft) {
+        return Verdict::NotEnded;
+    }
+    if present.contains(&NodeStatus::Failed) || present.contains(&NodeStatus::Skipped) {
+        Verdict::Failure(ReasonKind::Nodes)
+    } else {
+        Verdict::Failure(ReasonKind::Unfinished)
+    }
+}
+
+/// Judge a run a driver has let go of, on the graph as it now stands: the
+/// [`verdict`], with the nodes a failure is handed.
+pub(crate) fn judge(state: &RunState, paths: &RunPaths) -> Judged {
+    let statuses = state.statuses();
+    let present = statuses.values().copied().collect();
+    match verdict(&present, || views::decision_outstanding(state, paths)) {
+        Verdict::NotEnded => Judged::NotEnded,
+        Verdict::Paused => Judged::Withhold,
+        Verdict::Success => Judged::Fire(Firing::Success),
+        Verdict::Failure(kind) => Judged::Fire(Firing::Failure(Reason {
+            kind,
+            nodes: unsettled(state, &statuses),
+        })),
+    }
+}
+
+/// Every node not `done`, in plan order, as a hook is handed it — and as a
+/// view lists an ended run's.
+pub(crate) fn unsettled(
+    state: &RunState,
+    statuses: &BTreeMap<String, NodeStatus>,
+) -> Vec<EndedNode> {
     state
         .graph
         .iter()
@@ -270,7 +307,7 @@ fn unsettled(state: &RunState, statuses: &BTreeMap<String, NodeStatus>) -> Vec<U
                 .get(&node.id)
                 .copied()
                 .unwrap_or(NodeStatus::Pending);
-            (status != NodeStatus::Done).then(|| Unsettled {
+            (status != NodeStatus::Done).then(|| EndedNode {
                 id: node.id.clone(),
                 status: status.as_str(),
                 outcome: state.outcomes.get(&node.id).cloned(),
@@ -1143,7 +1180,7 @@ mod tests {
                 kind: ReasonKind::Unfinished,
                 nodes: nodes
                     .iter()
-                    .map(|(id, status)| Unsettled {
+                    .map(|(id, status)| EndedNode {
                         id: (*id).to_string(),
                         status,
                         outcome: None,

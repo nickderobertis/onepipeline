@@ -159,6 +159,7 @@ mod recorded_support;
 mod retirement;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod run_end_hooks;
+mod run_ending;
 mod scratch;
 mod session;
 mod session_reuse;

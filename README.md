@@ -601,9 +601,19 @@ node is doing right now, with an event count and an age; `transcript RUN [NODE]`
 renders a dispatched turn's tools and its words; `telemetry` reports what each
 party spent and where the wall clock went, in eight buckets that sum exactly.
 Anything nothing in the stack measures is reported absent, never as a zero.
-`status [RUN] --no-providers` leaves out the closing provider report and does not
-ask `oneagentgraph` for it; every other line is the one `status` prints without the
-flag, so a watch that used to cut the view with a shell filter is one plain command.
+`status [RUN] [--no-providers] [--json]`: `--no-providers` leaves out the closing
+provider report and does not ask `oneagentgraph` for it; every other line is the one
+`status` prints without the flag, so a watch that used to cut the view with a shell
+filter is one plain command.
+
+A run nothing drives says how it was left. `SETTLED` is a run whose every node is
+`done`; `ENDED failed`, `ENDED unfinished` and `ENDED stopped` are the endings its
+run-end hook fired for; `PAUSED` is a run held on a decision — a waiting human
+action or a blocking question — and is told how to settle it; and `DRIVER DEAD`
+is a run whose driver went while it still had work to move. `status RUN --json`
+prints that reading as one JSON line a script can branch on — its word, whether it
+is driven, and its ending or its pause — in the shape
+[`schemas/run-reading.schema.json`](schemas/run-reading.schema.json) states.
 
 ![a live run's state: ACTIVE, NO OBSERVER, 2 of 6 nodes done, then one line each for docs and service saying how long it has been running, how many events it has produced and how long ago the last one was, then the free space on the filesystem holding the runs root and a provider-health line](screenshots/images/status.svg)
 

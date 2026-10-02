@@ -1,0 +1,225 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "description": "The version of this document.",
+      "const": 1
+    },
+    "run_id": {
+      "type": "string",
+      "description": "The run."
+    },
+    "word": {
+      "type": "string",
+      "description": "The word `status` and `runs` print for the run.",
+      "enum": [
+        "SETTLED",
+        "ENDED failed",
+        "ENDED unfinished",
+        "ENDED stopped",
+        "PAUSED",
+        "ACTIVE",
+        "PARKED",
+        "DRIVER DEAD",
+        "UNDRIVEN"
+      ]
+    },
+    "liveness": {
+      "type": "string",
+      "description": "How the run is being driven: the driver-liveness word.",
+      "enum": [
+        "ACTIVE",
+        "PARKED",
+        "DRIVER DEAD",
+        "UNDRIVEN"
+      ]
+    },
+    "driven": {
+      "type": "boolean",
+      "description": "Whether anything is driving the run."
+    },
+    "ending": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Ending"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "How the run ended, or `null` for a run that has not."
+    },
+    "paused": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Paused"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The decision the run is paused on, or `null` for a run that is not."
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "word",
+    "liveness",
+    "driven",
+    "ending",
+    "paused"
+  ],
+  "title": "RunReading",
+  "description": "Whether a run is driven or ended, as one document a script reads:\n`onepipeline status <RUN> --json`.\n\n`ending` and `paused` are never both set, and both are `null` while the run is\ndriven. `schemas/run-reading.schema.json` states the document.",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "driven": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "ending": {
+            "type": "null"
+          },
+          "paused": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "anyOf": [
+        {
+          "properties": {
+            "ending": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "paused": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Ending": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/EndingKind",
+          "description": "Which ending: the run-end hook judge's verdict."
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EndedNode"
+          },
+          "description": "Every node not `done`, in plan order — the list a failure hook is handed,\nand empty for `complete`."
+        }
+      },
+      "required": [
+        "kind",
+        "nodes"
+      ],
+      "description": "How a run ended, and every node not `done` when it did."
+    },
+    "EndingKind": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "complete",
+          "description": "Every node is `done`: the success hook's ending."
+        },
+        {
+          "type": "string",
+          "const": "failed",
+          "description": "A node is `failed` or `skipped`: the failure hook's `nodes` reason."
+        },
+        {
+          "type": "string",
+          "const": "unfinished",
+          "description": "A node is not `done`, none failed or skipped, and nothing is left to\ndecide: the failure hook's `unfinished` reason."
+        },
+        {
+          "type": "string",
+          "const": "stopped",
+          "description": "A `stop` was recorded and no driver has adopted the run since: the\nfailure hook's `stopped` reason."
+        }
+      ],
+      "description": "How a run ended: the run-end hook judge's own verdict, read back."
+    },
+    "EndedNode": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The node's id."
+        },
+        "status": {
+          "type": "string",
+          "description": "The node's status word.",
+          "enum": [
+            "pending",
+            "ready",
+            "running",
+            "waiting",
+            "blocked",
+            "parked",
+            "cancelled",
+            "complete-but-draft",
+            "failed",
+            "skipped"
+          ]
+        },
+        "outcome": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The outcome its settlement recorded, or `null` for a node that recorded none."
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "outcome"
+      ],
+      "description": "One node that was not `done` when a run ended — as a failure hook is handed it."
+    },
+    "Paused": {
+      "type": "object",
+      "properties": {
+        "human_actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Each waiting human action, by node id: completed with `attest`, or\nretired with a `drop`."
+        },
+        "blocking_surface": {
+          "type": "boolean",
+          "description": "Whether a blocking planner question is outstanding, answered with `reply`."
+        }
+      },
+      "required": [
+        "human_actions",
+        "blocking_surface"
+      ],
+      "description": "The decision a run nothing is driving is paused on."
+    }
+  }
+}

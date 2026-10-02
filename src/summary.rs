@@ -119,7 +119,12 @@ use crate::telemetry::{self, RunTelemetry};
 /// still owed from this document alone, and a version-7 document carries no
 /// answer to whether its run was driven under that rule rather than a run that
 /// was not — so it is refolded once rather than served as a run nobody owes.
-pub const SUMMARY_SCHEMA_VERSION: u32 = 8;
+///
+/// **9** since a row carries [`waiting`](RunSummary::waiting), the human actions
+/// a paused run is held on: `runs` names each one in the advice under a `PAUSED`
+/// row, and a version-8 document carries no answer to which nodes wait rather
+/// than none — so it is refolded once rather than served as a pause naming nothing.
+pub const SUMMARY_SCHEMA_VERSION: u32 = 9;
 
 /// Read the version, refusing a document this build cannot honestly read.
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
@@ -354,12 +359,19 @@ pub struct RunSummary {
     /// The nodes a planner's `cancel` idled, which no later pass dispatches
     /// until a `requeue`.
     ///
-    /// The **names**, rather than a count, because the one thing a view says
+    /// The **names**, rather than a count, because the one thing a reader says
     /// about them is what to requeue. Recorded whatever the run's convergence —
     /// a reader decides for itself whether a park is holding a settled run back,
     /// which is a question about the run rather than about the node.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parked: Vec<String>,
+    /// The human actions waiting on a person, by node id.
+    ///
+    /// The **names**, rather than a count, because the one thing a view says
+    /// about them is how each is completed or retired, under a run paused on them. [`awaiting_human_action`](Self::awaiting_human_action)
+    /// is whether this is empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waiting: Vec<String>,
     /// The nodes that failed on a judge's own verdict, which nothing dispatches
     /// as they stand.
     ///
@@ -645,8 +657,8 @@ impl RunSummary {
             timing: timing.clone(),
             oneharness_sessions: launch.oneharness_sessions.clone(),
             parked: with_status(graph::NodeStatus::Parked),
-            // The same three records `views::rejected_by_a_judge` reads, taken
-            // where all three are in hand: the derived status, the settlement's
+            waiting: with_status(graph::NodeStatus::Waiting),
+            // Three records, taken where all three are in hand: the derived status, the settlement's
             // own outcome, and the verdict the store carries. Either record alone
             // names the wrong nodes — a node that simply failed its task is not a
             // node a judge turned down.
@@ -1721,7 +1733,7 @@ mod tests {
     /// Read rather than restated: this is the wire a consumer parses, and the
     /// only thing that stops a field being renamed, an absence becoming a zero,
     /// or the version moving without anyone deciding to move it.
-    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v8.json");
+    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v9.json");
 
     /// The documents earlier builds wrote, kept exactly as those builds wrote them.
     ///
@@ -1734,10 +1746,11 @@ mod tests {
     /// that answered it — a real schema 5 document, which carries no plan
     /// name — and a real schema 6 document, which carries no answer to where
     /// the run's oneharness sessions are — and a real schema 7 document, which
-    /// carries no answer to whether its run was driven under the closure rule.
-    /// The reader below has to refuse all seven rather than read any as one of
-    /// its own.
-    const GOLDEN_EARLIER: [(u32, &str); 7] = [
+    /// carries no answer to whether its run was driven under the closure rule —
+    /// and a real schema 8 document, which carries no answer to which human
+    /// actions wait. The reader below has to refuse all eight rather than read
+    /// any as one of its own.
+    const GOLDEN_EARLIER: [(u32, &str); 8] = [
         (1, include_str!("../tests/golden/run-summary-v1.json")),
         (2, include_str!("../tests/golden/run-summary-v2.json")),
         (3, include_str!("../tests/golden/run-summary-v3.json")),
@@ -1745,6 +1758,7 @@ mod tests {
         (5, include_str!("../tests/golden/run-summary-v5.json")),
         (6, include_str!("../tests/golden/run-summary-v6.json")),
         (7, include_str!("../tests/golden/run-summary-v7.json")),
+        (8, include_str!("../tests/golden/run-summary-v8.json")),
     ];
 
     /// The document the golden pins, built through the types.
@@ -1793,6 +1807,9 @@ mod tests {
             // Nothing parked, which is an absent key rather than an empty list on
             // the wire.
             parked: Vec::new(),
+            // One action waiting, so the key is on the wire and cannot move
+            // without the version.
+            waiting: vec!["approve".into()],
             judge_rejected: vec!["publish".into()],
             landings: BTreeMap::from([
                 // Observed landed, and with nothing to ask again about: a base
@@ -1823,13 +1840,13 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_8_document_is_the_shape_the_golden_pins() {
+    fn a_schema_9_document_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&golden()).expect("it serialises");
         assert_eq!(
             rendered.trim(),
             GOLDEN.trim(),
             "the summary document changed shape. If that was deliberate, bump \
-             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v8.json together"
+             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v9.json together"
         );
     }
 
@@ -1855,7 +1872,7 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_8_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
+    fn a_schema_9_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
         let read: RunSummary =
             serde_json::from_str(GOLDEN).expect("the golden reads back into the types");
         assert_eq!(read, golden());

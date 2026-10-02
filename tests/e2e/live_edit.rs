@@ -351,7 +351,7 @@ fn a_run_wide_set_edit_is_replayed_when_a_driver_adopts() {
         world
             .run(&["status", "sets-adopted"])
             .stdout
-            .contains("DRIVER DEAD")
+            .contains("PAUSED")
     });
     world.run(&["status", "sets-adopted"]).exited(0);
     let checkpoint = world.run_json("sets-adopted", "checkpoint.json");

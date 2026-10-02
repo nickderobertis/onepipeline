@@ -403,7 +403,7 @@ fn the_listing_tells_a_driver_this_host_can_prove_is_gone_from_one_merely_quiet(
     // A run whose graph did **not** complete, because a completed one is
     // `SETTLED` whatever became of its driver — which is the distinction
     // `Standing::word` draws and `tests/e2e/views.rs` holds. This one lost a
-    // node, so the word on its row is the liveness verdict.
+    // node and was stopped, so its liveness verdict is read off its reading.
     world.script("build.fail", "1");
     let run = settled(&world, "stopped", vec![agent("build", &[])]);
     world
@@ -411,10 +411,16 @@ fn the_listing_tells_a_driver_this_host_can_prove_is_gone_from_one_merely_quiet(
         .exited(0)
         .out_has(r#""stopped":true"#);
 
+    // Stopped, so the word on its row is the ending the stop fired for; the
+    // verdict about its driver is still `DRIVER DEAD`.
     for argv in LISTINGS {
         let rendered = world.run(argv);
-        rendered.exited(0).out_has(&run).out_has("DRIVER DEAD");
+        rendered.exited(0).out_has(&run).out_has("ENDED stopped");
     }
+    assert_eq!(
+        world.run(&["status", &run, "--json"]).json()["liveness"],
+        "DRIVER DEAD"
+    );
 
     // The other one, on a run whose driver is alive and has stopped writing: the
     // dispatch is held open, so the pid proves ownership and not progress.

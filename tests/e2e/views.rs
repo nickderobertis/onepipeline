@@ -2674,7 +2674,7 @@ fn status_and_watch_judge_a_stopped_run_by_the_driver_that_adopted_it() {
     world
         .run(&["status", "readopted"])
         .exited(0)
-        .out_has("DRIVER DEAD");
+        .out_has("ENDED stopped");
     let watched = world.run(&[
         "watch",
         "readopted",
@@ -3576,28 +3576,14 @@ fn a_ready_node_whose_repositorys_only_session_has_closed_reads_as_queued() {
     world.release("blocker.go");
 }
 
-/// Whether one fragment is rendered before another, for a journey whose claim is
-/// about the **order** two steps are prescribed in.
-///
-/// A prescription that names both steps in the wrong order is as expensive as
-/// one that names the wrong step: it is the order that makes the second one do
-/// anything.
-fn named_in_order(rendered: &str, first: &str, then: &str) -> bool {
-    match (rendered.find(first), rendered.find(then)) {
-        (Some(before), Some(after)) => before < after,
-        _ => false,
-    }
-}
-
 /// A run whose graph has settled is never sent an operator after a fresh driver.
 ///
 /// The two lines came from two readings — the row's word from the graph, the
 /// advice under it from the driver alone — so a run that had finished printed
 /// `SETTLED` and, directly beneath it, `DRIVER DEAD — attach a fresh driver`.
 /// Both endings a settled graph has are driven here, because the prescription
-/// was identical for them: a run that converged, and one that failed. The word
-/// under each is still the truth about its driver; what is gone is the advice to
-/// replace it.
+/// was identical for them: a run that converged, and one that failed. Each now
+/// reads as the ending it reached, and neither is advised to replace its driver.
 #[test]
 fn a_settled_run_is_never_advised_to_attach_a_fresh_driver() {
     let world = World::new("views-settled-advice");
@@ -3607,7 +3593,7 @@ fn a_settled_run_is_never_advised_to_attach_a_fresh_driver() {
 
     let listing = world.run(&["runs"]);
     listing.exited(0).out_has(&converged).out_has(&broke);
-    listing.out_has("SETTLED").out_has("DRIVER DEAD");
+    listing.out_has("SETTLED").out_has("ENDED failed");
     listing.out_lacks("attach a fresh driver");
     listing.out_lacks("onepipeline adopt");
 
@@ -3619,16 +3605,16 @@ fn a_settled_run_is_never_advised_to_attach_a_fresh_driver() {
     }
 }
 
-/// A run nothing is driving whose unfinished work is parked is told to requeue
-/// it **before** a driver is attached.
+/// A run nothing is driving whose only unfinished work is parked has ended
+/// `unfinished`, and its ending is its whole reading.
 ///
 /// The state is reached the way an operator reaches it: a `cancel` idles the
 /// node, its dispatch stops, and the driver — with an empty frontier and nothing
-/// it may dispatch — closes the run out and goes. A parked node is held out of
-/// every later reconcile pass, so the `adopt` this used to prescribe on its own
-/// returns at exit 0 having dispatched nothing, which is what it did twice.
+/// it may dispatch — closes the run out and goes. It used to read `DRIVER DEAD`
+/// beside a prescription to requeue and adopt; the run-end hook had already fired
+/// for it as `unfinished`, and that is what it reads now, with no advice under it.
 #[test]
-fn a_run_whose_unfinished_work_is_parked_is_told_to_requeue_before_adopting() {
+fn a_run_whose_unfinished_work_is_parked_reads_ended_unfinished_and_is_given_no_advice() {
     let world = World::new("views-parked-advice");
     world.script("slow.turn-open", "");
     world.script("slow.wait", "hold");
@@ -3647,52 +3633,26 @@ fn a_run_whose_unfinished_work_is_parked_is_told_to_requeue_before_adopting() {
         )
         .exited(0);
     // The run is only what this journey is about once its driver has gone: what
-    // is being read is the advice given to a run nothing is driving.
-    // `result.json` is written before the driver exits, so it is not the signal:
-    // on Windows the driver was still alive when `runs` read it and the listing
-    // said `NO OBSERVER`. Wait until `runs` itself reads the driver dead.
+    // is being read is a run nothing is driving. `result.json` is written before
+    // the driver exits, so it is not the signal on its own.
     world.until("the driver to close the run out", |world| {
         world.run_file("parkedrun", "result.json").is_file()
     });
     // Each look starts a process, so it yields between looks rather than taking
     // the host from the exit it is waiting on (`tests/AGENTS.md`).
-    world.until_store("the driver to read as dead", |world| {
-        world.run(&["runs"]).stdout.contains("DRIVER DEAD")
+    world.until_store("the run to read as ended", |world| {
+        world.run(&["runs"]).stdout.contains("ENDED unfinished")
     });
 
     let listing = world.run(&["runs"]);
     listing.exited(0).out_has("parkedrun");
-    listing.out_has("DRIVER DEAD");
-    // The node to requeue is named, so the reply the line asks for is one a
-    // reader can write without going looking for what is parked.
-    listing.out_has("slow");
-    listing.out_has("onepipeline reply parkedrun");
-    listing.out_has("onepipeline adopt parkedrun");
-    assert!(
-        named_in_order(&listing.stdout, "requeue", "onepipeline adopt parkedrun"),
-        "`runs` prescribes the adoption before the requeue that gives it something \
-         to do:\n{}",
-        listing.stdout
-    );
-
+    listing.out_has("ENDED unfinished");
     let status = world.run(&["status", "parkedrun"]);
-    status.exited(0);
-    status.out_has("onepipeline reply parkedrun");
-    status.out_has("onepipeline adopt parkedrun");
-    assert!(
-        named_in_order(&status.stdout, "requeue", "onepipeline adopt parkedrun"),
-        "`status` prescribes the adoption before the requeue that gives it something \
-         to do:\n{}",
-        status.stdout
-    );
-    // And neither view gives the prescription that did nothing: an adoption on
-    // its own.
-    for rendered in [&listing.stdout, &status.stdout] {
-        assert!(
-            !rendered.contains("its ledger is intact; attach a fresh driver"),
-            "a run whose only unfinished work is parked was sent straight to an \
-             adoption:\n{rendered}"
-        );
+    status.exited(0).out_has("parkedrun  ENDED unfinished");
+    for rendered in [&listing, &status] {
+        rendered.out_lacks("requeue");
+        rendered.out_lacks("adopt");
+        rendered.out_lacks("DRIVER DEAD");
     }
 
     world.release("slow.go");
@@ -3752,15 +3712,14 @@ fn a_run_with_work_a_fresh_driver_could_schedule_is_still_told_to_adopt() {
     world.release("build.go");
 }
 
-/// A run nothing is driving whose unfinished work is held up by a node a judge
-/// rejected is told that a judgement happened, and what answers it.
+/// A run nothing is driving that ended over a node a judge rejected reads
+/// `ENDED failed`, and is given no advice — the verdict is still there to read.
 ///
 /// A rejection is outside the publication attempt budget, so nothing dispatches
-/// the node as it stands and the `adopt` an operator took twice settled again
-/// having moved nothing. Both views are read, because one prescription that
-/// reads two ways is the defect this replaces.
+/// the node as it stands and an `adopt` settles again having moved nothing. The
+/// failure hook fired for it as `nodes`, which is the ending both views read.
 #[test]
-fn a_run_held_up_by_a_judges_rejection_is_told_to_read_the_verdict_and_supersede() {
+fn a_run_ended_over_a_judges_rejection_reads_ended_failed_and_is_given_no_advice() {
     let world = World::new("views-rejected-advice");
     world.script(
         "build.verdict",
@@ -3773,42 +3732,29 @@ fn a_run_held_up_by_a_judges_rejection_is_told_to_read_the_verdict_and_supersede
         vec![agent("build", &[]), agent("later", &["build"])],
     );
 
-    // One prescription, spelled once here and asserted of every view that gives
-    // advice: two views that agreed about the run and disagreed about the answer
-    // is the defect this is the fix for.
-    let prescription = format!(
-        "its unfinished work is held up by build, whose work a judge rejected, and no \
-         driver dispatches a rejected node as it stands: read the verdict with: onepipeline \
-         results {run} — and decide from it, most likely amending the task and superseding \
-         the node with an `amend` and a `retry` on: onepipeline reply {run}"
-    );
-
     let listing = world.run(&["runs"]);
-    listing.exited(0).out_has(&run).out_has(&prescription);
+    listing.exited(0).out_has(&run).out_has("ENDED failed");
     let status = world.run(&["status", &run]);
-    status.exited(0).out_has(&prescription);
+    status.exited(0).out_has(&format!("{run}  ENDED failed"));
 
     for rendered in [&listing, &status] {
         rendered.out_lacks("adopt");
         rendered.out_lacks("requeue");
+        rendered.out_lacks("whose work a judge rejected");
     }
 
-    // The verdict the advice sends a reader to is really there to be read: an
-    // advice line naming a command that answers nothing is the same defect in a
-    // new place.
+    // The verdict is still the run's own record, read where it always was.
     world
         .run(&["results", &run])
         .exited(0)
         .out_has("verdict: 'the change builds' failed — cargo build fails in src/views.rs");
 }
 
-/// The judgement outranks the advice to attach a driver, on a run whose waiting
-/// human action still reads as work a driver could pick up.
-///
-/// That reading is what prescribed `adopt` here, and adopting moves neither the
-/// rejected node nor an action waiting on a person.
+/// A run holding a judge's rejection and a human action still waiting on a person
+/// is paused on that action, not ended: it reads `PAUSED`, and is told to attest
+/// or drop the action, or stop the run — never to adopt it.
 #[test]
-fn a_judges_rejection_outranks_the_advice_to_attach_a_fresh_driver() {
+fn a_run_holding_a_rejection_and_a_waiting_human_action_reads_paused_on_the_action() {
     let world = World::new("views-rejected-outranks");
     world.script(
         "build.verdict",
@@ -3823,22 +3769,20 @@ fn a_judges_rejection_outranks_the_advice_to_attach_a_fresh_driver() {
 
     for rendered in [world.run(&["runs"]), world.run(&["status", &run])] {
         rendered.exited(0);
-        rendered.out_has("build, whose work a judge rejected");
-        rendered.out_has(&format!("onepipeline results {run}"));
+        rendered.out_has("PAUSED");
+        rendered.out_has(&format!("onepipeline attest {run} approve"));
+        rendered.out_has(&format!("onepipeline stop {run}"));
         rendered.out_lacks("attach a fresh driver");
         rendered.out_lacks("adopt it or stop it");
+        rendered.out_lacks(&format!("onepipeline adopt {run}"));
     }
 }
 
-/// A run holding both parked work and a judge's rejection is told to requeue
-/// first: a requeue is the one of the two that moves the run at all.
-///
-/// The ranking is the claim. A parked node returns to the frontier on a
-/// `requeue` and is dispatched; a rejected one is not dispatched until a planner
-/// has read the verdict, so a run with both is given the prescription that does
-/// something, and the run is not given two.
+/// A run that ended holding both parked work and a judge's rejection reads
+/// `ENDED failed` — a failed node is the ending the hook names — and is given
+/// neither prescription.
 #[test]
-fn a_run_that_is_both_parked_and_judged_is_told_to_requeue_first() {
+fn a_run_that_ended_both_parked_and_judged_reads_ended_failed() {
     let world = World::new("views-parked-and-rejected");
     world.script("slow.turn-open", "");
     world.script("slow.wait", "hold");
@@ -3865,36 +3809,33 @@ fn a_run_that_is_both_parked_and_judged_is_told_to_requeue_first() {
         )
         .exited(0);
     // Waited for the driver to be *gone*, not for the result it writes on the way
-    // out: the prescription is for a run nothing is driving, and a driver that has
-    // written the result is still in the process table until it exits, reading
-    // as `ACTIVE` — and giving no advice at all — for as long as that takes.
+    // out: a driver that has written the result is still in the process table
+    // until it lets go, reading as `ACTIVE` for as long as that takes.
     world.until("the driver to close the run out and exit", |world| {
         world
             .run(&["status", "bothrun"])
             .stdout
-            .contains("DRIVER DEAD")
+            .contains("ENDED failed")
     });
 
     for rendered in [world.run(&["runs"]), world.run(&["status", "bothrun"])] {
         rendered.exited(0);
-        rendered.out_has("onepipeline reply bothrun");
-        assert!(
-            named_in_order(&rendered.stdout, "requeue", "onepipeline adopt bothrun"),
-            "the run holding parked work is not told to requeue it first:\n{}",
-            rendered.stdout
-        );
+        rendered.out_has("ENDED failed");
+        rendered.out_lacks("requeue");
+        rendered.out_lacks("adopt");
         rendered.out_lacks("whose work a judge rejected");
     }
+    world.release("slow.go");
 }
 
-/// A node whose judge rejected it after its own dispatch opened a change request
-/// is named as rejected too.
+/// A run that ended over a node whose judge rejected it after its own dispatch
+/// opened a change request reads `ENDED failed` too.
 ///
 /// It settles under a different word — `task-failed-change-open`, because a
-/// reviewer is waiting on the change the worker opened — and the judgement
-/// behind it is the same one, answered the same way.
+/// reviewer is waiting on the change the worker opened — and the run's ending is
+/// the same one, given no advice to adopt.
 #[test]
-fn a_rejection_over_an_open_change_request_is_named_as_a_rejection() {
+fn a_run_ended_over_a_rejection_with_an_open_change_request_reads_ended_failed() {
     let world = World::new("views-rejected-change-open");
     world.repository("change-open", &[]);
     world.script("service.work", "the work its judge would not pass\n");
@@ -3915,7 +3856,7 @@ fn a_rejection_over_an_open_change_request_is_named_as_a_rejection() {
         .out_has("task-failed-change-open");
     for rendered in [world.run(&["runs"]), world.run(&["status", &run])] {
         rendered.exited(0);
-        rendered.out_has("service, whose work a judge rejected");
+        rendered.out_has("ENDED failed");
         rendered.out_lacks("attach a fresh driver");
         rendered.out_lacks("adopt it or stop it");
     }
