@@ -151,12 +151,16 @@ fn arm_until(world: &World, run: &str, until: &str) -> std::process::Child {
         .expect("the watch starts");
     // Waited on by **this watch's own name** rather than by a count, because a
     // writer arming a watch also sweeps the records it has proved are not live: a
-    // count can come out where it started, and did.
+    // count can come out where it started, and did. And by the **published** name,
+    // `<pid>-<nonce>.json`: the record is written through a temporary beside it
+    // that carries the same `<pid>-` prefix, and a wait that took the temporary
+    // for the record handed the journey a file renamed away before it was read.
     let mine = format!("{}-", watching.id());
     world.until("the watch to record itself", |world| {
-        records_under(world, run)
-            .iter()
-            .any(|path| named(path).starts_with(&mine))
+        records_under(world, run).iter().any(|path| {
+            let name = named(path);
+            name.starts_with(&mine) && name.ends_with(".json")
+        })
     });
     watching
 }

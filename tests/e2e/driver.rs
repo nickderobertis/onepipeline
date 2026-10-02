@@ -2714,6 +2714,17 @@ fn a_launch_record_the_driver_cannot_write_does_not_end_a_working_observer() {
     world.script("build.wait", "hold");
     world.script("observer.wait", "hold");
     let run = start_detached_observed(&world, "unwritable", vec![agent("build", &[])]);
+    // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this diff changes only how an existing
+    // journey waits, not where it lives. It drives the driver's dispatch registry and observer restarts under `src/`, and
+    // `nx.json`'s `noteJourneySource` — the one separately edged test project's input —
+    // itself begins `{workspaceRoot}/src/**/*`, so a narrower edge would drop it out of
+    // `nx affected` for the changes it exists to catch.
+    // In flight **on the record**, and not only invoked: the dispatch's registry
+    // entry is written through a temporary in the run's directory once the launch
+    // has returned, so a double that has recorded its invocation can be a moment
+    // ahead of it — and a directory closed in that moment refuses the dispatch
+    // itself, which settles the only node and ends the run before any observer is
+    // restarted.
     world.until(
         "the observer to be watching and the node to be in flight",
         |world| {
@@ -2722,8 +2733,10 @@ fn a_launch_record_the_driver_cannot_write_does_not_end_a_working_observer() {
                     "oneagentgraph",
                     &["run", "--label", "onepipeline.node=build"],
                 )
+                && !world.dispatch_records(&run).is_empty()
         },
     );
+    // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
     // The run's own directory, closed to new files: `ledger::write_atomic` writes
     // its temporary beside the target, so this is the write failing at the
@@ -4779,6 +4792,18 @@ fn a_registry_entry_from_another_build_is_read_and_its_work_is_still_stopped() {
         !dispatches(driver).is_empty()
     });
     let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
+    // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this diff changes only how an existing
+    // journey waits, not where it lives. It drives the driver's dispatch registry and `stop` under `src/`, and
+    // `nx.json`'s `noteJourneySource` — the one separately edged test project's input —
+    // itself begins `{workspaceRoot}/src/**/*`, so a narrower edge would drop it out of
+    // `nx affected` for the changes it exists to catch.
+    // Recorded, and not only running: the entry is written once the launch has
+    // returned, so the dispatch can be below the driver a moment before its entry
+    // is in place — and an entry read in that moment is no entry at all.
+    world.until("the dispatch to be recorded in the registry", |world| {
+        tree[1..].iter().all(|pid| world.registered(&run, *pid))
+    });
+    // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
     let registry = world.run_file(&run, "dispatches");
     let entries: Vec<std::path::PathBuf> = std::fs::read_dir(&registry)
