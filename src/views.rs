@@ -189,6 +189,14 @@ pub struct EndedNode {
     pub outcome: Option<String>,
 }
 
+// llmlint: ignore-block[invalid_states_unrepresentable] `Ending { kind, nodes }` and
+// `Paused { human_actions, blocking_surface }` are the published types exactly as the
+// approved contract names them, and their fields are the `--json` document's `ending` and
+// `paused` objects that the onepipeline-ui relink and the host's `scripts/follow-ups.sh`
+// read; a variant per ending or per decision form would change that wire shape. The only
+// constructors are `reading` and `Standing`, which build `nodes` from `hooks::unsettled`
+// (empty when every node is `done`) and a `Paused` only where `hooks::verdict` found a
+// decision outstanding — a waiting human action or a blocking surface.
 /// How a run ended, and every node not `done` when it did.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct Ending {
@@ -208,6 +216,7 @@ pub struct Paused {
     /// Whether a blocking planner question is outstanding, answered with `reply`.
     pub blocking_surface: bool,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// The word a view prints for a run nothing drives that is paused on a decision.
 const PAUSED_WORD: &str = "PAUSED";
