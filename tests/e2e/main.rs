@@ -93,6 +93,7 @@ mod dispatch_env_hook;
 mod draft_lifecycle;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod driver;
+mod driver_exit;
 mod envelope_reviewer;
 mod filter;
 mod holds;

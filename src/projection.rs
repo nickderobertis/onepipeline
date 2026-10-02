@@ -978,6 +978,16 @@ pub fn fold(events: &[Envelope]) -> RunState {
 }
 
 pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
+    // A driver's account of its own ending, and nothing the run is: no node, no
+    // edit, no claim — and not a write that keeps the run looking busy either,
+    // so a run reads exactly as it would without it. Only `status` reads it, off
+    // the store.
+    if event.source == Source::Pipeline
+        && journal::PipelineKind::from_wire(&event.kind)
+            == Some(journal::PipelineKind::DriverExited)
+    {
+        return;
+    }
     state.last_write_at = Some(
         millis_of(&event.ts)
             .unwrap_or(0)
@@ -3160,6 +3170,58 @@ mod tests {
         ]);
         assert_eq!(adopted.stop, StopState::NotStopped);
         assert!(!adopted.stop_recorded());
+    }
+
+    /// A `driver-exited` changes nothing the run is: folded with and without
+    /// one — after a settlement, a pause, and a reported error alike — the state
+    /// is the same, down to when the run last wrote, so every view and verdict
+    /// read off the fold reads the same.
+    #[test]
+    fn a_driver_exit_folds_to_the_state_the_run_had_without_it() {
+        let plan = plan_of_nodes(vec![agent("build", &[]), agent("ship", &["build"])]);
+        let before = vec![
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(journal::PipelineKind::NodeReady, 1, Some("build"), &[]),
+            pipeline(journal::PipelineKind::NodeDispatched, 2, Some("build"), &[]),
+            pipeline(
+                journal::PipelineKind::NodeSettled,
+                3,
+                Some("build"),
+                &[
+                    ("status", json!("done")),
+                    ("outcome", json!("task-completed")),
+                ],
+            ),
+        ];
+        let unchanged = serde_json::to_value(fold(&before)).expect("a state serializes");
+        for (seq, settlement, reason) in [
+            (40, "complete", Value::Null),
+            (50, "awaiting-planner", Value::Null),
+            (60, "error", json!("the queue could not be read")),
+        ] {
+            let mut with = before.clone();
+            with.push(pipeline(
+                journal::PipelineKind::DriverExited,
+                seq,
+                None,
+                &[
+                    ("pid", json!(7)),
+                    ("settlement", json!(settlement)),
+                    ("reason", reason),
+                    ("last_answered_command", Value::Null),
+                ],
+            ));
+            assert_eq!(
+                serde_json::to_value(fold(&with)).expect("a state serializes"),
+                unchanged,
+                "a {settlement} driver-exited changed the fold"
+            );
+        }
     }
 
     #[test]

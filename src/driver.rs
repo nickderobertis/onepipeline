@@ -2158,7 +2158,7 @@ fn attach(
             // showed, so no journey can fail on this call — it covers the write-ordering race
             // between two maintainers over one journal, which nothing can stage on purpose.
             crate::summary::seal(paths);
-            let settlement = settlement_of(&view);
+            let settlement = driven.settlement;
             said(settlement);
             // After the settlement is decided and said, so nothing a hook does —
             // however it ends, and whatever it launches — can change either.
@@ -2176,14 +2176,18 @@ fn attach(
 /// Re-derived from the graph and the channel rather than from any round state:
 /// what makes a run `awaiting-planner` is an outstanding **decision point** —
 /// a ready human action, or a blocking surface nobody has answered.
-fn settlement_of(view: &RunView) -> Settlement {
-    let statuses = view.state.statuses();
+///
+/// Asked by the driver itself, of the state it holds, as it lets go: the word an
+/// attached launch prints and the word its `driver-exited` record carries are
+/// this one answer.
+pub(crate) fn settled(state: &crate::projection::RunState, paths: &RunPaths) -> Settlement {
+    let statuses = state.statuses();
     if !statuses.is_empty() && graph::state_of(&statuses) == GraphState::Complete {
         return Settlement::Complete;
     }
     // A *non-blocking* surface is deliberately not `awaiting-planner`: it is a
     // report, and it holds nothing back.
-    if views::decision_outstanding(&view.state, &view.paths) {
+    if views::decision_outstanding(state, paths) {
         return Settlement::AwaitingPlanner;
     }
     Settlement::Unattended

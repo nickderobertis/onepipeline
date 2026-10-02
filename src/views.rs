@@ -2315,6 +2315,7 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
         if let Some(shutdown) = &shutdown {
             out.push_str(&shutdown.line(&view.paths.run));
         }
+        out.push_str(&driver_exit_lines(view));
         let statuses = view.state.statuses();
         for (id, node_status) in &statuses {
             if *node_status != NodeStatus::Running {
@@ -3676,6 +3677,65 @@ fn evidence(landed: &onevcs::Landed) -> String {
             landed.tier()
         ),
     }
+}
+
+/// How the run's last driver to let go of it ended, and every command envelope
+/// claimed off its queue that was never answered.
+///
+/// The first is the last `driver-exited` record's time and settlement, with the
+/// error a driver reported; nothing where no driver has written one. The second
+/// is read off the channel rather than the journal: an envelope at or below the
+/// command cursor with no outcome line is one no writer will claim again and
+/// whose submitter was told nothing, which is what a reader deciding whether an
+/// edit was applied or abandoned has to be told.
+fn driver_exit_lines(view: &RunView) -> String {
+    let mut out = String::new();
+    if let Some(event) = view
+        .events
+        .iter()
+        .rev()
+        .find(|event| PipelineKind::from_wire(&event.kind) == Some(PipelineKind::DriverExited))
+    {
+        let ago = crate::projection::millis_of(&event.ts)
+            .map(|at| {
+                format!(
+                    " {} ago",
+                    crate::telemetry::duration(sys::now_millis().saturating_sub(at))
+                )
+            })
+            .unwrap_or_default();
+        let exited = serde_json::from_value::<crate::payload::DriverExited>(
+            serde_json::Value::Object(event.payload.clone()),
+        );
+        match exited {
+            Ok(exited) => out.push_str(&format!(
+                "  driver exited{ago} ({}): settled {}{}\n",
+                event.ts,
+                exited.settlement.as_str(),
+                exited
+                    .reason
+                    .map(|reason| format!(" — {}", one_line(&reason)))
+                    .unwrap_or_default()
+            )),
+            Err(_) => out.push_str(&format!(
+                "  driver exited{ago} ({}): its driver-exited record could not be read\n",
+                event.ts
+            )),
+        }
+    }
+    let unanswered = crate::channel::ChannelState::new(&view.paths).claimed_unanswered();
+    if !unanswered.is_empty() {
+        out.push_str(&format!(
+            "  claimed with no outcome: command envelope(s) {} — taken off the queue and never \
+             answered, so nothing applies them and their submitters were told nothing\n",
+            unanswered
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    out
 }
 
 /// What a view says about the records the run's own store does not hold whole,
