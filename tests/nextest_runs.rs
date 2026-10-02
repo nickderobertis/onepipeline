@@ -89,6 +89,9 @@ impl Fixture {
         command.env("CARGO_TARGET_DIR", self.path("target"));
         // Set by every CI runner, and it changes what the report prints.
         command.env_remove("GITHUB_ACTIONS");
+        // `ci.yml` sets it for every job, and nextest then colours the counts
+        // these tests read; `failed_step` asks for colour where it means to.
+        command.env_remove("CARGO_TERM_COLOR");
         command
     }
 
