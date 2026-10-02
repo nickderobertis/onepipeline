@@ -865,9 +865,11 @@ fn the_contract_names_the_producers_words_for_a_chain_that_stopped() {
 }
 
 /// Every way `committed` departs from the compiled-in registry, one line each:
-/// an id it carries in another place than [`events_bundle_ids`] lists, or under
-/// a document other than the one `onepipeline::payload::registry` holds for it.
-/// Empty when the two agree on every id and every document.
+/// an id [`events_bundle_ids`] lists or a pipeline kind registers that it does
+/// not carry, an id it carries that neither names, ids out of
+/// [`events_bundle_ids`]'s order, and a document other than the one
+/// `onepipeline::payload::registry` holds for its id. Empty when the two agree
+/// on every id and every document.
 ///
 /// [`events_bundle_ids`]: onepipeline::vocabulary::events_bundle_ids
 fn events_bundle_departures(committed: &str) -> Vec<String> {
@@ -879,13 +881,14 @@ fn events_bundle_departures(committed: &str) -> Vec<String> {
         Err(why) => return vec![format!("the bus does not read the document: {why}")],
     };
     let registry = registry();
-    let mut expected: Vec<String> = events_bundle_ids()
+    let expected: Vec<String> = events_bundle_ids()
         .iter()
         .map(ToString::to_string)
         .collect();
     let pipeline: Vec<String> = PIPELINE_KINDS
         .iter()
         .map(|kind| schema_of(*kind).to_string())
+        .filter(|id| !expected.contains(id))
         .collect();
     let carried: Vec<String> = bundle
         .schemas()
@@ -893,11 +896,9 @@ fn events_bundle_departures(committed: &str) -> Vec<String> {
         .map(|document| document.id.to_string())
         .collect();
     let mut found = Vec::new();
-    for id in &pipeline {
+    for id in expected.iter().chain(&pipeline) {
         if !carried.contains(id) {
-            found.push(format!(
-                "the registered pipeline payload {id} is not published"
-            ));
+            found.push(format!("{id} is registered but not published"));
         }
     }
     for id in &carried {
@@ -907,7 +908,6 @@ fn events_bundle_departures(committed: &str) -> Vec<String> {
             ));
         }
     }
-    expected.retain(|id| carried.contains(id));
     if found.is_empty() && carried != expected {
         found.push(format!(
             "the bundle lists its ids out of order: {carried:?}, not {expected:?}"
@@ -1048,8 +1048,8 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
 }
 
 /// The drift gate's comparison refuses the committed bundle with one pipeline
-/// payload's entry taken out, and with one entry's document edited, naming the
-/// id each time.
+/// payload's entry taken out, with a vocabulary entry taken out, and with one
+/// entry's document edited, naming the id each time.
 #[test]
 fn the_events_bundle_gate_refuses_a_missing_or_edited_pipeline_payload() {
     use onepipeline::vocabulary::EVENTS_BUNDLE_PATH;
@@ -1073,8 +1073,19 @@ fn the_events_bundle_gate_refuses_a_missing_or_edited_pipeline_payload() {
     assert!(
         departures
             .iter()
-            .any(|line| line.contains(deferred) && line.contains("not published")),
+            .any(|line| *line == format!("{deferred} is registered but not published")),
         "a missing {deferred} entry was not refused: {departures:?}"
+    );
+
+    let mut unlabelled = document.clone();
+    unlabelled["schemas"]
+        .as_array_mut()
+        .expect("a schema list")
+        .retain(|entry| entry["id"] != "agent.labels@1");
+    assert_eq!(
+        events_bundle_departures(&unlabelled.to_string()),
+        ["agent.labels@1 is registered but not published"],
+        "a missing vocabulary entry was not refused"
     );
 
     let mut edited = document;

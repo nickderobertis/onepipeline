@@ -277,7 +277,6 @@ fn the_only_prose_that_moved_is_the_phase_its_producer_now_owns() {
     assert_eq!(Some(phase), onevcs["description"].as_str());
 }
 
-/// The payload of the recorded envelope of `kind`.
 fn recorded_payload(kind: &str) -> Value {
     RECORDED_KINDS
         .lines()
