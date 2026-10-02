@@ -863,8 +863,6 @@ fn stranger(
     home: &QualifiedId,
     members: &[GlobalId],
 ) -> Option<&'static str> {
-    // The project this task's own source holds the plan's tasks in: the home in the home's
-    // source, a member in each member's, and none in any other.
     let expected = if task.id.source.as_str() == home.source() {
         Some(home.native())
     } else {

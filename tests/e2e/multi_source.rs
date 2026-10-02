@@ -474,3 +474,82 @@ fn a_stop_releases_and_an_adoption_reclaims_the_unstarted_items_of_both_sources(
     assert_eq!(held(STORE_SOURCE), ["core", "ship"]);
     assert_eq!(held(MEMBERS), ["adopt"]);
 }
+
+/// The projection record's attempts, in the order the run made them.
+fn records(world: &World, run: &str) -> Vec<Value> {
+    std::fs::read_to_string(world.run_file(run, "writeback-projections.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a record line is JSON"))
+        .collect()
+}
+
+/// A run an older build started holds no landed baseline, so an adopting driver reads each
+/// lineage once by the id its task was read out of — a member task's in the member's own source,
+/// which its task record names — and claims each item where it lives, creating nothing.
+#[test]
+fn an_adoption_with_no_baseline_reads_a_member_task_by_its_id_in_its_own_source() {
+    let world = a_routed_world("multi-source-cold");
+    let _service = world.repository("local-direct", &[]);
+    let _engine = world.extra_repository("engine");
+    world.script("core.wait", "hold");
+    let name = "cold";
+    let home = filed(
+        &world,
+        name,
+        &plan_of(
+            name,
+            vec![
+                on(HOME, "core", &[]),
+                on(ROUTED, "adopt", &["core"]),
+                on(HOME, "ship", &["adopt"]),
+            ],
+        ),
+    );
+    world.run(&["start", &home, "--detach"]).exited(0);
+    world.until_store("the run's claim to reach both sources", |world| {
+        let board = words(world, &home);
+        board.get("adopt").map(String::as_str) == Some("queued")
+            && board.get("ship").map(String::as_str) == Some("queued")
+    });
+    world.run(&["stop", name]).exited(0);
+    assert_eq!(
+        words(&world, &home).get("adopt").map(String::as_str),
+        Some("todo")
+    );
+    let plan = world.run_json(name, "plan.json");
+    let adopt = plan["tasks"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .find(|node| node["id"] == "adopt")
+        .expect("the member's node");
+    assert_eq!(adopt["task_record"]["source"], MEMBERS, "{adopt}");
+
+    // llmlint: ignore[tests_mirror_real_usage] a run directory an older build left holds no landed baseline, and no invocation of this build produces one without it: every launch seeds the file. Removing it is exactly that directory, as `writeback_projections` states it.
+    std::fs::remove_file(world.run_file(name, "writeback-landed.json")).expect("a seeded baseline");
+    let mark = records(&world, name).len();
+    world.run(&["adopt", name, "--detach"]).exited(0);
+    world.until_store(
+        "the adopted driver's claim to reach both sources",
+        |world| {
+            let board = words(world, &home);
+            board.get("adopt").map(String::as_str) == Some("queued")
+                && board.get("ship").map(String::as_str) == Some("queued")
+        },
+    );
+    let first = records(&world, name)
+        .get(mark)
+        .cloned()
+        .expect("the adopted driver's first attempt");
+    assert_eq!(first["outcome"], "projected", "{first}");
+    assert_eq!(first["calls"]["task-show"], 3, "{first}");
+    assert!(
+        first["calls"].get("project-copy").is_none(),
+        "a lineage the run knew an item for was created again: {first}"
+    );
+    world.run(&["stop", name]).exited(0);
+    let held = |source: &str| -> Vec<String> { source_nodes(&world, source).into_keys().collect() };
+    assert_eq!(held(STORE_SOURCE), ["core", "ship"]);
+    assert_eq!(held(MEMBERS), ["adopt"]);
+}

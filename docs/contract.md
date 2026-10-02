@@ -65,6 +65,21 @@ Where a plan lives: a run is launched by naming a **qualified onetaskgraph proje
 
 Where a plan lives, when it spans sources. *Recorded as an amendment on the ruling of the planner who owns this contract, for ai-orchestrator's multi-source plans (node `op-multi-source-plans`), with the approved text above unedited; entry 106 of `docs/contract-divergences.md` records it.* **A plan spanning sources is a home project plus the member projects its `onetaskgraph.members` names**, never one project with members in several sources. The launched id is the **home** project's qualified id; its members are the store's to keep — at most one per other source, each naming its home at `onetaskgraph.member_of` — and the plan is read as one graph and driven as one run. The read asks the store for the home with its members (`TaskRequest.include_members`): a task of the home's project in the home's source, or of a member's project in that member's source, is a node of the plan, and a task of any other source or project is refused as before, naming it. A blocking edge between tasks of two of the plan's sources is a dependency of the plan, resolved through the far task's `onepipeline.id`; a far end outside the plan is refused as before. A member task's `task_record` carries `source`, the source its item is in, and a home task's carries none, so a record written before a plan could span sources reads as it did; a run journalled with the field cannot be adopted by an engine older than the one that writes it. Every per-task check — `require_rendered` among them — applies to a member's tasks as to the home's, and a node's `repo` is still its task's first `repositories` entry. **Each settlement is written where its task lives.** The write-back finds a lineage's item in the task's own source, and creates items through the store's routed member copy into the home's source, so the store's `routes` place each one and the engine never chooses a source. Its landed baseline accepts an item in the home's source or in a source a member of the run can be in — a member task's own, or one the home's source routes to — and refuses any other; `writeback-landed.json` and `writeback-projections.jsonl` keep their schemas, each item's destination naming its own source. A live `add` whose node names a `repo` the home's source routes elsewhere lands in that source's member project, created if the plan had none there. The words, the `queued` claim, its release at closeout and `delivers` behave as for a single source, for every item of the plan in whichever source it lives.
 
+A home in the plan's source, its member in a second, and a task record of each as a loaded node carries it:
+
+```json
+{
+  "multi_source_plan": {
+    "launched": "plans:spanning-board",
+    "members_key": "onetaskgraph.members",
+    "member_of_key": "onetaskgraph.member_of",
+    "members": ["linear:spanning-board"],
+    "home_task_record": {"id": "spanning-board/000-core", "title": "feat: ship core"},
+    "member_task_record": {"id": "spanning-board/001-adopt", "title": "feat: ship adopt", "source": "linear"}
+  }
+}
+```
+
 **A plan is one onetaskgraph project; a node is one task in that project.**
 
 * The plan-level fields — `schema_version`, `goal`, `name`, `concurrency` — are reserved metadata keys `onepipeline.<field>` on the **project**, carrying the same names and the same JSON types the schema-3 plan document uses. The project's own `title` is the plan's name when `onepipeline.name` is absent.

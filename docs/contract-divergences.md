@@ -8729,12 +8729,13 @@ project's. Every ledger and journal written before reads and writes back unchang
 adopted by an engine older than this release**.
 
 **The write-back.** `known_id` builds a lineage's item id in the source its task record
-names, else in the home's, and takes a recorded shadow origin in any source this run's
-items can be in. That set is the home's source, every member task's own, and every
-source the home's source routes to under the configuration the launch directory
-discovers. Routes are the one way a member project comes to exist mid-run, so the set
-is read from the snapshot and the configuration alone, never from a source.
-`LandedBaseline::checked` accepts a destination in that set and refuses any other.
+names, else in the home's. A shadow origin it reads is still taken only in the home's
+source: only a build older than member projects records one, and none of those named a
+member. `LandedBaseline::checked` accepts a destination in the sources this run's items
+can be in, and refuses any other. That set is the home's source, every member task's
+own, and every source the home's source routes to under the configuration the launch
+directory discovers. Routes are the one way a member project comes to exist mid-run, so
+the set is read from the snapshot and the configuration alone, never from a source.
 `create` still copies through the store with `CopyScope::Members` and `destination` the
 home's source; the store's routing places each item, and the engine never chooses a
 source. `writeback-landed.json` and `writeback-projections.jsonl` keep their schemas and
@@ -8753,7 +8754,9 @@ holds the read, the order across both sources, the `queued` claim and the settle
 words. `a_live_add_routed_to_the_second_source_lands_in_a_member_project_created_for_it`
 holds the routed `add`, and
 `a_stop_releases_and_an_adoption_reclaims_the_unstarted_items_of_both_sources` holds
-the release and the baseline read back by another process. `taskgraph::tests` holds
+the release and the baseline read back by another process.
+`an_adoption_with_no_baseline_reads_a_member_task_by_its_id_in_its_own_source` holds
+`known_id` for a member task, in a run whose baseline is gone. `taskgraph::tests` holds
 the refusals, and `writeback::tests` holds `known_id` and `checked`.
 `plan::tests::a_ledger_plan_written_before_task_records_named_a_source_reads_and_writes_back_unchanged`
 holds the older ledger.

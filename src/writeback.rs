@@ -1156,7 +1156,7 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     let mut baseline = Baseline::load(
         &paths.dir,
         &snapshot.project,
-        plan_sources(&store, &snapshot),
+        &plan_sources(&store, &snapshot),
     );
     // A rate limit the driver was waiting out binds this process too: the release asks the store
     // nothing before the wait the store named has passed. It waits that out where the wait ends
@@ -1312,7 +1312,11 @@ fn worker(
             }
         }
         let baseline = baseline.get_or_insert_with(|| {
-            Baseline::load(&run_dir, &snapshot.project, plan_sources(&store, &snapshot))
+            Baseline::load(
+                &run_dir,
+                &snapshot.project,
+                &plan_sources(&store, &snapshot),
+            )
         });
         let at = crate::sys::now_rfc3339();
         let started = Instant::now();
@@ -2437,7 +2441,7 @@ fn decide(
                         decided.carried.insert(root.clone());
                     }
                 }
-                None => match known_id(snapshot, lineages, root, &baseline.sources) {
+                None => match known_id(snapshot, lineages, root) {
                     Some(id) => {
                         decided.unread.insert(root.clone(), id);
                     }
@@ -2457,7 +2461,7 @@ fn decide(
                         }
                     }
                     None => {
-                        if let Some(id) = known_id(snapshot, lineages, root, &baseline.sources) {
+                        if let Some(id) = known_id(snapshot, lineages, root) {
                             decided.unread.insert(root.clone(), id);
                         }
                     }
@@ -2471,17 +2475,10 @@ fn decide(
 /// The destination id the run knows for a lineage the baseline does not hold, furthest along
 /// first: the origin the previous driver's shadow document recorded for the head or any
 /// attempt before it — which is where a board an older build wrote keeps one item per attempt
-/// — and otherwise the task the root was read out of at launch, in that task's own source.
-///
-/// A recorded origin counts only in one of `sources`, the sources this run's items can be in:
-/// the copy places each item where the home's routes send it, so a member task's item is in
-/// its member's source and never in the home's.
-fn known_id(
-    snapshot: &Snapshot,
-    lineages: &Lineages,
-    root: &str,
-    sources: &BTreeSet<SourceName>,
-) -> Option<GlobalId> {
+/// — and otherwise the task the root was read out of at launch, in that task's own source: the
+/// one its record names for a member's task, and the home's for the home's own.
+fn known_id(snapshot: &Snapshot, lineages: &Lineages, root: &str) -> Option<GlobalId> {
+    let home = snapshot.project.global().source;
     let folder = snapshot
         .dir
         .join("tasks")
@@ -2489,14 +2486,14 @@ fn known_id(
     let recorded = lineages.chain(root).and_then(|chain| {
         chain.iter().rev().find_map(|node| {
             shadow_origin(&folder.join(format!("{}.md", task_file(node))))
-                .filter(|id| sources.contains(&id.source))
+                .filter(|id| id.source == home)
         })
     });
     recorded.or_else(|| {
         let record = snapshot.nodes.get(root)?.task_record.as_ref()?;
         let source = match &record.source {
             Some(source) => SourceName::new(source.as_str()).ok()?,
-            None => snapshot.project.global().source,
+            None => home,
         };
         Some(GlobalId::new(source, NativeId::from(record.id.as_str())))
     })
@@ -2629,24 +2626,23 @@ fn owned(metadata: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
 
 const OWNED_PREFIX: &str = "onepipeline.";
 
-/// What this run has put on the board: the landed baseline, the file it is kept in, and the
-/// sources its items can be in — see [`plan_sources`].
+/// What this run has put on the board: the landed baseline, and the file it is kept in.
 struct Baseline {
     path: PathBuf,
     landed: LandedBaseline,
-    sources: BTreeSet<SourceName>,
 }
 
 impl Baseline {
-    /// The run's baseline, or an empty one where its directory holds none — a run an older
+    /// The run's baseline, read as one whose items are in `sources` — see [`plan_sources`] — or
+    /// an empty one where its directory holds none — a run an older
     /// build started — or holds one this build cannot read, which is said on standard error:
     /// either way every lineage is then read once by its own id rather than trusted.
-    fn load(run_dir: &Path, project: &QualifiedId, sources: BTreeSet<SourceName>) -> Self {
+    fn load(run_dir: &Path, project: &QualifiedId, sources: &BTreeSet<SourceName>) -> Self {
         let path = run_dir.join(WRITEBACK_LANDED_FILE);
         let landed = match std::fs::read_to_string(&path) {
             Ok(text) => match serde_json::from_str::<LandedBaseline>(&text)
                 .map_err(|error| error.to_string())
-                .and_then(|landed| landed.checked(project, &sources).map(|()| landed))
+                .and_then(|landed| landed.checked(project, sources).map(|()| landed))
             {
                 Ok(landed) => landed,
                 Err(why) => {
@@ -2674,11 +2670,7 @@ impl Baseline {
                 LandedBaseline::empty(project)
             } // llmlint: ignore-end[changed_behavior_has_e2e]
         };
-        Self {
-            path,
-            landed,
-            sources,
-        }
+        Self { path, landed }
     }
 
     /// Whether the snapshot restates a project key the destination holds with another value
@@ -2740,7 +2732,6 @@ pub(crate) fn seed_landed(run_dir: &Path, project: &QualifiedId, read: &crate::t
     Baseline {
         path: run_dir.join(WRITEBACK_LANDED_FILE),
         landed,
-        sources: BTreeSet::new(),
     }
     .save();
 }
@@ -6135,7 +6126,6 @@ mod tests {
         Baseline {
             path: snapshot.dir.join(crate::cli::WRITEBACK_LANDED_FILE),
             landed,
-            sources: home(snapshot),
         }
     }
 
@@ -6275,7 +6265,6 @@ mod tests {
         let empty = Baseline {
             path: known.dir.join(crate::cli::WRITEBACK_LANDED_FILE),
             landed: LandedBaseline::empty(&known.project),
-            sources: home(&known),
         };
         let decided = decide(
             &known,
@@ -6450,8 +6439,7 @@ mod tests {
             .join(super::project_file(&snapshot.project));
         std::fs::create_dir_all(&folder).expect("the shadow folder");
         assert_eq!(
-            super::known_id(&snapshot, &lineages, "build", &home(&snapshot))
-                .map(|id| id.to_string()),
+            super::known_id(&snapshot, &lineages, "build").map(|id| id.to_string()),
             Some("plans:board/000-root".to_owned()),
             "with no shadow document the root's own task is not the one read"
         );
@@ -6468,16 +6456,8 @@ mod tests {
         // A document naming an item in another source names nothing on this destination.
         write(&chain[2], "elsewhere:board/stray");
         assert_eq!(
-            super::known_id(&snapshot, &lineages, "build", &home(&snapshot))
-                .map(|id| id.to_string()),
+            super::known_id(&snapshot, &lineages, "build").map(|id| id.to_string()),
             Some("plans:board/older-attempt".to_owned())
-        );
-        // A member's source is one of the run's, so the copy's origin there is the lineage's.
-        let mut sources = home(&snapshot);
-        sources.insert(onetaskgraph_plugin_api::SourceName::new("elsewhere").expect("a name"));
-        assert_eq!(
-            super::known_id(&snapshot, &lineages, "build", &sources).map(|id| id.to_string()),
-            Some("elsewhere:board/stray".to_owned())
         );
     }
 
@@ -6490,8 +6470,7 @@ mod tests {
         let snapshot = fixture.snapshot.clone();
         let lineages = snapshot.lineages();
         assert_eq!(
-            super::known_id(&snapshot, &lineages, "build", &home(&snapshot))
-                .map(|id| id.to_string()),
+            super::known_id(&snapshot, &lineages, "build").map(|id| id.to_string()),
             Some("plans:member/000-build".to_owned()),
             "a home task's record names no source, and its item is in the home's"
         );
@@ -6504,8 +6483,7 @@ mod tests {
             .source = Some("linear".to_owned());
         let snapshot = fixture.snapshot.clone();
         assert_eq!(
-            super::known_id(&snapshot, &lineages, "build", &home(&snapshot))
-                .map(|id| id.to_string()),
+            super::known_id(&snapshot, &lineages, "build").map(|id| id.to_string()),
             Some("linear:member/000-build".to_owned())
         );
     }
@@ -7058,7 +7036,7 @@ mod tests {
             .dir
             .join(std::ffi::OsStr::from_bytes(b"shadow-\xff"));
         let store = crate::taskgraph::Store::at(fixture.dir.to_path_buf());
-        let mut baseline = super::Baseline::load(&fixture.dir, &snapshot.project, home(&snapshot));
+        let mut baseline = super::Baseline::load(&fixture.dir, &snapshot.project, &home(&snapshot));
         let attempted = super::project(
             &store,
             DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,

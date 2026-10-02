@@ -7208,6 +7208,56 @@ const RULINGS: &[(&str, &str)] = &[
     ),
 ];
 
+/// A plan spanning sources, as the contract's block states it: the store's own two member
+/// keys, and the task record a loaded node carries — the home's naming no source, a member's
+/// naming its own — parsed by this crate's `TaskRecord` and written back as the block spells
+/// it, so the documented field and the serialized one cannot drift apart.
+#[test]
+fn a_member_tasks_record_names_its_source_as_the_contract_spells_it() {
+    let block: Value = serde_json::from_str(&fenced_block_naming("json", "\"multi_source_plan\""))
+        .expect("the multi-source block is JSON");
+    let block = &block["multi_source_plan"];
+    assert_eq!(
+        block["members_key"],
+        onetaskgraph_plugin_api::MetadataKey::MEMBERS_KEY
+    );
+    assert_eq!(
+        block["member_of_key"],
+        onetaskgraph_plugin_api::MetadataKey::MEMBER_OF_KEY
+    );
+    let launched = block["launched"].as_str().expect("a launched id");
+    let (home_source, _) = launched.split_once(':').expect("a qualified id");
+    let member_source = block["members"][0]
+        .as_str()
+        .and_then(|member| member.split_once(':'))
+        .map(|(source, _)| source)
+        .expect("a qualified member");
+    assert_ne!(home_source, member_source, "a member is in another source");
+
+    let parsed = |key: &str| -> TaskRecord {
+        let record: TaskRecord =
+            serde_json::from_value(block[key].clone()).expect("the task record parses");
+        assert_eq!(
+            serde_json::to_value(&record).expect("serializes"),
+            block[key],
+            "{key} is written back otherwise than the contract spells it"
+        );
+        record
+    };
+    assert_eq!(parsed("home_task_record").source, None);
+    assert_eq!(
+        parsed("member_task_record").source.as_deref(),
+        Some(member_source)
+    );
+    let tokens = backticked();
+    for token in ["source", "task_record", "TaskRequest.include_members"] {
+        assert!(
+            tokens.contains(token),
+            "the contract no longer names `{token}`"
+        );
+    }
+}
+
 #[test]
 fn every_recorded_divergence_is_ruled_on_or_states_the_proposal_it_waits_on() {
     let divergences = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
