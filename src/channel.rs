@@ -982,8 +982,11 @@ pub(crate) struct Undecodable {
     pub(crate) id: u64,
     /// The record's `author` where it is one this build reads, else the planner.
     pub(crate) author: Author,
-    /// Each command the record carried, exactly as sent — or, for a record with
-    /// no readable `commands` array, the one placeholder that carries the record.
+    /// Each command the record carried, exactly as sent — one that is not an
+    /// object carried inside an `unreadable` placeholder, because what is
+    /// journalled of a command is one — or, for a record with no readable
+    /// `commands` array, the one placeholder that carries the record. An empty
+    /// list carried no command, so it has none.
     pub(crate) commands: Vec<Value>,
     /// What the submitter is told: the decoder's own message, after the words
     /// that say the whole envelope was refused.
@@ -994,7 +997,7 @@ impl Undecodable {
     fn of(record: Value, error: &serde_json::Error) -> Self {
         let unreadable = |value: Value| serde_json::json!({"op": "unreadable", "value": value});
         let commands = match record.get("commands") {
-            Some(Value::Array(commands)) if !commands.is_empty() => commands
+            Some(Value::Array(commands)) => commands
                 .iter()
                 .map(|command| {
                     if command.is_object() {
@@ -2689,9 +2692,16 @@ mod tests {
             refused.reason
         );
 
+        let Claimed::Undecodable(refused) = Claimed::of(json!({"author": "", "commands": []}))
+        else {
+            panic!("an envelope with a blank author decoded");
+        };
+        assert_eq!(refused.author, Author::planner());
+        assert!(refused.commands.is_empty(), "{:?}", refused.commands);
+
         for record in [
             json!({"id": "x", "author": 4, "commands": "drop a"}),
-            json!({"author": "", "commands": [], "extra": true}),
+            json!({"author": "", "commands": {"op": "drop", "id": "a"}}),
         ] {
             let Claimed::Undecodable(refused) = Claimed::of(record.clone()) else {
                 panic!("{record} decoded");

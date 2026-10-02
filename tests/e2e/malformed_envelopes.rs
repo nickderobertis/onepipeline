@@ -20,12 +20,37 @@ use onemessagebus::{Config, Layouts, LocalTransport, QueueName, Transport, Trans
 use onepipeline::channel::layout::{PlannerChannel, COMMANDS, PLANNER_CHANNEL, REPLIES};
 use serde_json::{json, Value};
 
-use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
+use crate::harness::{agent, human, plan_of, repo_file, World, NOTHING_DRIVING, REFUSED};
 use crate::run_end_hooks::{hook, invocations, records, RECORD_ENV};
 
 /// What every refusal of an undecodable envelope begins with, before the
 /// decoder's own message.
 const MALFORMED: &str = "refused: the envelope is malformed: ";
+
+/// The contract's own spellings of what a refusal journals and answers, which
+/// every journey here asserts — so a change to either side fails here rather
+/// than leaving the two to differ.
+#[test]
+fn the_refusal_these_journeys_assert_is_the_one_the_contract_states() {
+    let contract =
+        std::fs::read_to_string(repo_file("docs/contract.md")).expect("the contract ships");
+    for spelling in [
+        format!("\"reason\": \"{MALFORMED}<the decoder's message>\""),
+        "\"applied\": false".to_owned(),
+        "with no `results`".to_owned(),
+        "{\"op\": \"unreadable\", \"value\": <the command>}` for one that is not an object"
+            .to_owned(),
+        "a record whose list is empty journals none".to_owned(),
+        "{\"op\": \"unreadable\", \"value\": <the record>}".to_owned(),
+        "one non-blocking `edit-rejected` surface naming the envelope's id".to_owned(),
+        "blank it is refused by name".to_owned(),
+    ] {
+        assert!(
+            contract.contains(&spelling),
+            "docs/contract.md no longer states {spelling}"
+        );
+    }
+}
 
 fn queue(name: &str) -> QueueName {
     name.parse().expect("a queue name")
@@ -226,7 +251,8 @@ fn every_envelope_the_reconciler_cannot_decode_is_answered_and_nothing_of_it_app
     for (record, reason) in records.iter().zip(&reasons) {
         let author = record["author"].as_str().unwrap_or("planner");
         match record["commands"].as_array() {
-            Some(commands) if !commands.is_empty() => {
+            // An empty list carried no command, so it journals none.
+            Some(commands) => {
                 for command in commands {
                     let command = if command.is_object() {
                         command.clone()
@@ -241,16 +267,12 @@ fn every_envelope_the_reconciler_cannot_decode_is_answered_and_nothing_of_it_app
         }
     }
     assert_eq!(rejected, expected);
-    assert_eq!(rejected.len(), 10);
+    assert_eq!(rejected.len(), 9);
     assert_eq!(rejected[6]["author"], "monitor");
     assert_eq!(
         rejected[7],
         json!({"author": "planner", "command": {"op": "unreadable", "value": "drop sign-off"},
                "reason": reasons[6]})
-    );
-    assert_eq!(
-        rejected[9]["command"],
-        json!({"op": "unreadable", "value": records[7]})
     );
 
     // One non-blocking surface per envelope, naming its id and its reason.

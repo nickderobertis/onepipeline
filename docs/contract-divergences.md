@@ -8522,9 +8522,11 @@ refused whole at the claim: one `command-outcomes.jsonl` line
 `{"id": <its id as an unsigned integer, else 0>, "applied": false, "reason":
 "refused: the envelope is malformed: <the decoder's message>"}` with no `results`;
 one `edit-rejected` per command it carried — `author` the record's own (else
-`planner`), `command` the command exactly as sent, `reason` the same — or, for a
-record with no readable `commands` list, one whose `command` is
-`{"op": "unreadable", "value": <the record>}`; and one non-blocking `edit-rejected`
+`planner`), `command` the command exactly as sent (`{"op": "unreadable", "value":
+<the command>}` for one that is not an object, since the record's `command` is
+one), `reason` the same, and none for an empty list — or, for a record with no
+readable `commands` list, one whose `command` is `{"op": "unreadable", "value":
+<the record>}`; and one non-blocking `edit-rejected`
 surface naming the envelope's id and the reason. Nothing of it applies, and the
 driver neither panics nor exits over it. The queue's outstanding work counts such
 a record, so a driver holding the run — one adopted onto a run whose graph has
