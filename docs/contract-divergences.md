@@ -6,7 +6,7 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96, 97 and 99** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96, 97, 99, 100 and 102** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
@@ -8541,3 +8541,53 @@ not part of this ruling.
 
 `tests/e2e/malformed_envelopes.rs` drives each case through the compiled binary,
 over envelopes sent through the planner channel's own bus.
+
+## 102. A driver's ending wrote nothing, so a crash and a clean exit read the same — RESOLVED
+
+**Ruling: the plan `run-ending-liveness` (onepipeline#527) adds one pipeline kind,
+`driver-exited`, and `docs/contract.md` states it.** A driver adoption was journalled
+(`driver-adopted`) and a deliberate `stop` was (`run-stopped`), but an ordinary
+driver ending wrote nothing: one run on the operator's host carries 18
+`driver-adopted` records and no record of any driver ending. A manager reading that
+journal could not tell a driver that settled the run and exited from one that
+crashed, nor whether an edit queued just before the ending was applied or abandoned.
+
+**The record.** Every driver that drove a run and lets go of it without crashing
+journals one `driver-exited`, labelled with the run — after its last outcome line,
+inside the handover section that releases the run, before the release and before
+any run-end hook of that ending. The payload is
+`{"pid", "settlement", "reason", "last_answered_command"}`: `settlement` is the
+attached settlement word the driver returns — `complete`, `awaiting-planner` or
+`unattended`, the same answer the attached launch prints — or `error` for a
+driver-side error it reports, recorded while it still holds the run; `reason` is that
+error's message, and `null` otherwise; `last_answered_command` is the highest command
+envelope id this driver wrote an outcome line for, read off the outcome log past the
+mark the driver took as it started, or `null`. It is registered as
+`agent.pipeline.driver-exited@2` beside every other kind's document, not in
+`schemas/events.json`, which publishes the envelope and no per-kind schema.
+
+**What its absence means.** A driver killed by a signal or a panic writes nothing, so
+no `driver-exited` after the last `driver-adopted`, on a driver proved over, is how a
+crash reads.
+
+**What reads it.** Only `status <RUN>`, which prints the last record's time and
+settlement — with an error's reason — and names every command envelope the
+reconciler claimed, at or below the queue's cursor, that has no outcome line; that
+list is read off the channel, in the text view only. The fold skips the record
+entirely, `last_write_at` included, so the run projection, the views, `watch` and the
+run-end hooks read a run the same with it as without it, and an older reader skips a
+kind it does not know.
+
+**Where it is held.** `tests/e2e/driver_exit.rs` drives a driver to each ending —
+complete, paused on a waiting human node, nothing left to drive, a reported error —
+and reads one record each, after the last outcome line, before the hook, and already
+there when a reader outside the driver finds the ownership lock released; a driver
+that cannot hand the run on still writes one and leaves its claim; a driver killed by
+a signal leaves none, and its adopter's names none of the edits the killed driver
+answered; an adopter that panics as it drives — its terminal gone, so its stream's next
+write panics — leaves none; and `status` reads the latest of several, says one it cannot read could not
+be read, and names the one claimed envelope a killed driver never answered — not the
+one it answered, nor the one still behind the cursor. `engine::tests` holds the panic
+half's unwinding and the let-go's ordering, `projection::tests` that the fold is unchanged by it,
+and `payload::tests` its document and that the payload `docs/contract.md` states is
+that document.

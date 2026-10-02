@@ -633,6 +633,58 @@ pub(crate) struct RunStopped {
     pub(crate) teardown: Option<String>,
 }
 
+/// The settlement a driver let go of a run at: the attached settlement word it
+/// returns, or `error` for a driver-side error it reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ExitSettlementWord {
+    /// `complete`.
+    Complete,
+    /// `awaiting-planner`.
+    AwaitingPlanner,
+    /// `unattended`.
+    Unattended,
+    /// `error`: the driver reported an error of its own and let go.
+    Error,
+}
+
+impl From<crate::driver::Settlement> for ExitSettlementWord {
+    fn from(settlement: crate::driver::Settlement) -> Self {
+        use crate::driver::Settlement as S;
+        match settlement {
+            S::Complete => Self::Complete,
+            S::AwaitingPlanner => Self::AwaitingPlanner,
+            S::Unattended => Self::Unattended,
+        }
+    }
+}
+
+impl ExitSettlementWord {
+    /// The word as the record spells it.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::AwaitingPlanner => "awaiting-planner",
+            Self::Unattended => "unattended",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// `driver-exited`: a driver let go of the run it drove without crashing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct DriverExited {
+    /// The driver.
+    pub(crate) pid: u32,
+    /// The settlement it let go at.
+    pub(crate) settlement: ExitSettlementWord,
+    /// The error's message for `error`, and `null` otherwise.
+    pub(crate) reason: Option<String>,
+    /// The highest command envelope id this driver wrote an outcome line for, or
+    /// `null` where it answered none.
+    pub(crate) last_answered_command: Option<u64>,
+}
+
 /// `dispatch-stopped`: one live dispatch a host shutdown acted on.
 // llmlint: ignore[boundary_inputs_validated] this module's own rule, stated at its head: a key no document names is not refused, because a record a later build wrote is the ordinary contents of a runs root — no payload document here denies unknown fields, and a reader of this one that did would call a newer build's record unreadable. What a reader acts on is still typed and required.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1372,6 +1424,7 @@ payload_messages! {
     HumanAttested => "human-attested";
     DriverAdopted => "driver-adopted";
     RunStopped => "run-stopped";
+    DriverExited => "driver-exited";
     QuietWorker => "quiet-worker";
     NodeHeld => "node-held";
     NodeUnheld => "node-unheld";
@@ -1575,6 +1628,152 @@ mod tests {
                 other => panic!("{kind} without `{key}` was not refused: {other:?}"),
             }
         }
+    }
+
+    /// `driver-exited` declares all four keys its one writer always writes —
+    /// requiring `pid` and `settlement`, and leaving `reason` and
+    /// `last_answered_command` optional as this module's rule leaves every key
+    /// whose value may be `null` — admits only the settlement words a driver
+    /// returns plus `error`, and refuses a payload that disagrees with it, which
+    /// is what a debug build of the binary checks every emitted record against.
+    #[test]
+    fn the_driver_exited_document_declares_every_key_and_admits_only_its_words() {
+        let id = schema_of(PipelineKind::DriverExited);
+        assert_eq!(id.to_string(), "agent.pipeline.driver-exited@2");
+        let document = registry().schema(&id).expect("registered").clone();
+        let mut required: Vec<&str> = document["required"]
+            .as_array()
+            .expect("the document requires keys")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        required.sort_unstable();
+        assert_eq!(required, ["pid", "settlement"]);
+        for key in ["pid", "settlement", "reason", "last_answered_command"] {
+            assert!(
+                document["properties"].get(key).is_some(),
+                "{id} does not declare {key}"
+            );
+        }
+        for written in [
+            DriverExited {
+                pid: 7,
+                settlement: ExitSettlementWord::Complete,
+                reason: None,
+                last_answered_command: Some(3),
+            },
+            DriverExited {
+                pid: 7,
+                settlement: ExitSettlementWord::Error,
+                reason: Some("the queue could not be read".to_string()),
+                last_answered_command: None,
+            },
+        ] {
+            let payload = serde_json::to_value(&written).expect("it serializes");
+            registry()
+                .check(&id, &payload)
+                .unwrap_or_else(|refusal| panic!("{payload} is refused: {refusal}"));
+            let read: DriverExited = serde_json::from_value(payload).expect("it reads back");
+            assert_eq!(read, written);
+        }
+        let whole = serde_json::json!({
+            "pid": 7, "settlement": "awaiting-planner", "reason": null,
+            "last_answered_command": null,
+        });
+        registry()
+            .check(&id, &whole)
+            .expect("a paused exit is admitted");
+        for (key, wrong) in [
+            ("settlement", serde_json::json!("crashed")),
+            ("settlement", serde_json::json!(null)),
+            ("pid", serde_json::json!(-1)),
+            ("reason", serde_json::json!(5)),
+            ("last_answered_command", serde_json::json!("3")),
+        ] {
+            let mut refused = whole.clone();
+            refused[key] = wrong.clone();
+            assert!(
+                registry().check(&id, &refused).is_err(),
+                "{id} admitted {key} = {wrong}"
+            );
+        }
+        for key in ["pid", "settlement"] {
+            let mut missing = whole.clone();
+            missing.as_object_mut().expect("an object").remove(key);
+            assert!(
+                registry().check(&id, &missing).is_err(),
+                "{id} admitted a payload without {key}"
+            );
+        }
+    }
+
+    /// The `driver-exited` payload `docs/contract.md` states is the one this
+    /// crate registers and writes: the same keys as the document declares, and the
+    /// same settlement words as the type that writes them — every word the
+    /// contract lists is admitted, and every word the type can write is listed.
+    #[test]
+    fn the_contracts_driver_exited_payload_is_the_registered_document() {
+        let contract = include_str!("../docs/contract.md");
+        let stated = contract
+            .split("**`driver-exited`**")
+            .nth(1)
+            .and_then(|rest| rest.split("Its payload is `").nth(1))
+            .and_then(|rest| rest.split('`').next())
+            .expect("the contract states the driver-exited payload");
+        let mut keys = Vec::new();
+        let mut words = Vec::new();
+        for (index, quoted) in stated.split('"').enumerate() {
+            if index % 2 == 0 {
+                continue;
+            }
+            let after = stated
+                .split(&format!("\"{quoted}\""))
+                .nth(1)
+                .unwrap_or_default();
+            if after.starts_with(':') {
+                keys.push(quoted.to_string());
+            } else {
+                words.push(quoted.to_string());
+            }
+        }
+        let id = schema_of(PipelineKind::DriverExited);
+        let document = registry().schema(&id).expect("registered").clone();
+        let mut declared: Vec<String> = document["properties"]
+            .as_object()
+            .expect("the document declares properties")
+            .keys()
+            .cloned()
+            .collect();
+        declared.sort_unstable();
+        keys.sort_unstable();
+        assert_eq!(keys, declared, "the contract and {id} name different keys");
+
+        for word in &words {
+            let payload = serde_json::json!({"pid": 1, "settlement": word});
+            registry()
+                .check(&id, &payload)
+                .unwrap_or_else(|refusal| panic!("the contract's `{word}` is refused: {refusal}"));
+        }
+        // Every word the writer has, by a match that stops compiling when it grows.
+        let every = |word: ExitSettlementWord| match word {
+            ExitSettlementWord::Complete
+            | ExitSettlementWord::AwaitingPlanner
+            | ExitSettlementWord::Unattended
+            | ExitSettlementWord::Error => word.as_str().to_string(),
+        };
+        let written: Vec<String> = [
+            ExitSettlementWord::Complete,
+            ExitSettlementWord::AwaitingPlanner,
+            ExitSettlementWord::Unattended,
+            ExitSettlementWord::Error,
+        ]
+        .into_iter()
+        .map(every)
+        .collect();
+        assert_eq!(
+            written, words,
+            "the contract and the writer list different words"
+        );
     }
 
     /// A `concurrent-acknowledged` holder written before a holder could say
@@ -1813,6 +2012,19 @@ mod tests {
         assert_eq!(
             word(&WithheldSettlementWord::AwaitingPlanner),
             crate::hooks::PAUSED
+        );
+        use crate::driver::Settlement as Settled;
+        for settled in [
+            Settled::Complete,
+            Settled::AwaitingPlanner,
+            Settled::Unattended,
+        ] {
+            assert_eq!(word(&ExitSettlementWord::from(settled)), settled.as_str());
+            assert_eq!(ExitSettlementWord::from(settled).as_str(), settled.as_str());
+        }
+        assert_eq!(
+            word(&ExitSettlementWord::Error),
+            ExitSettlementWord::Error.as_str()
         );
         use crate::note::Evidence as E;
         for evidence in [
