@@ -698,7 +698,7 @@ pub fn channel(paths: &RunPaths) -> Result<ChannelQueue> {
         waiting: queue.waiting,
         held: queue.pending,
         replies: channel.replies(),
-        commands: channel.claimable_commands(),
+        commands: channel.claimable_commands().envelopes,
         outcomes: channel.outcomes(),
     })
 }
