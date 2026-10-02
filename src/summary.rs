@@ -531,9 +531,10 @@ impl RunSummary {
     /// The reader's half of a document that is complete about the journal and one
     /// step behind the report beside it. A driver re-reads every unlanded change
     /// as it closes out — `engine`'s `landings_after_asking_again` — and writes
-    /// what it found to `result.json`, **after** the last record it appends: so
-    /// the writer maintaining this document has already written its last version
-    /// by the time that report exists. A fold takes the report
+    /// what it found to `result.json` **before** the last record it appends — its
+    /// `driver-exited` — and before [`seal`]: so a version written before the
+    /// report exists is still current for its journal until that record lands, and
+    /// would be served in between without what the report says. A fold takes the report
     /// ([`views::landings_the_run_re_read`](crate::views::landings_the_run_re_read)),
     /// so a served row that did not would be the two accounts of one run this
     /// document exists to keep as one — and it is the account that costs, because
