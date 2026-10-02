@@ -6103,7 +6103,6 @@ mod tests {
     };
     use onetaskgraph_plugin_api::{MetadataKey, TaskRef, TaskUpdate};
 
-    /// The sources a run of `snapshot` projecting onto its home alone has items in.
     fn home(
         snapshot: &Snapshot,
     ) -> std::collections::BTreeSet<onetaskgraph_plugin_api::SourceName> {

@@ -31,8 +31,7 @@ fn root_of(world: &World, source: &str) -> PathBuf {
     world.root.join(format!("{source}-store"))
 }
 
-/// A world whose plan source routes [`ROUTED`] to [`MEMBERS`], with a draft source beside both,
-/// and the two repositories registered.
+/// A world whose plan source routes [`ROUTED`] to [`MEMBERS`], with a draft source beside both.
 fn a_routed_world(name: &str) -> World {
     let world = World::new(name);
     let mut configured = world;
@@ -61,7 +60,6 @@ fn a_routed_world(name: &str) -> World {
         )
 }
 
-/// A lifecycle node on `repo`, waiting on `deps`.
 fn on(repo: &str, id: &str, deps: &[&str]) -> Value {
     json!({
         "id": id,
@@ -189,7 +187,6 @@ fn source_nodes(world: &World, source: &str) -> BTreeMap<String, Value> {
     })
 }
 
-/// The status word each of the plan's items reads under, by node id.
 fn words(world: &World, home: &str) -> BTreeMap<String, String> {
     plan_tasks(world, home)
         .into_iter()
@@ -203,7 +200,6 @@ fn words(world: &World, home: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// The source each of the plan's items is in, by node id.
 fn sources(world: &World, home: &str) -> BTreeMap<String, String> {
     plan_tasks(world, home)
         .into_iter()
@@ -215,7 +211,6 @@ fn sources(world: &World, home: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Where each kind of event about each node falls in the run's journal.
 fn position(journal: &[Value], kind: &str, node: &str) -> usize {
     journal
         .iter()
@@ -475,7 +470,6 @@ fn a_stop_releases_and_an_adoption_reclaims_the_unstarted_items_of_both_sources(
     assert_eq!(held(MEMBERS), ["adopt"]);
 }
 
-/// The projection record's attempts, in the order the run made them.
 fn records(world: &World, run: &str) -> Vec<Value> {
     std::fs::read_to_string(world.run_file(run, "writeback-projections.jsonl"))
         .unwrap_or_default()
