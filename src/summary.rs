@@ -1287,6 +1287,50 @@ mod tests {
         paths
     }
 
+    /// The same store as [`recorded`], with its summary written once rather than
+    /// once per record.
+    ///
+    /// The real writer rewrites and syncs the summary on every append, which is
+    /// what a run pays per record and what [`recorded`] pays per record too: for
+    /// a store of ten thousand that was twenty thousand syncs and as many file
+    /// replacements, minutes of a Windows runner's disk for a test that measures
+    /// bytes, and once past nextest's terminate-after (PR #641's run 36876601588).
+    /// So the records between the first and the last reach the store in one
+    /// append, as another appender's would, and the writer appends the last of
+    /// them — folding the store it opened and writing the summary over all of it,
+    /// which is the document a reader of a run that long is served.
+    fn recorded_in_bulk(root: &Path, run: &str, records: usize) -> RunPaths {
+        use std::io::Write as _;
+        let paths = a_run(root, run);
+        Journal::open(&paths)
+            .emit(
+                PipelineKind::RunStarted,
+                crate::journal::labels(run, None),
+                crate::journal::payload(&[("plan", json!(plan(&["build", "ship"])))]),
+            )
+            .expect("appended");
+        let node = |nth: usize| if nth % 2 == 0 { "build" } else { "ship" };
+        let mut bulk = String::new();
+        for nth in 0..records - 1 {
+            let mut record = event(PipelineKind::NodeReady, run, "bulk-appender", nth as u64);
+            record.labels.node = Some(node(nth).into());
+            bulk.push_str(&serde_json::to_string(&record).expect("a record serializes"));
+            bulk.push('\n');
+        }
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(paths.journal())
+            .and_then(|mut journal| journal.write_all(bulk.as_bytes()))
+            .expect("the records are appended");
+        emit(
+            &mut Journal::open(&paths),
+            PipelineKind::NodeReady,
+            Some(node(records - 1)),
+            run,
+        );
+        paths
+    }
+
     /// What one read of a run's summary cost, in bytes off the ledger.
     fn cost_of(paths: &RunPaths) -> (RunSummary, u64) {
         let before = ledger::bytes_read();
@@ -1334,8 +1378,8 @@ mod tests {
     #[test]
     fn a_summary_read_is_bounded_and_the_fold_it_replaces_is_not() {
         let root = scratch("bounded");
-        let small = recorded(&root, "small", 10);
-        let large = recorded(&root, "large", 10_000);
+        let small = recorded_in_bulk(&root, "small", 10);
+        let large = recorded_in_bulk(&root, "large", 10_000);
         assert!(
             std::fs::metadata(large.journal()).expect("a store").len()
                 > 100 * std::fs::metadata(small.journal()).expect("a store").len(),
