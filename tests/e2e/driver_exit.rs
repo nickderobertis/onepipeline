@@ -23,6 +23,7 @@
 // each is the operator's own command, and these journeys supply real ones. `harness.rs`
 // carries the same suppression and the full rationale.
 
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -526,6 +527,7 @@ fn waiting_reply(world: &World, run: &str, commands: Value) -> std::process::Chi
     replying
 }
 
+#[cfg(unix)]
 fn unanswered_line(world: &World, run: &str) -> Option<String> {
     let status = world.run(&["status", run]);
     status.exited(0);
