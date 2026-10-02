@@ -1007,6 +1007,62 @@ fn a_parked_run_whose_record_names_no_pid_is_advised_and_refused_without_one() {
     );
 }
 
+/// A live driver gone quiet after **every node of its graph settled** is still
+/// driving: it has written no ending yet, so the run reads `PARKED`, driven, and
+/// neither ended nor paused — the reading a run nothing drives would give that
+/// graph is an ending, and calling it one while its driver works is what lets a
+/// follow-up race the driver (onepipeline#528).
+///
+/// What keeps the driver alive and quiet is a real one: the write-back of the
+/// node's settlement, which the driver waits on at close-out before it ends the
+/// run, held open at the store. Each write-back attempt's first targeted update
+/// meets this journey; the ones before the node settles are let go, and the one
+/// after is held.
+#[test]
+fn a_live_driver_quiet_over_a_settled_graph_reads_parked_driven_and_not_ended() {
+    let world = World::new("driver-parked-settled");
+    let meeting = world.store_holds("update_task");
+    let world = world.through_scripted_source();
+    let run = start_detached(&world, "settledquiet", vec![agent("build", &[])]);
+
+    let held = loop {
+        let arrival = meeting.arrived();
+        if world.events_of(&run, "node-settled").is_empty() {
+            arrival.release();
+        } else {
+            break arrival;
+        }
+    };
+
+    let parked = |argv: &[&str]| {
+        let mut command = world.cmd(argv);
+        command.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+        world.run_on(command, &argv.join(" "))
+    };
+    world.until("the settled run to be reported parked", |_| {
+        parked(&["status", &run, "--json"]).json()["liveness"] == "PARKED"
+    });
+    let reading = parked(&["status", &run, "--json"]).json();
+    assert_eq!(reading["driven"], true, "{reading}");
+    assert_eq!(reading["ending"], Value::Null, "{reading}");
+    assert_eq!(reading["paused"], Value::Null, "{reading}");
+    assert!(
+        !world.run_file(&run, "result.json").is_file(),
+        "the driver ended the run before the journey read it"
+    );
+    let driver = &world.run_json(&run, "launch.json")["pid"];
+    parked(&["adopt", &run]).exited(REFUSED).err_has(&format!(
+        "still being driven by driver pid {driver} (PARKED)"
+    ));
+    assert!(world.events_of(&run, "driver-adopted").is_empty());
+
+    held.release();
+    world.until(
+        "the driver it refused to displace to end the run",
+        |world| world.run_file(&run, "result.json").is_file(),
+    );
+}
+
 /// The same silence, with a decision point outstanding, is *not* parked.
 ///
 /// The discriminating counterpart to the journey above: identical held dispatch,
