@@ -3613,7 +3613,8 @@ fn a_watch_armed_on_a_run_nothing_is_driving_ends_when_the_run_moves() {
     // driving with work still in flight. A verdict for the next listener lands in
     // the channel's reply queue — a record that is not a surface — and the run
     // journals that it was replied to. A live driver that has merely gone quiet
-    // is `PARKED`, still driven, and is the journey after this one.
+    // is `PARKED`, still driven, and is
+    // `a_driver_that_goes_quiet_during_the_wait_does_not_end_it_nothing_driving`.
     world.script("hold.wait", "hold");
     let orphaned = running(&world, "watchwakeorphaned", vec![agent("hold", &[])]);
     crate::harness::end_driver(&world, &orphaned);
