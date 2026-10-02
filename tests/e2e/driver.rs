@@ -26,6 +26,7 @@ use crate::harness::{
 // which compiles the unix half, cannot see.
 #[cfg(unix)]
 use crate::harness::{end_process, reaped_pid};
+use onepipeline::views::PARKED_AFTER_ENV;
 use serde_json::{json, Value};
 
 fn start_detached(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
@@ -891,6 +892,13 @@ fn a_live_driver_that_has_stopped_writing_reads_as_parked_and_still_driven() {
 
     until_parked(&world, &run);
     a_parked_run_is_read_as_driven(&world, &run);
+    // `next` with nothing queued answers that the run is still running, not that
+    // it has finished.
+    let mut next = world.cmd(&["next", &run]);
+    next.env(PARKED_AFTER_ENV, "1");
+    let next = world.run_on(next, "next");
+    next.exited(0);
+    assert_eq!(next.json()["status"], "running", "{}", next.stdout);
 
     // The driver the adoption refused is still the one driving: let its work go
     // and the run it held completes, with no second dispatch of the node.

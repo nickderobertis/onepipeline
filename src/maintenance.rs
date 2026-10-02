@@ -843,7 +843,7 @@ impl Drop for Sweep {
 /// a sweep nothing is running, and the driver that next adopts the run takes it
 /// back before its first pass.
 pub(crate) fn status_line(view: &crate::views::RunView) -> String {
-    if !view.liveness().is_undriven() {
+    if view.liveness() == crate::views::DriverLiveness::Driving {
         if let Some(marker) = crate::ledger::read_json_opt::<Value>(&view.paths.maintenance()) {
             let since = marker["started_at"]
                 .as_str()

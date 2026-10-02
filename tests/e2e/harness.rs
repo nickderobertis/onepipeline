@@ -6310,7 +6310,7 @@ pub fn a_parked_run_is_read_as_driven(world: &World, run: &str) {
 /// `ACTIVE` when the watch armed too. The watch then outlives the run turning
 /// `PARKED` and ends at its own deadline.
 pub fn a_watch_armed_active_outlasts_the_run_turning_parked(world: &World, run: &str) {
-    const AFTER: &str = "5";
+    const AFTER: &str = "4";
     let watchers = || {
         std::fs::read_dir(world.run_file(run, "watchers")).map_or(0, |entries| {
             entries
@@ -6329,7 +6329,7 @@ pub fn a_watch_armed_active_outlasts_the_run_turning_parked(world: &World, run: 
         "--until",
         "nothing-driving",
         "--timeout",
-        "25",
+        "8",
         "--tick-interval",
         "0",
     ]);

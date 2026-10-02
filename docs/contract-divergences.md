@@ -8806,8 +8806,7 @@ an operator judges wedged, and never `adopt`. `adopt` refuses it as it refuses a
 `ACTIVE` run, naming the live pid, and the polite ending entry 27 added is now reached
 only for a driver whose recorded stop has not yet seen it exit. `watch` ends
 `nothing-driving` only on a run turning `DRIVER DEAD`. `next` answers `running` rather
-than `finished` for a `PARKED` run, and `status` reports a pool-maintenance sweep while
-one is.
+than `finished` for a `PARKED` run.
 
 **What this build does.** `tests/e2e/driver.rs`'s
 `a_live_driver_that_has_stopped_writing_reads_as_parked_and_still_driven` and

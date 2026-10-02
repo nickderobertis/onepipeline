@@ -2446,7 +2446,7 @@ fn displace_the_stopped_driver(record: &LaunchRecord) {
         return;
     }
     eprintln!(
-        "onepipeline: run '{}' is held by driver pid {}, whose stop is recorded; \
+        "onepipeline: run '{}' is held by driver pid {}, which is not working; \
          ending it to adopt the run",
         record.run_id, record.pid
     );
