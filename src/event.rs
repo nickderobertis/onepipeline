@@ -165,6 +165,21 @@ pub enum PipelineKind {
     DriverAdopted,
     /// The run was ended by `stop`.
     RunStopped,
+    /// A driver that drove the run let go of it without crashing, and how.
+    ///
+    /// Written once per driver ending — the run settled, paused on a decision,
+    /// left with nothing it can drive, or a driver-side error it reports —
+    /// **before** the driver releases the run's ownership lock and before any
+    /// run-end hook fires, so a reader that finds the run free already finds
+    /// this. Carries the driver's `pid`, the `settlement` word it returns
+    /// (`error` for a reported error), the error's `reason` or `null`, and
+    /// `last_answered_command`, the highest command envelope id this driver
+    /// wrote an outcome line for, or `null` where it answered none.
+    ///
+    /// A driver killed by a signal or a panic writes nothing, so its absence
+    /// after the last `driver-adopted`, on a driver proved over, is how a crash
+    /// reads. It changes no state: every fold, view and hook reads past it.
+    DriverExited,
     /// An in-flight dispatch recorded nothing past the stall threshold.
     QuietWorker,
     /// The loop is not running a node it has not settled, and this is why.
@@ -314,6 +329,7 @@ impl PipelineKind {
             Self::HumanAttested => "human-attested",
             Self::DriverAdopted => "driver-adopted",
             Self::RunStopped => "run-stopped",
+            Self::DriverExited => "driver-exited",
             Self::QuietWorker => "quiet-worker",
             Self::NodeHeld => "node-held",
             Self::NodeUnheld => "node-unheld",
@@ -381,6 +397,7 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::HumanAttested,
     PipelineKind::DriverAdopted,
     PipelineKind::RunStopped,
+    PipelineKind::DriverExited,
     PipelineKind::QuietWorker,
     PipelineKind::NodeHeld,
     PipelineKind::NodeUnheld,

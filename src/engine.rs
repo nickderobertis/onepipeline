@@ -780,6 +780,83 @@ pub fn claim(paths: &RunPaths) -> Result<OwnershipLock> {
 /// the channel — a decision point cleared while the loop is still running
 /// resumes the subtree it held, without any external driver action.
 pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<Driven> {
+    exiting_from(paths, lock, driving)
+}
+
+/// Run a driver's `body` over the lock, and journal how it ended when it
+/// reports an error.
+///
+/// `body` lets go of the run itself — and writes its own `driver-exited` as it
+/// does — by taking the lock out of the slot it is handed. An error it returns
+/// with the lock still in that slot is a driver-side error reported while the
+/// run is held: it is recorded, and only then is the lock released, so a reader
+/// that finds the run free finds the reason with it. A panic unwinds past the
+/// record and writes nothing, as a signal does, which is how a crash reads.
+fn exiting_from(
+    paths: &RunPaths,
+    lock: OwnershipLock,
+    body: impl FnOnce(&RunPaths, &mut Option<OwnershipLock>, usize) -> Result<Driven>,
+) -> Result<Driven> {
+    // Taken before anything is applied, so every outcome line after it is this
+    // driver's: nothing else writes one while it holds the lock.
+    let answered_from = ChannelState::new(paths).outcomes_mark();
+    let mut held = Some(lock);
+    let driven = body(paths, &mut held, answered_from);
+    if let (Err(error), Some(_)) = (&driven, &held) {
+        record_exit(
+            paths,
+            crate::payload::ExitSettlementWord::Error,
+            Some(error.to_string()),
+            answered_from,
+        );
+    }
+    drop(held);
+    driven
+}
+
+/// Journal this driver's ending: the one `driver-exited` it writes, while it
+/// still holds the run.
+///
+/// A record this process could not write is said on stderr rather than failing
+/// the ending it describes: the run is let go of either way, and refusing to let
+/// go over a record about letting go would leave it claimed by a process that is
+/// ending.
+fn record_exit(
+    paths: &RunPaths,
+    settlement: crate::payload::ExitSettlementWord,
+    reason: Option<String>,
+    answered_from: usize,
+) {
+    let exited = crate::payload::DriverExited {
+        pid: sys::pid(),
+        settlement,
+        reason,
+        last_answered_command: ChannelState::new(paths).highest_answered_after(answered_from),
+    };
+    let written = match serde_json::to_value(&exited) {
+        Ok(Value::Object(payload)) => Journal::open(paths).emit(
+            journal::PipelineKind::DriverExited,
+            journal::labels(&paths.run, None),
+            payload,
+        ),
+        _ => Err(Error::Invalid("the driver-exited payload".to_string())),
+    };
+    if let Err(why) = written {
+        eprintln!(
+            "onepipeline: run '{}' could not record how its driver ended: {why}",
+            paths.run
+        );
+    }
+}
+
+/// [`drive_holding`]'s body, over a lock it takes back out of `held` only to
+/// let go of it — so an error returned with the lock still in `held` is one this
+/// driver reports while it holds the run.
+fn driving(
+    paths: &RunPaths,
+    held: &mut Option<OwnershipLock>,
+    answered_from: usize,
+) -> Result<Driven> {
     let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
     // llmlint: ignore-block[boundary_inputs_validated] graph-reference syntax and
     // contents are oneagentgraph's validation boundary. Here the ledger boundary
@@ -809,9 +886,7 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<Driven> {
     // word on what became of it. It cannot spin, because the queue's cursor only
     // advances, and the release itself is [`let_go_of`]'s.
     let channel = ChannelState::of_run(paths, &launch);
-    let mut lock = lock;
-    let mut departure = Departure::LeftClaimed;
-    loop {
+    let (settlement, departure) = loop {
         // Everything the queue is holding, applied and then recorded — the run's
         // last word has to carry an edit applied after it was written.
         let mut moved = false;
@@ -830,31 +905,41 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<Driven> {
             outcome = graph::state_of(&state.statuses());
             record_result(paths, &state, outcome)?;
         }
+        let settlement = crate::driver::settled(&state, paths);
+        // Always here: only a let-go takes the lock out, and one that hands it
+        // back puts it back.
+        let Some(lock) = held.take() else {
+            return Err(Error::Invalid(format!(
+                "the driver of run '{}' no longer holds it",
+                paths.run
+            )));
+        };
         // And then the run itself, let go of under the handover: the empty check
         // and the release are one section, so an edit accepted after this driver
-        // stopped claiming is an edit accepted from a run that is free.
-        match let_go_of(paths, lock) {
-            LettingGo::Released => {
-                departure = Departure::Released;
-                break;
-            }
-            LettingGo::QueueMoved(back) => lock = back,
+        // stopped claiming is an edit accepted from a run that is free. Its
+        // `driver-exited` is written inside that section, after the last outcome
+        // line and before the release, so it is this driver's last word.
+        let exiting = || record_exit(paths, settlement.into(), None, answered_from);
+        match let_go_of_saying(paths, lock, exiting) {
+            LettingGo::Released => break (settlement, Departure::Released),
+            LettingGo::QueueMoved(back) => *held = Some(back),
             // Nothing was looked at and nothing released, so this driver does not
             // release the run either: it leaves the claim standing over a process
             // that is ending, which the next writer reclaims, rather than opening
             // the window an accepted edit falls into.
-            LettingGo::NotHandedOver(held, why) => {
+            LettingGo::NotHandedOver(claim, why) => {
                 eprintln!(
                     "onepipeline: run '{}' is being left claimed rather than released: {why}. \
                      Its next writer reclaims it — `onepipeline adopt {}` — and any edit on \
                      its queue is applied then",
                     paths.run, paths.run
                 );
-                held.abandon();
-                break;
+                record_exit(paths, settlement.into(), None, answered_from);
+                claim.abandon();
+                break (settlement, Departure::LeftClaimed);
             }
         }
-    }
+    };
     // The authoritative summary write on the detached path, whose only journal
     // appender is this loop; the attached path's observer relay seals again after
     // its own drain. See [`crate::summary::seal`].
@@ -865,6 +950,7 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<Driven> {
     crate::summary::seal(paths);
     Ok(Driven {
         state: outcome,
+        settlement,
         departure,
     })
 }
@@ -874,6 +960,9 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<Driven> {
 pub struct Driven {
     /// The state the graph settled in, whose exit code the binary carries.
     pub state: GraphState,
+    /// The settlement the driver let go of the run at — the word its
+    /// `driver-exited` record carries.
+    pub settlement: crate::driver::Settlement,
     /// Whether the driver let go of the run on its way out.
     pub departure: Departure,
 }
@@ -927,19 +1016,31 @@ pub(crate) enum LettingGo {
 /// conversation. A queue that moved sends the caller back to apply it with the
 /// gate already dropped.
 pub(crate) fn let_go_of(paths: &RunPaths, lock: OwnershipLock) -> LettingGo {
+    let_go_of_saying(paths, lock, || {})
+}
+
+/// [`let_go_of`], running `last` inside the section once the queue is found
+/// empty and before the release — the one moment a writer knows it is letting go
+/// and still holds the run.
+fn let_go_of_saying(paths: &RunPaths, lock: OwnershipLock, last: impl FnOnce()) -> LettingGo {
     let handover = match ledger::Handover::hold(paths) {
         Ok(handover) => handover,
         Err(why) => return LettingGo::NotHandedOver(lock, why),
     };
-    let letting = letting_go_under_the_handover(paths, lock);
+    let letting = letting_go_under_the_handover(paths, lock, last);
     drop(handover);
     letting
 }
 
 /// The section itself, for a caller already inside the handover — apart from its
 /// gate so a test holding the gate can be the other party.
-fn letting_go_under_the_handover(paths: &RunPaths, lock: OwnershipLock) -> LettingGo {
+fn letting_go_under_the_handover(
+    paths: &RunPaths,
+    lock: OwnershipLock,
+    last: impl FnOnce(),
+) -> LettingGo {
     if ChannelState::new(paths).claimable_commands().is_empty() {
+        last();
         lock.release();
         return LettingGo::Released;
     }
@@ -7003,7 +7104,7 @@ mod tests {
                 !submitting.is_finished(),
                 "the submitter was answered while another party was inside the handover"
             );
-            let letting_go = letting_go_under_the_handover(&paths, held);
+            let letting_go = letting_go_under_the_handover(&paths, held, || {});
             assert!(
                 matches!(letting_go, LettingGo::Released),
                 "nothing was on the queue, so the owner had nothing to stay for"
@@ -7019,6 +7120,93 @@ mod tests {
             ChannelState::new(&paths).claimable_commands().is_empty(),
             "an envelope reached the queue of a run nothing was driving"
         );
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    fn exits_of(paths: &RunPaths) -> Vec<Value> {
+        ledger::read_lines(&paths.journal())
+            .iter()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|event| event["kind"] == "driver-exited")
+            .collect()
+    }
+
+    /// **A driver-side error is recorded while the run is still held, and a
+    /// panic records nothing.**
+    ///
+    /// The error half: the body reports an error with the lock still its own, and
+    /// one `error` record carrying the error's own message is written — and the
+    /// lock is released only after it. The panic half is the crash a journey
+    /// cannot stage against the compiled binary: it unwinds past the record, so
+    /// the run is released with nothing on it, which is how a crash reads.
+    #[test]
+    fn a_reported_error_is_recorded_before_the_release_and_a_panic_records_nothing() {
+        let paths = handover_scratch("exit-error");
+        let lock = OwnershipLock::acquire(&paths, "drive").expect("the run is driven");
+        let failed = exiting_from(&paths, lock, |paths, held, _| {
+            assert!(held.is_some() && paths.lock().is_file());
+            Err(Error::Invalid("the queue could not be read".to_string()))
+        });
+        assert!(failed.is_err());
+        let exits = exits_of(&paths);
+        assert_eq!(exits.len(), 1, "{exits:?}");
+        assert_eq!(
+            exits[0]["payload"],
+            json!({
+                "pid": sys::pid(),
+                "settlement": "error",
+                "reason": "invalid: the queue could not be read",
+                "last_answered_command": null,
+            })
+        );
+        assert!(!paths.lock().exists(), "the run was left claimed");
+        std::fs::remove_dir_all(&paths.dir).ok();
+
+        let paths = handover_scratch("exit-panic");
+        let lock = OwnershipLock::acquire(&paths, "drive").expect("the run is driven");
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            exiting_from(&paths, lock, |_, _, _| panic!("a driver bug"))
+        }));
+        assert!(unwound.is_err(), "the panic did not unwind");
+        assert!(
+            exits_of(&paths).is_empty(),
+            "a panicking driver wrote an exit record"
+        );
+        assert!(!paths.lock().exists(), "the unwind left the run claimed");
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    /// **The let-go writes its record inside the handover, before the release.**
+    ///
+    /// What runs as a writer lets go is run with the lock still on disk, and only
+    /// on the let-go that releases: a queue that moved hands the lock back with
+    /// nothing said, because that writer is not leaving yet.
+    #[test]
+    fn the_let_go_says_its_last_word_while_the_run_is_held_and_only_when_it_releases() {
+        let paths = handover_scratch("exit-last-word");
+        let lock = OwnershipLock::acquire(&paths, "drive").expect("the run is driven");
+        let mut said_while_held = None;
+        let letting = let_go_of_saying(&paths, lock, || {
+            said_while_held = Some(paths.lock().is_file());
+        });
+        assert!(matches!(letting, LettingGo::Released));
+        assert_eq!(said_while_held, Some(true));
+        assert!(!paths.lock().exists());
+
+        let lock = OwnershipLock::acquire(&paths, "drive").expect("the run is driven again");
+        ChannelState::new(&paths)
+            .submit(
+                crate::channel::Author::planner(),
+                &[Command::Cancel {
+                    id: "node".to_owned(),
+                    reason: None,
+                }],
+            )
+            .expect("an edit is queued");
+        let mut said = false;
+        let letting = let_go_of_saying(&paths, lock, || said = true);
+        assert!(matches!(letting, LettingGo::QueueMoved(_)));
+        assert!(!said, "a writer the queue kept said its last word anyway");
         std::fs::remove_dir_all(&paths.dir).ok();
     }
 
