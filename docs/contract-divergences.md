@@ -8176,7 +8176,11 @@ its single writer where nothing drives it, under the handover gate `reply`
 already takes, journals `planner-replied` and `completion-requested`, and answers
 entry 64's receipt as `{"reply":0,"state":"delivered","verdict":"delivered"}` —
 `0` because no queue is behind it; a settled run a driver still holds, and any
-other reply to a settled run, is refused as before.
+other uncorrelated reply to a settled run with nothing pending, is refused as
+before. A verdict naming with `--correlation` a question the bus can still bind on
+the run is that question's ruling and is delivered to its asker, settled run or
+not (entry 101): it journals `planner-replied` and never `completion-requested`,
+so it leaves a run that was owed still owed.
 
 The rule is read from the run summary, which `unwatched` may read where it may
 not read the journal (entry 68's cost rule). **Schema 8** adds three fields,
@@ -8433,3 +8437,60 @@ through the compiled binary.
   "status": "done"
 }
 ```
+
+## 101. A correlated ruling on a settled run was taken as the run's own completion, or refused — RESOLVED
+
+**Ruling: a verdict sent with `--correlation C` is the ruling on the question C
+names, delivered to that question's asker, whether the run is live or settled and
+whether or not a driver holds it — decided by the planner who owns the contract in
+ai-orchestrator's plan `channel-reply-completion`.** It is general behaviour of the
+engine's reply submission, so the `reply` verb and the library call
+`verbs::reply` behind it, which onepipeline-ui's
+`POST /api/v2/runs/{run}/channel/reply?correlation=C` makes, answer it alike.
+
+**What was wrong.** A commandless reply to a settled run was refused unless the
+pending slot held something, and the pending slot holds only a blocking question.
+So a `--correlation` naming a **non-blocking** question still outstanding, its
+asker still listening, either closed the run — `{"completion":true,"reason":…}`
+was journalled as the run's own `completion-requested` and the asker never
+received it — or was refused with "has settled". The monitor's end-of-run
+completion-bar question is exactly that shape: raised non-blocking as its
+conversation ends, and answered by correlation once the run has settled. On a
+live run the same verdict *was* delivered, and was journalled as the run asking
+to complete as well.
+
+**The rule.** For a reply carrying a verdict half — `completion`, `message` or
+`reason` — with or without commands:
+
+1. **Correlated, and C names a question the bus can still bind on the run's
+   surfaces queue** — raised and not yet answered, blocking or non-blocking: the
+   verdict is bound to C through the channel's named binding and the listener
+   waiting on C receives it, live or settled, a driver holding the run or none.
+   Answering is a bus append and takes no ownership lock. A blocking question's
+   pending slot is released as before. The receipt is entry 64's
+   `{"reply":<id>,"state":"delivered","verdict":"delivered"}`, exit `0`. The
+   journal gains `planner-replied`, its payload unchanged, and **never**
+   `completion-requested` from that verdict, even `completion: true` with a
+   reason — so a settled run that was owed under "Owed until closed" (entry 98)
+   is still owed after it. The author checks (`declares`, `allows_completion`,
+   `allows`) run first and the reply validator judges the envelope before
+   anything is appended, as before. Commands beside it take their own path
+   unchanged, and a `complete` *command* still journals `completion-requested`;
+   only the correlated verdict half stops doing so.
+2. **Correlated, and C names nothing the bus can bind** — never raised on the
+   run, or already answered: refused at exit `2` naming C, with nothing appended
+   to the channel and nothing journalled, live or settled. Which questions can
+   be bound is the bus's own rule. The one exception stands as it was: a verdict
+   whose own commands answered C (a reconciler finding's edit, or the `retry` or
+   `drop` that discharged C) is appended beside that answer.
+3. **Correlated, with no verdict half**: refused at exit `2`, nothing queued.
+4. **Uncorrelated: unchanged.** On a live run the verdict binds in the channel's
+   order, and `completion: true` with a reason journals `completion-requested`.
+   On a settled run with nothing pending, `completion: true` with a reason closes
+   the run where nothing drives it (receipt `reply: 0`) and is refused where a
+   driver still holds it; any other uncorrelated verdict is refused with "has
+   settled", even with a non-blocking question outstanding and its listener
+   live. With a blocking question pending it answers that question.
+
+`tests/e2e/wake_budget.rs` drives each case through the compiled binary, over
+questions raised through the bus's own library server.
