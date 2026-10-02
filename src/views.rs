@@ -27,7 +27,9 @@
 /// its ledger is intact and `onepipeline adopt` attaches a fresh driver to it —
 /// while a parked node is a planner's own deliberate idle and nothing to
 /// intervene in. Reading one as the other is what this distinction exists to
-/// prevent.
+/// prevent. And a run whose live driver has merely gone quiet is still driven:
+/// nothing has proved that driver over, so it is not a run an adoption may take
+/// out from under its own work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DriverLiveness {
@@ -37,9 +39,14 @@ pub enum DriverLiveness {
     /// journal records that driver letting go of it to fire its run-end hook.
     /// Nothing is driving the run; `adopt` is the way back.
     DriverDead,
-    /// The launch still holds its recorded pid, but nothing is happening — no
-    /// child process, no surface, no ledger write. Alive and not working, so
-    /// treat it as stopped and intervene.
+    /// A live driver that has gone quiet: the driver the record names is not
+    /// proved over on this host, and the run's journal has been quiet past
+    /// [`parked_after_seconds`] with no decision outstanding.
+    ///
+    /// **Still driven.** A quiet journal is not a stopped driver — a relay
+    /// blocked on a slow dispatch reads exactly like this and then writes again —
+    /// so nothing here invites an `adopt`, which would end that live work. An
+    /// operator who judges the driver wedged ends it with `stop`.
     Parked,
     /// A *node* the ledger records as started that nothing is driving.
     /// Deliberately not [`Parked`](Self::Parked), which is the state a planner's
@@ -409,8 +416,8 @@ pub use crate::writeback::{
     ProjectionRecord, ProjectionScope, StoreCall, UpdatedField, WholeBecause,
 };
 
-/// How long a launch may hold its pid without doing anything before it is
-/// reported [`Parked`](DriverLiveness::Parked).
+/// How long a live driver's run may be quiet before it is reported
+/// [`Parked`](DriverLiveness::Parked).
 ///
 /// The default planner-update interval: a run that has not written, surfaced,
 /// or dispatched for a whole interval is not merely between turns.
@@ -705,9 +712,12 @@ impl DriverLiveness {
 
     /// Whether this verdict means nothing is driving the run.
     ///
-    /// `adopt` is the way back from both of the two that do.
+    /// [`DriverDead`](Self::DriverDead) and [`Undriven`](Self::Undriven), and
+    /// never [`Parked`](Self::Parked): a quiet driver that is still alive is still
+    /// driving, and `adopt` is the way back only from the two that are not.
     pub fn is_undriven(self) -> bool {
-        matches!(self, Self::DriverDead | Self::Parked)
+        // llmlint: ignore[changed_behavior_has_e2e] no verb can produce `Undriven`: nothing in this crate constructs it as a run's verdict, so no journey through the binary reaches this arm, and it exists for a consumer of the published enum — which is why `driver::tests::an_undriven_run_is_the_settlement_a_planner_must_intervene_in` holds it through that public API. The `Parked` and `DriverDead` arms are driven end to end in `tests/e2e/driver.rs`, `cancellation.rs` and `watch.rs`.
+        matches!(self, Self::DriverDead | Self::Undriven)
     }
 }
 
@@ -726,9 +736,9 @@ pub fn parked_after_seconds() -> u64 {
 ///
 /// The one question every verdict about a stalled run asks, so the settlement and
 /// the liveness verdict cannot disagree about the same run — a run reported
-/// `PARKED` invites an `adopt` that may end its driver, and doing that to a run
-/// whose next move is already sitting in a planner's queue costs the work it
-/// holds for nothing.
+/// `PARKED` tells an operator its driver may be wedged and offers `stop`, and
+/// doing that to a run whose next move is already sitting in a planner's queue
+/// costs the work it holds for nothing.
 pub fn decision_outstanding(state: &RunState, paths: &RunPaths) -> bool {
     state.awaiting_human_action() || blocking_surface(paths)
 }
@@ -1508,6 +1518,44 @@ struct Standing {
     /// human action is paused — an `attest` moves it — and it has still settled,
     /// its driver having written its result and gone.
     convergence: Convergence,
+    /// The live driver and its silence, which the advice under a `PARKED` run
+    /// names.
+    quiet: Quiet,
+}
+
+/// What the advice under a `PARKED` run names: the live driver, and how long the
+/// run's journal has been quiet.
+#[derive(Debug, Clone, Copy)]
+struct Quiet {
+    /// The driver the record names, where it names one.
+    pid: Option<std::num::NonZeroU32>,
+    /// When the run's journal was last written, in epoch milliseconds.
+    last_write_at: Option<u64>,
+}
+
+impl Quiet {
+    /// The prescription for a `PARKED` run, phrased once for both views that give
+    /// it: the driver is live and quiet, and `stop` is the one way to end it —
+    /// never `adopt`, which would take a live driver's run out from under it.
+    fn advice(self, run: &str) -> String {
+        let driver = self.pid.map_or_else(
+            || "its driver is alive".to_string(),
+            |pid| format!("driver pid {pid} is alive"),
+        );
+        let quiet = self.last_write_at.map_or_else(
+            || "its journal has been quiet".to_string(),
+            |last| {
+                format!(
+                    "its journal has been quiet for {}",
+                    crate::telemetry::duration(sys::now_millis().saturating_sub(last))
+                )
+            },
+        );
+        format!(
+            "{driver} and {quiet}; it is still driving the run — if you judge it wedged, \
+             end it with: onepipeline stop {run}"
+        )
+    }
 }
 
 /// Whether every node of a run's graph reached a state the loop is finished
@@ -1634,6 +1682,10 @@ impl Standing {
             reached,
             complete: graph == GraphStanding::Complete,
             convergence: Convergence::of(graph.converged()),
+            quiet: Quiet {
+                pid: view.launch.driver_pid(),
+                last_write_at: view.state.last_write_at,
+            },
         }
     }
 
@@ -1673,6 +1725,10 @@ impl Standing {
             reached,
             complete: graph == GraphStanding::Complete,
             convergence: Convergence::of(graph.converged()),
+            quiet: Quiet {
+                pid: row.summary.pid,
+                last_write_at: row.summary.last_write_at,
+            },
         }
     }
 
@@ -1693,7 +1749,14 @@ impl Standing {
     /// moved nothing. A paused run needs its decision settled, and is told how.
     /// What is left is a run whose driver went while it had work it could still
     /// move — the run `adopt` exists for.
+    ///
+    /// The one driven run given advice is one whose word is `PARKED`: its live
+    /// driver has gone quiet, and the operator is told so and how to end it if it
+    /// is wedged. One that settled while quiet reads `SETTLED`, and needs nothing.
     fn intervention(&self) -> Option<Intervention<'_>> {
+        if self.word() == DriverLiveness::Parked.as_str() {
+            return Some(Intervention::Quiet(self.quiet));
+        }
         if !self.liveness.is_undriven() {
             return None;
         }
@@ -1705,8 +1768,11 @@ impl Standing {
     }
 }
 
-/// What a run nothing is driving needs before it can move again.
+/// What a run nothing is driving needs before it can move again — or, for a
+/// live driver gone quiet, what an operator may do about it.
 enum Intervention<'a> {
+    /// Nothing: the driver is live, and `stop` ends it if it is wedged.
+    Quiet(Quiet),
     /// A fresh driver, and nothing else: work is waiting on the frontier for it.
     Adopt,
     /// The decision a paused run is held on, settled — or the run stopped.
@@ -2155,22 +2221,31 @@ fn runs_row(root: &Path, summary: &RunSummary, session: &str) -> String {
     // than an invitation to read updates nothing will follow up on. A run
     // that needs no intervention falls through to those updates instead:
     // its work is over, and what is left to say about it is what nobody has
-    // read yet.
-    if let Some(intervention) = standing.intervention() {
-        out.push_str(&match intervention {
-            Intervention::Adopt => format!(
+    // read yet. So does a `PARKED` one, whose live driver will still read them.
+    match standing.intervention() {
+        Some(Intervention::Adopt) => {
+            out.push_str(&format!(
                 "    {} — its ledger is intact; attach a fresh driver with: \
                  onepipeline adopt {}\n",
                 standing.word(),
                 summary.run_id
-            ),
-            Intervention::Decide(decision) => format!(
+            ));
+            return out;
+        }
+        Some(Intervention::Decide(decision)) => {
+            out.push_str(&format!(
                 "    {} — {}\n",
                 standing.word(),
                 settle_or_stop(&summary.run_id, decision)
-            ),
-        });
-        return out;
+            ));
+            return out;
+        }
+        Some(Intervention::Quiet(quiet)) => out.push_str(&format!(
+            "    {} — {}\n",
+            standing.word(),
+            quiet.advice(&summary.run_id)
+        )),
+        None => {}
     }
     let unread = row.unread();
     if let (count, Some(stale)) = (unread.count, unread.oldest_seconds) {
@@ -2252,6 +2327,9 @@ fn status_run_lines(
                 "  {}: nothing is driving this run; adopt it or stop it\n",
                 standing.word()
             ),
+            Intervention::Quiet(quiet) => {
+                format!("  {}: {}\n", standing.word(), quiet.advice(run))
+            }
             Intervention::Decide(decision) => format!(
                 "  {}: nothing is driving this run and {}\n",
                 standing.word(),
@@ -4960,12 +5038,54 @@ mod tests {
         write_run(root, run, sys::pid(), &[stale])
     }
 
+    /// And a quiet live driver is still a driver: `PARKED` is driven, with
+    /// neither an ending nor a pause, and its advice names the live pid and
+    /// `stop` and never `adopt` — on the folded view and on the listing row.
     #[test]
     fn a_live_driver_that_has_gone_quiet_with_nothing_outstanding_reads_as_parked() {
         let root = scratch("quiet-parked");
         let paths = quiet_run(&root, "demo");
         let view = RunView::open(&paths).expect("the run reads");
         assert_eq!(view.liveness(), DriverLiveness::Parked);
+        assert!(!view.liveness().is_undriven());
+        let read = reading(&view);
+        assert_eq!(read.word, "PARKED");
+        assert!(read.driven);
+        assert_eq!(read.ending, None);
+        assert_eq!(read.paused, None);
+
+        let pid = format!("driver pid {} is alive", sys::pid());
+        for rendered in [status(&Survey::of(&root)), runs(&root, false, "session-a")] {
+            assert!(rendered.contains("PARKED"), "{rendered}");
+            assert!(rendered.contains(&pid), "{rendered}");
+            assert!(
+                rendered.contains("its journal has been quiet for "),
+                "{rendered}"
+            );
+            assert!(rendered.contains("onepipeline stop demo"), "{rendered}");
+            assert!(!rendered.contains("adopt"), "{rendered}");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A quiet run whose record names no pid — what an older build left — is
+    /// still `PARKED`, and its advice says its driver is alive without inventing
+    /// a pid, and still offers `stop` rather than `adopt`.
+    #[test]
+    fn a_quiet_run_whose_record_names_no_pid_is_advised_without_one() {
+        let root = scratch("quiet-no-pid");
+        let paths = quiet_run(&root, "demo");
+        without(&paths, &["pid", "started"]);
+        let view = RunView::open(&paths).expect("the run reads");
+        assert_eq!(view.liveness(), DriverLiveness::Parked);
+        let rendered = status(&Survey::of(&root));
+        assert!(
+            rendered.contains("PARKED: its driver is alive and its journal has been quiet for "),
+            "{rendered}"
+        );
+        assert!(rendered.contains("onepipeline stop demo"), "{rendered}");
+        assert!(!rendered.contains("driver pid"), "{rendered}");
+        assert!(!rendered.contains("adopt"), "{rendered}");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -6936,11 +7056,13 @@ mod tests {
     #[test]
     fn a_row_counting_a_status_word_this_build_cannot_read_is_judged_by_its_driver_alone() {
         let root = scratch("unknown-status-word");
-        let summary: RunSummary =
+        let mut summary: RunSummary =
             serde_json::from_str(include_str!("../tests/golden/run-summary-v9.json"))
                 .expect("the summary golden reads");
-        // Quiet since long before now, naming no driver this host can prove gone:
-        // a driver parked, and nothing outstanding to hold that verdict off.
+        // Naming a driver this host proves gone: nothing drives the run, so what
+        // its graph holds is what decides its word.
+        summary.host = Some(sys::hostname());
+        summary.pid = std::num::NonZeroU32::new(dead_pid());
         assert_eq!(summary_standing_word(&root, &summary), "ENDED failed");
 
         let mut unreadable = summary.clone();
@@ -6954,7 +7076,7 @@ mod tests {
         let row = Row::of(&root, &unreadable);
         let standing = Standing::of_row(&row);
         assert_eq!(standing.reached, Reached::Neither);
-        assert_eq!(standing.word(), DriverLiveness::Parked.as_str());
+        assert_eq!(standing.word(), DriverLiveness::DriverDead.as_str());
         assert!(matches!(standing.intervention(), Some(Intervention::Adopt)));
         std::fs::remove_dir_all(&root).ok();
     }
