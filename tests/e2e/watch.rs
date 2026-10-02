@@ -20,8 +20,9 @@ use std::io::Write;
 use serde_json::{json, Value};
 
 use crate::harness::{
-    agent, ended, epoch_seconds, human, plan_of, Run, World, NODE_SETTLED, NOTHING_DRIVING,
-    REFUSED, RENDER_COST_ENV, RUN_CHANGED, SURFACE_WAITING, USAGE_ERROR, WATCH_ELAPSED,
+    agent, end_driver, ended, epoch_seconds, human, plan_of, Run, World, NODE_SETTLED,
+    NOTHING_DRIVING, REFUSED, RENDER_COST_ENV, RUN_CHANGED, SURFACE_WAITING, USAGE_ERROR,
+    WATCH_ELAPSED,
 };
 
 /// A window long enough that the tree before `watch` waited on the bus — which
@@ -3533,27 +3534,17 @@ fn a_watch_armed_on_a_run_nothing_is_driving_ends_when_the_run_moves() {
     let world = World::new("watch-wake-undriven");
     let default = ["--timeout", "120", "--tick-interval", "0"];
 
-    // Parked: a live driver holding a dispatch open that has written nothing
-    // for longer than the bound the watch reads it by, which is a run nothing
-    // is driving. A verdict for the next listener lands in the channel's reply
-    // queue — a record that is not a surface — and the run journals that it
-    // was replied to.
-    let parked_after = [("ONEPIPELINE_PARKED_AFTER_SECONDS", "1")];
+    // A driver gone with its dispatch held open: nothing drives the run, and it
+    // still has work it could move, so it takes a reply. A verdict for the next
+    // listener lands in the channel's reply queue — a record that is not a
+    // surface — and the run journals that it was replied to.
     world.script("hold.wait", "hold");
-    let quiet = running(&world, "watchwakeparked", vec![agent("hold", &[])]);
-    world.until("the run to read as parked", |world| {
-        let mut status = world.cmd(&["status", &quiet]);
-        status.env(parked_after[0].0, parked_after[0].1);
-        let out = status.output().expect("the binary runs");
-        String::from_utf8_lossy(&out.stdout).contains("PARKED")
-    });
-    let replies = length(&world, &quiet, "channel/replies.jsonl");
-    let watching = armed_watch_with(&world, &quiet, &default, &parked_after);
+    let gone = running(&world, "watchwakegone", vec![agent("hold", &[])]);
+    end_driver(&world, &gone);
+    let replies = length(&world, &gone, "channel/replies.jsonl");
+    let watching = armed_watch(&world, &gone, &default);
     world
-        .run_with_stdin(
-            &["reply", &quiet],
-            r#"{"message": "carry on when you can"}"#,
-        )
+        .run_with_stdin(&["reply", &gone], r#"{"message": "carry on when you can"}"#)
         .exited(0);
     let (code, last, said) = finished(watching);
     assert_eq!(code, RUN_CHANGED, "{last}\n{said}");
@@ -3561,7 +3552,7 @@ fn a_watch_armed_on_a_run_nothing_is_driving_ends_when_the_run_moves() {
     assert!(last.get("summary").is_none(), "{last}");
     assert!(said.contains("run-changed"), "{said}");
     assert!(
-        length(&world, &quiet, "channel/replies.jsonl") > replies,
+        length(&world, &gone, "channel/replies.jsonl") > replies,
         "the reply queue did not move, so this was not the move under test"
     );
     world.release("hold.go");

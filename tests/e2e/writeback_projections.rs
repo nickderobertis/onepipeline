@@ -24,7 +24,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, plan_of, project_id, World, CANCEL_GRACE_ENV, RENDEZVOUS_SECONDS_ENV};
+use crate::harness::{
+    agent, end_driver, plan_of, project_id, World, CANCEL_GRACE_ENV, RENDEZVOUS_SECONDS_ENV,
+};
 
 /// Entry 73's block, which is where the record's path is written down.
 fn proposed() -> Value {
@@ -245,15 +247,8 @@ fn edit(world: &World, run: &str, command: Value) {
 
 /// End the run's quiet driver and adopt it, so a second driver projects the same run.
 fn adopted(world: &World, run: &str) {
-    world.until("the quiet driver to be reported parked", |world| {
-        let mut status = world.cmd(&["status", run]);
-        status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-        let out = status.output().expect("the binary runs");
-        String::from_utf8_lossy(&out.stdout).contains("PARKED")
-    });
-    let mut adopt = world.cmd(&["adopt", run, "--detach"]);
-    adopt.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-    world.run_on(adopt, "adopt --detach").exited(0);
+    end_driver(world, run);
+    world.run(&["adopt", run, "--detach"]).exited(0);
 }
 
 /// What a destination says when it declines a write or a read, in the store's own shape.

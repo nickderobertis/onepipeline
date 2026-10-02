@@ -394,7 +394,7 @@ fn a_document_at_the_schema_before_this_build_is_refused_refolded_and_left_curre
 ///
 /// Both verdicts are read from the **host** as the row renders — neither is on
 /// the document — and the pair is what a stored `ACTIVE` would have collapsed:
-/// `PARKED` is a live pid with nothing happening, and `DRIVER DEAD` is a run
+/// `PARKED` is a live driver that has gone quiet, and `DRIVER DEAD` is a run
 /// nothing holds. `tests/e2e/driver.rs` holds the same distinction on the detail
 /// read.
 #[test]
@@ -439,9 +439,13 @@ fn the_listing_tells_a_driver_this_host_can_prove_is_gone_from_one_merely_quiet(
             "a live driver that stopped writing was reported dead: {}",
             rendered.stdout
         );
+        // Still driven by that live driver, so it is told how to end one judged
+        // wedged — and never to adopt it, which would end the work it holds.
         assert!(
-            rendered.stdout.contains("adopt"),
-            "a parked run was not told the way back: {}",
+            rendered.stdout.contains("still holds this run")
+                && rendered.stdout.contains("onepipeline stop quiet")
+                && !rendered.stdout.contains("onepipeline adopt"),
+            "a parked run was not told it is still driven: {}",
             rendered.stdout
         );
     }

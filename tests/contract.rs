@@ -7121,7 +7121,7 @@ const RULINGS: &[(&str, &str)] = &[
     ("24.", "NodeControls"),
     ("25.", "drive-run RUN"),
     ("26.", "nothing else able to move"),
-    ("27.", "ending that parked driver politely"),
+    ("27.", "ending that driver politely"),
     ("28.", "`attempt`, `attempts`"),
     ("29.", "inherits both"),
     ("30.", "--launch-config FILE"),
@@ -7205,6 +7205,11 @@ const RULINGS: &[(&str, &str)] = &[
         "106.",
         "**A plan spanning sources is a home project plus the member projects its \
          `onetaskgraph.members` names**",
+    ),
+    // The driver contract's narrowing of `PARKED` to a live driver `adopt` refuses.
+    (
+        "107.",
+        "**`PARKED` is a live driver that has gone quiet, not one an adoption may displace**",
     ),
 ];
 

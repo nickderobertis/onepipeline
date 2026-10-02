@@ -29,7 +29,8 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::harness::{
-    agent, plan_of, repo_file, Rendezvous, World, REFUSED, RENDEZVOUS_SECONDS_ENV, SCRIPTED_KEY,
+    agent, end_driver, plan_of, repo_file, Rendezvous, World, REFUSED, RENDEZVOUS_SECONDS_ENV,
+    SCRIPTED_KEY,
 };
 
 /// What entry 71 of the divergence record proposes, which is where the three
@@ -309,7 +310,7 @@ fn an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arit
     );
 
     // The launching driver's updates are let go at once, so they land and the run is
-    // quiet: nothing has failed yet, and the driver is one an adoption may end. There
+    // quiet: nothing has failed yet, and the driver may be ended for an adoption. There
     // are two of them — the claim a driver projects before its first dispatch, which
     // writes the held node `queued`, and the projection of that node running.
     meeting.arrived().release();
@@ -319,23 +320,12 @@ fn an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arit
     });
     assert!(!a_projection_failed(&world, run));
 
-    // Adopted from a shell whose environment names a far larger budget, with the
-    // quiet driver ended for it — the same taking-over `driver.rs` drives, once
-    // the view an operator reads calls the run parked.
-    world.until("the quiet driver to be reported parked", |world| {
-        let mut status = world.cmd(&["status", run]);
-        status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-        let out = status.output().expect("the binary runs");
-        String::from_utf8_lossy(&out.stdout).contains("PARKED")
-    });
+    // Adopted from a shell whose environment names a far larger budget, once the
+    // quiet driver has gone — the same taking-over `driver.rs` drives.
+    end_driver(&world, run);
     let mut adopt = world.cmd(&["adopt", run, "--detach"]);
-    adopt
-        .env(spelling("environment"), "1000")
-        .env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-    world
-        .run_on(adopt, "adopt --detach")
-        .exited(0)
-        .err_has("ending it to adopt the run");
+    adopt.env(spelling("environment"), "1000");
+    world.run_on(adopt, "adopt --detach").exited(0);
     assert_eq!(
         world.run_json(run, "launch.json")["writeback_item_budget"],
         Value::from(1),
@@ -523,20 +513,10 @@ fn a_record_an_older_build_wrote_is_adopted_and_its_update_runs_under_the_shippe
     std::fs::write(&launch, older.to_string()).expect("the older record is written");
     // llmlint: ignore-end[tests_mirror_real_usage]
 
-    world.until("the quiet driver to be reported parked", |world| {
-        let mut status = world.cmd(&["status", run]);
-        status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-        let out = status.output().expect("the binary runs");
-        String::from_utf8_lossy(&out.stdout).contains("PARKED")
-    });
+    end_driver(&world, run);
     let mut adopt = world.cmd(&["adopt", run, "--detach"]);
-    adopt
-        .env(spelling("environment"), "1000")
-        .env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-    world
-        .run_on(adopt, "adopt --detach")
-        .exited(0)
-        .err_has("ending it to adopt the run");
+    adopt.env(spelling("environment"), "1000");
+    world.run_on(adopt, "adopt --detach").exited(0);
     assert_eq!(
         recorded_budget(&world, run),
         Value::from(0),

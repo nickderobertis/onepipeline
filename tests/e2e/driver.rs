@@ -12,7 +12,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::dispatch::OBSERVER_RESTARTS_ENV;
-use crate::harness::{agent, human, plan_of, rows, World, NOTHING_DRIVING, REFUSED};
+use crate::harness::{
+    a_parked_run_is_read_as_driven, a_watch_armed_active_outlasts_the_run_turning_parked, agent,
+    end_driver, human, plan_of, rows, until_parked, World, NOTHING_DRIVING, REFUSED,
+};
 // The journeys that end a process, and those that assert against a process table,
 // are `#[cfg(unix)]`, so what only they reach for is imported on the same terms.
 // Both names have to be: `end_process` is `#[cfg(unix)]` in `harness.rs`, so an
@@ -867,29 +870,50 @@ fn an_attach_returns_awaiting_planner_when_a_decision_point_is_all_that_is_left(
     );
 }
 
+/// A live driver that has stopped writing reads `PARKED` — and is still driving
+/// the run.
+///
+/// Journal silence cannot tell a wedge from a long publication gate or a quiet
+/// release wait, so the verdict says only that the live driver has gone quiet:
+/// every reader calls the run driven, the advice names the driver and how long it
+/// has been quiet and offers `stop` for one an operator judges wedged, and `adopt`
+/// — which would end the work it holds — refuses it.
 #[test]
-fn a_live_driver_that_has_stopped_writing_reads_as_parked_rather_than_dead() {
+fn a_live_driver_that_has_stopped_writing_reads_as_parked_and_still_driven() {
     let world = World::new("driver-parked");
     // The driver is alive with a dispatch held open, so its pid proves nothing
     // about progress — which is the whole distinction `PARKED` exists to draw.
     world.script("build.wait", "hold");
     let run = start_detached(&world, "quiet", vec![agent("build", &[])]);
-
-    world.until("the run to be reported parked", |world| {
-        let mut status = world.cmd(&["status", &run]);
-        // A second of silence is enough to call it: what is under test is the
-        // verdict, not the threshold.
-        status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-        let out = status.output().expect("the binary runs");
-        String::from_utf8_lossy(&out.stdout).contains("PARKED")
+    world.until("the held node to be dispatched", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
     });
 
-    // Parked is not dead: the ledger is intact and the way back is the same.
-    let mut parked = world.cmd(&["status", &run]);
-    parked.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-    let rendered = String::from_utf8_lossy(&parked.output().expect("runs").stdout).to_string();
-    assert!(!rendered.contains("DRIVER DEAD"), "{rendered}");
-    assert!(rendered.contains("adopt"), "{rendered}");
+    until_parked(&world, &run);
+    a_parked_run_is_read_as_driven(&world, &run);
+
+    // The driver the adoption refused is still the one driving: let its work go
+    // and the run it held completes, with no second dispatch of the node.
+    world.release("build.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
+    assert_eq!(world.events_of(&run, "node-dispatched").len(), 1);
+}
+
+/// A watch armed while the run read `ACTIVE` outlives its driver going quiet:
+/// `nothing-driving` is the run losing its driver, and a live driver turning
+/// `PARKED` has not.
+#[test]
+fn a_watch_armed_on_an_active_run_does_not_end_nothing_driving_when_it_turns_parked() {
+    let world = World::new("driver-parked-watch");
+    world.script("build.wait", "hold");
+    let run = start_detached(&world, "quietwatch", vec![agent("build", &[])]);
+    world.until("the held node to be dispatched", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    a_watch_armed_active_outlasts_the_run_turning_parked(&world, &run);
     world.release("build.go");
 }
 
@@ -936,62 +960,6 @@ fn a_quiet_driver_holding_a_decision_point_reads_as_active_rather_than_parked() 
         "a run waiting on a person is not reported active: {rendered}"
     );
     world.release("build.go");
-}
-
-#[test]
-fn a_parked_run_is_adoptable_as_much_as_a_dead_one_is() {
-    let world = World::new("driver-adopt-parked");
-    // Its driver is alive with a dispatch held open, so this is the *other*
-    // undriven verdict: nothing has proved the process gone, and nothing is
-    // happening either.
-    world.script("build.wait", "hold");
-    let run = start_detached(&world, "idle", vec![agent("build", &[])]);
-    world.until("the run to be reported parked", |world| {
-        let mut status = world.cmd(&["status", &run]);
-        status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-        let out = status.output().expect("the binary runs");
-        String::from_utf8_lossy(&out.stdout).contains("PARKED")
-    });
-
-    // The hint a parked run prints has to be a hint that works: an `adopt` that
-    // refused here would leave the only offered way back closed. It stays
-    // attached until the run settles, so the work it picks up is released from
-    // beside it: the node the dead driver left in flight is re-dispatched by the
-    // fresh one, and this is that dispatch being let go.
-    let mut adopt = world.cmd(&["adopt", &run]);
-    adopt.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-    let adopted = std::thread::scope(|scope| {
-        scope.spawn(|| {
-            world.until("the fresh driver to re-dispatch the held node", |world| {
-                world.events_of(&run, "node-dispatched").len() >= 2
-            });
-            world.release("build.go");
-        });
-        adopt.output().expect("the binary runs")
-    });
-    assert!(
-        !String::from_utf8_lossy(&adopted.stderr).contains("still being driven"),
-        "a parked run refused the adoption its own status line offers: {}",
-        String::from_utf8_lossy(&adopted.stderr)
-    );
-    assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
-    // Taking the run over ended the driver that was holding it: the loop an
-    // adoption starts is the run's single writer, so the parked one could not
-    // stay.
-    assert!(
-        String::from_utf8_lossy(&adopted.stderr).contains("ending it to adopt the run"),
-        "the parked driver was left holding the run: {}",
-        String::from_utf8_lossy(&adopted.stderr)
-    );
-    // And the work the dead driver had in flight was offered to the fresh one: a
-    // node left recorded as running is a node nothing runs and nothing settles,
-    // which is a loop that spins on it for good.
-    assert_eq!(
-        world.run_json(&run, "result.json")["state"],
-        "complete",
-        "the adopted run did not finish the work it took over:\n{}",
-        world.dump()
-    );
 }
 
 #[test]
@@ -1081,28 +1049,18 @@ fn a_detached_adoption_leaves_a_driver_holding_the_run_its_record_names() {
     world.script("build.wait", "hold");
     let (run, displaced) =
         start_detached_announcing(&world, "handed-over", vec![agent("build", &[])]);
-    // Parked only says the driver has written nothing for the bound, which a
-    // slow driver also reads as between `node-ready` and its dispatch. An
-    // adoption then would displace a driver that never dispatched, and the
-    // re-dispatch below would be the only one.
+    // Ended only once it has dispatched: a driver ended between `node-ready`
+    // and its dispatch never dispatched, and the re-dispatch below would be the
+    // only one.
     world.until("the held node to be dispatched", |world| {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
-    world.until("the run to be reported parked", |world| {
-        let mut status = world.cmd(&["status", &run]);
-        status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-        let out = status.output().expect("the binary runs");
-        String::from_utf8_lossy(&out.stdout).contains("PARKED")
-    });
+    // The driver goes, leaving its held dispatch behind: a live one, however
+    // quiet, is still driving the run and the adoption would refuse it.
+    assert_eq!(end_driver(&world, &run), displaced);
 
-    let mut adopt = world.cmd(&["adopt", &run, "--detach"]);
-    adopt.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-    let adopted = world.run_on(adopt, "adopt --detach");
+    let adopted = world.run(&["adopt", &run, "--detach"]);
     adopted.exited(0);
-    // The parked driver was ended by the process the operator is watching, so
-    // the reason a run was taken over is on the terminal that took it over and
-    // not in a log nobody is reading.
-    adopted.err_has("ending it to adopt the run");
 
     // The launch record a detached launch prints, for the same reason: an
     // operator who detached has to be told what to address.

@@ -20,11 +20,10 @@
 // journeys are about. `dispatch.rs` drives the same cancellation through the *real*
 // sibling. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, plan_of, World, CANCEL_GRACE_ENV, REFUSED};
-// The crate's own constant, because `views` is part of the published surface:
-// the threshold a run is reported parked past is what makes an adoption
-// reachable inside a test's patience, and a copy here could go stale silently.
-use onepipeline::views::PARKED_AFTER_ENV;
+use crate::harness::{
+    a_parked_run_is_read_as_driven, agent, end_driver, plan_of, until_parked, World,
+    CANCEL_GRACE_ENV, REFUSED,
+};
 use serde_json::{json, Value};
 
 /// A deadline short enough for a journey to wait through.
@@ -529,23 +528,16 @@ fn an_adoption_ends_a_cancellation_the_driver_it_replaced_was_waiting_on() {
     });
 
     // The dispatch it is waiting on is held open and silent, so the driver has
-    // nothing left to write and the run becomes adoptable.
-    // Read off the run's liveness rather than its word: with its only node parked
-    // and its driver parked, the run reads as ended `unfinished`.
-    world.until("the run to be reported parked", |world| {
-        let mut status = world.cmd(&["status", &run, "--json"]);
-        status.env(PARKED_AFTER_ENV, "1");
-        let out = status.output().expect("the binary runs");
-        String::from_utf8_lossy(&out.stdout).contains("\"liveness\":\"PARKED\"")
-    });
-    let mut adopt = world.cmd(&["adopt", &run]);
-    adopt.env(PARKED_AFTER_ENV, "1");
-    let adopted = adopt.output().expect("the binary runs");
-    assert!(
-        String::from_utf8_lossy(&adopted.stderr).contains("ending it to adopt the run"),
-        "the driver holding the cancellation was left running: {}",
-        String::from_utf8_lossy(&adopted.stderr)
-    );
+    // nothing left to write and goes quiet. Its only node is parked, so every
+    // node has settled — and the run is still driven, by the live driver waiting
+    // on that dispatch: it reads `PARKED`, with neither an ending nor a pause,
+    // and an adoption is refused rather than ending the wait.
+    until_parked(&world, &run);
+    a_parked_run_is_read_as_driven(&world, &run);
+
+    // Only a driver that has gone leaves the run to an adoption.
+    end_driver(&world, &run);
+    world.run(&["adopt", &run]);
     assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
 
     // Nothing is converging on that stop any more, and nothing says it is. The

@@ -133,7 +133,7 @@ fn read_as(world: &World, run: &str, word: &str) -> Value {
     );
     assert_eq!(
         reading["driven"],
-        json!(!matches!(liveness, "DRIVER DEAD" | "PARKED")),
+        json!(liveness != "DRIVER DEAD"),
         "{reading}"
     );
     assert!(

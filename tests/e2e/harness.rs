@@ -6171,3 +6171,219 @@ pub fn now_millis() -> u64 {
         .expect("a clock after the epoch");
     u64::try_from(since.as_millis()).expect("milliseconds since the epoch fit")
 }
+
+/// Read a run until `status` calls it `PARKED`, with the threshold at a second.
+///
+/// What a journey about a live, quiet driver waits for before asking anything
+/// else: its driver has gone quiet past the bound and nothing is outstanding.
+pub fn until_parked(world: &World, run: &str) {
+    world.until("the run to be reported parked", |world| {
+        parked_reading(world, run, "1")["liveness"] == "PARKED"
+    });
+}
+
+/// `status <RUN> --json`, read with the parked threshold at `after` seconds.
+fn parked_reading(world: &World, run: &str, after: &str) -> Value {
+    let mut status = world.cmd(&["status", run, "--json"]);
+    status.env(onepipeline::views::PARKED_AFTER_ENV, after);
+    world.run_on(status, "status --json").json()
+}
+
+/// What every reader owes a run whose recorded driver is alive on this host and
+/// whose journal has gone quiet past the threshold with nothing outstanding:
+/// `PARKED` is a live driver, so the run is **driven** and not one an adoption
+/// may take over.
+///
+/// - `status` and `runs` read it `PARKED`, and the advice under it names the live
+///   driver's pid, how long the journal has been quiet, and `stop` — never
+///   `adopt`;
+/// - `status --json` reads it driven, with neither an ending nor a pause;
+/// - `adopt` refuses it, naming the live driver, and leaves that driver holding it.
+///
+/// Asked of a run [`until_parked`] has already seen parked.
+pub fn a_parked_run_is_read_as_driven(world: &World, run: &str) {
+    let pid = world.run_json(run, "launch.json")["pid"]
+        .as_u64()
+        .expect("the launch record names the live driver");
+    let parked = [(onepipeline::views::PARKED_AFTER_ENV, "1")];
+    let with_parked = |args: &[&str]| {
+        let mut command = world.cmd(args);
+        command.envs(parked);
+        world.run_on(command, &args.join(" "))
+    };
+
+    let reading = parked_reading(world, run, "1");
+    assert_eq!(reading["liveness"], "PARKED", "{reading}");
+    assert_eq!(reading["word"], "PARKED", "{reading}");
+    assert_eq!(reading["driven"], json!(true), "{reading}");
+    assert_eq!(reading["ending"], Value::Null, "{reading}");
+    assert_eq!(reading["paused"], Value::Null, "{reading}");
+
+    // The advice is one line, read on its own: a held node's own line may well
+    // say `adoption`, which is a node's release policy and not this advice.
+    let status = with_parked(&["status", run]);
+    status.exited(0);
+    let advice = status
+        .stdout
+        .lines()
+        .find(|line| line.starts_with("  PARKED: "))
+        .unwrap_or_else(|| panic!("`status` gave a parked run no advice:\n{}", status.stdout));
+    for said in [
+        format!("driver pid {pid} still holds this run and its journal has been quiet for "),
+        format!("onepipeline stop {run}"),
+    ] {
+        assert!(
+            advice.contains(&said),
+            "`status` advice does not say {said:?}:\n{}",
+            status.stdout
+        );
+    }
+    assert!(
+        !advice.contains("onepipeline adopt"),
+        "`status` invited an adoption of a live driver:\n{}",
+        status.stdout
+    );
+    let runs = with_parked(&["runs"]);
+    runs.exited(0);
+    let row: Vec<&str> = runs
+        .stdout
+        .lines()
+        .skip_while(|line| {
+            !line
+                .trim_start_matches(['*', ' '])
+                .starts_with(&format!("{run} "))
+        })
+        .take(2)
+        .collect();
+    assert!(
+        row.first().is_some_and(|line| line.contains("PARKED")),
+        "`runs` did not read the run parked:\n{}",
+        runs.stdout
+    );
+    let advice = row.get(1).copied().unwrap_or_default();
+    for said in [
+        format!("PARKED — driver pid {pid} still holds this run"),
+        "quiet for ".to_owned(),
+        format!("onepipeline stop {run}"),
+    ] {
+        assert!(
+            advice.contains(&said),
+            "`runs` advice does not say {said:?}:\n{}",
+            runs.stdout
+        );
+    }
+    assert!(
+        !advice.contains("onepipeline adopt"),
+        "`runs` invited an adoption of a live driver:\n{}",
+        runs.stdout
+    );
+
+    // Detached, so an adoption this build wrongly accepted returns rather than
+    // driving the run to its end inside the journey.
+    let adopt = with_parked(&["adopt", run, "--detach"]);
+    adopt
+        .exited(REFUSED)
+        .err_has(&format!("is still being driven by driver pid {pid}"))
+        .err_lacks("ending it to adopt the run");
+    assert!(
+        world.events_of(run, "driver-adopted").is_empty(),
+        "a refused adoption took the run over anyway"
+    );
+    assert_eq!(
+        world.run_json(run, "launch.json")["pid"],
+        json!(pid),
+        "the refused adoption rewrote who drives the run"
+    );
+    assert!(
+        !process_ended(u32::try_from(pid).expect("a pid fits")),
+        "the refused adoption ended the live driver"
+    );
+}
+
+/// A watch armed on a run while it read `ACTIVE` does not end `nothing-driving`
+/// when the run turns `PARKED`: a live driver going quiet is not the run losing
+/// its driver.
+///
+/// The threshold is a few seconds here rather than one, so the watch can be
+/// armed inside it: a reply journals a fresh record, the watch arms, and a read
+/// after arming still says `ACTIVE` — quiet only grows between writes, so it was
+/// `ACTIVE` when the watch armed too. The watch then outlives the run turning
+/// `PARKED` and ends at its own deadline.
+pub fn a_watch_armed_active_outlasts_the_run_turning_parked(world: &World, run: &str) {
+    const AFTER: &str = "5";
+    let watchers = || {
+        std::fs::read_dir(world.run_file(run, "watchers")).map_or(0, |entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+                .count()
+        })
+    };
+    let before = watchers();
+    world
+        .run_with_stdin(&["reply", run], r#"{"message": "carry on"}"#)
+        .exited(0);
+    let mut watch = world.cmd(&[
+        "watch",
+        run,
+        "--until",
+        "nothing-driving",
+        "--timeout",
+        "25",
+        "--tick-interval",
+        "0",
+    ]);
+    watch.env(onepipeline::views::PARKED_AFTER_ENV, AFTER);
+    let watching = watch
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the watch starts");
+    world.until("the watch to arm", |_| watchers() > before);
+    let armed = parked_reading(world, run, AFTER);
+    assert_eq!(
+        armed["liveness"], "ACTIVE",
+        "the run was not ACTIVE when the watch armed, so this proves nothing: {armed}"
+    );
+    world.until("the run to turn parked under the watch", |world| {
+        parked_reading(world, run, AFTER)["liveness"] == "PARKED"
+    });
+
+    let output = watching.wait_with_output().expect("the watch exits");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let last: Value = serde_json::from_str(stdout.lines().last().unwrap_or_default())
+        .unwrap_or_else(|error| panic!("the watch's last line is not JSON ({error}):\n{stdout}"));
+    assert_eq!(
+        last["condition"],
+        json!("elapsed"),
+        "a watch armed on a driven run ended when its driver went quiet: {last}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.status.code(), Some(WATCH_ELAPSED), "{last}");
+}
+
+/// End a run's driver outright and wait until it is gone, leaving what it started
+/// running — the state an adoption takes a run back from — and answer its pid.
+///
+/// Not `stop`, which records an ending the adoption would then be reading, and
+/// no longer by waiting for the run to read `PARKED`: a live driver gone quiet is
+/// still driving its run, and `adopt` refuses it. Forcefully on both platforms,
+/// and on Windows without `/T`, so the tree it started outlives it there too.
+pub fn end_driver(world: &World, run: &str) -> u32 {
+    let pid = world.run_json(run, "launch.json")["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .expect("the launch record names the driver");
+    #[cfg(unix)]
+    end_process(pid);
+    #[cfg(windows)]
+    {
+        Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .stdout(Stdio::null())
+            .status()
+            .expect("this host ends a process it owns");
+        world.until("the driver to be gone", |_| process_ended(pid));
+    }
+    pid
+}
