@@ -1011,6 +1011,13 @@ fn a_driver_that_dies_during_the_wait_ends_it_nothing_driving() {
     }
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] its eight-second wait is
+// the behaviour under test — a watch armed on an `ACTIVE` run has to outlast the run turning
+// `PARKED` to show it does not end `nothing-driving` — and it measured 9.4s a run over five
+// stress runs. The code it guards is `views::DriverLiveness` and `src/watch.rs`, under the
+// crate's own edge, so a narrower project would drop it out of `nx affected` for the changes
+// it exists to catch; the `onepipeline-note-journeys` edge belongs to this project already,
+// as `mod watch` in `tests/e2e/main.rs` records.
 /// A live driver that goes quiet while a watch waits is still driving the run:
 /// a watch armed while the run read `ACTIVE` does not end `nothing-driving` when
 /// the run turns `PARKED`, and runs out its own bound instead.
@@ -1078,6 +1085,7 @@ fn a_driver_that_goes_quiet_during_the_wait_does_not_end_it_nothing_driving() {
     assert_eq!(reading["driven"], true, "{reading}");
     world.release("build.go");
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// What happens **while** the watch is already blocking reaches it as it happens.
 ///
