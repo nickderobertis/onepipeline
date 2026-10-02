@@ -141,8 +141,20 @@ fn every_envelope_the_reconciler_cannot_decode_is_answered_and_nothing_of_it_app
         run,
         &json!({"id": next + 1, "author": "monitor", "commands": [cancelled]}),
     );
+    // And the corners of a record's own fields: an author no build reads, a
+    // command that is not an object, and a command list that is empty.
+    appended_beneath_the_layout(
+        &world,
+        run,
+        &json!({"id": next + 2, "author": 7, "commands": ["drop sign-off", undecodable_drop]}),
+    );
+    appended_beneath_the_layout(
+        &world,
+        run,
+        &json!({"id": next + 3, "author": ["monitor"], "commands": []}),
+    );
     let records = queued(&world, run);
-    assert_eq!(records.len(), 6, "{records:?}");
+    assert_eq!(records.len(), 8, "{records:?}");
     assert!(
         world.command_outcomes(run).is_empty(),
         "something answered before a driver held the run"
@@ -214,18 +226,32 @@ fn every_envelope_the_reconciler_cannot_decode_is_answered_and_nothing_of_it_app
     for (record, reason) in records.iter().zip(&reasons) {
         let author = record["author"].as_str().unwrap_or("planner");
         match record["commands"].as_array() {
-            Some(commands) => {
+            Some(commands) if !commands.is_empty() => {
                 for command in commands {
+                    let command = if command.is_object() {
+                        command.clone()
+                    } else {
+                        json!({"op": "unreadable", "value": command})
+                    };
                     expected.push(json!({"author": author, "command": command, "reason": reason}));
                 }
             }
-            None => expected.push(json!({"author": author,
+            _ => expected.push(json!({"author": author,
                 "command": {"op": "unreadable", "value": record}, "reason": reason})),
         }
     }
     assert_eq!(rejected, expected);
-    assert_eq!(rejected.len(), 7);
+    assert_eq!(rejected.len(), 10);
     assert_eq!(rejected[6]["author"], "monitor");
+    assert_eq!(
+        rejected[7],
+        json!({"author": "planner", "command": {"op": "unreadable", "value": "drop sign-off"},
+               "reason": reasons[6]})
+    );
+    assert_eq!(
+        rejected[9]["command"],
+        json!({"op": "unreadable", "value": records[7]})
+    );
 
     // One non-blocking surface per envelope, naming its id and its reason.
     let surfaces = rejected_surfaces(&world, run);
@@ -339,6 +365,22 @@ fn a_superseded_human_action_is_retired_with_a_drop_that_states_why() {
             {"op": "drop", "id": id, "dependents": "detach", "reason": reason}
         ]})
     };
+
+    // `cancel` is not how a waiting human action is put down, and its refusal
+    // names the two edits that are; any other node's refusal is as it was.
+    let cancel = |id: &str| json!({"version": 3, "commands": [{"op": "cancel", "id": id}]});
+    world
+        .run_with_stdin(&["reply", run], &cancel("sign-off").to_string())
+        .exited(REFUSED)
+        .err_has(
+            "cancel: node 'sign-off' is waiting, not pending or running: a waiting human action \
+             is completed with `attest`, or retired with `drop` (its `dependents` `detach` or \
+             `drop`, and an optional `reason`)",
+        );
+    world
+        .run_with_stdin(&["reply", run], &cancel("build").to_string())
+        .exited(REFUSED)
+        .err_has("cancel: node 'build' is done, not pending or running\n");
 
     // `reply` refuses a blank reason by name, and accepts a stated one.
     world
