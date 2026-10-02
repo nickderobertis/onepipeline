@@ -302,6 +302,7 @@ mod tests {
                 id: "tasks/build.md".into(),
                 key: key.map(str::to_owned),
                 title: "Build it".into(),
+                source: None,
             }),
             ..Node::default()
         }

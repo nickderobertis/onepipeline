@@ -154,6 +154,8 @@ mod maintenance;
 // `src/` can move.
 mod malformed_envelopes;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] these journeys read a plan out of two sources, run it and write each settlement back where its task lives, exercising `taskgraph`, `writeback`, `edits` and `driver` together, so the crate is the narrowest edge they can honestly sit behind; same grounds as `mod delivers` above.
+mod multi_source;
 mod node_validator;
 mod older_launch_record;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
