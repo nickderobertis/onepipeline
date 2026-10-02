@@ -127,7 +127,7 @@ done < <(tests_matching "$failed_re" "$work/step.log")
 
 if [ "${#failed[@]}" -eq 0 ]; then
   if [ "$unrun" -eq 1 ] || grep -qE '^error: test run failed' "$work/step.log"; then
-    warn "the test run failed and names no failed test, so there is nothing to re-run. The job's verdict stays failed."
+    warn "the test run failed and names no failed test, so there is nothing to re-run. The job's verdict stays failed: what ended the run is in the step's output above, and a line above names it when it is tests left unrun."
     exit 1
   fi
   say "$log names no failed test, so there is nothing to re-run (the step failed outside the test run; its own output above says where)."
@@ -152,9 +152,12 @@ for run in $(seq 1 "$times"); do
   out="$work/rerun-$run.log"
   grouped && echo "::group::re-run $run of $times: nextest output"
   CARGO_TERM_QUIET=false "${runner[@]}" --no-fail-fast --status-level pass \
-    --final-status-level none -E "$filter" 2>&1 | tee "$out"
-  exited="${PIPESTATUS[0]}"
+    --final-status-level none -E "$filter" >"$out.stdout" 2>"$out.stderr"
+  exited=$?
+  cat "$out.stdout"
+  cat "$out.stderr" >&2
   grouped && echo "::endgroup::"
+  cat "$out.stdout" "$out.stderr" >"$out"
   plain "$out" >"$out.plain"
   rebuilt="$(sed -nE 's/^[[:space:]]*Compiling ([^ ]+).*/\1/p' "$out.plain" | tr '\n' ' ')"
   if [ -n "$rebuilt" ]; then
@@ -171,7 +174,7 @@ for run in $(seq 1 "$times"); do
       say "re-run $run of $times: $test passed"
     else
       unran[i]=$((unran[i] + 1))
-      say "re-run $run of $times: $test did not run (the re-run exited with status $exited; its output is above)"
+      say "re-run $run of $times: $test did not run (the re-run exited with status $exited; its output above says why, and ${runner[*]} -E '$filter' repeats it)"
     fi
     i=$((i + 1))
   done
@@ -184,7 +187,7 @@ for test in "${failed[@]}"; do
   count="${fails[i]}"
   ran=$((times - unran[i]))
   if [ "$ran" -eq 0 ]; then
-    reading="did not run in any re-run, so this says nothing about it; the re-runs' output above says why"
+    reading="did not run in any re-run, so this says nothing about it: fix what the re-runs' output above names, then run ${runner[*]} -E 'binary_id(=$binary) and test(=$name)'"
   elif [ "$count" -eq "$ran" ]; then
     reading="fails every time on this build, which reads as a regression: reproduce it with cargo nextest run -E 'binary_id(=$binary) and test(=$name)' and fix it"
   elif [ "$count" -eq 0 ]; then

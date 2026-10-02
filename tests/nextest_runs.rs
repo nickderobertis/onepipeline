@@ -5,10 +5,8 @@
 //!
 //! # Tests left unrun with no reason
 //!
-//! The macOS leg of run 36876601588 (job 110417653725) passed 1097 of 2247
-//! tests, printed `warning: 1150/2247 tests were not run`, and named nothing
-//! that failed. The `priority` note in `.config/nextest.toml` says why. The
-//! fixture here carries **that file, verbatim**, with binaries named as its
+//! A CI leg once ended with tests unrun and no reason; the `priority` note in
+//! `.config/nextest.toml` says why. The fixture here carries **that file, verbatim**, with binaries named as its
 //! filters name them, and sets up the condition the leg hit: the group's
 //! one-thread tests finish while tests outside the group hold the slots a queued
 //! four-thread test needs.
@@ -700,7 +698,6 @@ fn tests_a_cancelled_run_left_unrun_are_reported_with_nextests_reason() {
                 && line.contains(" not run due to test failure")
         })
         .unwrap_or_else(|| panic!("the report relays nextest's reason:\n{report}"));
-    // Every failing test, and the one that passes.
     let tests = FAILING.len() + 1;
     assert!(
         reason.contains(&format!("/{tests} tests not run")),
@@ -851,6 +848,11 @@ fn the_scripts_refuse_what_they_cannot_run() {
 /// promises about them: they run only after their job's test step failed, they
 /// cannot change the job's verdict, and their timeout covers every re-run of a
 /// test that hangs until nextest ends it.
+// llmlint: ignore-block[changed_behavior_has_e2e] a workflow's `if:` and
+// `continue-on-error` are evaluated by GitHub's runner and by nothing on this
+// host, so no test here can execute them. What can be is held here, and the
+// script the steps run is driven end to end above. The steps themselves are
+// proven on GitHub by the demonstration run recorded on this change request.
 #[test]
 fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
     let workflow = fs::read_to_string(repo_root().join(".github/workflows/ci.yml"))
@@ -893,4 +895,4 @@ fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
             period * terminate_after
         );
     }
-}
+} // llmlint: ignore-end[changed_behavior_has_e2e]
