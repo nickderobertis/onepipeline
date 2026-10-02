@@ -7171,6 +7171,12 @@ const RULINGS: &[(&str, &str)] = &[
         "**`change-review-draft`**: status `done`, the checks green and the change request \
          **kept as a draft for its user's review**",
     ),
+    // The channel paragraph's named binding, which the ruling holds on a settled
+    // run as on a live one, and never as the run's own completion request.
+    (
+        "101.",
+        "`--correlation C` binds it to the question `C` names",
+    ),
 ];
 
 #[test]

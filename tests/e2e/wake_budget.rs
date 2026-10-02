@@ -24,7 +24,7 @@ use std::process::Child;
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, plan_of, World, REFUSED, RUNS_UNWATCHED, WATCH_ELAPSED};
+use crate::harness::{agent, double, plan_of, World, REFUSED, RUNS_UNWATCHED, WATCH_ELAPSED};
 
 use onepipeline::cli::WAKE_BUDGET_ENV;
 use onepipeline::views::{
@@ -1019,6 +1019,410 @@ fn a_complete_verdict_closes_a_settled_run_and_a_stop_closes_any() {
     world.release("halt.go");
     drop((completing, stopping));
 }
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys answer
+// questions through `driver`'s reply path, `channel` and the bus at once, and read closure
+// through `unwatched` — the reason `mod wake_budget` gives in `tests/e2e/main.rs` for the
+// crate being the narrowest edge they can honestly sit behind, and not restated here.
+/// A question raised on a run's surfaces queue through the bus's own library
+/// server, its asker still listening for the ruling.
+struct Asked {
+    serving: Child,
+    stdin: std::process::ChildStdin,
+    correlation: String,
+}
+
+impl Asked {
+    /// Raise `message` on `run` — non-blocking unless `blocking` — and return
+    /// once the bus has queued it, with the correlation it was queued under.
+    fn on(world: &World, run: &str, message: &str, blocking: bool) -> Self {
+        use std::io::Write;
+
+        let before = world.queued_surfaces(run).len();
+        let mut serving = world
+            .host_channel(run)
+            .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the channel server starts");
+        let mut stdin = serving.stdin.take().expect("stdin is piped");
+        writeln!(
+            stdin,
+            "{}",
+            json!({"kind": "monitor-completion", "message": message, "blocking": blocking})
+        )
+        .expect("the frame is written");
+        stdin.flush().expect("the frame flushes");
+        world.until("the question to reach the channel", |world| {
+            world.queued_surfaces(run).len() > before
+        });
+        let correlation = world.queued_surfaces(run)[before]["correlation"]
+            .as_str()
+            .expect("the question carries its correlation")
+            .to_owned();
+        Self {
+            serving,
+            stdin,
+            correlation,
+        }
+    }
+
+    /// The one line the asker was answered with, once the server has ended.
+    fn ruling(mut self) -> Value {
+        use std::io::BufRead;
+
+        let mut line = String::new();
+        std::io::BufReader::new(self.serving.stdout.take().expect("stdout is piped"))
+            .read_line(&mut line)
+            .expect("the answer reads");
+        drop(self.stdin);
+        crate::harness::ended(self.serving);
+        serde_json::from_str(line.trim())
+            .unwrap_or_else(|why| panic!("the asker was answered with {line:?}: {why}"))
+    }
+}
+
+fn replies_on(world: &World, run: &str) -> usize {
+    std::fs::read_to_string(world.run_file(run, "channel/replies.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+/// Answer `asked` with `envelope` by its correlation, and hold the answer to
+/// entry 64's receipt with its verdict delivered, the asker's ruling, and a
+/// journal that gained `planner-replied` and never `completion-requested`.
+fn ruled(world: &World, run: &str, asked: Asked, envelope: &Value) -> Value {
+    let replied = world.events_of(run, "planner-replied").len();
+    let answered = world.run_with_stdin(
+        &["reply", run, "--correlation", &asked.correlation],
+        &envelope.to_string(),
+    );
+    answered.exited(0);
+    let receipt = answered.json();
+    assert!(receipt["reply"].as_u64().is_some(), "{receipt}");
+    assert_eq!(receipt["verdict"], json!("delivered"), "{receipt}");
+    if envelope.get("commands").is_some() {
+        assert_eq!(
+            keys(&receipt),
+            ["commands", "reply", "state", "verdict"],
+            "the receipt is not entry 64's: {receipt}"
+        );
+        assert_eq!(receipt["commands"], receipt["state"], "{receipt}");
+    } else {
+        assert_eq!(
+            keys(&receipt),
+            ["reply", "state", "verdict"],
+            "the receipt is not entry 64's: {receipt}"
+        );
+        assert_eq!(receipt["state"], json!("delivered"), "{receipt}");
+    }
+    let ruling = asked.ruling();
+    for field in ["completion", "reason", "message"] {
+        assert_eq!(
+            ruling[field], envelope[field],
+            "the asker was handed some other ruling than {envelope}: {ruling}"
+        );
+    }
+    assert_eq!(
+        world.events_of(run, "planner-replied").len(),
+        replied + 1,
+        "the ruling was not journalled as the planner's reply: {:?}",
+        world.kinds(run)
+    );
+    assert!(
+        world.events_of(run, "completion-requested").is_empty(),
+        "a question's ruling was journalled as the run asking to complete: {:?}",
+        world.kinds(run)
+    );
+    ruling
+}
+
+/// A correlation that names nothing the bus can bind is refused naming it, with
+/// nothing appended to the channel and nothing journalled.
+fn refused_by_name(world: &World, run: &str, correlation: &str) {
+    let replies = replies_on(world, run);
+    let journal = world.kinds(run);
+    world
+        .run_with_stdin(
+            &["reply", run, "--correlation", correlation],
+            r#"{"completion":true,"reason":"to nobody"}"#,
+        )
+        .exited(REFUSED)
+        .err_has(correlation);
+    assert_eq!(
+        replies_on(world, run),
+        replies,
+        "a refused ruling reached the channel"
+    );
+    assert_eq!(world.kinds(run), journal, "a refused ruling was journalled");
+}
+
+/// A verdict naming a question still waiting on a settled run nothing drives is
+/// that question's ruling: its asker is handed it, the receipt is the delivered
+/// one, and the run is still owed — a `completion: true` ruling answers the
+/// asker, and is not the run asking to complete.
+///
+/// The monitor's end-of-run completion-bar question is this shape: raised
+/// non-blocking as the run ends, and answered by correlation once it has settled.
+#[test]
+fn a_correlated_ruling_on_a_settled_run_reaches_its_asker_and_leaves_the_run_owed() {
+    let world = World::new("wake-correlated");
+    let owed = world.as_session("correlated-settled");
+    world.script("build.work", "the worker wrote this\n");
+    let run = settled(&owed, "correlatedsettled", "build", &[]);
+
+    let met = Asked::on(&owed, &run, "is the bar met?", false);
+    let unmet = Asked::on(&owed, &run, "is the bar met, again?", false);
+
+    // A verdict naming no question is not that question's ruling, however one
+    // is waiting: only the completion verdict a settled run is owed gets past.
+    let replies = replies_on(&owed, &run);
+    let journal = owed.kinds(&run);
+    owed.run_with_stdin(
+        &["reply", &run],
+        r#"{"completion":false,"message":"not yet"}"#,
+    )
+    .exited(REFUSED)
+    .err_has("has settled");
+    assert_eq!(replies_on(&owed, &run), replies, "the refusal was queued");
+    assert_eq!(owed.kinds(&run), journal, "the refusal was journalled");
+
+    refused_by_name(&owed, &run, "c-never-raised-here");
+
+    let answered = met.correlation.clone();
+    ruled(
+        &owed,
+        &run,
+        met,
+        &json!({"completion": true, "reason": "the bar is met"}),
+    );
+    blocked(
+        &owed,
+        &[],
+        &run,
+        "SETTLED",
+        &format!("onepipeline reply {run}, or acknowledge it"),
+    );
+    ruled(
+        &owed,
+        &run,
+        unmet,
+        &json!({"completion": false, "message": "the bar is not met"}),
+    );
+    blocked(
+        &owed,
+        &[],
+        &run,
+        "SETTLED",
+        &format!("onepipeline reply {run}, or acknowledge it"),
+    );
+
+    // Answered once, it is no longer a question a verdict can name.
+    refused_by_name(&owed, &run, &answered);
+    drop(owed);
+}
+
+/// The same ruling on a settled run a driver still holds is delivered all the
+/// same: answering a question is a bus append, and takes no ownership lock.
+#[test]
+fn a_correlated_ruling_reaches_its_asker_on_a_settled_run_a_driver_still_holds() {
+    let world = World::new("wake-correlated-held");
+    world.script("build.work", "the worker wrote this\n");
+    let run = settled(&world, "correlatedheld", "build", &[]);
+    let asked = Asked::on(&world, &run, "is the bar met?", false);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb leaves an ownership lock
+    // nobody can read beside a settled run; it stands in for a driver still closing the
+    // run out, a window no journey can hold open without racing it, exactly as
+    // `a_complete_verdict_closes_a_settled_run_and_a_stop_closes_any` arranges it.
+    let lock = world.run_file(&run, "owner.lock");
+    std::fs::write(&lock, "not a lock this build wrote").expect("the lock");
+    ruled(
+        &world,
+        &run,
+        asked,
+        &json!({"completion": true, "reason": "the bar is met"}),
+    );
+    assert!(lock.is_file(), "answering took the run's lock over");
+    std::fs::remove_file(&lock).expect("the lock");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+}
+
+/// A verdict naming a blocking question a settled run's planner was handed
+/// answers it, and releases the slot it held.
+#[test]
+fn a_correlated_ruling_answers_a_blocking_question_on_a_settled_run() {
+    let world = World::new("wake-correlated-blocking");
+    world.script("build.work", "the worker wrote this\n");
+    let run = settled(&world, "correlatedblocking", "build", &[]);
+    let asked = Asked::on(&world, &run, "may this ship?", true);
+    world
+        .run(&["next", &run])
+        .exited(0)
+        .out_has("may this ship?");
+    let held = || {
+        let queue = world.run(&["channel", "queue", &run]);
+        queue.exited(0);
+        queue.json()["held"].clone()
+    };
+    assert_eq!(
+        held()["correlation"],
+        json!(asked.correlation),
+        "{}",
+        held()
+    );
+
+    ruled(
+        &world,
+        &run,
+        asked,
+        &json!({"completion": true, "reason": "ship it"}),
+    );
+    assert_eq!(held(), Value::Null, "the pending slot was left holding it");
+}
+
+/// On a live run the same ruling reaches its asker and is not recorded as the
+/// run asking to complete; a correlation never raised, or already answered, is
+/// refused by name with nothing appended or journalled.
+#[test]
+fn a_correlated_ruling_on_a_live_run_reaches_its_asker_and_never_completes_the_run() {
+    let world = World::new("wake-correlated-live");
+    let run = held(&world, "correlatedlive", "build");
+    let asked = Asked::on(&world, &run, "is the bar met?", false);
+    let answered = asked.correlation.clone();
+
+    refused_by_name(&world, &run, "c-never-raised-here");
+    ruled(
+        &world,
+        &run,
+        asked,
+        &json!({"completion": true, "reason": "the bar is met"}),
+    );
+    refused_by_name(&world, &run, &answered);
+    assert!(
+        !world.run_file(&run, "result.json").is_file(),
+        "a question's ruling settled the run"
+    );
+    world.release("build.go");
+}
+
+/// A correlated ruling beside commands is the same ruling: the commands take
+/// their own path, and the verdict half reaches its asker without being
+/// journalled as the run asking to complete.
+#[test]
+fn a_correlated_ruling_beside_commands_reaches_its_asker_and_never_completes_the_run() {
+    let world = World::new("wake-correlated-commands");
+    let run = held(&world, "correlatedcommands", "build");
+    let asked = Asked::on(&world, &run, "is the bar met?", false);
+
+    ruled(
+        &world,
+        &run,
+        asked,
+        &json!({
+            "version": onepipeline::channel::REPLY_ENVELOPE_VERSION,
+            "completion": true,
+            "reason": "the bar is met",
+            "commands": [{"op": "note", "id": "build", "addressee": "worker",
+                          "text": "the bar is met", "deliver": "next"}],
+        }),
+    );
+    assert!(
+        !world.events_of(&run, "edit-committed").is_empty(),
+        "the commands beside the ruling were not committed: {:?}",
+        world.kinds(&run)
+    );
+    world.release("build.go");
+}
+
+/// The same ruling beside commands this process applies itself, on a settled
+/// run nothing drives: the commands are applied here, and the verdict half
+/// still reaches its asker without being journalled as the run asking to
+/// complete.
+#[test]
+fn a_correlated_ruling_beside_commands_applied_here_never_completes_the_run() {
+    let world = World::new("wake-correlated-applied");
+    world.script("build.work", "the worker wrote this\n");
+    let run = settled(&world, "correlatedapplied", "build", &[]);
+    let asked = Asked::on(&world, &run, "is the bar met?", false);
+
+    ruled(
+        &world,
+        &run,
+        asked,
+        &json!({
+            "version": onepipeline::channel::REPLY_ENVELOPE_VERSION,
+            "completion": true,
+            "reason": "the bar is met",
+            "commands": [{"op": "finding", "message": "the bar was met at settlement"}],
+        }),
+    );
+    assert!(
+        !world.events_of(&run, "command-accepted").is_empty(),
+        "the commands beside the ruling were not applied: {:?}",
+        world.kinds(&run)
+    );
+}
+
+/// A correlated ruling the run's reply validator refuses is refused in its
+/// words, with nothing appended to the channel and nothing journalled — and the
+/// question still stands, so the ruling the validator accepts reaches its asker.
+#[test]
+fn a_correlated_ruling_the_reply_validator_refuses_leaves_the_question_standing() {
+    let world = World::new("wake-correlated-validated");
+    let validator = double("bus-validator").to_string_lossy().into_owned();
+    let config = world.root.join("onemessagebus.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "version: 1\ntransport: {{kind: local}}\nvalidators:\n  \
+             - {{on: replies, kind: command, command: [{validator:?}]}}\n"
+        ),
+    )
+    .expect("the bus configuration is written");
+    world.script("build.work", "the worker wrote this\n");
+    let run = settled(
+        &world,
+        "correlatedvalidated",
+        "build",
+        &["--bus-config", &config.to_string_lossy()],
+    );
+    let asked = Asked::on(&world, &run, "is the bar met?", false);
+
+    let reason = "this ruling names no evidence the run holds";
+    world.script("bus-validator.refuse", reason);
+    let replies = replies_on(&world, &run);
+    let journal = world.kinds(&run);
+    world
+        .run_with_stdin(
+            &["reply", &run, "--correlation", &asked.correlation],
+            r#"{"completion":true,"reason":"the bar is met"}"#,
+        )
+        .exited(REFUSED)
+        .err_has(reason);
+    assert_eq!(
+        replies_on(&world, &run),
+        replies,
+        "a refused ruling reached the channel"
+    );
+    assert_eq!(
+        world.kinds(&run),
+        journal,
+        "a refused ruling was journalled"
+    );
+
+    std::fs::remove_file(world.fakes.join("bus-validator.refuse")).expect("the refusal is lifted");
+    ruled(
+        &world,
+        &run,
+        asked,
+        &json!({"completion": true, "reason": "the bar is met, with evidence"}),
+    );
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Strip the closure rule's marker from a run's journal, and fold it afresh:
 /// the run as an engine before this release leaves it.
