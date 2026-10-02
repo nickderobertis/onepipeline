@@ -44,7 +44,7 @@ use onetaskgraph_core::{
     TaskRequest,
 };
 use onetaskgraph_plugin_api::{
-    DependencyKind, Direction, ItemKind, NativeId, Project, SourceName, Task,
+    DependencyKind, Direction, ItemKind, MetadataKey, NativeId, Project, SourceName, Task,
 };
 use serde_json::{Map, Value};
 
@@ -334,7 +334,12 @@ impl Reader {
 
     fn load(&self, project: &QualifiedId) -> std::result::Result<Read, Load> {
         let held = self.project(project)?;
-        let tasks = self.tasks(project)?;
+        let members = members_of(&held.id, &held.item.metadata.clone().into_iter().collect())
+            .map_err(|why| Error::Sibling {
+                tool: STORE,
+                message: why,
+            })?;
+        let tasks = self.tasks(project, &members)?;
 
         let mut document = Map::new();
         for (key, value) in &held.item.metadata {
@@ -381,7 +386,7 @@ impl Reader {
 
         let mut nodes = Vec::with_capacity(tasks.len());
         for task in &tasks {
-            nodes.push(self.node(task, &ids)?);
+            nodes.push(self.node(task, project, &ids)?);
         }
         document.insert("tasks".to_owned(), Value::Array(nodes));
 
@@ -479,8 +484,14 @@ impl Reader {
         })
     }
 
-    /// One node, assembled out of its task.
-    fn node(&self, task: &Qualified<Task>, ids: &Ids) -> std::result::Result<Value, Load> {
+    /// One node, assembled out of its task — a task of the home project `home`, or of one of
+    /// its members.
+    fn node(
+        &self,
+        task: &Qualified<Task>,
+        home: &QualifiedId,
+        ids: &Ids,
+    ) -> std::result::Result<Value, Load> {
         let whole = task.id.to_string();
         let mut node = Map::new();
         for (key, value) in &task.item.metadata {
@@ -536,12 +547,20 @@ impl Reader {
         }
         // The task's human-facing record, which is what a branch this node's session
         // cuts is named from. A blank key is the store's way of carrying none, as a
-        // blank title is.
+        // blank title is. A member's task names its own source, which is what the
+        // write-back finds its item by; a home task's is the launched project's, and
+        // is left unsaid so a plan read from one source records what it always did.
         let mut record = Map::new();
         record.insert(
             "id".to_owned(),
             Value::String(task.id.native.as_str().to_owned()),
         );
+        if task.id.source.as_str() != home.source() {
+            record.insert(
+                "source".to_owned(),
+                Value::String(task.id.source.as_str().to_owned()),
+            );
+        }
         if let Some(key) = task.item.key.as_ref().filter(|key| !key.trim().is_empty()) {
             record.insert("key".to_owned(), Value::String(key.clone()));
         }
@@ -690,16 +709,22 @@ impl Reader {
         one(task, "task show", read)
     }
 
-    /// Every task of one project, each one that project's own.
+    /// Every task of one home project and of the member projects it names, each one
+    /// that home's own or one of those members' own.
+    ///
+    /// A plan is a home project plus the member projects its `onetaskgraph.members`
+    /// names, each in a source of its own, so the read asks the store for the home
+    /// with its members and every task comes back qualified by its own source.
     ///
     /// Checked rather than assumed: the project selector is a filter this build asked a
     /// **third party**'s sources to apply, and a plan assembled out of an item from
-    /// somewhere else would carry a node nobody put in this project. Both halves
-    /// of "somewhere else" are refused — another source, and another project of
-    /// this one — because the two are different mistakes and neither is one a
-    /// launch could report afterwards. Refused here, where the project asked for
-    /// and the item answered with can both still be named.
-    fn tasks(&self, project: &QualifiedId) -> Result<Vec<Qualified<Task>>> {
+    /// somewhere else would carry a node nobody put in this plan. Both halves
+    /// of "somewhere else" are refused — a source holding neither the home nor a
+    /// member, and another project of a source that does — because the two are
+    /// different mistakes and neither is one a launch could report afterwards.
+    /// Refused here, where the project asked for and the item answered with can both
+    /// still be named.
+    fn tasks(&self, project: &QualifiedId, members: &[GlobalId]) -> Result<Vec<Qualified<Task>>> {
         let selector = selector(&self.engine, project);
         let tasks = self.paged("task list", project.as_str(), |token| {
             let request = TaskRequest {
@@ -710,6 +735,9 @@ impl Reader {
                 origin: None,
                 project: selector.clone(),
                 commented_since: None,
+                // Asked only of a home that names members: the store learns them by reading the
+                // home again, and a plan of one source needs no second read of it.
+                include_members: !members.is_empty(),
                 paging: Paging {
                     limit: self.page,
                     token,
@@ -718,17 +746,7 @@ impl Reader {
             async move { self.engine.tasks(&request).await }
         })?;
         for task in &tasks {
-            let elsewhere = match &task.item.project {
-                _ if task.id.source.as_str() != project.source() => {
-                    Some("an item of another source")
-                }
-                Some(named) if named.as_str() != project.native() => {
-                    Some("a task of another project")
-                }
-                None => Some("a task of no project at all"),
-                Some(_) => None,
-            };
-            if let Some(elsewhere) = elsewhere {
+            if let Some(elsewhere) = stranger(task, project, members) {
                 return Err(Error::Sibling {
                     tool: STORE,
                     message: format!(
@@ -831,6 +849,74 @@ fn partial(query: &str, about: &str, errors: &[SourceFailure]) -> Result<()> {
             named.join("; ")
         ),
     })
+}
+
+/// Why `task` is no task of the plan whose home is `home` and whose members are `members`, or
+/// `None` where it is one: a task of the home's project in the home's source, or of a member's
+/// project in that member's source.
+fn stranger(
+    task: &Qualified<Task>,
+    home: &QualifiedId,
+    members: &[GlobalId],
+) -> Option<&'static str> {
+    let expected = if task.id.source.as_str() == home.source() {
+        Some(home.native())
+    } else {
+        members
+            .iter()
+            .find(|member| member.source == task.id.source)
+            .map(|member| member.native.as_str())
+    };
+    match (&task.item.project, expected) {
+        // llmlint: ignore[changed_behavior_has_e2e] the linked store answers a members read with the home's own project in its source and each member's in theirs, by construction, so no configuration a journey can write reaches this arm through the CLI; it defends a third party's source, and `taskgraph::tests::a_task_of_neither_the_home_nor_a_member_is_named_for_what_it_is` holds every arm.
+        (_, None) => Some("an item of a source holding neither the home nor a member"),
+        (Some(named), Some(expected)) if named.as_str() != expected => {
+            Some("a task of another project")
+        }
+        (None, Some(_)) => Some("a task of no project at all"),
+        (Some(_), Some(_)) => None,
+    }
+}
+
+/// The member projects the home `home` names at `onetaskgraph.members`: none where it names
+/// no such key.
+///
+/// External input, held to the store's own rule for the list rather than trimmed to what
+/// parses: a list of qualified project ids, none in the home's source and at most one per
+/// source. A list that breaks it is refused naming the home and why, because a plan read as
+/// though it had fewer members than it does would leave a member's tasks out silently.
+pub(crate) fn members_of(
+    home: &GlobalId,
+    metadata: &BTreeMap<String, Value>,
+) -> std::result::Result<Vec<GlobalId>, String> {
+    let key = MetadataKey::MEMBERS_KEY;
+    let Some(value) = metadata.get(key) else {
+        return Ok(Vec::new());
+    };
+    let refuse = |why: String| {
+        format!(
+            "{home} records {key} as {value}, which {why}; a home's member list is a list of \
+             qualified project ids, at most one per source and none in the home's own"
+        )
+    };
+    let Value::Array(entries) = value else {
+        return Err(refuse("is not a list".to_owned()));
+    };
+    let mut members: Vec<GlobalId> = Vec::new();
+    for entry in entries {
+        let member = entry
+            .as_str()
+            .and_then(|entry| entry.parse::<GlobalId>().ok())
+            .ok_or_else(|| refuse(format!("holds {entry}, which is not a qualified id")))?;
+        if member.source == home.source || members.iter().any(|kept| kept.source == member.source) {
+            return Err(refuse(format!(
+                "names {member}, a second project in {}",
+                member.source
+            )));
+        }
+        members.push(member);
+    }
+    Ok(members)
 }
 
 /// What one end of a dependency edge names, as a refusal says it.
@@ -1446,6 +1532,234 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A store of three `local-md` sources under a scratch directory of its own: `plans`,
+    /// holding the home `ship`, whose `onetaskgraph.members` names `linear:ship-linear`;
+    /// `linear`, holding that member; and `other`, holding a project that is no part of the
+    /// plan. `tasks` are `(source, project, file, node id, edges)`, each edge a qualified task.
+    fn spanning(name: &str, tasks: &[(&str, &str, &str, &str, &[&str])]) -> Built {
+        let dir = std::env::temp_dir().join(format!(
+            "onepipeline-spanning-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let write = |path: PathBuf, front: Value| {
+            std::fs::create_dir_all(path.parent().expect("a folder")).expect("a store folder");
+            let yaml = serde_norway::to_string(&front).expect("front matter");
+            std::fs::write(
+                path,
+                format!(
+                    "---\n{yaml}---\n## What\nDo it.\n\n## Acceptance criteria\n- It is done.\n"
+                ),
+            )
+            .expect("a document");
+        };
+        for (source, project, metadata) in [
+            (
+                "plans",
+                "ship",
+                json!({"onepipeline.schema_version": crate::plan::PLAN_SCHEMA_VERSION,
+                       "onetaskgraph.members": ["linear:ship-linear"]}),
+            ),
+            (
+                "linear",
+                "ship-linear",
+                json!({"onetaskgraph.member_of": "plans:ship"}),
+            ),
+            ("other", "elsewhere", json!({})),
+        ] {
+            write(
+                dir.join(source)
+                    .join("projects")
+                    .join(format!("{project}.md")),
+                json!({"title": project, "metadata": metadata}),
+            );
+        }
+        for (source, project, file, id, edges) in tasks {
+            let depends_on: Vec<Value> = edges
+                .iter()
+                .map(|to| json!({"id": to, "kind": "blocks", "item": "task"}))
+                .collect();
+            write(
+                dir.join(source)
+                    .join("tasks")
+                    .join(project)
+                    .join(format!("{file}.md")),
+                json!({"title": format!("Do {id}"), "project": project, "depends_on": depends_on,
+                       "metadata": node(id)}),
+            );
+        }
+        let source = |name: &str| json!({"plugin": "local-md", "config": {"root": dir.join(name).to_string_lossy()}});
+        let config = Config::from_document(json!({
+            "sources": {"plans": source("plans"), "linear": source("linear"), "other": source("other")},
+        }))
+        .expect("the fixture configuration is one the store accepts");
+        Built {
+            engine: Engine::build(
+                &config,
+                &onetaskgraph_core::Secrets::load(Environment::default()).expect("no secrets"),
+            ),
+            page: config.page_size(),
+        }
+    }
+
+    /// A plan is a home project plus the member projects it names: one read answers the
+    /// tasks of both sources, an edge between two of them resolves to a dependency in either
+    /// direction, and a member's task records the source its item is in.
+    #[test]
+    fn a_home_and_its_member_read_as_one_plan_with_edges_both_ways() {
+        let read = load(spanning(
+            "both-ways",
+            &[
+                ("plans", "ship", "core", "core", &[]),
+                (
+                    "linear",
+                    "ship-linear",
+                    "adopt",
+                    "adopt",
+                    &["plans:ship/core"],
+                ),
+                (
+                    "plans",
+                    "ship",
+                    "ship",
+                    "ship",
+                    &["linear:ship-linear/adopt"],
+                ),
+            ],
+        ))
+        .unwrap_or_else(|load| panic!("the plan reads: {}", Error::from(load)));
+        let nodes: BTreeMap<&str, &Node> = read
+            .plan
+            .tasks
+            .iter()
+            .map(|node| (node.id.as_str(), node))
+            .collect();
+        assert_eq!(nodes.len(), 3, "{:?}", read.plan.tasks);
+        assert_eq!(nodes["adopt"].deps, vec!["core".to_owned()]);
+        assert_eq!(nodes["ship"].deps, vec!["adopt".to_owned()]);
+        let record = |id: &str| nodes[id].task_record.clone().expect("a task record");
+        assert_eq!(
+            record("adopt").source.as_ref().map(SourceName::as_str),
+            Some("linear")
+        );
+        assert_eq!(record("adopt").id, "ship-linear/adopt");
+        assert_eq!(
+            record("core").source,
+            None,
+            "a home task's record names no source"
+        );
+        assert_eq!(
+            read.stored["adopt"].qualified.as_str(),
+            "linear:ship-linear/adopt"
+        );
+    }
+
+    /// An edge onto a task of a source and project that is neither the home nor a member is
+    /// outside the plan, and is refused as it always was, naming the task it leaves.
+    #[test]
+    fn an_edge_onto_a_task_outside_the_home_and_its_members_is_refused() {
+        let refused = refusal(load(spanning(
+            "outside",
+            &[
+                ("plans", "ship", "core", "core", &["other:elsewhere/stray"]),
+                ("other", "elsewhere", "stray", "stray", &[]),
+            ],
+        )));
+        assert!(
+            refused.contains("node 'core' depends on 'stray', which is not in the plan"),
+            "{refused}"
+        );
+    }
+
+    /// A home's member list is held to the store's own rule: a list of qualified ids, none in
+    /// the home's source and at most one per source. Anything else is refused naming the home,
+    /// and a plan read over it is unreadable rather than a plan with fewer members.
+    #[test]
+    fn a_member_list_breaking_the_stores_rule_is_refused() {
+        let home: GlobalId = "plans:ship".parse().expect("an id");
+        let listing = |value: Value| BTreeMap::from([(MetadataKey::MEMBERS_KEY.to_owned(), value)]);
+        assert_eq!(members_of(&home, &BTreeMap::new()), Ok(Vec::new()));
+        assert_eq!(
+            members_of(&home, &listing(json!(["linear:ship-linear"]))),
+            Ok(vec!["linear:ship-linear"
+                .parse::<GlobalId>()
+                .expect("an id")])
+        );
+        for (value, why) in [
+            (json!("linear:ship-linear"), "is not a list"),
+            (json!(["bare"]), "which is not a qualified id"),
+            (json!([7]), "which is not a qualified id"),
+            (json!(["plans:other"]), "a second project in plans"),
+            (
+                json!(["linear:a", "linear:b"]),
+                "a second project in linear",
+            ),
+        ] {
+            let refused = members_of(&home, &listing(value.clone()))
+                .expect_err(&format!("{value} was read as a member list"));
+            assert!(
+                refused.contains(why) && refused.contains("plans:ship"),
+                "{refused}"
+            );
+        }
+
+        let unreadable = load(store(
+            json!({MetadataKey::MEMBERS_KEY: "linear:ship-linear"}),
+            vec![task("t-a", node("a"), json!({}))],
+            vec![],
+        ));
+        match unreadable {
+            Err(Load::Unreadable(error)) => {
+                assert!(error.to_string().contains("is not a list"), "{error}");
+            }
+            Err(Load::Refused(refusal)) => panic!("refused: {}", Error::from(refusal)),
+            Ok(_) => panic!("a plan was read over a member list the store's rule refuses"),
+        }
+    }
+
+    /// A task the store answers with is the plan's only where it is a task of the home's
+    /// project in the home's source or of a member's project in that member's source; any
+    /// other is named for what it is.
+    #[test]
+    fn a_task_of_neither_the_home_nor_a_member_is_named_for_what_it_is() {
+        let home: QualifiedId = "plans:ship".parse().expect("a qualified id");
+        let members = ["linear:ship-linear".parse::<GlobalId>().expect("an id")];
+        let answered = |id: &str, project: Option<&str>| {
+            let mut task: Task =
+                serde_json::from_value(task("t", node("n"), json!({"project": project})))
+                    .expect("a task");
+            task.project = project.map(NativeId::from);
+            Qualified {
+                id: id.parse::<GlobalId>().expect("an id"),
+                item: task,
+            }
+        };
+        assert_eq!(
+            stranger(&answered("plans:t", Some("ship")), &home, &members),
+            None
+        );
+        assert_eq!(
+            stranger(&answered("linear:t", Some("ship-linear")), &home, &members),
+            None
+        );
+        assert_eq!(
+            stranger(&answered("other:t", Some("ship")), &home, &members),
+            Some("an item of a source holding neither the home nor a member")
+        );
+        assert_eq!(
+            stranger(&answered("linear:t", Some("ship")), &home, &members),
+            Some("a task of another project")
+        );
+        assert_eq!(
+            stranger(&answered("plans:t", Some("ship-linear")), &home, &members),
+            Some("a task of another project")
+        );
+        assert_eq!(
+            stranger(&answered("plans:t", None), &home, &members),
+            Some("a task of no project at all")
+        );
     }
 
     /// A store that cannot be read is reported as unreadable — a store outage — and never
