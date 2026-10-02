@@ -953,6 +953,10 @@ fn a_lineage_read_cold_with_edges_is_carried_and_its_edges_put_right() {
     // yet recorded itself — the stop ends the driver mid-attempt — so the store was opened
     // once more than any record says, and the wait for the adopted driver's projection never
     // ended (Windows, run 36924701088).
+    // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this wait adds no work
+    // to the journey, only a condition it already reaches; where the journey sits in the project
+    // graph is the shared e2e target's edge, answered at `mod writeback_projections` in
+    // `tests/e2e/main.rs`, and no change to this wait can move it.
     projected_until(&world, run, &project, "the board to say it all", |tasks| {
         board_word(tasks, "first").as_deref() == Some("done")
             && board_task(tasks, "first")["item"]["metadata"]["onepipeline.settlement"]["status"]
@@ -961,6 +965,7 @@ fn a_lineage_read_cold_with_edges_is_carried_and_its_edges_put_right() {
             && board_task(tasks, "second")["item"]["metadata"]["onepipeline.settlement"]["status"]
                 == "cancelled"
     });
+    // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
     world.run(&["stop", run]).exited(0);
 
     let second = board_task(&world.store_tasks(&project), "second").clone();

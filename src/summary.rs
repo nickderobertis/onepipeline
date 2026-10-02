@@ -1287,18 +1287,10 @@ mod tests {
         paths
     }
 
-    /// The same store as [`recorded`], with its summary written once rather than
-    /// once per record.
-    ///
-    /// The real writer rewrites and syncs the summary on every append, which is
-    /// what a run pays per record and what [`recorded`] pays per record too: for
-    /// a store of ten thousand that was twenty thousand syncs and as many file
-    /// replacements, minutes of a Windows runner's disk for a test that measures
-    /// bytes, and once past nextest's terminate-after (PR #641's run 36876601588).
-    /// So the records between the first and the last reach the store in one
-    /// append, as another appender's would, and the writer appends the last of
-    /// them — folding the store it opened and writing the summary over all of it,
-    /// which is the document a reader of a run that long is served.
+    /// The same store as [`recorded`], without a summary rewrite and sync per record,
+    /// which cost a Windows runner minutes at ten thousand: the records between the
+    /// first and the last arrive in one append, and the real writer appends the last
+    /// and writes the summary over all of them.
     fn recorded_in_bulk(root: &Path, run: &str, records: usize) -> RunPaths {
         use std::io::Write as _;
         let paths = a_run(root, run);
