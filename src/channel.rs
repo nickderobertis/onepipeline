@@ -2666,13 +2666,13 @@ mod tests {
     /// the record itself where it has no command list to carry.
     #[test]
     fn an_undecodable_record_keeps_its_id_author_and_commands_as_sent() {
-        let Claimed::Undecodable(refused) = Claimed::of(json!({"id": 7, "author": "monitor",
+        let Claimed::Undecodable(refused) = Claimed::of(json!({"id": 7, "author": "sentinel",
             "commands": [{"op": "note", "id": "a", "text": "t"}, {"op": "drop", "id": "a"}, 3]}))
         else {
             panic!("a drop with no dependents decoded");
         };
         assert_eq!(refused.id, 7);
-        assert_eq!(refused.author.as_str(), "monitor");
+        assert_eq!(refused.author.as_str(), "sentinel");
         assert_eq!(
             refused.commands,
             [
