@@ -6,7 +6,7 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96, 97, 99, 100 and 101** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96, 97, 99, 100 and 102** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
@@ -8432,7 +8432,7 @@ through the compiled binary.
 }
 ```
 
-## 101. A driver's ending wrote nothing, so a crash and a clean exit read the same — RESOLVED
+## 102. A driver's ending wrote nothing, so a crash and a clean exit read the same — RESOLVED
 
 **Ruling: the plan `run-ending-liveness` (onepipeline#527) adds one pipeline kind,
 `driver-exited`, and `docs/contract.md` states it.** A driver adoption was journalled
