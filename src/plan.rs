@@ -1660,6 +1660,13 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         let record = read.tasks[0].task_record.clone().expect("a task record");
         assert_eq!(record.source, None);
+        assert!(
+            serde_json::to_value(&record)
+                .expect("a record serializes")
+                .get("source")
+                .is_none(),
+            "a record naming no source wrote a `source` key"
+        );
         let written = serde_json::to_value(&read).expect("a plan serializes");
         assert_eq!(
             written["tasks"][0]["task_record"], older["tasks"][0]["task_record"],
@@ -1671,7 +1678,11 @@ mod tests {
             ..record
         };
         let carried = serde_json::to_value(&member).expect("a record serializes");
-        assert_eq!(carried["source"], "linear");
+        assert_eq!(
+            carried["source"],
+            serde_json::Value::String("linear".to_owned()),
+            "a member's source is not written as the plain source-name string"
+        );
         assert_eq!(
             serde_json::from_value::<TaskRecord>(carried.clone()).expect("a record parses"),
             member
