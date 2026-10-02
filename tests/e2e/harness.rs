@@ -4623,13 +4623,20 @@ fn end_driver_process(pid: u32) {
 ///
 /// Read from the CSV form, whose first two fields are the image and the pid;
 /// the row is matched on the pid field itself, so the informational line
-/// `tasklist` prints when nothing matches is never read as a process.
+/// `tasklist` prints when nothing matches is never read as a process. A listing
+/// that failed is refused rather than read as empty, because the wait above
+/// takes nothing at that pid as proof the driver has gone.
 #[cfg(windows)]
 fn listed_image(pid: u32) -> Option<String> {
     let listing = std::process::Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .output()
         .expect("this host lists its processes");
+    assert!(
+        listing.status.success(),
+        "tasklist could not list pid {pid}: {}",
+        String::from_utf8_lossy(&listing.stderr)
+    );
     let wanted = pid.to_string();
     String::from_utf8_lossy(&listing.stdout)
         .lines()
