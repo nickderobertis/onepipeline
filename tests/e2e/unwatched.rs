@@ -2371,35 +2371,95 @@ fn a_run_settled_under_an_observer_mid_turn_leaves_a_current_document_and_is_exc
 /// The same clause-2 guarantee for a **detached** driver, whose only journal
 /// appender is the engine loop: a run started detached that the retained driver
 /// drives to settlement leaves a document current for its journal, read off the
-/// files before any view, so `unwatched` excludes it — the documented happy path
-/// `onepipeline start --detach` returns on, with no observer relay beside the
-/// engine loop.
+/// files once that driver has handed back and before any view, so `unwatched`
+/// excludes it — the documented happy path `onepipeline start --detach` returns
+/// on, with no observer relay beside the engine loop.
+///
+/// **Handed back** is the driver's process ending, and nothing short of it. The
+/// driver writes `result.json` and only then journals the `driver-exited` the
+/// contract places after its last outcome line and before it lets go, and seals
+/// the document after that — so a journey that read the document as soon as
+/// `result.json` appeared raced the driver's last append, and lost it on slow
+/// Windows runners. Here that window is held open on purpose: an entry this
+/// journey puts in the run's handover gate stops the driver between its result
+/// and its last append, which makes the early read deterministically one record
+/// short, and the guarantee is then read where it holds.
 #[test]
 fn a_detached_driver_that_settles_leaves_a_current_document_and_is_excluded() {
     let world = World::new("unwatched-detached");
+    world.script("build.wait", "hold");
     world.script("build.work", "the worker wrote this\n");
     let run = "unwatcheddetached";
     let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
     // Detached, with the shipped default `--dag-graph off`: no observer, so the
     // engine loop is the only writer of this run's journal.
-    world.run(&["start", &path, "--detach"]).exited(0);
-    // The retained driver settles the run on its own. `result.json` is a direct
-    // file check rather than a view, so nothing refreshes the summary document
-    // between the driver writing it and this journey reading it — the engine loop
-    // wrote the document at its last append, before this file exists.
-    world.until("the run to settle", |world| {
-        world.run_file(run, "result.json").is_file()
+    let started = world.run(&["start", &path, "--detach"]);
+    started.exited(0);
+    let announced: Value = serde_json::from_str(started.stdout.trim())
+        .unwrap_or_else(|error| panic!("a detached launch announces itself: {error}"));
+    let driver = announced["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .unwrap_or_else(|| panic!("the launch announced no driver: {announced}"));
+    world.until("the run to dispatch something", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
     });
 
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb holds a run's handover gate
+    // past its own two file operations, so none can stop a driver between its result and
+    // its last append; an entry naming this live test process is a holder the driver
+    // cannot show has gone, and it waits for it exactly as it waits for a submitter.
+    let gate = world.run_file(run, "channel/handover");
+    std::fs::create_dir_all(&gate).expect("the gate is there");
+    let held = gate.join(format!("{:020}", 1));
+    std::fs::write(
+        &held,
+        format!("{} {}", std::process::id(), "e2e-gate-holder"),
+    )
+    .expect("the gate is held");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.release("build.go");
+    world.until("the driver to write its result", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
     let paths = paths_of(&world, run);
+    // What a reader finds when `result.json` appears: the driver is in the gate,
+    // its `driver-exited` not yet written.
+    let early = document(&paths);
+    assert!(
+        world.events_of(run, "driver-exited").is_empty(),
+        "the driver wrote its last record past a gate it did not hold"
+    );
+    std::fs::remove_file(&held).expect("the gate is let go");
+    world.until("the detached driver to hand back", |_| {
+        crate::harness::process_ended(driver)
+    });
+
+    let journal = stamp_of(&paths);
+    assert_eq!(
+        world.events_of(run, "driver-exited").len(),
+        1,
+        "the driver ended without its one record of how it let go"
+    );
+    // The early read is one record short of the journal as it finally stands: the
+    // window the old journey raced on, here every time.
+    assert_ne!(
+        (
+            early["journal_len"].as_u64(),
+            early["journal_mtime_ms"].as_u64()
+        ),
+        journal,
+        "the gate did not hold the driver between its result and its last append: {early}"
+    );
     let left = document(&paths);
     assert_eq!(left["graph_complete"], json!(true), "{left}");
+    assert_eq!(left["last_event_kind"], json!("driver-exited"), "{left}");
     assert_eq!(
         (
             left["journal_len"].as_u64(),
             left["journal_mtime_ms"].as_u64()
         ),
-        stamp_of(&paths),
+        journal,
         "the detached driver left a document behind its journal at handback: {left}"
     );
 
