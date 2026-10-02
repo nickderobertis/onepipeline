@@ -2667,12 +2667,6 @@ mod tests {
     /// A record that does not decode keeps what its refusal needs: its own id and
     /// author where it carries readable ones, each command exactly as sent, and
     /// the record itself where it has no command list to carry.
-    ///
-    /// This is the proof of the corners — an author that is not a string, a
-    /// command that is not an object, an empty list beside them — because no
-    /// channel path delivers one: the planner channel's layout refuses each
-    /// shape before it is queued, which `malformed_envelopes`'s journey asserts
-    /// through the bus, and that journey drives the shapes the bus does carry.
     #[test]
     fn an_undecodable_record_keeps_its_id_author_and_commands_as_sent() {
         let Claimed::Undecodable(refused) = Claimed::of(json!({"id": 7, "author": "sentinel",

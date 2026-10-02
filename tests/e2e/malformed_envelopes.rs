@@ -187,24 +187,16 @@ fn every_envelope_the_reconciler_cannot_decode_is_answered_and_nothing_of_it_app
     }
     // The bus stamps every record it queues with an id, and refuses a command
     // list that is not a list — so that record, and the first, only reach the
-    // queue beneath it. It refuses the reconciler's other corners as well — an
-    // author that is not a string, a command that is not an object — which is
-    // why `channel::tests` holds those rather than this journey.
+    // queue beneath it.
     let not_a_list = json!({"op": "drop", "id": "sign-off", "dependents": "detach"});
-    for refused in [
-        json!({"version": 3, "commands": not_a_list}),
-        json!({"version": 3, "author": 7, "commands": [undecodable_drop]}),
-        json!({"version": 3, "commands": ["drop sign-off", undecodable_drop]}),
-    ] {
-        assert!(
-            offered(
-                Config::local(world.run_file(run, "channel"), Some(PLANNER_CHANNEL)),
-                &refused,
-            )
-            .is_err(),
-            "the planner channel's layout queued {refused}"
-        );
-    }
+    assert!(
+        offered(
+            Config::local(world.run_file(run, "channel"), Some(PLANNER_CHANNEL)),
+            &json!({"version": 3, "commands": not_a_list}),
+        )
+        .is_err(),
+        "the planner channel's layout queued a command list that is not a list"
+    );
     let next = u64::try_from(queued(&world, run).len()).expect("a queue length");
     appended_beneath_the_layout(&world, run, &json!({"id": next, "commands": not_a_list}));
     sent_by_the_monitor(
@@ -340,6 +332,90 @@ fn every_envelope_the_reconciler_cannot_decode_is_answered_and_nothing_of_it_app
             + world.events_of(run, "command-accepted").len(),
         1
     );
+}
+
+/// The corners of a record's own fields, which the planner channel's layout
+/// refuses and so only reach the queue beneath it: an author that is not a
+/// string is answered as the planner's, a command that is not an object is
+/// journalled inside an `unreadable` placeholder, and an empty command list
+/// journals nothing — yet each record still gets its outcome line and surface.
+#[test]
+fn a_record_the_layout_refuses_is_answered_from_whatever_of_it_reads() {
+    let world = World::new("malformed-corners");
+    let run = "corners";
+    paused(
+        &world,
+        run,
+        vec![human("sign-off", &[]), agent("after", &["sign-off"])],
+        &[],
+    );
+    let undecodable_drop = json!({"op": "drop", "id": "sign-off"});
+    let records = [
+        json!({"id": 0, "author": 7, "commands": ["drop sign-off", undecodable_drop]}),
+        json!({"id": 1, "author": ["monitor"], "commands": []}),
+    ];
+    for record in &records {
+        let mut envelope = record.clone();
+        envelope["version"] = json!(3);
+        assert!(
+            offered(
+                Config::local(world.run_file(run, "channel"), Some(PLANNER_CHANNEL)),
+                &envelope,
+            )
+            .is_err(),
+            "the planner channel's layout queued {envelope}"
+        );
+        appended_beneath_the_layout(&world, run, record);
+    }
+
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"awaiting-planner\"")
+        .err_lacks("panicked");
+
+    let outcomes = world.command_outcomes(run);
+    assert_eq!(outcomes.len(), 2, "{outcomes:?}");
+    assert_eq!(cursor(&world, run), 2);
+    let reasons: Vec<&str> = outcomes
+        .iter()
+        .zip([0, 1])
+        .map(|(outcome, id)| {
+            assert_eq!(outcome["id"], json!(id), "{outcome}");
+            assert_eq!(outcome["applied"], json!(false), "{outcome}");
+            assert!(outcome.get("results").is_none(), "{outcome}");
+            let reason = outcome["reason"].as_str().expect("a refusal states why");
+            assert!(reason.starts_with(MALFORMED), "{reason}");
+            reason
+        })
+        .collect();
+
+    let rejected: Vec<Value> = world
+        .events_of(run, "edit-rejected")
+        .into_iter()
+        .map(|event| event["payload"].clone())
+        .collect();
+    assert_eq!(
+        rejected,
+        [
+            json!({"author": "planner", "command": {"op": "unreadable", "value": "drop sign-off"},
+                   "reason": reasons[0]}),
+            json!({"author": "planner", "command": undecodable_drop, "reason": reasons[0]}),
+        ]
+    );
+
+    let surfaces = rejected_surfaces(&world, run);
+    assert_eq!(surfaces.len(), 2, "{surfaces:?}");
+    for (id, reason) in reasons.iter().enumerate() {
+        assert!(
+            surfaces.iter().any(|surface| surface["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(&format!("envelope {id} "))
+                    && message.contains(reason))),
+            "no surface names envelope {id}: {surfaces:?}"
+        );
+    }
+    assert!(world.events_of(run, "node-dropped").is_empty());
 }
 
 /// onepipeline#455's shape: a malformed `drop` queued onto a run whose graph has
