@@ -3,9 +3,10 @@
 # exit status on stderr.
 #
 # Nothing else is touched: no pipe, so a terminal still gets nextest's progress
-# bar, and the status this exits with is nextest's own. The one added line is
-# what `scripts/rerun-failed.sh` reads when nextest ends a run with tests unrun
-# and names no reason, because nextest itself never prints the code it exits with.
+# bar, and the status this exits with is nextest's own. Of the two added lines,
+# the first is what `scripts/rerun-failed.sh` reads when nextest ends a run with
+# tests unrun and names no reason, because nextest itself never prints the code
+# it exits with, and the second says what to run next.
 set -uo pipefail
 
 if [ "$#" -eq 0 ]; then

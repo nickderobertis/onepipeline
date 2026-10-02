@@ -327,11 +327,17 @@ _note-test:
 # Coverage instrumentation is measured on Linux only, so the cross-platform CI
 # legs run the same suite through this instead of `test`.
 # The offline suite without coverage instrumentation.
+# llmlint: ignore-block[diagnostics_error_or_absent] the archive line has to build
+# exactly what the run line after it builds, so that the run finds it fresh and
+# the archive is the build the step tested; the run sets no RUSTFLAGS, so neither
+# can the archive. Warnings are denied by `just lint`, which `check-cross` runs
+# before this.
 test-quick:
     @just _strace-preflight
     @just _onetaskgraph-preflight
     @[ -z "${ONEPIPELINE_TEST_ARCHIVE:-}" ] || cargo nextest archive --locked --archive-file "$ONEPIPELINE_TEST_ARCHIVE"
     @bash scripts/nextest-run.sh cargo nextest run --locked -E '{{offline-tiers}}'
+# llmlint: ignore-end[diagnostics_error_or_absent]
 
 # `ONEPIPELINE_TEST_ARCHIVE` (CI sets it; nothing local does) makes `test-quick`
 # and `_crate-test-rest` archive the build they are about to run, with nextest's

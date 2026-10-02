@@ -137,6 +137,23 @@ impl Fixture {
         (output, text)
     }
 
+    /// One shell line from the fixture's root, as a recipe runs it.
+    fn script_line(&self, line: &str, env: &[(&str, &str)]) -> (Output, String) {
+        let output = self
+            .command(bash())
+            .envs(env.iter().copied())
+            .args(["-eu", "-o", "pipefail", "-c", line])
+            .stdin(Stdio::null())
+            .output()
+            .expect("bash runs the line");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (output, text)
+    }
+
     /// The suite's run, as `just test-quick` makes it: nextest, through the
     /// wrapper that names its exit status.
     fn nextest_run(&self, args: &[&str]) -> (Output, String) {
@@ -483,23 +500,47 @@ fn rerun_fixture(case: &str) -> Fixture {
     )
 }
 
-/// The fixture's first run, failed: what a CI test step leaves behind, colour
-/// escapes included, as a runner with `CARGO_TERM_COLOR=always` writes them.
-/// The justfile's `test-quick` line, run as CI runs it: the build is archived
-/// before the run.
+/// One line of a justfile recipe's body, as the shell is given it.
+fn recipe_line(recipe: &str, containing: &str) -> String {
+    let justfile = fs::read_to_string(repo_root().join("justfile")).expect("the justfile reads");
+    justfile
+        .split(&format!("\n{recipe}:\n"))
+        .nth(1)
+        .unwrap_or_else(|| panic!("the justfile has a `{recipe}` recipe"))
+        .lines()
+        .take_while(|line| line.starts_with("    "))
+        .find(|line| line.contains(containing))
+        .unwrap_or_else(|| panic!("`{recipe}` has a line running {containing}"))
+        .trim_start()
+        .trim_start_matches('@')
+        .to_owned()
+}
+
+/// `test-quick`'s own archive line, run in the fixture as CI runs it, before
+/// the run: with `ONEPIPELINE_TEST_ARCHIVE` naming where. Without it the line
+/// archives nothing, which is how every run outside CI goes.
 fn archive(fixture: &Fixture) {
-    let archived = fixture
+    let line = recipe_line("test-quick", "nextest archive");
+    let locked = fixture
         .command(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-        .args(["nextest", "archive", "--archive-file", ARCHIVE])
+        .args(["generate-lockfile", "--offline"])
         .output()
-        .expect("cargo nextest archive runs");
+        .expect("cargo writes the fixture's lock");
+    assert!(locked.status.success(), "the fixture's lock is written");
+    let (output, said) = fixture.script_line(&line, &[]);
     assert!(
-        archived.status.success(),
-        "the fixture's build is archived: {}",
-        String::from_utf8_lossy(&archived.stderr)
+        output.status.success() && !fixture.path(ARCHIVE).exists(),
+        "without ONEPIPELINE_TEST_ARCHIVE the line archives nothing:\n{said}"
+    );
+    let (output, said) = fixture.script_line(&line, &[("ONEPIPELINE_TEST_ARCHIVE", ARCHIVE)]);
+    assert!(
+        output.status.success() && fixture.path(ARCHIVE).is_file(),
+        "the fixture's build is archived by `{line}`:\n{said}"
     );
 }
 
+/// The fixture's first run, failed: what a CI test step leaves behind, colour
+/// escapes included, as a runner with `CARGO_TERM_COLOR=always` writes them.
 fn failed_step(case: &str) -> Fixture {
     let fixture = rerun_fixture(case);
     archive(&fixture);
@@ -1059,4 +1100,43 @@ fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
             period * terminate_after
         );
     }
+} // llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// The gate's instrumented suite archives the build it is about to run, under
+/// the same flags, before running it, and only when CI names where.
+// llmlint: ignore-block[changed_behavior_has_e2e] running this line needs
+// cargo-llvm-cov, which the cross legs that run every test do not install, so a
+// test executing it could only pass there by skipping. `test-quick`'s archive
+// line is executed above; this one is held to the same shape, and the gate job
+// runs it for real on every run.
+#[test]
+fn the_instrumented_suite_archives_the_build_it_runs_before_running_it() {
+    let justfile = fs::read_to_string(repo_root().join("justfile")).expect("the justfile reads");
+    let body: Vec<&str> = justfile
+        .split("\n_crate-test-rest:\n")
+        .nth(1)
+        .expect("the justfile has `_crate-test-rest`")
+        .lines()
+        .take_while(|line| line.starts_with("    "))
+        .collect();
+    let at = |needle: &str| {
+        body.iter()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("`_crate-test-rest` runs {needle}:\n{body:#?}"))
+    };
+    let archive = at("nextest-archive");
+    let run = at("llvm-cov --no-report nextest --locked -E");
+    assert!(
+        archive < run,
+        "the archive is made before the run:\n{body:#?}"
+    );
+    let flags = "RUSTFLAGS=\"-D warnings\" cargo llvm-cov --no-report nextest";
+    assert!(body[run].contains(flags), "{}", body[run]);
+    assert!(
+        body[archive].contains(&format!(
+            "{flags}-archive --locked --archive-file \"$ONEPIPELINE_TEST_ARCHIVE\""
+        )) && body[archive].contains("[ -z \"${ONEPIPELINE_TEST_ARCHIVE:-}\" ] ||"),
+        "the archive is built as the run builds, only when CI names where:\n{}",
+        body[archive]
+    );
 } // llmlint: ignore-end[changed_behavior_has_e2e]
