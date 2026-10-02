@@ -5,13 +5,12 @@
 //! can drive, or a driver-side error it reports — after its last outcome line,
 //! before any run-end hook of that ending, and while it still holds the run's
 //! ownership lock. A driver killed by a signal writes nothing, so the absence of
-//! one after the last `driver-adopted` is how a crash reads; the panic half of
-//! that is held by `engine::tests`, because nothing a journey can do to the
-//! compiled binary makes it panic. `status` prints the last record, and names
+//! one after the last `driver-adopted` is how a crash reads, and a driver that
+//! panics writes nothing either. `status` prints the last record, and names
 //! every command envelope claimed off the queue that has no outcome line.
 
 // llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
-// assumed: the eleven journeys here take about 40 seconds on the wall under nextest's
+// assumed: the twelve journeys here take about 40 seconds on the wall under nextest's
 // parallelism, each driving a real detached or attached driver to its ending. What they
 // exercise is how a driver lets go of a run — `engine`, `driver`, `channel`, `projection`,
 // `views` and `hooks` together — which any change under `src/` can move, so a project edged
@@ -411,6 +410,74 @@ fn a_driver_killed_by_a_signal_leaves_no_record_and_its_adopter_writes_its_own()
         "the adopter named an edit the driver before it answered"
     );
     assert!(first(&world, run, "driver-adopted") < first(&world, run, "driver-exited"));
+}
+
+/// **A driver that panics writes nothing.** A run's driver is killed, and an
+/// attached `adopt` takes the run over and journals its `driver-adopted`. Its
+/// terminal then goes away while it drives: the next line its attached stream
+/// writes fails, and `eprintln!` panics on a failed write — a real panic in the
+/// real driver, reached only by closing the pipe this journey holds. The process
+/// ends as a panicking Rust process does, and no `driver-exited` names it.
+#[cfg(unix)]
+#[test]
+fn a_driver_that_panics_after_adoption_leaves_no_record() {
+    let world = World::new("exit-panic");
+    let run = "panicked";
+    world.script("build.wait", "hold");
+    world.script("ship.wait", "hold");
+    let killed = start_detached(
+        &world,
+        run,
+        vec![agent("build", &[]), agent("ship", &[])],
+        &[],
+    );
+    world.until("both held nodes to be dispatched", |world| {
+        world.events_of(run, "node-dispatched").len() >= 2
+    });
+    end_process(killed);
+
+    let mut adopt = world.cmd(&["adopt", run]);
+    adopt
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let mut adopting = adopt.spawn().expect("the adoption starts");
+    let pid = adopting.id();
+    world.until(
+        "the adopter to journal its adoption and re-dispatch both nodes",
+        |world| {
+            world
+                .events_of(run, "driver-adopted")
+                .iter()
+                .any(|adopted| adopted["payload"]["pid"] == json!(pid))
+                && world.events_of(run, "node-dispatched").len() >= 4
+        },
+    );
+    // The terminal goes away: every later line the attached stream writes fails.
+    drop(adopting.stderr.take());
+    // One node settles, which the attached stream writes about; the other is
+    // still held, so the driver has work in flight when it panics.
+    world.release("build.go");
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let ended = loop {
+        if let Some(status) = adopting.try_wait().expect("the adoption is waited on") {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "the adopter never ended");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    // 101 is the status a Rust process exits with when a panic ends it.
+    assert_eq!(ended.code(), Some(101), "the adopter ended with {ended:?}");
+    let exits = world.events_of(run, "driver-exited");
+    assert!(
+        !exits
+            .iter()
+            .any(|exited| exited["payload"]["pid"] == json!(pid)),
+        "the panicking driver {pid} wrote a driver-exited: {exits:?}"
+    );
+    assert!(exits.is_empty(), "{exits:?}");
+    world.release("ship.go");
 }
 
 /// A node validator that passes the edit it is offered at submission, and holds
