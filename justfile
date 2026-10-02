@@ -329,7 +329,29 @@ _note-test:
 test-quick:
     @just _strace-preflight
     @just _onetaskgraph-preflight
-    @cargo nextest run --locked -E '{{offline-tiers}}'
+    @bash scripts/nextest-run.sh cargo nextest run --locked -E '{{offline-tiers}}'
+
+# How many times `rerun-failed` re-runs each test a failed CI test step failed.
+# Three tells "fails every time" from "fails some of the time" and stays bounded:
+# a test that hangs every time is ended at `.config/nextest.toml`'s 360-second
+# `terminate-after`, so three re-runs fit inside the 20 minutes `ci.yml` gives
+# the step.
+rerun-times := "3"
+
+# What CI runs once a test step has failed: why any tests went unrun, then how
+# often each failed test fails again on the build that step made. Reports only;
+# it never turns a failed run green. `scripts/known-flakes.txt` annotates and
+# excuses nothing.
+# Re-run a failed step's failed tests against its build, from the step's LOG.
+rerun-failed log:
+    @bash scripts/rerun-failed.sh --log "$1" --times {{rerun-times}} --known-flakes scripts/known-flakes.txt -- cargo nextest run --locked
+
+# The same for the gate's instrumented suite: re-running through the command
+# `_crate-test-rest` and `_note-test` built it with is what keeps cargo from
+# compiling a second, uninstrumented tree.
+# Re-run a failed gate step's failed tests against its coverage build.
+rerun-failed-coverage log:
+    @RUSTFLAGS="-D warnings" bash scripts/rerun-failed.sh --log "$1" --times {{rerun-times}} --known-flakes scripts/known-flakes.txt -- cargo llvm-cov --no-report nextest --locked
 
 # The one journey that is not offline: the real `onevcs`, real git against a real
 # remote, and the real GitHub API opening and merging a pull request on a scratch

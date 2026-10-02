@@ -67,12 +67,28 @@ jobs:
       # without (`_ensure-strace` in the justfile).
       - name: Bootstrap
         run: just bootstrap
+      # Each tees its output for the re-run step below, under `shell: bash` for
+      # pipefail, so the tee cannot turn a failed gate green.
       - name: Quality gate (affected projects)
+        id: affected
         if: github.event_name == 'pull_request'
-        run: just check-affected
+        shell: bash
+        run: just check-affected 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
       - name: Quality gate (every project)
+        id: every
         if: github.event_name != 'pull_request'
-        run: just check
+        shell: bash
+        run: just check 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
+      # Whether each test the gate failed fails again on the same instrumented
+      # build: a new flake or a regression. It cannot change the verdict. The
+      # gate step has already failed the job, and `continue-on-error` keeps this
+      # step's own exit out of it. 20 minutes is `just rerun-failed`'s bound, and
+      # the justfile says why.
+      - name: Does each failed test fail again on this build
+        if: failure() && (steps.affected.outcome == 'failure' || steps.every.outcome == 'failure')
+        continue-on-error: true
+        timeout-minutes: 20
+        run: just rerun-failed-coverage "$RUNNER_TEMP/quality-gate.log"
       # A committed lockfile that `just bootstrap`/`just check` had to change is
       # a stale generated file; fail rather than let it drift.
       - name: Committed generated files are up to date
@@ -136,6 +152,10 @@ jobs:
   # quarter of GitHub's 360-minute default. macOS is unmoved by these too and far
   # inside: over the same three runs 25m24s-31m04s step, 28m45s-34m06s job.
   #
+  # The job is 105 + 20 = 125 since the step that re-runs a failed test was added
+  # after the gate: its 20 minutes come on top of a step that can take all 90, and
+  # the 15-minute gap between step and job is kept as it was.
+  #
   # Splitting the suite across more jobs is the only thing that would make the leg
   # itself shorter, and it is not available: branch protection requires `cross
   # (macos-latest)` and `cross (windows-latest)` by rendered name, so a shard axis
@@ -149,7 +169,7 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 105
+    timeout-minutes: 125
     env:
       NEXTEST_PROFILE: ci
     defaults:
@@ -166,9 +186,12 @@ jobs:
           tool: just,nextest
       - name: Bootstrap
         run: just bootstrap
+      # Teed for the re-run step below; `shell: bash` above is pipefail, so the
+      # tee cannot turn a failed leg green.
       - name: Quality gate (cross-platform legs)
+        id: gate
         timeout-minutes: 90
-        run: just check-cross
+        run: just check-cross 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
       # A leg that stops without a verdict stops holding something — a test
       # process, or a child of one that outlived it — and on Windows there are no
       # process groups to make that visible afterwards, so it is read here while
@@ -184,6 +207,17 @@ jobs:
           else
             ps -ef
           fi
+      # After the process table, so the snapshot above is of the leg as it
+      # stopped rather than of these re-runs. This step says why any tests went
+      # unrun, then whether each failed test fails again on the build the step
+      # above made. It cannot change the verdict: that step has already failed
+      # the job, and `continue-on-error` keeps this one's exit out of it. 20
+      # minutes is `just rerun-failed`'s bound, and the justfile says why.
+      - name: Does each failed test fail again on this build
+        if: failure() && steps.gate.outcome == 'failure'
+        continue-on-error: true
+        timeout-minutes: 20
+        run: just rerun-failed "$RUNNER_TEMP/quality-gate.log"
 
   # The declared MSRV is a promise to consumers, so prove it rather than document
   # it: a floor that only lives in Cargo.toml drifts the first time a dependency

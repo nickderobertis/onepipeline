@@ -97,9 +97,24 @@ status-level = "pass"
 #
 # **Before the group assignment below**, because the first matching override wins
 # per setting and the one below matches every test in these binaries.
+#
+# Every override that asks for more than one thread also sets `priority`, so these
+# tests are scheduled before every one-thread test in the group. Without that
+# ordering nextest can end a run with tests silently unrun: its scheduler
+# (`future-queue` 0.4.0, `FutureQueueGrouped::poll_pop_in_progress`) re-reads a
+# group's queue only when a member *of that group* finishes. A queued four-thread
+# test that does not fit when the group's last running member ends then waits
+# for a wake-up that never comes, because the global slots it needs are held by
+# tests outside the group. The run ends with `warning: N/M tests were not run`,
+# no reason, and exit 100. That is the macOS leg of run 36876601588, job
+# 110417653725, which stopped at 1097 of 2247. Scheduled first, a test that needs
+# the whole group only ever waits behind another such test, and that test frees
+# as much as it needs. `tests/nextest_runs.rs` drives this file through nextest
+# under that condition and holds it.
 [[profile.default.overrides]]
 filter = 'test(/a_host_sized/)'
 threads-required = 4
+priority = 100
 
 # The pool-maintenance journeys take the whole group too, so none of them runs
 # beside the `loopcost` and `adoption` journeys that count loop passes per window:
@@ -112,6 +127,7 @@ threads-required = 4
 [[profile.default.overrides]]
 filter = 'binary(e2e) and test(/^maintenance::/)'
 threads-required = 4
+priority = 100
 
 # The four journeys that hold a loop's pass **rate** to a floor take the whole
 # group as well. Each counts passes across a wall-clock window, so anything else
@@ -124,6 +140,7 @@ threads-required = 4
 [[profile.default.overrides]]
 filter = 'binary(e2e) and (test(=adoption::a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs) or test(=loopcost::a_converged_run_does_no_scheduling_work_while_it_records_nothing) or test(=loopcost::an_idle_pass_does_not_grow_with_the_run_it_is_idling_on) or test(=loopcost::another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops))'
 threads-required = 4
+priority = 100
 
 # Declared on `default` and inherited by `ci`, so the cap holds on the
 # cross-platform legs too. Asked of the runner rather than assumed: `cargo nextest
