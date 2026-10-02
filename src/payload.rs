@@ -1726,7 +1726,6 @@ mod tests {
             if index % 2 == 0 {
                 continue;
             }
-            // A quoted token followed by a colon is a key; any other is a word.
             let after = stated
                 .split(&format!("\"{quoted}\""))
                 .nth(1)

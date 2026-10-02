@@ -26,7 +26,6 @@ use crate::harness::end_process;
 use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING};
 use crate::run_end_hooks::{hook, records, HOOK_TIMEOUT, RECORD_ENV};
 
-/// A world whose run-end hook fixture records into the world's own scratch.
 fn hooked_world(name: &str) -> World {
     let world = World::new(name);
     std::fs::create_dir_all(records(&world)).expect("a record directory");
@@ -64,7 +63,6 @@ fn start_detached(world: &World, run: &str, nodes: Vec<Value>, extra: &[&str]) -
         .unwrap_or_else(|| panic!("the launch announced no driver: {announced}"))
 }
 
-/// The same launch, attached: it returns once the driver has let go.
 fn start_attached(world: &World, run: &str, nodes: Vec<Value>) -> crate::harness::Run {
     let hook = hook(world);
     let path = world.plan(run, &plan_of(run, nodes));
@@ -84,7 +82,6 @@ fn start_attached(world: &World, run: &str, nodes: Vec<Value>) -> crate::harness
     )
 }
 
-/// Where one kind first appears in a run's journal.
 fn first(world: &World, run: &str, kind: &str) -> usize {
     world
         .kinds(run)
@@ -93,7 +90,6 @@ fn first(world: &World, run: &str, kind: &str) -> usize {
         .unwrap_or_else(|| panic!("{run} recorded no {kind}: {:?}", world.kinds(run)))
 }
 
-/// The one `driver-exited` a run carries, refused unless there is exactly one.
 fn the_exit(world: &World, run: &str) -> Value {
     let exits = world.events_of(run, "driver-exited");
     assert_eq!(
@@ -106,12 +102,10 @@ fn the_exit(world: &World, run: &str) -> Value {
     exits[0].clone()
 }
 
-/// What the run's launch record names as its driver.
 fn recorded_driver(world: &World, run: &str) -> Value {
     world.run_json(run, "launch.json")["pid"].clone()
 }
 
-/// Submit one edit the driver applies, and wait for its answer.
 fn an_applied_edit(world: &World, run: &str, model: &str) {
     world
         .run_with_stdin(
@@ -125,7 +119,6 @@ fn an_applied_edit(world: &World, run: &str, model: &str) {
         .out_has("\"applied\"");
 }
 
-/// The highest envelope id the run's channel holds an outcome line for.
 fn highest_outcome(world: &World, run: &str) -> Option<u64> {
     world
         .command_outcomes(run)
@@ -355,8 +348,9 @@ fn a_driver_that_reports_an_error_records_it_while_it_still_holds_the_run() {
 /// **A driver killed by a signal writes nothing.** The record's absence after
 /// the last `driver-adopted`, on a driver proved over, is how the crash reads —
 /// and the driver that adopts the run and settles it writes the one record,
-/// naming itself and none of the edits the killed driver answered: what it
-/// answered is counted from where it took the run.
+/// naming itself and none of the edits the killed driver answered — not even
+/// an outcome line this build cannot decode: what it answered is counted from
+/// where it took the run.
 #[cfg(unix)]
 #[test]
 fn a_driver_killed_by_a_signal_leaves_no_record_and_its_adopter_writes_its_own() {
@@ -369,6 +363,17 @@ fn a_driver_killed_by_a_signal_leaves_no_record_and_its_adopter_writes_its_own()
     });
     an_applied_edit(&world, run, "before-the-kill");
     end_process(pid);
+    // llmlint: ignore-block[tests_mirror_real_usage] an outcome line a newer build wrote,
+    // naming an envelope id higher than any this run answered: no verb of this build writes
+    // one it cannot read back, and the outcome log is the one place such a line reaches the
+    // driver that adopts the run.
+    let mut outcomes = std::fs::OpenOptions::new()
+        .append(true)
+        .open(world.run_file(run, "channel/command-outcomes.jsonl"))
+        .expect("the outcome log opens");
+    std::io::Write::write_all(&mut outcomes, b"{\"id\":99,\"from\":\"a newer build\"}\n")
+        .expect("the line is appended");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world
         .run(&["status", run])
         .exited(0)
@@ -391,7 +396,7 @@ fn a_driver_killed_by_a_signal_leaves_no_record_and_its_adopter_writes_its_own()
     assert_ne!(adopter, json!(pid));
     assert_eq!(exited["payload"]["pid"], adopter);
     assert_eq!(exited["payload"]["settlement"], "complete");
-    assert_eq!(highest_outcome(&world, run), Some(0));
+    assert_eq!(highest_outcome(&world, run), Some(99));
     assert_eq!(
         exited["payload"]["last_answered_command"],
         Value::Null,
@@ -446,7 +451,6 @@ fn waiting_reply(world: &World, run: &str, commands: Value) -> std::process::Chi
     replying
 }
 
-/// The line `status` names claimed, unanswered envelopes on, if it prints one.
 fn unanswered_line(world: &World, run: &str) -> Option<String> {
     let status = world.run(&["status", run]);
     status.exited(0);
@@ -522,12 +526,68 @@ fn status_names_an_envelope_the_driver_claimed_and_never_answered() {
     assert_eq!(answered, [0]);
     assert!(world.events_of(run, "driver-exited").is_empty());
 
+    // An outcome log this reader cannot read names nothing, rather than every
+    // envelope ever claimed as though none had been answered.
+    // llmlint: ignore-block[tests_mirror_real_usage] an outcome log that stops being a file
+    // is a storage fault no verb makes; it is the narrowest one that reaches `status`'s read
+    // of it through the compiled binary.
+    let log = world.run_file(run, "channel/command-outcomes.jsonl");
+    std::fs::remove_file(&log).expect("the outcome log is removed");
+    std::fs::create_dir_all(&log).expect("a directory takes its place");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    assert_eq!(unanswered_line(&world, run), None);
+
     std::fs::write(&go, "go").expect("the validator is released");
     world.release("build.go");
     for reply in [&mut claimed, &mut queued] {
         let _ = reply.kill();
         let _ = reply.wait();
     }
+}
+
+/// **A driver that cannot write its record.** The run's journal stops taking
+/// writes under a live driver, so the record of how it ended cannot be written:
+/// the driver says so on its log and lets go of the run anyway, rather than
+/// leaving it claimed over a record about leaving.
+#[cfg(unix)]
+#[test]
+fn a_driver_that_cannot_write_its_record_says_so_and_still_lets_go() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = hooked_world("exit-unwritten");
+    let run = "unwritten";
+    world.script("build.wait", "hold");
+    start_detached(&world, run, vec![agent("build", &[])], &[]);
+    world.until("the held node to be dispatched", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+    let journal = world.run_file(run, "events.jsonl");
+    let writable = std::fs::metadata(&journal)
+        .expect("the journal is there")
+        .permissions();
+    // llmlint: ignore-block[tests_mirror_real_usage] a journal that stops taking writes under
+    // a live driver is a storage fault — a full or read-only filesystem — that no verb makes;
+    // a read-only file is the narrowest one that reaches the driver's own record of its
+    // ending through the compiled binary.
+    std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o444))
+        .expect("the journal is made read-only");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.release("build.go");
+
+    let log = world.run_file(run, "driver.log");
+    world.until("the driver to say its record could not be written", |_| {
+        std::fs::read_to_string(&log)
+            .is_ok_and(|said| said.contains("could not record how its driver ended"))
+    });
+    world.until("the driver to let go of the run", |world| {
+        !world.run_file(run, "owner.lock").exists()
+    });
+    std::fs::set_permissions(&journal, writable).expect("the journal is writable again");
+    assert!(world.events_of(run, "driver-exited").is_empty());
+    world
+        .run(&["status", run])
+        .exited(0)
+        .out_has("DRIVER DEAD")
+        .out_lacks("driver exited");
 }
 
 /// **A driver that cannot hand the run on.** Its handover gate cannot be taken

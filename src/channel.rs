@@ -2039,11 +2039,8 @@ impl ChannelState {
 
     /// How many outcome lines the reconciler has written so far: the mark a
     /// driver takes as it starts, so the lines after it are the ones it wrote.
-    ///
-    /// Counted off the raw log rather than off [`outcomes`](Self::outcomes), so a
-    /// line this build cannot decode still moves the mark past itself.
     pub(crate) fn outcomes_mark(&self) -> usize {
-        self.outcome_lines().len()
+        self.outcome_lines().map_or(0, |lines| lines.len())
     }
 
     /// The highest envelope id among the outcome lines written after `mark`, or
@@ -2052,7 +2049,7 @@ impl ChannelState {
     /// What a driver holding the run's ownership lock since `mark` answered:
     /// nothing else writes an outcome line while it holds the lock.
     pub(crate) fn highest_answered_after(&self, mark: usize) -> Option<u64> {
-        self.outcome_lines()
+        self.outcome_lines()?
             .iter()
             .skip(mark)
             .filter_map(|(record, _)| record.get("id").and_then(Value::as_u64))
@@ -2065,7 +2062,8 @@ impl ChannelState {
     /// An envelope taken off the queue and never answered is one whose submitter
     /// was told nothing, and one no later writer claims again: the cursor is
     /// already past it. Read leniently, as every view of the channel is: a
-    /// channel this reader cannot open names nothing.
+    /// channel this reader cannot open names nothing, and neither does one whose
+    /// outcome log it cannot read — that would name every envelope ever answered.
     pub(crate) fn claimed_unanswered(&self) -> Vec<u64> {
         if !self.paths.channel_dir().is_dir() {
             return Vec::new();
@@ -2088,8 +2086,10 @@ impl ChannelState {
                 break;
             }
         }
-        let answered: BTreeSet<u64> = self
-            .outcome_lines()
+        let Some(outcomes) = self.outcome_lines() else {
+            return Vec::new();
+        };
+        let answered: BTreeSet<u64> = outcomes
             .iter()
             .filter_map(|(record, _)| record.get("id").and_then(Value::as_u64))
             .collect();
@@ -2097,15 +2097,13 @@ impl ChannelState {
         claimed
     }
 
-    /// Every outcome line, raw, or none for a channel this reader cannot open.
-    fn outcome_lines(&self) -> Vec<(Value, onemessagebus::Position)> {
+    /// Every outcome line, raw — none for a run with no channel yet — or `None`
+    /// for an outcome log this reader cannot read.
+    fn outcome_lines(&self) -> Option<Vec<(Value, onemessagebus::Position)>> {
         if !self.paths.channel_dir().is_dir() {
-            return Vec::new();
+            return Some(Vec::new());
         }
-        self.plain(COMMAND_OUTCOMES)
-            .ok()
-            .and_then(|outcomes| outcomes.log(None).ok())
-            .unwrap_or_default()
+        self.plain(COMMAND_OUTCOMES).ok()?.log(None).ok()
     }
 }
 

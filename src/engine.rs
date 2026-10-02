@@ -6907,7 +6907,6 @@ mod tests {
         std::fs::remove_dir_all(&paths.dir).ok();
     }
 
-    /// The `driver-exited` records a run's journal holds, as written.
     fn exits_of(paths: &RunPaths) -> Vec<Value> {
         ledger::read_lines(&paths.journal())
             .iter()
