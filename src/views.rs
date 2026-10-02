@@ -300,7 +300,8 @@ pub fn reading(view: &RunView) -> RunReading {
     }
 }
 
-/// The waiting human actions of a status map, by id.
+/// Ordered by id, as the summary document records them, so a fold and a listing
+/// row name a paused run's actions in one order.
 fn waiting_nodes(statuses: &BTreeMap<String, NodeStatus>) -> Vec<String> {
     statuses
         .iter()

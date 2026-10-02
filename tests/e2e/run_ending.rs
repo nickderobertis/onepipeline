@@ -36,28 +36,23 @@ fn ending_world(name: &str) -> World {
     world.with_env(RECORD_ENV, &record)
 }
 
-/// The launch flags naming the hook fixture for both run-end hooks.
-fn hooked(hook: &str) -> Vec<String> {
-    [
-        "--success-hook",
-        hook,
-        "--failure-hook",
-        hook,
-        "--hook-timeout",
-        HOOK_TIMEOUT,
-    ]
-    .map(str::to_owned)
-    .to_vec()
-}
-
-/// Start a run over these nodes with both hooks named, attached or detached.
 fn start(world: &World, run: &str, nodes: Vec<Value>, mode: &str) -> crate::harness::Run {
     let path = world.plan(run, &plan_of(run, nodes));
     let hook = hook(world);
-    let mut args = vec!["start".to_owned(), path, mode.to_owned()];
-    args.extend(hooked(&hook));
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    world.run_from(&world.project, &args)
+    world.run_from(
+        &world.project,
+        &[
+            "start",
+            &path,
+            mode,
+            "--success-hook",
+            &hook,
+            "--failure-hook",
+            &hook,
+            "--hook-timeout",
+            HOOK_TIMEOUT,
+        ],
+    )
 }
 
 /// One run, read the three ways a reader asks for it, each held to `word`.
@@ -142,7 +137,6 @@ fn read_as(world: &World, run: &str, word: &str) -> Value {
         );
     }
 
-    // The SDK's two readers give the word the binary printed.
     let paths = onepipeline::views::RunPaths::under(&world.runs, run);
     let summary = onepipeline::views::RunSummary::of(&paths).expect("the run's summary reads");
     let view = onepipeline::views::RunView::open(&paths).expect("the run folds");
@@ -206,7 +200,6 @@ fn fired_ending(world: &World, run: &str) -> (Value, Value) {
     }
 }
 
-/// The reading's ending is the hook the run fired: its kind, and its nodes.
 fn ending_is_the_hook_it_fired(world: &World, run: &str, reading: &Value) {
     let (kind, nodes) = fired_ending(world, run);
     assert_eq!(reading["ending"]["kind"], kind, "{reading}");
@@ -448,17 +441,66 @@ fn a_run_held_on_a_blocking_question_reads_paused_on_it() {
     advised_to_settle_or_stop(&world, run, &[], true);
 }
 
+/// An undriven run held on two human actions and a blocking question at once reads
+/// `PAUSED` on all three, and its advice names every way to settle them.
+#[test]
+fn a_run_paused_on_two_human_actions_and_a_blocking_question_names_all_three() {
+    let world = ending_world("ending-paused-both");
+    let run = "decisions";
+    start(
+        &world,
+        run,
+        vec![human("first", &[]), human("second", &[])],
+        "--attach",
+    )
+    .exited(0)
+    .out_has("\"settlement\":\"awaiting-planner\"");
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 3, "commands": [
+                {"op": "finding", "blocking": true, "id": "first",
+                 "message": "is first still the person to ask?"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the blocking finding to be raised", |world| {
+        world
+            .queued_surfaces(run)
+            .iter()
+            .any(|surface| surface["blocking"] == json!(true))
+    });
+
+    let reading = read_as(&world, run, "PAUSED");
+    assert_eq!(reading["ending"], Value::Null);
+    assert_eq!(
+        reading["paused"],
+        json!({"human_actions": ["first", "second"], "blocking_surface": true})
+    );
+    advised_to_settle_or_stop(&world, run, &["first", "second"], true);
+    assert!(invocations(&world, run).is_empty());
+}
+
 /// A run with a live driver reads as driven, with neither an ending nor a pause;
 /// once that driver is gone while a node is still `ready` and nothing stopped the
 /// run, it reads `DRIVER DEAD` — still neither ended nor paused — and is told to
-/// adopt it.
+/// adopt it. A human action waiting beside that work does not make it `PAUSED`:
+/// work the driver could still move outranks a decision.
 #[cfg(unix)]
 #[test]
 fn a_driven_run_reads_driven_and_one_whose_driver_died_with_work_ready_reads_driver_dead() {
     let world = ending_world("ending-driver-dead");
     world.script("build.wait", "hold");
     let run = "crashed";
-    let mut plan = plan_of(run, vec![agent("build", &[]), agent("after", &[])]);
+    let mut plan = plan_of(
+        run,
+        vec![
+            agent("build", &[]),
+            agent("after", &[]),
+            human("approve", &[]),
+        ],
+    );
     // One slot, so the second node is `ready` behind the held first.
     plan["concurrency"] = json!(1);
     let path = world.plan(run, &plan);
@@ -488,6 +530,16 @@ fn a_driven_run_reads_driven_and_one_whose_driver_died_with_work_ready_reads_dri
         .out_has("DRIVER DEAD: nothing is driving this run; adopt it or stop it")
         // The journey's precondition: a node is `ready`, not only one running.
         .out_has("  after: ready");
+    // And a decision is outstanding beside it.
+    let results = world.run(&["results", run]);
+    assert!(
+        results
+            .stdout
+            .lines()
+            .any(|line| line.trim_start().starts_with("approve") && line.contains("waiting")),
+        "the journey's precondition, a waiting human action, does not hold:\n{}",
+        results.stdout
+    );
     world.release("build.go");
 }
 

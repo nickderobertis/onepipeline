@@ -159,7 +159,14 @@ mod recorded_support;
 mod retirement;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod run_end_hooks;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
+// exercise is one reading across `views`, `hooks`, `summary`, `unwatched` and the `status`
+// verb in `driver` together, through the compiled binary and the run-end hook fixture
+// `run_end_hooks` places — so the narrowest edge they can honestly sit behind is the crate
+// itself, which is this target's, and the note-journey dependency is this binary's own,
+// shared by every module in it. Same grounds as `mod retirement` above.
 mod run_ending;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod scratch;
 mod session;
 mod session_reuse;
