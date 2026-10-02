@@ -1,0 +1,43 @@
+# DO NOT MERGE: throwaway on-platform evidence for the session PR this is stacked on.
+# Builds once and runs only the four tests that PR is about, under nextest's stress
+# mode, on the runner they failed on, with the repository's `ci` nextest profile.
+name: Windows stress demonstration
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  stress:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      NEXTEST_PROFILE: ci
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,nextest
+      - name: Bootstrap
+        run: just bootstrap
+      - name: Build
+        run: cargo nextest run --locked --lib --test e2e --no-run
+      - name: Stress the four tests
+        run: >-
+          cargo nextest run --locked --lib --test e2e --no-fail-fast --stress-count 20
+          -E 'test(=writeback_projections::a_lineage_read_cold_with_edges_is_carried_and_its_edges_put_right)
+          | test(=writeback_projections::an_adoption_whose_every_read_matches_reads_each_item_once_and_copies_nothing)
+          | test(=writeback_cost::the_comparable_plan_spends_what_the_committed_record_says)
+          | test(=summary::tests::a_summary_read_is_bounded_and_the_fold_it_replaces_is_not)'
