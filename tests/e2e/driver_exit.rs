@@ -859,7 +859,8 @@ fn a_run_reads_the_same_with_its_driver_exit_as_without_it() {
 /// **A record this build cannot read.** A `driver-exited` a newer build wrote,
 /// with a settlement word this one does not know, is still a driver that exited
 /// at that time: `status` says so and says the rest could not be read, rather
-/// than guessing a settlement or dropping the line.
+/// than guessing a settlement or dropping the line. A sibling's envelope of the
+/// same spelling is not read as one at all.
 #[test]
 fn status_says_a_driver_exit_it_cannot_read_could_not_be_read() {
     let world = hooked_world("exit-unreadable");
@@ -871,6 +872,23 @@ fn status_says_a_driver_exit_it_cannot_read_could_not_be_read() {
     // after it, so it is the last one in the store's merge order.
     let ours = the_exit(&world, run);
     let at = ours["ts"].as_str().expect("a time").to_string();
+    // A sibling's envelope spelled the same way is not this run's driver: the kind
+    // is this library's only when this library produced it.
+    append_to_journal(
+        &world,
+        run,
+        &json!({"v": 1, "ts": at, "stream": "~a-sibling", "seq": 999,
+                "source": "agentgraph", "kind": "driver-exited",
+                "labels": {"run_id": run},
+                "payload": {"settlement": "a-sibling-word"},
+                "artifacts": []}),
+    );
+    world
+        .run(&["status", run])
+        .exited(0)
+        .out_has("settled complete")
+        .out_lacks("a-sibling-word");
+
     append_to_journal(
         &world,
         run,

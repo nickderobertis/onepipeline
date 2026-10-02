@@ -3690,12 +3690,10 @@ fn evidence(landed: &onevcs::Landed) -> String {
 /// edit was applied or abandoned has to be told.
 fn driver_exit_lines(view: &RunView) -> String {
     let mut out = String::new();
-    if let Some(event) = view
-        .events
-        .iter()
-        .rev()
-        .find(|event| PipelineKind::from_wire(&event.kind) == Some(PipelineKind::DriverExited))
-    {
+    if let Some(event) = view.events.iter().rev().find(|event| {
+        event.source == Source::Pipeline
+            && PipelineKind::from_wire(&event.kind) == Some(PipelineKind::DriverExited)
+    }) {
         let ago = crate::projection::millis_of(&event.ts)
             .map(|at| {
                 format!(
