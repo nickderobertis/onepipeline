@@ -46,12 +46,24 @@ fn bash() -> PathBuf {
         .expect("a bash on PATH outside the Windows system directory runs the CI scripts")
 }
 
-/// A crate outside every workspace, written fresh under this clone's `target/`.
+/// A crate outside every workspace, written fresh under the system's temporary
+/// directory and removed with this value. Not under `target/`: CI's
+/// `Swatinem/rust-cache` cleans that tree and reports a crate it finds there
+/// with a `tests/` directory as an error on every job.
 struct Fixture(PathBuf);
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 
 impl Fixture {
     fn new(case: &str, manifest: &str, files: &[(&str, &str)]) -> Self {
-        let root = repo_root().join("target/nextest-runs").join(case);
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-nextest-runs-{case}-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("the fixture directory is made");
         fs::write(root.join("Cargo.toml"), manifest).expect("the fixture manifest is written");

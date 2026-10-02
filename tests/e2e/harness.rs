@@ -4645,6 +4645,13 @@ fn build(selection: &[&str]) -> PathBuf {
         .arg("--target-dir")
         .arg(target)
         .current_dir(repo_file("."));
+    // llmlint: ignore-block[changed_behavior_has_e2e] a test of this would run
+    // cargo over the suite's own target directory from inside the suite, which is
+    // the nesting this scrub exists to make harmless. What holds it instead: every
+    // failed CI test step re-runs its failures (`just rerun-failed`), and that step
+    // warns whenever a re-run had to compile. On #672's demonstration runs, the
+    // first re-run recompiled from `ring` up before this scrub and compiled
+    // nothing after it.
     // What cargo sets for a running test is not the environment a build runs
     // in. Dependency build scripts track some of it (`ring`'s reads
     // `CARGO_MANIFEST_DIR` and `CARGO_PKG_NAME`), so a nested build carrying it
@@ -4669,6 +4676,7 @@ fn build(selection: &[&str]) -> PathBuf {
             cargo.env_remove(name.as_ref());
         }
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     let built = cargo.output().expect("cargo builds the subprocess doubles");
     assert!(
         built.status.success(),
