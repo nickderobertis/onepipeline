@@ -118,7 +118,8 @@ pub fn execute(
     // `on_remote`: where the branch stands on its remote, which the next attempt
     // is told so that its repair grows that commit rather than rewriting it.
     // `last_preserved`: the failure the attempt before this one preserved, once
-    // there is one.
+    // there is one. `conflicted`: the attempts whose dispatch was handed the
+    // branch's conflict with its base, for the decision a spent budget raises.
     let (
         attempts,
         mut node,
@@ -128,6 +129,7 @@ pub fn execute(
         mut on_remote,
         mut notes,
         mut last_preserved,
+        mut conflicted,
     ) = match resume {
         None => (
             engine::publication_attempts(),
@@ -138,6 +140,7 @@ pub fn execute(
             OnRemote::Never,
             Vec::new(),
             None,
+            Conflicted::default(),
         ),
         Some(continuation) => (
             continuation.attempts,
@@ -148,6 +151,7 @@ pub fn execute(
             continuation.on_remote,
             continuation.notes,
             Some(continuation.preserved),
+            continuation.conflicted,
         ),
     };
     loop {
@@ -182,13 +186,27 @@ pub fn execute(
                         on_remote,
                         notes,
                         preserved,
+                        // llmlint: ignore[changed_behavior_has_e2e] carried by move for
+                        // `on_remote`'s reason above: a journey needs a full pool at a
+                        // conflicted re-dispatch and two more unconcluded attempts after it.
+                        conflicted,
                     })
                 });
                 return engine::Ending::Exhausted(refusal);
             }
         };
         endings.push(preserved.outcome);
-        if let Some(same) = republished(published.as_deref(), &preserved.tip) {
+        conflicted.read(&preserved);
+        // A dispatch handed an unfinished merge that it did not conclude cannot
+        // move the branch — git commits nothing over unmerged paths — so the same
+        // commit published twice says nothing about whether the refusal is the
+        // branch's. It is: the conflict is the branch's, every attempt is handed
+        // it again, and the budget is what bounds that.
+        let unconcluded =
+            preserved.handed.is_some() && preserved.outcome == crate::vcs::Preserving::SyncConflict;
+        if let Some(same) =
+            republished(published.as_deref(), &preserved.tip).filter(|_| !unconcluded)
+        {
             return engine::Ending::Settled(republished_the_same_commit(
                 &node.id, &preserved, &endings, &same, attempt,
             ));
@@ -209,6 +227,20 @@ pub fn execute(
         // then settle as the cancellation rather than as the publication failure
         // that is the useful half of what happened.
         if attempt >= attempts || cancel.is_cancelled() {
+            // A budget spent on a conflict the worker was handed and did not
+            // conclude is the one ending here that is a decision rather than a
+            // report: the work went back to the worker every attempt it could,
+            // so what is left is the supervisor's. Not for a cancelled run,
+            // which stopped asking rather than ran out of answers.
+            // llmlint: ignore[changed_behavior_has_e2e] a journey would have to stop the run
+            // inside the instant between a conflicted publication's refusal and this check;
+            // the predicate is the one the settlement beside it already reads, and the
+            // finding it guards is driven by `a_conflict_the_worker_never_concludes_*`.
+            if !cancel.is_cancelled() {
+                if let Some(unconverged) = conflicted.unconverged(&node, &preserved) {
+                    let _ = tx.send(Message::SessionConflicted(Box::new(unconverged)));
+                }
+            }
             return engine::Ending::Settled(stopped_retrying(&node.id, &preserved, &endings));
         }
         attempt = attempt.saturating_add(1);
@@ -286,6 +318,7 @@ pub(crate) struct Continuation {
     published: Option<String>,
     on_remote: OnRemote,
     preserved: Preserved,
+    conflicted: Conflicted,
 }
 
 impl Continuation {
@@ -417,6 +450,10 @@ fn attempt_once(
     // The steps the preserved branch already carries, plus the ones this attempt
     // adds. Carried forward whole, because the branch a later attempt preserves
     // is the same branch: a step skipped on one attempt is still on it.
+    // The merge this attempt's session opened with, when its dispatch was
+    // handed one: the first step's, since that is the dispatch that opens the
+    // session and every later step works in the same worktree.
+    let mut handed: Option<onevcs::OpenConflict> = None;
     let mut completed: Vec<String> = node
         .resume
         .as_ref()
@@ -520,7 +557,7 @@ fn attempt_once(
             crate::vcs::wait_out_the_second(began);
         }
         let drained = match engine::attempt(executor, node, cancel, tx, &build, ended, attempt) {
-            engine::Attempted::Drained(drained) => drained,
+            engine::Attempted::Drained(drained) => *drained,
             engine::Attempted::Exhausted(refusal) => return Attempt::Exhausted(Box::new(refusal)),
         };
         // The session the dispatch opened is what publication needs, whether or
@@ -528,6 +565,7 @@ fn attempt_once(
         // the branch it left behind.
         session = drained.session.or(session);
         branch = drained.branch.or(branch);
+        handed = drained.conflict.map(|conflict| *conflict).or(handed);
         if stream.is_none() {
             if let Some(token) = &session {
                 let opened = crate::vcs::working_session(token);
@@ -573,7 +611,7 @@ fn attempt_once(
         });
     };
 
-    let attempted = publish(
+    let mut attempted = publish(
         executor,
         paths,
         launch,
@@ -589,6 +627,9 @@ fn attempt_once(
         branch,
         attempt,
     );
+    if let Attempt::Preserving(preserved) = &mut attempted {
+        preserved.handed = handed;
+    }
     // Only where this attempt is the node's answer. A publication that failed
     // leaving the work on its branch is asked again, and reporting a criterion
     // against every attempt of a node that is still being re-dispatched would
@@ -960,7 +1001,29 @@ fn publish(
         // it is the same `publication_failed` the outcome arm above takes, which
         // `a_publication_its_merge_path_refuses_settles_the_node_failed_by_name` drives
         // end to end beside an undrafted body.
-        Err(error) => publication_failed(error.to_string()),
+        // The one refusal of the call itself that is a preserving ending: the
+        // session opened with its base's merge in progress and the worker did
+        // not conclude it, so `onevcs` refused before committing or pushing
+        // anything. The branch is where the session found it, and the next
+        // attempt is handed the same conflict to conclude — the publication
+        // budget, and nothing else, is what bounds that.
+        Err(crate::vcs::PublishRefused::MergeUnfinished(reason)) => match branch {
+            Some(branch) => Attempt::Preserving(Box::new(Preserved {
+                branch,
+                outcome: crate::vcs::Preserving::SyncConflict,
+                reason: engine::bounded(&crate::views::one_line(&reason)),
+                evidence: crate::vcs::evidence_in(token),
+                body_aside: body_aside.clone(),
+                tip: crate::vcs::session_tip(token),
+                handed: None,
+            })),
+            // llmlint: ignore[changed_behavior_has_e2e] a session that opened with a merge
+            // in progress is one continuing an existing branch, and the dispatch that opened
+            // it named that branch, so no invocation reaches a publication with a merge
+            // unfinished and no branch in hand; it settles as the residual it would be.
+            None => publication_failed(reason),
+        },
+        Err(crate::vcs::PublishRefused::Refused(error)) => publication_failed(error.to_string()),
     }
 }
 
@@ -1149,7 +1212,7 @@ fn finished_detail(
 /// One publication, and how many reads of the merge path it took to answer.
 struct Published {
     /// What the last read answered, which is the publication the node settles on.
-    answered: crate::error::Result<onevcs::Publication>,
+    answered: std::result::Result<onevcs::Publication, crate::vcs::PublishRefused>,
     /// How many reads were made, for the settlement a spent budget writes. One
     /// on every path but the re-read, which is every publication that answered
     /// the first time it was asked.
@@ -1224,7 +1287,9 @@ fn waited(backoff: std::time::Duration, cancel: &crate::executor::CancellationTo
 /// land, and a refusal is the first of those. Nothing about it says a push reached
 /// anything, so re-reading it would ask the host about work that may never have
 /// left this machine. It settles as the residual, exactly as it always did.
-fn still_unread(answered: &crate::error::Result<onevcs::Publication>) -> bool {
+fn still_unread(
+    answered: &std::result::Result<onevcs::Publication, crate::vcs::PublishRefused>,
+) -> bool {
     let Ok(published) = answered else {
         return false;
     };
@@ -1319,6 +1384,54 @@ struct Preserved {
     /// [`SessionTip::Unmoved`]: crate::vcs::SessionTip::Unmoved
     /// [`SessionTip::Unknown`]: crate::vcs::SessionTip::Unknown
     tip: crate::vcs::SessionTip,
+    /// The merge this attempt's session opened with, when it opened with one and
+    /// the attempt's dispatch was handed it to conclude.
+    handed: Option<onevcs::OpenConflict>,
+}
+
+/// The dispatches of one node that were handed its branch's conflict with the
+/// base, carried across every attempt of the publication-retry loop.
+#[derive(Debug, Clone, Default)]
+struct Conflicted {
+    dispatches: u32,
+    /// The finding names this one's paths: the base may have moved between
+    /// attempts, so an earlier dispatch's conflict can be stale.
+    last: Option<onevcs::OpenConflict>,
+}
+
+impl Conflicted {
+    fn read(&mut self, preserved: &Preserved) {
+        if let Some(conflict) = &preserved.handed {
+            self.dispatches = self.dispatches.saturating_add(1);
+            self.last = Some(conflict.clone());
+        }
+    }
+
+    // llmlint: ignore[changed_behavior_has_e2e] both answers that raise or withhold the
+    // finding after a spent budget are driven end to end — raised by
+    // `a_conflict_the_worker_never_concludes_spends_the_budget_and_then_asks`, withheld by
+    // `a_publication_conflict_is_redispatched_into_the_merge_and_concluded`; a conflicted
+    // dispatch whose *last* refusal is another word needs a merge path that refuses only
+    // after a conclusion, and is held by `a_spent_budget_asks_only_about_a_conflict_still_standing`.
+    /// The decision to put to the supervisor once the budget is spent on a
+    /// conflict the node's dispatches were handed and did not conclude: the
+    /// attempt that stopped the loop ended `sync-conflict`, and at least one of
+    /// the node's dispatches was dispatched into the merge. `None` otherwise — a
+    /// node whose last refusal is about something else is settled under that
+    /// word and asks nothing new.
+    fn unconverged(&self, node: &Node, preserved: &Preserved) -> Option<engine::SessionConflict> {
+        if preserved.outcome != crate::vcs::Preserving::SyncConflict {
+            return None;
+        }
+        let last = self.last.as_ref()?;
+        Some(engine::SessionConflict {
+            node: crate::graph::NodeRef::of(node)?,
+            dispatched: self.dispatches,
+            branch: preserved.branch.clone(),
+            paths: last.paths.clone(),
+            because: preserved.reason.clone(),
+        })
+    }
 }
 
 /// Where a preserved branch stands on its remote, as far as this node's
@@ -1352,13 +1465,11 @@ impl OnRemote {
             // Refused before anything reached the remote, which still holds
             // whatever an earlier attempt pushed.
             //
-            // llmlint: ignore[changed_behavior_has_e2e] `sync-conflict` shares this arm with
-            // `push-rejected`, which
-            // `a_redispatch_after_a_refused_push_is_told_the_commit_the_remote_still_holds`
-            // drives. The one journey that ends a publication `sync-conflict`,
-            // `a_session_open_conflict_raises_a_decision_where_a_publication_conflict_retries`,
-            // cannot show the diagnosis: its re-dispatch meets the same conflict at session
-            // open, so no worker is ever handed the task the diagnosis is composed into.
+            // `push-rejected` is driven by
+            // `a_redispatch_after_a_refused_push_is_told_the_commit_the_remote_still_holds`,
+            // and `sync-conflict` by
+            // `a_publication_conflict_is_redispatched_into_the_merge_and_concluded`, whose
+            // re-dispatch is handed the diagnosis beside the conflict it opens with.
             crate::vcs::Preserving::PushRejected | crate::vcs::Preserving::SyncConflict => self,
         }
     }
@@ -1408,6 +1519,9 @@ fn failed_publication(
                 evidence: crate::vcs::evidence_in(token),
                 body_aside,
                 tip: crate::vcs::session_tip(token),
+                // Filled by `attempt_once`, which is what knows what its
+                // dispatch was handed.
+                handed: None,
             }))
         }
         // The host refused, not the work: no edit to the tree installs the tool
@@ -2458,6 +2572,7 @@ mod tests {
             evidence: Vec::new(),
             body_aside: None,
             tip: crate::vcs::SessionTip::Unknown,
+            handed: None,
         };
         let two = std::num::NonZeroU32::new(2).expect("two");
         let three = std::num::NonZeroU32::new(3).expect("three");
@@ -2548,6 +2663,7 @@ mod tests {
             }],
             body_aside: None,
             tip: crate::vcs::SessionTip::Unknown,
+            handed: None,
         };
         let two = std::num::NonZeroU32::new(2).expect("two");
         let three = std::num::NonZeroU32::new(3).expect("three");
@@ -3008,6 +3124,47 @@ mod tests {
             std::num::NonZeroU32::new(45),
             "the step's own budget did not survive the conversion"
         );
+    }
+
+    /// A spent budget asks about the conflict only where the last refusal is that
+    /// conflict and some dispatch was handed it — not where the worker concluded
+    /// it and the publication then failed for something else, and not where no
+    /// dispatch was ever handed one.
+    #[test]
+    fn a_spent_budget_asks_only_about_a_conflict_still_standing() {
+        let node = Node {
+            id: "service".into(),
+            ..Node::default()
+        };
+        let ended = |outcome| Preserved {
+            branch: "feat/service".into(),
+            outcome,
+            reason: "sync conflict".into(),
+            evidence: Vec::new(),
+            body_aside: None,
+            tip: crate::vcs::SessionTip::Unknown,
+            handed: Some(onevcs::OpenConflict {
+                paths: vec!["a.md".into()],
+                base_commit: "b".repeat(40),
+                branch_tip: "t".repeat(40),
+            }),
+        };
+        let mut conflicted = Conflicted::default();
+        let never = conflicted.unconverged(&node, &ended(crate::vcs::Preserving::SyncConflict));
+        assert!(never.is_none(), "nothing was counted yet");
+
+        conflicted.read(&ended(crate::vcs::Preserving::SyncConflict));
+        conflicted.read(&ended(crate::vcs::Preserving::SyncConflict));
+        let asked = conflicted
+            .unconverged(&node, &ended(crate::vcs::Preserving::SyncConflict))
+            .expect("a conflict still standing is asked about");
+        assert_eq!(asked.dispatched, 2);
+        assert_eq!(asked.paths, vec!["a.md".to_owned()]);
+        assert_eq!(asked.branch, "feat/service");
+
+        assert!(conflicted
+            .unconverged(&node, &ended(crate::vcs::Preserving::ChecksFailed))
+            .is_none());
     }
 
     fn step(id: &str, deps: &[&str]) -> Step {

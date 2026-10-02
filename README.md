@@ -323,6 +323,21 @@ however many times they are asked. The loop is bounded by
 settles `failed` under the last failure's word, saying how many attempts were made
 and what each one ended with.
 
+A branch whose base has moved to **conflict** with it is handed back to the worker
+to merge, never to a person. `onevcs` opens a session continuing such a branch with
+the merge left in progress, and that session — a node's first step, a pinned
+continuation, or the re-dispatch after a `sync-conflict` — is dispatched like any
+other: the task carries the conflict under `## Planner context` (the base and the
+branch, the commit each stands at, the unmerged paths, and the base's commits that
+touched them) and one criterion under `### Merge resolution` at the end of its
+`## Acceptance criteria`, so its judge reviews the merge commit that concludes it. A
+worker that does not conclude the merge publishes into `onevcs`'s refusal, which is
+`sync-conflict` and is dispatched again, spending the same
+`ONEPIPELINE_PUBLICATION_ATTEMPTS` budget and nothing else. Once it is spent the node
+settles `failed`/`sync-conflict`, and one blocking `session-conflict` finding asks the
+supervisor to decide — a `retry`, with an amended task where the worker needs
+direction.
+
 A lifecycle node whose branch is **level with its base** — every commit on it one
 the base already carries, and nothing left in the worktree to commit — has no
 change-request body drafted and nothing published, and settles on whether this

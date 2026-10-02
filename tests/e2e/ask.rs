@@ -416,6 +416,9 @@ fn the_reply_window_is_the_flags_then_the_launch_records_then_the_buss_own() {
 
 /// A wait that elapses is not a ruling: the question stands on the channel,
 /// marked abandoned, and the asker exits `1` with the bus's own word for it.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] its one-second wait is the
+// behaviour under test, and the reply it ends on goes through `driver`'s reply path — the
+// reason `mod ask` gives in `tests/e2e/main.rs` for the crate being its narrowest edge.
 #[test]
 fn an_elapsed_wait_answers_timeout_at_exit_one_and_leaves_the_question_standing() {
     let world = World::new("ask-timeout");
@@ -453,19 +456,27 @@ fn an_elapsed_wait_answers_timeout_at_exit_one_and_leaves_the_question_standing(
         "the elapsed question was left attended: {held}"
     );
 
-    // What the advice cannot promise on a *settled* run is that the reply will
-    // reach anybody, and the reply verb says exactly that rather than queueing
-    // one nothing will read — so the elapsed asker's advice is the standing
-    // question's, not a promise about this run.
+    // And the advice holds on a *settled* run: a verdict naming the standing
+    // question is that question's ruling, bound to it on the channel for the
+    // listener that takes it back (entry 101 of `docs/contract-divergences.md`).
     let correlation = surface["correlation"].as_str().expect("a correlation");
     world
         .run_with_stdin(
             &["reply", &run, "--correlation", correlation],
             &json!({"version": 2, "completion": false, "message": "here now"}).to_string(),
         )
-        .exited(REFUSED)
-        .err_has("has settled");
+        .exited(0)
+        .out_has(r#""state":"delivered","verdict":"delivered""#);
+    let queue = world.run(&["channel", "queue", &run]);
+    queue.exited(0);
+    let replies = queue.json()["replies"].clone();
+    let [reply] = replies.as_array().expect("the reply log").as_slice() else {
+        panic!("one ruling was not bound to the question: {replies}");
+    };
+    assert_eq!(reply["correlation"], surface["correlation"], "{reply}");
+    assert_eq!(reply["reply"]["message"], json!("here now"), "{reply}");
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// An elapsed question that cannot be marked abandoned is still `timeout` at
 /// exit `1` — the wait did elapse — and the advice says the mark failed rather
