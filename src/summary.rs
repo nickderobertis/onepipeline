@@ -1309,7 +1309,13 @@ mod tests {
                 crate::journal::payload(&[("plan", json!(plan(&["build", "ship"])))]),
             )
             .expect("appended");
-        let node = |nth: usize| if nth % 2 == 0 { "build" } else { "ship" };
+        let node = |nth: usize| {
+            if nth.is_multiple_of(2) {
+                "build"
+            } else {
+                "ship"
+            }
+        };
         let mut bulk = String::new();
         for nth in 0..records - 1 {
             let mut record = event(PipelineKind::NodeReady, run, "bulk-appender", nth as u64);
