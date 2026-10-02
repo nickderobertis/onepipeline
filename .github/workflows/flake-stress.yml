@@ -1,0 +1,64 @@
+# THROWAWAY demonstration for the process-flakes change request: never merged.
+# Builds once per platform and stress-runs only that platform's named tests.
+name: flake-stress-demo
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            filter: >-
+              binary(e2e) and (
+              test(=driver::a_launch_record_the_driver_cannot_write_does_not_end_a_working_observer) or
+              test(=session_reuse::every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base) or
+              test(=lifecycle::a_workspace_held_node_reads_as_held_for_concurrency_while_the_host_is_full_and_for_its_workspace_again_after))
+          - os: windows-latest
+            filter: >-
+              binary(e2e) and (
+              test(=lifecycle::a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back) or
+              test(=unwatched::a_reused_pid_another_host_an_empty_token_another_run_a_schema_and_a_stamp_are_not_live))
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    env:
+      NEXTEST_PROFILE: ci
+      CARGO_TERM_COLOR: always
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,nextest
+      - name: Bootstrap
+        run: just bootstrap
+      - name: git version
+        run: git version
+      - name: Build once
+        run: cargo nextest run --locked --no-run --profile ci
+      - name: Stress the platform's flakes (20 iterations each)
+        timeout-minutes: 120
+        # Read rather than trusted: this nextest has been seen to exit 0 from a
+        # stress run with a failed iteration, so any failing line fails the job.
+        run: |
+          set -o pipefail
+          code=0
+          cargo nextest run --locked --color never --profile ci --no-fail-fast --stress-count 20 -E "${{ matrix.filter }}" 2>&1 | tee stress.log || code=$?
+          echo "nextest exit: $code"
+          grep -E "Stress test \[" stress.log
+          if [ "$code" -ne 0 ] || grep -qE "^ *(FAIL|TIMEOUT|SIGSEGV|SIGABRT|ABORT|LEAK-FAIL) \[" stress.log \
+             || [ "$(grep -cE 'Stress test \[.*iteration [0-9]+/20: [0-9]+ tests? run: [0-9]+ passed, [0-9]+ skipped' stress.log)" -ne 20 ]; then
+            echo "a stressed iteration did not pass"; exit 1
+          fi
