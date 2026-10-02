@@ -10,6 +10,14 @@
 //! compiled binary makes it panic. `status` prints the last record, and names
 //! every command envelope claimed off the queue that has no outcome line.
 
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
+// assumed: the eleven journeys here take about 40 seconds on the wall under nextest's
+// parallelism, each driving a real detached or attached driver to its ending. What they
+// exercise is how a driver lets go of a run — `engine`, `driver`, `channel`, `projection`,
+// `views` and `hooks` together — which any change under `src/` can move, so a project edged
+// narrower than the crate would drop them out of `nx affected` for the very changes they
+// exist to catch. Same grounds as `driver.rs`, `run_end_hooks.rs` and `shutdown.rs`.
+
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
 // compiled binary. The run-end hook and the node validator are not substitutions either:
