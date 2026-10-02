@@ -948,6 +948,65 @@ fn a_live_driver_that_has_stopped_writing_reads_parked_driven_and_not_adoptable(
     );
 }
 
+/// A live, quiet run whose launch record names no pid — the record an older
+/// build wrote — is still `PARKED` and driven: its advice says its driver is
+/// alive without inventing a pid, and `adopt` refuses it all the same.
+#[test]
+fn a_parked_run_whose_record_names_no_pid_is_advised_and_refused_without_one() {
+    let world = World::new("driver-parked-no-pid");
+    world.script("build.wait", "hold");
+    let run = start_detached(&world, "unnamed", vec![agent("build", &[])]);
+    world.until("the held node to be dispatched", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    // llmlint: ignore-block[tests_mirror_real_usage] a launch record written by **another
+    // build** is the input here, and there is no invocation a user can type that produces
+    // one: this build names its driver on every record. What is written is the record as
+    // that build left it, and everything then asserted is the real compiled binary reading
+    // it — as `writeback_budget.rs` states an older build's launch record.
+    let launch = world.run_file(&run, "launch.json");
+    let mut older = world.run_json(&run, "launch.json");
+    let record = older.as_object_mut().expect("a launch record");
+    record.remove("pid").expect("this build names its driver");
+    record.remove("started");
+    std::fs::write(&launch, older.to_string()).expect("the older record is written");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let parked = |argv: &[&str]| {
+        let mut command = world.cmd(argv);
+        command.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+        world.run_on(command, &argv.join(" "))
+    };
+    world.until("the run to be reported parked", |_| {
+        parked(&["status", &run]).stdout.contains("PARKED")
+    });
+    // `status <RUN>` and `adopt` read the record; `runs` reads the summary the
+    // live driver keeps writing, which still names it.
+    let rendered = parked(&["status", &run]);
+    rendered
+        .exited(0)
+        .out_has("PARKED: its driver is alive and its journal has been quiet for ")
+        .out_has("onepipeline stop unnamed");
+    assert!(
+        !rendered.stdout.contains("driver pid"),
+        "{}",
+        rendered.stdout
+    );
+    assert!(!rendered.stdout.contains("adopt"), "{}", rendered.stdout);
+    assert_eq!(parked(&["status", &run, "--json"]).json()["driven"], true);
+    parked(&["adopt", &run])
+        .exited(REFUSED)
+        .err_has("run 'unnamed' is still being driven (PARKED)")
+        .err_has("onepipeline stop unnamed");
+    assert!(world.events_of(&run, "driver-adopted").is_empty());
+
+    world.release("build.go");
+    world.until(
+        "the driver it refused to displace to finish the run",
+        |world| world.run_file(&run, "result.json").is_file(),
+    );
+}
+
 /// The same silence, with a decision point outstanding, is *not* parked.
 ///
 /// The discriminating counterpart to the journey above: identical held dispatch,
