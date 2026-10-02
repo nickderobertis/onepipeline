@@ -8684,7 +8684,10 @@ epoch here either. The edit rule is unchanged.
 `retry` puts an agent replacement on the graph before any hook has fired, and `stop`
 fires the failure hook over that replacement while it is still `ready`. Then the
 adoption records the epoch before its first `node-dispatched`, and the success hook
-fires exactly once. In `adopting_an_ended_run_twice_fires_nothing_new_and_retires_nothing`,
+fires exactly once. In
+`a_run_adopted_live_after_its_failure_hook_fired_fires_failure_again_once_if_it_fails`, the
+same replacement fails, and the failure hook fires a second time, once, naming it. In
+`adopting_an_ended_run_twice_fires_nothing_new_and_retires_nothing`,
 an ended run is adopted twice and neither adoption records an epoch.
 `a_run_made_live_by_something_nobody_edited_leaves_its_marker_standing` holds the
 cross-DAG exclusion, unchanged.

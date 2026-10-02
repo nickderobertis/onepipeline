@@ -513,7 +513,7 @@ fn mark(paths: &RunPaths, firing: &Firing, command: &str) -> Result<bool> {
 /// only for an edit arriving while a marker stands, so a run that has never fired
 /// pays for none of it.
 fn fired(paths: &RunPaths) -> bool {
-    epochs(&journal::read(&paths.journal())).fired
+    epochs(&journal::read(&paths.journal())).marker.is_some()
 }
 
 /// Whether a driver adopting the run, about to drive `state`, starts a new hook
@@ -536,7 +536,7 @@ fn fired(paths: &RunPaths) -> bool {
 /// [`fired`] gives an edit beside one.
 pub(crate) fn adoption_starts_epoch(state: &RunState, paths: &RunPaths) -> bool {
     let standing = epochs(&journal::read(&paths.journal()));
-    if !state.strict || !standing.fired || !standing.fired_live {
+    if !state.strict || standing.marker != Some(FiredOver::Live) {
         return false;
     }
     let statuses = state.statuses();
@@ -550,14 +550,22 @@ pub(crate) fn adoption_starts_epoch(state: &RunState, paths: &RunPaths) -> bool 
 
 /// The run's idempotency epochs, as one walk of its journal.
 struct Epochs {
-    /// Whether the epoch the run is now in carries a marker.
-    fired: bool,
-    /// Whether that marker was fired over a graph that was still live — work
-    /// left that could move, which only an adoption then carries on.
-    fired_live: bool,
+    /// The marker the epoch the run is now in carries, if it carries one.
+    marker: Option<FiredOver>,
     /// Where in the journal each edit or adoption that retired a marker is, in
     /// order: each one ended the epoch every record before it belongs to.
     ended_by: Vec<usize>,
+}
+
+/// What the graph was at when a standing marker was fired, which is what
+/// [`adoption_starts_epoch`] asks of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FiredOver {
+    /// Work was left that could still move: the hook fired over a run that had
+    /// not ended, which only an adoption then carries on.
+    Live,
+    /// The graph had ended.
+    Ended,
 }
 
 /// Walk a journal the way [`fired`] reads it — the one rule, so the epoch
@@ -567,15 +575,14 @@ fn epochs(events: &[Envelope]) -> Epochs {
         strict: true,
         ..RunState::default()
     };
-    let mut fired = false;
-    let mut fired_live = false;
+    let mut marker = None;
     let mut ended_by = Vec::new();
     for (at, event) in events.iter().enumerate() {
         let kind = PipelineKind::from_wire(&event.kind);
         // The ending in front of an edit arriving while a marker stands, and
         // nothing otherwise: an edit that found the run live changed no ending,
         // whatever it left behind.
-        let before = (kind == Some(PipelineKind::EditCommitted) && fired)
+        let before = (kind == Some(PipelineKind::EditCommitted) && marker.is_some())
             .then(|| ending(&state))
             .flatten();
         crate::projection::fold_one(&mut state, event);
@@ -583,29 +590,28 @@ fn epochs(events: &[Envelope]) -> Epochs {
         // decided by [`adoption_starts_epoch`] on the graph the adoption drove,
         // and is read back rather than derived a second time.
         let adopted_live = kind == Some(PipelineKind::DriverAdopted)
-            && fired
+            && marker.is_some()
             && journal::starts_hook_epoch(&event.payload);
         match before {
             Some(before) if state.strict && ending(&state) != Some(before) => {
-                fired = false;
+                marker = None;
                 ended_by.push(at);
             }
             _ if adopted_live => {
-                fired = false;
+                marker = None;
                 ended_by.push(at);
             }
             _ if kind == Some(PipelineKind::RunHookFired) => {
-                fired = true;
-                fired_live = ending(&state).is_none();
+                marker = Some(if ending(&state).is_none() {
+                    FiredOver::Live
+                } else {
+                    FiredOver::Ended
+                });
             }
             _ => {}
         }
     }
-    Epochs {
-        fired,
-        fired_live,
-        ended_by,
-    }
+    Epochs { marker, ended_by }
 }
 
 /// The two ways a graph has ended, as the epoch rule tells them apart: which hook
