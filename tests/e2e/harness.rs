@@ -4647,10 +4647,8 @@ fn build(selection: &[&str]) -> PathBuf {
         .current_dir(repo_file("."));
     // llmlint: ignore-block[changed_behavior_has_e2e] a test of this would run
     // cargo over the suite's own target directory from inside the suite, which is
-    // the nesting this scrub exists to make harmless. What it was proven against:
-    // on #672's demonstration runs, CI's first re-run of a failed test, then still
-    // a cargo build, recompiled from `ring` up before this scrub and compiled
-    // nothing after it.
+    // the nesting this scrub exists to make harmless. A regression shows itself
+    // as the next top-level build after any e2e run compiling from `ring` up.
     // What cargo sets for a running test is not the environment a build runs
     // in. Dependency build scripts track some of it (`ring`'s reads
     // `CARGO_MANIFEST_DIR` and `CARGO_PKG_NAME`), so a nested build carrying it

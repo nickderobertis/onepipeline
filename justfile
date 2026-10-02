@@ -369,7 +369,7 @@ rerun-failed log archive:
 # driven end to end by tests/nextest_runs.rs; what only this recipe adds is the
 # instrumented runner. A test of that needs cargo-llvm-cov, which the cross legs
 # that run every test do not install, so it could only pass there by skipping.
-# The proof is the gate job itself, on the demonstration run #670 records.
+# The gate job runs this recipe for real whenever one of its tests fails.
 # Re-run a failed gate step's failed tests from its instrumented archive, given its LOG and ARCHIVE.
 rerun-failed-coverage log archive:
     @RUSTFLAGS="-D warnings" bash scripts/rerun-failed.sh --log "$1" --archive "$2" --times {{rerun-times}} --known-flakes scripts/known-flakes.txt -- cargo llvm-cov --no-report nextest --extract-overwrite
