@@ -24,9 +24,6 @@ name: Engine currency
 # entry point, against a lock that is current and a lock that is behind.
 
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:
