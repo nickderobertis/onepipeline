@@ -7177,6 +7177,12 @@ const RULINGS: &[(&str, &str)] = &[
         "101.",
         "`--correlation C` binds it to the question `C` names",
     ),
+    // The channel paragraph's claim-time refusal: a record the reconciler cannot
+    // decode is answered by name rather than discarded.
+    (
+        "104.",
+        "**Every envelope the reconciler claims is answered.**",
+    ),
 ];
 
 #[test]
