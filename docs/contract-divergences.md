@@ -2323,7 +2323,7 @@ queues passes that check — so once there is once per envelope rather than once
 path. It is not the only door to the durable queue: the bus appends what the planner
 channel's layout passes, so an envelope sent with `onemessagebus send` reaches the
 queue without this check and without `reply`'s decoding, and what the reconciler
-does with one it cannot decode is entry 102's. The code records this reasoning where
+does with one it cannot decode is entry 104's. The code records this reasoning where
 it makes the choice.
 
 It is nameable three ways, in the order entry 41 states and for the same reason:
@@ -8499,7 +8499,7 @@ to complete as well.
 `tests/e2e/wake_budget.rs` drives each case through the compiled binary, over
 questions raised through the bus's own library server.
 
-## 102. An envelope the reconciler could not decode was claimed and discarded without an answer — RESOLVED
+## 104. An envelope the reconciler could not decode was claimed and discarded without an answer — RESOLVED
 
 **Ruling: every record the reconciler claims from the command queue is answered,
 applied or refused by name — decided by the planner who owns the contract in

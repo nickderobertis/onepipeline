@@ -7180,7 +7180,7 @@ const RULINGS: &[(&str, &str)] = &[
     // The channel paragraph's claim-time refusal: a record the reconciler cannot
     // decode is answered by name rather than discarded.
     (
-        "102.",
+        "104.",
         "**Every envelope the reconciler claims is answered.**",
     ),
 ];
