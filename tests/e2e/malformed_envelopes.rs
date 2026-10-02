@@ -16,7 +16,10 @@
 
 use std::sync::Arc;
 
-use onemessagebus::{Config, Layouts, LocalTransport, QueueName, Transport, TransportKinds};
+use onemessagebus::{
+    AuthorConfig, BusError, Config, Layouts, LocalTransport, OpWord, QueueName, Transport,
+    TransportKinds,
+};
 use onepipeline::channel::layout::{PlannerChannel, COMMANDS, PLANNER_CHANNEL, REPLIES};
 use serde_json::{json, Value};
 
@@ -60,14 +63,39 @@ fn queue(name: &str) -> QueueName {
 /// the `replies` queue under the planner channel's layout, which routes its
 /// commands onto the run's command queue without decoding them.
 fn sent_through_the_bus(world: &World, run: &str, envelope: &Value) {
-    let bus = Config::local(world.run_file(run, "channel"), Some(PLANNER_CHANNEL))
+    sent_through(
+        Config::local(world.run_file(run, "channel"), Some(PLANNER_CHANNEL)),
+        envelope,
+    );
+}
+
+/// Send an envelope through the bus as [`sent_through_the_bus`] does, under a
+/// configuration that also declares the `monitor` author — what a host's
+/// `onemessagebus.yaml` naming it gives `onemessagebus send replies`.
+fn sent_by_the_monitor(world: &World, run: &str, envelope: &Value) {
+    let mut config = Config::local(world.run_file(run, "channel"), Some(PLANNER_CHANNEL));
+    config.authors.insert(
+        "monitor".into(),
+        AuthorConfig {
+            capabilities: vec![OpWord("settle".to_owned())],
+            refusals: std::collections::BTreeMap::new(),
+        },
+    );
+    sent_through(config, envelope);
+}
+
+fn sent_through(config: Config, envelope: &Value) {
+    offered(config, envelope).unwrap_or_else(|error| panic!("the bus refused {envelope}: {error}"));
+}
+
+fn offered(config: Config, envelope: &Value) -> Result<(), BusError> {
+    let bus = config
         .resolve(
             &Layouts::new().with(Arc::new(PlannerChannel)),
             &TransportKinds::builtin(),
         )
         .expect("the planner channel's bus resolves over the run's channel");
-    bus.send(&queue(REPLIES), envelope.clone())
-        .unwrap_or_else(|error| panic!("the bus refused {envelope}: {error}"));
+    bus.send(&queue(REPLIES), envelope.clone()).map(drop)
 }
 
 /// Append one record to the command queue as the channel's transport does,
@@ -124,12 +152,15 @@ fn paused(world: &World, run: &str, nodes: Vec<Value>, extra: &[&str]) {
         .out_has("\"settlement\":\"awaiting-planner\"");
 }
 
-/// Eight records no build decodes reach a run with a waiting human node — three
-/// through the bus's own layout, and five beneath it in shapes the layout would
-/// turn away — and the adopting driver answers each one: one outcome line under
-/// its own id, an `edit-rejected` per command under its own author, one surface —
-/// and nothing of any of them applies, the valid note beside a malformed drop
-/// included.
+/// Six records no build decodes reach a run with a waiting human node, and the
+/// adopting driver answers each one: one outcome line under its own id, an
+/// `edit-rejected` per command under its own author, one surface — and nothing
+/// of any of them applies, the valid note beside a malformed drop included.
+///
+/// Four go through the bus's own send path, the monitor's under a configuration
+/// declaring that author. Two are shapes the planner channel's layout itself
+/// turns away, so they are appended beneath it: the first record, which carries
+/// no `id`, and the fifth, whose `commands` is an object rather than a list.
 #[test]
 fn every_envelope_the_reconciler_cannot_decode_is_answered_and_nothing_of_it_applies() {
     let world = World::new("malformed-envelopes");
@@ -154,31 +185,27 @@ fn every_envelope_the_reconciler_cannot_decode_is_answered_and_nothing_of_it_app
     ] {
         sent_through_the_bus(&world, run, &json!({"version": 3, "commands": commands}));
     }
+    // The bus stamps every record it queues with an id, and refuses a command
+    // list that is not a list, so these two only reach the queue beneath it.
+    let not_a_list = json!({"op": "drop", "id": "sign-off", "dependents": "detach"});
+    assert!(
+        offered(
+            Config::local(world.run_file(run, "channel"), Some(PLANNER_CHANNEL)),
+            &json!({"version": 3, "commands": not_a_list}),
+        )
+        .is_err(),
+        "the planner channel's layout queued a command list that is not a list"
+    );
     let next = u64::try_from(queued(&world, run).len()).expect("a queue length");
-    appended_beneath_the_layout(
+    appended_beneath_the_layout(&world, run, &json!({"id": next, "commands": not_a_list}));
+    sent_by_the_monitor(
         &world,
         run,
-        &json!({"id": next, "commands": {"op": "drop", "id": "sign-off", "dependents": "detach"}}),
-    );
-    appended_beneath_the_layout(
-        &world,
-        run,
-        &json!({"id": next + 1, "author": "monitor", "commands": [cancelled]}),
-    );
-    // And the corners of a record's own fields: an author no build reads, a
-    // command that is not an object, and a command list that is empty.
-    appended_beneath_the_layout(
-        &world,
-        run,
-        &json!({"id": next + 2, "author": 7, "commands": ["drop sign-off", undecodable_drop]}),
-    );
-    appended_beneath_the_layout(
-        &world,
-        run,
-        &json!({"id": next + 3, "author": ["monitor"], "commands": []}),
+        &json!({"version": 3, "author": "monitor", "commands": [cancelled]}),
     );
     let records = queued(&world, run);
-    assert_eq!(records.len(), 8, "{records:?}");
+    assert_eq!(records.len(), 6, "{records:?}");
+    assert_eq!(records[5]["author"], "monitor", "{records:?}");
     assert!(
         world.command_outcomes(run).is_empty(),
         "something answered before a driver held the run"
@@ -238,6 +265,10 @@ fn every_envelope_the_reconciler_cannot_decode_is_answered_and_nothing_of_it_app
         "{reasons:?}"
     );
     assert!(reasons[4].contains("invalid type"), "{reasons:?}");
+    assert!(
+        reasons[5].contains("unknown variant `cancelled`"),
+        "{reasons:?}"
+    );
 
     // One `edit-rejected` per command sent, carrying it as sent under the
     // envelope's own author; the record with no command list carries itself.
@@ -250,14 +281,8 @@ fn every_envelope_the_reconciler_cannot_decode_is_answered_and_nothing_of_it_app
     for (record, reason) in records.iter().zip(&reasons) {
         let author = record["author"].as_str().unwrap_or("planner");
         match record["commands"].as_array() {
-            // An empty list carried no command, so it journals none.
             Some(commands) => {
                 for command in commands {
-                    let command = if command.is_object() {
-                        command.clone()
-                    } else {
-                        json!({"op": "unreadable", "value": command})
-                    };
                     expected.push(json!({"author": author, "command": command, "reason": reason}));
                 }
             }
@@ -266,13 +291,8 @@ fn every_envelope_the_reconciler_cannot_decode_is_answered_and_nothing_of_it_app
         }
     }
     assert_eq!(rejected, expected);
-    assert_eq!(rejected.len(), 9);
+    assert_eq!(rejected.len(), 7);
     assert_eq!(rejected[6]["author"], "monitor");
-    assert_eq!(
-        rejected[7],
-        json!({"author": "planner", "command": {"op": "unreadable", "value": "drop sign-off"},
-               "reason": reasons[6]})
-    );
 
     // One non-blocking surface per envelope, naming its id and its reason.
     let surfaces = rejected_surfaces(&world, run);
