@@ -92,8 +92,8 @@ impl Fixture {
         command
     }
 
-    /// A repository script, run with its output captured into one file the way
-    /// a CI step's log captures both streams.
+    /// A repository script, run with its two streams kept apart for the
+    /// assertions and written together to `log`, as a CI step's tee writes them.
     fn script(&self, script: &str, args: &[&str], log: &str) -> (Output, String) {
         self.script_in(script, args, log, &[])
     }
@@ -105,18 +105,20 @@ impl Fixture {
         log: &str,
         env: &[(&str, &str)],
     ) -> (Output, String) {
-        let file = fs::File::create(self.path(log)).expect("the log file is made");
         let output = self
             .command(bash())
             .envs(env.iter().copied())
             .arg(repo_root().join("scripts").join(script))
             .args(args)
-            .stdout(file.try_clone().expect("the log file is shared"))
-            .stderr(file)
             .stdin(Stdio::null())
             .output()
             .expect("bash runs the script");
-        let text = fs::read_to_string(self.path(log)).expect("the log reads");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::write(self.path(log), &text).expect("the log is written");
         (output, text)
     }
 
@@ -254,6 +256,14 @@ fn scheduling_fixture(case: &str, config: &str) -> Fixture {
     )
 }
 
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
 fn repository_config() -> String {
     fs::read_to_string(repo_root().join(".config/nextest.toml"))
         .expect("the runner's configuration ships")
@@ -299,10 +309,15 @@ fn a_run_ended_with_tests_unrun_and_no_reason_is_named_by_nextests_exit_status()
         Some(100),
         "the wrapper exits with nextest's status:\n{log}"
     );
+    let wrapper_said = stderr(&output);
     assert!(
-        log.contains("nextest-run: nextest exited with status 100"),
-        "the wrapper names nextest's exit status:\n{log}"
+        wrapper_said.contains("nextest-run: nextest exited with status 100\n")
+            && wrapper_said.contains(
+                "nextest-run: 'just rerun-failed <this output>' re-runs the tests it failed"
+            ),
+        "the wrapper names nextest's exit status and the next step on stderr:\n{log}"
     );
+    assert!(!stdout(&output).contains("nextest-run:"), "{log}");
 
     let (report, text) = fixture.rerun_failed(&repo_root().join("scripts/known-flakes.txt"));
     assert_eq!(
@@ -311,10 +326,10 @@ fn a_run_ended_with_tests_unrun_and_no_reason_is_named_by_nextests_exit_status()
         "a failed run is reported as failed:\n{text}"
     );
     assert!(
-        text.lines().any(|line| line
+        stderr(&report).lines().any(|line| line
             .starts_with("rerun-failed: nextest exited with status 100 and left ")
             && line.contains("tests not run, and gave no reason")),
-        "the report names the status and says nextest gave no reason:\n{text}"
+        "the report names the status and says nextest gave no reason, on stderr:\n{text}"
     );
     assert!(
         text.contains("nothing to re-run") && text.contains("verdict stays failed"),
@@ -544,9 +559,16 @@ fn only_the_failed_tests_run_again_and_each_ones_failures_are_counted() {
         )
     );
     assert!(
-        report.contains("rerun-failed: the test step failed, and that verdict stands."),
-        "{report}"
+        stderr(&output).contains("rerun-failed: the test step failed, and that verdict stands."),
+        "the verdict is stated on stderr:\n{report}"
     );
+    let reported = stdout(&output);
+    for test in FAILING {
+        assert!(
+            reported.contains(summary_line(&report, test)),
+            "the summary is the report, on stdout:\n{report}"
+        );
+    }
     assert!(
         !report.contains("compiled"),
         "a re-run rebuilt instead of running the failed step's build:\n{report}"
