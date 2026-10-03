@@ -837,6 +837,9 @@ const OTHER_RULING: &str = "other: keep the fixture where it is";
 /// A node added behind the note, naming the note's node only among its `deps`.
 const ADDED: &str = "after-build";
 
+/// A ruling on that added node alone, claimed while its `add` is still held.
+const ADDED_RULING: &str = "after-build: only once build's note is read";
+
 /// A pending node reparented onto the note's node behind the note.
 const REPARENTED: &str = "late";
 
@@ -854,6 +857,29 @@ fn sent_through_the_bus(world: &World, run: &str, envelope: &Value) {
         .expect("the planner channel's bus resolves over the run's channel");
     bus.send(&REPLIES.parse().expect("a queue name"), envelope.clone())
         .unwrap_or_else(|error| panic!("the bus refused {envelope}: {error}"));
+}
+
+/// The queue id of the one queued envelope whose record mentions `text`.
+fn queued_id_of(world: &World, run: &str, text: &str) -> u64 {
+    std::fs::read_to_string(world.run_file(run, "channel/commands.jsonl"))
+        .expect("the command queue is there")
+        .lines()
+        .filter(|line| line.contains(text))
+        .map(|line| {
+            serde_json::from_str::<Value>(line).expect("a queued record is JSON")["id"]
+                .as_u64()
+                .expect("a queued record has an id")
+        })
+        .next()
+        .unwrap_or_else(|| panic!("nothing queued mentions {text}"))
+}
+
+/// The answer the reconciler gave envelope `id`, if it has given one.
+fn outcome_of(world: &World, run: &str, id: u64) -> Option<Value> {
+    world
+        .command_outcomes(run)
+        .into_iter()
+        .find(|outcome| outcome["id"] == id)
 }
 
 /// A monitor's finding about the run rather than any one node.
@@ -881,8 +907,8 @@ fn committed_at(journal: &[Value], op: &str, field: &str, value: &str) -> Option
 /// claimed behind it and are both committed and answered while the note is still
 /// waiting, and a record naming `build` that does not decode is refused as it is
 /// claimed; a finding about `build`, a second amendment to `docs`, and an `add` and
-/// a `reparent` naming `build` only among their `deps` are held, unanswered, and
-/// applied once the
+/// a `reparent` naming `build` only among their `deps` are held, as is an `amend`
+/// naming only the node that held `add` creates, unanswered, and applied once the
 /// note is — after it, and in the order they were claimed, so no edit to `docs`
 /// overtakes the one the note's envelope carried.
 #[test]
@@ -940,6 +966,23 @@ fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
         &envelope(json!({"op": "add", "node": agent(ADDED, &["build"])})),
     );
     world.until("the node added after build to be queued", queued(ADDED));
+    // Naming only the node that held `add` creates, which no outstanding envelope
+    // names: held behind the `add`, so it is judged against a record that has
+    // the node rather than refused for one that does not yet. Sent through the
+    // bus, as a monitor sends, because `reply` checks it against the record
+    // before queueing it and the node is not in the record yet.
+    sent_through_the_bus(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            {"op": "amend", "id": ADDED, "text": ADDED_RULING},
+        ]}),
+    );
+    world.until(
+        "the ruling on the added node to be queued",
+        queued(ADDED_RULING),
+    );
+    let on_added = queued_id_of(&world, run, ADDED_RULING);
     let mut reparented = submitted(
         &world,
         run,
@@ -1015,6 +1058,17 @@ fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
         }),
         "an envelope naming the note's node among its deps was applied ahead of it"
     );
+    assert!(
+        committed_at(&journal, "amend", "text", ADDED_RULING).is_none()
+            && journal
+                .iter()
+                .all(|event| event["payload"]["command"]["text"] != ADDED_RULING),
+        "the ruling on the added node was judged ahead of the held add that creates it"
+    );
+    assert!(
+        outcome_of(&world, run, on_added).is_none(),
+        "the ruling on the added node was answered while the add it waits behind was not"
+    );
     for (what, reply) in [
         ("build", &mut about_build),
         ("docs", &mut about_docs),
@@ -1043,6 +1097,11 @@ fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
             "{what} envelope was not applied"
         );
     }
+    world.until("the ruling on the added node to be answered", |world| {
+        outcome_of(world, run, on_added).is_some()
+    });
+    let outcome = outcome_of(&world, run, on_added).expect("answered");
+    assert_eq!(outcome["applied"], json!(true), "{outcome}");
     let journal = world.journal(run);
     let at = |op, field, value| {
         committed_at(&journal, op, field, value)
@@ -1064,6 +1123,7 @@ fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
                     && event["payload"]["command"]["node"]["id"] == ADDED
             })
             .expect("the added node was committed"),
+        at("amend", "text", ADDED_RULING),
         at("reparent", "id", REPARENTED),
     ];
     assert!(

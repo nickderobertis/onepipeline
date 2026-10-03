@@ -7359,8 +7359,9 @@ const RULINGS: &[(&str, &str)] = &[
     (
         "108.",
         "**An envelope claimed behind one awaiting a live note's answer is held, in claim \
-         order, only when it names a node the envelope awaiting the answer names; any other \
-         envelope is judged and applied on the pass that claims it.**",
+         order, only when it names a node the envelope awaiting the answer names, or a node \
+         an envelope already held behind it names; any other envelope is judged and applied \
+         on the pass that claims it.**",
     ),
 ];
 

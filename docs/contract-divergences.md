@@ -8844,8 +8844,12 @@ only once the note is answered, without being judged again, so a later `[amend C
 by nothing would commit ahead of the earlier `drop C`, against a graph the earlier
 command was not judged on. The planner ruled that edge: an envelope awaiting a note's
 answer holds every node it names — its notes' nodes and its other commands' — which for
-a note-only envelope is the ticket's rule exactly. For the same reason an envelope naming
-a node an envelope already held names is held behind it. An envelope naming nodes of two
+a note-only envelope is the ticket's rule exactly. A second ruling on the same node
+authorized the hold's one further reach: an envelope naming a node an envelope already
+held behind it names is held too, in claim order. With a note to A outstanding and
+`[add C deps A]` held, a later `[amend C]` overlaps no outstanding envelope, and judged at
+once it would be refused for a node not yet there — or, generally, a later edit to a node
+would commit ahead of an earlier held one. An envelope naming nodes of two
 outstanding envelopes waits for both; one naming no node — `complete`, a `finding` about
 no node — is never held. A held envelope is answered when it is applied, as before. Each
 envelope that offers a note is handed to a delivery thread of its own, so a note to one
@@ -8856,8 +8860,10 @@ conversation never waits on another conversation's turn.
 with a `[note build, amend docs]` envelope outstanding and drives four envelopes behind
 it through `reply`: an `amend` to `other` and a `finding` about no node are committed and
 answered while the note still waits, and a `finding` about `build`, a second `amend` to
-`docs`, and an `add` and a `reparent` naming `build` only among their `deps` stay
-unanswered until the note is, then commit after it in claim order; a record naming
+`docs`, an `add` and a `reparent` naming `build` only among their `deps`, and an `amend`
+naming only the node that held `add` creates — sent through the planner channel's bus,
+since `reply` checks it against the record before queueing it — stay unanswered until the
+note is, then commit after it in claim order; a record naming
 `build` that does not decode is refused as it is claimed, not held. `notes_to_two_conversations_wait_in_both_inboxes_at_once`
 holds two workers' turns and has a note to each waiting in both inboxes at once, with an
 envelope naming both nodes unanswered until both notes are recorded. Two notes answered
