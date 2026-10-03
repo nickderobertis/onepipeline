@@ -9,11 +9,17 @@
 use std::collections::BTreeMap;
 
 use onemessagebus::{CheckError, Read, Registry, SchemaId};
+use onepipeline::event::PipelineKind;
+use onepipeline::payload::schema_of;
 use onepipeline::vocabulary::{registry, EVENT_ENVELOPE_FAMILY};
 use serde_json::{json, Value};
 
 const ENVELOPE_V1: &str = include_str!("golden/envelope-v1.json");
 const ENVELOPE_V2: &str = include_str!("golden/envelope-v2.json");
+
+/// One envelope of every kind this crate emits, recorded from real runs — see
+/// `src/payload.rs`'s `RECORDED` for where each line came from.
+const RECORDED_KINDS: &str = include_str!("recorded/pipeline-kinds.jsonl");
 
 /// See `tests/recorded/registry/README.md`.
 const CAPTURED: &str = include_str!("recorded/registry/onemessagebus-agent-0.8.0.json");
@@ -269,4 +275,64 @@ fn the_only_prose_that_moved_is_the_phase_its_producer_now_owns() {
     let onevcs = serde_json::to_value(schemars::schema_for!(onevcs::Phase))
         .expect("onevcs's phase document serializes");
     assert_eq!(Some(phase), onevcs["description"].as_str());
+}
+
+fn recorded_payload(kind: &str) -> Value {
+    RECORDED_KINDS
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("a recorded envelope is JSON"))
+        .find(|envelope| envelope["kind"] == kind)
+        .unwrap_or_else(|| panic!("no recorded {kind} envelope"))["payload"]
+        .clone()
+}
+
+/// A reader outside this crate validates a recorded journal's concurrency
+/// payloads through the public payload registry, under the id `schema_of`
+/// names for each kind — and a payload missing a key every writer of the kind
+/// writes, or one of the other kind's shape, is refused naming that id.
+#[test]
+fn recorded_concurrency_payloads_validate_through_the_public_payload_registry() {
+    let registry = onepipeline::payload::registry();
+    for (kind, wire, written) in [
+        (
+            PipelineKind::ConcurrentDeferred,
+            "concurrent-deferred",
+            "launching",
+        ),
+        (
+            PipelineKind::ConcurrentAcknowledged,
+            "concurrent-acknowledged",
+            "shared_identities",
+        ),
+    ] {
+        let id = schema_of(kind);
+        assert_eq!(id.to_string(), format!("agent.pipeline.{wire}@2"));
+        let payload = recorded_payload(wire);
+        registry
+            .check(&id, &payload)
+            .unwrap_or_else(|refusal| panic!("the recorded {wire} is refused: {refusal}"));
+
+        let mut missing = payload.clone();
+        missing
+            .as_object_mut()
+            .expect("a payload is an object")
+            .remove(written);
+        match registry.check(&id, &missing) {
+            Err(CheckError::Violation(violation)) => {
+                assert_eq!(violation.id, id);
+                assert!(
+                    violation.to_string().contains(&id.to_string()),
+                    "the refusal does not name {id}: {violation}"
+                );
+            }
+            other => panic!("{wire} without `{written}` was not refused: {other:?}"),
+        }
+    }
+    let acknowledged = recorded_payload("concurrent-acknowledged");
+    match registry.check(&schema_of(PipelineKind::ConcurrentDeferred), &acknowledged) {
+        Err(CheckError::Violation(violation)) => {
+            assert_eq!(violation.id, schema_of(PipelineKind::ConcurrentDeferred));
+        }
+        other => panic!("an acknowledgement validated as a deferral: {other:?}"),
+    }
 }
