@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.60.2](https://github.com/nickderobertis/onepipeline/compare/v0.60.1...v0.60.2) - 2026-10-03
+
+### Fixed
+
+- *(channel)* hold behind a live note only the commands that name its node ([#725](https://github.com/nickderobertis/onepipeline/pull/725))
+- *(land)* publish an out-of-band landing under its owning node's title ([#723](https://github.com/nickderobertis/onepipeline/pull/723))
+- *(lifecycle)* let a cancel or retry interrupt a publication watch ([#717](https://github.com/nickderobertis/onepipeline/pull/717))
+
 ## [0.60.1](https://github.com/nickderobertis/onepipeline/compare/v0.60.0...v0.60.1) - 2026-10-03
 
 ### Added
