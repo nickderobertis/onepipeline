@@ -139,7 +139,8 @@ if "%~2"=="" (
   call :fail "commit-in-fixture takes the fixture directory"
   exit /b 64
 )
-if not "%~3"=="" (
+call :argcount %*
+if not "!argc!"=="2" (
   call :fail "commit-in-fixture takes the fixture directory, and nothing else"
   exit /b 64
 )
@@ -245,6 +246,16 @@ goto streamloop
 :streammissing
 set "stream="
 exit /b 1
+
+rem How many arguments the verb was given, left in `argc`, counting an empty quoted
+rem one too: `takes` in `hook.sh` is the same count.
+:argcount
+set "argc=0"
+:argcountloop
+if [%1]==[] goto :eof
+set /a "argc+=1"
+shift
+goto argcountloop
 
 :fail
 echo pre-push: %~1 1>&2
