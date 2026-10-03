@@ -167,6 +167,7 @@ pub struct RunState {
     /// not, and the names a run's own nodes are cut under are its own. Omitted
     /// when empty, which is every run whose driver retired nothing.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] a branch is the plain string every neighbouring field of this struct carries it as — `branches`, `bases`, and the session's own branch, which `DispatchSession::branch` hands back as a `String` to compare — and a newtype on this one set would disagree with each of them and convert at every read. What could go wrong with an unchecked one is checked where it enters, by `vcs::usable`, which is the only thing that writes this set.
     pub retired_branches: BTreeSet<String>,
     /// Whether each published node's change reached its base branch.
     ///
@@ -1557,11 +1558,16 @@ fn fold_session(state: &mut RunState, event: &Envelope) {
 /// [`crate::vcs::usable`] refuses is one no node's settlement could carry
 /// either, so it is dropped with nothing lost.
 fn fold_retired_branches(state: &mut RunState, payload: &serde_json::Map<String, Value>) {
+    // llmlint: ignore-block[changed_behavior_has_e2e] no invocation of this build writes a
+    // `branches-retired` this reads as nothing: its one writer, `maintenance`, serializes this
+    // same type. An unreadable one is a journal another build wrote or a person edited, which
+    // no journey can produce without writing that journal by hand; this module's
+    // `a_retired_branch_a_session_opens_again_is_a_branch_once_more` folds one instead.
     let Ok(record) =
         serde_json::from_value::<crate::payload::BranchesRetired>(Value::Object(payload.clone()))
     else {
         return;
-    };
+    }; // llmlint: ignore-end[changed_behavior_has_e2e]
     state.retired_branches.extend(
         record
             .retired

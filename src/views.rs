@@ -2764,6 +2764,13 @@ fn death_phrase(state: &RunState, id: &str, branch: Option<&str>) -> Option<Stri
 
 /// The base a node's work is merged with: the one `onevcs` named for it, else
 /// the one its plan names, else the words for one nobody recorded.
+//
+// llmlint: ignore-block[changed_behavior_has_e2e] the two fallbacks are unreachable from any
+// invocation of this build: every lifecycle dispatch opens its session before it can land or
+// leave a branch, and `onevcs` names the base on every `session-opened`, which the fold records.
+// A died node without one is a journal an older build wrote or a person edited, so this
+// module's `a_died_dispatch_names_its_landing_and_its_retirement_against_the_base_it_has`
+// folds those records instead; the journeys hold the base the session names.
 fn base_of(state: &RunState, id: &str) -> String {
     state
         .bases
@@ -2777,6 +2784,7 @@ fn base_of(state: &RunState, id: &str) -> String {
         })
         .unwrap_or_else(|| "its base".to_owned())
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// How long a node's cancellation has been waiting on the dispatch it asked to
 /// stop, when one is still out there — see [`Recorded::cancelling_since`].
