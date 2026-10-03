@@ -1,6 +1,6 @@
 {
-  "version": "1.0.0",
-  "description": "The agent stack's event envelope, filter, artifact reference and labels, as onepipeline declares them.",
+  "version": "1.1.0",
+  "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
       "id": "agent.event-envelope@1",
@@ -642,6 +642,2524 @@
         "description": "The reserved label keys, plus whatever else a producer stamped.\n\nReserved keys are absent rather than empty when unknown, so an enricher can\ntell \"not stamped\" from \"stamped empty\". The extras are flattened beside\nthem, in the order they were stamped.",
         "title": "Labels",
         "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.run-started@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "plan": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "The plan document, read back through the plan schema."
+          },
+          "graph": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The observer graph, `null` when the launch named none."
+          },
+          "dir": {
+            "type": "string",
+            "description": "The directory the run was launched from."
+          },
+          "heartbeat_interval": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The check-in interval, in seconds."
+          },
+          "owed_until_closed": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Owed"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`true` where the launching driver holds the run to the closure rule;\nabsent from a record an earlier build wrote."
+          }
+        },
+        "required": [
+          "plan",
+          "dir",
+          "heartbeat_interval"
+        ],
+        "description": "`run-started`: the plan the run was launched with, and how it is driven.",
+        "title": "RunStarted",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "Owed": {
+            "const": true
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.concurrent-acknowledged@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "shared_identities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The identities the launch shares with a live holder."
+          },
+          "runs": {
+            "$ref": "#/$defs/ConcurrentRuns",
+            "description": "The launching run and the sessions holding them."
+          },
+          "holders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Holder"
+            },
+            "description": "Each live holder."
+          }
+        },
+        "required": [
+          "shared_identities",
+          "runs",
+          "holders"
+        ],
+        "description": "`concurrent-acknowledged`: a launch beside live repository holders.",
+        "title": "ConcurrentAcknowledged",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ConcurrentRuns": {
+            "type": "object",
+            "properties": {
+              "launching": {
+                "type": "string",
+                "description": "The run being launched."
+              },
+              "holding_sessions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The sessions holding a shared identity."
+              }
+            },
+            "required": [
+              "launching",
+              "holding_sessions"
+            ],
+            "description": "The runs a concurrent launch acknowledged."
+          },
+          "Holder": {
+            "type": "object",
+            "properties": {
+              "session": {
+                "type": "string",
+                "description": "The holding session."
+              },
+              "owner_pid": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "description": "The process that owns it."
+              },
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The identity it holds; absent from a record an earlier build wrote."
+              },
+              "run": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The run its session was opened for, from the session's `run` label;\nabsent for an unattributed holder."
+              },
+              "node": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The node its session was opened for, from the session's `node` label."
+              },
+              "dependency": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The `run:<run>#<node>` dependency that also acknowledges it, set only\nwhere one does, so a reader tells those from flag-only holders."
+              }
+            },
+            "required": [
+              "session",
+              "owner_pid"
+            ],
+            "description": "One live holder of a shared identity."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.concurrent-deferred@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "launching": {
+            "type": "string",
+            "description": "The run being launched."
+          },
+          "holders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/DeferredHolder"
+            },
+            "description": "Each live holder a dependency acknowledges."
+          }
+        },
+        "required": [
+          "launching",
+          "holders"
+        ],
+        "description": "`concurrent-deferred`: a launch whose plan depends on live repository\nholders, so waits for them rather than racing them.",
+        "title": "ConcurrentDeferred",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "DeferredHolder": {
+            "type": "object",
+            "properties": {
+              "identity": {
+                "type": "string",
+                "description": "The identity it holds."
+              },
+              "session": {
+                "type": "string",
+                "description": "The holding session."
+              },
+              "owner_pid": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "description": "The process that owns it."
+              },
+              "run": {
+                "type": "string",
+                "description": "The run its session was opened for."
+              },
+              "node": {
+                "type": "string",
+                "description": "The node its session was opened for."
+              },
+              "dependency": {
+                "type": "string",
+                "description": "The reference the dependents reach, `run:<run>#<node>`."
+              },
+              "dependents": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The launching plan's nodes on the identity, each of which reaches it."
+              }
+            },
+            "required": [
+              "identity",
+              "session",
+              "owner_pid",
+              "run",
+              "node",
+              "dependency",
+              "dependents"
+            ],
+            "description": "One live holder the launching plan depends on."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.node-ready@2",
+      "schema": {
+        "type": "object",
+        "description": "`node-ready`: carries nothing beyond the node label.",
+        "title": "NodeReady",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.node-dispatched@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Which attempt this is, from 1."
+          },
+          "persona": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The persona a first dispatch runs under, `null` for none.",
+            "default": null
+          },
+          "attempts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "A re-dispatch's budget."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the previous attempt ended with."
+          },
+          "notes_spent": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "description": "The notes a first dispatch was handed."
+          },
+          "notes_carried": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "description": "The notes a re-dispatch carried forward."
+          }
+        },
+        "required": [
+          "attempt"
+        ],
+        "description": "`node-dispatched`: a first dispatch, or a re-dispatch and why.",
+        "title": "NodeDispatched",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.node-settled@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "$ref": "#/$defs/Status",
+            "description": "The terminal status."
+          },
+          "outcome": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The word its settlement was reached under."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bounded detail."
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The branch the node left."
+          },
+          "change_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The change request its publication opened."
+          },
+          "cause": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The producer's classification of a dispatch that died."
+          },
+          "head": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The commit the branch was left at."
+          },
+          "landing": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/LandingWord"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Whether the change reached its base."
+          },
+          "completed_steps": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "The steps the branch carries."
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "description": "`node-settled`: the status a node reached, and what it left.",
+        "title": "NodeSettled",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "Status": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "pending",
+                "description": "`pending`."
+              },
+              {
+                "type": "string",
+                "const": "ready",
+                "description": "`ready`."
+              },
+              {
+                "type": "string",
+                "const": "running",
+                "description": "`running`."
+              },
+              {
+                "type": "string",
+                "const": "waiting",
+                "description": "`waiting`."
+              },
+              {
+                "type": "string",
+                "const": "blocked",
+                "description": "`blocked`."
+              },
+              {
+                "type": "string",
+                "const": "parked",
+                "description": "`parked`."
+              },
+              {
+                "type": "string",
+                "const": "cancelled",
+                "description": "`cancelled`."
+              },
+              {
+                "type": "string",
+                "const": "done",
+                "description": "`done`."
+              },
+              {
+                "type": "string",
+                "const": "complete-but-draft",
+                "description": "`complete-but-draft`."
+              },
+              {
+                "type": "string",
+                "const": "failed",
+                "description": "`failed`."
+              },
+              {
+                "type": "string",
+                "const": "skipped",
+                "description": "`skipped`."
+              }
+            ],
+            "description": "A node's status, as a settlement records it."
+          },
+          "LandingWord": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "landed",
+                "description": "`landed`."
+              },
+              {
+                "type": "string",
+                "const": "unlanded",
+                "description": "`unlanded`."
+              }
+            ],
+            "description": "Whether a published change reached its base."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.node-requeued@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "$ref": "#/$defs/RequeueReasonWord",
+            "description": "Which ending handed it back."
+          },
+          "detail": {
+            "type": "string",
+            "description": "The sibling's own account of the refusal."
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The branch a re-dispatch keeps its pin to through the queue. A first\nattempt has no pin and its record carries neither this nor `attempt`."
+          },
+          "attempt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The publication attempt the refusal interrupted, for a pinned re-dispatch."
+          }
+        },
+        "required": [
+          "reason",
+          "detail"
+        ],
+        "description": "`node-requeued`: a dispatched node handed back to the queue, unsettled.",
+        "title": "NodeRequeued",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "RequeueReasonWord": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "workspace-exhausted",
+                "description": "`workspace-exhausted`: its repository identity admitted no session."
+              }
+            ],
+            "description": "The reason a dispatched node was handed back to the queue."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.edit-committed@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "author": {
+            "$ref": "#/$defs/AuthorWord",
+            "description": "Who submitted it."
+          },
+          "command": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "The command as submitted."
+          },
+          "operations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "description": "The operations it compiled to."
+          },
+          "operation_kinds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Each operation's kind, in order."
+          }
+        },
+        "required": [
+          "author",
+          "command",
+          "operations",
+          "operation_kinds"
+        ],
+        "description": "`edit-committed`: an accepted command that changed something.",
+        "title": "EditCommitted",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "AuthorWord": {
+            "type": "string",
+            "description": "Who submitted a command or a reply."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.command-accepted@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "author": {
+            "$ref": "#/$defs/AuthorWord",
+            "description": "Who submitted it."
+          },
+          "command": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "The command as submitted."
+          },
+          "operations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "description": "The operations it compiled to."
+          },
+          "operation_kinds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Each operation's kind, in order."
+          }
+        },
+        "required": [
+          "author",
+          "command",
+          "operations",
+          "operation_kinds"
+        ],
+        "description": "`command-accepted`: an accepted command that committed nothing a reader folds.",
+        "title": "CommandAccepted",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "AuthorWord": {
+            "type": "string",
+            "description": "Who submitted a command or a reply."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.edit-rejected@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "author": {
+            "$ref": "#/$defs/AuthorWord",
+            "description": "Who submitted it."
+          },
+          "command": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "The command as submitted."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why it was refused."
+          }
+        },
+        "required": [
+          "author",
+          "command",
+          "reason"
+        ],
+        "description": "`edit-rejected`: a refused command and the reason its submitter was told.",
+        "title": "EditRejected",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "AuthorWord": {
+            "type": "string",
+            "description": "Who submitted a command or a reply."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.planner-surface-queued@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "The surface's kind."
+          },
+          "message": {
+            "type": "string",
+            "description": "What it says."
+          },
+          "source": {
+            "type": "string",
+            "description": "What raised it."
+          },
+          "blocking": {
+            "type": "boolean",
+            "description": "Whether it holds dependents back."
+          }
+        },
+        "required": [
+          "kind",
+          "message",
+          "source",
+          "blocking"
+        ],
+        "description": "`planner-surface-queued`: a surface sent.",
+        "title": "PlannerSurfaceQueued",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.planner-surfaced@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "The surface's kind."
+          },
+          "message": {
+            "type": "string",
+            "description": "What it says."
+          },
+          "source": {
+            "type": "string",
+            "description": "What raised it."
+          },
+          "blocking": {
+            "type": "boolean",
+            "description": "Whether it held dependents back."
+          },
+          "queued_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "When it was queued, in milliseconds; absent from a hand-out recorded\nbefore the instant was."
+          }
+        },
+        "required": [
+          "kind",
+          "message",
+          "source",
+          "blocking"
+        ],
+        "description": "`planner-surfaced`: a surface consumed.",
+        "title": "PlannerSurfaced",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.planner-replied@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "author": {
+            "$ref": "#/$defs/AuthorWord",
+            "description": "Who replied."
+          },
+          "completion": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether it declared completion, `null` for no word.",
+            "default": null
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Its reason, `null` for none.",
+            "default": null
+          }
+        },
+        "required": [
+          "author"
+        ],
+        "description": "`planner-replied`: the verdict half of a reply.",
+        "title": "PlannerReplied",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "AuthorWord": {
+            "type": "string",
+            "description": "Who submitted a command or a reply."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.human-attested@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "ref": {
+            "type": "string",
+            "description": "The reference attested."
+          }
+        },
+        "required": [
+          "ref"
+        ],
+        "description": "`human-attested`: a human action attested.",
+        "title": "HumanAttested",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.driver-adopted@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "adoption": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "How many adoptions the run has had."
+          },
+          "pid": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The adopting driver."
+          },
+          "abandoned": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/$defs/Abandoned"
+            },
+            "description": "The dispatches the previous driver left running."
+          },
+          "owed_until_closed": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Owed"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`true` where the adopting driver holds the run to the closure rule;\nabsent from a record an earlier build wrote."
+          },
+          "hook_epoch": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HookEpoch"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`true` where the adoption started a new run-end hook epoch, retiring the\nmarker that stood over the live graph it adopted; absent otherwise."
+          }
+        },
+        "required": [
+          "adoption",
+          "pid"
+        ],
+        "description": "`driver-adopted`: a fresh driver on an intact ledger.",
+        "title": "DriverAdopted",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "Abandoned": {
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string",
+                "description": "The node."
+              },
+              "session": {
+                "type": "string",
+                "description": "Its session."
+              },
+              "branch": {
+                "type": "string",
+                "description": "Its branch."
+              }
+            },
+            "required": [
+              "node",
+              "session",
+              "branch"
+            ],
+            "description": "One dispatch a previous driver left behind."
+          },
+          "Owed": {
+            "const": true
+          },
+          "HookEpoch": {
+            "const": true
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.run-stopped@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "description": "Who stopped it."
+          },
+          "forced": {
+            "type": "boolean",
+            "description": "Whether it was forced."
+          },
+          "teardown": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What its teardown established; absent from a record written before it\nwas recorded."
+          }
+        },
+        "required": [
+          "owner",
+          "forced"
+        ],
+        "description": "`run-stopped`: the run ended by `stop`.",
+        "title": "RunStopped",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.driver-exited@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "pid": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "description": "The driver."
+          },
+          "settlement": {
+            "$ref": "#/$defs/ExitSettlementWord",
+            "description": "The settlement it let go at."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The error's message for `error`, and `null` otherwise."
+          },
+          "last_answered_command": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The highest command envelope id this driver wrote an outcome line for, or\n`null` where it answered none."
+          }
+        },
+        "required": [
+          "pid",
+          "settlement"
+        ],
+        "description": "`driver-exited`: a driver let go of the run it drove without crashing.",
+        "title": "DriverExited",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ExitSettlementWord": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "complete",
+                "description": "`complete`."
+              },
+              {
+                "type": "string",
+                "const": "awaiting-planner",
+                "description": "`awaiting-planner`."
+              },
+              {
+                "type": "string",
+                "const": "unattended",
+                "description": "`unattended`."
+              },
+              {
+                "type": "string",
+                "const": "error",
+                "description": "`error`: the driver reported an error of its own and let go."
+              }
+            ],
+            "description": "The settlement a driver let go of a run at: the attached settlement word it\nreturns, or `error` for a driver-side error it reported."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.quiet-worker@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "quiet_for_seconds": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "How long it has been silent."
+          },
+          "threshold_seconds": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The threshold it passed."
+          },
+          "persona": {
+            "type": "string",
+            "description": "The persona it runs under."
+          }
+        },
+        "required": [
+          "quiet_for_seconds",
+          "threshold_seconds",
+          "persona"
+        ],
+        "description": "`quiet-worker`: a dispatch silent past the threshold.",
+        "title": "QuietWorker",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.node-held@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "description": "One entry per reason holding it."
+          }
+        },
+        "required": [
+          "reasons"
+        ],
+        "description": "`node-held`: why the loop is not running a node.",
+        "title": "NodeHeld",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.node-unheld@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "released": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "description": "The reasons that were holding it."
+          }
+        },
+        "required": [
+          "released"
+        ],
+        "description": "`node-unheld`: the hold cleared.",
+        "title": "NodeUnheld",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.decision-pending@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "reference": {
+            "type": "string",
+            "description": "The node or surface deciding."
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The decision's kind."
+          },
+          "unblocks": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "What it holds back."
+          }
+        },
+        "required": [
+          "reference"
+        ],
+        "description": "`decision-pending`: a blocking surface holding dependents back.",
+        "title": "DecisionPending",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.decision-cleared@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "reference": {
+            "type": "string",
+            "description": "The node or surface that decided."
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The decision's kind."
+          },
+          "released": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "What it released."
+          }
+        },
+        "required": [
+          "reference"
+        ],
+        "description": "`decision-cleared`: that surface cleared.",
+        "title": "DecisionCleared",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.cross-dag-satisfied@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "dependency": {
+            "type": "string",
+            "description": "The `run:<id>#<node>` reference."
+          },
+          "last_seq": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "How many records the upstream's store held."
+          }
+        },
+        "required": [
+          "dependency",
+          "last_seq"
+        ],
+        "description": "`cross-dag-satisfied`: a cross-DAG edge resolved.",
+        "title": "CrossDagSatisfied",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.upstream-modified@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "dependency": {
+            "type": "string",
+            "description": "The `run:<id>#<node>` reference."
+          },
+          "captured_last_seq": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "What the consumer recorded."
+          },
+          "observed_last_seq": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "What the upstream holds now."
+          }
+        },
+        "required": [
+          "dependency",
+          "captured_last_seq",
+          "observed_last_seq"
+        ],
+        "description": "`upstream-modified`: that upstream advanced afterwards.",
+        "title": "UpstreamModified",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.completion-requested@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "Why."
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "description": "`completion-requested`: the planner asked to complete.",
+        "title": "CompletionRequested",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.release-wait@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The waiting node."
+          },
+          "awaiting": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "description": "Each release it waits on."
+          }
+        },
+        "required": [
+          "node",
+          "awaiting"
+        ],
+        "description": "`release-wait`: a node waiting on releases.",
+        "title": "ReleaseWait",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.release-arrived@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The waiting node."
+          },
+          "dep": {
+            "type": "string",
+            "description": "The dependency it names."
+          },
+          "identity": {
+            "type": "string",
+            "description": "The repository identity."
+          },
+          "version": {
+            "type": "string",
+            "description": "The version released."
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The release target, `null` for none.",
+            "default": null
+          },
+          "style": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReleaseStyleWord"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The release style, `null` for none.",
+            "default": null
+          }
+        },
+        "required": [
+          "node",
+          "dep",
+          "identity",
+          "version"
+        ],
+        "description": "`release-arrived`: one awaited release happened.",
+        "title": "ReleaseArrived",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ReleaseStyleWord": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "automated",
+                "description": "`automated`."
+              },
+              {
+                "type": "string",
+                "const": "human-step",
+                "description": "`human-step`."
+              }
+            ],
+            "description": "Which of the two release styles a target is."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.release-adopted@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node."
+          },
+          "delivery": {
+            "$ref": "#/$defs/DeliveryWord",
+            "description": "Whether the note reached a running turn or its next dispatch."
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/AdoptedVersion"
+            },
+            "description": "The releases it was told of."
+          }
+        },
+        "required": [
+          "node",
+          "delivery",
+          "versions"
+        ],
+        "description": "`release-adopted`: a fast-adoption node told its releases arrived.",
+        "title": "ReleaseAdopted",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "DeliveryWord": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "live",
+                "description": "`live`: into the running turn."
+              },
+              {
+                "type": "string",
+                "const": "next",
+                "description": "`next`: onto the node's next dispatch."
+              }
+            ],
+            "description": "Where a release note was delivered."
+          },
+          "AdoptedVersion": {
+            "type": "object",
+            "properties": {
+              "identity": {
+                "type": "string",
+                "description": "The repository identity."
+              },
+              "target": {
+                "type": "string",
+                "description": "The release target."
+              },
+              "version": {
+                "type": "string",
+                "description": "The version."
+              },
+              "dep": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The dependency it names."
+              },
+              "branch": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The branch it landed from."
+              },
+              "commit": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The landing commit."
+              },
+              "instructions": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The producer's adoption instructions."
+              }
+            },
+            "required": [
+              "identity",
+              "target",
+              "version"
+            ],
+            "description": "One release a node was told of."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.criterion-checked@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "criterion": {
+            "type": "string",
+            "description": "The criterion's text."
+          },
+          "file": {
+            "type": "string",
+            "description": "The file it names."
+          },
+          "expected": {
+            "type": "string",
+            "description": "The literal it expects."
+          },
+          "answer": {
+            "$ref": "#/$defs/AnswerWord",
+            "description": "`match`, `mismatch`, or `unread`."
+          },
+          "holds": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the file holds instead, on a mismatch."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it was not read, on an unread."
+          }
+        },
+        "required": [
+          "criterion",
+          "file",
+          "expected",
+          "answer"
+        ],
+        "description": "`criterion-checked`: one checkable criterion against the settled branch.",
+        "title": "CriterionChecked",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "AnswerWord": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "match",
+                "description": "`match`."
+              },
+              {
+                "type": "string",
+                "const": "mismatch",
+                "description": "`mismatch`."
+              },
+              {
+                "type": "string",
+                "const": "unread",
+                "description": "`unread`."
+              }
+            ],
+            "description": "What checking a criterion answered."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.body-not-drafted@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "ending": {
+            "$ref": "#/$defs/EndingWord",
+            "description": "Which of the three endings."
+          },
+          "detail": {
+            "type": "string",
+            "description": "The detail the settlement carries too."
+          }
+        },
+        "required": [
+          "ending",
+          "detail"
+        ],
+        "description": "`body-not-drafted`: a drafting dispatch that produced no body.",
+        "title": "BodyNotDrafted",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "EndingWord": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "dispatch-failed",
+                "description": "`dispatch-failed`."
+              },
+              {
+                "type": "string",
+                "const": "schema-refused",
+                "description": "`schema-refused`."
+              },
+              {
+                "type": "string",
+                "const": "no-body",
+                "description": "`no-body`."
+              }
+            ],
+            "description": "How a drafting dispatch ended without a body."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.note-shown@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "addressee": {
+            "$ref": "#/$defs/Addressee",
+            "description": "Who the note was addressed to."
+          },
+          "text": {
+            "type": "string",
+            "description": "The note."
+          },
+          "reached": {
+            "$ref": "#/$defs/ReachedWord",
+            "description": "Where it reached."
+          },
+          "criterion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The criterion it carried."
+          },
+          "completion_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A judged-with delivery's completion reason."
+          },
+          "party": {
+            "$ref": "#/$defs/Party",
+            "description": "The party shown it."
+          },
+          "turn": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The turn the presentation opened."
+          },
+          "evidence": {
+            "$ref": "#/$defs/EvidenceWord",
+            "description": "What showed the presentation happening."
+          }
+        },
+        "required": [
+          "addressee",
+          "text",
+          "reached",
+          "party",
+          "turn",
+          "evidence"
+        ],
+        "description": "`note-shown`: a party of a conversation shown a manager's note.",
+        "title": "NoteShown",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "Addressee": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "worker",
+                "description": "An update to the *worker's* task."
+              },
+              {
+                "type": "string",
+                "const": "supervisor",
+                "description": "An update to the *supervisor's* brief."
+              },
+              {
+                "type": "string",
+                "const": "both",
+                "description": "Addressed to both parties."
+              }
+            ],
+            "description": "Who a note is for.\n\nRequired; there is no default, because a note whose addressee is guessed is a\nnote the judge may read as an instruction to itself. One run saw a simulated\nuser compose a four-point \"manager ruling\" in-conversation and instruct the\nworker to post it over the run channel, and the worker complied."
+          },
+          "ReachedWord": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "queued",
+                "description": "`queued`."
+              },
+              {
+                "type": "string",
+                "const": "worker",
+                "description": "`worker`."
+              },
+              {
+                "type": "string",
+                "const": "supervisor",
+                "description": "`supervisor`."
+              },
+              {
+                "type": "string",
+                "const": "judged-with",
+                "description": "`judged-with`."
+              },
+              {
+                "type": "string",
+                "const": "carried",
+                "description": "`carried`."
+              }
+            ],
+            "description": "Where a note reached, as its record's tag."
+          },
+          "Party": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "worker",
+                "description": "The agent under test."
+              },
+              {
+                "type": "string",
+                "const": "supervisor",
+                "description": "The simulated user / completion supervisor."
+              }
+            ],
+            "description": "Which party of the conversation a delivery reached."
+          },
+          "EvidenceWord": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "delivered-origin",
+                "description": "`delivered-origin`."
+              },
+              {
+                "type": "string",
+                "const": "opening-task",
+                "description": "`opening-task`."
+              },
+              {
+                "type": "string",
+                "const": "instruction-text",
+                "description": "`instruction-text`."
+              },
+              {
+                "type": "string",
+                "const": "answering-turn",
+                "description": "`answering-turn`."
+              }
+            ],
+            "description": "What a `note-shown` was decided from."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.run-hook-fired@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "hook": {
+            "$ref": "#/$defs/HookWord",
+            "description": "Which hook."
+          },
+          "command": {
+            "type": "string",
+            "description": "The command the launch record names for it."
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HookReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the failure hook fired; `null` for the success hook."
+          }
+        },
+        "required": [
+          "hook",
+          "command"
+        ],
+        "description": "`run-hook-fired`: a run-end hook marked as fired, once per ending the run\nreaches.",
+        "title": "RunHookFired",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "HookWord": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "success",
+                "description": "Every node settled `done`."
+              },
+              {
+                "type": "string",
+                "const": "failure",
+                "description": "The run ended any other way."
+              }
+            ],
+            "description": "The word a run-end hook record names its hook by."
+          },
+          "HookReason": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/HookReasonWord",
+                "description": "Why."
+              },
+              "nodes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/UnsettledNode"
+                },
+                "description": "Every node not `done`."
+              }
+            },
+            "required": [
+              "kind",
+              "nodes"
+            ],
+            "description": "Why the failure hook fired, and every node not `done` when it was judged."
+          },
+          "HookReasonWord": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "nodes",
+                "description": "The graph holds a `failed` or `skipped` node."
+              },
+              {
+                "type": "string",
+                "const": "unfinished",
+                "description": "The graph holds a node that is not `done`, none failed or skipped, and no\ndecision is outstanding."
+              },
+              {
+                "type": "string",
+                "const": "stopped",
+                "description": "`stop` established a clean teardown."
+              }
+            ],
+            "description": "Why the failure hook fired."
+          },
+          "UnsettledNode": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "The node."
+              },
+              "status": {
+                "$ref": "#/$defs/Status",
+                "description": "Its status word."
+              },
+              "outcome": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Its outcome, written as `null` rather than omitted where it has none."
+              }
+            },
+            "required": [
+              "id",
+              "status"
+            ],
+            "description": "One node that was not `done` when a hook was judged."
+          },
+          "Status": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "pending",
+                "description": "`pending`."
+              },
+              {
+                "type": "string",
+                "const": "ready",
+                "description": "`ready`."
+              },
+              {
+                "type": "string",
+                "const": "running",
+                "description": "`running`."
+              },
+              {
+                "type": "string",
+                "const": "waiting",
+                "description": "`waiting`."
+              },
+              {
+                "type": "string",
+                "const": "blocked",
+                "description": "`blocked`."
+              },
+              {
+                "type": "string",
+                "const": "parked",
+                "description": "`parked`."
+              },
+              {
+                "type": "string",
+                "const": "cancelled",
+                "description": "`cancelled`."
+              },
+              {
+                "type": "string",
+                "const": "done",
+                "description": "`done`."
+              },
+              {
+                "type": "string",
+                "const": "complete-but-draft",
+                "description": "`complete-but-draft`."
+              },
+              {
+                "type": "string",
+                "const": "failed",
+                "description": "`failed`."
+              },
+              {
+                "type": "string",
+                "const": "skipped",
+                "description": "`skipped`."
+              }
+            ],
+            "description": "A node's status, as a settlement records it."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.run-hook-finished@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "hook": {
+            "$ref": "#/$defs/HookWord",
+            "description": "Which hook."
+          },
+          "exit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Its exit status; `null` where it never started or was ended."
+          },
+          "ending": {
+            "$ref": "#/$defs/HookEndingWord",
+            "description": "How it ended."
+          },
+          "log": {
+            "type": "string",
+            "description": "Where its output was captured."
+          }
+        },
+        "required": [
+          "hook",
+          "ending",
+          "log"
+        ],
+        "description": "`run-hook-finished`: how the fired hook ended.",
+        "title": "RunHookFinished",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "HookWord": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "success",
+                "description": "Every node settled `done`."
+              },
+              {
+                "type": "string",
+                "const": "failure",
+                "description": "The run ended any other way."
+              }
+            ],
+            "description": "The word a run-end hook record names its hook by."
+          },
+          "HookEndingWord": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "succeeded",
+                "description": "Exit status zero."
+              },
+              {
+                "type": "string",
+                "const": "failed",
+                "description": "Any other exit status."
+              },
+              {
+                "type": "string",
+                "const": "could-not-start",
+                "description": "The command could not be started."
+              },
+              {
+                "type": "string",
+                "const": "timed-out",
+                "description": "The bound on its running elapsed."
+              }
+            ],
+            "description": "How a run-end hook ended."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.run-hook-withheld@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "settlement": {
+            "$ref": "#/$defs/WithheldSettlementWord",
+            "description": "The settlement word the run was left under."
+          }
+        },
+        "required": [
+          "settlement"
+        ],
+        "description": "`run-hook-withheld`: a driver let go of a paused run without firing a hook.",
+        "title": "RunHookWithheld",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "WithheldSettlementWord": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "awaiting-planner",
+                "description": "`awaiting-planner`: a decision is outstanding."
+              }
+            ],
+            "description": "The settlement a run is withheld its hook under: the one that pauses it."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.pool-maintenance@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "started_at": {
+            "type": "string",
+            "description": "When the sweep started, RFC3339 — spelled as every other instant a record\nof this crate carries is, and as the sibling spells `last_maintained`\nbeside it: the document names a string, and the writer is `sys::now_rfc3339`."
+          },
+          "identities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/MaintainedIdentity"
+            },
+            "description": "Every identity the sweep records: one whose slot ran, one another run had\nclaimed, or one that failed."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the host's identities could not be enumerated, where they could not."
+          },
+          "cut_short": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CutShort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the pass stopped before reaching every identity; absent for a pass\nthat visited them all."
+          }
+        },
+        "required": [
+          "started_at",
+          "identities"
+        ],
+        "description": "`pool-maintenance`: one sweep of the schedule that did something.",
+        "title": "PoolMaintenance",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "MaintainedIdentity": {
+            "type": "object",
+            "properties": {
+              "identity": {
+                "type": "string",
+                "description": "The identity key."
+              },
+              "every": {
+                "type": "string",
+                "description": "The cadence it was maintained on, as the schedule spells a span."
+              }
+            },
+            "required": [
+              "identity",
+              "every"
+            ],
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "outcome": {
+                    "description": "The sibling's outcome."
+                  }
+                },
+                "required": [
+                  "outcome"
+                ],
+                "description": "The sibling's own `IdentityOutcome`, as `onevcs` serializes it:\n`{\"claimed\": {\"by_pid\": N}}`, or `{\"slots\": [{\"number\": N, \"outcome\": ...},\n...]}` with each slot's outcome spelled by that library."
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "error": {
+                    "type": "string",
+                    "description": "The reason, bounded as every payload text is."
+                  }
+                },
+                "required": [
+                  "error"
+                ],
+                "description": "Why the identity could not be maintained."
+              }
+            ],
+            "description": "One identity of a `pool-maintenance` record."
+          },
+          "CutShort": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/CutReason",
+                "description": "What stopped it."
+              },
+              "unreached": {
+                "$ref": "#/$defs/Unreached",
+                "description": "Every identity the pass never began, spelled as the record's `identity`\nfields are, in the sorted order the sweep visits them."
+              }
+            },
+            "required": [
+              "reason",
+              "unreached"
+            ],
+            "description": "Why a pass of the sweep stopped before reaching every identity, and which\nidentities it never began: the `cut_short` of a `pool-maintenance` or\n`branches-retired` record.\n\nThe identity in progress when the stop arrived is finished and reported as an\nordinary entry of the record, and is never one of `unreached`."
+          },
+          "CutReason": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "driver-closing",
+                "description": "`driver-closing`: the driver running the sweep was closing out."
+              }
+            ],
+            "description": "What stopped a pass of the sweep before every identity.\n\nOne word, because a sweep stops early for one reason: the driver running it\nis closing out, and stops it at the next identity boundary rather than wait\nfor the rest. What it left due, another driver's idle pass or the host's own\nsweep picks up."
+          },
+          "Unreached": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "description": "The identities a cut-short pass never began: never empty, because a pass that\nreached every identity carries no `cut_short` at all. Built through\n[`Unreached::new`] and read back refusing an empty list, so no value of this\ntype is a cut that left nothing out."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.dispatch-stopped@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "pid": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "description": "The process the dispatch was running in."
+          },
+          "interrupt": {
+            "$ref": "#/$defs/InterruptWord",
+            "description": "What the interrupt was answered with."
+          },
+          "detail": {
+            "type": "string",
+            "description": "The answer in the words a reader is shown."
+          },
+          "ended": {
+            "$ref": "#/$defs/DispatchEndingWord",
+            "description": "How the dispatch ended."
+          },
+          "waited_ms": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "How long it was watched for, from the moment it was asked."
+          }
+        },
+        "required": [
+          "pid",
+          "interrupt",
+          "detail",
+          "ended",
+          "waited_ms"
+        ],
+        "description": "`dispatch-stopped`: one live dispatch a host shutdown acted on.",
+        "title": "DispatchStopped",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "InterruptWord": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "delivered",
+                  "no-turn",
+                  "failed"
+                ]
+              },
+              {
+                "type": "string",
+                "const": "not-asked",
+                "description": "`not-asked`: nothing was asked at all — the `--force` path, or a run the\nhold could not be written for."
+              }
+            ],
+            "description": "What one dispatch's interrupt was answered with."
+          },
+          "DispatchEndingWord": {
+            "type": "string",
+            "enum": [
+              "graceful",
+              "killed",
+              "still-running"
+            ],
+            "description": "How a dispatch a host shutdown acted on ended."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.host-shutdown@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "$ref": "#/$defs/ScopeWord",
+            "description": "Which scope selected this run."
+          },
+          "owner": {
+            "type": "string",
+            "description": "Who owns it."
+          },
+          "forced": {
+            "type": "boolean",
+            "description": "Whether the interrupt and the wait were skipped."
+          },
+          "grace_seconds": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The grace a dispatch had to end itself."
+          },
+          "dispatches": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "description": "How many live dispatches the shutdown acted on."
+          },
+          "graceful": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "description": "How many of them ended within the grace."
+          },
+          "killed": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "description": "How many were killed at the deadline."
+          },
+          "teardown": {
+            "$ref": "#/$defs/TeardownWord",
+            "description": "What the teardown established, in `run-stopped`'s own vocabulary."
+          },
+          "root": {
+            "type": "string",
+            "description": "The runs root the shutdown read."
+          },
+          "branches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/BranchPreserved"
+            },
+            "description": "One entry per branch the run's records named."
+          }
+        },
+        "required": [
+          "scope",
+          "owner",
+          "forced",
+          "grace_seconds",
+          "dispatches",
+          "graceful",
+          "killed",
+          "teardown",
+          "root",
+          "branches"
+        ],
+        "description": "`host-shutdown`: the run was put down mid-flight by a host shutdown.",
+        "title": "HostShutdown",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ScopeWord": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "run",
+                "description": "`run`: the positional run id."
+              },
+              {
+                "type": "string",
+                "const": "mine",
+                "description": "`mine`: every run this session owns."
+              },
+              {
+                "type": "string",
+                "const": "host",
+                "description": "`host`: every run under the runs root."
+              }
+            ],
+            "description": "Which scope a host shutdown selected a run under."
+          },
+          "TeardownWord": {
+            "type": "string",
+            "enum": [
+              "signalled",
+              "nothing-to-stop",
+              "identity-declined",
+              "not-attempted",
+              "partly-signalled",
+              "refused",
+              "elsewhere"
+            ],
+            "description": "What a teardown established, in the words `run-stopped` carries."
+          },
+          "BranchPreserved": {
+            "type": "object",
+            "properties": {
+              "identity": {
+                "type": "string",
+                "description": "The repository identity it belongs to."
+              },
+              "branch": {
+                "type": "string",
+                "description": "The branch, under the name it already had."
+              },
+              "result": {
+                "$ref": "#/$defs/PreservedWord",
+                "description": "What preserving it found to do."
+              },
+              "remote": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The origin it went to, where there was one."
+              },
+              "commit": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The commit it stands at, where the preservation read one."
+              },
+              "detail": {
+                "type": "string",
+                "description": "What the sibling said, in the words a reader is shown."
+              }
+            },
+            "required": [
+              "identity",
+              "branch",
+              "result",
+              "detail"
+            ],
+            "description": "One branch a host shutdown offered to `onevcs::preserve`."
+          },
+          "PreservedWord": {
+            "type": "string",
+            "enum": [
+              "pushed",
+              "already-on-origin",
+              "no-remote",
+              "refused"
+            ],
+            "description": "What preserving one branch found to do."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.branches-superseded@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node whose landing superseded them: the head of the lineage."
+          },
+          "landing": {
+            "type": "string",
+            "description": "Where it landed, as `onevcs` was told: a commit, or a change request's URL."
+          },
+          "superseded": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/SupersededAttempt"
+            },
+            "description": "Every earlier attempt recorded as superseded."
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/UnrecordedAttempt"
+            },
+            "description": "Every earlier attempt whose record `onevcs` refused, and why."
+          }
+        },
+        "required": [
+          "node",
+          "landing",
+          "superseded",
+          "failed"
+        ],
+        "description": "`branches-superseded`: what one landed lineage told `onevcs` about the earlier\nattempts it superseded on branches of their own.",
+        "title": "BranchesSuperseded",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "SupersededAttempt": {
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string"
+              },
+              "branch": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "node",
+              "branch"
+            ],
+            "description": "One earlier attempt of a `branches-superseded` record."
+          },
+          "UnrecordedAttempt": {
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string"
+              },
+              "branch": {
+                "type": "string"
+              },
+              "error": {
+                "type": "string",
+                "description": "What `onevcs` answered, bounded as every payload text is."
+              }
+            },
+            "required": [
+              "node",
+              "branch",
+              "error"
+            ],
+            "description": "One earlier attempt whose supersession `onevcs` did not record."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.branches-retired@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "retired": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/RetiredBranch"
+            },
+            "description": "Every branch the pass deleted."
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/UnretiredIdentity"
+            },
+            "description": "Every identity whose pass failed, and every branch a deletion did not\nfinish."
+          },
+          "cut_short": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CutShort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the pass stopped before reaching every identity — or never began,\nits sweep's maintenance having been cut short; absent for a pass that\nvisited them all."
+          }
+        },
+        "required": [
+          "retired",
+          "failed"
+        ],
+        "description": "`branches-retired`: what one idle pass's `onevcs::retire_finished` retired, or\nwhy a pass over an identity could not be made.",
+        "title": "BranchesRetired",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "RetiredBranch": {
+            "type": "object",
+            "properties": {
+              "identity": {
+                "type": "string",
+                "description": "The identity key the pass was scoped to, as `onevcs` reports it."
+              },
+              "branch": {
+                "type": "string",
+                "description": "The branch name every copy of which the pass deleted."
+              },
+              "class": {
+                "type": "string",
+                "description": "Its class, as `onevcs` serializes it. That type derives no `JsonSchema`,\nso the document says a string and the type is what is read and written."
+              },
+              "proof": {
+                "description": "What proved it held nothing beyond its base."
+              },
+              "trigger": {
+                "$ref": "#/$defs/RetirementTrigger",
+                "description": "What retired it."
+              }
+            },
+            "required": [
+              "identity",
+              "branch",
+              "class",
+              "proof",
+              "trigger"
+            ],
+            "description": "One branch of a `branches-retired` record, in the words `onevcs`'s report\ncarries it."
+          },
+          "RetirementTrigger": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "pass",
+                "description": "The automatic pass `onevcs::retire_finished` makes."
+              }
+            ],
+            "description": "What retired a branch of a `branches-retired` record.\n\nOne word, because this crate reaches retirement through `retire_finished`\nalone. `onevcs` keeps its trigger vocabulary private, so the spelling is held\nto the one it records by `tests/e2e/retirement.rs`, which reads that\nlibrary's own record of the branch back through `onevcs status`."
+          },
+          "UnretiredIdentity": {
+            "type": "object",
+            "properties": {
+              "identity": {
+                "type": "string",
+                "description": "The identity key."
+              },
+              "branch": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The branch, where the failure was one branch's rather than the pass's."
+              },
+              "error": {
+                "type": "string",
+                "description": "What stopped it, bounded as every payload text is."
+              }
+            },
+            "required": [
+              "identity",
+              "error"
+            ],
+            "description": "One identity, or one branch of it, an idle pass did not finish retiring."
+          },
+          "CutShort": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/CutReason",
+                "description": "What stopped it."
+              },
+              "unreached": {
+                "$ref": "#/$defs/Unreached",
+                "description": "Every identity the pass never began, spelled as the record's `identity`\nfields are, in the sorted order the sweep visits them."
+              }
+            },
+            "required": [
+              "reason",
+              "unreached"
+            ],
+            "description": "Why a pass of the sweep stopped before reaching every identity, and which\nidentities it never began: the `cut_short` of a `pool-maintenance` or\n`branches-retired` record.\n\nThe identity in progress when the stop arrived is finished and reported as an\nordinary entry of the record, and is never one of `unreached`."
+          },
+          "CutReason": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "driver-closing",
+                "description": "`driver-closing`: the driver running the sweep was closing out."
+              }
+            ],
+            "description": "What stopped a pass of the sweep before every identity.\n\nOne word, because a sweep stops early for one reason: the driver running it\nis closing out, and stops it at the next identity boundary rather than wait\nfor the rest. What it left due, another driver's idle pass or the host's own\nsweep picks up."
+          },
+          "Unreached": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "description": "The identities a cut-short pass never began: never empty, because a pass that\nreached every identity carries no `cut_short` at all. Built through\n[`Unreached::new`] and read back refusing an empty list, so no value of this\ntype is a cut that left nothing out."
+          }
+        }
       }
     }
   ]
