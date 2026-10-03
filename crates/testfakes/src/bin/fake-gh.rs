@@ -795,6 +795,11 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         // shown of the worker's own description, and what a journey reads back
         // to hold the description the closeout wrote to the one the host has.
         Some("title,body") => "title,body",
+        // Whether the change can merge into its base. `onevcs` 0.38.0 reads it
+        // while it watches a merge it armed, so a conflict the host confirms
+        // ends the watch as `sync-conflict` rather than waiting out its bound.
+        // This host never computes a conflict: what it answers is `MERGEABLE`.
+        Some("mergeable,mergeStateStatus") => "mergeable,mergeStateStatus",
         _ => "number,state,mergeStateStatus,headRefOid,mergeCommit,statusCheckRollup",
     };
     if let Err(refusal) = shaped(
@@ -825,6 +830,7 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
             "title": opened.title,
             "body": opened.body,
             "state": if merged { "MERGED" } else { "OPEN" },
+            "mergeable": "MERGEABLE",
             "mergeStateStatus": "CLEAN",
             "headRefOid": head.as_str(),
             // Whether the host is holding this change back. Read off the state
