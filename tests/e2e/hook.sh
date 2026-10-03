@@ -14,7 +14,8 @@
 #
 # Verbs, and the exit codes they answer with:
 #
-#   wait-for PATH        block until PATH exists            0
+#   wait-for PATH        mark PATH.holding, then block      0
+#                        until PATH exists
 #                        …or refuse the push once the        1
 #                        ceiling below expires
 #   break-streams        leave a file where the session     0
@@ -192,6 +193,14 @@ case "${1-}" in
       fail "wait-for takes the path to wait for"
     fi
     wait_ceiling
+    # Said before the wait, so a journey can tell a push the merge path is
+    # holding from one that has not reached it yet: `onevcs` never interrupts a
+    # push that is running, and asks its caller's cancellation before one starts.
+    if ! : >"$2.holding"; then
+      echo "pre-push: cannot write $2.holding, the marker that says this push is held" >&2
+      echo "pre-push: wait-for writes beside the path it waits for; check that $(dirname "$2") exists and is writable" >&2
+      exit 1
+    fi
     deadline=$(( $(date +%s) + seconds ))
     until [ -f "$2" ]; do
       if [ "$(date +%s)" -ge "$deadline" ]; then
