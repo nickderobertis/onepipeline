@@ -27,7 +27,8 @@ call :waitceiling
 if errorlevel 1 exit /b 64
 type nul >"%~2.holding"
 if errorlevel 1 (
-  call :broke "cannot write %~2.holding"
+  echo pre-push: cannot write %~2.holding, the marker that says this push is held 1>&2
+  echo pre-push: wait-for writes beside the path it waits for; check that %~dp2 exists and is writable 1>&2
   exit /b 1
 )
 set /a "left=seconds"

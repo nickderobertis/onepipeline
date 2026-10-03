@@ -4450,30 +4450,20 @@ fn start_ready(
     Ok(settled_here)
 }
 
-/// Whether any node `node` superseded — directly, or through a chain of retries —
-/// still has a dispatch in flight, which holds the session `node` would open.
+/// Whether a node `node` superseded still has a dispatch in flight, which holds the
+/// session `node` would open.
 ///
-/// The whole lineage rather than the one node a `retry` named: a retry of a
-/// replacement that never started supersedes a node whose own dispatch may still
-/// be returning, and that dispatch holds the same branch's session.
+/// The direct predecessor only: a `retry` is refused for a node that is not
+/// running, failed or cancelled, so a replacement that never dispatched cannot
+/// itself be superseded while an older dispatch is still returning.
 fn superseded_in_flight(
     superseded: &BTreeMap<String, String>,
     node: &str,
     in_flight: &BTreeMap<String, Dispatch>,
 ) -> bool {
-    let mut lineage = vec![node];
-    let mut seen = BTreeSet::new();
-    while let Some(replacement) = lineage.pop() {
-        for (predecessor, by) in superseded {
-            if by == replacement && seen.insert(predecessor.as_str()) {
-                if in_flight.contains_key(predecessor) {
-                    return true;
-                }
-                lineage.push(predecessor);
-            }
-        }
-    }
-    false
+    superseded
+        .iter()
+        .any(|(predecessor, by)| by == node && in_flight.contains_key(predecessor))
 }
 
 /// What the run's record says about a fresh dispatch of a node and the manager's

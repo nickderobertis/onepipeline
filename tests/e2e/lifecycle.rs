@@ -2541,7 +2541,6 @@ const WATCH_BOUND_SECONDS: &str = "3600";
 /// cancellation every tenth of a second, and the rest is the session closing.
 const INTERRUPTED_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// The branches the origin carries beside its base.
 fn published_branches(world: &World, repo: &Repository) -> Vec<String> {
     git(
         world,
@@ -2554,7 +2553,6 @@ fn published_branches(world: &World, repo: &Repository) -> Vec<String> {
     .collect()
 }
 
-/// Where in the run's journal the first record `matching` sits.
 fn journalled_at(
     journal: &[serde_json::Value],
     matching: impl Fn(&serde_json::Value) -> bool,
@@ -2562,7 +2560,6 @@ fn journalled_at(
     journal.iter().position(matching)
 }
 
-/// One node's records of one kind from one source, by their journal positions.
 fn positions_of(journal: &[serde_json::Value], source: &str, kind: &str, node: &str) -> Vec<usize> {
     journal
         .iter()
@@ -2574,6 +2571,12 @@ fn positions_of(journal: &[serde_json::Value], source: &str, kind: &str, node: &
         .collect()
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the two journeys below
+// each make real publications into a real origin through the linked `onevcs`, and what they
+// prove is `lifecycle`'s publication, `vcs`'s cancellation seam and `engine`'s scheduling of
+// a retry's replacement together — every one of which any change under `src/` can move — so
+// a project edged narrower than the crate would drop them out of `nx affected` for exactly
+// the changes they exist to catch. Same grounds as the publication journeys above.
 /// A `cancel` reaches a publication that is waiting in `onevcs`'s watch.
 ///
 /// onepipeline#692: the cancel was recorded, and the node went on holding its
@@ -2830,6 +2833,7 @@ fn a_retry_interrupts_a_publication_waiting_on_its_merge_and_its_replacement_con
         "the replacement's session opened at {opened:?}, not after its dispatch at {dispatched}"
     );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A merge path the reads never answer settles the node saying where the work is.
 ///

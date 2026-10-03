@@ -197,7 +197,9 @@ case "${1-}" in
     # holding from one that has not reached it yet: `onevcs` never interrupts a
     # push that is running, and asks its caller's cancellation before one starts.
     if ! : >"$2.holding"; then
-      broke "cannot write $2.holding"
+      echo "pre-push: cannot write $2.holding, the marker that says this push is held" >&2
+      echo "pre-push: wait-for writes beside the path it waits for; check that $(dirname "$2") exists and is writable" >&2
+      exit 1
     fi
     deadline=$(( $(date +%s) + seconds ))
     until [ -f "$2" ]; do
