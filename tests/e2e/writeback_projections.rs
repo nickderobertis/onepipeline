@@ -243,17 +243,13 @@ fn edit(world: &World, run: &str, command: Value) {
         .exited(0);
 }
 
-/// End the run's quiet driver and adopt it, so a second driver projects the same run.
+/// End the run's driver and adopt it, so a second driver projects the same run.
+///
+/// Ended by pid, because a live driver that has merely gone quiet is still driving
+/// and an adoption refuses it.
 fn adopted(world: &World, run: &str) {
-    world.until("the quiet driver to be reported parked", |world| {
-        let mut status = world.cmd(&["status", run]);
-        status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-        let out = status.output().expect("the binary runs");
-        String::from_utf8_lossy(&out.stdout).contains("PARKED")
-    });
-    let mut adopt = world.cmd(&["adopt", run, "--detach"]);
-    adopt.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-    world.run_on(adopt, "adopt --detach").exited(0);
+    crate::harness::end_driver(world, run);
+    world.run(&["adopt", run, "--detach"]).exited(0);
 }
 
 /// What a destination says when it declines a write or a read, in the store's own shape.
