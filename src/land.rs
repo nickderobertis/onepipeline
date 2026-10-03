@@ -98,10 +98,202 @@ pub(crate) fn land(verb: Verb, args: Vec<OsString>) -> Result<i32> {
             _ => {}
         }
     }
+    let source = entitle(&mut cli.command, &crate::ledger::runs_root());
     if let Some(request) = Landing::of(&cli.command) {
+        eprintln!("{}", source.line());
         return Ok(report(request.land()));
     }
     Ok(i32::from(onevcs::run(&cli)))
+}
+
+/// Where the subject a landing publishes under came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SubjectSource {
+    /// The run node that owns the branch, by its title.
+    Owner {
+        /// `<run>#<node>`.
+        node: String,
+        /// The node's title, which the landing publishes under.
+        title: String,
+    },
+    /// The caller's own `--title`.
+    Title(String),
+    /// `onevcs`'s default: no node, or more than one, owns the branch.
+    Unowned,
+    /// `onevcs`'s default: the owning node, `<run>#<node>`, states no title.
+    Untitled(String),
+    /// `onevcs`'s default: the owning node's title is not one `onevcs` will
+    /// commit under, with what `onevcs` said of it.
+    Refused {
+        /// `<run>#<node>`.
+        node: String,
+        /// `onevcs`'s own reason.
+        why: String,
+    },
+}
+
+impl SubjectSource {
+    /// The line said on stderr before the landing publishes, so the permanent
+    /// headline's source is read before it lands rather than after.
+    ///
+    /// The default names no subject: which of the branch's commits supplies it is
+    /// `onevcs`'s ranking, which this crate does not repeat, and a guess that
+    /// differed from its pick would misstate the very headline this line exists
+    /// to show.
+    fn line(&self) -> String {
+        match self {
+            Self::Owner { node, title } => {
+                format!("publishing under '{title}' (from {node})")
+            }
+            Self::Title(title) => format!("publishing under '{title}' (--title)"),
+            Self::Unowned => {
+                "publishing under onevcs's default subject (no unique owning node)".to_owned()
+            }
+            Self::Untitled(node) => {
+                format!("publishing under onevcs's default subject ({node} states no title)")
+            }
+            Self::Refused { node, why } => format!(
+                "publishing under onevcs's default subject ({node}'s title is not a subject \
+                 onevcs will commit under: {why})"
+            ),
+        }
+    }
+}
+
+/// Settle the subject a branch-keyed landing publishes under, writing the owning
+/// node's title into the command where the caller gave none, and answer where it
+/// came from. A command that lands no branch is left as it is.
+fn entitle(command: &mut onevcs::cli::Command, runs: &Path) -> SubjectSource {
+    let (branch, title) = match command {
+        onevcs::cli::Command::PublishBranch(args) => (&args.branch, &mut args.title),
+        onevcs::cli::Command::Recover(args) => (&args.branch, &mut args.title),
+        _ => return SubjectSource::Unowned,
+    };
+    if let Some(title) = title {
+        return SubjectSource::Title(title.clone());
+    }
+    let Some(owner) = owner_of(runs, branch) else {
+        return SubjectSource::Unowned;
+    };
+    let node = format!("{}#{}", owner.run, owner.node);
+    let Some(owned) = owner.title else {
+        return SubjectSource::Untitled(node);
+    };
+    match onevcs::Subject::try_from(owned.clone()) {
+        Ok(_) => {
+            *title = Some(owned.clone());
+            SubjectSource::Owner { node, title: owned }
+        }
+        Err(why) => SubjectSource::Refused { node, why },
+    }
+}
+
+/// The one run node whose work a branch is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Owner {
+    run: String,
+    node: String,
+    /// Its title as its task record states it, where it states one.
+    title: Option<String>,
+}
+
+/// The one run node under the runs root that owns `branch`, or `None` where no
+/// node does or more than one does.
+///
+/// Read off what each run's journal already records: every session a node's
+/// dispatch opened, the branch each settlement left, the dispatches an adoption
+/// cleared, and the branch a node is pinned to or resumes. A node dispatched more
+/// than once onto the branch is one owner, and so is a retry lineage — the retry
+/// records carry the branch from one attempt to its replacement — which is owned
+/// by its latest replacement. Two lineages, or two runs, naming it own nothing.
+fn owner_of(runs: &Path, branch: &str) -> Option<Owner> {
+    // The branch as its journal spells it inside a JSON string, so a run that
+    // never names it is passed over without folding.
+    let spelled = serde_json::to_string(branch).ok()?;
+    let spelled = spelled.trim_matches('"');
+    let mut owners = Vec::new();
+    for paths in crate::ledger::all_runs(runs).runs {
+        let journal = paths.journal();
+        if !std::fs::read_to_string(&journal).is_ok_and(|text| text.contains(spelled)) {
+            continue;
+        }
+        let events = crate::journal::read(&journal);
+        let state = crate::projection::fold(&events);
+        let mut named: Vec<&str> = events
+            .iter()
+            .filter(|event| {
+                event.source == crate::event::Source::Vcs
+                    && crate::vcs::is_session_opened(&event.kind)
+            })
+            .filter_map(|event| {
+                let node = event.labels.node.as_deref()?;
+                let session = crate::vcs::DispatchSession::read_from(event)?;
+                (session.branch().as_str() == branch).then_some(node)
+            })
+            .collect();
+        named.extend(
+            state
+                .branches
+                .iter()
+                .filter(|(_, left)| left.as_str() == branch)
+                .map(|(node, _)| node.as_str()),
+        );
+        named.extend(
+            state
+                .sessions
+                .iter()
+                .chain(&state.abandoned)
+                .filter(|(_, session)| session.branch().as_str() == branch)
+                .map(|(node, _)| node.as_str()),
+        );
+        named.extend(
+            state
+                .graph
+                .iter()
+                .filter(|node| {
+                    node.branch.as_deref() == Some(branch)
+                        || node
+                            .resume
+                            .as_ref()
+                            .is_some_and(|resume| resume.branch == branch)
+                })
+                .map(|node| node.id.as_str()),
+        );
+        let mut heads: Vec<&str> = named
+            .into_iter()
+            .map(|node| lineage_head(&state.superseded, node))
+            .collect();
+        heads.sort_unstable();
+        heads.dedup();
+        owners.extend(heads.into_iter().map(|node| Owner {
+            run: paths.run.clone(),
+            node: node.to_owned(),
+            title: state.graph.get(node).and_then(|node| node.title.clone()),
+        }));
+    }
+    match <[Owner; 1]>::try_from(owners) {
+        Ok([owner]) => Some(owner),
+        Err(_) => None,
+    }
+}
+
+/// The latest replacement a node's retries reached, or the node itself where it
+/// was never retried. A journal a person edited can hold a cycle; it is walked
+/// once whatever it holds.
+fn lineage_head<'a>(
+    superseded: &'a std::collections::BTreeMap<String, String>,
+    node: &'a str,
+) -> &'a str {
+    let mut at = node;
+    let mut seen = vec![node];
+    while let Some(replacement) = superseded.get(at) {
+        if seen.contains(&replacement.as_str()) {
+            break;
+        }
+        at = replacement;
+        seen.push(at);
+    }
+    at
 }
 
 /// One branch-keyed landing, in the library form of the verb it fronts.
