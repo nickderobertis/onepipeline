@@ -2850,8 +2850,8 @@ mod tests {
              this engine drives relays a word any party said while it was saying it: that kind \
              ships in 0.3.6 and the resolution predates it. {MOVE_THE_LOCK}"
         );
-        // The observation half of an activity: a `tool_result` names no tool
-        // because it answers one already named, carries what came back, and
+        // The observation half of an activity: a `tool_result` may name no tool
+        // (one whose call the run never saw), carries what came back, and
         // joins to its call by id. Below the floor `name` is a bare `String`
         // and the other three are unknown fields, so this is refused there.
         serde_json::from_value::<oneagentgraph::event::TurnActivity>(serde_json::json!({
