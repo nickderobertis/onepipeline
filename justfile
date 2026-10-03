@@ -32,7 +32,7 @@ set positional-arguments := true
 # release into this clone's own build directory, never onto `PATH`, and
 # `tests/linked_engines.rs` fails if this line ever names a release other than the one
 # the lock links.
-onetaskgraph-version := "0.2.57"
+onetaskgraph-version := "0.2.58"
 onetaskgraph-root := justfile_directory() / "target" / "tools" / ("onetaskgraph-" + onetaskgraph-version)
 
 # The renderer the visual-docs capture draws each scene with (`just screenshots`).

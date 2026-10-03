@@ -608,6 +608,17 @@ resolver = "2"
 # `^0.37` admits no 0.38.x; `onevcs-testing` 0.11.0 requires exactly `=0.38.0`,
 # so the pair moves as one.
 #
+# `onevcs` 0.39.0 is the floor because it retires landed branches on Windows and
+# says, in `Retirement::cause`, which read left a branch `keep / unknown`. The engine
+# journals only retired and failed branches in `branches-retired`, so it reads no
+# cause. The release also ends the revisions it hands git with `--`, so a revision
+# that is also a file in the tree is never ambiguous. The hook-environment fix a dispatch's
+# publication relies on shipped in 0.38.0, and `tests/e2e/lifecycle.rs`'s
+# `a_hooks_git_commands_in_a_fixture_repository_*` journey drives it: a `pre-push`
+# hook commits in a fixture repository and unsets nothing. A **requirement**, because
+# `^0.38` admits no 0.39.x; `onevcs-testing` 0.11.1 requires exactly `=0.39.0`, so
+# the pair moves as one.
+#
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
 # `reasoning` items as `turn-activity` under their own kind — the agent's words,
 # with no tool name — which `src/views.rs` and `src/projection.rs` render as what
@@ -641,7 +652,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.5"
-onevcs = "0.38.0"
+onevcs = "0.39.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -837,7 +848,7 @@ oneharness-core = "0.24.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.11.0"
+onevcs-testing = "0.11.1"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -855,9 +866,12 @@ onevcs-testing = "0.11.0"
 # reads a home with its members (`include_members`); `src/taskgraph.rs` reads a plan
 # that way. It also carries the Linear plugin's `status_mapping`, which a write-back to
 # a Linear source needs.
-onetaskgraph-core = "=0.2.57"
-onetaskgraph-plugin-api = "=0.2.57"
-onetaskgraph-local-md = "=0.2.57"
+#
+# 0.2.58 answers a project or document text query against a GitHub Projects source
+# with the board's own search. Nothing in the engine's calls changed.
+onetaskgraph-core = "=0.2.58"
+onetaskgraph-plugin-api = "=0.2.58"
+onetaskgraph-local-md = "=0.2.58"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
