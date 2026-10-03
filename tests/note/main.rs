@@ -837,6 +837,9 @@ const OTHER_RULING: &str = "other: keep the fixture where it is";
 /// A node added behind the note, naming the note's node only among its `deps`.
 const ADDED: &str = "after-build";
 
+/// A pending node reparented onto the note's node behind the note.
+const REPARENTED: &str = "late";
+
 /// How the reconciler opens its refusal of a record it cannot decode.
 const MALFORMED: &str = "refused: the envelope is malformed: ";
 
@@ -877,8 +880,9 @@ fn committed_at(journal: &[Value], op: &str, field: &str, value: &str) -> Option
 /// also amends `docs`. An amendment to `other` and a finding about no node are
 /// claimed behind it and are both committed and answered while the note is still
 /// waiting, and a record naming `build` that does not decode is refused as it is
-/// claimed; a finding about `build`, a second amendment to `docs`, and an `add`
-/// naming `build` only among its `deps` are held, unanswered, and applied once the
+/// claimed; a finding about `build`, a second amendment to `docs`, and an `add` and
+/// a `reparent` naming `build` only among their `deps` are held, unanswered, and
+/// applied once the
 /// note is — after it, and in the order they were claimed, so no edit to `docs`
 /// overtakes the one the note's envelope carried.
 #[test]
@@ -892,6 +896,7 @@ fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
             agent("build", &[]),
             agent("docs", &["build"]),
             agent("other", &["build"]),
+            agent(REPARENTED, &["other"]),
         ],
     );
     let queue = world.run_file(run, "channel/commands.jsonl");
@@ -935,6 +940,15 @@ fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
         &envelope(json!({"op": "add", "node": agent(ADDED, &["build"])})),
     );
     world.until("the node added after build to be queued", queued(ADDED));
+    let mut reparented = submitted(
+        &world,
+        run,
+        &envelope(json!({"op": "reparent", "id": REPARENTED, "deps": ["build"]})),
+    );
+    world.until(
+        "the node reparented onto build to be queued",
+        queued("reparent"),
+    );
     // Claimed after both, and naming nothing the note's envelope names.
     let about_other = submitted(
         &world,
@@ -995,15 +1009,17 @@ fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
         "an envelope naming a node the waiting envelope names was applied ahead of it"
     );
     assert!(
-        journal
-            .iter()
-            .all(|event| event["payload"]["command"]["op"] != "add"),
+        journal.iter().all(|event| {
+            event["payload"]["command"]["op"] != "add"
+                && event["payload"]["command"]["op"] != "reparent"
+        }),
         "an envelope naming the note's node among its deps was applied ahead of it"
     );
     for (what, reply) in [
         ("build", &mut about_build),
         ("docs", &mut about_docs),
         ("the node depending on build", &mut after_build),
+        ("the node reparented onto build", &mut reparented),
     ] {
         assert!(
             reply.try_wait().expect("the reply is readable").is_none(),
@@ -1020,6 +1036,7 @@ fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
         ("the finding about build's", about_build),
         ("the second ruling on docs'", about_docs),
         ("the added node's", after_build),
+        ("the reparented node's", reparented),
     ] {
         assert!(
             answered(reply).contains("\"state\":\"applied\""),
@@ -1047,6 +1064,7 @@ fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
                     && event["payload"]["command"]["node"]["id"] == ADDED
             })
             .expect("the added node was committed"),
+        at("reparent", "id", REPARENTED),
     ];
     assert!(
         order.windows(2).all(|pair| pair[0] < pair[1]),
@@ -1055,7 +1073,7 @@ fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
     );
 
     world.until("the run to settle", |world| {
-        world.events_of(run, "node-settled").len() == 4
+        world.events_of(run, "node-settled").len() == 5
     });
 }
 

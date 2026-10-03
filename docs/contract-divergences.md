@@ -8856,8 +8856,9 @@ conversation never waits on another conversation's turn.
 with a `[note build, amend docs]` envelope outstanding and drives four envelopes behind
 it through `reply`: an `amend` to `other` and a `finding` about no node are committed and
 answered while the note still waits, and a `finding` about `build`, a second `amend` to
-`docs` and an `add` naming `build` only among its `deps` stay unanswered until the note
-is, then commit after it in claim order. `notes_to_two_conversations_wait_in_both_inboxes_at_once`
+`docs`, and an `add` and a `reparent` naming `build` only among their `deps` stay
+unanswered until the note is, then commit after it in claim order; a record naming
+`build` that does not decode is refused as it is claimed, not held. `notes_to_two_conversations_wait_in_both_inboxes_at_once`
 holds two workers' turns and has a note to each waiting in both inboxes at once, with an
 envelope naming both nodes unanswered until both notes are recorded. Two notes answered
 one at a time is not a state the doubled turn can arrange — its hold is one pair of gates

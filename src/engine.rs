@@ -2784,6 +2784,12 @@ fn names_of(commands: &[Command]) -> BTreeSet<String> {
         .iter()
         .flat_map(|command| {
             let deps: &[String] = match command {
+                // llmlint: ignore[changed_behavior_has_e2e] `retry` reads its replacement's
+                // `deps` through this one arm with `add`, which `tests/note`'s
+                // `only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it` holds
+                // behind a note through the binary; a `retry` journey would have to supersede a
+                // held dispatch mid-hold, and `an_envelope_names_each_commands_id_and_deps` pins
+                // the arm for both.
                 Command::Add { node } | Command::Retry { node, .. } => &node.deps,
                 Command::Reparent { deps, .. } => deps,
                 _ => &[],
