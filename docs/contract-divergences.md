@@ -7340,6 +7340,23 @@ point is too, and the consumer's recipes become passthroughs.
   so a `--title` reading `--no-draft` stays a title. This is the one place this
   binary exits with a code the contract does not assign: it is `onevcs`'s code,
   passed through unchanged, because the verb's answer *is* this command's answer.
+- **The subject defaults to the owning run node's title.** With no `--title`,
+  the verb looks for the one run node under the runs root whose journal records
+  the branch — every session a node's dispatch opened on it, and every node the
+  plan pins to it, which is how a retry carries a branch to its replacement — and
+  hands the verb that node's title as its `--title`, the subject the run's own
+  closeout would have used. A node dispatched more than once onto the branch is
+  one owner, and so is a retry lineage, titled by its most recent node. No owner,
+  more than one, an owner with no title, a title `Subject::try_from` refuses, a
+  run journal that cannot be read, or a run root this build refuses whose journal
+  names the branch leaves the verb its own default. Before it
+  publishes, standard error says where the subject came from: `publishing under
+  '<subject>' (from <run>#<node>)`, `publishing under '<subject>' (--title)`, or
+  `publishing under onevcs's default subject (<why>)` — naming no subject there,
+  because which commit supplies the default is `onevcs`'s ranking and is not
+  repeated here. Driven by the journeys after
+  `publish_branch_lands_an_owned_branch_under_its_owning_nodes_title` in
+  `tests/e2e/out_of_band.rs`.
 - **`--repo` takes a registered alias or a path.** The drafter needs a directory
   and the verb accepts an alias, so a value that is not a directory is resolved to
   its publication checkout through `onevcs resolve` — the resolution the loader
@@ -8816,3 +8833,58 @@ reads the same over a graph whose only node has settled; and `tests/e2e/watch.rs
 `a_driver_that_goes_quiet_during_the_wait_does_not_end_it_nothing_driving` arms a watch on
 an `ACTIVE` run and holds it past the run turning `PARKED`. A journey that needs a live
 driver's run taken over now ends that driver by pid first, as a crash or a `stop` would.
+
+## 108. Every envelope claimed behind a live note waited for that note's answer — RESOLVED
+
+**Ruling: the user accepted onepipeline#320 with its fix stated, and ruled it into the
+plan `accepted-follow-ups-1002-plan` (node `op-320`); the planner who owns the contract
+ruled the one edge its wording left open on that node.** An envelope claimed behind one
+awaiting a live note's answer is held only when it names a node the awaiting envelope
+names, and every other envelope is judged and applied on the pass that claims it.
+
+**What was wrong.** Since `a72e88e` a live note is offered off the run's single writer,
+so relay, settlement and heartbeats go on while a conversation decides. But the
+reconciler then stopped judging: every envelope claimed behind the outstanding one was
+held, unjudged and unanswered, until the addressed conversation answered, and a worker
+turn can run for many minutes. Every later manager edit, monitor finding and amendment
+waited for all of it, about other nodes as much as the addressed one, with nothing
+saying why; the ticket records fifteen occurrences, and a manager seeing no outcome sent
+the same correction again, which held the queue for a second turn. The rule was stated
+only in the engine's own comment on `reconcile_edits`, which said every envelope claimed
+behind the handed one is held, in claim order, until that answer is recorded.
+
+**The rule.** A command names the node its `id` names and the nodes in its `deps` where
+it carries any; an envelope names every node any of its commands names. The ticket's
+wording held only what names a node *the note* addresses. An envelope awaiting a note's
+answer can carry other commands — `[note A, drop C]` — whose compiled operations commit
+only once the note is answered, without being judged again, so a later `[amend C]` held
+by nothing would commit ahead of the earlier `drop C`, against a graph the earlier
+command was not judged on. The planner ruled that edge: an envelope awaiting a note's
+answer holds every node it names — its notes' nodes and its other commands' — which for
+a note-only envelope is the ticket's rule exactly. A second ruling on the same node
+authorized the hold's one further reach: an envelope naming a node an envelope already
+held behind it names is held too, in claim order. With a note to A outstanding and
+`[add C deps A]` held, a later `[amend C]` overlaps no outstanding envelope, and judged at
+once it would be refused for a node not yet there — or, generally, a later edit to a node
+would commit ahead of an earlier held one. An envelope naming nodes of two
+outstanding envelopes waits for both; one naming no node — `complete`, a `finding` about
+no node — is never held. A held envelope is answered when it is applied, as before. Each
+envelope that offers a note is handed to a delivery thread of its own, so a note to one
+conversation never waits on another conversation's turn.
+
+**What this build does.** `tests/note/main.rs`'s
+`only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it` holds a worker turn
+with a `[note build, amend docs]` envelope outstanding and drives four envelopes behind
+it through `reply`: an `amend` to `other` and a `finding` about no node are committed and
+answered while the note still waits, and a `finding` about `build`, a second `amend` to
+`docs`, an `add` and a `reparent` naming `build` only among their `deps`, and an `amend`
+naming only the node that held `add` creates — sent through the planner channel's bus,
+since `reply` checks it against the record before queueing it — stay unanswered until the
+note is, then commit after it in claim order; a record naming
+`build` that does not decode is refused as it is claimed, not held. `notes_to_two_conversations_wait_in_both_inboxes_at_once`
+holds two workers' turns and has a note to each waiting in both inboxes at once, with an
+envelope naming both nodes unanswered until both notes are recorded. Two notes answered
+one at a time is not a state the doubled turn can arrange — its hold is one pair of gates
+for every conversation — so `src/engine.rs`'s
+`an_envelope_naming_two_outstanding_notes_waits_for_both_answers` drives the real queue
+and the real reconciler with two deliveries outstanding and answers them in turn.

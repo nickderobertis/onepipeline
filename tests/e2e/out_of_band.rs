@@ -435,8 +435,13 @@ fn an_unusable_bound_is_refused_before_a_landing_pushes_or_touches_the_host() {
                 .env(bound, "soon")
                 .output()
                 .expect("onevcs runs");
+            // After the line this crate says before every landing it hands the
+            // verb, which names where the subject came from and nothing else.
+            let refused = stderr
+                .strip_prefix("publishing under 'feat: add the widget' (--title)\n")
+                .unwrap_or_else(|| panic!("{verb} {bound}: no subject line leads: {stderr}"));
             assert_eq!(
-                (landed.status.code(), stderr.as_ref()),
+                (landed.status.code(), refused),
                 (
                     sibling.status.code(),
                     String::from_utf8_lossy(&sibling.stderr).as_ref()
@@ -1345,5 +1350,420 @@ fn a_landing_under_nohup_drafts_and_lands_through_a_hangup() {
     );
     assert_eq!(state_of(&world, &repository.checkout), before);
     assert!(!worktree.exists(), "{}", worktree.display());
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys drive
+// `src/land.rs` through the compiled binary over a real run, a real `onevcs`-registered
+// checkout and real git — the edge they need is the crate under test itself, and the one
+// separately edged test project's input begins at `{workspaceRoot}/src/**/*`, so a project of
+// their own would declare the same dependency and skip nothing. They sit with the other
+// landing journeys, where a reader looks for one.
+const OWNER_TITLE: &str = "perf: speed up the gate and the board read";
+
+/// Drive one real run whose lifecycle node `service`, titled [`OWNER_TITLE`],
+/// works and is refused at its publishing push — or, `failing`, stops before it
+/// completes — so its work is left on the branch its session opened; and then let
+/// the merge path through, the state a manager lands that branch by hand from.
+/// Answers the repository and that branch.
+fn owned_branch(world: &World, run: &str, failing: bool) -> (Repository, String) {
+    owned_branch_then(world, run, failing, |_, _| {})
+}
+
+/// [`owned_branch`], running `then` with the branch while the merge path still
+/// refuses, so a later run can also work on it and leave it unpublished.
+fn owned_branch_then(
+    world: &World,
+    run: &str,
+    failing: bool,
+    then: impl FnOnce(&World, &str),
+) -> (Repository, String) {
+    let repository = world.repository("local-direct", &["false"]);
+    world.script("service.work", "the worker wrote this\n");
+    if failing {
+        world.script("service.fail", "1");
+    }
+    let result = refused_run(world, run, vec![owner_node()]);
+    let branch = result["nodes"][0]["branch"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the refused node named no branch: {result}"))
+        .to_owned();
+    then(world, &branch);
+    onepipeline_testfakes::executable(
+        &world.root.join("hooks").join("pre-push"),
+        "#!/bin/sh\nexit 0\n",
+    );
+    (repository, branch)
+}
+
+fn owner_node() -> Value {
+    let mut node = crate::harness::lifecycle("service", &[]);
+    node["title"] = serde_json::json!(OWNER_TITLE);
+    node
+}
+
+fn refused_run(world: &World, run: &str, nodes: Vec<Value>) -> Value {
+    let path = world.plan(run, &crate::harness::plan_of(run, nodes));
+    world.run(&["start", &path, "--attach"]).settled();
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    let result = world.run_json(run, "result.json");
+    assert_eq!(result["nodes"][0]["status"], "failed", "{result}");
+    result
+}
+
+fn base_subject(world: &World, repository: &Repository) -> String {
+    git(
+        world,
+        &repository.origin,
+        &["log", "-1", "--format=%s", "main"],
+    )
+    .trim()
+    .to_owned()
+}
+
+const UNOWNED: &str = "publishing under onevcs's default subject (no unique owning node)";
+
+/// The journey the ticket is about: a run node's finished branch, landed by hand
+/// with no `--title`, lands under the node's own title rather than the subject
+/// `onevcs` would compose from the branch's commits — here the preservation
+/// commit's, a headline that names none of the work — and says so on stderr
+/// before it publishes.
+#[test]
+fn publish_branch_lands_an_owned_branch_under_its_owning_nodes_title() {
+    let world = World::new("oob-owned");
+    let (repository, branch) = owned_branch(&world, "owned", false);
+
+    world
+        .run(&["publish-branch", &branch, "--repo", "service"])
+        .exited(0)
+        .err_has(&format!(
+            "publishing under '{OWNER_TITLE}' (from owned#service)\n"
+        ));
+
+    assert_eq!(
+        base_subject(&world, &repository),
+        OWNER_TITLE,
+        "{}",
+        world.dump()
+    );
+    assert!(
+        repository
+            .base_file("service.md")
+            .is_some_and(|work| work.contains("the worker wrote this")),
+        "the node's work did not land\n{}",
+        world.dump()
+    );
+}
+
+/// `repo-recover` is the same: a branch its node's dispatch left behind with an
+/// incomplete-step marker is recovered under the owning node's title.
+#[test]
+fn repo_recover_lands_an_owned_branch_under_its_owning_nodes_title() {
+    let world = World::new("oob-owned-recover");
+    let (repository, branch) = owned_branch(&world, "stalled", true);
+    let tip = git(
+        &world,
+        &repository.checkout,
+        &["log", "-1", "--format=%B", &branch],
+    );
+    assert!(
+        tip.contains("(incomplete step)"),
+        "the dispatch left no incomplete-step marker: {tip}"
+    );
+
+    world
+        .run(&["repo-recover", &branch, "--repo", "service"])
+        .exited(0)
+        .err_has(&format!(
+            "publishing under '{OWNER_TITLE}' (from stalled#service)\n"
+        ));
+
+    assert_eq!(
+        base_subject(&world, &repository),
+        OWNER_TITLE,
+        "{}",
+        world.dump()
+    );
+}
+
+/// A caller's own `--title` still wins over the owning node's, and the line says
+/// that is where the subject came from.
+#[test]
+fn an_explicit_title_wins_over_the_owning_nodes() {
+    let world = World::new("oob-owned-titled");
+    let (repository, branch) = owned_branch(&world, "owned", false);
+
+    world
+        .run(&[
+            "publish-branch",
+            &branch,
+            "--repo",
+            "service",
+            "--title",
+            "fix: the operator's own headline",
+        ])
+        .exited(0)
+        .err_has("publishing under 'fix: the operator's own headline' (--title)\n")
+        .err_lacks("(from owned#service)");
+
+    assert_eq!(
+        base_subject(&world, &repository),
+        "fix: the operator's own headline"
+    );
+}
+
+/// A branch no run node owns, and one two runs both name, are handed `onevcs`'s
+/// default and the line says no single node owns them — naming no subject,
+/// because which commit supplies the default is `onevcs`'s to decide.
+#[test]
+fn a_branch_with_no_single_owner_lands_under_the_onevcs_default() {
+    let world = World::new("oob-unowned");
+    let repository = world.repository("local-direct", &[]);
+    branch_with_work(&world, &repository);
+    world
+        .run(&["publish-branch", BRANCH, "--repo", "service"])
+        .exited(0)
+        .err_has(&format!("{UNOWNED}\n"))
+        .err_lacks("(from ");
+    assert_eq!(base_subject(&world, &repository), "feat: add the widget");
+
+    // Two runs naming one branch: a second run whose node is pinned to it, which
+    // works on it and is refused just the same.
+    let world = World::new("oob-two-runs");
+    let (repository, branch) = owned_branch_then(&world, "owned", false, |world, branch| {
+        let mut again = owner_node();
+        again["branch"] = serde_json::json!(branch);
+        refused_run(world, "again", vec![again]);
+    });
+    world
+        .run(&["publish-branch", &branch, "--repo", "service"])
+        .exited(0)
+        .err_has(&format!("{UNOWNED}\n"))
+        .err_lacks(OWNER_TITLE);
+    assert_eq!(
+        base_subject(&world, &repository),
+        format!("chore: preserve work on {branch}"),
+        "{}",
+        world.dump()
+    );
+
+    // Two lineages of one run: `service` worked on the branch, and `follow` — a
+    // node of its own, not a retry of it — is pinned there and never ran.
+    let world = World::new("oob-two-nodes");
+    let repository = world.repository("local-direct", &["false"]);
+    world.script("service.work", "the worker wrote this\n");
+    let mut follow = crate::harness::lifecycle("follow", &["service"]);
+    follow["branch"] = serde_json::json!("pair/service");
+    let result = refused_run(&world, "pair", vec![owner_node(), follow]);
+    assert_eq!(result["nodes"][0]["branch"], "pair/service", "{result}");
+    onepipeline_testfakes::executable(
+        &world.root.join("hooks").join("pre-push"),
+        "#!/bin/sh\nexit 0\n",
+    );
+    world
+        .run(&["publish-branch", "pair/service", "--repo", "service"])
+        .exited(0)
+        .err_has(&format!("{UNOWNED}\n"));
+    assert_eq!(
+        base_subject(&world, &repository),
+        "chore: preserve work on pair/service"
+    );
+}
+
+/// An owning node whose recorded title `onevcs` will not commit under — longer
+/// than its limit, which only a journal another build wrote or a person edited
+/// can hold, since the launch refuses one — is not a failed landing: it lands
+/// under the default, and the line names the node and `onevcs`'s reason.
+#[test]
+fn an_owning_nodes_title_onevcs_refuses_falls_back_to_its_default() {
+    let world = World::new("oob-owned-refused");
+    let (repository, branch) = owned_branch(&world, "owned", false);
+    let journal = world.run_file("owned", "events.jsonl");
+    let long = format!("perf: {}", "x".repeat(onevcs::provenance::SUBJECT_LIMIT));
+    let recorded = std::fs::read_to_string(&journal).expect("the run's journal");
+    assert!(
+        recorded.contains(OWNER_TITLE),
+        "the journal records no title"
+    );
+    std::fs::write(&journal, recorded.replace(OWNER_TITLE, &long)).expect("journal edited");
+
+    world
+        .run(&["publish-branch", &branch, "--repo", "service"])
+        .exited(0)
+        .err_has(
+            "publishing under onevcs's default subject (owned#service's title is not a \
+             subject onevcs will commit under: the explicit title is",
+        )
+        .err_has(&format!(
+            "over the {}-character limit)\n",
+            onevcs::provenance::SUBJECT_LIMIT
+        ));
+    assert_eq!(
+        base_subject(&world, &repository),
+        format!("chore: preserve work on {branch}")
+    );
+}
+
+/// An owning node that states no title — a node of a plan from before titles
+/// were required, as an older build recorded it — lands under the default, and
+/// the line names that node rather than saying nothing owns the branch.
+#[test]
+fn an_untitled_owning_node_lands_under_the_onevcs_default_and_is_named() {
+    let world = World::new("oob-owned-untitled");
+    let (repository, branch) = owned_branch(&world, "owned", false);
+    let journal = world.run_file("owned", "events.jsonl");
+    let recorded = std::fs::read_to_string(&journal).expect("the run's journal");
+    let title = format!("\"title\":{}", serde_json::json!(OWNER_TITLE));
+    let untitled = recorded
+        .replace(&format!("{title},"), "")
+        .replace(&format!(",{title}"), "");
+    assert_ne!(untitled, recorded, "the journal records no title");
+    std::fs::write(&journal, untitled).expect("journal edited");
+
+    world
+        .run(&["publish-branch", &branch, "--repo", "service"])
+        .exited(0)
+        .err_has("publishing under onevcs's default subject (owned#service states no title)\n");
+    assert_eq!(
+        base_subject(&world, &repository),
+        format!("chore: preserve work on {branch}")
+    );
+}
+
+/// A run whose records cannot be read might name the branch too, so an owner
+/// found elsewhere is not known to be the only one: the landing takes the
+/// default rather than a title it cannot vouch for, and says which record it
+/// could not read. A run that has no journal yet, or a run root this build
+/// refuses whose journal never names the branch, names nothing, and the owner
+/// found elsewhere stands.
+#[test]
+fn a_run_whose_records_cannot_be_read_leaves_no_owner_known_to_be_unique() {
+    for case in [
+        "no-journal",
+        "unreadable",
+        "partial",
+        "refused",
+        "refused-naming",
+        "refused-unreadable",
+    ] {
+        let world = World::new(&format!("oob-owned-{case}"));
+        let (repository, branch) = owned_branch_then(&world, "owned", false, |world, branch| {
+            if case == "refused-naming" {
+                let mut again = owner_node();
+                again["branch"] = serde_json::json!(branch);
+                refused_run(world, "other", vec![again]);
+            } else {
+                let path = world.plan(
+                    "other",
+                    &crate::harness::plan_of(
+                        "other",
+                        vec![crate::harness::agent("elsewhere", &[])],
+                    ),
+                );
+                world.run(&["start", &path, "--attach"]).settled();
+            }
+        });
+        let other = world.runs.join("other");
+        let journal = other.join("events.jsonl");
+        match case {
+            "no-journal" => std::fs::remove_file(&journal).expect("the other run's journal"),
+            "unreadable" => {
+                std::fs::remove_file(&journal).expect("the other run's journal");
+                std::fs::create_dir(&journal).expect("a journal no reader can open");
+            }
+            // The owner's own journal, with a line no build wrote whole.
+            "partial" => {
+                let owned = world.runs.join("owned").join("events.jsonl");
+                let mut text = std::fs::read_to_string(&owned).expect("the owner's journal");
+                text.push_str("{\"v\": not a record\n");
+                std::fs::write(&owned, text).expect("journal edited");
+            }
+            _ => {
+                std::fs::remove_file(other.join("launch.json")).expect("its launch record");
+                if case == "refused-unreadable" {
+                    std::fs::remove_file(&journal).expect("the other run's journal");
+                    std::fs::create_dir(&journal).expect("a journal no reader can open");
+                }
+            }
+        }
+
+        let landed = world.run(&["publish-branch", &branch, "--repo", "service"]);
+        landed.exited(0);
+        match case {
+            "unreadable" | "partial" | "refused-naming" | "refused-unreadable" => {
+                let why = match case {
+                    "partial" => format!(
+                        "{} holds a line this build cannot read)",
+                        world.runs.join("owned").join("events.jsonl").display()
+                    ),
+                    "refused-naming" => format!(
+                        "{} records the branch and is not a run this build reads: ",
+                        other.display()
+                    ),
+                    _ => format!("{} cannot be read: ", journal.display()),
+                };
+                landed
+                    .err_has(&format!(
+                        "publishing under onevcs's default subject (no owning node is known \
+                         to be unique: {why}"
+                    ))
+                    .err_lacks(OWNER_TITLE);
+                assert_eq!(
+                    base_subject(&world, &repository),
+                    format!("chore: preserve work on {branch}"),
+                    "{case}"
+                );
+            }
+            _ => {
+                landed.err_has(&format!(
+                    "publishing under '{OWNER_TITLE}' (from owned#service)\n"
+                ));
+                assert_eq!(base_subject(&world, &repository), OWNER_TITLE, "{case}");
+            }
+        }
+    }
+}
+
+/// A retry lineage is one owner: the replacement a planner retried the node
+/// under inherits its branch, and the landing publishes under the title of the
+/// lineage's most recent node, since a retry can carry a corrected one. The node
+/// itself, dispatched twice onto that branch by its publication attempts, is
+/// one owner too.
+#[test]
+fn a_retried_nodes_branch_lands_under_its_latest_replacements_title() {
+    let world = World::new("oob-owned-retried");
+    let (repository, branch) = owned_branch(&world, "owned", false);
+    assert!(
+        world.events_of("owned", "node-dispatched").len() > 1,
+        "the node was dispatched onto its branch only once"
+    );
+    world
+        .run_with_stdin(
+            &["reply", "owned"],
+            &serde_json::json!({
+                "version": 2,
+                "commands": [{
+                    "op": "retry",
+                    "id": "service",
+                    "node": {"id": "service-2", "repo": "service", "persona": "engineer",
+                             "title": "perf: the corrected headline",
+                             "task": "## What\nPublish again.\n\n## Why\nIt failed.\n\n\
+                                      ## Acceptance criteria\n- published."},
+                }],
+            })
+            .to_string(),
+        )
+        .exited(0);
+
+    world
+        .run(&["publish-branch", &branch, "--repo", "service"])
+        .exited(0)
+        .err_has("publishing under 'perf: the corrected headline' (from owned#service-2)\n");
+    assert_eq!(
+        base_subject(&world, &repository),
+        "perf: the corrected headline"
+    );
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
