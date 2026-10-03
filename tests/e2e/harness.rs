@@ -5142,6 +5142,13 @@ pub fn hook_script(world: &World, verb: &ReturningHookVerb) -> Vec<String> {
     hook_argv(world, &[verb.word()])
 }
 
+/// A repository's own `pre-push` hook that makes `fixture` a repository of its own
+/// and commits in it, finding it from that directory and unsetting nothing git
+/// exported to the hook — what a hook testing against a scratch repository does.
+pub fn fixture_hook_script(world: &World, fixture: &Path) -> Vec<String> {
+    hook_argv(world, &["commit-in-fixture", &fixture.to_string_lossy()])
+}
+
 /// A `pre-push` hook **holding** the publishing push, and the release that ends
 /// the hold however the journey ends.
 ///
@@ -5417,7 +5424,8 @@ fn both_hook_scripts_answer_the_same_verbs() {
             "break-streams",
             "append-future-event",
             "append-foreign-source-event",
-            "missing-prerequisite"
+            "missing-prerequisite",
+            "commit-in-fixture"
         ],
         "the hook scripts no longer dispatch the way this reads them"
     );

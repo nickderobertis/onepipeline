@@ -29,6 +29,10 @@
 #   missing-prerequisite refuse the push as a tool this      1
 #                        host does not have, on the line
 #                        `onevcs` reads as such
+#   commit-in-fixture DIR
+#                        make DIR a repository of its own   0
+#                        and commit in it, discovering it
+#                        from DIR
 #   anything else        refuse, naming the verbs           64
 #   a verb that could not do what it names                  1
 #
@@ -44,7 +48,7 @@ set -u
 
 fail() {
   echo "pre-push: $1" >&2
-  echo "pre-push: the verbs are: wait-for PATH | break-streams | append-future-event | append-foreign-source-event | missing-prerequisite" >&2
+  echo "pre-push: the verbs are: wait-for PATH | break-streams | append-future-event | append-foreign-source-event | missing-prerequisite | commit-in-fixture DIR" >&2
   exit 64
 }
 
@@ -274,6 +278,27 @@ case "${1-}" in
     # rather than here as a push that was merely rejected.
     echo "onevcs: host-prerequisite: release-plz is not on PATH; install it with cargo install release-plz and retry the node" >&2
     exit 1
+    ;;
+  commit-in-fixture)
+    takes "$#" 2 "commit-in-fixture takes the fixture directory, and nothing else"
+    if [ -z "$2" ]; then
+      fail "commit-in-fixture takes the fixture directory"
+    fi
+    # What a real hook does when it tests the repository against a scratch one of
+    # its own: it moves there and runs git, and git finds the repository from the
+    # directory. Nothing here unsets anything git exported to the hook, because a
+    # repository's hook does not, so whichever repository these commands act on is
+    # the one the hook was handed. `-C` is not used for the same reason: it is a
+    # directory to start in, and an inherited `GIT_DIR` would win over it anyway.
+    if ! mkdir -p "$2" || ! cd "$2"; then
+      echo "pre-push: cannot make the fixture directory $2" >&2
+      exit 1
+    fi
+    if ! git init -q || ! git -c user.name=fixture -c user.email=fixture@example.invalid \
+      commit -q --allow-empty -m "fixture: committed by the pre-push hook"; then
+      echo "pre-push: git refused the fixture's init or commit in $2" >&2
+      exit 1
+    fi
     ;;
   *)
     fail "unknown command '${1-}'"
