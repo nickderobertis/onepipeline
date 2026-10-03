@@ -146,6 +146,28 @@ pub struct RunState {
     /// settlement, because the settlement records that a change landed and not
     /// what it landed as.
     pub landing_commits: BTreeMap<String, String>,
+    /// The base each node's work is merged with, as `onevcs` named it on the
+    /// session's own stream: the `base` of the session it opened, and then of
+    /// the `merge-completed` its change landed with, where that one names it.
+    ///
+    /// What a died dispatch's guidance names its landing or its retirement
+    /// against, so a reader is told *where* the work went rather than only that
+    /// it went. Omitted when empty, which is every run without a lifecycle node.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] a node id and a branch are the plain strings every neighbouring map of this struct carries — `branches` holds the same kind of value — and the branch is checked where it enters, by `vcs::usable`, which is the only thing that writes this map.
+    pub bases: BTreeMap<String, String>,
+    /// The branches an idle pass of this run's driver retired as holding no work
+    /// beyond their base, folded from its `branches-retired`.
+    ///
+    /// A name leaves the set when a later session opens on it again, because
+    /// that session cut it fresh from the base and it is a branch once more. So a
+    /// name here is one that does not exist any more, which is what keeps a died
+    /// dispatch's guidance from sending anybody to recover work from it. Keyed by
+    /// the name alone: a pass reports its identity and a node's settlement does
+    /// not, and the names a run's own nodes are cut under are its own. Omitted
+    /// when empty, which is every run whose driver retired nothing.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub retired_branches: BTreeSet<String>,
     /// Whether each published node's change reached its base branch.
     ///
     /// Written only by a settlement that observed one, like
@@ -1428,6 +1450,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 }
             }
         }
+        Some(journal::PipelineKind::BranchesRetired) => fold_retired_branches(state, payload),
         _ => {}
     }
 }
@@ -1496,6 +1519,17 @@ fn fold_landing_commit(state: &mut RunState, event: &Envelope) {
         return;
     };
     state.landing_commits.insert(node.to_string(), commit);
+    // The direct path names the base it landed on; the change-request one does
+    // not, and leaves the base its session opened on standing.
+    if let Some(base) = base_named_by(event) {
+        state.bases.insert(node.to_string(), base);
+    }
+}
+
+/// The `base` a relayed `onevcs` record names, where [`crate::vcs::usable`]
+/// accepts it as one a view can print on a line of its own.
+fn base_named_by(event: &Envelope) -> Option<String> {
+    crate::vcs::usable(event.payload.get("base")?.as_str()?)
 }
 
 fn fold_session(state: &mut RunState, event: &Envelope) {
@@ -1508,7 +1542,32 @@ fn fold_session(state: &mut RunState, event: &Envelope) {
     let Some(session) = crate::vcs::DispatchSession::read_from(event) else {
         return;
     };
+    // Cut fresh from the base if a pass had retired it, so it exists again.
+    state.retired_branches.remove(session.branch().as_str());
+    if let Some(base) = base_named_by(event) {
+        state.bases.insert(node.to_string(), base);
+    }
     state.sessions.insert(node.to_string(), session);
+}
+
+/// Record every branch one `branches-retired` says its pass deleted.
+///
+/// Read through the payload's own declaration, so a record this build cannot
+/// read records nothing rather than half of what it says; a branch name
+/// [`crate::vcs::usable`] refuses is one no node's settlement could carry
+/// either, so it is dropped with nothing lost.
+fn fold_retired_branches(state: &mut RunState, payload: &serde_json::Map<String, Value>) {
+    let Ok(record) =
+        serde_json::from_value::<crate::payload::BranchesRetired>(Value::Object(payload.clone()))
+    else {
+        return;
+    };
+    state.retired_branches.extend(
+        record
+            .retired
+            .iter()
+            .filter_map(|retired| crate::vcs::usable(&retired.branch)),
+    );
 }
 
 /// Statuses whose work is still on the branch the attempt left behind.
