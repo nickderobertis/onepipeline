@@ -824,6 +824,179 @@ fn notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_c
     });
 }
 
+/// What the manager rules on a node the outstanding note's own envelope also
+/// amends, and what it rules on the same node afterwards.
+const FIRST_RULING: &str = "docs: describe only the flags that shipped";
+const SECOND_RULING: &str = "docs: and link the changelog entry";
+
+/// A ruling on a node nothing outstanding names.
+const OTHER_RULING: &str = "other: keep the fixture where it is";
+
+/// A monitor's finding about the run rather than any one node.
+const UNADDRESSED: &str = "the run's queue depth keeps growing";
+
+/// Where the journal records the command `op` whose `field` reads `value` as
+/// applied: an edit as `edit-committed`, and a finding, which edits nothing, as
+/// `command-accepted`.
+fn committed_at(journal: &[Value], op: &str, field: &str, value: &str) -> Option<usize> {
+    journal.iter().position(|event| {
+        (event["kind"] == "edit-committed" || event["kind"] == "command-accepted")
+            && event["payload"]["command"]["op"] == op
+            && event["payload"]["command"][field] == value
+    })
+}
+
+/// While a note waits on a turn, only an envelope naming a node the waiting
+/// envelope names waits with it; every other one is judged and answered on the
+/// pass that claims it.
+///
+/// A worker turn can run for many minutes, and a writer that held every command
+/// behind a note to it held edits and findings about the rest of the run for all
+/// of that turn, unanswered and with nothing saying why. Here the note's envelope
+/// also amends `docs`. An amendment to `other` and a finding about no node are
+/// claimed behind it and are both committed and answered while the note is still
+/// waiting; a finding about `build` and a second amendment to `docs` are held,
+/// unanswered, and applied once the note is — after it, and in the order they were
+/// claimed, so no edit to `docs` overtakes the one the note's envelope carried.
+#[test]
+fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
+    let world = World::new("note-unrelated");
+    let run = "unrelated";
+    held_heartbeating_conversation(
+        &world,
+        run,
+        vec![
+            agent("build", &[]),
+            agent("docs", &["build"]),
+            agent("other", &["build"]),
+        ],
+    );
+    let queue = world.run_file(run, "channel/commands.jsonl");
+    let queued = |text: &str| {
+        let text = text.to_string();
+        let queue = queue.clone();
+        move |_: &World| std::fs::read_to_string(&queue).is_ok_and(|held| held.contains(&text))
+    };
+
+    let note = submitted(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            note_op("build", "worker", NOTE, None),
+            {"op": "amend", "id": "docs", "text": FIRST_RULING},
+        ]})
+        .to_string(),
+    );
+    world.until("the note to wait in the conversation's inbox", |world| {
+        awaiting_an_answer(world) == 1
+    });
+    // Claimed behind the note, and each naming a node its envelope names.
+    let mut about_build = submitted(
+        &world,
+        run,
+        &envelope(json!({"op": "finding", "id": "build", "message": FINDING})),
+    );
+    world.until("the finding about build to be queued", queued(FINDING));
+    let mut about_docs = submitted(
+        &world,
+        run,
+        &envelope(json!({"op": "amend", "id": "docs", "text": SECOND_RULING})),
+    );
+    world.until(
+        "the second ruling on docs to be queued",
+        queued(SECOND_RULING),
+    );
+    // Claimed after both, and naming nothing the note's envelope names.
+    let about_other = submitted(
+        &world,
+        run,
+        &envelope(json!({"op": "amend", "id": "other", "text": OTHER_RULING})),
+    );
+    let unaddressed = submitted(
+        &world,
+        run,
+        &envelope(json!({"op": "finding", "message": UNADDRESSED})),
+    );
+
+    world.until(
+        "the ruling on other and the finding about no node to be committed",
+        |world| {
+            let journal = world.journal(run);
+            committed_at(&journal, "amend", "text", OTHER_RULING).is_some()
+                && committed_at(&journal, "finding", "message", UNADDRESSED).is_some()
+        },
+    );
+    assert!(
+        answered(about_other).contains("\"state\":\"applied\""),
+        "the ruling on a node nothing outstanding names was not applied"
+    );
+    assert!(
+        answered(unaddressed).contains("\"state\":\"applied\""),
+        "the finding about no node was not applied"
+    );
+    assert_eq!(
+        awaiting_an_answer(&world),
+        1,
+        "the conversation answered the note before its turn ended, so nothing above was \
+         applied while one was waiting"
+    );
+    let journal = world.journal(run);
+    assert!(
+        committed_at(&journal, "note", "id", "build").is_none(),
+        "the note was recorded before its conversation answered it"
+    );
+    assert!(
+        committed_at(&journal, "finding", "message", FINDING).is_none()
+            && committed_at(&journal, "amend", "text", SECOND_RULING).is_none(),
+        "an envelope naming a node the waiting envelope names was applied ahead of it"
+    );
+    for (what, reply) in [("build", &mut about_build), ("docs", &mut about_docs)] {
+        assert!(
+            reply.try_wait().expect("the reply is readable").is_none(),
+            "the envelope about {what} was answered while the note it waits behind was not"
+        );
+    }
+
+    // The turn ends and the conversation takes the note; what waited behind it is
+    // applied after it, in the order it was claimed.
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    for (what, reply) in [
+        ("the note's", note),
+        ("the finding about build's", about_build),
+        ("the second ruling on docs'", about_docs),
+    ] {
+        assert!(
+            answered(reply).contains("\"state\":\"applied\""),
+            "{what} envelope was not applied"
+        );
+    }
+    let journal = world.journal(run);
+    let at = |op, field, value| {
+        committed_at(&journal, op, field, value)
+            .unwrap_or_else(|| panic!("no {op} reading {value} was committed"))
+    };
+    // The two unheld envelopes were submitted together, so only their place
+    // before the note is theirs to keep, not an order between them.
+    let unheld = at("amend", "text", OTHER_RULING).max(at("finding", "message", UNADDRESSED));
+    let order = [
+        unheld,
+        at("note", "id", "build"),
+        at("amend", "text", FIRST_RULING),
+        at("finding", "message", FINDING),
+        at("amend", "text", SECOND_RULING),
+    ];
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "the envelopes were not committed unheld first, then the note's, then what it \
+         held in the order it was claimed: {order:?}"
+    );
+
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() == 3
+    });
+}
+
 /// A note the conversation refuses while the run is still being driven is
 /// journalled and surfaced exactly as a refusal answered inline is.
 ///
