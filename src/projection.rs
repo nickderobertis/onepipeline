@@ -2880,6 +2880,56 @@ mod tests {
         }
     }
 
+    /// A branch a pass retired stops being retired the moment a session opens on
+    /// it again, because that session cut it fresh from the base — and a
+    /// `branches-retired` this build cannot read retires nothing.
+    #[test]
+    fn a_retired_branch_a_session_opens_again_is_a_branch_once_more() {
+        let plan = plan_of_nodes(vec![agent("service", &[])]);
+        let retired = |seq: u64, retired: serde_json::Value| {
+            pipeline(
+                journal::PipelineKind::BranchesRetired,
+                seq,
+                None,
+                &[("retired", retired), ("failed", json!([]))],
+            )
+        };
+        let entry = |branch: &str| {
+            json!({
+                "identity": "github.com/owner/service",
+                "branch": branch,
+                "class": "retirable",
+                "proof": {"kind": "content-identical", "base_commit": "f".repeat(40)},
+                "trigger": "pass",
+            })
+        };
+        let mut events = vec![
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            retired(1, json!([entry("work/service"), entry("work/other")])),
+            // Not a record of this build's shape, so it says nothing.
+            retired(2, json!("work/unread")),
+        ];
+        let state = fold(&events);
+        assert_eq!(
+            state.retired_branches,
+            BTreeSet::from(["work/other".to_owned(), "work/service".to_owned()])
+        );
+
+        events.push(opened(3, "service", "s-abc", "work/service"));
+        let state = fold(&events);
+        assert_eq!(
+            state.retired_branches,
+            BTreeSet::from(["work/other".to_owned()]),
+            "a branch cut again was still read as retired"
+        );
+        assert_eq!(state.bases["service"], "main");
+    }
+
     /// A driver dying does not end the *work* its dispatch was doing: the branch
     /// holds whatever the worker committed and the session still knows where.
     ///

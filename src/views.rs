@@ -5831,6 +5831,105 @@ mod tests {
         );
     }
 
+    /// Where the run recorded no base for a died dispatch's work, its landing and
+    /// its retirement are named against the base its plan states, or else against
+    /// "its base" — never against a base nobody named.
+    ///
+    /// The journeys reach the base `onevcs` names on the session's stream; these
+    /// are the records that carry none: a change-request landing names no base,
+    /// and a node whose session record was lost still names the one it asked for.
+    /// The provider death keeps its own opening in both forms.
+    #[test]
+    fn a_died_dispatch_names_its_landing_and_its_retirement_against_the_base_it_has() {
+        let root = scratch("died-bases");
+        let landed = "e".repeat(40);
+        let died = |node: &str, outcome: &str, branch: &str| {
+            event(
+                crate::journal::PipelineKind::NodeSettled,
+                Some(node),
+                &[
+                    ("status", json!("failed")),
+                    ("outcome", json!(outcome)),
+                    ("cause", json!("quota")),
+                    ("branch", json!(branch)),
+                ],
+            )
+        };
+        let mut plan = plan();
+        for (id, base) in [
+            ("landed", None),
+            ("planned", Some("develop")),
+            ("provider", None),
+        ] {
+            plan.tasks.push(Node {
+                id: id.into(),
+                task: Some("## What\ndo it".into()),
+                base_branch: base.map(str::to_owned),
+                ..Node::default()
+            });
+        }
+        let retired = |branch: &str| {
+            json!({
+                "identity": "github.com/owner/service",
+                "branch": branch,
+                "class": "retirable",
+                "proof": {"kind": "content-identical", "base_commit": "f".repeat(40)},
+                "trigger": "pass",
+            })
+        };
+        write_run(
+            &root,
+            "died",
+            sys::pid(),
+            &[
+                event(
+                    crate::journal::PipelineKind::RunStarted,
+                    None,
+                    &[("plan", json!(plan))],
+                ),
+                relayed(
+                    EventKind("merge-completed".into()),
+                    Source::Vcs,
+                    Some("landed"),
+                    &[("sha", json!(landed))],
+                ),
+                died("landed", crate::engine::DISPATCH_DIED, "b/landed"),
+                died("planned", crate::engine::DISPATCH_DIED, "b/planned"),
+                died("provider", crate::engine::PROVIDER_FAILED, "b/provider"),
+                event(
+                    crate::journal::PipelineKind::BranchesRetired,
+                    None,
+                    &[
+                        (
+                            "retired",
+                            json!([retired("b/planned"), retired("b/provider")]),
+                        ),
+                        ("failed", json!([])),
+                    ],
+                ),
+            ],
+        );
+
+        let survey = Survey::of(&root);
+        let rendered = results(&survey.views[0]);
+        for said in [
+            format!("the dispatch died (quota) after its work landed on its base at {landed}"),
+            "the dispatch died (quota) rather than failing its task; b/planned was retired as \
+             holding no work beyond develop"
+                .to_owned(),
+            "the provider killed the dispatch (quota), so nothing here is the work's fault; \
+             b/provider was retired as holding no work beyond its base"
+                .to_owned(),
+        ] {
+            assert!(rendered.contains(&said), "{said:?} is not in:{rendered}");
+        }
+        assert!(
+            !rendered.contains("may carry finished work"),
+            "a landed or retired branch was offered as recoverable:{rendered}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// A node that failed says which chain **ran out** and which merely fell
     /// through and was served — and never the second under the first's word.
     ///
