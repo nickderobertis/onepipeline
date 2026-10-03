@@ -1359,7 +1359,6 @@ fn a_landing_under_nohup_drafts_and_lands_through_a_hangup() {
 // separately edged test project's input begins at `{workspaceRoot}/src/**/*`, so a project of
 // their own would declare the same dependency and skip nothing. They sit with the other
 // landing journeys, where a reader looks for one.
-/// The title a run node owning a branch publishes under.
 const OWNER_TITLE: &str = "perf: speed up the gate and the board read";
 
 /// Drive one real run whose lifecycle node `service`, titled [`OWNER_TITLE`],
@@ -1397,15 +1396,12 @@ fn owned_branch_then(
     (repository, branch)
 }
 
-/// The lifecycle node `service`, titled [`OWNER_TITLE`].
 fn owner_node() -> Value {
     let mut node = crate::harness::lifecycle("service", &[]);
     node["title"] = serde_json::json!(OWNER_TITLE);
     node
 }
 
-/// Launch a run of `nodes` attached, wait for its result, and answer it with its
-/// first node settled `failed`.
 fn refused_run(world: &World, run: &str, nodes: Vec<Value>) -> Value {
     let path = world.plan(run, &crate::harness::plan_of(run, nodes));
     world.run(&["start", &path, "--attach"]).settled();
@@ -1417,7 +1413,6 @@ fn refused_run(world: &World, run: &str, nodes: Vec<Value>) -> Value {
     result
 }
 
-/// The subject of the commit the base now ends at.
 fn base_subject(world: &World, repository: &Repository) -> String {
     git(
         world,
@@ -1428,8 +1423,6 @@ fn base_subject(world: &World, repository: &Repository) -> String {
     .to_owned()
 }
 
-/// The line said on stderr before a landing publishes under `onevcs`'s default
-/// because no single run node owns the branch.
 const UNOWNED: &str = "publishing under onevcs's default subject (no unique owning node)";
 
 /// The journey the ticket is about: a run node's finished branch, landed by hand
@@ -1645,31 +1638,43 @@ fn an_untitled_owning_node_lands_under_the_onevcs_default_and_is_named() {
 /// could not read.
 #[test]
 fn an_unreadable_run_journal_leaves_no_owner_known_to_be_unique() {
-    let world = World::new("oob-owned-unreadable");
-    let (repository, branch) = owned_branch_then(&world, "owned", false, |world, _| {
-        let path = world.plan(
-            "other",
-            &crate::harness::plan_of("other", vec![crate::harness::agent("elsewhere", &[])]),
-        );
-        world.run(&["start", &path, "--attach"]).settled();
-    });
-    let journal = world.run_file("other", "events.jsonl");
-    std::fs::remove_file(&journal).expect("the other run's journal");
-    std::fs::create_dir(&journal).expect("a journal no reader can open");
-
-    world
-        .run(&["publish-branch", &branch, "--repo", "service"])
-        .exited(0)
-        .err_has(&format!(
-            "publishing under onevcs's default subject (no owning node is known to be \
-             unique: {} cannot be read: ",
-            journal.display()
-        ))
-        .err_lacks(OWNER_TITLE);
-    assert_eq!(
-        base_subject(&world, &repository),
-        format!("chore: preserve work on {branch}")
-    );
+    for unreadable in [false, true] {
+        let world = World::new(&format!("oob-owned-unreadable-{unreadable}"));
+        let (repository, branch) = owned_branch_then(&world, "owned", false, |world, _| {
+            let path = world.plan(
+                "other",
+                &crate::harness::plan_of("other", vec![crate::harness::agent("elsewhere", &[])]),
+            );
+            world.run(&["start", &path, "--attach"]).settled();
+        });
+        let journal = world.run_file("other", "events.jsonl");
+        std::fs::remove_file(&journal).expect("the other run's journal");
+        if unreadable {
+            std::fs::create_dir(&journal).expect("a journal no reader can open");
+        }
+        let landed = world.run(&["publish-branch", &branch, "--repo", "service"]);
+        landed.exited(0);
+        if unreadable {
+            landed
+                .err_has(&format!(
+                    "publishing under onevcs's default subject (no owning node is known to \
+                     be unique: {} cannot be read: ",
+                    journal.display()
+                ))
+                .err_lacks(OWNER_TITLE);
+            assert_eq!(
+                base_subject(&world, &repository),
+                format!("chore: preserve work on {branch}")
+            );
+        } else {
+            // A run with no journal yet — as one is between its launch record and
+            // its first event — names nothing, so the owner found elsewhere stands.
+            landed.err_has(&format!(
+                "publishing under '{OWNER_TITLE}' (from owned#service)\n"
+            ));
+            assert_eq!(base_subject(&world, &repository), OWNER_TITLE);
+        }
+    }
 }
 
 /// A retry lineage is one owner: the replacement a planner retried the node

@@ -114,7 +114,7 @@ enum SubjectSource {
         /// `<run>#<node>`.
         node: String,
         /// The node's title, which the landing publishes under.
-        title: String,
+        title: onevcs::Subject,
     },
     /// The caller's own `--title`.
     Title(String),
@@ -146,7 +146,7 @@ impl SubjectSource {
     fn line(&self) -> String {
         match self {
             Self::Owner { node, title } => {
-                format!("publishing under '{title}' (from {node})")
+                format!("publishing under '{}' (from {node})", &**title)
             }
             Self::Title(title) => format!("publishing under '{title}' (--title)"),
             Self::Unowned => {
@@ -188,10 +188,13 @@ fn entitle(command: &mut onevcs::cli::Command, runs: &Path) -> SubjectSource {
     let Some(owned) = owner.title else {
         return SubjectSource::Untitled(node);
     };
-    match onevcs::Subject::try_from(owned.clone()) {
-        Ok(_) => {
-            *title = Some(owned.clone());
-            SubjectSource::Owner { node, title: owned }
+    match onevcs::Subject::try_from(owned) {
+        Ok(subject) => {
+            *title = Some(String::from(subject.clone()));
+            SubjectSource::Owner {
+                node,
+                title: subject,
+            }
         }
         Err(why) => SubjectSource::Refused { node, why },
     }
