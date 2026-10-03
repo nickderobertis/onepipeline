@@ -341,6 +341,50 @@ fn a_lifecycle_node_opens_a_session_works_in_it_and_publishes_through_onevcs() {
     assert_eq!(result["state"], "complete");
 }
 
+/// A repository's own `pre-push` hook that tests against a scratch repository of
+/// its own — moving there and running git, and unsetting nothing git exported to it
+/// — acts on that scratch repository, not on the session's.
+///
+/// `local-direct` pushes from a linked worktree, where git hands the hook a
+/// `GIT_DIR` naming that worktree's administrative directory, which every git
+/// command the hook starts would otherwise act on. So the hook's commit lands in
+/// the fixture, and the base holds the seed and the publication and nothing else.
+#[test]
+fn a_hooks_git_commands_in_a_fixture_repository_act_on_the_fixture_and_not_the_publication() {
+    let world = World::new("lifecycle-hook-fixture");
+    let fixture = world.root.join("hook-fixture");
+    let hook = crate::harness::fixture_hook_script(&world, &fixture);
+    let hook: Vec<&str> = hook.iter().map(String::as_str).collect();
+    let repo = world.repository("local-direct", &hook);
+    world.script("service.work", "the worker wrote this\n");
+    let run = settle(&world, "fixtured", vec![lifecycle("service", &[])]);
+
+    let result = world.run_json(&run, "result.json");
+    assert_eq!(
+        result["nodes"][0]["status"],
+        "done",
+        "{}",
+        why(&world, &run)
+    );
+    assert!(
+        fixture.join(".git").is_dir(),
+        "the hook's `git init` in {} made no repository there, so its git commands \
+         acted on another one",
+        fixture.display()
+    );
+    assert_eq!(
+        git(&world, &fixture, &["log", "--format=%s"]).trim(),
+        "fixture: committed by the pre-push hook",
+        "the fixture does not hold the hook's commit"
+    );
+    let base = git(&world, &repo.origin, &["log", "--format=%s", "main"]);
+    assert_eq!(
+        base.lines().collect::<Vec<_>>(),
+        ["feat: ship service", "chore: seed the repository"],
+        "the base holds something besides the seed and the publication"
+    );
+}
+
 #[test]
 fn several_steps_share_one_branch_and_run_serially_in_topological_order() {
     let world = World::new("lifecycle-steps");
