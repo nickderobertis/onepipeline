@@ -269,7 +269,6 @@ fn first_attempt_beside_a_hold(world: &World, run: &str) -> u32 {
 }
 
 /// Wait until a node has recorded a settlement.
-#[cfg(unix)]
 fn until_settled(world: &World, run: &str, node: &str) {
     world.until(&format!("{node} to settle"), |world| {
         world
