@@ -8645,20 +8645,135 @@ fn an_exhausted_identity_at_a_publication_redispatch_keeps_the_pin_and_resumes_o
     );
 }
 
-/// The queue times, in epoch milliseconds, of every `workspace-wait` the channel
-/// has queued about `node`, or `None` while its projection is behind its log.
-fn workspace_wait_times(world: &World, run: &str, node: &str) -> Option<Vec<u64>> {
-    let queued = world.queued_surfaces(run);
-    if queued.is_empty() {
+/// One `workspace-wait` the channel queued about a node, with the three things
+/// divergence entry 99's sixth ruling decides a re-queue by.
+#[derive(Debug)]
+struct QueuedWait {
+    /// What it says: the hold's identity and reading, so a changed reading is a
+    /// changed message.
+    message: String,
+    /// When the channel log says it was queued, in epoch milliseconds — the
+    /// stamp the ruling counts the next interval from.
+    queued_at: u64,
+    /// Whether the wait before it had been read when this one was queued.
+    previous_read: bool,
+    /// Whether the node's workspace hold ended between the wait before it and
+    /// this one — the node dispatched, unheld, or held for something else — so
+    /// this one is the first wait of a hold that began again.
+    hold_began: bool,
+}
+
+/// Every `workspace-wait` queued about `node`, oldest first, or `None` while the
+/// journal has not yet recorded every wait the channel log holds.
+///
+/// Read off the run's own records rather than counted at a moment: the channel
+/// log orders each wait against every read of it, and the journal orders each
+/// wait's `planner-surface-queued` against the node's hold records. The driver
+/// writes both of a wait's records, the log's first, so the nth wait in one is
+/// the nth in the other.
+fn queued_waits(world: &World, run: &str, node: &str) -> Option<Vec<QueuedWait>> {
+    let log =
+        std::fs::read_to_string(world.run_file(run, "channel/surfaces.jsonl")).unwrap_or_default();
+    let mut claimed = std::collections::BTreeSet::new();
+    let mut waits: Vec<(u64, QueuedWait)> = Vec::new();
+    for record in log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    {
+        let id = record["id"].as_u64();
+        match record["event"].as_str() {
+            Some("claimed") => claimed.extend(id),
+            Some("queued")
+                if record["kind"] == "workspace-wait" && record["workstream"] == node =>
+            {
+                let previous_read = waits
+                    .last()
+                    .is_some_and(|(previous, _)| claimed.contains(previous));
+                waits.push((
+                    id.expect("a queued surface carries its id"),
+                    QueuedWait {
+                        message: record["message"].as_str().unwrap_or_default().to_owned(),
+                        queued_at: record["queued_at"].as_u64().unwrap_or_default(),
+                        previous_read,
+                        hold_began: false,
+                    },
+                ));
+            }
+            _ => {}
+        }
+    }
+    let mut began = Vec::new();
+    let mut ended = false;
+    for event in world
+        .journal(run)
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+    {
+        let held_for_workspace = || {
+            event["payload"]["reasons"]
+                .as_array()
+                .is_some_and(|reasons| reasons.iter().any(|reason| reason["kind"] == "workspace"))
+        };
+        match event["kind"].as_str() {
+            Some("node-dispatched" | "node-unheld") => ended = true,
+            Some("node-held") if !held_for_workspace() => ended = true,
+            Some("planner-surface-queued") if event["payload"]["kind"] == "workspace-wait" => {
+                began.push(std::mem::take(&mut ended));
+            }
+            _ => {}
+        }
+    }
+    if began.len() != waits.len() {
         return None;
     }
     Some(
-        queued
+        waits
             .into_iter()
-            .filter(|surface| surface["kind"] == "workspace-wait" && surface["workstream"] == node)
-            .filter_map(|surface| surface["queued_at"].as_u64())
+            .zip(began)
+            .enumerate()
+            .map(|(at, ((_, wait), began))| QueuedWait {
+                hold_began: at > 0 && began,
+                ..wait
+            })
             .collect(),
     )
+}
+
+/// [`queued_waits`], once the journal has caught up with the channel log.
+fn waits_of(world: &World, run: &str, node: &str) -> Vec<QueuedWait> {
+    let mut read = None;
+    world.until(
+        "the journal to record every wait the channel queued",
+        |world| {
+            read = queued_waits(world, run, node);
+            read.is_some()
+        },
+    );
+    read.expect("the waits were read")
+}
+
+/// The waits the sixth ruling forbids: each that repeats the wait before it, in
+/// the same hold, while that one was still unread. A changed reading and a hold
+/// that began again are queued whatever was read; an unchanged one waits to be.
+fn unchanged_and_unread(waits: &[QueuedWait]) -> Vec<&QueuedWait> {
+    waits
+        .windows(2)
+        .filter(|pair| {
+            pair[1].message == pair[0].message && !pair[1].hold_began && !pair[1].previous_read
+        })
+        .map(|pair| &pair[1])
+        .collect()
+}
+
+/// The newest hold's unchanged waits, oldest first: the trailing waits that say
+/// one thing in one hold, which is the run its interval doubles along.
+fn last_unchanged_run(waits: &[QueuedWait]) -> &[QueuedWait] {
+    let mut start = waits.len().saturating_sub(1);
+    while start > 0 && waits[start].message == waits[start - 1].message && !waits[start].hold_began
+    {
+        start -= 1;
+    }
+    &waits[start..]
 }
 
 /// Read every surface the run has waiting, as a supervisor does between looks.
@@ -8673,10 +8788,12 @@ fn read_everything(world: &World, run: &str) {
     panic!("`next` never ran out of surfaces on {run}");
 }
 
-/// A workspace hold is surfaced on the release wait's cadence: an unchanged
-/// wait is not queued again while the one before it is unread, and once read it
-/// is queued again at an interval that doubles from the configured base — the
-/// one cadence `tests/e2e/adoption.rs` climbs to its fixed four-hour ceiling.
+/// A workspace hold is surfaced on the release wait's cadence: a wait whose
+/// reading changes is queued as it changes, an unchanged one is not queued again
+/// while the one before it is unread — across a window in which a session outside
+/// the run moves the reading — and once read it is queued again
+/// at an interval that doubles from the configured base — the one cadence
+/// `tests/e2e/adoption.rs` climbs to its fixed four-hour ceiling.
 /// And an elapsed watch over the same run names
 /// the hold, what settled past its cursor, and when the run last moved.
 /// Divergence entry 99.
@@ -8704,32 +8821,70 @@ fn a_workspace_wait_is_queued_again_only_once_read_and_an_elapsed_watch_names_th
     let path = world.plan("poolcadence", &plan);
     world.run(&["start", &path, "--detach"]).exited(0);
     let run = "poolcadence".to_string();
-    // The reading the hold is on settles once the first's session holds the
-    // one slot; each reading before that is a different wait, and queued as one.
-    world.until("the hold's reading to settle on the held slot", |world| {
-        workspace_hold_of(world, &run, "second")
-            .is_some_and(|hold| hold["slots"] == 1 && hold["idle"] == 0)
-            && workspace_wait_times(world, &run, "second").is_some_and(|waits| !waits.is_empty())
+    // The hold's reading settles once the first's session holds the one slot;
+    // each reading before that is a different wait, and queued as one.
+    let full = "pool 1 (1 slot(s): 0 idle, 0 maintaining), overflow 0 with 0 in use";
+    let outside = "pool 1 (1 slot(s): 0 idle, 0 maintaining), overflow 0 with 1 in use";
+    let saying = |waits: &[QueuedWait], reading: &str| -> Vec<usize> {
+        (0..waits.len())
+            .filter(|at| waits[*at].message.contains(reading))
+            .collect()
+    };
+    world.until("a wait on the held slot", |world| {
+        queued_waits(world, &run, "second").is_some_and(|waits| !saying(&waits, full).is_empty())
     });
-    std::thread::sleep(std::time::Duration::from_secs(1));
-    world.until("the queue to be read back", |world| {
-        workspace_wait_times(world, &run, "second").is_some()
+    // The window an unread wait's reading can move in, opened on purpose: while
+    // nothing reads the queue, a session outside the run is opened on the
+    // identity past its bound and closed again, and each is a reading the hold
+    // says — one more overflow session in use, then none — so each is queued as
+    // the changed wait it is, and the identity admits the node at neither. A
+    // sibling reading that differs from one pass to the next on its own — a
+    // record or a `git` it could not read for a moment, which reads as room the
+    // open then refuses, ending the hold and beginning it again — moves the count
+    // the same way on its own clock; this moves it on every platform, in order.
+    // How many waits that queues is the sibling's readings' to say, so it is no
+    // number this journey can fix: what the ruling fixes is which may repeat the
+    // one before.
+    let opened = world.run_on(
+        world.cmd_on(
+            &crate::harness::onevcs_binary(),
+            &["session", "open", "service", "--overflow", "1"],
+        ),
+        "onevcs session open",
+    );
+    opened.exited(0);
+    let token = opened.json()["token"]
+        .as_str()
+        .map(str::to_owned)
+        .expect("the sibling printed a session token");
+    world.until("a wait on the outside session", |world| {
+        queued_waits(world, &run, "second").is_some_and(|waits| !saying(&waits, outside).is_empty())
     });
-    let settled = workspace_wait_times(&world, &run, "second")
-        .expect("read")
-        .len();
+    world
+        .run_on(
+            world.cmd_on(
+                &crate::harness::onevcs_binary(),
+                &["session", "close", &token],
+            ),
+            "onevcs session close",
+        )
+        .exited(0);
+    world.until("a wait on the outside session gone", |world| {
+        queued_waits(world, &run, "second")
+            .is_some_and(|waits| saying(&waits, full).last() > saying(&waits, outside).first())
+    });
 
     // Unread, the unchanged wait is not queued again.
     std::thread::sleep(std::time::Duration::from_secs(4));
-    world.until("the queue to be read back", |world| {
-        workspace_wait_times(world, &run, "second").is_some()
-    });
-    assert_eq!(
-        workspace_wait_times(&world, &run, "second")
-            .expect("read")
-            .len(),
-        settled,
-        "an unchanged workspace wait was queued again while the one before it was unread"
+    let waits = waits_of(&world, &run, "second");
+    assert!(
+        waits.iter().all(|wait| !wait.previous_read),
+        "something read the queue this journey leaves unread: {waits:#?}"
+    );
+    assert!(
+        unchanged_and_unread(&waits).is_empty(),
+        "an unchanged workspace wait was queued again while the one before it was unread: \
+         {waits:#?}"
     );
 
     // An elapsed watch from a cursor taken now: `quick` settles past it while
@@ -8830,30 +8985,34 @@ fn a_workspace_wait_is_queued_again_only_once_read_and_an_elapsed_watch_names_th
         watched.stderr
     );
 
-    // Read, it is queued again: at once, then after two, four, and eight.
+    // Read, the hold's unchanged wait is queued again at an interval that starts
+    // at the base and doubles: one, two, four, and eight seconds after the wait
+    // before it, each counted from that wait's own `queued_at`.
     world.until(
         "four unchanged waits queued again as each is read",
         |world| {
             read_everything(world, &run);
-            workspace_wait_times(world, &run, "second")
-                .is_some_and(|waits| waits.len() >= settled + 4)
+            queued_waits(world, &run, "second")
+                .is_some_and(|waits| last_unchanged_run(&waits).len() >= 5)
         },
     );
-    let waits = workspace_wait_times(&world, &run, "second").expect("read")[settled - 1..].to_vec();
-    let gap = |at: usize| waits[at].saturating_sub(waits[at - 1]);
-    assert!(gap(1) >= 4_000, "{waits:?}");
+    let waits = waits_of(&world, &run, "second");
     assert!(
-        gap(2) >= 2_000,
-        "the interval did not double from the base: {waits:?}"
+        unchanged_and_unread(&waits).is_empty(),
+        "an unchanged workspace wait was queued again while the one before it was unread: \
+         {waits:#?}"
     );
-    assert!(
-        gap(3) >= 4_000,
-        "the interval did not double again: {waits:?}"
-    );
-    assert!(
-        gap(4) >= 8_000,
-        "the interval did not double a third time: {waits:?}"
-    );
+    let unchanged: Vec<u64> = last_unchanged_run(&waits)
+        .iter()
+        .map(|wait| wait.queued_at)
+        .collect();
+    for (at, interval) in [(1, 1_000), (2, 2_000), (3, 4_000), (4, 8_000)] {
+        assert!(
+            unchanged[at].saturating_sub(unchanged[at - 1]) >= interval,
+            "unchanged wait {at} came sooner than the {interval}ms the doubling owes it: \
+             {unchanged:?}"
+        );
+    }
 
     world.release("first.go");
     world.until("the run to settle", |world| {
