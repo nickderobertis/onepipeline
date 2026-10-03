@@ -139,9 +139,9 @@ fn a_real_dispatched_turn_relays_every_field_its_producer_publishes() {
         "a call carries an observation it has not been given yet: {activity:?}"
     );
     assert_eq!(result.kind, "tool_result", "{activity:?}");
-    // A result names no tool, because it answers one already named. `None`
-    // rather than an empty string: the field is a fact about this event.
-    assert_eq!(result.name, None, "{activity:?}");
+    // A result names the tool its call named, joined by the call's id, so a
+    // failed result can say which tool failed (oneharness #1403).
+    assert_eq!(result.name, call.name, "{activity:?}");
     assert_eq!(
         result.output.as_deref(),
         Some("the turn ran"),

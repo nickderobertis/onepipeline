@@ -616,6 +616,14 @@ resolver = "2"
 # **requirement**, because `^0.38` admits no 0.39.x; `onevcs-testing` 0.11.1 requires
 # exactly `=0.39.0`, so the pair moves as one.
 #
+# `onevcs` 0.40.2 is the floor because it carries three publication fixes: a running
+# `publish-branch` holds its branch, so a holders read answers `HeldBy.token: None`
+# with `Holding::PublicationRunning` (onevcs #261); a finished publication releases
+# its workspace and stops its processes (onevcs #277); and `publish-branch` resumes
+# an already verified open change (onevcs #276). A **requirement**, because `^0.39`
+# admits no 0.40.x; `onevcs-testing` 0.12.2 requires exactly `=0.40.2`, so the pair
+# moves as one.
+#
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
 # `reasoning` items as `turn-activity` under their own kind — the agent's words,
 # with no tool name — which `src/views.rs` and `src/projection.rs` render as what
@@ -649,7 +657,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.5"
-onevcs = "0.39.0"
+onevcs = "0.40.2"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -834,7 +842,12 @@ onejudge = "0.17.1"
 # `tests/e2e/agents.rs`'s `unscanned` journeys record through both member kinds
 # under `strace`, so a core that lists, scans or locks the store fails there.
 # `oneagentgraph` 0.5.5 and `onejudge` 0.17.1 each require it exactly.
-oneharness-core = "0.24.0"
+#
+# **0.24.1 marks a failed tool result**: a Claude `tool_result` carries
+# `status: completed | failed`, and `render_event` draws a `✗ <tool>  failed` line
+# (oneharness #1403), which the run views draw a turn's activity through. Inside
+# `^0.24.0`, so `oneagentgraph` and `onejudge` resolve this one copy with it.
+oneharness-core = "0.24.1"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
 # from one commit, each release of this crate requiring the exact `onevcs` it was
@@ -845,7 +858,7 @@ oneharness-core = "0.24.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.11.1"
+onevcs-testing = "0.12.2"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
