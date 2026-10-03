@@ -7354,6 +7354,15 @@ const RULINGS: &[(&str, &str)] = &[
     ),
     // onepipeline#528: a live driver gone quiet is still driving the run.
     ("107.", "**`PARKED` is a live driver, and is driven.**"),
+    // onepipeline#320: only what names a node an envelope awaiting a live note's
+    // answer names waits for that answer.
+    (
+        "108.",
+        "**An envelope claimed behind one awaiting a live note's answer is held, in claim \
+         order, only when it names a node the envelope awaiting the answer names, or a node \
+         an envelope already held behind it names; any other envelope is judged and applied \
+         on the pass that claims it.**",
+    ),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
