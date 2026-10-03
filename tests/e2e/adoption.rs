@@ -30,8 +30,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::harness::{
-    agent, counts, human, lifecycle, plan_of, project_id, reporting, rows, Counts, Repository,
-    World, LOOP_STATS_ENV, REFUSED,
+    a_parked_run_is_read_as_driven, a_watch_armed_active_outlasts_the_run_turning_parked, agent,
+    counts, human, lifecycle, plan_of, project_id, reporting, rows, until_parked, Counts,
+    Repository, World, LOOP_STATS_ENV, REFUSED,
 };
 use oneagentgraph::event::{session_label, SESSION_LABEL};
 use onepipeline::plan::CROSS_REPO_REFERENCES_HEADING;
@@ -1112,6 +1113,55 @@ fn status_names_the_release_a_held_node_awaits_rather_than_calling_it_queued() {
     world.until("status to stop reporting the node as held", |world| {
         !consumer_line(world).is_some_and(|line| line.contains("consumer: held"))
     });
+}
+
+/// A live driver holding its only remaining node on a published-release wait is
+/// still driving the run when its journal goes quiet.
+///
+/// The wait is legitimate quiet: the driver goes on asking the probe, and an
+/// unchanged hold is re-surfaced on a slowing cadence, so nothing is journalled
+/// for long stretches. The run reads `PARKED` then, and every reader still calls
+/// it driven — advice that names the live driver and `stop` rather than `adopt`,
+/// an adoption refused, and a watch that does not end `nothing-driving` — and when
+/// the release arrives that same driver lets the node go.
+#[test]
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] about thirteen seconds, eight of them the watch's own deadline, which is what proves it did not end `nothing-driving`; and what the journey exercises is `release`, `views`, `driver` and `watch` together through the compiled binary, so the narrowest edge it can honestly sit behind is the crate itself, which is this target's — the same grounds as the parked journeys already in `mod driver` and `mod watch`. The unrelated dependency the target carries is the shared target's.
+fn a_run_held_only_on_a_published_release_reads_parked_and_still_driven() {
+    let world = watching("adoption-held-parked");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+
+    let run = start(
+        &world,
+        "adoption-held-parked",
+        vec![engine(), consumer(Some("published"))],
+    );
+    world.until("the consumer to be held on the engine's release", |world| {
+        world
+            .run(&["status", &run])
+            .stdout
+            .contains("consumer: held — awaiting the published release of engine")
+    });
+    let driver = world.run_json(&run, "launch.json")["pid"].clone();
+
+    until_parked(&world, &run);
+    a_parked_run_is_read_as_driven(&world, &run);
+    a_watch_armed_active_outlasts_the_run_turning_parked(&world, &run);
+
+    // The driver nobody displaced is the one that sees the release and lets the
+    // node go.
+    releases_at(&answer, "0.2.0");
+    world.until("the held node to be dispatched", |world| {
+        world
+            .events_of(&run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "consumer")
+    });
+    assert_eq!(world.run_json(&run, "launch.json")["pid"], driver);
+    assert!(world.events_of(&run, "driver-adopted").is_empty());
 }
 
 /// An answer this host **cannot read** is never read as a release that has not
