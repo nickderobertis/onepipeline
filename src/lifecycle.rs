@@ -910,6 +910,15 @@ fn publish(
                 // rejected by: there is nothing about the tree to fix, and the
                 // node says what it is — where the work is, what commit it is at,
                 // and what stopped the read — instead of being asked for again.
+                if crate::vcs::failure_of(*kind) == crate::vcs::Failure::Cancelled {
+                    return cancelled_publication(
+                        &node.id,
+                        token,
+                        branch.or_else(|| Some(published.branch.clone())),
+                        reason,
+                        body_aside.clone(),
+                    );
+                }
                 if crate::vcs::failure_of(*kind) == crate::vcs::Failure::Unread {
                     return unread_merge_path(
                         &node.id,
@@ -1283,8 +1292,16 @@ fn publish_rereading_the_merge_path(
     draft: Option<&onevcs::DraftReason>,
     cancel: &crate::executor::CancellationToken,
 ) -> Published {
-    let publish =
-        || crate::vcs::publish(token, node.merge_policy, node.title.as_deref(), body, draft);
+    let publish = || {
+        crate::vcs::publish(
+            token,
+            node.merge_policy,
+            node.title.as_deref(),
+            body,
+            draft,
+            cancel,
+        )
+    };
     let budget = engine::merge_path_reads();
     let mut backoff = engine::merge_path_backoff();
     let mut reads = std::num::NonZeroU32::MIN;
@@ -1339,6 +1356,40 @@ fn still_unread(
         onevcs::PublishOutcome::Failed { kind, .. }
             if crate::vcs::failure_of(*kind) == crate::vcs::Failure::Unread
     )
+}
+
+/// The settlement of a node whose publication its own cancellation stopped.
+///
+/// `cancelled`, the status every stopped dispatch settles under, and **not**
+/// re-dispatched: the stop is the manager's decision about the node, and the
+/// attempt after it is the `retry` they ask for or none. What a retry continues
+/// is said beside it — the branch, which `onevcs` left on its remote, and the
+/// commit it stands at — and `reason` is the sibling's own sentence naming what
+/// the publication was waiting on when it stopped.
+fn cancelled_publication(
+    node: &str,
+    token: &onevcs::SessionToken,
+    branch: Option<String>,
+    reason: &str,
+    body_aside: Option<String>,
+) -> Attempt {
+    Attempt::settled(Settlement {
+        branch,
+        head: session_head(token),
+        detail: Some(compose(&format!("onevcs: {reason}"), body_aside.as_deref())),
+        ..Settlement::plain(node, NodeStatus::Cancelled, None)
+    })
+}
+
+/// The commit a session's branch stands at, where its record says one.
+///
+/// What a settlement that leaves the branch for somebody else to continue names
+/// beside it, so a `retry` knows where it starts from without asking the host.
+fn session_head(token: &onevcs::SessionToken) -> Option<String> {
+    match crate::vcs::session_tip(token) {
+        crate::vcs::SessionTip::At(commit) => Some(commit.as_str().to_owned()),
+        crate::vcs::SessionTip::Unmoved | crate::vcs::SessionTip::Unknown => None,
+    }
 }
 
 /// The settlement of a node whose work reached the remote and whose merge path
@@ -1571,10 +1622,7 @@ fn failed_publication(
         // branch so a `retry` after the install has somewhere to continue from.
         (crate::vcs::Failure::HostPrerequisite, _, _) => Attempt::settled(Settlement {
             branch: branch.clone(),
-            head: match crate::vcs::session_tip(token) {
-                crate::vcs::SessionTip::At(commit) => Some(commit.as_str().to_owned()),
-                crate::vcs::SessionTip::Unmoved | crate::vcs::SessionTip::Unknown => None,
-            },
+            head: session_head(token),
             detail: Some(compose(&format!("onevcs: {reason}"), body_aside.as_deref())),
             ..Settlement::plain(node, NodeStatus::Failed, Some(failure.outcome()))
         }),
