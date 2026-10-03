@@ -5166,6 +5166,18 @@ impl HeldPublication {
         self.argv.iter().map(String::as_str).collect()
     }
 
+    /// Whether the merge path has started holding the push — git is running the
+    /// hook, so the push is under way and nothing interrupts it from here.
+    ///
+    /// Not the same moment as the publication's last record before the push:
+    /// `onevcs` asks its caller's cancellation between the two, so a journey
+    /// about a cancel that lands *during* the push waits for this.
+    pub fn holding(&self) -> bool {
+        let mut marker = self.rendezvous.clone().into_os_string();
+        marker.push(".holding");
+        PathBuf::from(marker).is_file()
+    }
+
     /// Let the held push through, now, because this journey has seen what it
     /// needed to while the publication was still running.
     pub fn release(&self) {

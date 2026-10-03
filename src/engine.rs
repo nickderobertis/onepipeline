@@ -4333,6 +4333,19 @@ fn start_ready(
             .as_deref()
             .map_or(&node, |continuation| &continuation.node);
         if let Some(request) = crate::vcs::request_for(opens) {
+            // A `retry`'s replacement that opens a session waits for the
+            // dispatch it superseded to settle. The retry raised that dispatch's
+            // cancellation, but a raised token is a request: until the old
+            // attempt returns it holds the node's session, and a replacement
+            // pinned to the same branch would be handed that session and then
+            // have it closed under it by the attempt it replaced. Skipped rather
+            // than broken past, like the hold below, and dispatched on the pass
+            // its predecessor's settlement wakes. A node that opens no session
+            // has nothing to share with its predecessor and is not held.
+            if superseded_in_flight(&state.superseded, &node.id, in_flight) {
+                workspaces.keep_resuming(&node.id, resume);
+                continue;
+            }
             match workspaces.admit(&node.id, &request) {
                 crate::pool::Admission::Admitted | crate::pool::Admission::Unread => {}
                 crate::pool::Admission::Held => {
@@ -4435,6 +4448,32 @@ fn start_ready(
         state.refresh(paths);
     }
     Ok(settled_here)
+}
+
+/// Whether any node `node` superseded — directly, or through a chain of retries —
+/// still has a dispatch in flight, which holds the session `node` would open.
+///
+/// The whole lineage rather than the one node a `retry` named: a retry of a
+/// replacement that never started supersedes a node whose own dispatch may still
+/// be returning, and that dispatch holds the same branch's session.
+fn superseded_in_flight(
+    superseded: &BTreeMap<String, String>,
+    node: &str,
+    in_flight: &BTreeMap<String, Dispatch>,
+) -> bool {
+    let mut lineage = vec![node];
+    let mut seen = BTreeSet::new();
+    while let Some(replacement) = lineage.pop() {
+        for (predecessor, by) in superseded {
+            if by == replacement && seen.insert(predecessor.as_str()) {
+                if in_flight.contains_key(predecessor) {
+                    return true;
+                }
+                lineage.push(predecessor);
+            }
+        }
+    }
+    false
 }
 
 /// What the run's record says about a fresh dispatch of a node and the manager's
@@ -7747,6 +7786,7 @@ mod tests {
         onevcs::FailureKind::PushRejected,
         onevcs::FailureKind::PushedUnverified,
         onevcs::FailureKind::HostPrerequisite,
+        onevcs::FailureKind::Cancelled,
     ];
 
     /// A change request URL, for the publication outcomes that carry one.

@@ -25,6 +25,11 @@ if not "%~3"=="" (
 )
 call :waitceiling
 if errorlevel 1 exit /b 64
+type nul >"%~2.holding"
+if errorlevel 1 (
+  call :broke "cannot write %~2.holding"
+  exit /b 1
+)
 set /a "left=seconds"
 :waitloop
 if exist "%~2" exit /b 0
