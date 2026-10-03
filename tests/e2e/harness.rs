@@ -6352,7 +6352,6 @@ pub fn until_parked(world: &World, run: &str) {
     });
 }
 
-/// `status <RUN> --json`, read with the parked threshold at `after` seconds.
 fn parked_reading(world: &World, run: &str, after: &str) -> Value {
     let mut status = world.cmd(&["status", run, "--json"]);
     status.env(onepipeline::views::PARKED_AFTER_ENV, after);

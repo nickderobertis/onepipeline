@@ -1125,6 +1125,7 @@ fn status_names_the_release_a_held_node_awaits_rather_than_calling_it_queued() {
 /// an adoption refused, and a watch that does not end `nothing-driving` — and when
 /// the release arrives that same driver lets the node go.
 #[test]
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] about thirteen seconds, eight of them the watch's own deadline, which is what proves it did not end `nothing-driving`; and what the journey exercises is `release`, `views`, `driver` and `watch` together through the compiled binary, so the narrowest edge it can honestly sit behind is the crate itself, which is this target's — the same grounds as the parked journeys already in `mod driver` and `mod watch`. The unrelated dependency the target carries is the shared target's.
 fn a_run_held_only_on_a_published_release_reads_parked_and_still_driven() {
     let world = watching("adoption-held-parked");
     world.write_graphs();
