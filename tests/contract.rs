@@ -7363,6 +7363,13 @@ const RULINGS: &[(&str, &str)] = &[
          an envelope already held behind it names; any other envelope is judged and applied \
          on the pass that claims it.**",
     ),
+    // onepipeline#561: a died dispatch's guidance names its landing or its retirement
+    // before it offers a branch as recoverable.
+    (
+        "109.",
+        "**say where the work stands, in exactly one of three forms: landed, retired, or a \
+         branch that may carry finished work**",
+    ),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
