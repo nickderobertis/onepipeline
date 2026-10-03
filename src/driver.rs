@@ -2203,7 +2203,7 @@ pub(crate) fn settled(state: &crate::projection::RunState, paths: &RunPaths) -> 
     Settlement::Unattended
 }
 
-/// `onepipeline adopt --detach`: validate, displace the parked driver, and hand
+/// `onepipeline adopt --detach`: validate, displace the undriven driver, and hand
 /// the run to the program `retain` names.
 ///
 /// Nothing is written here, and the lock is not taken here either. The process
@@ -2222,7 +2222,7 @@ pub(crate) fn adopt_detached(paths: &RunPaths, retain: &crate::verbs::Retain) ->
     Ok(pid)
 }
 
-/// `onepipeline adopt`: validate, displace the parked driver, and drive the run
+/// `onepipeline adopt`: validate, displace the undriven driver, and drive the run
 /// in this process until it settles.
 ///
 /// Adoption keeps everything the run owns and replaces only the driver: the run
@@ -2271,7 +2271,7 @@ pub(crate) fn adopt_attached(
     attach(paths, observer.as_mut(), &mut watch, lock, said)
 }
 
-/// The checks every adoption makes before anything is written, and the stopped
+/// The checks every adoption makes before anything is written, and the parked
 /// driver it ends.
 ///
 /// Both launch paths refuse for the same reasons and refuse **here**, in the
@@ -2295,8 +2295,8 @@ fn validate_and_displace_for_adoption(paths: &RunPaths) -> Result<(LaunchRecord,
         });
     }
     let view = RunView::open(paths)?;
-    // A `PARKED` run is refused here with an `ACTIVE` one: its driver is live and
-    // only quiet, and taking the run over would end the work it is holding.
+    // A `PARKED` run is refused here with an `ACTIVE` one: its driver is alive and
+    // only quiet, and taking the run over would end that live work.
     let liveness = view.liveness();
     if !liveness.is_undriven() {
         let driver = record
@@ -2321,12 +2321,11 @@ fn validate_and_displace_for_adoption(paths: &RunPaths) -> Result<(LaunchRecord,
             graph::check_criteria(node)?;
         }
     }
-    // A driver whose run records a stop may still be alive holding the run's
-    // ownership lock, and the loop this adoption is about to start is the run's
-    // single writer — so taking the run over means ending the process that had
-    // it. Only ever a driver the verdict above already called undriven: a run
-    // still being driven — a quiet, `PARKED` one included — was refused. A dead
-    // one is signalled to no effect, which is the ordinary case.
+    // The loop this adoption is about to start is the run's single writer, so
+    // taking the run over means the process that had it is gone. Only ever a
+    // driver the verdict above already called undriven — proved over, or named by
+    // a recorded stop — and never a live, quiet one, which was refused. A dead one
+    // is signalled to no effect, which is the ordinary case.
     // Except a driver that let go of the run to fire its run-end hook: it holds
     // nothing, and the process it awaits that hook in is not one to end.
     if !views::let_go(
@@ -2334,7 +2333,7 @@ fn validate_and_displace_for_adoption(paths: &RunPaths) -> Result<(LaunchRecord,
         record.driver_pid(),
         view.state.let_go_by.as_ref(),
     ) {
-        displace_the_stopped_driver(&record);
+        displace_the_undriven_driver(&record);
     }
     Ok((record, view))
 }
@@ -2427,13 +2426,12 @@ fn report_and_journal_adoption(
 /// End a driver that holds a run nothing is driving, and wait for it to go.
 ///
 /// The lock the engine loop takes is reclaimable only from a holder this host
-/// can prove is gone, so an adoption that took its lock beside a driver whose
-/// stop was recorded but which has not yet exited would lose the race. Never
-/// reached for a `PARKED` driver: that one is live, and the adoption refused it.
-/// The wait is bounded and answers nothing itself: whether the run may
-/// be taken over is the **lock's** question, and a driver that outlasts this is
-/// answered by the lock's own refusal, which names the pid still holding it.
-fn displace_the_stopped_driver(record: &LaunchRecord) {
+/// can prove is gone, so an adoption that took its lock beside a driver a
+/// recorded stop names, but which is still winding down, would lose the race.
+/// The wait is bounded and answers nothing itself: whether the run may be taken
+/// over is the **lock's** question, and a driver that outlasts this is answered
+/// by the lock's own refusal, which names the pid still holding it.
+fn displace_the_undriven_driver(record: &LaunchRecord) {
     if record.host != sys::hostname() {
         return;
     }
@@ -2441,7 +2439,7 @@ fn displace_the_stopped_driver(record: &LaunchRecord) {
     // since given to another process is a driver that is already gone, and the
     // signal below would land on a stranger's work. An unstamped or undescribed
     // live pid is still signalled, as it always was — the adoption's verdict
-    // called it undriven, by the stop its run records.
+    // called it undriven, and that is the one case this displacement exists for.
     if sys::claim_on(record.pid, &record.started).is_over() {
         return;
     }
@@ -3918,10 +3916,10 @@ mod tests {
         // Assembled from the same parts the view reads, so the verdict under
         // test is the one `attach` returns rather than a restatement of it.
         assert!(DriverLiveness::DriverDead.is_undriven());
-        // A parked driver is live and only quiet: it is still driving the run.
+        assert!(DriverLiveness::Undriven.is_undriven());
+        // A live driver gone quiet is still driving: nothing may adopt it.
         assert!(!DriverLiveness::Parked.is_undriven());
         assert!(!DriverLiveness::Driving.is_undriven());
-        assert!(!DriverLiveness::Undriven.is_undriven());
     }
 
     #[test]

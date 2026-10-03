@@ -29,8 +29,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::harness::{
-    agent, end_driver, plan_of, repo_file, Rendezvous, World, REFUSED, RENDEZVOUS_SECONDS_ENV,
-    SCRIPTED_KEY,
+    agent, plan_of, repo_file, Rendezvous, World, REFUSED, RENDEZVOUS_SECONDS_ENV, SCRIPTED_KEY,
 };
 
 /// What entry 71 of the divergence record proposes, which is where the three
@@ -309,10 +308,10 @@ fn an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arit
         &[flag.as_str(), "1"],
     );
 
-    // The launching driver's updates are let go at once, so they land and the run is
-    // quiet: nothing has failed yet, and the driver may be ended for an adoption. There
-    // are two of them — the claim a driver projects before its first dispatch, which
-    // writes the held node `queued`, and the projection of that node running.
+    // The launching driver's updates are let go at once, so they land and nothing has
+    // failed yet when the driver is ended for the adoption below. There are two of
+    // them — the claim a driver projects before its first dispatch, which writes the
+    // held node `queued`, and the projection of that node running.
     meeting.arrived().release();
     meeting.arrived().release();
     world.until_store("the launching driver's copy to reach the board", |world| {
@@ -320,9 +319,10 @@ fn an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arit
     });
     assert!(!a_projection_failed(&world, run));
 
-    // Adopted from a shell whose environment names a far larger budget, once the
-    // quiet driver has gone — the same taking-over `driver.rs` drives.
-    end_driver(&world, run);
+    // Adopted from a shell whose environment names a far larger budget, with the
+    // driver ended first — a quiet live driver is still driving, and an adoption
+    // refuses it.
+    crate::harness::end_driver(&world, run);
     let mut adopt = world.cmd(&["adopt", run, "--detach"]);
     adopt.env(spelling("environment"), "1000");
     world.run_on(adopt, "adopt --detach").exited(0);
@@ -489,8 +489,8 @@ fn a_record_an_older_build_wrote_is_adopted_and_its_update_runs_under_the_shippe
         a_run_whose_first_update_is_held("writeback-budget-older-record", run, items, &[]);
 
     // The launching driver's updates are let go at once — its claim before the first
-    // dispatch, and the projection of the held node running — so the run is quiet and
-    // an adoption may end its driver.
+    // dispatch, and the projection of the held node running — so nothing is held when
+    // its driver is ended for the adoption below.
     meeting.arrived().release();
     meeting.arrived().release();
     world.until_store("the launching driver's copy to reach the board", |world| {
@@ -513,7 +513,7 @@ fn a_record_an_older_build_wrote_is_adopted_and_its_update_runs_under_the_shippe
     std::fs::write(&launch, older.to_string()).expect("the older record is written");
     // llmlint: ignore-end[tests_mirror_real_usage]
 
-    end_driver(&world, run);
+    crate::harness::end_driver(&world, run);
     let mut adopt = world.cmd(&["adopt", run, "--detach"]);
     adopt.env(spelling("environment"), "1000");
     world.run_on(adopt, "adopt --detach").exited(0);

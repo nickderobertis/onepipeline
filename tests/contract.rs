@@ -7121,7 +7121,12 @@ const RULINGS: &[(&str, &str)] = &[
     ("24.", "NodeControls"),
     ("25.", "drive-run RUN"),
     ("26.", "nothing else able to move"),
-    ("27.", "ending that driver politely"),
+    // Narrowed by entry 107: the taking-over stands for an undriven run, and a
+    // `PARKED` one is refused.
+    (
+        "27.",
+        "ending a driver a recorded stop names that is still winding down politely",
+    ),
     ("28.", "`attempt`, `attempts`"),
     ("29.", "inherits both"),
     ("30.", "--launch-config FILE"),
@@ -7206,11 +7211,8 @@ const RULINGS: &[(&str, &str)] = &[
         "**A plan spanning sources is a home project plus the member projects its \
          `onetaskgraph.members` names**",
     ),
-    // The driver contract's narrowing of `PARKED` to a live driver `adopt` refuses.
-    (
-        "107.",
-        "**`PARKED` is a live driver that has gone quiet, not one an adoption may displace**",
-    ),
+    // onepipeline#528: a live driver gone quiet is still driving the run.
+    ("107.", "**`PARKED` is a live driver, and is driven.**"),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member

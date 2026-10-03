@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.60.0](https://github.com/nickderobertis/onepipeline/compare/v0.59.0...v0.60.0) - 2026-10-02
+
+### Added
+
+- *(store)* run one plan across its home and member projects ([#703](https://github.com/nickderobertis/onepipeline/pull/703))
+
 ## [0.59.0](https://github.com/nickderobertis/onepipeline/compare/v0.58.0...v0.59.0) - 2026-10-02
 
 ### Added

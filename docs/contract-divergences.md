@@ -6,7 +6,7 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96, 97, 99, 100, 102 and 106** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96, 97, 99, 100, 102, 106 and 107** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
@@ -819,6 +819,9 @@ ruling confirmed, and the driver contract now states the conjunction outright.
 
 ## 27. `adopt` now ends the parked driver it is taking the run over from — RESOLVED
 
+*Narrowed by entry 107: a `PARKED` run is a live driver and is refused; the taking-over
+below stands only for a run the verdict calls undriven.*
+
 **Ruling: confirmed. `adopt` may politely end a driver the liveness verdict has
 already called PARKED or otherwise undriven, wait for it to go, and then take the
 lock. The stderr disclosure stands, and there is still no `--force`.**
@@ -836,10 +839,6 @@ being driven, ends the parked driver politely, waits for it to go, and then take
 the lock. It says so on stderr, and it still has no `--force`: what it may end is
 only a driver the liveness verdict has already called undriven. The driver
 contract now says all of that.
-
-**Narrowed by entry 107.** `PARKED` is no longer an undriven verdict: it is a live
-driver that has gone quiet, and `adopt` refuses it. What `adopt` still ends, politely
-and on stderr, is a driver whose run records a stop but which has not yet exited.
 
 ## 28. A retried dispatch is journalled as a dispatch, not as its own kind — RESOLVED
 
@@ -8778,44 +8777,42 @@ asked for the members.
 `plan::tests::an_older_ledgers_task_record_loads_and_writes_back_unchanged`
 holds the older ledger.
 
-## 107. A live driver that had only gone quiet read `PARKED` as a run nothing drives, and `adopt` ended it — RESOLVED
+## 107. A live driver that had gone quiet read as a run nothing was driving — RESOLVED
 
-**Ruling: the plan `authoring:accepted-followups-1002` (node `op-parked-liveness`)
-narrows `PARKED` to a live driver, delivering onepipeline#528: "`PARKED` is a live
-driver that has gone quiet, not one an adoption may displace".** `DriverLiveness::Parked`
-and its word stay. `DriverLiveness::is_undriven` is true for `DriverDead` alone;
-`Undriven` answers as it did. `DRIVER DEAD`, a recorded stop, a driver proved over and
-`ONEPIPELINE_PARKED_AFTER_SECONDS` are unchanged.
+**Ruling: the user accepted onepipeline#528 and ruled it into the plan
+`run-ending-liveness-2026-10-01` (node `op-parked-liveness`), which fixes the contract
+this entry records: `PARKED` means a live driver, and is driven.** It narrows entry 27,
+which let `adopt` end a driver the liveness verdict called `PARKED`; that taking-over is
+withdrawn for `PARKED` and stands for a run the verdict calls undriven.
 
-**Why.** The verdict is read off journal silence: a driver not proved over on this host
-whose journal has been quiet past the threshold, with no decision outstanding. A live
-driver is quiet for legitimate reasons — a published-release wait re-surfaced on a
-cadence slowing to four hours, a pre-push gate running inside a publication for half an
-hour — and silence cannot tell those from a wedge. Read as undriven, such a run printed
-`PARKED: nothing is driving this run; adopt it or stop it`, ended `watch` as
-`nothing-driving`, and let `adopt` end the live driver: one adoption interrupted a
-merge-queued publication, and a run flapping between `PARKED` and `ACTIVE` cost a manager
-a two-hour misdiagnosis. Six runs reported it.
+**What was wrong.** The verdict read a run `PARKED` when its journal had been quiet past
+`ONEPIPELINE_PARKED_AFTER_SECONDS` — even while the driver its record names was alive on
+this host — and `DriverLiveness::is_undriven()` counted `PARKED` as undriven. So a live
+driver whose relay was blocked on a slow dispatch read `PARKED: nothing is driving this
+run; adopt it or stop it`, was offered to an `adopt` that ended its live work
+(onepipeline#526), and ended a watch `nothing-driving`; under the ending reading of
+entry 103 it would also have read as ended over a converged graph while its process still
+ran. The ticket's evidence is one live driver read `PARKED` at 18:08:44 and `ACTIVE` at
+18:16:33 with no event between, while `adopt` refused it as still driven. onepipeline-ui
+already read `PARKED` as a live driver gone quiet and not one an adoption may displace;
+the engine was the reader that disagreed.
 
-**What moved.** A `PARKED` run's `status <RUN> --json` reading has `driven` true and
-`ending` and `paused` both null, whatever its graph holds, so a run whose only node is
-parked behind a pending cancellation no longer reads `ENDED unfinished` while its driver
-waits on that cancellation. `status` and `runs` advise, under a `PARKED` run, that the
-driver pid still holds it, how long its journal has been quiet, and `stop` for a driver
-an operator judges wedged, and never `adopt`. `adopt` refuses it as it refuses an
-`ACTIVE` run, naming the live pid, and the polite ending entry 27 added is now reached
-only for a driver whose recorded stop has not yet seen it exit. `watch` ends
-`nothing-driving` only on a run turning `DRIVER DEAD`. `next` answers `running` rather
-than `finished` for a `PARKED` run.
+**What moved.** `is_undriven()` is true for `DriverDead` and `Undriven` only. `adopt`
+refuses a `PARKED` run as it refuses an `ACTIVE` one, naming the live driver's pid and
+its liveness word. `watch` reads the same verdict, so a run going from driving to parked
+never ends it `nothing-driving`. `status <RUN> --json` reports a `PARKED` run `driven:
+true` with `ending` and `paused` both `null`, whatever its graph holds. `status` and
+`runs` advice under `PARKED` names the live pid and how long the journal has been quiet,
+and offers `stop` for a driver the operator judges wedged, never `adopt`. `DriverLiveness`
+and its words, `DRIVER DEAD`, a recorded stop, a driver proved over, and the threshold
+variable are unchanged; the contract's driver and views paragraphs state the narrowed
+meaning.
 
 **What this build does.** `tests/e2e/driver.rs`'s
-`a_live_driver_that_has_stopped_writing_reads_as_parked_and_still_driven` and
-`a_watch_armed_on_an_active_run_does_not_end_nothing_driving_when_it_turns_parked` hold
-the readings, the advice, the refused adoption and the watch over a held dispatch;
-`tests/e2e/adoption.rs`'s
-`a_run_held_only_on_a_published_release_reads_parked_and_still_driven` holds them over a
-run whose only remaining node waits on a published release; and
-`tests/e2e/cancellation.rs`'s
-`an_adoption_ends_a_cancellation_the_driver_it_replaced_was_waiting_on` holds the reading
-over a run whose every node has settled. A journey that hands a run to a fresh driver now
-ends the old one outright first, through `harness::end_driver`.
+`a_live_driver_that_has_stopped_writing_reads_parked_driven_and_not_adoptable` reads one
+live, quiet run through `status`, `runs`, `status --json` and a refused `adopt`;
+`tests/e2e/cancellation.rs`'s `an_adoption_ends_a_cancellation_the_driver_it_replaced_was_waiting_on`
+reads the same over a graph whose only node has settled; and `tests/e2e/watch.rs`'s
+`a_driver_that_goes_quiet_during_the_wait_does_not_end_it_nothing_driving` arms a watch on
+an `ACTIVE` run and holds it past the run turning `PARKED`. A journey that needs a live
+driver's run taken over now ends that driver by pid first, as a crash or a `stop` would.

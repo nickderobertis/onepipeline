@@ -20,10 +20,11 @@
 // journeys are about. `dispatch.rs` drives the same cancellation through the *real*
 // sibling. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{
-    a_parked_run_is_read_as_driven, agent, end_driver, plan_of, until_parked, World,
-    CANCEL_GRACE_ENV, REFUSED,
-};
+use crate::harness::{agent, plan_of, World, CANCEL_GRACE_ENV, REFUSED};
+// The crate's own constant, because `views` is part of the published surface:
+// the threshold a run is reported parked past is what makes that verdict
+// reachable inside a test's patience, and a copy here could go stale silently.
+use onepipeline::views::PARKED_AFTER_ENV;
 use serde_json::{json, Value};
 
 /// A deadline short enough for a journey to wait through.
@@ -510,6 +511,13 @@ fn a_node_whose_cancellation_is_still_in_flight_renders_as_cancelling() {
 /// converging on for as long as the run exists, which is the same lie the
 /// rendering was added to stop telling.
 ///
+/// Before that, the driver is alive and waiting, and quiet: the graph's only
+/// node is parked, with the dispatch it is cancelling still in flight, and the
+/// run reads `PARKED`, still driven, neither ended nor paused, and an `adopt`
+/// refuses it. Only a driver this host has proved gone is taken over. A quiet
+/// driver over a graph whose every node has *settled* is
+/// `driver::a_live_driver_quiet_over_a_settled_graph_reads_parked_driven_and_not_ended`.
+///
 /// The park itself is the planner's own idle and outlives any driver: what the
 /// node comes back through is still a `requeue`, and it is accepted here for the
 /// ordinary reason — nothing is in flight for the node any more.
@@ -528,15 +536,32 @@ fn an_adoption_ends_a_cancellation_the_driver_it_replaced_was_waiting_on() {
     });
 
     // The dispatch it is waiting on is held open and silent, so the driver has
-    // nothing left to write and goes quiet. Its only node is parked, so every
-    // node has settled — and the run is still driven, by the live driver waiting
-    // on that dispatch: it reads `PARKED`, with neither an ending nor a pause,
-    // and an adoption is refused rather than ending the wait.
-    until_parked(&world, &run);
-    a_parked_run_is_read_as_driven(&world, &run);
+    // nothing left to write: a live driver gone quiet over a parked node.
+    let quiet = |argv: &[&str]| {
+        let mut command = world.cmd(argv);
+        command.env(PARKED_AFTER_ENV, "1");
+        world.run_on(command, &argv.join(" "))
+    };
+    world.until("the run to be reported parked", |_| {
+        quiet(&["status", &run, "--json"])
+            .stdout
+            .contains("\"liveness\":\"PARKED\"")
+    });
+    let reading = quiet(&["status", &run, "--json"]).json();
+    assert_eq!(reading["word"], "PARKED", "{reading}");
+    assert_eq!(reading["driven"], true, "{reading}");
+    assert_eq!(reading["ending"], Value::Null, "{reading}");
+    assert_eq!(reading["paused"], Value::Null, "{reading}");
+    let driver = &world.run_json(&run, "launch.json")["pid"];
+    quiet(&["adopt", &run]).exited(REFUSED).err_has(&format!(
+        "still being driven by driver pid {driver} (PARKED)"
+    ));
+    assert!(world.events_of(&run, "driver-adopted").is_empty());
 
-    // Only a driver that has gone leaves the run to an adoption.
-    end_driver(&world, &run);
+    // Its driver gone, nothing is driving the run, and it is taken over.
+    // Its only node parked, the fresh driver has nothing to move and returns
+    // `unattended`; what is under test is the adoption it journalled.
+    crate::harness::end_driver(&world, &run);
     world.run(&["adopt", &run]);
     assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
 

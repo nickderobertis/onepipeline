@@ -24,9 +24,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::harness::{
-    agent, end_driver, plan_of, project_id, World, CANCEL_GRACE_ENV, RENDEZVOUS_SECONDS_ENV,
-};
+use crate::harness::{agent, plan_of, project_id, World, CANCEL_GRACE_ENV, RENDEZVOUS_SECONDS_ENV};
 
 /// Entry 73's block, which is where the record's path is written down.
 fn proposed() -> Value {
@@ -245,9 +243,12 @@ fn edit(world: &World, run: &str, command: Value) {
         .exited(0);
 }
 
-/// End the run's quiet driver and adopt it, so a second driver projects the same run.
+/// End the run's driver and adopt it, so a second driver projects the same run.
+///
+/// Ended by pid, because a live driver that has merely gone quiet is still driving
+/// and an adoption refuses it.
 fn adopted(world: &World, run: &str) {
-    end_driver(world, run);
+    crate::harness::end_driver(world, run);
     world.run(&["adopt", run, "--detach"]).exited(0);
 }
 

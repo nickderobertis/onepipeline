@@ -4595,6 +4595,176 @@ pub fn end_process(pid: u32) {
     panic!("pid {pid} outlived the one ask no process can ignore");
 }
 
+/// End the driver a run's launch record names, and wait until it is gone: the
+/// state an adoption recovers from, and the one way a journey makes a run whose
+/// driver is alive into one nothing is driving.
+///
+/// A live driver that has merely gone quiet is `PARKED`, and still driving, so
+/// an adoption refuses it; a journey that needs the run taken over ends the
+/// driver first, as an operator's `stop` or a crash would.
+///
+/// Only ever **this run's own driver**: the pid the run's launch record names
+/// under this world's own runs root, holding that run's ownership lock, and —
+/// what tells it from a stranger handed the same pid — a process whose start
+/// this host reports with the very stamp the record was written with. A pid
+/// whose process started at any other moment is refused rather than signalled.
+/// Several suites share a host, and a pid that is not provably this run's driver
+/// belongs to somebody. What is left is the instant between that proof and the
+/// signal, inside which the driver would have to exit and its pid be reissued.
+pub fn end_driver(world: &World, run: &str) -> u32 {
+    let launch = world.run_json(run, "launch.json");
+    let pid_of = |record: &Value| {
+        record["pid"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
+    };
+    let pid =
+        pid_of(&launch).unwrap_or_else(|| panic!("the launch record of {run} names no driver"));
+    assert_eq!(
+        pid_of(&world.run_json(run, "owner.lock")),
+        Some(pid),
+        "the driver {run}'s launch record names is not the one holding its lock; \
+         refusing to end pid {pid}"
+    );
+    let started = launch["started"]
+        .as_str()
+        .filter(|started| !started.is_empty())
+        .unwrap_or_else(|| panic!("the launch record of {run} stamps no start for pid {pid}"));
+    assert_eq!(
+        start_stamp(pid).as_deref(),
+        Some(started),
+        "pid {pid} is not the process {run}'s launch record started; refusing to end it"
+    );
+    end_driver_process(pid);
+    pid
+}
+
+/// When the process at `pid` started, spelled the way the engine stamps a launch
+/// record, or nothing for no such process.
+///
+/// Linux reads field 22 of `/proc/<pid>/stat`, the start in clock ticks after
+/// boot, parsed from after the command's closing parenthesis because the command
+/// may itself hold one.
+#[cfg(target_os = "linux")]
+fn start_stamp(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let ticks = stat.rsplit_once(')')?.1.split_whitespace().nth(19)?;
+    Some(format!("linux-proc-stat:{}", ticks.parse::<u64>().ok()?))
+}
+
+/// The other Unix hosts have no procfs, and the engine stamps `ps`'s `lstart`,
+/// read in UTC under the C locale so the spelling does not follow the reader's.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn start_stamp(pid: u32) -> Option<String> {
+    let listed = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .env("TZ", "UTC")
+        .env("LC_ALL", "C")
+        .stderr(Stdio::null())
+        .output()
+        .expect("this host answers about its processes");
+    let answer = String::from_utf8_lossy(&listed.stdout).trim().to_string();
+    (listed.status.success() && !answer.is_empty()).then_some(answer)
+}
+
+/// Windows stamps the process's creation `FILETIME` as `high:low`.
+#[cfg(windows)]
+fn start_stamp(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: `OpenProcess` returns a null handle on failure and a handle this
+    // function closes on success; no borrowed memory crosses the boundary.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    let mut created = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut exited = created;
+    let mut kernel = created;
+    let mut user = created;
+    // SAFETY: `handle` is a live handle and every out-parameter is a `FILETIME`
+    // this frame owns for the duration of the call.
+    let read = unsafe {
+        GetProcessTimes(
+            handle,
+            &raw mut created,
+            &raw mut exited,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    };
+    // SAFETY: the handle came from `OpenProcess` above and is closed once.
+    unsafe { CloseHandle(handle) };
+    (read != 0).then(|| format!("{}:{}", created.dwHighDateTime, created.dwLowDateTime))
+}
+
+#[cfg(unix)]
+fn end_driver_process(pid: u32) {
+    end_process(pid);
+}
+
+/// The Windows spelling of [`end_process`], for a driver alone.
+///
+/// `taskkill /F` without `/T`: the driver and nothing under it, which is the
+/// state an adoption recovers from — a driver gone with its dispatches left in
+/// flight. Forcefully, because a console process ignores the polite ask (the
+/// crate's own `sys` says why). Which process that is, [`end_driver`] has
+/// already proved by its start.
+#[cfg(windows)]
+fn end_driver_process(pid: u32) {
+    let ended = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("this host ends a process it owns");
+    assert!(ended.success(), "taskkill could not end pid {pid}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        if listed_image(pid).is_none() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("pid {pid} outlived a forced taskkill");
+}
+
+/// The image name `tasklist` reports at `pid`, or nothing for no such process.
+///
+/// Read from the CSV form, whose first two fields are the image and the pid;
+/// the row is matched on the pid field itself, so the informational line
+/// `tasklist` prints when nothing matches is never read as a process. A listing
+/// that failed is refused rather than read as empty, because the wait above
+/// takes nothing at that pid as proof the driver has gone.
+#[cfg(windows)]
+fn listed_image(pid: u32) -> Option<String> {
+    let listing = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .expect("this host lists its processes");
+    assert!(
+        listing.status.success(),
+        "tasklist could not list pid {pid}: {}",
+        String::from_utf8_lossy(&listing.stderr)
+    );
+    let wanted = pid.to_string();
+    String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .find_map(|row| {
+            let mut fields = row
+                .split("\",\"")
+                .map(|field| field.trim().trim_matches('"'));
+            let image = fields.next()?;
+            (fields.next()? == wanted).then(|| image.to_string())
+        })
+}
+
 /// This host's own `ps`, found the way a shell finds it.
 ///
 /// Resolved here rather than written down, because it is `/bin/ps` on some hosts
@@ -6219,72 +6389,29 @@ pub fn a_parked_run_is_read_as_driven(world: &World, run: &str) {
     assert_eq!(reading["ending"], Value::Null, "{reading}");
     assert_eq!(reading["paused"], Value::Null, "{reading}");
 
-    // The advice is one line, read on its own: a held node's own line may well
+    // `onepipeline adopt` rather than `adopt`: a held node's own line may well
     // say `adoption`, which is a node's release policy and not this advice.
-    let status = with_parked(&["status", run]);
-    status.exited(0);
-    let advice = status
-        .stdout
-        .lines()
-        .find(|line| line.starts_with("  PARKED: "))
-        .unwrap_or_else(|| panic!("`status` gave a parked run no advice:\n{}", status.stdout));
-    for said in [
-        format!("driver pid {pid} still holds this run and its journal has been quiet for "),
-        format!("onepipeline stop {run}"),
-    ] {
+    for rendered in [with_parked(&["status", run]), with_parked(&["runs"])] {
+        rendered
+            .exited(0)
+            .out_has("PARKED")
+            .out_has(&format!("driver pid {pid} is alive"))
+            .out_has("its journal has been quiet for ")
+            .out_has(&format!("onepipeline stop {run}"));
         assert!(
-            advice.contains(&said),
-            "`status` advice does not say {said:?}:\n{}",
-            status.stdout
+            !rendered.stdout.contains("onepipeline adopt"),
+            "a parked run's advice invited an adoption of a live driver:\n{}",
+            rendered.stdout
         );
     }
-    assert!(
-        !advice.contains("onepipeline adopt"),
-        "`status` invited an adoption of a live driver:\n{}",
-        status.stdout
-    );
-    let runs = with_parked(&["runs"]);
-    runs.exited(0);
-    let row: Vec<&str> = runs
-        .stdout
-        .lines()
-        .skip_while(|line| {
-            !line
-                .trim_start_matches(['*', ' '])
-                .starts_with(&format!("{run} "))
-        })
-        .take(2)
-        .collect();
-    assert!(
-        row.first().is_some_and(|line| line.contains("PARKED")),
-        "`runs` did not read the run parked:\n{}",
-        runs.stdout
-    );
-    let advice = row.get(1).copied().unwrap_or_default();
-    for said in [
-        format!("PARKED — driver pid {pid} still holds this run"),
-        "quiet for ".to_owned(),
-        format!("onepipeline stop {run}"),
-    ] {
-        assert!(
-            advice.contains(&said),
-            "`runs` advice does not say {said:?}:\n{}",
-            runs.stdout
-        );
-    }
-    assert!(
-        !advice.contains("onepipeline adopt"),
-        "`runs` invited an adoption of a live driver:\n{}",
-        runs.stdout
-    );
 
     // Detached, so an adoption this build wrongly accepted returns rather than
     // driving the run to its end inside the journey.
     let adopt = with_parked(&["adopt", run, "--detach"]);
     adopt
         .exited(REFUSED)
-        .err_has(&format!("is still being driven by driver pid {pid}"))
-        .err_lacks("ending it to adopt the run");
+        .err_has(&format!("still being driven by driver pid {pid} (PARKED)"))
+        .err_has(&format!("onepipeline stop {run}"));
     assert!(
         world.events_of(run, "driver-adopted").is_empty(),
         "a refused adoption took the run over anyway"
@@ -6360,30 +6487,4 @@ pub fn a_watch_armed_active_outlasts_the_run_turning_parked(world: &World, run: 
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.status.code(), Some(WATCH_ELAPSED), "{last}");
-}
-
-/// End a run's driver outright and wait until it is gone, leaving what it started
-/// running — the state an adoption takes a run back from — and answer its pid.
-///
-/// Not `stop`, which records an ending the adoption would then be reading, and
-/// no longer by waiting for the run to read `PARKED`: a live driver gone quiet is
-/// still driving its run, and `adopt` refuses it. Forcefully on both platforms,
-/// and on Windows without `/T`, so the tree it started outlives it there too.
-pub fn end_driver(world: &World, run: &str) -> u32 {
-    let pid = world.run_json(run, "launch.json")["pid"]
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
-        .expect("the launch record names the driver");
-    #[cfg(unix)]
-    end_process(pid);
-    #[cfg(windows)]
-    {
-        Command::new("taskkill")
-            .args(["/F", "/PID", &pid.to_string()])
-            .stdout(Stdio::null())
-            .status()
-            .expect("this host ends a process it owns");
-        world.until("the driver to be gone", |_| process_ended(pid));
-    }
-    pid
 }
