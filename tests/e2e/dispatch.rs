@@ -1870,14 +1870,14 @@ fn transcript_renders_a_real_dispatched_turns_tools_and_words() {
     assert!(
         from_the_store
             .lines()
-            .any(|line| line == "    tool_result   the turn ran"),
+            .any(|line| line == "    tool_result bash  the turn ran"),
         "what the tool returned is a blank column in the store's own summaries:\n{}",
         transcript.stdout
     );
     assert!(
         from_the_report
             .lines()
-            .any(|line| line == "      tool_result   the turn ran"),
+            .any(|line| line == "      tool_result bash  the turn ran"),
         "what the tool returned is a blank column in the retained report:\n{}",
         transcript.stdout
     );
@@ -1997,7 +1997,7 @@ fn the_views_show_what_a_dispatched_agent_said_and_thought_apart_from_its_tools(
         for expected in [
             format!("{indent}(thinking) {THOUGHT}"),
             format!("{indent}tool_call bash  {input}"),
-            format!("{indent}tool_result   the turn ran"),
+            format!("{indent}tool_result bash  the turn ran"),
             format!("{indent}› {SAID}"),
         ] {
             assert!(

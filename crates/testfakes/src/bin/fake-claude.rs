@@ -484,7 +484,7 @@ fn tool_call(index: u64, command: &str) {
 ///
 /// It carries **no tool name**, which is the shape rather than an omission: a
 /// result answers a call already named, so `oneharness_core` normalizes it to an
-/// event whose `name` is absent and whose `output` is what came back.
+/// event named after that call, whose `output` is what came back.
 // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same provider wire shape
 // as `tool_call` above, gated the same way: the real `oneharness_core` normalizes these
 // lines, so a shape it stops reading is `tests/e2e/turns.rs` finding a dispatch that
