@@ -864,10 +864,76 @@ fn the_contract_names_the_producers_words_for_a_chain_that_stopped() {
     }
 }
 
-/// The committed event bundle is the one this build generates from its own
-/// vocabulary, through the bus's own bundle type: a change to the envelope, the
-/// filter, the artifact reference or the labels that is not regenerated here
-/// fails, and so does a hand edit.
+/// Every way `committed` departs from the compiled-in registry, one line each:
+/// an id [`events_bundle_ids`] lists or a pipeline kind registers that it does
+/// not carry, an id it carries that neither names, ids out of
+/// [`events_bundle_ids`]'s order, and a document other than the one
+/// `onepipeline::payload::registry` holds for its id. Empty when the two agree
+/// on every id and every document.
+///
+/// [`events_bundle_ids`]: onepipeline::vocabulary::events_bundle_ids
+fn events_bundle_departures(committed: &str) -> Vec<String> {
+    use onepipeline::event::PIPELINE_KINDS;
+    use onepipeline::payload::{registry, schema_of};
+    use onepipeline::vocabulary::events_bundle_ids;
+    let bundle = match onemessagebus::SchemaBundle::from_json(committed) {
+        Ok(bundle) => bundle,
+        Err(why) => return vec![format!("the bus does not read the document: {why}")],
+    };
+    let registry = registry();
+    let expected: Vec<String> = events_bundle_ids()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let pipeline: Vec<String> = PIPELINE_KINDS
+        .iter()
+        .map(|kind| schema_of(*kind).to_string())
+        .filter(|id| !expected.contains(id))
+        .collect();
+    let carried: Vec<String> = bundle
+        .schemas()
+        .iter()
+        .map(|document| document.id.to_string())
+        .collect();
+    let mut found = Vec::new();
+    for id in expected.iter().chain(&pipeline) {
+        if !carried.contains(id) {
+            found.push(format!("{id} is registered but not published"));
+        }
+    }
+    for id in &carried {
+        if !expected.contains(id) {
+            found.push(format!(
+                "{id} is published but is not one of the bundle's ids"
+            ));
+        }
+    }
+    if found.is_empty() && carried != expected {
+        found.push(format!(
+            "the bundle lists its ids out of order: {carried:?}, not {expected:?}"
+        ));
+    }
+    for document in bundle.schemas() {
+        match registry.schema(&document.id) {
+            Some(held) if *held == document.schema => {}
+            Some(_) => found.push(format!(
+                "{} is published under a document the registry does not hold for it",
+                document.id
+            )),
+            None => found.push(format!(
+                "{} is not in the compiled-in registry",
+                document.id
+            )),
+        }
+    }
+    found
+}
+
+/// The committed event bundle is the one this build generates from its
+/// compiled-in registry, through the bus's own bundle type: it carries the five
+/// event-vocabulary ids and every registered pipeline payload, each under the
+/// document the registry holds for it, so a change to a type that is not
+/// regenerated here fails, and so does a hand edit.
 ///
 /// `ONEPIPELINE_WRITE_EVENTS_BUNDLE=1` writes the generated document in place of
 /// the committed one instead — how it is regenerated, and never set by a check.
@@ -890,13 +956,19 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
     }
     let committed = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("{EVENTS_BUNDLE_PATH} is committed: {error}"));
+    let regenerate = "If the vocabulary changed on purpose, raise `EVENTS_BUNDLE_VERSION` and \
+         regenerate it with `ONEPIPELINE_WRITE_EVENTS_BUNDLE=1 cargo test --test contract \
+         the_committed_events_bundle_is_the_compiled_in_vocabulary`; never edit it by hand.";
+    let departures = events_bundle_departures(&committed);
+    assert!(
+        departures.is_empty(),
+        "{EVENTS_BUNDLE_PATH} departs from the compiled-in registry:\n{}\n{regenerate}",
+        departures.join("\n")
+    );
     assert!(
         committed == generated,
-        "{EVENTS_BUNDLE_PATH} is not what the compiled-in vocabulary generates. If the \
-         vocabulary changed on purpose, raise `EVENTS_BUNDLE_VERSION` and regenerate it with \
-         `ONEPIPELINE_WRITE_EVENTS_BUNDLE=1 cargo test --test contract \
-         the_committed_events_bundle_is_the_compiled_in_vocabulary`; never edit it by \
-         hand.\n--- committed\n{committed}\n--- generated\n{generated}"
+        "{EVENTS_BUNDLE_PATH} is not what the compiled-in vocabulary generates. \
+         {regenerate}\n--- committed\n{committed}\n--- generated\n{generated}"
     );
 
     let bundle =
@@ -907,16 +979,28 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         .iter()
         .map(|document| document.id.to_string())
         .collect();
+    let vocabulary = [
+        "agent.event-envelope@1",
+        "agent.event-envelope@2",
+        "agent.event-filter@1",
+        "agent.artifact-ref@1",
+        "agent.labels@1",
+    ];
     assert_eq!(
-        carried,
-        [
-            "agent.event-envelope@1",
-            "agent.event-envelope@2",
-            "agent.event-filter@1",
-            "agent.artifact-ref@1",
-            "agent.labels@1",
-        ],
-        "the bundle no longer publishes exactly the five ids this crate owns"
+        carried[..vocabulary.len()],
+        vocabulary,
+        "the bundle no longer leads with exactly the five vocabulary ids this crate owns"
+    );
+    assert_eq!(
+        carried[vocabulary.len()..].len(),
+        onepipeline::event::PIPELINE_KINDS.len(),
+        "the bundle does not publish one payload per pipeline kind"
+    );
+    assert!(
+        carried[vocabulary.len()..]
+            .iter()
+            .all(|id| id.starts_with("agent.pipeline.") && id.ends_with("@2")),
+        "a pipeline payload is published outside `agent.pipeline.<kind>@2`: {carried:?}"
     );
     assert_eq!(
         carried,
@@ -937,9 +1021,13 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         EVENTS_BUNDLE_VERSION,
         "SchemaBundle",
         "onepipeline::vocabulary",
+        "PIPELINE_KINDS",
+        "agent.pipeline.<kind>@2",
+        "onepipeline::payload::registry",
+        "onepipeline::payload::schema_of",
     ]
     .into_iter()
-    .chain(carried.iter().map(String::as_str))
+    .chain(vocabulary)
     {
         assert!(
             named.contains(word),
@@ -947,7 +1035,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         );
     }
     assert!(
-        passage.contains("compiled-in vocabulary is its one source"),
+        passage.contains("compiled-in registry is its one source"),
         "the paragraph does not say where the bundle comes from: {passage}"
     );
 
@@ -956,6 +1044,59 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
     assert!(
         !onepipeline::channel::layout::bundle_json().contains("\"agent.event-envelope@2\""),
         "the planner-channel bundle now publishes the event ids too"
+    );
+}
+
+/// The drift gate's comparison refuses the committed bundle with one pipeline
+/// payload's entry taken out, with a vocabulary entry taken out, and with one
+/// entry's document edited, naming the id each time.
+#[test]
+fn the_events_bundle_gate_refuses_a_missing_or_edited_pipeline_payload() {
+    use onepipeline::vocabulary::EVENTS_BUNDLE_PATH;
+    let committed = std::fs::read_to_string(repo_root().join(EVENTS_BUNDLE_PATH))
+        .expect("the bundle is committed");
+    let document: serde_json::Value = serde_json::from_str(&committed).expect("JSON");
+    let deferred = "agent.pipeline.concurrent-deferred@2";
+    let position = document["schemas"]
+        .as_array()
+        .expect("a schema list")
+        .iter()
+        .position(|entry| entry["id"] == deferred)
+        .expect("the committed bundle publishes concurrent-deferred");
+
+    let mut removed = document.clone();
+    removed["schemas"]
+        .as_array_mut()
+        .expect("a schema list")
+        .remove(position);
+    let departures = events_bundle_departures(&removed.to_string());
+    assert!(
+        departures
+            .iter()
+            .any(|line| *line == format!("{deferred} is registered but not published")),
+        "a missing {deferred} entry was not refused: {departures:?}"
+    );
+
+    let mut unlabelled = document.clone();
+    unlabelled["schemas"]
+        .as_array_mut()
+        .expect("a schema list")
+        .retain(|entry| entry["id"] != "agent.labels@1");
+    assert_eq!(
+        events_bundle_departures(&unlabelled.to_string()),
+        ["agent.labels@1 is registered but not published"],
+        "a missing vocabulary entry was not refused"
+    );
+
+    let mut edited = document;
+    edited["schemas"][position]["schema"]["required"] = serde_json::json!(["launching"]);
+    let departures = events_bundle_departures(&edited.to_string());
+    assert_eq!(
+        departures,
+        [format!(
+            "{deferred} is published under a document the registry does not hold for it"
+        )],
+        "an edited {deferred} document was not refused alone"
     );
 }
 
