@@ -11,6 +11,7 @@ if "%~1"=="break-streams" goto breakstreams
 if "%~1"=="append-future-event" goto appendfuture
 if "%~1"=="append-foreign-source-event" goto appendforeignsource
 if "%~1"=="missing-prerequisite" goto missingprerequisite
+if "%~1"=="commit-in-fixture" goto commitinfixture
 call :fail "unknown command '%~1'"
 exit /b 64
 
@@ -131,6 +132,36 @@ if not "%~2"=="" (
 echo onevcs: host-prerequisite: release-plz is not on PATH; install it with cargo install release-plz and retry the node 1>&2
 exit /b 1
 
+rem A repository's hook testing against a scratch repository of its own, unsetting
+rem nothing git exported to it; `hook.sh` says why neither `-C` nor an unset is used.
+:commitinfixture
+if "%~2"=="" (
+  call :fail "commit-in-fixture takes the fixture directory"
+  exit /b 64
+)
+call :argcount %*
+if not "!argc!"=="2" (
+  call :fail "commit-in-fixture takes the fixture directory, and nothing else"
+  exit /b 64
+)
+if not exist "%~2\" mkdir "%~2"
+cd /d "%~2"
+if errorlevel 1 (
+  echo pre-push: cannot make or enter the fixture directory %~2; check that its parent exists and is writable 1>&2
+  exit /b 1
+)
+git init -q
+if errorlevel 1 (
+  echo pre-push: git init refused in the fixture %~2; run git rev-parse --absolute-git-dir there to see which repository git resolved, and unset any GIT_DIR or GIT_WORK_TREE that names another 1>&2
+  exit /b 1
+)
+git -c user.name=fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m "fixture: committed by the pre-push hook"
+if errorlevel 1 (
+  echo pre-push: git commit refused in the fixture %~2; run git rev-parse --absolute-git-dir there to see which repository git resolved, and unset any GIT_DIR or GIT_WORK_TREE that names another 1>&2
+  exit /b 1
+)
+exit /b 0
+
 rem How long `wait-for` waits for its rendezvous before it refuses the push, and
 rem the environment variable that carries it — both in `hook.sh`, with why the
 rem wait is bounded and why a value it does not accept is refused rather than
@@ -216,9 +247,19 @@ goto streamloop
 set "stream="
 exit /b 1
 
+rem How many arguments the verb was given, left in `argc`, counting an empty quoted
+rem one too: `takes` in `hook.sh` is the same count.
+:argcount
+set "argc=0"
+:argcountloop
+if [%1]==[] goto :eof
+set /a "argc+=1"
+shift
+goto argcountloop
+
 :fail
 echo pre-push: %~1 1>&2
-echo pre-push: the verbs are: wait-for PATH ^| break-streams ^| append-future-event ^| append-foreign-source-event ^| missing-prerequisite 1>&2
+echo pre-push: the verbs are: wait-for PATH ^| break-streams ^| append-future-event ^| append-foreign-source-event ^| missing-prerequisite ^| commit-in-fixture DIR 1>&2
 goto :eof
 
 rem A verb that could not do what it names — the host's fault rather than the
