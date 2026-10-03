@@ -137,6 +137,35 @@ fn accepted(world: &World, run: &str) -> u64 {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// How long a driver's counts must hold still before a window over it opens.
+const QUIET: Duration = Duration::from_secs(5);
+
+/// The runs' counts, read once each run's driver has stopped working.
+///
+/// A run's last record is not its driver's last pass: the pass that follows it
+/// re-derives the graph and publishes the board, and on a loaded Windows runner a
+/// large run's took long enough to land inside the window after a fixed two
+/// seconds — one refold of a 4,187-record journal, read as an idle pass growing
+/// with the run. So the window opens once every count has held still for
+/// [`QUIET`]. The wait is bounded by one [`WINDOW`] and never fails on its own: a
+/// driver that does not go quiet is the defect these journeys catch, and it is
+/// left to their assertions to name.
+fn quiet_counts(world: &World, runs: &[&str]) -> Vec<Counts> {
+    let read = || -> Vec<Counts> { runs.iter().map(|run| counts(world, run)).collect() };
+    let deadline = Instant::now() + WINDOW;
+    let mut last = read();
+    let mut since = Instant::now();
+    while since.elapsed() < QUIET && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(250));
+        let now = read();
+        if now != last {
+            last = now;
+            since = Instant::now();
+        }
+    }
+    last
+}
+
 /// The one record of this kind for this node, for a latency measured off two.
 fn one(world: &World, run: &str, kind: &str, node: &str) -> Value {
     let found: Vec<Value> = world
@@ -287,7 +316,7 @@ fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
             .count()
             == 99
     });
-    std::thread::sleep(Duration::from_secs(2));
+    let before = quiet_counts(&world, &["small", "large"]);
 
     let sizes: Vec<usize> = ["small", "large"]
         .iter()
@@ -298,10 +327,6 @@ fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
         "the two runs are not orders of magnitude apart: {sizes:?}"
     );
 
-    let before: Vec<Counts> = ["small", "large"]
-        .iter()
-        .map(|run| counts(&world, run))
-        .collect();
     std::thread::sleep(WINDOW);
     let did: Vec<Counts> = ["small", "large"]
         .iter()
