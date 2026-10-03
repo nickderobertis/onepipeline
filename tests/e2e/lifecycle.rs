@@ -82,6 +82,17 @@ fn published_locally(world: &World) -> Repository {
     world.repository("local-direct", &[])
 }
 
+/// The commit `onevcs` recorded `node`'s change landing at, off the
+/// `merge-completed` its publication wrote to the run's merged stream.
+fn landed_commit(world: &World, run: &str, node: &str) -> String {
+    world
+        .events_of(run, "merge-completed")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == node)
+        .and_then(|event| event["payload"]["sha"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| panic!("{node}'s publication recorded no landing\n{}", world.dump()))
+}
+
 /// A `pre-push` hook a repository can be given, for a journey that needs its
 /// merge path to do something other than let the push through — and to be done
 /// with it by the time git returns.
@@ -6036,13 +6047,21 @@ fn a_dispatch_that_died_rather_than_failing_its_task_settles_naming_what_killed_
     );
 
     // And a manager reads all of it without opening the store: what killed the
-    // dispatch, that the branch may carry finished work, and which commit to read.
-    let said = format!(
-        "the dispatch died (rate_limit) rather than failing its task; {branch} may carry \
-         finished work, at {head}"
-    );
-    world.run(&["results", &run]).exited(0).out_has(&said);
-    world.run(&["status", &run]).exited(0).out_has(&said);
+    // dispatch, and that its work already landed — on which base, at which
+    // commit — so nothing is left to recover. The commit is the sibling's own
+    // record of the landing, read off the run's merged stream.
+    let landed = landed_commit(&world, &run, "service");
+    let said = format!("the dispatch died (rate_limit) after its work landed on main at {landed}");
+    for view in ["results", "status"] {
+        let read = world.run(&[view, &run]);
+        read.exited(0).out_has(&said);
+        // The branch the landing retired is offered to nobody as recoverable.
+        assert!(
+            !read.stdout.contains("may carry finished work"),
+            "`{view}` sent a manager to recover work that already landed:\n{}",
+            read.stdout
+        );
+    }
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
@@ -6151,10 +6170,12 @@ fn a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_
     );
 
     // And a manager tells the two apart in both views a run is read through,
-    // without opening the journal the death was published on.
+    // without opening the journal the death was published on. The worker
+    // published before its provider went, so the line names the landing rather
+    // than the branch the landing retired.
+    let landed = landed_commit(&world, &run, "service");
     let said = format!(
-        "the provider killed the dispatch (quota), so nothing here is the work's fault; \
-         {branch} may carry finished work, at {head}"
+        "the provider killed the dispatch (quota) after its work landed on main at {landed}"
     );
     for view in ["results", "status"] {
         let read = world.run(&[view, &run]);
@@ -6162,6 +6183,11 @@ fn a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_
         assert!(
             !read.stdout.contains("task-failed"),
             "`{view}` reported a dispatch that died as a task its agent failed:\n{}",
+            read.stdout
+        );
+        assert!(
+            !read.stdout.contains("may carry finished work"),
+            "`{view}` sent a manager to recover work that already landed:\n{}",
             read.stdout
         );
     }

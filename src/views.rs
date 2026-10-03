@@ -2687,6 +2687,13 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
 /// the commit, which is the half that otherwise has to be dug out of the run's
 /// journal by hand.
 ///
+/// Except where the run's own records say that branch is no place to look. A
+/// dispatch can die after its own publication landed, and then the landing is
+/// the answer — named on its base at its landed commit, and no branch offered as
+/// recoverable, because the work is already where it was going. And a branch an
+/// idle pass retired as holding nothing beyond its base no longer exists, so it
+/// is named as retired rather than as somewhere finished work might be.
+///
 /// It says **may**, deliberately. This crate cannot tell a worker's prose report
 /// from a gate verdict, and a sentence that was sometimes wrong about "the gate
 /// passed" would be worse than no sentence at all. So it points at the branch and
@@ -2712,7 +2719,29 @@ fn death_phrase(state: &RunState, id: &str, branch: Option<&str>) -> Option<Stri
         // an unwrap. Held by this module's unit test instead, which folds that record.
         None => String::new(),
     };
+    let provider = word == crate::engine::PROVIDER_FAILED;
+    // Its work already reached the base, so there is nothing to recover: the
+    // landing is what a reader is pointed at, whether or not the branch that
+    // carried it still exists. Said without "rather than failing its task",
+    // because a node whose work landed is not one anybody wonders that about.
+    if let Some(landed) = state.landing_commits.get(id) {
+        let opening = if provider {
+            format!("the provider killed the dispatch{classified}")
+        } else {
+            format!("the dispatch died{classified}")
+        };
+        return Some(format!(
+            "{opening} after its work landed on {} at {landed}",
+            base_of(state, id)
+        ));
+    }
     let where_the_work_is = match (branch, state.heads.get(id)) {
+        // A pass retired it as holding nothing beyond its base, so the branch
+        // is gone and there is nothing on it to recover.
+        (Some(branch), _) if state.retired_branches.contains(branch) => format!(
+            "{branch} was retired as holding no work beyond {}",
+            base_of(state, id)
+        ),
         (Some(branch), Some(head)) => {
             format!("{branch} may carry finished work, at {head}")
         }
@@ -2725,13 +2754,37 @@ fn death_phrase(state: &RunState, id: &str, branch: Option<&str>) -> Option<Stri
     // The provider death says what it was rather than what it was not, because
     // that is the reading `task-failed` used to deny it: nothing was wrong with
     // the work, so "rather than failing its task" is not the contrast to draw.
-    let how = if word == crate::engine::PROVIDER_FAILED {
+    let how = if provider {
         format!("the provider killed the dispatch{classified}, so nothing here is the work's fault")
     } else {
         format!("the dispatch died{classified} rather than failing its task")
     };
     Some(format!("{how}; {where_the_work_is}"))
 }
+
+/// The base a node's work is merged with: the one `onevcs` named for it, else
+/// the one its plan names, else the words for one nobody recorded.
+//
+// llmlint: ignore-block[changed_behavior_has_e2e] the two fallbacks are unreachable from any
+// invocation of this build: every lifecycle dispatch opens its session before it can land or
+// leave a branch, and `onevcs` names the base on every `session-opened`, which the fold records.
+// A died node without one is a journal an older build wrote or a person edited, so this
+// module's `a_died_dispatch_names_its_landing_and_its_retirement_against_the_base_it_has`
+// folds those records instead; the journeys hold the base the session names.
+fn base_of(state: &RunState, id: &str) -> String {
+    state
+        .bases
+        .get(id)
+        .cloned()
+        .or_else(|| {
+            state
+                .graph
+                .get(id)
+                .and_then(|node| node.base_branch.clone())
+        })
+        .unwrap_or_else(|| "its base".to_owned())
+}
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// How long a node's cancellation has been waiting on the dispatch it asked to
 /// stop, when one is still out there — see [`Recorded::cancelling_since`].
@@ -5784,6 +5837,105 @@ mod tests {
             standing.contains("the dispatch died (rate_limit) rather than failing its task"),
             "{standing}"
         );
+    }
+
+    /// Where the run recorded no base for a died dispatch's work, its landing and
+    /// its retirement are named against the base its plan states, or else against
+    /// "its base" — never against a base nobody named.
+    ///
+    /// The journeys reach the base `onevcs` names on the session's stream; these
+    /// are the records that carry none: a change-request landing names no base,
+    /// and a node whose session record was lost still names the one it asked for.
+    /// The provider death keeps its own opening in both forms.
+    #[test]
+    fn a_died_dispatch_names_its_landing_and_its_retirement_against_the_base_it_has() {
+        let root = scratch("died-bases");
+        let landed = "e".repeat(40);
+        let died = |node: &str, outcome: &str, branch: &str| {
+            event(
+                crate::journal::PipelineKind::NodeSettled,
+                Some(node),
+                &[
+                    ("status", json!("failed")),
+                    ("outcome", json!(outcome)),
+                    ("cause", json!("quota")),
+                    ("branch", json!(branch)),
+                ],
+            )
+        };
+        let mut plan = plan();
+        for (id, base) in [
+            ("landed", None),
+            ("planned", Some("develop")),
+            ("provider", None),
+        ] {
+            plan.tasks.push(Node {
+                id: id.into(),
+                task: Some("## What\ndo it".into()),
+                base_branch: base.map(str::to_owned),
+                ..Node::default()
+            });
+        }
+        let retired = |branch: &str| {
+            json!({
+                "identity": "github.com/owner/service",
+                "branch": branch,
+                "class": "retirable",
+                "proof": {"kind": "content-identical", "base_commit": "f".repeat(40)},
+                "trigger": "pass",
+            })
+        };
+        write_run(
+            &root,
+            "died",
+            sys::pid(),
+            &[
+                event(
+                    crate::journal::PipelineKind::RunStarted,
+                    None,
+                    &[("plan", json!(plan))],
+                ),
+                relayed(
+                    EventKind("merge-completed".into()),
+                    Source::Vcs,
+                    Some("landed"),
+                    &[("sha", json!(landed))],
+                ),
+                died("landed", crate::engine::DISPATCH_DIED, "b/landed"),
+                died("planned", crate::engine::DISPATCH_DIED, "b/planned"),
+                died("provider", crate::engine::PROVIDER_FAILED, "b/provider"),
+                event(
+                    crate::journal::PipelineKind::BranchesRetired,
+                    None,
+                    &[
+                        (
+                            "retired",
+                            json!([retired("b/planned"), retired("b/provider")]),
+                        ),
+                        ("failed", json!([])),
+                    ],
+                ),
+            ],
+        );
+
+        let survey = Survey::of(&root);
+        let rendered = results(&survey.views[0]);
+        for said in [
+            format!("the dispatch died (quota) after its work landed on its base at {landed}"),
+            "the dispatch died (quota) rather than failing its task; b/planned was retired as \
+             holding no work beyond develop"
+                .to_owned(),
+            "the provider killed the dispatch (quota), so nothing here is the work's fault; \
+             b/provider was retired as holding no work beyond its base"
+                .to_owned(),
+        ] {
+            assert!(rendered.contains(&said), "{said:?} is not in:{rendered}");
+        }
+        assert!(
+            !rendered.contains("may carry finished work"),
+            "a landed or retired branch was offered as recoverable:{rendered}"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// A node that failed says which chain **ran out** and which merely fell
