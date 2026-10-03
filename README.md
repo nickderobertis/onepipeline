@@ -314,7 +314,12 @@ hook itself, on the one line beginning with `onevcs`'s host-prerequisite marker 
 not re-dispatched at all, because no edit to the tree installs anything on the host:
 it settles `failed` under `infrastructure-failure`, the word the dispatch layer
 already uses for a host that could not launch a dispatch, carrying the preserved
-branch, the commit it stands at, and the hook's own remediation. Everything else settles
+branch, the commit it stands at, and the hook's own remediation. A `cancel`, `drop` or
+`retry` of the node **interrupts the publication** wherever it is waiting — on the host's
+checks, on a merge, or on the merge queue — rather than leaving it to the watch's bound:
+the node settles `cancelled` with its branch on the remote, any change request open, and
+its session released, and a `retry`'s replacement is dispatched only once that has
+happened, so it continues the same branch in a session nothing else holds. Everything else settles
 `publication-failed` as it always
 did and is not retried: the repository's own gate, a request refused at a trust
 boundary, and a seam with no implementation behind it all answer the same way

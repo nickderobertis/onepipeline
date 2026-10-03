@@ -1324,8 +1324,9 @@ impl Adopted {
 ///
 /// Both refuse for the same reasons and refuse here, before anything is
 /// written: a run another session owns ([`Error::NotOwned`]), and a run
-/// something is still driving. A run the liveness verdict has called undriven is
-/// taken over, ending the parked driver politely first.
+/// something is still driving — `PARKED` among them, a live driver gone quiet. A
+/// run the liveness verdict has called undriven is taken over, ending a driver a
+/// recorded stop names politely first.
 ///
 /// # Errors
 ///

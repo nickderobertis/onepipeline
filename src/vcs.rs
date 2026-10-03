@@ -204,12 +204,20 @@ pub(crate) fn session_open_exhausted(error: &Error) -> bool {
 /// it is *not* is a node's `task`: that is the brief its agent was given, not a
 /// description of what the branch turned out to hold, so a body is one that was
 /// drafted from the diff or there is none.
+///
+/// `cancel` is the node's own token, asked by every phase of the publication that
+/// waits — the host's checks, a merge the host was armed to perform, the
+/// identity's merge queue — so a `cancel`, `drop` or `retry` of the node ends the
+/// watch rather than waiting out its bound. A publication it stops answers
+/// [`PublishOutcome::Failed`] of kind [`onevcs::FailureKind::Cancelled`], with the
+/// branch on its remote and any change request open.
 pub fn publish(
     token: &SessionToken,
     policy: Option<MergePolicy>,
     title: Option<&str>,
     body: Option<&str>,
     draft: Option<&DraftReason>,
+    cancel: &crate::executor::CancellationToken,
 ) -> std::result::Result<Publication, PublishRefused> {
     let title = title
         .map(|title| title.parse::<Subject>().map_err(sibling))
@@ -223,7 +231,7 @@ pub fn publish(
             .checked()
             .map_err(|error| PublishRefused::Refused(refusal(error)))?;
     }
-    onevcs::publish(
+    onevcs::publish_with_cancellation(
         &providers(),
         token,
         &PublishRequest {
@@ -232,8 +240,22 @@ pub fn publish(
             body: body.map(str::to_owned),
             draft: draft.cloned(),
         },
+        &NodeCancellation(cancel),
     )
     .map_err(publication_refusal)
+}
+
+/// The node's cancellation, as the publication watch asks it.
+///
+/// A wrapper rather than an implementation on the token itself: the token is the
+/// executor seam's public type, and the sibling's trait implemented on it would
+/// publish a promise the contract does not make.
+struct NodeCancellation<'a>(&'a crate::executor::CancellationToken);
+
+impl onevcs::PublicationCancellation for NodeCancellation<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
 }
 
 /// A publication call `onevcs` did not answer with a publication.
@@ -447,6 +469,12 @@ pub enum Failure {
     /// tree as it stands all answer the same way however many times they are
     /// asked. It settles under [`Failure::RESIDUAL`].
     Terminal,
+    /// The node's own `cancel`, `drop` or `retry` stopped the publication while
+    /// it waited. Nothing rejected the tree and nothing was undone — the branch
+    /// is on its remote and any change request is open — so it is neither sent
+    /// back to a worker nor reported as a failure: the node settles
+    /// [`Failure::CANCELLED`], the status every stopped dispatch settles under.
+    Cancelled,
 }
 
 impl Failure {
@@ -475,6 +503,13 @@ impl Failure {
     /// names both sharings rather than letting a third arrive unnoticed.
     pub const HOST: &'static str = crate::engine::INFRASTRUCTURE_FAILURE;
 
+    /// The word a publication its node's cancellation stopped settles on.
+    ///
+    /// The **status** a stopped dispatch settles under rather than an outcome of
+    /// its own: the stop is the node's, not the publication's, and a reader of a
+    /// node a `cancel` interrupted reads the same word wherever it was stopped.
+    pub const CANCELLED: &'static str = "cancelled";
+
     /// The word the node settles on.
     #[must_use]
     pub fn outcome(self) -> &'static str {
@@ -483,6 +518,7 @@ impl Failure {
             Self::Unread => Self::UNREAD,
             Self::HostPrerequisite => Self::HOST,
             Self::Terminal => Self::RESIDUAL,
+            Self::Cancelled => Self::CANCELLED,
         }
     }
 }
@@ -518,6 +554,10 @@ pub fn failure_of(kind: onevcs::FailureKind) -> Failure {
         // other two, on the reading the kind was written for: a verdict on the
         // tree as it stands, which nothing this crate can do from here changes.
         FailureKind::Gate | FailureKind::Invalid | FailureKind::NotImplemented => Failure::Terminal,
+        // The node's own token stopped the watch, which is a decision about the
+        // node rather than a verdict on its tree: re-dispatching it would undo
+        // the stop, and settling it failed would report a failure nobody judged.
+        FailureKind::Cancelled => Failure::Cancelled,
     }
 }
 
@@ -2306,6 +2346,7 @@ mod tests {
         onevcs::FailureKind::PushRejected,
         onevcs::FailureKind::PushedUnverified,
         onevcs::FailureKind::HostPrerequisite,
+        onevcs::FailureKind::Cancelled,
     ];
 
     /// Every failure a further attempt can answer, as the type spells them.
@@ -2358,7 +2399,12 @@ mod tests {
         let vocabulary: BTreeSet<&str> = EVERY_PRESERVING
             .iter()
             .map(|preserving| preserving.outcome())
-            .chain([Failure::UNREAD, Failure::HOST, Failure::RESIDUAL])
+            .chain([
+                Failure::UNREAD,
+                Failure::HOST,
+                Failure::CANCELLED,
+                Failure::RESIDUAL,
+            ])
             .collect();
         let produced: BTreeSet<&str> = EVERY_KIND
             .iter()
@@ -2525,14 +2571,32 @@ mod tests {
             Failure::HostPrerequisite,
             "a prerequisite the host is missing is answered by re-dispatching the agent"
         );
+        // The one kind that is the node's own stop. Not preserving — the manager
+        // stopped the node, so sending a worker back would undo the stop — and
+        // settled under the status every stopped dispatch settles under rather
+        // than a failure word, because nothing about the work was judged.
+        assert_eq!(
+            failure_of(onevcs::FailureKind::Cancelled),
+            Failure::Cancelled,
+            "a publication its node's cancellation stopped is answered by re-dispatching the agent"
+        );
+        assert_eq!(
+            Failure::Cancelled.outcome(),
+            crate::graph::NodeStatus::Cancelled.as_str(),
+            "a stopped publication settles under a word other than the stopped status"
+        );
         let preserving: BTreeSet<&str> = EVERY_KIND
             .iter()
             .filter(|kind| !terminal.contains(kind))
             .filter(|kind| **kind != onevcs::FailureKind::PushedUnverified)
             .filter(|kind| **kind != onevcs::FailureKind::HostPrerequisite)
+            .filter(|kind| **kind != onevcs::FailureKind::Cancelled)
             .map(|kind| match failure_of(*kind) {
                 Failure::Preserving(preserving) => preserving.outcome(),
-                Failure::Unread | Failure::HostPrerequisite | Failure::Terminal => {
+                Failure::Unread
+                | Failure::HostPrerequisite
+                | Failure::Terminal
+                | Failure::Cancelled => {
                     panic!("{kind:?} is not the tree being rejected, so nothing re-dispatches it")
                 }
             })

@@ -2359,28 +2359,30 @@ fn an_unusable_read_budget_falls_back_rather_than_disabling_the_recovery() {
     );
 }
 
-/// A run being torn down stops the re-read where it stands.
+/// A run being torn down reads no merge path at all once its push has landed.
 ///
 /// The bound is not the only thing that ends these reads. A cancelled run must
 /// not be held open polling somebody else's API — the teardown is on its way to
-/// reap this dispatch — so the loop stops on the cancellation and the node settles
-/// on the reading it had.
+/// reap this dispatch — and since `onevcs` 0.38.0 the cancellation reaches the
+/// publication itself: the push it was making runs to completion, and the host
+/// is never asked about it, so there is no unread path to re-read and the node
+/// settles `cancelled` with the work on the origin.
 ///
 /// The window is held open rather than raced for, the way
 /// `a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failure`
 /// holds its own: the repository's `pre-push` hook blocks until this test releases
-/// it, so the cancel lands before the push completes and everything after the
-/// release — the push reaching the origin, the host refusing the read — happens
-/// with the cancellation already set.
+/// it, so the cancel lands while the push is running and everything after the
+/// release — the push reaching the origin — happens with the cancellation
+/// already set.
 #[test]
-fn a_cancelled_run_stops_re_reading_the_merge_path_where_it_stands() {
+fn a_cancelled_run_reads_no_merge_path_once_its_push_has_landed() {
     let world = World::new("lifecycle-rereadcancelled")
         // Long enough that a loop which ignored the cancellation would be
         // obvious: three reads a minute apart rather than one and done.
         .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "60");
     let go = world.fakes.join("push.go");
     let held = held_merge_path(&world, &go);
-    world.repository("change-auto", &held.argv());
+    let repo = world.repository("change-auto", &held.argv());
     world.script("service.work", "the worker wrote this\n");
     // The host never comes back, so every read this loop is allowed would fail.
     world.script("gh.outage", "");
@@ -2394,12 +2396,7 @@ fn a_cancelled_run_stops_re_reading_the_merge_path_where_it_stands() {
 
     // The publication has committed and is held at the merge path, which is
     // before the push and therefore before any read of the host.
-    world.until("the publication to reach its merge path", |world| {
-        world
-            .journal(&run)
-            .iter()
-            .any(|event| event["source"] == "vcs" && event["kind"] == "commit-preserved")
-    });
+    world.until("the merge path to be holding the push", |_| held.holding());
     world
         .run_with_stdin(
             &["reply", &run],
@@ -2415,27 +2412,35 @@ fn a_cancelled_run_stops_re_reading_the_merge_path_where_it_stands() {
         world.run_file(&run, "result.json").is_file()
     });
     let settled = &world.events_of(&run, "node-settled")[0]["payload"];
-    // It settles on the reading it had, under the word that reading earned.
-    assert_eq!(settled["outcome"], "pushed-unverified", "{settled}");
+    // It settles as the stop, saying the push ran and where the work is.
+    assert_eq!(settled["status"], "cancelled", "{settled}");
     let detail = settled["detail"]
         .as_str()
         .expect("the settlement says why")
         .to_string();
     assert!(
-        detail.contains("the merge path was read 1 time and never answered"),
-        "the cancelled run kept re-reading the host: {detail}"
+        detail.contains("its publishing push ran") && detail.contains("is on origin"),
+        "the cancelled publication does not say its push reached the origin: {detail}"
     );
-    // And the host was asked exactly twice, which is the same fact from the far
-    // side: once by the closeout, asking whether the session already holds a
-    // change request, and once by the publication, which fails on its first
-    // call to `gh`. A third call would be the loop reading the merge path again.
+    let branch = settled["branch"]
+        .as_str()
+        .expect("the node names its branch");
+    assert!(
+        !git(&world, &repo.origin, &["branch", "--list", branch])
+            .trim()
+            .is_empty(),
+        "the branch the cancelled publication pushed is not on the origin"
+    );
+    // And the host was asked exactly once, which is the same fact from the far
+    // side: by the closeout, asking whether the session already holds a change
+    // request. A second call would be the publication reading its merge path.
     let asked: Vec<String> = gh_calls(&world)
         .iter()
         .map(|call| call.iter().take(2).cloned().collect::<Vec<_>>().join(" "))
         .collect();
     assert_eq!(
         asked,
-        vec!["pr list".to_string(), "api user".to_string()],
+        vec!["pr list".to_string()],
         "a run being torn down went on polling the host: {asked:?}"
     );
 }
@@ -2476,12 +2481,7 @@ fn a_node_cancelled_during_its_publication_settles_on_it_and_is_no_longer_parked
 
     // The dispatch is over and the publication has committed its work and is
     // held at the merge path: the moment a cancel is too late to stop anything.
-    world.until("the publication to reach its merge path", |world| {
-        world
-            .journal(&run)
-            .iter()
-            .any(|event| event["source"] == "vcs" && event["kind"] == "commit-preserved")
-    });
+    world.until("the merge path to be holding the push", |_| held.holding());
     world
         .run_with_stdin(
             &["reply", &run],
@@ -2530,6 +2530,310 @@ fn a_node_cancelled_during_its_publication_settles_on_it_and_is_no_longer_parked
     );
     assert_eq!(result["state"], "complete", "{result}");
 }
+
+/// What `onevcs` watches a publication for in the two journeys below: an hour, its
+/// own default, put back over the two seconds every other journey runs with. A
+/// settlement that waited for the watch to give up would take that long, so a
+/// node settling inside [`INTERRUPTED_WITHIN`] is one the cancellation reached.
+const WATCH_BOUND_SECONDS: &str = "3600";
+
+/// How long a cancelled publication may take to settle: the watch asks its
+/// cancellation every tenth of a second, and the rest is the session closing.
+const INTERRUPTED_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn published_branches(world: &World, repo: &Repository) -> Vec<String> {
+    git(
+        world,
+        &repo.origin,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    )
+    .lines()
+    .filter(|branch| *branch != "main")
+    .map(str::to_owned)
+    .collect()
+}
+
+fn journalled_at(
+    journal: &[serde_json::Value],
+    matching: impl Fn(&serde_json::Value) -> bool,
+) -> Option<usize> {
+    journal.iter().position(matching)
+}
+
+fn positions_of(journal: &[serde_json::Value], source: &str, kind: &str, node: &str) -> Vec<usize> {
+    journal
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            event["source"] == source && event["kind"] == kind && event["labels"]["node"] == node
+        })
+        .map(|(at, _)| at)
+        .collect()
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the two journeys below
+// each make real publications into a real origin through the linked `onevcs`, and what they
+// prove is `lifecycle`'s publication, `vcs`'s cancellation seam and `engine`'s scheduling of
+// a retry's replacement together — every one of which any change under `src/` can move — so
+// a project edged narrower than the crate would drop them out of `nx affected` for exactly
+// the changes they exist to catch. Same grounds as the publication journeys above.
+/// A `cancel` reaches a publication that is waiting in `onevcs`'s watch.
+///
+/// onepipeline#692: the cancel was recorded, and the node went on holding its
+/// workspace for as long as the watch's hour-long bound, because nothing handed
+/// the watch the node's cancellation — `status` read *cancelling … still holds
+/// the node's workspace* for the whole of it. Here the host holds the required
+/// check in progress with the watch bounded at an hour, so only the cancellation
+/// can end it inside [`INTERRUPTED_WITHIN`]: the node settles `cancelled`, the
+/// session is released, and the branch is still on the origin at the commit the
+/// settlement names, with its change request never closed.
+#[test]
+fn a_cancel_interrupts_a_publication_waiting_on_its_checks_and_keeps_its_branch() {
+    let world = World::new("lifecycle-cancelwatch")
+        .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", WATCH_BOUND_SECONDS);
+    let repo = world.repository("change-auto", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.checks", "lint in_progress - required");
+
+    let path = world.plan(
+        "cancelwatch",
+        &plan_of("cancelwatch", vec![lifecycle("service", &[])]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    let run = "cancelwatch".to_string();
+    world.until("the publication to be watching its checks", |world| {
+        !positions_of(&world.journal(&run), "vcs", "change-check", "service").is_empty()
+    });
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "commands": [{"op": "cancel", "id": "service"}]}).to_string(),
+        )
+        .exited(0);
+    world.until_within(
+        INTERRUPTED_WITHIN,
+        "the cancelled publication to settle",
+        |world| {
+            world
+                .events_of(&run, "node-settled")
+                .iter()
+                .any(|event| event["labels"]["node"] == "service")
+        },
+    );
+
+    let settled = world
+        .events_of(&run, "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "service")
+        .expect("the node settled");
+    let payload = &settled["payload"];
+    assert_eq!(payload["status"], "cancelled", "{settled}");
+    assert_eq!(payload["outcome"], json!(null), "{settled}");
+    let detail = payload["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("cancelled the publication") && detail.contains("Nothing was undone"),
+        "the settlement does not say the publication was cancelled and kept: {detail}"
+    );
+
+    // The branch is where a retry continues from: on the origin, at the commit
+    // the settlement names, and its change request is still open.
+    let branch = payload["branch"]
+        .as_str()
+        .expect("the settlement names its branch");
+    assert_eq!(published_branches(&world, &repo), vec![branch.to_owned()]);
+    assert_eq!(
+        payload["head"].as_str(),
+        Some(git(&world, &repo.origin, &["rev-parse", branch]).trim()),
+        "{settled}"
+    );
+    assert!(
+        gh_pr_calls(&world, "close").is_empty(),
+        "the cancelled publication closed its change request"
+    );
+
+    // The workspace was released before the node settled, so nothing is left
+    // holding it once the settlement is on the record.
+    let journal = world.journal(&run);
+    let closed = positions_of(&journal, "vcs", "session-closed", "service");
+    let settled_at = journalled_at(&journal, |event| {
+        event["kind"] == "node-settled" && event["labels"]["node"] == "service"
+    })
+    .expect("the settlement is journalled");
+    assert!(
+        closed.first().is_some_and(|at| *at < settled_at),
+        "the session was not closed before the node settled: closed at {closed:?}, settled at \
+         {settled_at}"
+    );
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("still holds the node's workspace");
+
+    // And the cancel's park stands: the run waits on the manager's decision.
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let result = world.run_json(&run, "result.json");
+    assert_eq!(result["nodes"][0]["status"], "parked", "{result}");
+    assert_eq!(result["state"], "waiting", "{result}");
+}
+
+/// A `retry` sent while the node's publication waits on a merge interrupts the
+/// watch, and its replacement starts only once the superseded attempt has let go
+/// of the session.
+///
+/// The comment on onepipeline#692: a superseded attempt's watch outlived the
+/// retry, and when it gave up it closed the session the replacement was
+/// publishing from. Here the host's checks are green and the merge never
+/// arrives, so the watch would wait its hour. No `cancel` is sent first. The
+/// journal has to show the superseded node settled `cancelled` and its session
+/// closed before the replacement is dispatched, the superseded node closing
+/// nothing after that, and the replacement landing the same branch.
+#[test]
+fn a_retry_interrupts_a_publication_waiting_on_its_merge_and_its_replacement_continues_the_branch()
+{
+    let world = World::new("lifecycle-retrywatch")
+        .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", WATCH_BOUND_SECONDS);
+    let repo = world.repository("change-auto", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("service-again.work", "the replacement wrote this\n");
+    world.script("gh.checks", "lint completed success required");
+
+    let path = world.plan(
+        "retrywatch",
+        &plan_of("retrywatch", vec![lifecycle("service", &[])]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    let run = "retrywatch".to_string();
+    world.until("the publication to be waiting on its merge", |world| {
+        !gh_pr_calls(world, "merge").is_empty()
+    });
+    // From here the host lands what it is asked to merge. The superseded watch
+    // armed its merge before this, so only the replacement's request lands.
+    world.script("gh.merged", "");
+    let branches = published_branches(&world, &repo);
+    let [branch] = branches.as_slice() else {
+        panic!("the publication pushed one branch: {branches:?}");
+    };
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "version": 2,
+                "commands": [{
+                    "op": "retry",
+                    "id": "service",
+                    "node": {
+                        "id": "service-again",
+                        "repo": "service",
+                        "persona": "engineer",
+                        "title": "feat: ship service",
+                        "branch": branch,
+                        "task": "## What\nShip service.\n\n## Why\nUsers need it.\n\n\
+                                 ## Acceptance criteria\n- service is published.",
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .exited(0);
+    world.until_within(
+        INTERRUPTED_WITHIN,
+        "the superseded publication to settle",
+        |world| {
+            world
+                .events_of(&run, "node-settled")
+                .iter()
+                .any(|event| event["labels"]["node"] == "service")
+        },
+    );
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+
+    let settled_as = |node: &str| {
+        world
+            .events_of(&run, "node-settled")
+            .into_iter()
+            .find(|event| event["labels"]["node"] == node)
+            .unwrap_or_else(|| panic!("{node} never settled\n{}", why(&world, &run)))
+    };
+    let superseded = settled_as("service");
+    assert_eq!(superseded["payload"]["status"], "cancelled", "{superseded}");
+    assert_eq!(
+        superseded["payload"]["branch"],
+        json!(branch),
+        "{superseded}"
+    );
+    let replaced = settled_as("service-again");
+    assert_eq!(
+        replaced["payload"]["status"],
+        "done",
+        "{replaced}\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(replaced["payload"]["outcome"], "merged", "{replaced}");
+    assert_eq!(replaced["payload"]["branch"], json!(branch), "{replaced}");
+    // Continued rather than recut: what the replacement published is a commit
+    // on top of the one the superseded attempt left, carrying both attempts'
+    // work. Read from the origin's object store, because `onevcs` retires a
+    // landed branch when it closes the session.
+    let left = superseded["payload"]["head"]
+        .as_str()
+        .expect("the superseded settlement names the commit it left");
+    let landed = preserved_head(&world, &run, branch);
+    assert_ne!(landed, left, "the replacement published nothing of its own");
+    assert!(
+        std::process::Command::new("git")
+            .args(["merge-base", "--is-ancestor", left, &landed])
+            .current_dir(&repo.origin)
+            .status()
+            .is_ok_and(|status| status.success()),
+        "the replacement's {landed} does not continue the superseded {left}"
+    );
+    for (file, body) in [
+        ("service.md", "the worker wrote this"),
+        ("service-again.md", "the replacement wrote this"),
+    ] {
+        assert_eq!(
+            git(&world, &repo.origin, &["show", &format!("{landed}:{file}")]).trim(),
+            body,
+            "what the replacement published does not carry {file}"
+        );
+    }
+
+    // The ordering the overlap broke: the superseded attempt settled and gave
+    // its session back before the replacement was dispatched, and closed
+    // nothing after it.
+    let journal = world.journal(&run);
+    let dispatched = journalled_at(&journal, |event| {
+        event["kind"] == "node-dispatched" && event["labels"]["node"] == "service-again"
+    })
+    .expect("the replacement was dispatched");
+    let settled_at = journalled_at(&journal, |event| {
+        event["kind"] == "node-settled" && event["labels"]["node"] == "service"
+    })
+    .expect("the superseded node settled");
+    let closed = positions_of(&journal, "vcs", "session-closed", "service");
+    assert!(
+        settled_at < dispatched,
+        "the replacement was dispatched at {dispatched}, before the superseded node settled at \
+         {settled_at}"
+    );
+    assert!(
+        !closed.is_empty() && closed.iter().all(|at| *at < dispatched),
+        "the superseded attempt closed a session at {closed:?}, not all before the replacement \
+         was dispatched at {dispatched}"
+    );
+    let opened = positions_of(&journal, "vcs", "session-opened", "service-again");
+    assert!(
+        !opened.is_empty() && opened.iter().all(|at| *at > dispatched),
+        "the replacement's session opened at {opened:?}, not after its dispatch at {dispatched}"
+    );
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A merge path the reads never answer settles the node saying where the work is.
 ///
@@ -3023,12 +3327,7 @@ fn a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failur
     // push, so it never arrives while the push is the thing being held. Once the
     // work is committed the publication cannot get past the hook until this test
     // releases it, so there is no race left to lose.
-    world.until("the publication to reach its merge path", |world| {
-        world
-            .journal(&run)
-            .iter()
-            .any(|event| event["source"] == "vcs" && event["kind"] == "commit-preserved")
-    });
+    world.until("the merge path to be holding the push", |_| held.holding());
     world
         .run_with_stdin(
             &["reply", &run],
@@ -8645,20 +8944,135 @@ fn an_exhausted_identity_at_a_publication_redispatch_keeps_the_pin_and_resumes_o
     );
 }
 
-/// The queue times, in epoch milliseconds, of every `workspace-wait` the channel
-/// has queued about `node`, or `None` while its projection is behind its log.
-fn workspace_wait_times(world: &World, run: &str, node: &str) -> Option<Vec<u64>> {
-    let queued = world.queued_surfaces(run);
-    if queued.is_empty() {
+/// One `workspace-wait` the channel queued about a node, with the three things
+/// divergence entry 99's sixth ruling decides a re-queue by.
+#[derive(Debug)]
+struct QueuedWait {
+    /// What it says: the hold's identity and reading, so a changed reading is a
+    /// changed message.
+    message: String,
+    /// When the channel log says it was queued, in epoch milliseconds — the
+    /// stamp the ruling counts the next interval from.
+    queued_at: u64,
+    /// Whether the wait before it had been read when this one was queued.
+    previous_read: bool,
+    /// Whether the node's workspace hold ended between the wait before it and
+    /// this one — the node dispatched, unheld, or held for something else — so
+    /// this one is the first wait of a hold that began again.
+    hold_began: bool,
+}
+
+/// Every `workspace-wait` queued about `node`, oldest first, or `None` while the
+/// journal has not yet recorded every wait the channel log holds.
+///
+/// Read off the run's own records rather than counted at a moment: the channel
+/// log orders each wait against every read of it, and the journal orders each
+/// wait's `planner-surface-queued` against the node's hold records. The driver
+/// writes both of a wait's records, the log's first, so the nth wait in one is
+/// the nth in the other.
+fn queued_waits(world: &World, run: &str, node: &str) -> Option<Vec<QueuedWait>> {
+    let log =
+        std::fs::read_to_string(world.run_file(run, "channel/surfaces.jsonl")).unwrap_or_default();
+    let mut claimed = std::collections::BTreeSet::new();
+    let mut waits: Vec<(u64, QueuedWait)> = Vec::new();
+    for record in log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    {
+        let id = record["id"].as_u64();
+        match record["event"].as_str() {
+            Some("claimed") => claimed.extend(id),
+            Some("queued")
+                if record["kind"] == "workspace-wait" && record["workstream"] == node =>
+            {
+                let previous_read = waits
+                    .last()
+                    .is_some_and(|(previous, _)| claimed.contains(previous));
+                waits.push((
+                    id.expect("a queued surface carries its id"),
+                    QueuedWait {
+                        message: record["message"].as_str().unwrap_or_default().to_owned(),
+                        queued_at: record["queued_at"].as_u64().unwrap_or_default(),
+                        previous_read,
+                        hold_began: false,
+                    },
+                ));
+            }
+            _ => {}
+        }
+    }
+    let mut began = Vec::new();
+    let mut ended = false;
+    for event in world
+        .journal(run)
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+    {
+        let held_for_workspace = || {
+            event["payload"]["reasons"]
+                .as_array()
+                .is_some_and(|reasons| reasons.iter().any(|reason| reason["kind"] == "workspace"))
+        };
+        match event["kind"].as_str() {
+            Some("node-dispatched" | "node-unheld") => ended = true,
+            Some("node-held") if !held_for_workspace() => ended = true,
+            Some("planner-surface-queued") if event["payload"]["kind"] == "workspace-wait" => {
+                began.push(std::mem::take(&mut ended));
+            }
+            _ => {}
+        }
+    }
+    if began.len() != waits.len() {
         return None;
     }
     Some(
-        queued
+        waits
             .into_iter()
-            .filter(|surface| surface["kind"] == "workspace-wait" && surface["workstream"] == node)
-            .filter_map(|surface| surface["queued_at"].as_u64())
+            .zip(began)
+            .enumerate()
+            .map(|(at, ((_, wait), began))| QueuedWait {
+                hold_began: at > 0 && began,
+                ..wait
+            })
             .collect(),
     )
+}
+
+/// [`queued_waits`], once the journal has caught up with the channel log.
+fn waits_of(world: &World, run: &str, node: &str) -> Vec<QueuedWait> {
+    let mut read = None;
+    world.until(
+        "the journal to record every wait the channel queued",
+        |world| {
+            read = queued_waits(world, run, node);
+            read.is_some()
+        },
+    );
+    read.expect("the waits were read")
+}
+
+/// The waits the sixth ruling forbids: each that repeats the wait before it, in
+/// the same hold, while that one was still unread. A changed reading and a hold
+/// that began again are queued whatever was read; an unchanged one waits to be.
+fn unchanged_and_unread(waits: &[QueuedWait]) -> Vec<&QueuedWait> {
+    waits
+        .windows(2)
+        .filter(|pair| {
+            pair[1].message == pair[0].message && !pair[1].hold_began && !pair[1].previous_read
+        })
+        .map(|pair| &pair[1])
+        .collect()
+}
+
+/// The newest hold's unchanged waits, oldest first: the trailing waits that say
+/// one thing in one hold, which is the run its interval doubles along.
+fn last_unchanged_run(waits: &[QueuedWait]) -> &[QueuedWait] {
+    let mut start = waits.len().saturating_sub(1);
+    while start > 0 && waits[start].message == waits[start - 1].message && !waits[start].hold_began
+    {
+        start -= 1;
+    }
+    &waits[start..]
 }
 
 /// Read every surface the run has waiting, as a supervisor does between looks.
@@ -8673,10 +9087,12 @@ fn read_everything(world: &World, run: &str) {
     panic!("`next` never ran out of surfaces on {run}");
 }
 
-/// A workspace hold is surfaced on the release wait's cadence: an unchanged
-/// wait is not queued again while the one before it is unread, and once read it
-/// is queued again at an interval that doubles from the configured base — the
-/// one cadence `tests/e2e/adoption.rs` climbs to its fixed four-hour ceiling.
+/// A workspace hold is surfaced on the release wait's cadence: a wait whose
+/// reading changes is queued as it changes, an unchanged one is not queued again
+/// while the one before it is unread — across a window in which a session outside
+/// the run moves the reading — and once read it is queued again
+/// at an interval that doubles from the configured base — the one cadence
+/// `tests/e2e/adoption.rs` climbs to its fixed four-hour ceiling.
 /// And an elapsed watch over the same run names
 /// the hold, what settled past its cursor, and when the run last moved.
 /// Divergence entry 99.
@@ -8704,32 +9120,70 @@ fn a_workspace_wait_is_queued_again_only_once_read_and_an_elapsed_watch_names_th
     let path = world.plan("poolcadence", &plan);
     world.run(&["start", &path, "--detach"]).exited(0);
     let run = "poolcadence".to_string();
-    // The reading the hold is on settles once the first's session holds the
-    // one slot; each reading before that is a different wait, and queued as one.
-    world.until("the hold's reading to settle on the held slot", |world| {
-        workspace_hold_of(world, &run, "second")
-            .is_some_and(|hold| hold["slots"] == 1 && hold["idle"] == 0)
-            && workspace_wait_times(world, &run, "second").is_some_and(|waits| !waits.is_empty())
+    // The hold's reading settles once the first's session holds the one slot;
+    // each reading before that is a different wait, and queued as one.
+    let full = "pool 1 (1 slot(s): 0 idle, 0 maintaining), overflow 0 with 0 in use";
+    let outside = "pool 1 (1 slot(s): 0 idle, 0 maintaining), overflow 0 with 1 in use";
+    let saying = |waits: &[QueuedWait], reading: &str| -> Vec<usize> {
+        (0..waits.len())
+            .filter(|at| waits[*at].message.contains(reading))
+            .collect()
+    };
+    world.until("a wait on the held slot", |world| {
+        queued_waits(world, &run, "second").is_some_and(|waits| !saying(&waits, full).is_empty())
     });
-    std::thread::sleep(std::time::Duration::from_secs(1));
-    world.until("the queue to be read back", |world| {
-        workspace_wait_times(world, &run, "second").is_some()
+    // The window an unread wait's reading can move in, opened on purpose: while
+    // nothing reads the queue, a session outside the run is opened on the
+    // identity past its bound and closed again, and each is a reading the hold
+    // says — one more overflow session in use, then none — so each is queued as
+    // the changed wait it is, and the identity admits the node at neither. A
+    // sibling reading that differs from one pass to the next on its own — a
+    // record or a `git` it could not read for a moment, which reads as room the
+    // open then refuses, ending the hold and beginning it again — moves the count
+    // the same way on its own clock; this moves it on every platform, in order.
+    // How many waits that queues is the sibling's readings' to say, so it is no
+    // number this journey can fix: what the ruling fixes is which may repeat the
+    // one before.
+    let opened = world.run_on(
+        world.cmd_on(
+            &crate::harness::onevcs_binary(),
+            &["session", "open", "service", "--overflow", "1"],
+        ),
+        "onevcs session open",
+    );
+    opened.exited(0);
+    let token = opened.json()["token"]
+        .as_str()
+        .map(str::to_owned)
+        .expect("the sibling printed a session token");
+    world.until("a wait on the outside session", |world| {
+        queued_waits(world, &run, "second").is_some_and(|waits| !saying(&waits, outside).is_empty())
     });
-    let settled = workspace_wait_times(&world, &run, "second")
-        .expect("read")
-        .len();
+    world
+        .run_on(
+            world.cmd_on(
+                &crate::harness::onevcs_binary(),
+                &["session", "close", &token],
+            ),
+            "onevcs session close",
+        )
+        .exited(0);
+    world.until("a wait on the outside session gone", |world| {
+        queued_waits(world, &run, "second")
+            .is_some_and(|waits| saying(&waits, full).last() > saying(&waits, outside).first())
+    });
 
     // Unread, the unchanged wait is not queued again.
     std::thread::sleep(std::time::Duration::from_secs(4));
-    world.until("the queue to be read back", |world| {
-        workspace_wait_times(world, &run, "second").is_some()
-    });
-    assert_eq!(
-        workspace_wait_times(&world, &run, "second")
-            .expect("read")
-            .len(),
-        settled,
-        "an unchanged workspace wait was queued again while the one before it was unread"
+    let waits = waits_of(&world, &run, "second");
+    assert!(
+        waits.iter().all(|wait| !wait.previous_read),
+        "something read the queue this journey leaves unread: {waits:#?}"
+    );
+    assert!(
+        unchanged_and_unread(&waits).is_empty(),
+        "an unchanged workspace wait was queued again while the one before it was unread: \
+         {waits:#?}"
     );
 
     // An elapsed watch from a cursor taken now: `quick` settles past it while
@@ -8830,30 +9284,34 @@ fn a_workspace_wait_is_queued_again_only_once_read_and_an_elapsed_watch_names_th
         watched.stderr
     );
 
-    // Read, it is queued again: at once, then after two, four, and eight.
+    // Read, the hold's unchanged wait is queued again at an interval that starts
+    // at the base and doubles: one, two, four, and eight seconds after the wait
+    // before it, each counted from that wait's own `queued_at`.
     world.until(
         "four unchanged waits queued again as each is read",
         |world| {
             read_everything(world, &run);
-            workspace_wait_times(world, &run, "second")
-                .is_some_and(|waits| waits.len() >= settled + 4)
+            queued_waits(world, &run, "second")
+                .is_some_and(|waits| last_unchanged_run(&waits).len() >= 5)
         },
     );
-    let waits = workspace_wait_times(&world, &run, "second").expect("read")[settled - 1..].to_vec();
-    let gap = |at: usize| waits[at].saturating_sub(waits[at - 1]);
-    assert!(gap(1) >= 4_000, "{waits:?}");
+    let waits = waits_of(&world, &run, "second");
     assert!(
-        gap(2) >= 2_000,
-        "the interval did not double from the base: {waits:?}"
+        unchanged_and_unread(&waits).is_empty(),
+        "an unchanged workspace wait was queued again while the one before it was unread: \
+         {waits:#?}"
     );
-    assert!(
-        gap(3) >= 4_000,
-        "the interval did not double again: {waits:?}"
-    );
-    assert!(
-        gap(4) >= 8_000,
-        "the interval did not double a third time: {waits:?}"
-    );
+    let unchanged: Vec<u64> = last_unchanged_run(&waits)
+        .iter()
+        .map(|wait| wait.queued_at)
+        .collect();
+    for (at, interval) in [(1, 1_000), (2, 2_000), (3, 4_000), (4, 8_000)] {
+        assert!(
+            unchanged[at].saturating_sub(unchanged[at - 1]) >= interval,
+            "unchanged wait {at} came sooner than the {interval}ms the doubling owes it: \
+             {unchanged:?}"
+        );
+    }
 
     world.release("first.go");
     world.until("the run to settle", |world| {

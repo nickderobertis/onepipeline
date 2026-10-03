@@ -397,8 +397,8 @@ pub fn registry() -> Registry {
 /// The event vocabulary is this crate's, so the stack's own schemas for it are
 /// published from here the way `schemas/planner-channel.json` publishes the
 /// channel's layout. A reader in another language validates an envelope, a
-/// filter, an artifact reference or a label map against these documents rather
-/// than against a second reading of this module.
+/// filter, an artifact reference, a label map or a pipeline kind's payload
+/// against these documents rather than against a second reading of this crate.
 pub const EVENTS_BUNDLE_PATH: &str = "schemas/events.json";
 
 /// The version the published event bundle declares — what a link's pin is held
@@ -413,12 +413,17 @@ pub const EVENTS_BUNDLE_PATH: &str = "schemas/events.json";
 // through the bus's own `SchemaBundle`, asserts its version equals this, and holds the
 // contract paragraph naming it to the same string — so a value that is not a bundle version
 // fails the deterministic tier rather than reaching a link.
-pub const EVENTS_BUNDLE_VERSION: &str = "1.0.0";
+pub const EVENTS_BUNDLE_VERSION: &str = "1.1.0";
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
-/// The five ids [`EVENTS_BUNDLE_PATH`] publishes, in the order the bundle lists
+/// The ids [`EVENTS_BUNDLE_PATH`] publishes, in the order the bundle lists
 /// them: the envelope at each version this build reads, the filter, the
-/// artifact reference and the labels.
+/// artifact reference and the labels, then every [`PipelineKind`]'s payload
+/// under the id [`crate::payload::schema_of`] registers it as, in
+/// [`PIPELINE_KINDS`] order.
+///
+/// [`PipelineKind`]: crate::event::PipelineKind
+/// [`PIPELINE_KINDS`]: crate::event::PIPELINE_KINDS
 #[must_use]
 pub fn events_bundle_ids() -> Vec<SchemaId> {
     let mut ids: Vec<SchemaId> = EVENT_ENVELOPE_READS
@@ -429,11 +434,17 @@ pub fn events_bundle_ids() -> Vec<SchemaId> {
     ids.push(EVENT_FILTER);
     ids.push(ARTIFACT_REF);
     ids.push(SchemaId::literal("agent", "labels", 1));
+    ids.extend(
+        crate::event::PIPELINE_KINDS
+            .iter()
+            .map(|kind| crate::payload::schema_of(*kind)),
+    );
     ids
 }
 
-/// The schema bundle published at [`EVENTS_BUNDLE_PATH`]: the documents
-/// [`register_events`] generates, at [`EVENTS_BUNDLE_VERSION`].
+/// The schema bundle published at [`EVENTS_BUNDLE_PATH`]: each of
+/// [`events_bundle_ids`] under the document the compiled-in registry,
+/// [`crate::payload::registry`], holds for it, at [`EVENTS_BUNDLE_VERSION`].
 ///
 /// # Panics
 ///
@@ -441,18 +452,14 @@ pub fn events_bundle_ids() -> Vec<SchemaId> {
 /// each id appears once.
 #[must_use]
 pub fn events_bundle() -> onemessagebus::SchemaBundle {
-    let registry = {
-        let mut registry = Registry::new();
-        register_events(&mut registry).expect("the event vocabulary's schemas register");
-        registry
-    };
+    let registry = crate::payload::registry();
     let schemas = events_bundle_ids()
         .into_iter()
         .map(|id| onemessagebus::sdk_schema::RegistryDocument {
             schema: registry
                 .schema(&id)
                 .cloned()
-                .unwrap_or_else(|| unreachable!("the event vocabulary registers {id}")),
+                .unwrap_or_else(|| unreachable!("the compiled-in registry registers {id}")),
             id,
         })
         .collect();
@@ -461,8 +468,8 @@ pub fn events_bundle() -> onemessagebus::SchemaBundle {
             .parse::<onemessagebus::BundleVersion>()
             .unwrap_or_else(|why| unreachable!("{why}")),
         Some(
-            "The agent stack's event envelope, filter, artifact reference and labels, as \
-             onepipeline declares them."
+            "The agent stack's event envelope, filter, artifact reference and labels, and \
+             the payload of every onepipeline pipeline kind, as onepipeline declares them."
                 .to_owned(),
         ),
         schemas,
