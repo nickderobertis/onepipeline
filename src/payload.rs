@@ -3,10 +3,16 @@
 //!
 //! One [`Message`] per [`PipelineKind`], under `agent.pipeline.<kind>@2` — the
 //! envelope version those records are written at — and every one of them in the
-//! registry [`crate::event::registry`] constructs, beside the
-//! [`crate::vocabulary`] envelope that carries it. The merged stream's own kinds are then declared in
-//! the same registry as the siblings' (`agent.agentgraph.<kind>`), and a payload
-//! is checkable against a document rather than against whichever reader folds it.
+//! registry [`registry`] constructs, beside the [`crate::vocabulary`] envelope
+//! that carries it. The merged stream's own kinds are then declared in the same
+//! registry as the siblings' (`agent.agentgraph.<kind>`), and a payload is
+//! checkable against a document rather than against whichever reader folds it.
+//!
+//! [`registry`] and [`schema_of`] are the public surface: a reader of a run's
+//! journal validates a payload against the document this build registers for
+//! its kind, and `schemas/events.json` publishes the same documents for a reader
+//! in another language. The payload types themselves stay this crate's — the
+//! schemas are the contract, not the Rust shapes behind them.
 //!
 //! A document states what every writer of that kind **always** writes, and
 //! leaves optional what a writer omits: a key one emit site adds and another does
@@ -1412,7 +1418,8 @@ macro_rules! payload_messages {
         ///
         /// A match rather than a table, so a kind added without a payload document
         /// does not compile.
-        pub(crate) const fn schema_of(kind: PipelineKind) -> SchemaId {
+        #[must_use]
+        pub const fn schema_of(kind: PipelineKind) -> SchemaId {
             match kind {
                 $(PipelineKind::$payload => <$payload as Message>::SCHEMA,)*
             }
@@ -1426,7 +1433,8 @@ macro_rules! payload_messages {
         ///
         /// Never for this build's own types: each document is generated from the
         /// type it names, and each id is distinct.
-        pub(crate) fn registry() -> Registry {
+        #[must_use]
+        pub fn registry() -> Registry {
             let mut registry = crate::vocabulary::registry();
             $(
                 registry
