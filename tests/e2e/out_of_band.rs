@@ -1632,47 +1632,73 @@ fn an_untitled_owning_node_lands_under_the_onevcs_default_and_is_named() {
     );
 }
 
-/// A run whose journal cannot be read might name the branch too, so an owner
+/// A run whose records cannot be read might name the branch too, so an owner
 /// found elsewhere is not known to be the only one: the landing takes the
 /// default rather than a title it cannot vouch for, and says which record it
-/// could not read.
+/// could not read. A run that has no journal yet, or a run root this build
+/// refuses whose journal never names the branch, names nothing, and the owner
+/// found elsewhere stands.
 #[test]
-fn an_unreadable_run_journal_leaves_no_owner_known_to_be_unique() {
-    for unreadable in [false, true] {
-        let world = World::new(&format!("oob-owned-unreadable-{unreadable}"));
-        let (repository, branch) = owned_branch_then(&world, "owned", false, |world, _| {
-            let path = world.plan(
-                "other",
-                &crate::harness::plan_of("other", vec![crate::harness::agent("elsewhere", &[])]),
-            );
-            world.run(&["start", &path, "--attach"]).settled();
+fn a_run_whose_records_cannot_be_read_leaves_no_owner_known_to_be_unique() {
+    for case in ["no-journal", "unreadable", "refused", "refused-naming"] {
+        let world = World::new(&format!("oob-owned-{case}"));
+        let (repository, branch) = owned_branch_then(&world, "owned", false, |world, branch| {
+            if case == "refused-naming" {
+                let mut again = owner_node();
+                again["branch"] = serde_json::json!(branch);
+                refused_run(world, "other", vec![again]);
+            } else {
+                let path = world.plan(
+                    "other",
+                    &crate::harness::plan_of(
+                        "other",
+                        vec![crate::harness::agent("elsewhere", &[])],
+                    ),
+                );
+                world.run(&["start", &path, "--attach"]).settled();
+            }
         });
-        let journal = world.run_file("other", "events.jsonl");
-        std::fs::remove_file(&journal).expect("the other run's journal");
-        if unreadable {
-            std::fs::create_dir(&journal).expect("a journal no reader can open");
+        let other = world.runs.join("other");
+        let journal = other.join("events.jsonl");
+        match case {
+            "no-journal" => std::fs::remove_file(&journal).expect("the other run's journal"),
+            "unreadable" => {
+                std::fs::remove_file(&journal).expect("the other run's journal");
+                std::fs::create_dir(&journal).expect("a journal no reader can open");
+            }
+            _ => std::fs::remove_file(other.join("launch.json")).expect("its launch record"),
         }
+
         let landed = world.run(&["publish-branch", &branch, "--repo", "service"]);
         landed.exited(0);
-        if unreadable {
-            landed
-                .err_has(&format!(
-                    "publishing under onevcs's default subject (no owning node is known to \
-                     be unique: {} cannot be read: ",
-                    journal.display()
-                ))
-                .err_lacks(OWNER_TITLE);
-            assert_eq!(
-                base_subject(&world, &repository),
-                format!("chore: preserve work on {branch}")
-            );
-        } else {
-            // A run with no journal yet — as one is between its launch record and
-            // its first event — names nothing, so the owner found elsewhere stands.
-            landed.err_has(&format!(
-                "publishing under '{OWNER_TITLE}' (from owned#service)\n"
-            ));
-            assert_eq!(base_subject(&world, &repository), OWNER_TITLE);
+        match case {
+            "unreadable" | "refused-naming" => {
+                let why = if case == "unreadable" {
+                    format!("{} cannot be read: ", journal.display())
+                } else {
+                    format!(
+                        "{} records the branch and is not a run this build reads: ",
+                        other.display()
+                    )
+                };
+                landed
+                    .err_has(&format!(
+                        "publishing under onevcs's default subject (no owning node is known \
+                         to be unique: {why}"
+                    ))
+                    .err_lacks(OWNER_TITLE);
+                assert_eq!(
+                    base_subject(&world, &repository),
+                    format!("chore: preserve work on {branch}"),
+                    "{case}"
+                );
+            }
+            _ => {
+                landed.err_has(&format!(
+                    "publishing under '{OWNER_TITLE}' (from owned#service)\n"
+                ));
+                assert_eq!(base_subject(&world, &repository), OWNER_TITLE, "{case}");
+            }
         }
     }
 }

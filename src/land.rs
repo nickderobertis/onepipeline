@@ -113,7 +113,6 @@ enum SubjectSource {
     Owner {
         /// `<run>#<node>`.
         node: String,
-        /// The node's title, which the landing publishes under.
         title: onevcs::Subject,
     },
     /// The caller's own `--title`.
@@ -234,18 +233,30 @@ fn owner_of(runs: &Path, branch: &str) -> Ownership {
     // never names it is passed over without folding.
     let spelled = serde_json::to_string(branch).unwrap_or_default();
     let spelled = spelled.trim_matches('"');
-    let mut owners = Vec::new();
-    for paths in crate::ledger::all_runs(runs).runs {
-        let journal = paths.journal();
-        let text = match std::fs::read_to_string(&journal) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Ownership::Unread(format!("{} cannot be read: {error}", journal.display()))
+    let index = crate::ledger::all_runs(runs);
+    // A run root the index refuses is passed over only where it holds no journal
+    // naming the branch: one that does may be another owner this build cannot read.
+    for skipped in &index.skipped {
+        let journal = skipped.path.join("events.jsonl");
+        match journal_naming(&journal, spelled) {
+            Ok(false) => {}
+            Ok(true) => {
+                return Ownership::Unread(format!(
+                    "{} records the branch and is not a run this build reads: {}",
+                    skipped.path.display(),
+                    skipped.reason
+                ))
             }
-        };
-        if !text.contains(spelled) {
-            continue;
+            Err(why) => return Ownership::Unread(why),
+        }
+    }
+    let mut owners = Vec::new();
+    for paths in index.runs {
+        let journal = paths.journal();
+        match journal_naming(&journal, spelled) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(why) => return Ownership::Unread(why),
         }
         let events = crate::journal::read(&journal);
         let state = crate::projection::fold(&events);
@@ -280,6 +291,17 @@ fn owner_of(runs: &Path, branch: &str) -> Ownership {
     match <[Owner; 1]>::try_from(owners) {
         Ok([owner]) => Ownership::One(owner),
         Err(_) => Ownership::NotOne,
+    }
+}
+
+/// Whether a journal names `spelled` — `false` where it does not exist yet, as a
+/// run's does not between its launch record and its first event — or why it
+/// cannot be read.
+fn journal_naming(journal: &Path, spelled: &str) -> std::result::Result<bool, String> {
+    match std::fs::read_to_string(journal) {
+        Ok(text) => Ok(text.contains(spelled)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("{} cannot be read: {error}", journal.display())),
     }
 }
 

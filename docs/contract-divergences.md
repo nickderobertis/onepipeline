@@ -7344,8 +7344,9 @@ point is too, and the consumer's recipes become passthroughs.
   hands the verb that node's title as its `--title`, the subject the run's own
   closeout would have used. A node dispatched more than once onto the branch is
   one owner, and so is a retry lineage, titled by its most recent node. No owner,
-  more than one, an owner with no title, a title `Subject::try_from` refuses, or
-  a run journal that cannot be read leaves the verb its own default. Before it
+  more than one, an owner with no title, a title `Subject::try_from` refuses, a
+  run journal that cannot be read, or a run root this build refuses whose journal
+  names the branch leaves the verb its own default. Before it
   publishes, standard error says where the subject came from: `publishing under
   '<subject>' (from <run>#<node>)`, `publishing under '<subject>' (--title)`, or
   `publishing under onevcs's default subject (<why>)` — naming no subject there,
