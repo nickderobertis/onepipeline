@@ -7339,20 +7339,19 @@ point is too, and the consumer's recipes become passthroughs.
   passed through unchanged, because the verb's answer *is* this command's answer.
 - **The subject defaults to the owning run node's title.** With no `--title`,
   the verb looks for the one run node under the runs root whose journal records
-  the branch — a session its dispatch opened there, the branch a settlement left,
-  a dispatch an adoption cleared, or a pin or resume naming it — and hands the
-  verb that node's title as its `--title`, which is the subject the run's own
+  the branch — every session a node's dispatch opened on it, and every node the
+  plan pins to it, which is how a retry carries a branch to its replacement — and
+  hands the verb that node's title as its `--title`, the subject the run's own
   closeout would have used. A node dispatched more than once onto the branch is
   one owner, and so is a retry lineage, titled by its most recent node. No owner,
-  more than one, an owner with no title, or a title `Subject::try_from` refuses
-  leaves the verb its own default. Before it publishes, standard error says where
-  the subject came from: `publishing under '<subject>' (from <run>#<node>)`,
-  `publishing under '<subject>' (--title)`, or `publishing under onevcs's default
-  subject (<why>)` — naming no subject there, because which commit supplies the
-  default is `onevcs`'s ranking and is not repeated here. Driven by the
-  `*_owning_nodes_title*`, `an_explicit_title_wins_over_the_owning_nodes`,
-  `a_branch_with_no_single_owner_lands_under_the_onevcs_default` and
-  `a_retried_nodes_branch_lands_under_its_latest_replacements_title` journeys in
+  more than one, an owner with no title, a title `Subject::try_from` refuses, or
+  a run journal that cannot be read leaves the verb its own default. Before it
+  publishes, standard error says where the subject came from: `publishing under
+  '<subject>' (from <run>#<node>)`, `publishing under '<subject>' (--title)`, or
+  `publishing under onevcs's default subject (<why>)` — naming no subject there,
+  because which commit supplies the default is `onevcs`'s ranking and is not
+  repeated here. Driven by the journeys after
+  `publish_branch_lands_an_owned_branch_under_its_owning_nodes_title` in
   `tests/e2e/out_of_band.rs`.
 - **`--repo` takes a registered alias or a path.** The drafter needs a directory
   and the verb accepts an alias, so a value that is not a directory is resolved to
