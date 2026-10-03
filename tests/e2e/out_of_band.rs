@@ -1567,3 +1567,44 @@ fn copy_dir(from: &Path, to: &Path) {
         }
     }
 }
+
+/// A retry lineage is one owner: the replacement a planner retried the node
+/// under inherits its branch, and the landing publishes under the title of the
+/// lineage's most recent node, since a retry can carry a corrected one. The node
+/// itself, dispatched twice onto that branch by its publication attempts, is
+/// one owner too.
+#[test]
+fn a_retried_nodes_branch_lands_under_its_latest_replacements_title() {
+    let world = World::new("oob-owned-retried");
+    let (repository, branch) = owned_branch(&world, "owned", false);
+    assert!(
+        world.events_of("owned", "node-dispatched").len() > 1,
+        "the node was dispatched onto its branch only once"
+    );
+    world
+        .run_with_stdin(
+            &["reply", "owned"],
+            &serde_json::json!({
+                "version": 2,
+                "commands": [{
+                    "op": "retry",
+                    "id": "service",
+                    "node": {"id": "service-2", "repo": "service", "persona": "engineer",
+                             "title": "perf: the corrected headline",
+                             "task": "## What\nPublish again.\n\n## Why\nIt failed.\n\n\
+                                      ## Acceptance criteria\n- published."},
+                }],
+            })
+            .to_string(),
+        )
+        .exited(0);
+
+    world
+        .run(&["publish-branch", &branch, "--repo", "service"])
+        .exited(0)
+        .err_has("publishing under 'perf: the corrected headline' (from owned#service-2)\n");
+    assert_eq!(
+        base_subject(&world, &repository),
+        "perf: the corrected headline"
+    );
+}

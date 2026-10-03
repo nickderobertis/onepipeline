@@ -964,6 +964,29 @@ fn git_in<'a>(
 mod tests {
     use super::*;
 
+    /// An owning node that states no title — a plan from before titles were
+    /// required — lands under the default, and the line names the node rather
+    /// than claiming no node owns the branch.
+    #[test]
+    fn an_untitled_owner_is_named_as_the_reason_for_the_default() {
+        assert_eq!(
+            SubjectSource::Untitled("owned#service".to_owned()).line(),
+            "publishing under onevcs's default subject (owned#service states no title)"
+        );
+    }
+
+    /// A retry chain a person edited into a cycle is walked once, and ends on a
+    /// node rather than looping.
+    #[test]
+    fn a_cyclic_retry_chain_ends_on_a_node() {
+        let superseded: std::collections::BTreeMap<String, String> = [("a", "b"), ("b", "a")]
+            .into_iter()
+            .map(|(from, to)| (from.to_owned(), to.to_owned()))
+            .collect();
+        assert_eq!(lineage_head(&superseded, "a"), "b");
+        assert_eq!(lineage_head(&superseded, "c"), "c");
+    }
+
     fn words(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
     }
