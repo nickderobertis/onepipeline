@@ -608,16 +608,13 @@ resolver = "2"
 # `^0.37` admits no 0.38.x; `onevcs-testing` 0.11.0 requires exactly `=0.38.0`,
 # so the pair moves as one.
 #
-# `onevcs` 0.39.0 is the floor because it retires landed branches on Windows and
-# says, in `Retirement::cause`, which read left a branch `keep / unknown`. The engine
-# journals only retired and failed branches in `branches-retired`, so it reads no
-# cause. The release also ends the revisions it hands git with `--`, so a revision
-# that is also a file in the tree is never ambiguous. The hook-environment fix a dispatch's
-# publication relies on shipped in 0.38.0, and `tests/e2e/lifecycle.rs`'s
-# `a_hooks_git_commands_in_a_fixture_repository_*` journey drives it: a `pre-push`
-# hook commits in a fixture repository and unsets nothing. A **requirement**, because
-# `^0.38` admits no 0.39.x; `onevcs-testing` 0.11.1 requires exactly `=0.39.0`, so
-# the pair moves as one.
+# `onevcs` 0.39.0 is the floor because it retires landed branches on Windows, and a
+# dispatch on a Windows host retires through the release this lock links. The
+# hook-environment fix every publication relies on shipped in 0.38.0, and
+# `tests/e2e/lifecycle.rs`'s `a_hooks_git_commands_in_a_fixture_repository_*` journey
+# drives it: a `pre-push` hook commits in a fixture repository and unsets nothing. A
+# **requirement**, because `^0.38` admits no 0.39.x; `onevcs-testing` 0.11.1 requires
+# exactly `=0.39.0`, so the pair moves as one.
 #
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
 # `reasoning` items as `turn-activity` under their own kind — the agent's words,
@@ -867,8 +864,9 @@ onevcs-testing = "0.11.1"
 # that way. It also carries the Linear plugin's `status_mapping`, which a write-back to
 # a Linear source needs.
 #
-# 0.2.58 answers a project or document text query against a GitHub Projects source
-# with the board's own search. Nothing in the engine's calls changed.
+# 0.2.58 because a plan read from a GitHub Projects source runs its project and
+# document text queries through this release's board search; `justfile`'s
+# `onetaskgraph-version` moves with it.
 onetaskgraph-core = "=0.2.58"
 onetaskgraph-plugin-api = "=0.2.58"
 onetaskgraph-local-md = "=0.2.58"

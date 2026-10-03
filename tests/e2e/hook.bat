@@ -146,17 +146,20 @@ if not "%~3"=="" (
 if not exist "%~2\" mkdir "%~2"
 cd /d "%~2"
 if errorlevel 1 (
-  echo pre-push: cannot make the fixture directory %~2 1>&2
+  echo pre-push: cannot make or enter the fixture directory %~2; check that its parent exists and is writable 1>&2
   exit /b 1
 )
 git init -q
-if errorlevel 1 goto fixturerefused
+if errorlevel 1 (
+  echo pre-push: git init refused in the fixture %~2; git's own message is above 1>&2
+  exit /b 1
+)
 git -c user.name=fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m "fixture: committed by the pre-push hook"
-if errorlevel 1 goto fixturerefused
+if errorlevel 1 (
+  echo pre-push: git commit refused in the fixture %~2; git's own message is above 1>&2
+  exit /b 1
+)
 exit /b 0
-:fixturerefused
-echo pre-push: git refused the fixture's init or commit in %~2 1>&2
-exit /b 1
 
 rem How long `wait-for` waits for its rendezvous before it refuses the push, and
 rem the environment variable that carries it — both in `hook.sh`, with why the

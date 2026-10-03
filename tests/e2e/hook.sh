@@ -291,12 +291,16 @@ case "${1-}" in
     # the one the hook was handed. `-C` is not used for the same reason: it is a
     # directory to start in, and an inherited `GIT_DIR` would win over it anyway.
     if ! mkdir -p "$2" || ! cd "$2"; then
-      echo "pre-push: cannot make the fixture directory $2" >&2
+      echo "pre-push: cannot make or enter the fixture directory $2; check that its parent exists and is writable" >&2
       exit 1
     fi
-    if ! git init -q || ! git -c user.name=fixture -c user.email=fixture@example.invalid \
+    if ! git init -q; then
+      echo "pre-push: git init refused in the fixture $2; git's own message is above" >&2
+      exit 1
+    fi
+    if ! git -c user.name=fixture -c user.email=fixture@example.invalid \
       commit -q --allow-empty -m "fixture: committed by the pre-push hook"; then
-      echo "pre-push: git refused the fixture's init or commit in $2" >&2
+      echo "pre-push: git commit refused in the fixture $2; git's own message is above" >&2
       exit 1
     fi
     ;;
