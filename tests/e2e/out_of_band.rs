@@ -1640,7 +1640,14 @@ fn an_untitled_owning_node_lands_under_the_onevcs_default_and_is_named() {
 /// found elsewhere stands.
 #[test]
 fn a_run_whose_records_cannot_be_read_leaves_no_owner_known_to_be_unique() {
-    for case in ["no-journal", "unreadable", "refused", "refused-naming"] {
+    for case in [
+        "no-journal",
+        "unreadable",
+        "partial",
+        "refused",
+        "refused-naming",
+        "refused-unreadable",
+    ] {
         let world = World::new(&format!("oob-owned-{case}"));
         let (repository, branch) = owned_branch_then(&world, "owned", false, |world, branch| {
             if case == "refused-naming" {
@@ -1666,20 +1673,36 @@ fn a_run_whose_records_cannot_be_read_leaves_no_owner_known_to_be_unique() {
                 std::fs::remove_file(&journal).expect("the other run's journal");
                 std::fs::create_dir(&journal).expect("a journal no reader can open");
             }
-            _ => std::fs::remove_file(other.join("launch.json")).expect("its launch record"),
+            // The owner's own journal, with a line no build wrote whole.
+            "partial" => {
+                let owned = world.runs.join("owned").join("events.jsonl");
+                let mut text = std::fs::read_to_string(&owned).expect("the owner's journal");
+                text.push_str("{\"v\": not a record\n");
+                std::fs::write(&owned, text).expect("journal edited");
+            }
+            _ => {
+                std::fs::remove_file(other.join("launch.json")).expect("its launch record");
+                if case == "refused-unreadable" {
+                    std::fs::remove_file(&journal).expect("the other run's journal");
+                    std::fs::create_dir(&journal).expect("a journal no reader can open");
+                }
+            }
         }
 
         let landed = world.run(&["publish-branch", &branch, "--repo", "service"]);
         landed.exited(0);
         match case {
-            "unreadable" | "refused-naming" => {
-                let why = if case == "unreadable" {
-                    format!("{} cannot be read: ", journal.display())
-                } else {
-                    format!(
+            "unreadable" | "partial" | "refused-naming" | "refused-unreadable" => {
+                let why = match case {
+                    "partial" => format!(
+                        "{} holds a line this build cannot read)",
+                        world.runs.join("owned").join("events.jsonl").display()
+                    ),
+                    "refused-naming" => format!(
                         "{} records the branch and is not a run this build reads: ",
                         other.display()
-                    )
+                    ),
+                    _ => format!("{} cannot be read: ", journal.display()),
                 };
                 landed
                     .err_has(&format!(

@@ -258,6 +258,14 @@ fn owner_of(runs: &Path, branch: &str) -> Ownership {
             Ok(false) => continue,
             Err(why) => return Ownership::Unread(why),
         }
+        // A line this build cannot read may be the session, pin or retry that
+        // makes the owner not the only one, so a partial read answers nothing.
+        if crate::journal::has_unreadable_lines(&journal) {
+            return Ownership::Unread(format!(
+                "{} holds a line this build cannot read",
+                journal.display()
+            ));
+        }
         let events = crate::journal::read(&journal);
         let state = crate::projection::fold(&events);
         let opened = events
