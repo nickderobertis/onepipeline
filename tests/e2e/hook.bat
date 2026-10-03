@@ -151,12 +151,12 @@ if errorlevel 1 (
 )
 git init -q
 if errorlevel 1 (
-  echo pre-push: git init refused in the fixture %~2; git's own message is above 1>&2
+  echo pre-push: git init refused in the fixture %~2; run git rev-parse --absolute-git-dir there to see which repository git resolved, and unset any GIT_DIR or GIT_WORK_TREE that names another 1>&2
   exit /b 1
 )
 git -c user.name=fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m "fixture: committed by the pre-push hook"
 if errorlevel 1 (
-  echo pre-push: git commit refused in the fixture %~2; git's own message is above 1>&2
+  echo pre-push: git commit refused in the fixture %~2; run git rev-parse --absolute-git-dir there to see which repository git resolved, and unset any GIT_DIR or GIT_WORK_TREE that names another 1>&2
   exit /b 1
 )
 exit /b 0

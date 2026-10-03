@@ -295,12 +295,12 @@ case "${1-}" in
       exit 1
     fi
     if ! git init -q; then
-      echo "pre-push: git init refused in the fixture $2; git's own message is above" >&2
+      echo "pre-push: git init refused in the fixture $2; run git rev-parse --absolute-git-dir there to see which repository git resolved, and unset any GIT_DIR or GIT_WORK_TREE that names another" >&2
       exit 1
     fi
     if ! git -c user.name=fixture -c user.email=fixture@example.invalid \
       commit -q --allow-empty -m "fixture: committed by the pre-push hook"; then
-      echo "pre-push: git commit refused in the fixture $2; git's own message is above" >&2
+      echo "pre-push: git commit refused in the fixture $2; run git rev-parse --absolute-git-dir there to see which repository git resolved, and unset any GIT_DIR or GIT_WORK_TREE that names another" >&2
       exit 1
     fi
     ;;
