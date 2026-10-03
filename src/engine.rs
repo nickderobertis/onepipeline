@@ -10121,6 +10121,70 @@ mod tests {
         }
     }
 
+    /// What an envelope names, for every command shape: the node its `id`
+    /// names, the nodes in its `deps` for the three that carry any, and nothing
+    /// for a command naming no node.
+    #[test]
+    fn an_envelope_names_each_commands_id_and_deps() {
+        let node = |id: &str, deps: &[&str]| -> Node {
+            serde_json::from_value(json!({
+                "id": id,
+                "kind": "agent",
+                "task": "t",
+                "deps": deps,
+            }))
+            .expect("a node")
+        };
+        let named =
+            |commands: &[Command]| -> Vec<String> { names_of(commands).into_iter().collect() };
+        assert_eq!(
+            named(&[Command::Add {
+                node: node("added", &["build", "lint"]),
+            }]),
+            ["added", "build", "lint"]
+        );
+        assert_eq!(
+            named(&[Command::Retry {
+                id: "build".into(),
+                node: node("build-2", &["lint"]),
+            }]),
+            ["build", "lint"]
+        );
+        assert_eq!(
+            named(&[Command::Reparent {
+                id: "docs".into(),
+                deps: vec!["lint".into()],
+            }]),
+            ["docs", "lint"]
+        );
+        assert_eq!(
+            named(&[
+                Command::Amend {
+                    id: "docs".into(),
+                    text: "t".into(),
+                },
+                Command::Finding {
+                    message: "m".into(),
+                    blocking: false,
+                    id: Some("other".into()),
+                },
+            ]),
+            ["docs", "other"]
+        );
+        assert!(
+            named(&[
+                Command::Complete { reason: "r".into() },
+                Command::Finding {
+                    message: "m".into(),
+                    blocking: false,
+                    id: None,
+                },
+            ])
+            .is_empty(),
+            "a command naming no node named one"
+        );
+    }
+
     /// Envelopes held behind an outstanding note survive a queue that refuses the
     /// next claim, and are judged, in order, once the queue answers again.
     ///

@@ -38,6 +38,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use oneagentgraph::event::{Origin, TurnMessage, TurnStarted};
+use onemessagebus::{Config, Layouts, TransportKinds};
+use onepipeline::channel::layout::{PlannerChannel, PLANNER_CHANNEL, REPLIES};
 use onepipeline::channel::Command;
 use onepipeline::channel::Deliver;
 use onepipeline::note::{deliver, deliver_with, Addressee, Delivered, Note, Reached};
@@ -835,6 +837,22 @@ const OTHER_RULING: &str = "other: keep the fixture where it is";
 /// A node added behind the note, naming the note's node only among its `deps`.
 const ADDED: &str = "after-build";
 
+/// How the reconciler opens its refusal of a record it cannot decode.
+const MALFORMED: &str = "refused: the envelope is malformed: ";
+
+/// Send one envelope through the planner channel's own bus, which reads only each
+/// command's `op` — so a record `reply` would refuse reaches the queue this way.
+fn sent_through_the_bus(world: &World, run: &str, envelope: &Value) {
+    let bus = Config::local(world.run_file(run, "channel"), Some(PLANNER_CHANNEL))
+        .resolve(
+            &Layouts::new().with(std::sync::Arc::new(PlannerChannel)),
+            &TransportKinds::builtin(),
+        )
+        .expect("the planner channel's bus resolves over the run's channel");
+    bus.send(&REPLIES.parse().expect("a queue name"), envelope.clone())
+        .unwrap_or_else(|error| panic!("the bus refused {envelope}: {error}"));
+}
+
 /// A monitor's finding about the run rather than any one node.
 const UNADDRESSED: &str = "the run's queue depth keeps growing";
 
@@ -858,7 +876,8 @@ fn committed_at(journal: &[Value], op: &str, field: &str, value: &str) -> Option
 /// of that turn, unanswered and with nothing saying why. Here the note's envelope
 /// also amends `docs`. An amendment to `other` and a finding about no node are
 /// claimed behind it and are both committed and answered while the note is still
-/// waiting; a finding about `build`, a second amendment to `docs`, and an `add`
+/// waiting, and a record naming `build` that does not decode is refused as it is
+/// claimed; a finding about `build`, a second amendment to `docs`, and an `add`
 /// naming `build` only among its `deps` are held, unanswered, and applied once the
 /// note is — after it, and in the order they were claimed, so no edit to `docs`
 /// overtakes the one the note's envelope carried.
@@ -928,6 +947,21 @@ fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
         &envelope(json!({"op": "finding", "message": UNADDRESSED})),
     );
 
+    // Naming `build`, and refused as it is claimed rather than held: nothing of a
+    // record that does not decode can be applied, so nothing waits on its turn.
+    sent_through_the_bus(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [{"op": "drop", "id": "build"}]}),
+    );
+    world.until("the record that does not decode to be refused", |world| {
+        world.command_outcomes(run).iter().any(|outcome| {
+            outcome["applied"] == json!(false)
+                && outcome["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.starts_with(MALFORMED))
+        })
+    });
     world.until(
         "the ruling on other and the finding about no node to be committed",
         |world| {
