@@ -8816,3 +8816,48 @@ reads the same over a graph whose only node has settled; and `tests/e2e/watch.rs
 `a_driver_that_goes_quiet_during_the_wait_does_not_end_it_nothing_driving` arms a watch on
 an `ACTIVE` run and holds it past the run turning `PARKED`. A journey that needs a live
 driver's run taken over now ends that driver by pid first, as a crash or a `stop` would.
+
+## 108. Every envelope claimed behind a live note waited for that note's answer — RESOLVED
+
+**Ruling: the user accepted onepipeline#320 with its fix stated, and ruled it into the
+plan `accepted-follow-ups-1002-plan` (node `op-320`); the planner who owns the contract
+ruled the one edge its wording left open on that node.** An envelope claimed behind one
+awaiting a live note's answer is held only when it names a node the awaiting envelope
+names, and every other envelope is judged and applied on the pass that claims it.
+
+**What was wrong.** Since `a72e88e` a live note is offered off the run's single writer,
+so relay, settlement and heartbeats go on while a conversation decides. But the
+reconciler then stopped judging: every envelope claimed behind the outstanding one was
+held, unjudged and unanswered, until the addressed conversation answered, and a worker
+turn can run for many minutes. Every later manager edit, monitor finding and amendment
+waited for all of it, about other nodes as much as the addressed one, with nothing
+saying why; the ticket records fifteen occurrences, and a manager seeing no outcome sent
+the same correction again, which held the queue for a second turn. The rule was stated
+only in the engine's own comment on `reconcile_edits`, which said every envelope claimed
+behind the handed one is held, in claim order, until that answer is recorded.
+
+**The rule.** A command names the node its `id` names and the nodes in its `deps` where
+it carries any; an envelope names every node any of its commands names. The ticket's
+wording held only what names a node *the note* addresses. An envelope awaiting a note's
+answer can carry other commands — `[note A, drop C]` — whose compiled operations commit
+only once the note is answered, without being judged again, so a later `[amend C]` held
+by nothing would commit ahead of the earlier `drop C`, against a graph the earlier
+command was not judged on. The planner ruled that edge: an envelope awaiting a note's
+answer holds every node it names — its notes' nodes and its other commands' — which for
+a note-only envelope is the ticket's rule exactly. For the same reason an envelope naming
+a node an envelope already held names is held behind it. An envelope naming nodes of two
+outstanding envelopes waits for both; one naming no node — `complete`, a `finding` about
+no node — is never held. A held envelope is answered when it is applied, as before. Each
+envelope that offers a note is handed to a delivery thread of its own, so a note to one
+conversation never waits on another conversation's turn.
+
+**What this build does.** `tests/note/main.rs`'s
+`only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it` holds a worker turn
+with a `[note build, amend docs]` envelope outstanding and drives four envelopes behind
+it through `reply`: an `amend` to `other` and a `finding` about no node are committed and
+answered while the note still waits, and a `finding` about `build` and a second `amend`
+to `docs` stay unanswered until the note is, then commit after it in claim order. Two
+notes outstanding and answered one at a time is not a state the doubled turn can arrange
+— its hold is one pair of gates for every conversation — so `src/engine.rs`'s
+`an_envelope_naming_two_outstanding_notes_waits_for_both_answers` drives the real queue
+and the real reconciler with two deliveries outstanding.
