@@ -832,6 +832,9 @@ const SECOND_RULING: &str = "docs: and link the changelog entry";
 /// A ruling on a node nothing outstanding names.
 const OTHER_RULING: &str = "other: keep the fixture where it is";
 
+/// A node added behind the note, naming the note's node only among its `deps`.
+const ADDED: &str = "after-build";
+
 /// A monitor's finding about the run rather than any one node.
 const UNADDRESSED: &str = "the run's queue depth keeps growing";
 
@@ -855,9 +858,10 @@ fn committed_at(journal: &[Value], op: &str, field: &str, value: &str) -> Option
 /// of that turn, unanswered and with nothing saying why. Here the note's envelope
 /// also amends `docs`. An amendment to `other` and a finding about no node are
 /// claimed behind it and are both committed and answered while the note is still
-/// waiting; a finding about `build` and a second amendment to `docs` are held,
-/// unanswered, and applied once the note is — after it, and in the order they were
-/// claimed, so no edit to `docs` overtakes the one the note's envelope carried.
+/// waiting; a finding about `build`, a second amendment to `docs`, and an `add`
+/// naming `build` only among its `deps` are held, unanswered, and applied once the
+/// note is — after it, and in the order they were claimed, so no edit to `docs`
+/// overtakes the one the note's envelope carried.
 #[test]
 fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
     let world = World::new("note-unrelated");
@@ -906,6 +910,12 @@ fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
         "the second ruling on docs to be queued",
         queued(SECOND_RULING),
     );
+    let mut after_build = submitted(
+        &world,
+        run,
+        &envelope(json!({"op": "add", "node": agent(ADDED, &["build"])})),
+    );
+    world.until("the node added after build to be queued", queued(ADDED));
     // Claimed after both, and naming nothing the note's envelope names.
     let about_other = submitted(
         &world,
@@ -950,7 +960,17 @@ fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
             && committed_at(&journal, "amend", "text", SECOND_RULING).is_none(),
         "an envelope naming a node the waiting envelope names was applied ahead of it"
     );
-    for (what, reply) in [("build", &mut about_build), ("docs", &mut about_docs)] {
+    assert!(
+        journal
+            .iter()
+            .all(|event| event["payload"]["command"]["op"] != "add"),
+        "an envelope naming the note's node among its deps was applied ahead of it"
+    );
+    for (what, reply) in [
+        ("build", &mut about_build),
+        ("docs", &mut about_docs),
+        ("the node depending on build", &mut after_build),
+    ] {
         assert!(
             reply.try_wait().expect("the reply is readable").is_none(),
             "the envelope about {what} was answered while the note it waits behind was not"
@@ -965,6 +985,7 @@ fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
         ("the note's", note),
         ("the finding about build's", about_build),
         ("the second ruling on docs'", about_docs),
+        ("the added node's", after_build),
     ] {
         assert!(
             answered(reply).contains("\"state\":\"applied\""),
@@ -985,6 +1006,13 @@ fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
         at("amend", "text", FIRST_RULING),
         at("finding", "message", FINDING),
         at("amend", "text", SECOND_RULING),
+        journal
+            .iter()
+            .position(|event| {
+                event["kind"] == "edit-committed"
+                    && event["payload"]["command"]["node"]["id"] == ADDED
+            })
+            .expect("the added node was committed"),
     ];
     assert!(
         order.windows(2).all(|pair| pair[0] < pair[1]),
@@ -993,7 +1021,101 @@ fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
     );
 
     world.until("the run to settle", |world| {
-        world.events_of(run, "node-settled").len() == 3
+        world.events_of(run, "node-settled").len() == 4
+    });
+}
+
+/// Notes to two conversations wait in both inboxes at once, and an envelope naming
+/// both nodes waits for both answers.
+///
+/// Each envelope that offers a note is handed to a delivery thread of its own, so
+/// a note to one conversation is offered while another conversation's turn still
+/// holds the first: with one thread for every note, the second would wait in that
+/// thread behind the first and never reach its inbox until the first turn ended.
+/// The doubled turn's hold is one pair of gates for every conversation, so both
+/// answers come together here; which of the two an envelope naming both waits for
+/// alone is `engine`'s `an_envelope_naming_two_outstanding_notes_waits_for_both_answers`.
+#[test]
+fn notes_to_two_conversations_wait_in_both_inboxes_at_once() {
+    let world = World::new("note-two-inboxes");
+    let run = "twoinboxes";
+    held_heartbeating_conversation(&world, run, vec![agent("build", &[]), agent("lint", &[])]);
+    world.until("both workers' turns to open", |world| {
+        let opened = world.events_of(run, "turn-started");
+        ["build", "lint"]
+            .iter()
+            .all(|node| opened.iter().any(|event| event["labels"]["node"] == *node))
+    });
+
+    let to_build = submitted(
+        &world,
+        run,
+        &envelope(note_op("build", "worker", NOTE, None)),
+    );
+    let to_lint = submitted(
+        &world,
+        run,
+        &envelope(note_op("lint", "worker", PLANNER_CONTEXT, None)),
+    );
+    world.until(
+        "both notes to wait in their conversations' inboxes",
+        |world| awaiting_an_answer(world) == 2,
+    );
+    let mut about_both = submitted(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            {"op": "finding", "id": "build", "message": FINDING},
+            {"op": "finding", "id": "lint", "message": UNADDRESSED},
+        ]})
+        .to_string(),
+    );
+    let queue = world.run_file(run, "channel/commands.jsonl");
+    world.until("the envelope naming both to be queued", |_| {
+        std::fs::read_to_string(&queue).is_ok_and(|text| text.contains(UNADDRESSED))
+    });
+    let beats = world.events_of(run, "member-heartbeat").len();
+    world.until("the run to go on recording its dispatches", |world| {
+        world.events_of(run, "member-heartbeat").len() >= beats + 2
+    });
+    assert!(
+        about_both
+            .try_wait()
+            .expect("the reply is readable")
+            .is_none()
+            && world
+                .journal(run)
+                .iter()
+                .all(|event| event["payload"]["command"]["op"] != "finding"),
+        "the envelope naming both nodes was applied while both notes were waiting"
+    );
+
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    for (what, reply) in [
+        ("the note to build's", to_build),
+        ("the note to lint's", to_lint),
+        ("the envelope naming both's", about_both),
+    ] {
+        assert!(
+            answered(reply).contains("\"state\":\"applied\""),
+            "{what} envelope was not applied"
+        );
+    }
+    let journal = world.journal(run);
+    let at = |op, field, value| {
+        committed_at(&journal, op, field, value)
+            .unwrap_or_else(|| panic!("no {op} reading {value} was committed"))
+    };
+    let notes = at("note", "id", "build").max(at("note", "id", "lint"));
+    let findings = at("finding", "message", FINDING).min(at("finding", "message", UNADDRESSED));
+    assert!(
+        notes < findings,
+        "the envelope naming both nodes was committed before both notes were"
+    );
+
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() == 2
     });
 }
 

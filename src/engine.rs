@@ -3304,7 +3304,6 @@ impl Drop for PendingDelivery {
 }
 
 impl NoteDeliveries {
-    /// Deliveries answering on `tx`, with none outstanding.
     fn new(tx: &Sender<Message>, in_flight: &DeliveriesInFlight) -> Self {
         Self {
             answering: tx.clone(),

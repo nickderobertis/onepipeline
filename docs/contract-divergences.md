@@ -8855,9 +8855,12 @@ conversation never waits on another conversation's turn.
 `only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it` holds a worker turn
 with a `[note build, amend docs]` envelope outstanding and drives four envelopes behind
 it through `reply`: an `amend` to `other` and a `finding` about no node are committed and
-answered while the note still waits, and a `finding` about `build` and a second `amend`
-to `docs` stay unanswered until the note is, then commit after it in claim order. Two
-notes outstanding and answered one at a time is not a state the doubled turn can arrange
-— its hold is one pair of gates for every conversation — so `src/engine.rs`'s
+answered while the note still waits, and a `finding` about `build`, a second `amend` to
+`docs` and an `add` naming `build` only among its `deps` stay unanswered until the note
+is, then commit after it in claim order. `notes_to_two_conversations_wait_in_both_inboxes_at_once`
+holds two workers' turns and has a note to each waiting in both inboxes at once, with an
+envelope naming both nodes unanswered until both notes are recorded. Two notes answered
+one at a time is not a state the doubled turn can arrange — its hold is one pair of gates
+for every conversation — so `src/engine.rs`'s
 `an_envelope_naming_two_outstanding_notes_waits_for_both_answers` drives the real queue
-and the real reconciler with two deliveries outstanding.
+and the real reconciler with two deliveries outstanding and answers them in turn.
