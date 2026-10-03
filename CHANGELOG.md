@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.60.1](https://github.com/nickderobertis/onepipeline/compare/v0.60.0...v0.60.1) - 2026-10-03
+
+### Added
+
+- *(payload)* publish every pipeline payload schema and its registry ([#709](https://github.com/nickderobertis/onepipeline/pull/709))
+
+### Fixed
+
+- *(lifecycle)* queue an unchanged workspace wait again only once its predecessor is read ([#711](https://github.com/nickderobertis/onepipeline/pull/711))
+- *(views)* read a live, quiet driver as parked and driven, never as nothing driving ([#701](https://github.com/nickderobertis/onepipeline/pull/701))
+
 ## [0.60.0](https://github.com/nickderobertis/onepipeline/compare/v0.59.0...v0.60.0) - 2026-10-02
 
 ### Added
