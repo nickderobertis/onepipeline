@@ -269,7 +269,6 @@ fn first_attempt_beside_a_hold(world: &World, run: &str) -> u32 {
 }
 
 /// Wait until a node has recorded a settlement.
-#[cfg(unix)]
 fn until_settled(world: &World, run: &str, node: &str) {
     world.until(&format!("{node} to settle"), |world| {
         world
@@ -3003,4 +3002,128 @@ fn an_idle_driver_records_the_verdict_the_next_pass_reuses_until_its_branch_move
     world.until("the run to settle", |world| {
         world.run_file("verdicts", "result.json").is_file()
     });
+}
+
+/// A dispatch that died with nothing landed, whose branch an idle pass then
+/// retired, is named as retired rather than as somewhere finished work may be —
+/// and is a branch to look at again once a retry cuts it afresh.
+///
+/// Each node's worker writes a file and its harness dies before anything lands:
+/// `died` to a death its harness reported, `gone` to its provider. The branch
+/// `onevcs` preserves each file on is then made to hold no work beyond its base,
+/// by the base coming to carry the same file, and the driver's next idle pass
+/// deletes both. A manager reading either node afterwards must not be sent to
+/// recover work from a branch that no longer exists, and each still settles
+/// exactly as a dispatch that died does.
+#[test]
+fn a_died_dispatchs_branch_a_pass_retired_is_named_as_retired() {
+    let world = sweeping_world("retirement-died");
+    let repo = world.repository("local-direct", &[]);
+    world.script("died.work", "the died dispatch wrote this\n");
+    world.script(
+        "died.died",
+        "provider error (respond): harness failed (auth)",
+    );
+    let mut died = lifecycle("died", &[]);
+    died["branch"] = json!("died/work");
+    world.script("gone.work", "the dispatch its provider killed wrote this\n");
+    world.script(
+        "gone.died-as",
+        "provider-failure quota the subscription behind this member is exhausted",
+    );
+    let mut gone = lifecycle("gone", &[]);
+    gone["branch"] = json!("gone/work");
+
+    sweeping(
+        &world,
+        "sweeper",
+        crate::harness::agent("hold", &[]),
+        vec![died, gone],
+    );
+    for (node, outcome) in [("died", "dispatch-died"), ("gone", "provider-failed")] {
+        until_settled(&world, "sweeper", node);
+        let settled = settlement(&world, "sweeper", node);
+        assert_eq!(settled["status"], "failed", "{settled}");
+        assert_eq!(settled["outcome"], outcome, "{settled}");
+        // What it wrote is preserved on its branch, which so far holds work
+        // beyond the base; the base then comes to carry exactly that, so the
+        // pass after it finds nothing on the branch to lose.
+        let branch = format!("{node}/work");
+        assert_eq!(settled["branch"], branch.as_str(), "{settled}");
+        assert!(
+            holds(&world, &repo.checkout, &branch),
+            "{node} left no branch\n{}",
+            world.dump()
+        );
+        let file = format!("{node}.md");
+        let carried = git(
+            &world,
+            &repo.checkout,
+            &["show", &format!("{branch}:{file}")],
+        );
+        on_the_base(&world, &repo, &file, &carried);
+    }
+    until_retired(&world, "sweeper", &["died/work", "gone/work"]);
+    assert!(!holds(&world, &repo.checkout, "died/work"));
+    assert!(
+        world.events_of("sweeper", "merge-completed").is_empty(),
+        "this journey is about branches retired with no landing recorded"
+    );
+
+    let died_said = "the dispatch died (auth) rather than failing its task; died/work was \
+                     retired as holding no work beyond main";
+    let gone_said = "the provider killed the dispatch (quota), so nothing here is the work's \
+                     fault; gone/work was retired as holding no work beyond main";
+    for view in ["results", "status"] {
+        let read = world.run(&[view, "sweeper"]);
+        read.exited(0).out_has(died_said).out_has(gone_said);
+        assert!(
+            !read.stdout.contains("may carry finished work"),
+            "`{view}` sent a manager to recover work from a retired branch:\n{}",
+            read.stdout
+        );
+    }
+
+    // A retry pinned to the retired name cuts it fresh from the base, and what
+    // its dispatch leaves there is work to look at again: the name is a branch
+    // once more, and no view goes on calling it retired.
+    world.script("died-2.work-anew", "the retry wrote this");
+    world.script(
+        "died-2.died",
+        "provider error (respond): harness failed (auth)",
+    );
+    retry_of(&world, "sweeper", "died", "died-2", Some("died/work"));
+    until_settled(&world, "sweeper", "died-2");
+    let settled = settlement(&world, "sweeper", "died-2");
+    assert_eq!(settled["outcome"], "dispatch-died", "{settled}");
+    assert_eq!(settled["branch"], "died/work", "{settled}");
+    assert!(holds(&world, &repo.checkout, "died/work"));
+    let read = world.run(&["results", "sweeper"]);
+    read.exited(0)
+        .out_has(
+            "the dispatch died (auth) rather than failing its task; died/work may carry \
+             finished work",
+        )
+        .out_has(gone_said);
+    assert!(
+        !read.stdout.contains("died/work was retired"),
+        "a branch a retry cut again was still read as retired:\n{}",
+        read.stdout
+    );
+
+    world.release("hold.go");
+    world.until("the sweeper to settle", |world| {
+        world.run_file("sweeper", "result.json").is_file()
+    });
+    // Settled exactly as before: the retirement changed what the views say and
+    // nothing about any node's own word.
+    for (node, outcome) in [
+        ("died", "dispatch-died"),
+        ("gone", "provider-failed"),
+        ("died-2", "dispatch-died"),
+    ] {
+        let settled = settlement(&world, "sweeper", node);
+        assert_eq!(settled["status"], "failed", "{settled}");
+        assert_eq!(settled["outcome"], outcome, "{settled}");
+    }
 }

@@ -146,6 +146,29 @@ pub struct RunState {
     /// settlement, because the settlement records that a change landed and not
     /// what it landed as.
     pub landing_commits: BTreeMap<String, String>,
+    /// The base each node's work is merged with, as `onevcs` named it on the
+    /// session's own stream: the `base` of the session it opened, and then of
+    /// the `merge-completed` its change landed with, where that one names it.
+    ///
+    /// What a died dispatch's guidance names its landing or its retirement
+    /// against, so a reader is told *where* the work went rather than only that
+    /// it went. Omitted when empty, which is every run without a lifecycle node.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] a node id and a branch are the plain strings every neighbouring map of this struct carries — `branches` holds the same kind of value — and the branch is checked where it enters, by `vcs::usable`, which is the only thing that writes this map.
+    pub bases: BTreeMap<String, String>,
+    /// The branches an idle pass of this run's driver retired as holding no work
+    /// beyond their base, folded from its `branches-retired`.
+    ///
+    /// A name leaves the set when a later session opens on it again, because
+    /// that session cut it fresh from the base and it is a branch once more. So a
+    /// name here is one that does not exist any more, which is what keeps a died
+    /// dispatch's guidance from sending anybody to recover work from it. Keyed by
+    /// the name alone: a pass reports its identity and a node's settlement does
+    /// not, and the names a run's own nodes are cut under are its own. Omitted
+    /// when empty, which is every run whose driver retired nothing.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] a branch is the plain string every neighbouring field of this struct carries it as — `branches`, `bases`, and the session's own branch, which `DispatchSession::branch` hands back as a `String` to compare — and a newtype on this one set would disagree with each of them and convert at every read. What could go wrong with an unchecked one is checked where it enters, by `vcs::usable`, which is the only thing that writes this set.
+    pub retired_branches: BTreeSet<String>,
     /// Whether each published node's change reached its base branch.
     ///
     /// Written only by a settlement that observed one, like
@@ -1428,6 +1451,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 }
             }
         }
+        Some(journal::PipelineKind::BranchesRetired) => fold_retired_branches(state, payload),
         _ => {}
     }
 }
@@ -1496,6 +1520,17 @@ fn fold_landing_commit(state: &mut RunState, event: &Envelope) {
         return;
     };
     state.landing_commits.insert(node.to_string(), commit);
+    // The direct path names the base it landed on; the change-request one does
+    // not, and leaves the base its session opened on standing.
+    if let Some(base) = base_named_by(event) {
+        state.bases.insert(node.to_string(), base);
+    }
+}
+
+/// The `base` a relayed `onevcs` record names, where [`crate::vcs::usable`]
+/// accepts it as one a view can print on a line of its own.
+fn base_named_by(event: &Envelope) -> Option<String> {
+    crate::vcs::usable(event.payload.get("base")?.as_str()?)
 }
 
 fn fold_session(state: &mut RunState, event: &Envelope) {
@@ -1508,7 +1543,37 @@ fn fold_session(state: &mut RunState, event: &Envelope) {
     let Some(session) = crate::vcs::DispatchSession::read_from(event) else {
         return;
     };
+    // Cut fresh from the base if a pass had retired it, so it exists again.
+    state.retired_branches.remove(session.branch().as_str());
+    if let Some(base) = base_named_by(event) {
+        state.bases.insert(node.to_string(), base);
+    }
     state.sessions.insert(node.to_string(), session);
+}
+
+/// Record every branch one `branches-retired` says its pass deleted.
+///
+/// Read through the payload's own declaration, so a record this build cannot
+/// read records nothing rather than half of what it says; a branch name
+/// [`crate::vcs::usable`] refuses is one no node's settlement could carry
+/// either, so it is dropped with nothing lost.
+fn fold_retired_branches(state: &mut RunState, payload: &serde_json::Map<String, Value>) {
+    // llmlint: ignore-block[changed_behavior_has_e2e] no invocation of this build writes a
+    // `branches-retired` this reads as nothing: its one writer, `maintenance`, serializes this
+    // same type. An unreadable one is a journal another build wrote or a person edited, which
+    // no journey can produce without writing that journal by hand; this module's
+    // `a_retired_branch_a_session_opens_again_is_a_branch_once_more` folds one instead.
+    let Ok(record) =
+        serde_json::from_value::<crate::payload::BranchesRetired>(Value::Object(payload.clone()))
+    else {
+        return;
+    }; // llmlint: ignore-end[changed_behavior_has_e2e]
+    state.retired_branches.extend(
+        record
+            .retired
+            .iter()
+            .filter_map(|retired| crate::vcs::usable(&retired.branch)),
+    );
 }
 
 /// Statuses whose work is still on the branch the attempt left behind.
@@ -2825,6 +2890,56 @@ mod tests {
                 },
             )
         }
+    }
+
+    /// A branch a pass retired stops being retired the moment a session opens on
+    /// it again, because that session cut it fresh from the base — and a
+    /// `branches-retired` this build cannot read retires nothing.
+    #[test]
+    fn a_retired_branch_a_session_opens_again_is_a_branch_once_more() {
+        let plan = plan_of_nodes(vec![agent("service", &[])]);
+        let retired = |seq: u64, retired: serde_json::Value| {
+            pipeline(
+                journal::PipelineKind::BranchesRetired,
+                seq,
+                None,
+                &[("retired", retired), ("failed", json!([]))],
+            )
+        };
+        let entry = |branch: &str| {
+            json!({
+                "identity": "github.com/owner/service",
+                "branch": branch,
+                "class": "retirable",
+                "proof": {"kind": "content-identical", "base_commit": "f".repeat(40)},
+                "trigger": "pass",
+            })
+        };
+        let mut events = vec![
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            retired(1, json!([entry("work/service"), entry("work/other")])),
+            // Not a record of this build's shape, so it says nothing.
+            retired(2, json!("work/unread")),
+        ];
+        let state = fold(&events);
+        assert_eq!(
+            state.retired_branches,
+            BTreeSet::from(["work/other".to_owned(), "work/service".to_owned()])
+        );
+
+        events.push(opened(3, "service", "s-abc", "work/service"));
+        let state = fold(&events);
+        assert_eq!(
+            state.retired_branches,
+            BTreeSet::from(["work/other".to_owned()]),
+            "a branch cut again was still read as retired"
+        );
+        assert_eq!(state.bases["service"], "main");
     }
 
     /// A driver dying does not end the *work* its dispatch was doing: the branch

@@ -8888,3 +8888,36 @@ one at a time is not a state the doubled turn can arrange — its hold is one pa
 for every conversation — so `src/engine.rs`'s
 `an_envelope_naming_two_outstanding_notes_waits_for_both_answers` drives the real queue
 and the real reconciler with two deliveries outstanding and answers them in turn.
+
+## 109. A dispatch that died after its work landed was said to leave a branch that may carry finished work — RESOLVED
+
+**Ruling: the user accepted onepipeline#561 with its fix stated, and ruled it into the
+plan `accepted-followups-1002` (node `op-death-guidance`); the planner who owns the
+contract fixed the three forms there, and ruled on that node that they govern the tail of
+the line rather than its opening.** The `died:` line of `results` and the failed node's
+line of `status`, for `dispatch-died` and `provider-failed`, say where the work stands in
+exactly one of three forms: landed on its base at the landed commit, where the run
+recorded the node's `merge-completed`; retired as holding no work beyond its base, where no
+landing is recorded and an idle pass of the run's driver retired the branch; and otherwise
+the branch that may carry finished work, at its head where one is recorded.
+`provider-failed` keeps its own opening, `the provider killed the dispatch (<cause>)`.
+
+**What was wrong.** The contract said the per-node views, wherever a branch and a head are
+present, say the branch may carry finished work and name that commit. A worker that
+published `local-direct` and then lost its harness left both, and its branch had already
+been retired by the landing — so the run sent a manager to recover work from a branch that
+no longer existed, said nothing of the landing, and invited them to redo work already on
+the base. `branches-retired` was not folded into the run's projection at all, so a branch
+an idle pass deleted read the same way.
+
+**What this build does.** The projection keeps each node's base, off its session's
+`session-opened` and its landing's `merge-completed`, and the branches the run's driver
+retired, off its `branches-retired`; a later session opening on a retired name takes it
+off again. The checkpoint moves to schema 9 for it. `tests/e2e/lifecycle.rs`'s
+`a_dispatch_that_died_rather_than_failing_its_task_settles_naming_what_killed_it` and
+`a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published`
+publish, land and then die, and read the landed form off both views;
+`tests/e2e/retirement.rs`'s `a_died_dispatchs_branch_a_pass_retired_is_named_as_retired`
+reads the retired form once the driver's pass deletes the branch; and
+`a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_commit` still
+reads the unchanged line. Each node settles with the status and outcome word it did before.
