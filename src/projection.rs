@@ -1834,6 +1834,12 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
         }
         return;
     }
+    // A result answers the call already on the line, and is not a new thing
+    // the dispatch is doing: it carries the call's tool name and no detail, so
+    // read as one it would cut `bash echo the turn ran` down to `bash`.
+    if text("kind") == crate::report::TOOL_RESULT {
+        return;
+    }
     // The producer's own two fields, joined the way its own renderer joins
     // them. An activity naming neither leaves the last one that did standing
     // rather than blanking the line: the dispatch is still doing what it said.

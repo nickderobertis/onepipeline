@@ -703,7 +703,7 @@ impl Activity {
 }
 
 /// The kind a producer gives the half of an exchange that carries an output.
-const TOOL_RESULT: &str = "tool_result";
+pub(crate) const TOOL_RESULT: &str = "tool_result";
 
 /// An event's own text: what a call acted on, what the result answering it
 /// returned, or what the agent itself said or thought.
