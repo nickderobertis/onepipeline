@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.60.5](https://github.com/nickderobertis/onepipeline/compare/v0.60.4...v0.60.5) - 2026-10-04
+
+### Fixed
+
+- *(test)* keep the pacing and wake-budget journeys deterministic on a slow runner ([#738](https://github.com/nickderobertis/onepipeline/pull/738))
+
 ## [0.60.4](https://github.com/nickderobertis/onepipeline/compare/v0.60.3...v0.60.4) - 2026-10-04
 
 ### Fixed
