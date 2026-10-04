@@ -3637,7 +3637,7 @@ fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs(
     let opened = std::time::Instant::now();
     let before: Vec<Counts> = runs.iter().map(|run| counts(&world, run)).collect();
     std::thread::sleep(PACING_WINDOW);
-    let (did, ceiling, premised) = loop {
+    let (did, span, ceiling, premised) = loop {
         let did: Vec<Counts> = runs
             .iter()
             .enumerate()
@@ -3652,7 +3652,7 @@ fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs(
         // claim under them mean anything.
         let premised = did[0].passes > did[1].passes * 4 && did[0].passes > 100 * ceiling;
         if premised || span >= PACING_PATIENCE {
-            break (did, ceiling, premised);
+            break (did, span, ceiling, premised);
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
     };
@@ -3671,7 +3671,7 @@ fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs(
     for (nth, run) in runs.iter().enumerate() {
         assert!(
             did[nth].release_asks <= ceiling,
-            "{run} asked about one release {} times in {PACING_WINDOW:?}, which is oftener than \
+            "{run} asked about one release {} times in {span:.1?}, which is oftener than \
              the {SHIPPED_POLL_SECONDS}s interval allows: {did:?}",
             did[nth].release_asks
         );
