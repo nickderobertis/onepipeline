@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.60.4](https://github.com/nickderobertis/onepipeline/compare/v0.60.3...v0.60.4) - 2026-10-04
+
+### Fixed
+
+- *(views)* name a died dispatch's landing, not its retired branch ([#726](https://github.com/nickderobertis/onepipeline/pull/726))
+- *(deps)* link the onevcs and harness core that hold, resume and release publications ([#731](https://github.com/nickderobertis/onepipeline/pull/731))
+
 ## [0.60.3](https://github.com/nickderobertis/onepipeline/compare/v0.60.2...v0.60.3) - 2026-10-03
 
 ### Fixed
