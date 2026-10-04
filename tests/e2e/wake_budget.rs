@@ -1035,10 +1035,16 @@ struct Asked {
 impl Asked {
     /// Raise `message` on `run` — non-blocking unless `blocking` — and return
     /// once the bus has queued it, with the correlation it was queued under.
+    ///
+    /// The question is found by its own words, and its correlation taken from
+    /// the very read that found it. `queued_surfaces` reads nothing while the
+    /// bus's projection lags its log — and every later append opens that window
+    /// again — so a count taken first can read zero beside a question already
+    /// queued, and a second read after the wait can come back empty: on a loaded
+    /// runner that indexed an empty list.
     fn on(world: &World, run: &str, message: &str, blocking: bool) -> Self {
         use std::io::Write;
 
-        let before = world.queued_surfaces(run).len();
         let mut serving = world
             .host_channel(run)
             .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
@@ -1055,13 +1061,21 @@ impl Asked {
         )
         .expect("the frame is written");
         stdin.flush().expect("the frame flushes");
+        let mut correlation = None;
         world.until("the question to reach the channel", |world| {
-            world.queued_surfaces(run).len() > before
+            correlation = world
+                .queued_surfaces(run)
+                .into_iter()
+                .find(|surface| surface["message"] == message)
+                .map(|surface| {
+                    surface["correlation"]
+                        .as_str()
+                        .expect("the question carries its correlation")
+                        .to_owned()
+                });
+            correlation.is_some()
         });
-        let correlation = world.queued_surfaces(run)[before]["correlation"]
-            .as_str()
-            .expect("the question carries its correlation")
-            .to_owned();
+        let correlation = correlation.expect("the wait ended on the question");
         Self {
             serving,
             stdin,
