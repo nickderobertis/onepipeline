@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.60.3](https://github.com/nickderobertis/onepipeline/compare/v0.60.2...v0.60.3) - 2026-10-03
+
+### Fixed
+
+- *(deps)* link the onevcs and onetaskgraph releases with these fixes ([#724](https://github.com/nickderobertis/onepipeline/pull/724))
+
 ## [0.60.2](https://github.com/nickderobertis/onepipeline/compare/v0.60.1...v0.60.2) - 2026-10-03
 
 ### Fixed
