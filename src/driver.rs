@@ -23,7 +23,9 @@ use serde_json::json;
 
 use crate::agentgraph;
 use crate::channel::{Author, ChannelState, Command, Reply};
-use crate::cli::{Cli, ReadArgs, ReplyArgs, StartArgs, SurfaceArgs, ADOPT_FLAG, DAG_GRAPH_OFF};
+use crate::cli::{
+    Cli, ReadArgs, ReplyArgs, StartArgs, SurfaceArgs, TelemetryArgs, ADOPT_FLAG, DAG_GRAPH_OFF,
+};
 use crate::concurrency::{self, Liveness, State};
 use crate::edits::{self, Frontier};
 use crate::engine;
@@ -429,6 +431,16 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 }
             };
             print!("{}", verbs::render_agents(&agents));
+            Ok(EXIT_SUCCESS)
+        }
+        Verb::Telemetry(TelemetryArgs {
+            run: Some(run),
+            changes: true,
+            json,
+            ..
+        }) => {
+            let changes = verbs::change_telemetry(&ledger::runs_root(), &run)?;
+            print!("{}", verbs::render_change_telemetry(&changes, json)?);
             Ok(EXIT_SUCCESS)
         }
         Verb::Telemetry(args) => {

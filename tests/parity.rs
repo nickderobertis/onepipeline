@@ -618,6 +618,52 @@ fn telemetry_renders_each_runs_document_and_its_breakdown() {
     );
 }
 
+/// `telemetry RUN --changes [--json]` over a run recorded before the linked
+/// `onevcs` emitted `gate-run`: the binary prints the SDK's rendering, and both
+/// renderings are held to checked-in goldens, so a change to either form is a
+/// change to a file a reviewer reads.
+#[test]
+fn telemetry_changes_renders_each_change_as_its_goldens() {
+    let fixture = Fixture::new("telemetry-changes");
+    let _env = fixture.enter();
+
+    let changes = verbs::change_telemetry(&fixture.root, RUN).expect("the run reads");
+    let text = verbs::render_change_telemetry(&changes, false).expect("it renders");
+    let json = verbs::render_change_telemetry(&changes, true).expect("it renders");
+    same(
+        "telemetry RUN --changes",
+        &fixture.binary(&["telemetry", RUN, "--changes"]),
+        &text,
+        EXIT_SUCCESS,
+    );
+    same(
+        "telemetry RUN --changes --json",
+        &fixture.binary(&["telemetry", RUN, "--changes", "--json"]),
+        &json,
+        EXIT_SUCCESS,
+    );
+    assert_eq!(text, include_str!("golden/change-telemetry-v1.txt"));
+    assert_eq!(json, include_str!("golden/change-telemetry-v1.json"));
+    assert_eq!(
+        text,
+        onepipeline::telemetry::render_changes(&changes),
+        "the text is the change renderer's own"
+    );
+    // An older store reads all the same: no gate runs, and the gate unmeasured.
+    let change = &changes.changes[0];
+    assert!(change.gate_runs.is_empty());
+    assert!(change
+        .not_measured
+        .contains(&onepipeline::telemetry::Segment::Gate));
+
+    let missing = verbs::change_telemetry(&fixture.root, "nowhere").expect_err("no such run");
+    refused(
+        "telemetry nowhere --changes",
+        &fixture.binary(&["telemetry", "nowhere", "--changes"]),
+        &missing,
+    );
+}
+
 #[test]
 fn monitor_renders_the_stream_from_the_start_from_a_cursor_and_refuses_a_foreign_one() {
     let fixture = Fixture::new("monitor");

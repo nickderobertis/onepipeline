@@ -72,6 +72,7 @@ pub mod vocabulary;
 // reaches them through [`run`](crate::run).
 mod agentgraph;
 mod ask;
+mod changes;
 mod checkpoint;
 mod concurrency;
 mod criteria;

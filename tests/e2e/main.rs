@@ -49,6 +49,7 @@ mod branch_template;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod bus_config;
 mod cancellation;
+mod change_telemetry;
 mod channel;
 mod compatibility;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] four journeys, about

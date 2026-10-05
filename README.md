@@ -621,6 +621,11 @@ node is doing right now, with an event count and an age; `transcript RUN [NODE]`
 renders a dispatched turn's tools and its words; `telemetry` reports what each
 party spent and where the wall clock went, in eight buckets that sum exactly.
 Anything nothing in the stack measures is reported absent, never as a zero.
+`telemetry RUN --changes [--json]` reads the same run one change at a time: each
+retry chain's cycle time, from its first dispatch to the landing `onevcs`
+recorded, with its dispatches, publications and gate runs, and where the time went
+in segments that sum exactly — any segment its records cannot decide is named as
+not measured, never estimated.
 `status [RUN] [--no-providers] [--json]`: `--no-providers` leaves out the closing
 provider report and does not ask `oneagentgraph` for it; every other line is the one
 `status` prints without the flag, so a watch that used to cut the view with a shell

@@ -55,6 +55,9 @@ use onepipeline::report::{
     retain, ACCEPTED_REPORT_FILE, MAX_REPORT_BYTES, MEMBER_SETTLED, REPORT_PATH,
 };
 use onepipeline::rules::{ExecutorKind, ExecutorRules, Predicate};
+use onepipeline::telemetry::{
+    ChangeTelemetry, GateName, GateVerdict, Segment, CHANGE_TELEMETRY_SCHEMA_VERSION,
+};
 use onepipeline::verbs;
 use onepipeline::views::{
     FailureClass, Listing, NodeLanding, ProjectGroup, ProjectionActions, ProjectionCalls,
@@ -6855,6 +6858,14 @@ fn every_command_the_contract_names_parses() {
         ("transcript NODE", &["transcript", "run-1", "build"]),
         ("telemetry", &["telemetry"]),
         ("telemetry --breakdown", &["telemetry", "--breakdown"]),
+        (
+            "telemetry RUN --changes",
+            &["telemetry", "run-1", "--changes"],
+        ),
+        (
+            "telemetry RUN --changes --json",
+            &["telemetry", "run-1", "--changes", "--json"],
+        ),
     ];
 
     for (name, args) in invocations {
@@ -6889,6 +6900,7 @@ fn the_contract_names_every_command_and_view_this_crate_offers() {
     }
     assert!(tokens.contains("monitor RUN [--filter NAME|SPEC] [--all]"));
     assert!(tokens.contains("telemetry [--breakdown]"));
+    assert!(tokens.contains("telemetry RUN --changes [--json]"));
     assert!(tokens.contains("transcript RUN [NODE]"));
     assert!(tokens.contains("runs --mine"));
 }
@@ -8734,6 +8746,10 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
     let _: fn(&[RunTelemetry], bool) -> Result<String> = verbs::render_telemetry;
     let _: fn(&RunTelemetry) -> String = verbs::render_telemetry_breakdown;
     let _: fn(&RunPaths, &[Envelope]) -> RunTelemetry = onepipeline::telemetry::of_run;
+    let _: fn(&Path, &str) -> Result<ChangeTelemetry> = verbs::change_telemetry;
+    let _: fn(&ChangeTelemetry, bool) -> Result<String> = verbs::render_change_telemetry;
+    let _: fn(&RunPaths, &[Envelope]) -> ChangeTelemetry = onepipeline::telemetry::changes_of_run;
+    let _: fn(&ChangeTelemetry) -> String = onepipeline::telemetry::render_changes;
     let _: fn(&RunPaths, &EventFilter, Option<&str>) -> Result<Monitored> = verbs::monitor;
     let _: fn(&Monitored) -> String = verbs::render_monitor;
     let _: fn(&RunPaths, &EventFilter) -> Result<Next> = verbs::next;
@@ -9730,4 +9746,82 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
             "`PAUSED`",
         ],
     );
+}
+
+/// The `telemetry RUN --changes --json` document the contract states is the one
+/// the public types read and write: every field, each word, and the exact sum.
+#[test]
+fn the_change_telemetry_document_in_the_contract_is_the_one_the_types_read_and_write() {
+    let block: Value =
+        serde_json::from_str(&fenced_block_naming("json", "\"publication_attempts\""))
+            .expect("the contract's change telemetry document is JSON");
+    let document: ChangeTelemetry = serde_json::from_value(block.clone())
+        .expect("the contract's document reads into the types");
+    assert_eq!(document.schema_version, CHANGE_TELEMETRY_SCHEMA_VERSION);
+    assert_eq!(
+        serde_json::to_value(&document).expect("it serialises"),
+        block,
+        "the types write back exactly the document the contract states"
+    );
+
+    let change = &document.changes[0];
+    assert_eq!(change.lineage.last(), Some(&change.node));
+    assert_eq!(
+        change
+            .gate_runs
+            .iter()
+            .map(|run| (run.gate, run.verdict))
+            .collect::<Vec<_>>(),
+        [
+            (GateName::PrePush, GateVerdict::Failed),
+            (GateName::PrePush, GateVerdict::Passed)
+        ]
+    );
+    let ms = |seconds: f64| (seconds * 1_000.0).round() as i64;
+    let gates: i64 = change.gate_runs.iter().map(|run| ms(run.seconds)).sum();
+    assert_eq!(ms(change.gate_seconds), gates);
+    let segments: i64 = Segment::ALL
+        .iter()
+        .map(|segment| ms(change.segments.get(*segment)))
+        .sum();
+    assert_eq!(
+        Some(segments),
+        change.cycle_seconds.map(ms),
+        "the contract's own example sums exactly to its cycle"
+    );
+    // Every segment word the contract shows is one the type names.
+    let mut shown: Vec<&str> = block["changes"][0]["segments"]
+        .as_object()
+        .expect("segments are an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    shown.sort_unstable();
+    let mut named: Vec<&str> = Segment::ALL
+        .iter()
+        .map(|segment| segment.as_str())
+        .collect();
+    named.sort_unstable();
+    assert_eq!(shown, named);
+
+    // Each word the prose says the document carries is one the types write.
+    for word in ["no-verdict", "passed-with-skipped", "required-checks"] {
+        assert!(
+            CONTRACT.contains(word),
+            "the contract no longer names {word}"
+        );
+        let read: Result<GateVerdict, _> = serde_json::from_value(json!(word));
+        let gate: Result<GateName, _> = serde_json::from_value(json!(word));
+        assert!(
+            read.is_ok() || gate.is_ok(),
+            "{word} is not a word the types read"
+        );
+    }
+    for segment in Segment::ALL {
+        let written = serde_json::to_value(segment).expect("a segment serialises");
+        assert_eq!(written, json!(segment.as_str()));
+    }
+    let mut later = block;
+    later["schema_version"] = json!(2);
+    assert!(serde_json::from_value::<ChangeTelemetry>(later).is_err());
 }
