@@ -1813,9 +1813,17 @@ fn linger_in_the_worktree(args: &[String], dir: &std::path::Path, key: &str, sec
     let Some(workspace) = fake::flag(args, "--dir") else {
         fake::fail("lingering in a dispatch's worktree needs its --dir");
     };
+    // A whole number of seconds and nothing else, so what reaches `sleep` is a
+    // duration rather than an option, and a typo fails the journey here instead of
+    // a process that exits at once leaving a pid nothing is behind.
+    let Ok(seconds) = seconds.parse::<u32>() else {
+        fake::fail(&format!(
+            "{key}.lingers holds {seconds:?}, which is not a whole number of seconds"
+        ));
+    };
     let mut sleep = std::process::Command::new("sleep");
     sleep
-        .arg(seconds)
+        .arg(seconds.to_string())
         .current_dir(&workspace)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
