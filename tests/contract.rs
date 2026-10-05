@@ -9848,6 +9848,8 @@ fn the_change_telemetry_document_in_the_contract_is_the_one_the_types_read_and_w
         ("/changes/0/cycle_seconds", json!(9876.0)),
         ("/changes/0/cycle_seconds", Value::Null),
         ("/changes/0/landed_at", Value::Null),
+        ("/changes/0/landing", Value::Null),
+        ("/changes/0/landed_at", json!("2026-10-05T02:00:00.000Z")),
         ("/changes/0/gate_seconds", json!(2788.0)),
         ("/changes/0/segments/other", json!(1.0)),
         ("/changes/0/segments/scheduling", json!(-600.0)),

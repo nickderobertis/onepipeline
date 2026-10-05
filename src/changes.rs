@@ -134,12 +134,24 @@ impl TryFrom<ChangeCycleFields> for ChangeCycle {
     type Error = String;
 
     fn try_from(fields: ChangeCycleFields) -> Result<Self, String> {
+        if fields.landed_at.is_some() && fields.landing.is_none() {
+            return Err(format!(
+                "{}: landed_at names when a landing happened and no landing names what landed",
+                fields.node
+            ));
+        }
         let cycle = match (&fields.landed_at, fields.cycle_seconds) {
             (None, None) => None,
             (Some(landed), Some(cycle)) => {
-                let measured = landed
-                    .millis()
-                    .saturating_sub(fields.dispatched_at.millis());
+                let Some(measured) = landed.millis().checked_sub(fields.dispatched_at.millis())
+                else {
+                    return Err(format!(
+                        "{}: landed at {} before its first dispatch at {}",
+                        fields.node,
+                        landed.as_str(),
+                        fields.dispatched_at.as_str()
+                    ));
+                };
                 if cycle != seconds(measured) {
                     return Err(format!(
                         "{}: a cycle of {cycle} seconds between stamps {measured}ms apart",
@@ -811,6 +823,10 @@ fn cycle(
 
     let start = dispatched_at?;
     let (landed_at, landing) = landed.unwrap_or((None, None));
+    // A landing time is read only beside the commit it names, and only where it
+    // is after the change was first dispatched: a landing before the work began
+    // is not this change's time, and is not estimated into one.
+    let landed_at = landed_at.filter(|at| landing.is_some() && at.millis() >= start);
     let landed_ms = landed_at.as_ref().map(Stamp::millis);
     let end = landed_ms.unwrap_or(last).max(start);
 
@@ -1312,6 +1328,24 @@ mod tests {
         assert_eq!(ms[&Segment::Agent], 10_000);
         assert_eq!(ms[&Segment::Other], 3_000);
         assert_eq!(sum(&change), 13_000);
+    }
+
+    #[test]
+    fn a_landing_time_before_the_dispatch_or_beside_no_commit_is_not_a_cycle() {
+        for landed in [
+            json!({"landing": "abc", "landed_at": stamp(0).replace("2026", "2025")}),
+            json!({"landed_at": stamp(13)}),
+        ] {
+            let events = vec![
+                pipeline(0, "node-dispatched", json!({"attempt": 1})),
+                settled_agent(10),
+                vcs(13, "merge-completed", landed.clone()),
+            ];
+            let change = one(&events);
+            assert_eq!(change.landed_at, None, "{landed}");
+            assert_eq!(change.cycle_seconds, None, "{landed}");
+            assert_eq!(sum(&change), 13_000, "{landed}");
+        }
     }
 
     #[test]
