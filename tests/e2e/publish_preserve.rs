@@ -133,7 +133,6 @@ fn a_preserved_node_puts_its_branch_on_the_origin_and_lands_nothing() {
         .run(&["start", &path, "--attach", "--pr-author-graph", &drafting])
         .settled();
 
-    // The settlement: done, under its own word, naming where the work is.
     let node = settled_node(&world, "kept");
     assert_eq!(node["status"], "done", "{node}\n{}", world.dump());
     assert_eq!(node["outcome"], "preserved", "{node}");
@@ -161,7 +160,6 @@ fn a_preserved_node_puts_its_branch_on_the_origin_and_lands_nothing() {
         "a kept branch was counted as a landing: {summary}"
     );
 
-    // The origin carries the branch at exactly that commit, with the work on it.
     assert_eq!(
         origin_tip(&repo.origin, &branch).as_deref(),
         Some(head.as_str()),
@@ -171,7 +169,6 @@ fn a_preserved_node_puts_its_branch_on_the_origin_and_lands_nothing() {
         file_at(&world, &repo.origin, &head, "spike.md").trim(),
         "budget: 40"
     );
-    // And the base did not move.
     assert_eq!(
         repo.base_commits(&world),
         vec!["chore: seed the repository".to_string()],
@@ -228,7 +225,6 @@ fn a_preserved_node_puts_its_branch_on_the_origin_and_lands_nothing() {
     assert_eq!(compared[0]["file"], "spike.md", "{compared:?}");
     assert_eq!(compared[0]["answer"], "match", "{compared:?}");
 
-    // Every view says `preserved`, with the branch and the head.
     world
         .run(&["results", "kept"])
         .exited(0)
@@ -365,8 +361,6 @@ fn a_refused_preservation_fails_the_node_and_leaves_the_work_on_the_local_branch
     assert!(detail.contains("could not preserve"), "{detail}");
     assert!(detail.contains("push rejected"), "{detail}");
 
-    // The session closed, and the branch is on this host at the commit the
-    // settlement names, carrying the work.
     assert!(
         vcs_kinds(&world, "refused")
             .iter()
@@ -680,7 +674,6 @@ fn the_loader_refuses_publish_preserve_where_nothing_could_be_kept() {
     );
     assert!(message.contains("publish: \"preserve\""), "{message}");
 
-    // A value that is neither word.
     let mut typo = lifecycle("misspelt", &[]);
     typo["publish"] = json!("keep");
     let refusal = refused_by_check(
