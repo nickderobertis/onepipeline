@@ -124,7 +124,13 @@ use crate::telemetry::{self, RunTelemetry};
 /// a paused run is held on: `runs` names each one in the advice under a `PAUSED`
 /// row, and a version-8 document carries no answer to which nodes wait rather
 /// than none — so it is refolded once rather than served as a pause naming nothing.
-pub const SUMMARY_SCHEMA_VERSION: u32 = 9;
+///
+/// **10** since a row carries [`preserved`](RunSummary::preserved), each kept
+/// branch with the commit it stands at and what putting it on its origin found
+/// to do: a version-9 document carries no answer to where a node settled
+/// `preserved` kept its work rather than a run that kept none — so it is refolded
+/// once rather than served as a run whose kept branches nobody can find.
+pub const SUMMARY_SCHEMA_VERSION: u32 = 10;
 
 /// Read the version, refusing a document this build cannot honestly read.
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
@@ -198,6 +204,32 @@ pub struct NodeLanding {
     /// merged, and it has a line of its own saying what it waits on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub drafted: bool,
+}
+
+/// One node that kept its branch rather than landing it, as the run recorded it.
+///
+/// Where the work is, which is the whole of what such a node leaves a reader to
+/// act on: the branch, the commit it stands at, and what putting it on its
+/// identity's origin found to do. Every field is the settlement's own, carried
+/// as the run's own words for the reason [`NodeLanding::landing`] is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodePreserved {
+    /// The outcome the node settled under — `preserved` — carried rather than
+    /// implied by the map this sits in, so a reader holding one entry reads the
+    /// settlement's own word rather than inferring it from where it was found.
+    pub outcome: String,
+    /// The branch the work was kept on. Absent only where the settlement named
+    /// none, which no build of this crate writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The commit that branch stands at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    /// What putting it on the origin found to do: `pushed`, `already-on-origin`
+    /// or `no-remote`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
 }
 
 /// One run, as a listing reads it: a bounded read that does not grow with the
@@ -395,6 +427,13 @@ pub struct RunSummary {
     /// carries.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub landings: BTreeMap<String, NodeLanding>,
+    /// Every node that settled `preserved`, by node, with where its work was
+    /// kept. A kept branch is never a landing, so it has no place in
+    /// [`landings`](Self::landings); this is where a listing — or a consumer that
+    /// reads this document and not the journal — finds it. Omitted when empty,
+    /// which is every run that kept no branch.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub preserved: BTreeMap<String, NodePreserved>,
     /// The run's oneharness pointer file, as the launch record names it — where
     /// every harness run under this run's launches appended a line saying which
     /// session it wrote. See [`crate::agents`].
@@ -684,6 +723,25 @@ impl RunSummary {
                             branch: state.branches.get(node).cloned(),
                             repo: state.graph.get(node).and_then(|node| node.repo.clone()),
                             drafted: statuses.get(node) == Some(&graph::NodeStatus::CompleteDraft),
+                        },
+                    )
+                })
+                .collect(),
+            preserved: state
+                .outcomes
+                .iter()
+                .filter(|(_, outcome)| outcome.as_str() == crate::engine::PRESERVED)
+                .map(|(node, outcome)| {
+                    (
+                        node.clone(),
+                        NodePreserved {
+                            outcome: outcome.clone(),
+                            branch: state.branches.get(node).cloned(),
+                            head: state.heads.get(node).cloned(),
+                            remote: state
+                                .remotes
+                                .get(node)
+                                .map(|remote| crate::vcs::preservation_word(*remote).to_owned()),
                         },
                     )
                 })
@@ -1776,7 +1834,7 @@ mod tests {
     /// Read rather than restated: this is the wire a consumer parses, and the
     /// only thing that stops a field being renamed, an absence becoming a zero,
     /// or the version moving without anyone deciding to move it.
-    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v9.json");
+    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v10.json");
 
     /// The documents earlier builds wrote, kept exactly as those builds wrote them.
     ///
@@ -1791,9 +1849,10 @@ mod tests {
     /// the run's oneharness sessions are — and a real schema 7 document, which
     /// carries no answer to whether its run was driven under the closure rule —
     /// and a real schema 8 document, which carries no answer to which human
-    /// actions wait. The reader below has to refuse all eight rather than read
-    /// any as one of its own.
-    const GOLDEN_EARLIER: [(u32, &str); 8] = [
+    /// actions wait — and a real schema 9 document, which carries no answer to
+    /// where a kept branch is. The reader below has to refuse all nine rather
+    /// than read any as one of its own.
+    const GOLDEN_EARLIER: [(u32, &str); 9] = [
         (1, include_str!("../tests/golden/run-summary-v1.json")),
         (2, include_str!("../tests/golden/run-summary-v2.json")),
         (3, include_str!("../tests/golden/run-summary-v3.json")),
@@ -1802,6 +1861,7 @@ mod tests {
         (6, include_str!("../tests/golden/run-summary-v6.json")),
         (7, include_str!("../tests/golden/run-summary-v7.json")),
         (8, include_str!("../tests/golden/run-summary-v8.json")),
+        (9, include_str!("../tests/golden/run-summary-v9.json")),
     ];
 
     /// The document the golden pins, built through the types.
@@ -1877,19 +1937,30 @@ mod tests {
                     },
                 ),
             ]),
+            // One node that kept its branch, so the key and each of its fields are
+            // on the wire and cannot move without the version.
+            preserved: BTreeMap::from([(
+                "spike".to_string(),
+                NodePreserved {
+                    outcome: "preserved".into(),
+                    branch: Some("onepipeline/spike".into()),
+                    head: Some("0123456789abcdef0123456789abcdef01234567".into()),
+                    remote: Some("pushed".into()),
+                },
+            )]),
             journal_len: 8_192,
             journal_mtime_ms: 1_786_000_000_100,
         }
     }
 
     #[test]
-    fn a_schema_9_document_is_the_shape_the_golden_pins() {
+    fn a_schema_10_document_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&golden()).expect("it serialises");
         assert_eq!(
             rendered.trim(),
             GOLDEN.trim(),
             "the summary document changed shape. If that was deliberate, bump \
-             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v9.json together"
+             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v10.json together"
         );
     }
 
@@ -1915,7 +1986,7 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_9_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
+    fn a_schema_10_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
         let read: RunSummary =
             serde_json::from_str(GOLDEN).expect("the golden reads back into the types");
         assert_eq!(read, golden());

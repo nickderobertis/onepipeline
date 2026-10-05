@@ -128,6 +128,15 @@ pub struct RunState {
     // identifier in this crate is, for the reason `landing_commits` records. What could go
     // wrong with an unchecked one is checked where it enters, by `vcs::branch_head_in`.
     pub heads: BTreeMap<String, String>,
+    /// What putting each kept branch on its identity's origin found to do, by
+    /// node — written only by a settlement `preserved`, as its own `remote`.
+    ///
+    /// The sibling's own type rather than a word of this crate's: it is the
+    /// sibling's answer, and a closed set of three is what keeps an unknown word
+    /// a journal carried from being rendered as one of them. Omitted when empty,
+    /// which is every run that kept no branch.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub remotes: BTreeMap<String, onevcs::Preservation>,
     /// The commit each node's change reached its base at, as `onevcs` reported
     /// it on the session's own stream.
     ///
@@ -1187,6 +1196,13 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 .and_then(crate::vcs::usable)
             {
                 state.heads.insert(node.clone(), head);
+            }
+            if let Some(remote) = payload
+                .get(journal::SETTLED_REMOTE)
+                .and_then(Value::as_str)
+                .and_then(crate::vcs::preservation_of)
+            {
+                state.remotes.insert(node.clone(), remote);
             } // llmlint: ignore-end[changed_behavior_has_e2e]
               // Only a word this build can interpret: an unreadable landing leaves
               // the node with none, which reads as nothing observed.
