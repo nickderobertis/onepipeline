@@ -166,6 +166,12 @@ mod out_of_band;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod plan;
 mod plan_check;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the
+// head of `tests/e2e/publish_preserve.rs` and is not restated here; this declaration is
+// the other site the rule reads, and it belongs to this binary for the reason `mod
+// lifecycle` and `mod draft_lifecycle` above do.
+mod publish_preserve;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod real_vcs;
 mod recorded_channel;
 mod recorded_support;

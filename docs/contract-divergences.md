@@ -3428,7 +3428,11 @@ contract's vocabulary has nowhere to put one. So this crate now ships:
   under that rule rather than a run that was not. It moved to version 9 when the
   row grew `waiting` — the human actions a `PAUSED` run is held on, which `runs`
   names in the advice under that word (entry 103) — because a version-8 document
-  carries no answer to which nodes wait rather than none.
+  carries no answer to which nodes wait rather than none. It moved to version 10
+  when the row grew `preserved` — every node settled `preserved`, with the branch
+  it kept, the commit that branch stands at and what putting it on its origin
+  found to do (entry 110) — because a version-9 document carries no answer to
+  where a kept branch is rather than a run that kept none.
 - **`views::{RunTelemetry, Bucket, BucketName, Party, Usage}`**, re-exported
   because `RunSummary::timing` **is** the telemetry document whose shape the
   Views paragraph already fixes — eight buckets that sum exactly, per-party
@@ -3445,7 +3449,7 @@ cannot go on describing a document the build stopped writing:
 
 ```json
 {
-  "schema_version": 9,
+  "schema_version": 10,
   "fields": [
     "schema_version",
     "run_id",
@@ -3476,6 +3480,7 @@ cannot go on describing a document the build stopped writing:
     "waiting",
     "judge_rejected",
     "landings",
+    "preserved",
     "oneharness_sessions",
     "journal_len",
     "journal_mtime_ms"
@@ -3485,6 +3490,12 @@ cannot go on describing a document the build stopped writing:
     "branch",
     "repo",
     "drafted"
+  ],
+  "preserved_fields": [
+    "outcome",
+    "branch",
+    "head",
+    "remote"
   ]
 }
 ```
@@ -8921,3 +8932,105 @@ publish, land and then die, and read the landed form off both views;
 reads the retired form once the driver's pass deletes the branch; and
 `a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_commit` still
 reads the unchanged line. Each node settles with the status and outcome word it did before.
+
+## 110. A node's work could only be landed, never kept — RESOLVED
+
+**Ruling: the planner who owns the contract added the node field `publish` and the
+outcome `preserved`, verbatim, for the measurement spikes of
+`ai-orchestrator#1508`; `docs/contract.md`'s plan-schema paragraph states both.** A
+spike measures a real system and keeps its harness and its measurements on a branch
+for the plan's later workers. That work must reach them without landing on the base,
+and the user ruled that the worktree is released at once and only the branch stays,
+put on the origin with `onevcs preserve`. Every lifecycle node published at closeout
+under its identity's policy, which lands the work or opens a change request; the
+nearest lever, `draft: true`, leaves a change request open, and is refused on a
+`local-direct` identity.
+
+**The field.** `publish` on a lifecycle node — `onepipeline.publish` in a task's
+metadata, carrying the same JSON value — is `"land"`, the default and omitted when it
+is, or `"preserve"`. It is a schema-3 field, refused by its own name below that
+version whatever it carries, as `draft` is. `"preserve"` is refused on a direct node,
+a `kind: human` node and an `expects_no_diff` node, beside `draft: true`, and on any
+node that depends on one, because nothing a dependent built on it would ever reach a
+base; any other value is refused. Each refusal names the node and the rule, at the
+boundary every plan and every edited graph crosses, so an `add` cannot bring back what
+a launch refused. A preserve node keeps every other lifecycle rule, the required
+`title` included.
+
+**The closeout.** After the node's steps finish, no drafter runs and nothing is
+published. A branch level with its base settles `failed` as `empty-branch`, exactly as
+under a publication. Otherwise the session is closed — which commits whatever its
+worktree still holds and hands the branch back to the execution checkout, so what is
+kept is everything the session made — and `onevcs::preserve` then puts the branch on
+the identity's origin. Nothing is pushed from a session that has not closed: a close
+`onevcs` refuses — it does while a process is still working inside the session — is
+asked again for the grace the session relay already gives one, and a session still
+refusing then settles `failed` under `infrastructure-failure` naming the refusal, with
+nothing pushed. The node settles `done` with outcome **`preserved`**, carrying
+`branch`, `head` and `remote`, the last `pushed`, `already-on-origin` or `no-remote`
+as `onevcs::Preserved` answered. A preservation the sibling refuses settles `failed`
+under `infrastructure-failure`, carrying the branch, the commit its work stands at and
+`onevcs`'s own reason; the branch stays on this host at that commit. The sibling's own
+`branch-preserved` record reaches the run's journal through the session's stream,
+read through after the preservation.
+
+**Why the close comes first.** The approved text lists the preservation before the
+close, and this build closes first. `onevcs` offers no way to commit a session's
+worktree without publishing it except the close, so a preservation made while the
+session was open would put on the origin only what the worker had committed, and the
+close would then commit the rest onto a branch the origin no longer matched — a
+settlement naming a head the work had moved past. Closed first, the head the
+settlement names is the branch's tip on the origin and on this host alike. Nothing
+the contract names changes: the field, its values, the metadata key, the load rules,
+the outcome word and the three settlement fields are exactly as approved.
+
+**Where it reads.** `status` names each such node `preserved — kept on <branch> at
+<head> (<remote>)`; `results` puts the same beside `done (preserved)`; `monitor` and
+`watch` give its `node-settled` line `branch=`, `head=` and `remote=` and never cut
+it. The run's `result.json` node carries `remote` beside `branch` and `head`, which
+moves that document to schema 6; `summary.json` carries every such node under
+`preserved` (entry 56), which moves it to schema 10; and the fold checkpoint keeps
+each `remote`, which moves it to schema 10. The outcome is in
+`engine::SETTLEMENT_OUTCOMES`, so the one-vocabulary gate holds it apart from every
+publication word.
+
+**The block below is the source.** `tests/contract.rs` parses it out of this file and
+holds the field, its values and its metadata key to the plan schema and to the
+contract, the remote words to `onevcs::Preservation`'s own spelling, and the
+settlement fields to the summary's entry; `engine::tests` holds the outcome to the
+constant this build settles under.
+
+```json
+{
+  "node_fields": ["publish"],
+  "metadata_key": "onepipeline.publish",
+  "values": ["land", "preserve"],
+  "default": "land",
+  "outcomes": ["preserved"],
+  "status": "done",
+  "settlement_fields": ["branch", "head", "remote"],
+  "remote": ["pushed", "already-on-origin", "no-remote"]
+}
+```
+
+Driven end to end, against the real linked `onevcs` over a bare origin on disk, by
+`tests/e2e/publish_preserve.rs`:
+`a_preserved_node_puts_its_branch_on_the_origin_and_lands_nothing` holds the branch on
+the origin at the settled head, the base unmoved, no drafter and no change request on a
+`change-open` identity with a drafting graph named, the branch read against the node's
+bar before the close, the session closed with its worktree gone, `result.json`,
+`summary.json` and all four views;
+`a_preserved_node_whose_identity_has_no_origin_settles_no_remote` and
+`a_preserved_branch_the_origin_already_carries_settles_already_on_origin` hold the
+other two remote words;
+`a_close_refused_for_a_moment_is_asked_again_and_everything_the_session_made_is_kept`
+and `a_session_that_will_not_close_is_not_preserved` hold the close's refusal, a worker
+leaving a process in its worktree for a second and for a minute;
+`a_preserved_node_whose_base_already_carries_its_commit_settles_no_changes` holds the
+other reading of a level branch; `a_preserved_node_level_with_its_base_settles_empty_branch` and
+`a_refused_preservation_fails_the_node_and_leaves_the_work_on_the_local_branch` hold
+the two failures, the second reading the branch and its commit off the checkout after
+the session closed; `a_node_stating_land_publishes_exactly_as_one_stating_nothing`
+holds the default; three loader journeys hold every refusal through `plan check` and
+`start`; and `a_live_edit_adding_a_dependent_of_a_preserved_node_is_refused` holds the
+dependency rule against an edited graph.

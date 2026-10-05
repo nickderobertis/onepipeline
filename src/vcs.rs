@@ -943,6 +943,61 @@ pub fn working_session(token: &SessionToken) -> Option<Session> {
         .ok()
 }
 
+/// Put one branch on its identity's origin, as `onevcs preserve` does.
+///
+/// The repository is the node's own `repo`, read exactly as the sibling reads
+/// one; the answer is the sibling's [`onevcs::Preserved`] or its own refusal in
+/// its own words. Nothing about which outcome is wanted is decided here — that
+/// the identity has no origin is as much an answer as a push.
+pub fn preserve_branch(repo: &str, branch: &str) -> std::result::Result<onevcs::Preserved, String> {
+    onevcs::preserve(&onevcs::PreserveRequest {
+        repo: repo.to_owned(),
+        branch: branch.to_owned(),
+    })
+    .map_err(|refusal| refusal.to_string())
+}
+
+/// The word a [`onevcs::Preservation`] travels as, which is the sibling's own
+/// `branch-preserved` spelling and the one a settlement records.
+pub fn preservation_word(outcome: onevcs::Preservation) -> &'static str {
+    match outcome {
+        onevcs::Preservation::Pushed => "pushed",
+        onevcs::Preservation::AlreadyOnOrigin => "already-on-origin",
+        onevcs::Preservation::NoRemote => "no-remote",
+    }
+}
+
+/// Read a word [`preservation_word`] wrote back, or `None` for one it never
+/// writes — a journal is a file a person can edit, and an unknown word is no
+/// answer at all rather than some answer.
+pub fn preservation_of(word: &str) -> Option<onevcs::Preservation> {
+    [
+        onevcs::Preservation::Pushed,
+        onevcs::Preservation::AlreadyOnOrigin,
+        onevcs::Preservation::NoRemote,
+    ]
+    .into_iter()
+    .find(|outcome| preservation_word(*outcome) == word)
+}
+
+/// The commit a session's worktree has checked out, read before the session
+/// closes so that a branch whose preservation is refused can still be named at
+/// the commit its work stands at.
+///
+/// Run in the session's own worktree, for the reason [`level_with_base`] runs
+/// there (`docs/contract-divergences.md` entry 35). `None` where git could not
+/// answer, or answered with something this crate will not carry.
+pub fn worktree_head(worktree: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .current_dir(worktree)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    usable(String::from_utf8_lossy(&output.stdout).trim())
+}
+
 /// Release a session's worktree and its occupancy lease.
 ///
 /// Closing is best-effort on the failure path: a node that already failed must

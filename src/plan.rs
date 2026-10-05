@@ -81,6 +81,28 @@ pub(crate) fn draft_is_newer(declared: u32) -> String {
     )
 }
 
+/// What a lifecycle node stating `publish: "preserve"` beside `draft: true` is
+/// told: a draft is a state of a change request, and a kept branch opens none.
+pub(crate) const PRESERVE_BESIDE_DRAFT: &str = "`publish: \"preserve\"` keeps the branch and \
+     opens no change request, so there is nothing for `draft: true` to leave as a draft — drop \
+     one of the two";
+
+/// What a node that keeps nothing is told when it states `publish: "preserve"`.
+pub(crate) fn preserve_needs_a_branch(what: &str) -> String {
+    format!(
+        "`publish: \"preserve\"` keeps a lifecycle node's branch, and {what} leaves no branch to \
+         keep"
+    )
+}
+
+/// What a node depending on a `publish: "preserve"` node is told.
+pub(crate) fn depends_on_preserved(node: &str, dep: &str) -> String {
+    format!(
+        "node '{node}' depends on '{dep}', which states `publish: \"preserve\"`: its work is kept \
+         on a branch and never reaches a base, so nothing built on it could land"
+    )
+}
+
 /// Name a node field that this plan schema introduced, so an older document's
 /// request cannot be accepted and silently ignored.
 pub(crate) fn node_field_is_newer(field: &str, declared: u32) -> String {
@@ -1185,6 +1207,57 @@ impl NodeKind {
     }
 }
 
+/// What a lifecycle node's closeout does with its finished branch.
+///
+/// `land` is every closeout before this field existed: the branch is published
+/// under its identity's policy, which lands it or opens a change request.
+/// `preserve` keeps the work rather than landing it — the branch is put on the
+/// identity's origin with `onevcs::preserve`, the session closes, and the node
+/// settles `done` with outcome `preserved`. Written as the bare word, and
+/// omitted from a node that says `land`, so a plan that never names the field
+/// round-trips as it was written.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Publish {
+    /// Publish the branch under the identity's policy.
+    #[default]
+    Land,
+    /// Put the branch on the identity's origin and land nothing.
+    Preserve,
+}
+
+impl Publish {
+    /// Whether this is the default, so serialization can omit it.
+    pub fn is_land(&self) -> bool {
+        matches!(self, Self::Land)
+    }
+
+    /// The word a plan spells this value with.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Land => "land",
+            Self::Preserve => "preserve",
+        }
+    }
+}
+
+/// Read by hand rather than derived, so a value that is neither word is refused
+/// in a sentence naming the field and both words it may be: serde's own
+/// "unknown variant" names neither the field nor the rule, and a node carrying
+/// a typo would be told nothing it could act on.
+impl<'de> Deserialize<'de> for Publish {
+    fn deserialize<D: serde::Deserializer<'de>>(reader: D) -> Result<Self, D::Error> {
+        let stated = serde_json::Value::deserialize(reader)?;
+        match stated.as_str() {
+            Some("land") => Ok(Self::Land),
+            Some("preserve") => Ok(Self::Preserve),
+            _ => Err(serde::de::Error::custom(format!(
+                "`publish` is `land` or `preserve`, and this node states {stated}"
+            ))),
+        }
+    }
+}
+
 /// One node of the DAG.
 ///
 /// The same mapping carries a direct agent node, a lifecycle node (one that
@@ -1329,6 +1402,18 @@ pub struct Node {
     /// request, since a draft is a state of one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub draft: bool,
+    /// Whether this node's closeout lands its branch or keeps it.
+    ///
+    /// [`Publish::Preserve`] runs no drafter and no publication: the branch is
+    /// put on the identity's origin with `onevcs::preserve`, the session closes,
+    /// and the node settles `done` with outcome `preserved`, naming the branch,
+    /// the commit it stands at, and what the push found to do. Refused at load on
+    /// a node that publishes nothing to keep — a direct node, a `kind: human`
+    /// node, an `expects_no_diff` node — beside `draft: true`, and on any node
+    /// that depends on one, since nothing a dependent built on it would ever
+    /// reach a base. A schema-3 field, refused by name below that version.
+    #[serde(default, skip_serializing_if = "Publish::is_land")]
+    pub publish: Publish,
     /// The registered checkout the per-run clone is cut from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_checkout: Option<String>,

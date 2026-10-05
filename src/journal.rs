@@ -684,6 +684,14 @@ pub const SETTLED_CAUSE: &str = "cause";
 /// commit — a node that produced no branch, and a branch nothing committed to.
 pub const SETTLED_HEAD: &str = "head";
 
+/// The `node-settled` payload field saying what putting a kept branch on its
+/// identity's origin found to do: `pushed`, `already-on-origin` or `no-remote`,
+/// in `onevcs::Preservation`'s own words.
+///
+/// Written only by a node settled `preserved`, and absent on every other
+/// settlement — a branch nobody asked to keep has no answer to give here.
+pub const SETTLED_REMOTE: &str = "remote";
+
 /// The `driver-adopted` payload field naming the dispatches the adoption
 /// cleared, and where each one's work is.
 ///
