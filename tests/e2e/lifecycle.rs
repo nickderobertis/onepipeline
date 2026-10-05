@@ -5178,6 +5178,10 @@ fn the_run_result_a_consumer_reads_states_its_version_and_carries_the_landing() 
     );
     launched.settled();
     let recorded = world.run_json(&open, "result.json");
+    // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the only change in
+    // this journey is the run result's version number, which moved when a kept branch's
+    // `remote` joined the document; the journey's edge is `mod lifecycle`'s, argued at its
+    // declaration in `main.rs`, and a version literal moving changes none of what it costs.
     assert_eq!(
         recorded["schema_version"], 6,
         "the run result a consumer parses states no version, or not this one: {recorded}"
@@ -5209,6 +5213,7 @@ fn the_run_result_a_consumer_reads_states_its_version_and_carries_the_landing() 
     launched.settled();
     let recorded = world.run_json(&landed, "result.json");
     assert_eq!(recorded["schema_version"], 6, "{recorded}");
+    // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
     assert_eq!(
         node(&recorded, "service")["landing"],
         "landed",

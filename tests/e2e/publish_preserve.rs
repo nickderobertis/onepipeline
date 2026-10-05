@@ -13,6 +13,14 @@
 // one double, because what these journeys are about is the closeout and a real agent
 // turn is a paid one.
 
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] about 25 seconds under
+// the suite's parallelism, each journey but the loader's cutting a real branch through the
+// linked `onevcs` over real git. What they exercise is `lifecycle`'s closeout, `graph`'s and
+// `taskgraph`'s load rules, `edits`, `projection`, `summary`, `checkpoint` and `views`
+// together, which any change under `src/` can move, so a project edged narrower than the
+// crate would drop them out of `nx affected` for the very changes they exist to catch — the
+// ground `mod lifecycle` and `mod draft_lifecycle` sit on, whose closeout this one varies.
+
 use std::path::Path;
 
 use serde_json::{json, Value};
@@ -320,6 +328,34 @@ fn a_preserved_node_level_with_its_base_settles_empty_branch() {
             .iter()
             .any(|kind| kind == "branch-preserved"),
         "a level branch was preserved"
+    );
+}
+
+/// A kept node whose worker landed its own commit on the base settles
+/// `no-changes`, exactly as a published one does, and keeps nothing: the base
+/// already carries the work, so there is nothing a branch could add.
+#[test]
+fn a_preserved_node_whose_base_already_carries_its_commit_settles_no_changes() {
+    let world = World::new("preserve-carried");
+    let repo = world.repository("local-direct", &[]);
+    world.script("spike.lands-on-base", "main");
+    let path = world.plan("carried", &plan_of("carried", vec![kept("spike", &[])]));
+    world.run(&["start", &path, "--attach"]).settled();
+
+    let node = settled_node(&world, "carried");
+    assert_eq!(node["status"], "done", "{node}\n{}", world.dump());
+    assert_eq!(node["outcome"], "no-changes", "{node}");
+    assert!(node.get("remote").is_none(), "{node}");
+    let branch = node["branch"].as_str().expect("a branch");
+    assert_eq!(origin_tip(&repo.origin, branch), None);
+    let kinds = vcs_kinds(&world, "carried");
+    assert!(
+        kinds.iter().any(|kind| kind == "session-closed"),
+        "{kinds:?}"
+    );
+    assert!(
+        !kinds.iter().any(|kind| kind == "branch-preserved"),
+        "a branch the base already carries was preserved: {kinds:?}"
     );
 }
 
