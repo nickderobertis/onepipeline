@@ -800,6 +800,10 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         // ends the watch as `sync-conflict` rather than waiting out its bound.
         // This host never computes a conflict: what it answers is `MERGEABLE`.
         Some("mergeable,mergeStateStatus") => "mergeable,mergeStateStatus",
+        // When the host merged it. `onevcs` 0.42.0 reads it for the `landed_at`
+        // every record of a hosted landing carries; GitHub answers `null` for a
+        // change that has not merged.
+        Some("mergedAt") => "mergedAt",
         _ => "number,state,mergeStateStatus,headRefOid,mergeCommit,statusCheckRollup",
     };
     if let Err(refusal) = shaped(
@@ -838,6 +842,7 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
             // host actually did rather than what it was asked to do.
             "isDraft": state == Change::Draft,
             "mergeCommit": merged.then(|| serde_json::json!({"oid": MERGE_SHA})),
+            "mergedAt": merged.then(|| read_if_present(&merged_at(dir, &id))).flatten(),
             // What this host reports about the change request's checks, which is
             // the scripted part: unscripted it reports none, which is the
             // repository whose only bar is the `command:` gate its rules name.
@@ -1253,7 +1258,24 @@ fn merge(args: &[String], dir: &Path) -> ExitCode {
         Err(refusal) => return refusal,
     };
     if dir.join("gh.merged").exists() {
-        record(dir, &opened.number.to_string(), Change::Merged);
+        let id = opened.number.to_string();
+        record(dir, &id, Change::Merged);
+        // When it merged, which is now: what `pr view --json mergedAt` answers.
+        let at = merged_at(dir, &id);
+        if let Some(parent) = at.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                fake::fail(&format!("cannot create {}: {error}", parent.display()));
+            }
+        }
+        if let Err(error) = std::fs::write(&at, fake::now()) {
+            fake::fail(&format!("cannot write {}: {error}", at.display()));
+        }
     }
     ExitCode::SUCCESS
+}
+
+/// Where this host keeps the moment it merged a change request — beside the
+/// states rather than among them, which are one file per change request opened.
+fn merged_at(dir: &Path, id: &str) -> PathBuf {
+    dir.join("gh-merged-at").join(fake::segment(id))
 }

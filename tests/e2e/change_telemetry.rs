@@ -551,6 +551,51 @@ fn a_draft_the_plan_held_waits_on_review() {
     );
 }
 
+/// A change request an auto-merging repository lands: its draft is lifted once
+/// its checks are green, the host merges it, and the landing is the host's —
+/// `change-merged`, whose `landed_at` and `landing` the cycle ends at.
+#[test]
+fn a_change_the_host_merged_ends_its_cycle_at_the_hosts_landing() {
+    let world = World::new("changes-hosted");
+    world.repository("change-auto", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.checks", GREEN);
+    world.script("gh.merged", "");
+
+    let run = "hosted";
+    settled_run(&world, run, vec![lifecycle("service", &[])], &[]).settled();
+
+    let change = &changes(&world, run)["changes"][0];
+    assert_eq!(change["outcome"], "merged", "{change}");
+    let journal = world.journal(run);
+    // The draft the lifecycle opened while the checks ran was lifted.
+    only(&journal, "service", "draft-lifted");
+    let merged = only(&journal, "service", "change-merged");
+    assert_eq!(
+        change["landed_at"], merged["payload"]["landed_at"],
+        "{change}"
+    );
+    assert_eq!(change["landing"], merged["payload"]["landing"], "{change}");
+    assert_eq!(
+        change["change_url"], "https://github.com/owner/service/pull/1",
+        "{change}"
+    );
+    assert_eq!(change["publication_attempts"], 1, "{change}");
+    assert_eq!(
+        change["gate_runs"][0]["gate"], "required-checks",
+        "{change}"
+    );
+    let cycle = ms(change["landed_at"].as_str().expect("landed"))
+        - ms(change["dispatched_at"].as_str().expect("dispatched"));
+    assert_eq!(millis(&change["cycle_seconds"]), cycle, "{change}");
+    assert_eq!(total(change), cycle, "{:?}", segments(change));
+    assert_eq!(
+        segment(change, "gate"),
+        millis(&change["gate_seconds"]),
+        "{change}"
+    );
+}
+
 /// An open change request whose checks settled and which has not merged is
 /// waiting on a reviewer or on its host, and nothing it recorded says which: that
 /// time is `other`, and `review_wait` is named as not measured rather than

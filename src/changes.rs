@@ -191,7 +191,8 @@ impl TryFrom<GateRunFields> for GateRun {
                 fields.started_at.as_str()
             ));
         }
-        if !fields.seconds.is_finite() || millis(fields.seconds) != ended - started {
+        // Exactly, as `onevcs` writes it: the stamps' difference over a thousand.
+        if fields.seconds != seconds(ended - started) {
             return Err(format!(
                 "a gate run of {} seconds between stamps {}ms apart",
                 fields.seconds,
@@ -347,7 +348,6 @@ impl Segments {
     }
 }
 
-/// Milliseconds as seconds.
 fn seconds(ms: u64) -> f64 {
     ms as f64 / 1_000.0
 }
@@ -389,7 +389,8 @@ const PUBLISHING: [&str; 10] = [
 /// The `onevcs` records of a landing, each carrying `landed_at` and `landing`.
 const LANDED: [&str; 2] = ["merge-completed", "change-merged"];
 
-/// The records of a change request having been opened.
+/// A draft is a change request too: once either is open, checks that settle
+/// leave the change waiting on its merge rather than on its publication.
 const OPENED: [&str; 2] = ["change-opened", "change-drafted"];
 
 /// Every change one run made, folded from its merged store.
@@ -502,6 +503,7 @@ fn cycle(
     let mut landed: Option<(Option<Stamp>, Option<String>)> = None;
     let mut repository: Option<String> = None;
     let mut session_branch: Option<String> = None;
+    let mut opened_url: Option<String> = None;
 
     for event in records {
         let Some(node) = event.labels.node.as_deref() else {
@@ -609,6 +611,9 @@ fn cycle(
                 }
                 if OPENED.contains(&kind) {
                     opened_change = true;
+                    if let Some(url) = event.payload.get("url").and_then(Value::as_str) {
+                        opened_url = Some(url.to_owned());
+                    }
                 }
                 // A lifecycle draft opened while the checks run is no reason to
                 // hold anything; the two kinds a draft is held for are.
@@ -647,10 +652,20 @@ fn cycle(
                 }
                 if closing {
                     to = match kind {
+                        // llmlint: ignore[changed_behavior_has_e2e] a draft opened to wait for
+                        // a release is a fast-adoption node's, which no journey reaches without
+                        // a second repository cutting a release; the `held` kind beside it is
+                        // driven by `a_draft_the_plan_held_waits_on_review`, and both by
+                        // `a_draft_held_for_a_person_waits_on_review_and_one_awaiting_a_release_on_it`.
                         "checks-settled" if held_for.is_some() => held_for,
                         "checks-settled" if opened_change => Some(State::AwaitingMerge),
                         "draft-kept-for-review" => Some(State::ReviewWait),
                         "merge-queued" => Some(State::MergeQueue),
+                        // llmlint: ignore[changed_behavior_has_e2e] each is the publication
+                        // going on, so each leaves the change where a publication is; `push`,
+                        // `change-opened`, `change-drafted` and `draft-lifted` are driven off real
+                        // records by `tests/e2e/change_telemetry.rs`, and a `sync-conflict` — a
+                        // base moving under a publication — is one more record of the same state.
                         "push" | "change-opened" | "change-drafted" | "draft-lifted"
                         | "sync-conflict" => Some(State::Publication),
                         _ => None,
@@ -712,10 +727,13 @@ fn cycle(
         .rev()
         .find_map(|member| state.branches.get(member).cloned())
         .or(session_branch);
+    // A landing's settlement names no change request, so the lineage's own
+    // record of opening one is where a landed change's URL is read.
     let change_url = lineage
         .iter()
         .rev()
-        .find_map(|member| state.change_urls.get(member).cloned());
+        .find_map(|member| state.change_urls.get(member).cloned())
+        .or(opened_url);
     let outcome = state.outcomes.get(&head).cloned().unwrap_or_else(|| {
         state
             .recorded
