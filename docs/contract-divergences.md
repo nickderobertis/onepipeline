@@ -9013,11 +9013,15 @@ Driven end to end, against the real linked `onevcs` over a bare origin on disk, 
 `tests/e2e/publish_preserve.rs`:
 `a_preserved_node_puts_its_branch_on_the_origin_and_lands_nothing` holds the branch on
 the origin at the settled head, the base unmoved, no drafter and no change request on a
-`change-open` identity with a drafting graph named, the session closed with its
-worktree gone, `result.json`, `summary.json` and all four views;
-`a_preserved_node_level_with_its_base_settles_empty_branch` and
+`change-open` identity with a drafting graph named, the branch read against the node's
+bar before the close, the session closed with its worktree gone, `result.json`,
+`summary.json` and all four views;
+`a_preserved_node_whose_identity_has_no_origin_settles_no_remote` and
+`a_preserved_branch_the_origin_already_carries_settles_already_on_origin` hold the
+other two remote words; `a_preserved_node_level_with_its_base_settles_empty_branch` and
 `a_refused_preservation_fails_the_node_and_leaves_the_work_on_the_local_branch` hold
 the two failures, the second reading the branch and its commit off the checkout after
 the session closed; `a_node_stating_land_publishes_exactly_as_one_stating_nothing`
-holds the default; and three loader journeys hold every refusal through `plan check`
-and `start`.
+holds the default; three loader journeys hold every refusal through `plan check` and
+`start`; and `a_live_edit_adding_a_dependent_of_a_preserved_node_is_refused` holds the
+dependency rule against an edited graph.

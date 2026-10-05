@@ -7137,10 +7137,9 @@ fn superseded_results(state: &RunState, landings: &BTreeMap<String, Landing>) ->
             change_url: state.change_urls.get(id).cloned(),
             cause: state.causes.get(id).cloned(),
             head: state.heads.get(id).cloned(),
-            remote: state
-                .remotes
-                .get(id)
-                .map(|remote| crate::vcs::preservation_word(*remote).to_owned()),
+            // A `retry` supersedes only a node that is running, failed or
+            // cancelled, and only a node settled `done` kept a branch.
+            remote: None,
             superseded_by: Some(replacement.clone()),
         })
         .collect()

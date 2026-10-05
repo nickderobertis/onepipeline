@@ -119,9 +119,16 @@ fn opened_worktree(world: &World, run: &str) -> String {
 fn a_preserved_node_puts_its_branch_on_the_origin_and_lands_nothing() {
     let world = World::new("preserve-kept");
     let repo = world.repository("change-open", &[]);
-    world.script("spike.work", "what the spike measured\n");
+    world.script("spike.work", "budget: 40\n");
     let drafting = world.pr_author_graph();
-    let path = world.plan("kept", &plan_of("kept", vec![kept("spike", &[])]));
+    // A bar naming a value in the file the spike writes, so the branch is read
+    // against it before the close releases the worktree.
+    let mut spike = kept("spike", &[]);
+    spike["task"] = json!(
+        "## What\nMeasure the budget.\n\n## Why\nThe feature is sized by it.\n\n\
+         ## Acceptance criteria\n\n- the measured row in `spike.md` is `budget: 40`\n"
+    );
+    let path = world.plan("kept", &plan_of("kept", vec![spike]));
     world
         .run(&["start", &path, "--attach", "--pr-author-graph", &drafting])
         .settled();
@@ -162,7 +169,7 @@ fn a_preserved_node_puts_its_branch_on_the_origin_and_lands_nothing() {
     );
     assert_eq!(
         file_at(&world, &repo.origin, &head, "spike.md").trim(),
-        "what the spike measured"
+        "budget: 40"
     );
     // And the base did not move.
     assert_eq!(
@@ -211,6 +218,15 @@ fn a_preserved_node_puts_its_branch_on_the_origin_and_lands_nothing() {
         !Path::new(&worktree).exists(),
         "the session's worktree {worktree} was not released"
     );
+    // The branch was read against the node's bar while it was still in hand.
+    let compared: Vec<Value> = world
+        .events_of("kept", "criterion-checked")
+        .into_iter()
+        .map(|event| event["payload"].clone())
+        .collect();
+    assert_eq!(compared.len(), 1, "{compared:?}");
+    assert_eq!(compared[0]["file"], "spike.md", "{compared:?}");
+    assert_eq!(compared[0]["answer"], "match", "{compared:?}");
 
     // Every view says `preserved`, with the branch and the head.
     world
@@ -374,6 +390,136 @@ fn a_refused_preservation_fails_the_node_and_leaves_the_work_on_the_local_branch
     assert_eq!(
         repo.base_commits(&world),
         vec!["chore: seed the repository".to_string()]
+    );
+}
+
+/// An identity with no origin keeps the branch on this host, and says so: the
+/// node still settles `preserved`, under `no-remote`, naming the commit nothing
+/// outside this host carries.
+#[test]
+fn a_preserved_node_whose_identity_has_no_origin_settles_no_remote() {
+    let world = World::new("preserve-no-remote");
+    let repo = world.repository("local-direct", &[]);
+    git(&world, &repo.checkout, &["remote", "remove", "origin"]);
+    world.script("spike.work", "what the spike measured\n");
+    let path = world.plan("local", &plan_of("local", vec![kept("spike", &[])]));
+    world.run(&["start", &path, "--attach"]).settled();
+
+    let node = settled_node(&world, "local");
+    assert_eq!(node["status"], "done", "{node}\n{}", world.dump());
+    assert_eq!(node["outcome"], "preserved", "{node}");
+    assert_eq!(node["remote"], "no-remote", "{node}");
+    let branch = node["branch"].as_str().expect("a branch").to_owned();
+    let head = node["head"].as_str().expect("a head").to_owned();
+    assert_eq!(
+        git(&world, &repo.checkout, &["rev-parse", &branch]).trim(),
+        head,
+        "the branch kept on this host is not at the head the settlement names"
+    );
+    assert_eq!(origin_tip(&repo.origin, &branch), None);
+    assert_eq!(
+        world.run_json("local", "summary.json")["preserved"]["spike"]["remote"],
+        "no-remote"
+    );
+    world
+        .run(&["results", "local"])
+        .exited(0)
+        .out_has(&format!("kept on {branch} at {head} (no-remote)"));
+    world.run(&["status", "local"]).exited(0).out_has(&format!(
+        "spike: preserved — kept on {branch} at {head} (no-remote)"
+    ));
+}
+
+/// A branch the origin already carries at its tip is not pushed again: the node
+/// is pinned to a branch somebody already put there, adds nothing to it, and
+/// settles `preserved` under `already-on-origin` at that same commit.
+#[test]
+fn a_preserved_branch_the_origin_already_carries_settles_already_on_origin() {
+    let world = World::new("preserve-already");
+    let repo = world.repository("local-direct", &[]);
+    git(
+        &world,
+        &repo.checkout,
+        &["checkout", "-q", "-b", "spike/kept"],
+    );
+    std::fs::write(repo.checkout.join("spike.md"), "measured earlier\n")
+        .expect("the earlier work is written");
+    git(&world, &repo.checkout, &["add", "-A"]);
+    git(
+        &world,
+        &repo.checkout,
+        &["commit", "-q", "-m", "feat: measure earlier"],
+    );
+    git(
+        &world,
+        &repo.checkout,
+        &["push", "-q", "origin", "spike/kept"],
+    );
+    let pushed = git(&world, &repo.checkout, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    git(&world, &repo.checkout, &["checkout", "-q", "main"]);
+
+    let mut node = kept("spike", &[]);
+    node["branch"] = json!("spike/kept");
+    let path = world.plan("already", &plan_of("already", vec![node]));
+    world.run(&["start", &path, "--attach"]).settled();
+
+    let node = settled_node(&world, "already");
+    assert_eq!(node["status"], "done", "{node}\n{}", world.dump());
+    assert_eq!(node["outcome"], "preserved", "{node}");
+    assert_eq!(node["remote"], "already-on-origin", "{node}");
+    assert_eq!(node["branch"], "spike/kept", "{node}");
+    assert_eq!(node["head"], json!(pushed), "{node}");
+    assert_eq!(
+        origin_tip(&repo.origin, "spike/kept").as_deref(),
+        Some(pushed.as_str())
+    );
+    world
+        .run(&["results", "already"])
+        .exited(0)
+        .out_has(&format!(
+            "kept on spike/kept at {pushed} (already-on-origin)"
+        ));
+}
+
+/// A live edit cannot bring back what a launch refuses: an `add` whose node
+/// depends on a kept node is refused, naming both, and nothing is committed.
+#[test]
+fn a_live_edit_adding_a_dependent_of_a_preserved_node_is_refused() {
+    let world = World::new("preserve-edit");
+    world.repository("local-direct", &[]);
+    world.script("spike.work", "what the spike measured\n");
+    world.script("spike.wait", "hold");
+    let path = world.plan("edited", &plan_of("edited", vec![kept("spike", &[])]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the kept node to be in flight", |world| {
+        !world.events_of("edited", "node-dispatched").is_empty()
+    });
+
+    let envelope = json!({"version": 2, "commands": [
+        {"op": "add", "node": lifecycle("feature", &["spike"])},
+    ]})
+    .to_string();
+    world
+        .run_with_stdin(&["reply", "edited"], &envelope)
+        .exited(REFUSED)
+        .err_has("node 'feature' depends on 'spike'")
+        .err_has("publish: \"preserve\"");
+    assert!(
+        world.events_of("edited", "edit-committed").is_empty(),
+        "a refused edit was committed"
+    );
+
+    world.release("spike.go");
+    let node = settled_node(&world, "edited");
+    assert_eq!(node["outcome"], "preserved", "{node}\n{}", world.dump());
+    assert_eq!(
+        world.run_json("edited", "result.json")["nodes"]
+            .as_array()
+            .map(Vec::len),
+        Some(1),
+        "the refused node reached the graph"
     );
 }
 

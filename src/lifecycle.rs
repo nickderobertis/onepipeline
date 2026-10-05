@@ -740,7 +740,8 @@ struct Opened<'a> {
     base: Option<&'a str>,
     /// When this attempt's first dispatch began.
     began: std::time::SystemTime,
-    /// The session.
+    /// The session whose branch is kept, and whose stream the closeout reads
+    /// through once it has closed.
     token: &'a onevcs::SessionToken,
     /// The branch the dispatch reported, where it reported one.
     branch: Option<String>,
@@ -797,6 +798,11 @@ fn preserve(
     // says which when it does.
     let committed = worktree.and_then(crate::vcs::worktree_head);
     let followed_through = stream.map(crate::vcs::Follower::finish).unwrap_or_default();
+    // llmlint: ignore[changed_behavior_has_e2e] the close succeeding is what every preserve
+    // journey drives, and its refusal is not new here: `onevcs` refuses a close only over a
+    // live process working inside the run root at that instant, which no plan can ask for,
+    // and what follows one — the relay asking again until the terminator lands — is
+    // `relay_session_events`' own loop, held by its own journey for every closeout.
     let refused = close(Some(token));
     let answered = match (&branch, node.repo.as_deref()) {
         (Some(branch), Some(repo)) => crate::vcs::preserve_branch(repo, branch),
