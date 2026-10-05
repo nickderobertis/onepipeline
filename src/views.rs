@@ -98,8 +98,9 @@ pub use crate::ledger::RunPaths;
 /// that fold are the detail reads beside them.
 ///
 /// [`NodeLanding`] comes with it because [`RunSummary::landings`] carries one per
-/// node: a field a consumer cannot name is a field it cannot read.
-pub use crate::summary::{Listing, NodeLanding, RunSummary, SUMMARY_SCHEMA_VERSION};
+/// node, and [`NodePreserved`] because [`RunSummary::preserved`] does: a field a
+/// consumer cannot name is a field it cannot read.
+pub use crate::summary::{Listing, NodeLanding, NodePreserved, RunSummary, SUMMARY_SCHEMA_VERSION};
 
 /// The plan a run was launched with, read off its own `plan.json`.
 ///
@@ -2615,6 +2616,18 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
                 out.push_str(&format!("  {id}: complete-but-draft{says}\n"));
             }
         }
+        // The nodes that kept their branch rather than landing it. Nothing here
+        // is outstanding — keeping it was the whole of what the plan asked — but
+        // the branch is the one thing a reader of a quiet run cannot otherwise
+        // find, and the work on it is what the plan's later workers build from.
+        for (id, node_status) in &statuses {
+            if *node_status != NodeStatus::Done {
+                continue;
+            }
+            if let Some(kept) = preserved_phrase(&view.state, id) {
+                out.push_str(&format!("  {id}: {} — {kept}\n", crate::engine::PRESERVED));
+            }
+        }
         // The settled nodes whose work has not reached anyone. This view
         // otherwise reports only what is in flight, so a planner reading it saw
         // a run go quiet and took that for a run whose work had landed. Named
@@ -2665,6 +2678,29 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
         }
     }
     out
+}
+
+/// Where a node settled [`PRESERVED`] kept its work: the branch, the commit it
+/// stands at, and what putting it on its origin found to do — or `None` for every
+/// node that settled any other way.
+///
+/// Named once because `results` and `status` both say it, for the reason
+/// [`death_phrase`] is. A settlement that named no branch says nothing here,
+/// rather than a sentence pointing at no branch.
+///
+/// [`PRESERVED`]: crate::engine::PRESERVED
+fn preserved_phrase(state: &RunState, id: &str) -> Option<String> {
+    if state.outcomes.get(id).map(String::as_str) != Some(crate::engine::PRESERVED) {
+        return None;
+    }
+    let mut kept = format!("kept on {}", state.branches.get(id)?);
+    if let Some(head) = state.heads.get(id) {
+        kept.push_str(&format!(" at {head}"));
+    }
+    if let Some(remote) = state.remotes.get(id) {
+        kept.push_str(&format!(" ({})", crate::vcs::preservation_word(*remote)));
+    }
+    Some(kept)
 }
 
 /// What a node that settled [`DISPATCH_DIED`] or [`PROVIDER_FAILED`] says, in one
@@ -3766,6 +3802,25 @@ fn summarize(event: &Envelope) -> String {
             detail.push_str(&format!(" {value}"));
         }
     }
+    // A node that kept its branch says where, on the one line `monitor` and
+    // `watch` give its settlement: the outcome word alone names no branch, and
+    // the branch is the whole of what such a node leaves a reader to act on.
+    // Never cut, for the reason a surface is not — a head cut short names no
+    // commit.
+    let kept = event.source == Source::Pipeline
+        && PipelineKind::from_wire(&event.kind) == Some(PipelineKind::NodeSettled)
+        && event.payload.get("outcome").and_then(|v| v.as_str()) == Some(crate::engine::PRESERVED);
+    if kept {
+        for key in [
+            "branch",
+            crate::journal::SETTLED_HEAD,
+            crate::journal::SETTLED_REMOTE,
+        ] {
+            if let Some(value) = event.payload.get(key).and_then(|v| v.as_str()) {
+                detail.push_str(&format!(" {key}={value}"));
+            }
+        }
+    }
     // The agent's own words, which name no tool and so said nothing past the
     // kind: its text or its reasoning, on the one line oneharness draws it on.
     // A tool's activity is left as the kind alone, as it always was — its
@@ -3783,7 +3838,7 @@ fn summarize(event: &Envelope) -> String {
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
-    if surface {
+    if surface || kept {
         return stripped;
     }
     if stripped.chars().count() <= CAP {
@@ -4050,6 +4105,12 @@ pub fn results(view: &RunView) -> String {
             (status, &branch)
         {
             out.push_str(&format!(" — preserved on {branch}"));
+        }
+        // A node that kept its branch rather than landing it says where, beside
+        // the outcome word: it is `done`, and the word alone sends nobody to the
+        // branch the plan's later workers build from.
+        if let Some(kept) = preserved_phrase(&view.state, &node.id) {
+            out.push_str(&format!(" — {kept}"));
         }
         // Where the dispatch an adoption cleared had got to. The node itself is
         // dispatched again and settles under its own words, and none of them say
@@ -7245,7 +7306,7 @@ mod tests {
     fn a_row_counting_a_status_word_this_build_cannot_read_is_judged_by_its_driver_alone() {
         let root = scratch("unknown-status-word");
         let mut summary: RunSummary =
-            serde_json::from_str(include_str!("../tests/golden/run-summary-v9.json"))
+            serde_json::from_str(include_str!("../tests/golden/run-summary-v10.json"))
                 .expect("the summary golden reads");
         // Naming a driver this host proves gone: nothing drives the run, so what
         // its graph holds is what decides its word.

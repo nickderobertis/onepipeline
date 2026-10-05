@@ -403,26 +403,37 @@ impl Reader {
                 .expect("the nodes just written"),
         ) {
             let whole = task.id.to_string();
+            // The node as its plan names it, beside the task it was read out of: a
+            // task id is the store's, and only the node id is what the planner wrote.
+            let named = |what: String| match node.get("id").and_then(Value::as_str) {
+                Some(id) => format!("node '{id}': {what}"),
+                None => what,
+            };
             if let Some(version) = document["schema_version"]
                 .as_u64()
                 .filter(|v| *v < u64::from(crate::plan::PLAN_SCHEMA_VERSION))
             {
-                if node.get("sets").is_some() {
-                    return Err(refused(
-                        &whole,
-                        crate::plan::node_field_is_newer("sets", version as u32),
-                    )
-                    .field("sets")
-                    .into());
+                // By the key and whatever it carries: a schema-2 document has no
+                // `publish` to state, so even the default spelled out is a field that
+                // version never had.
+                for field in ["sets", "publish"] {
+                    if node.get(field).is_some() {
+                        return Err(refused(
+                            &whole,
+                            named(crate::plan::node_field_is_newer(field, version as u32)),
+                        )
+                        .field(field)
+                        .into());
+                    }
                 }
             }
             read::<Node>(node.clone()).map_err(|error| {
                 refused(
                     &whole,
-                    format!(
+                    named(format!(
                         "{error} — a node's fields are the reserved `{RESERVED}<field>` \
                          metadata keys on its task"
-                    ),
+                    )),
                 )
             })?;
         }

@@ -539,6 +539,16 @@ fn check_declared_version(plan: &Plan) -> std::result::Result<(), Refusal> {
         if node.draft && plan.schema_version < crate::plan::PLAN_SCHEMA_VERSION {
             return Err(named(crate::plan::draft_is_newer(plan.schema_version)).field("draft"));
         }
+        // The value rather than the key, for the reason `draft` is checked that way:
+        // `land` is the closeout every older version already has. The store's reader
+        // refuses the key itself, whatever it carries, before this is reached.
+        if !node.publish.is_land() && plan.schema_version < crate::plan::PLAN_SCHEMA_VERSION {
+            return Err(named(crate::plan::node_field_is_newer(
+                "publish",
+                plan.schema_version,
+            ))
+            .field("publish"));
+        }
         // These node fields arrived with schema 3. Older plans that named one
         // must be refused rather than silently losing the request.
         for (field, named_it) in [
@@ -759,6 +769,16 @@ pub(crate) fn check_edited(plan: &Plan) -> std::result::Result<(), Refusal> {
         }
     }
 
+    // The nodes whose work is kept rather than landed. Nothing built on one could
+    // reach a base, so a node depending on it is refused here — at the boundary
+    // every plan and every edited graph crosses, so an `add` cannot reintroduce
+    // what a launch refused.
+    let preserved: BTreeSet<&str> = plan
+        .tasks
+        .iter()
+        .filter(|node| node.publish == crate::plan::Publish::Preserve)
+        .map(|node| node.id.as_str())
+        .collect();
     for node in &plan.tasks {
         for dep in &node.deps {
             if dep == &node.id {
@@ -793,6 +813,13 @@ pub(crate) fn check_edited(plan: &Plan) -> std::result::Result<(), Refusal> {
                         "node '{}' depends on '{dep}', which is not in the plan",
                         node.id
                     ),
+                )
+                .field("deps"));
+            }
+            if preserved.contains(dep.as_str()) {
+                return Err(Refusal::about(
+                    &node.id,
+                    crate::plan::depends_on_preserved(&node.id, dep),
                 )
                 .field("deps"));
             }
@@ -835,6 +862,27 @@ pub(crate) fn check_node(node: &Node) -> std::result::Result<(), Refusal> {
     }
     if node.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
         return Err(named(RESERVED_PERSONA).field("persona"));
+    }
+    // A kept branch is a lifecycle node's, so a node that cuts none has nothing
+    // for `preserve` to keep — and a draft is a state of a change request, which a
+    // kept branch never opens. Ahead of the kind's own rules, so the refusal names
+    // this field rather than whichever other one the node also got wrong.
+    if node.publish == crate::plan::Publish::Preserve {
+        let keeps_nothing = if node.kind == NodeKind::Human {
+            Some("a `kind: human` node")
+        } else if node.expects_no_diff {
+            Some("an `expects_no_diff` node")
+        } else if node.repo.is_none() {
+            Some("a direct node")
+        } else {
+            None
+        };
+        if let Some(what) = keeps_nothing {
+            return Err(named(&crate::plan::preserve_needs_a_branch(what)).field("publish"));
+        }
+        if node.draft {
+            return Err(named(crate::plan::PRESERVE_BESIDE_DRAFT).field("publish"));
+        }
     }
 
     // What a node delivers is written onto the board as the store's own relation, and the

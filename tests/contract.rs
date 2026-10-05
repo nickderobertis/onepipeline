@@ -45,11 +45,12 @@ use onepipeline::filter::{
 };
 use onepipeline::note::{Addressee, Delivered, Note, Party, Reached};
 use onepipeline::plan::{
-    adoption_instructions, arrival_note, CrossRepoReference, Node, NodeKind, Plan, RepoType,
-    Resume, Step, TaskRecord, Workflow, ADOPTION_INSTRUCTION_VARIABLES, AMENDMENT_HEADING,
-    AMENDMENT_PRECEDENCE, CROSS_REPO_REFERENCES_HEADING, DEFAULT_ADOPTION_INSTRUCTION,
-    MERGE_RESOLUTION_CRITERION, MERGE_RESOLUTION_HEADING, MERGE_RESOLUTION_PREAMBLE,
-    OBSERVED_STATE, PLANNER_CONTEXT_HEADING, PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
+    adoption_instructions, arrival_note, CrossRepoReference, Node, NodeKind, Plan, Publish,
+    RepoType, Resume, Step, TaskRecord, Workflow, ADOPTION_INSTRUCTION_VARIABLES,
+    AMENDMENT_HEADING, AMENDMENT_PRECEDENCE, CROSS_REPO_REFERENCES_HEADING,
+    DEFAULT_ADOPTION_INSTRUCTION, MERGE_RESOLUTION_CRITERION, MERGE_RESOLUTION_HEADING,
+    MERGE_RESOLUTION_PREAMBLE, OBSERVED_STATE, PLANNER_CONTEXT_HEADING, PLAN_SCHEMA_VERSION,
+    PLAN_SCHEMA_VERSIONS_READ,
 };
 use onepipeline::report::{
     retain, ACCEPTED_REPORT_FILE, MAX_REPORT_BYTES, MEMBER_SETTLED, REPORT_PATH,
@@ -57,10 +58,10 @@ use onepipeline::report::{
 use onepipeline::rules::{ExecutorKind, ExecutorRules, Predicate};
 use onepipeline::verbs;
 use onepipeline::views::{
-    FailureClass, Listing, NodeLanding, ProjectGroup, ProjectionActions, ProjectionCalls,
-    ProjectionEnded, ProjectionFailure, ProjectionRecord, ProjectionScope, Projects, RunPaths,
-    RunSummary, RunTelemetry, StoreCall, UpdatedField, WholeBecause, GROUP_HEADER, NO_PROJECT,
-    SUMMARY_SCHEMA_VERSION,
+    FailureClass, Listing, NodeLanding, NodePreserved, ProjectGroup, ProjectionActions,
+    ProjectionCalls, ProjectionEnded, ProjectionFailure, ProjectionRecord, ProjectionScope,
+    Projects, RunPaths, RunSummary, RunTelemetry, StoreCall, UpdatedField, WholeBecause,
+    GROUP_HEADER, NO_PROJECT, SUMMARY_SCHEMA_VERSION,
 };
 use onevcs::{Adoption, MergePolicy, SessionRequest};
 use serde_json::{json, Value};
@@ -1742,6 +1743,7 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         title: Some("feat: x".into()),
         body: Some("why".into()),
         draft: true,
+        publish: Publish::Preserve,
         execution_checkout: Some("checkout".into()),
         pool: Some(1),
         overflow: Some(onevcs::Bound::Bounded(2)),
@@ -3039,6 +3041,9 @@ fn summary_fields() -> BTreeSet<String> {
         )]
         .into_iter()
         .collect(),
+        preserved: [("spike".to_string(), preserved_inputs())]
+            .into_iter()
+            .collect(),
         oneharness_sessions: Some("/runs/gated/oneharness-sessions.jsonl".into()),
         journal_len: 8_192,
         journal_mtime_ms: 1_786_000_000_100,
@@ -3073,6 +3078,28 @@ fn landing_fields() -> BTreeSet<String> {
         .collect()
 }
 
+/// One kept branch, with every field filled in so each reaches the wire.
+fn preserved_inputs() -> NodePreserved {
+    NodePreserved {
+        outcome: "preserved".into(),
+        branch: Some("onepipeline/spike".into()),
+        head: Some("0123456789abcdef0123456789abcdef01234567".into()),
+        remote: Some("pushed".into()),
+    }
+}
+
+/// Every field one kept branch's entry carries, on the terms
+/// [`landing_fields`] counts a landing's.
+fn preserved_fields() -> BTreeSet<String> {
+    serde_json::to_value(preserved_inputs())
+        .expect("a kept branch is an object")
+        .as_object()
+        .expect("a kept branch is an object")
+        .keys()
+        .cloned()
+        .collect()
+}
+
 /// The summary document's schema version and field inventory are the type's own.
 ///
 /// The contract names neither, so entry 56 is the only place the document a
@@ -3101,6 +3128,13 @@ fn the_summary_document_is_what_the_divergence_record_names() {
         landings,
         landing_fields(),
         "entry 56's landing inventory is not what this build writes"
+    );
+    let preserved: BTreeSet<String> = serde_json::from_value(block["preserved_fields"].clone())
+        .expect("entry 56 names a kept branch's fields");
+    assert_eq!(
+        preserved,
+        preserved_fields(),
+        "entry 56's kept-branch inventory is not what this build writes"
     );
 }
 
@@ -7370,6 +7404,11 @@ const RULINGS: &[(&str, &str)] = &[
         "**say where the work stands, in exactly one of three forms: landed, retired, or a \
          branch that may carry finished work**",
     ),
+    // ai-orchestrator#1508: a lifecycle node's work kept on a branch rather than landed.
+    (
+        "110.",
+        "`\"preserve\"`, which keeps the node's work rather than landing it",
+    ),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
@@ -7571,6 +7610,114 @@ fn the_draft_closeout_is_what_the_divergence_record_names() {
              repository's own template. The task this branch delivered:"
         )
     );
+}
+
+/// The `publish` field and the `preserved` settlement entry 110 records are what
+/// this build carries, at the surfaces this file can reach.
+///
+/// The field: named by the contract under its own name and its reserved metadata
+/// key, read for each value the entry names and written back as the entry says —
+/// the default omitted, `preserve` as the bare word — and any other value refused.
+/// The settlement: the outcome and every word `remote` can carry named by the
+/// contract, the words held to the sibling's own spelling of `Preservation`, and
+/// the settlement's fields to what a kept branch's summary entry carries. The
+/// outcome constant itself is engine vocabulary, which `engine::tests` holds to the
+/// same block.
+#[test]
+fn the_preserve_closeout_is_what_the_divergence_record_names() {
+    let block = divergence_block("110.");
+    let fields: Vec<String> =
+        serde_json::from_value(block["node_fields"].clone()).expect("entry 110 names its field");
+    assert_eq!(fields, vec!["publish".to_string()]);
+    let tokens = backticked();
+    let key = block["metadata_key"]
+        .as_str()
+        .expect("entry 110 names the key");
+    assert_eq!(key, format!("onepipeline.{}", fields[0]));
+    for named in [fields[0].as_str(), key] {
+        assert!(
+            tokens.contains(named),
+            "the contract does not name `{named}`"
+        );
+    }
+
+    let values: Vec<String> =
+        serde_json::from_value(block["values"].clone()).expect("entry 110 names the values");
+    let read: Vec<Publish> = values
+        .iter()
+        .map(|value| {
+            serde_json::from_value::<Node>(json!({"id": "spike", "publish": value}))
+                .unwrap_or_else(|error| panic!("`publish: {value}` does not read: {error}"))
+                .publish
+        })
+        .collect();
+    assert_eq!(read, vec![Publish::Land, Publish::Preserve]);
+    for (value, publish) in values.iter().zip(&read) {
+        assert_eq!(publish.as_str(), value);
+        assert!(
+            CONTRACT.contains(&format!("`\"{value}\"`")),
+            "the contract does not state `\"{value}\"`"
+        );
+    }
+    assert_eq!(block["default"], json!(Publish::default().as_str()));
+    let written = serde_json::to_value(Node {
+        id: "spike".into(),
+        publish: Publish::Preserve,
+        ..Node::default()
+    })
+    .expect("a node serialises");
+    assert_eq!(written["publish"], json!("preserve"));
+    let omitted = serde_json::to_value(Node::default()).expect("a node serialises");
+    assert!(
+        omitted.get("publish").is_none(),
+        "`publish` is written at its default, so a plan no longer round-trips as written"
+    );
+    let refused = serde_json::from_value::<Node>(json!({"id": "spike", "publish": "keep"}))
+        .expect_err("a value that is neither word is refused");
+    assert!(
+        refused
+            .to_string()
+            .contains("`publish` is `land` or `preserve`"),
+        "{refused}"
+    );
+
+    let outcomes: Vec<String> =
+        serde_json::from_value(block["outcomes"].clone()).expect("entry 110 names the outcome");
+    assert_eq!(outcomes, vec!["preserved".to_string()]);
+    assert_eq!(block["status"], json!("done"));
+    let remotes: Vec<String> =
+        serde_json::from_value(block["remote"].clone()).expect("entry 110 names the remote words");
+    let spelled: Vec<Value> = [
+        onevcs::Preservation::Pushed,
+        onevcs::Preservation::AlreadyOnOrigin,
+        onevcs::Preservation::NoRemote,
+    ]
+    .iter()
+    .map(|outcome| serde_json::to_value(outcome).expect("a preservation serialises"))
+    .collect();
+    assert_eq!(
+        remotes.iter().map(|word| json!(word)).collect::<Vec<_>>(),
+        spelled,
+        "entry 110's remote words are not the sibling's own"
+    );
+    for word in outcomes.iter().chain(&remotes) {
+        assert!(tokens.contains(word), "the contract does not name `{word}`");
+    }
+
+    let settled: BTreeSet<String> = serde_json::from_value(block["settlement_fields"].clone())
+        .expect("entry 110 names the settlement's fields");
+    let mut carried = preserved_fields();
+    carried.remove("outcome");
+    assert_eq!(
+        settled, carried,
+        "a kept branch's summary entry does not carry the settlement entry 110 names"
+    );
+    for field in &settled {
+        assert!(
+            tokens.contains(field),
+            "the contract does not name `{field}`"
+        );
+    }
 }
 
 /// The sentence entry 54 proposes to amend is one the contract still carries.
@@ -8851,8 +8998,8 @@ fn the_grouped_listing_is_what_the_contract_states() {
 
     // Rows over the checked-in golden document, so a row here is a document this
     // build reads rather than one assembled by hand.
-    let golden: RunSummary =
-        serde_json::from_str(include_str!("golden/run-summary-v9.json")).expect("the golden reads");
+    let golden: RunSummary = serde_json::from_str(include_str!("golden/run-summary-v10.json"))
+        .expect("the golden reads");
     let row = |run: &str, project: &str, name: Option<&str>, at: Option<u64>| RunSummary {
         run_id: run.into(),
         project: project.into(),

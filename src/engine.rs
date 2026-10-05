@@ -225,7 +225,10 @@ pub(crate) const UPSTREAM_EVERY: Duration = Duration::from_millis(500);
 /// back**, so the number is a statement to its consumers rather than to a reader
 /// here.
 ///
-/// `5` is this document: `4` plus the nodes a `retry` superseded, each carrying
+/// `6` is this document: `5` plus a kept branch's [`remote`](NodeResult::remote),
+/// what putting it on its identity's origin found to do, on a node settled
+/// `preserved` — whose branch and head it names under the two keys every node
+/// already carries. `5` was `4` plus the nodes a `retry` superseded, each carrying
 /// the replacement that took its place as
 /// [`superseded_by`](NodeResult::superseded_by). Those nodes were in no earlier
 /// version at all — a supersession takes the node out of the graph and the
@@ -238,7 +241,7 @@ pub(crate) const UPSTREAM_EVERY: Duration = Duration::from_millis(500);
 /// `round-NN/result.json` — `1` unversioned and saying only that a node had
 /// settled, `2` where a landing was first recorded — and both named a round that
 /// continuous execution does not have.
-pub const RUN_RESULT_SCHEMA_VERSION: u32 = 5;
+pub const RUN_RESULT_SCHEMA_VERSION: u32 = 6;
 
 /// Read the version, refusing every number this build did not write.
 ///
@@ -382,7 +385,7 @@ pub struct NodeResult {
     /// Where a human reads the change it published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change_url: Option<String>,
-    // llmlint: ignore-block[invalid_states_unrepresentable] both are the *wire* shape of
+    // llmlint: ignore-block[invalid_states_unrepresentable] all three are the *wire* shape of
     // this document, which builds other than this one parse: `cause` is an open vocabulary
     // the harness below this crate owns and grows, so a newtype validating it here would
     // refuse a classification that layer added and report it as none at all — the value is
@@ -390,7 +393,9 @@ pub struct NodeResult {
     // `is_a_classification`. `head` is the plain string every identifier in this crate is,
     // for the reason `crate::projection`'s `landing_commits` records, and is checked the
     // same way by `vcs::branch_head_in`. The sibling's `Sha` would put that library's type
-    // on a document consumers parse without it.
+    // on a document consumers parse without it, and `remote` is a word rather than the
+    // sibling's `Preservation` for the same reason: the fold holds it as that closed type,
+    // and this is only where it is written out.
     /// Why a dispatch that ended for a reason other than the agent's verdict
     /// ended, in the words its producer classified it with.
     ///
@@ -408,6 +413,16 @@ pub struct NodeResult {
     /// produced no branch at all, and one whose branch nothing committed to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
+    /// What putting a kept branch on its identity's origin found to do —
+    /// `pushed`, `already-on-origin` or `no-remote`, in `onevcs`'s own words —
+    /// on a node settled `preserved`, beside the [`branch`](Self::branch) it kept
+    /// and the [`head`](Self::head) that branch stands at.
+    ///
+    /// A word rather than the sibling's type, for the reason `head` is not the
+    /// sibling's `Sha`. Absent on every other node, and omitted when absent.
+    /// This field is what [`RUN_RESULT_SCHEMA_VERSION`] `6` records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
     // llmlint: ignore-block[invalid_states_unrepresentable] a node id is the plain string
     // every identifier on this record already is — `id` above all — for the reason the
@@ -475,6 +490,9 @@ pub struct Settlement {
     pub cause: Option<String>,
     /// The commit the node's branch was left at, when `onevcs` recorded one.
     pub head: Option<String>,
+    /// What putting a kept branch on its identity's origin found to do, on a
+    /// node settled [`PRESERVED`] and on no other.
+    pub remote: Option<onevcs::Preservation>,
     /// The declared steps this attempt finished, for a continuation to skip.
     pub completed_steps: Vec<String>,
 }
@@ -494,6 +512,7 @@ impl Settlement {
             change_url: None,
             cause: None,
             head: None,
+            remote: None,
             completed_steps: Vec::new(),
         }
     }
@@ -5430,6 +5449,16 @@ pub const NO_CHANGES: &str = "no-changes";
 /// [`crate::vcs::level_with_base`], before any drafting or publication is spent.
 pub const EMPTY_BRANCH: &str = "empty-branch";
 
+/// A lifecycle node declared `publish: "preserve"` whose branch was put on its
+/// identity's origin rather than published.
+///
+/// Settled `done`: keeping the branch is the whole of what the plan asked of
+/// the node. Its settlement names the branch, the commit it stands at and what
+/// the push found to do, because a kept branch is only worth anything to a
+/// reader who can find it — and it records no landing, because nothing landed
+/// and nothing in the run ever will.
+pub const PRESERVED: &str = "preserved";
+
 /// The dispatch layer refused **before any work began**.
 ///
 /// The word [`DISPATCH_DIED`] is deliberately not: see the reasoning there.
@@ -6659,6 +6688,12 @@ fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> R
     if let Some(head) = &settlement.head {
         payload.insert(journal::SETTLED_HEAD.into(), json!(head));
     }
+    if let Some(remote) = settlement.remote {
+        payload.insert(
+            journal::SETTLED_REMOTE.into(),
+            json!(crate::vcs::preservation_word(remote)),
+        );
+    }
     if let Some(landing) = settlement.landing {
         payload.insert(journal::SETTLED_LANDING.into(), json!(landing.as_str()));
     }
@@ -7016,6 +7051,10 @@ fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Res
                 change_url: state.change_urls.get(&node.id).cloned(),
                 cause: state.causes.get(&node.id).cloned(),
                 head: state.heads.get(&node.id).cloned(),
+                remote: state
+                    .remotes
+                    .get(&node.id)
+                    .map(|remote| crate::vcs::preservation_word(*remote).to_owned()),
                 // Every node the graph still holds is one nothing superseded:
                 // the supersession removes the node it replaced in the same
                 // edit, so the two lists cannot overlap.
@@ -7098,6 +7137,10 @@ fn superseded_results(state: &RunState, landings: &BTreeMap<String, Landing>) ->
             change_url: state.change_urls.get(id).cloned(),
             cause: state.causes.get(id).cloned(),
             head: state.heads.get(id).cloned(),
+            remote: state
+                .remotes
+                .get(id)
+                .map(|remote| crate::vcs::preservation_word(*remote).to_owned()),
             superseded_by: Some(replacement.clone()),
         })
         .collect()
@@ -7780,6 +7823,47 @@ mod tests {
         assert!(draftings.contains(&"dispatch-failed"));
     }
 
+    /// The outcome a kept branch settles under, and the words its `remote` is
+    /// written in, are what divergence entry 110 records.
+    ///
+    /// Both are engine vocabulary — [`PRESERVED`] and `vcs::preservation_word` —
+    /// so `tests/contract.rs`, which drives the published surface, cannot reach
+    /// either; it holds the same block to the contract and to the sibling's own
+    /// spelling, and this holds it to the constants this build writes.
+    #[test]
+    fn the_preserved_settlement_is_what_the_divergence_record_names() {
+        let record = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
+        )
+        .expect("the divergence record ships");
+        let block: Value = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("110."))
+            .and_then(|entry| entry.split("```json").nth(1))
+            .and_then(|rest| rest.split("```").next())
+            .and_then(|block| serde_json::from_str(block).ok())
+            .expect("entry 110 carries the json block this test drives");
+        assert_eq!(block["outcomes"], json!([PRESERVED]));
+        assert_eq!(block["status"], json!(NodeStatus::Done.as_str()));
+        let written: Vec<&str> = [
+            onevcs::Preservation::Pushed,
+            onevcs::Preservation::AlreadyOnOrigin,
+            onevcs::Preservation::NoRemote,
+        ]
+        .into_iter()
+        .map(crate::vcs::preservation_word)
+        .collect();
+        assert_eq!(block["remote"], json!(written));
+        for word in &written {
+            assert_eq!(
+                crate::vcs::preservation_of(word).map(crate::vcs::preservation_word),
+                Some(*word),
+                "`{word}` does not read back as the preservation it was written for"
+            );
+        }
+        assert_eq!(crate::vcs::preservation_of("pushed-somewhere"), None);
+    }
+
     /// Every word this crate settles a node under that a publication does not
     /// bring with it.
     ///
@@ -7790,10 +7874,11 @@ mod tests {
     /// this carries is the other half: a word *added* is a deliberate edit here,
     /// and the gate below is what stops it colliding with a vocabulary an
     /// operator reads through the same views.
-    const SETTLEMENT_OUTCOMES: [&str; 9] = [
+    const SETTLEMENT_OUTCOMES: [&str; 10] = [
         INVALID_NODE,
         NO_CHANGES,
         EMPTY_BRANCH,
+        PRESERVED,
         INFRASTRUCTURE_FAILURE,
         NO_AGENT_PROGRESS,
         TASK_FAILED,
@@ -8589,8 +8674,8 @@ mod tests {
         assert_eq!(word(&Death::Unstated), TASK_FAILED);
     }
 
-    /// The checked-in shape of a schema-5 run result.
-    const RUN_RESULT_GOLDEN: &str = include_str!("../tests/golden/run-result-v5.json");
+    /// The checked-in shape of a schema-6 run result.
+    const RUN_RESULT_GOLDEN: &str = include_str!("../tests/golden/run-result-v6.json");
 
     use serde_json::Value;
 
@@ -8608,6 +8693,7 @@ mod tests {
             change_url: None,
             cause: None,
             head: None,
+            remote: None,
             superseded_by: None,
         }
     }
@@ -8622,7 +8708,8 @@ mod tests {
     /// `cause` and a `head`, which is what schema `4` added. The fifth is a node a
     /// `retry` superseded, which is what schema `5` added — the one node here that
     /// is not in the run's graph at all, and the one carrying `superseded_by`,
-    /// which every other node omits.
+    /// which every other node omits. The sixth is a node that kept its branch,
+    /// which is what schema `6` added: the one node carrying `remote`.
     fn run_result_golden() -> RunResult {
         RunResult {
             run_id: "golden".into(),
@@ -8663,19 +8750,28 @@ mod tests {
                     superseded_by: Some("replaced-2".into()),
                     ..settled("replaced")
                 },
+                NodeResult {
+                    id: "kept".into(),
+                    status: NodeStatus::Done,
+                    outcome: Some(PRESERVED.into()),
+                    branch: Some("onepipeline/kept".into()),
+                    head: Some("89abcdef0123456789abcdef0123456789abcdef".into()),
+                    remote: Some("pushed".into()),
+                    ..settled("kept")
+                },
             ],
         }
     }
 
     /// The shape a run result is written as, pinned to the checked-in golden.
     #[test]
-    fn a_schema_5_run_result_is_the_shape_the_golden_pins() {
+    fn a_schema_6_run_result_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&run_result_golden()).expect("it serialises");
         assert_eq!(
             rendered.trim(),
             RUN_RESULT_GOLDEN.trim(),
             "the run result changed shape. If that was deliberate, bump \
-             RUN_RESULT_SCHEMA_VERSION and update tests/golden/run-result-v5.json together"
+             RUN_RESULT_SCHEMA_VERSION and update tests/golden/run-result-v6.json together"
         );
     }
 
@@ -8687,7 +8783,7 @@ mod tests {
     /// published nothing would have every consumer branching on a field that is
     /// always present and usually meaningless.
     #[test]
-    fn a_schema_5_run_result_round_trips_and_omits_what_it_does_not_have() {
+    fn a_schema_6_run_result_round_trips_and_omits_what_it_does_not_have() {
         let value = run_result_golden();
         let read: RunResult =
             serde_json::from_str(RUN_RESULT_GOLDEN).expect("the golden reads back into the types");
@@ -8712,10 +8808,19 @@ mod tests {
         // consumer branches on its presence rather than on a field that is there
         // for every node and meaningless for most.
         assert_eq!(document["nodes"][4]["superseded_by"], json!("replaced-2"));
-        for at in 0..4 {
+        for at in [0, 1, 2, 3, 5] {
             assert!(
                 document["nodes"][at].get("superseded_by").is_none(),
                 "a node nothing superseded carries a superseded_by key anyway: {}",
+                document["nodes"][at]
+            );
+        }
+        // And the key schema `6` added, on the one node that kept its branch.
+        assert_eq!(document["nodes"][5]["remote"], json!("pushed"));
+        for at in 0..5 {
+            assert!(
+                document["nodes"][at].get("remote").is_none(),
+                "a node that kept no branch carries a remote key anyway: {}",
                 document["nodes"][at]
             );
         }
@@ -8725,7 +8830,7 @@ mod tests {
     /// and the golden is named for the one it pins.
     #[test]
     fn the_run_result_schema_version_and_the_golden_name_the_same_number() {
-        assert_eq!(RUN_RESULT_SCHEMA_VERSION, 5);
+        assert_eq!(RUN_RESULT_SCHEMA_VERSION, 6);
         let document: Value = serde_json::from_str(RUN_RESULT_GOLDEN).expect("the golden is JSON");
         assert_eq!(document["schema_version"], RUN_RESULT_SCHEMA_VERSION);
         assert!(

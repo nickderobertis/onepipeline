@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "run_id": "golden",
   "state": "complete",
   "ok": true,
@@ -37,6 +37,14 @@
       "outcome": "task-failed",
       "branch": "onepipeline/replaced",
       "superseded_by": "replaced-2"
+    },
+    {
+      "id": "kept",
+      "status": "done",
+      "outcome": "preserved",
+      "branch": "onepipeline/kept",
+      "head": "89abcdef0123456789abcdef0123456789abcdef",
+      "remote": "pushed"
     }
   ]
 }

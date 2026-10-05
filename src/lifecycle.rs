@@ -652,6 +652,25 @@ fn attempt_once(
         });
     };
 
+    // A node whose work is kept rather than landed has a closeout of its own,
+    // which spends no drafter and no publication and ends its session itself.
+    if node.publish == crate::plan::Publish::Preserve {
+        return preserve(
+            node,
+            Opened {
+                worktree: worktree.as_deref(),
+                base: base.as_deref(),
+                began,
+                token: &token,
+                branch,
+            },
+            stream,
+            tx,
+            &whose,
+            vcs_filter,
+        );
+    }
+
     let mut attempted = publish(
         executor,
         paths,
@@ -709,6 +728,134 @@ fn check_criteria(node: &Node, worktree: Option<&std::path::Path>, tx: &Sender<M
                 answer,
             },
         )));
+    }
+}
+
+/// What a finished session left for its closeout: where its work is, and when the
+/// dispatch that made it began.
+struct Opened<'a> {
+    /// The session's worktree, where its record named one.
+    worktree: Option<&'a std::path::Path>,
+    /// What the session's branch is measured against, where its record named it.
+    base: Option<&'a str>,
+    /// When this attempt's first dispatch began.
+    began: std::time::SystemTime,
+    /// The session.
+    token: &'a onevcs::SessionToken,
+    /// The branch the dispatch reported, where it reported one.
+    branch: Option<String>,
+}
+
+/// Keep the branch rather than land it: the closeout of a node declared
+/// `publish: "preserve"`.
+///
+/// No drafter runs and nothing is published. The branch is read against its
+/// criteria while it is in hand, and a branch level with its base settles exactly
+/// as it would under a publication. Otherwise the session is **closed first** —
+/// which commits whatever its worktree still holds and hands the branch back to
+/// the execution checkout, so nothing the worker left is missing from what is
+/// kept — and the branch is then put on the identity's origin with
+/// `onevcs::preserve`, before the session's stream is read through, so the
+/// sibling's own `branch-preserved` record reaches the run's journal with the
+/// rest of the session.
+///
+/// The node settles `done` under [`engine::PRESERVED`], naming the branch, the
+/// commit it stands at and what the push found to do. A preservation the sibling
+/// refuses settles `failed` under [`engine::INFRASTRUCTURE_FAILURE`] — the host,
+/// not the work, is what stood in the way — naming the branch, the commit the
+/// work stands at on it, and the sibling's own sentence; the branch itself is
+/// still where the close handed it back, so nothing is lost.
+fn preserve(
+    node: &Node,
+    opened: Opened<'_>,
+    stream: Option<crate::vcs::Follower>,
+    tx: &Sender<Message>,
+    whose: &Labels,
+    filter: Option<&EventFilter>,
+) -> Attempt {
+    let Opened {
+        worktree,
+        base,
+        began,
+        token,
+        branch,
+    } = opened;
+    // The settlement below is this node's answer whatever it is, and the branch
+    // is only readable until the close releases the worktree.
+    check_criteria(node, worktree, tx);
+    if let Some(level) = worktree
+        .zip(base)
+        .and_then(|(worktree, base)| crate::vcs::level_with_base(worktree, base, began))
+    {
+        let settled = level_branch_settlement(node, &level, branch);
+        end_session(stream, tx, Some(token), whose, filter);
+        return settled;
+    }
+    let branch = branch.or_else(|| crate::vcs::working_session(token).map(|open| open.branch));
+    // What the worker committed, read while the worktree is still there: the
+    // close below adds a commit only where the tree still held something, and
+    // says which when it does.
+    let committed = worktree.and_then(crate::vcs::worktree_head);
+    let followed_through = stream.map(crate::vcs::Follower::finish).unwrap_or_default();
+    let refused = close(Some(token));
+    let answered = match (&branch, node.repo.as_deref()) {
+        (Some(branch), Some(repo)) => crate::vcs::preserve_branch(repo, branch),
+        // llmlint: ignore[changed_behavior_has_e2e] every session `onevcs` opens names
+        // its branch and every lifecycle node names its `repo`, so no invocation reaches
+        // a kept branch with neither; it settles as the infrastructure failure it would
+        // be rather than behind an unwrap.
+        _ => Err("the session named no branch to preserve".to_owned()),
+    };
+    relay_session_events(tx, Some(token), whose, followed_through, filter, refused);
+    match answered {
+        Ok(preserved) => {
+            let remote = crate::vcs::preservation_word(preserved.outcome);
+            let at = preserved.commit.as_deref().unwrap_or("its tip");
+            let reached = match (preserved.outcome, preserved.remote.as_deref()) {
+                (onevcs::Preservation::NoRemote, _) | (_, None) => {
+                    "the identity has no origin, so it is on this host only".to_owned()
+                }
+                (onevcs::Preservation::Pushed, Some(origin)) => format!("pushed to {origin}"),
+                (onevcs::Preservation::AlreadyOnOrigin, Some(origin)) => {
+                    format!("{origin} already carried it")
+                }
+            };
+            Attempt::settled(Settlement {
+                detail: Some(crate::views::one_line(&format!(
+                    "kept on {} at {at} ({remote}): {reached}. Nothing was drafted or published, \
+                     and the branch does not land",
+                    preserved.branch
+                ))),
+                head: preserved.commit.as_deref().and_then(crate::vcs::usable),
+                branch: Some(preserved.branch),
+                remote: Some(preserved.outcome),
+                ..Settlement::plain(&node.id, NodeStatus::Done, Some(engine::PRESERVED))
+            })
+        }
+        Err(why) => {
+            let head = match crate::vcs::session_tip(token) {
+                crate::vcs::SessionTip::At(commit) => Some(commit.as_str().to_owned()),
+                crate::vcs::SessionTip::Unmoved | crate::vcs::SessionTip::Unknown => committed,
+            };
+            let name = branch.as_deref().unwrap_or("the session's branch");
+            let at = head
+                .as_deref()
+                .map(|head| format!(" at {head}"))
+                .unwrap_or_default();
+            Attempt::settled(Settlement {
+                detail: Some(crate::views::one_line(&format!(
+                    "onevcs could not preserve {name}: {why}. The work stays on the local branch \
+                     {name}{at}; `onevcs preserve {name}` puts it on the origin once that is fixed"
+                ))),
+                branch,
+                head,
+                ..Settlement::plain(
+                    &node.id,
+                    NodeStatus::Failed,
+                    Some(engine::INFRASTRUCTURE_FAILURE),
+                )
+            })
+        }
     }
 }
 

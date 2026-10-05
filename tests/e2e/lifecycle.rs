@@ -5179,7 +5179,7 @@ fn the_run_result_a_consumer_reads_states_its_version_and_carries_the_landing() 
     launched.settled();
     let recorded = world.run_json(&open, "result.json");
     assert_eq!(
-        recorded["schema_version"], 5,
+        recorded["schema_version"], 6,
         "the run result a consumer parses states no version, or not this one: {recorded}"
     );
     assert!(
@@ -5208,7 +5208,7 @@ fn the_run_result_a_consumer_reads_states_its_version_and_carries_the_landing() 
     let (landed, launched) = driven(&world, "readapi", vec![lifecycle("service", &[])]);
     launched.settled();
     let recorded = world.run_json(&landed, "result.json");
-    assert_eq!(recorded["schema_version"], 5, "{recorded}");
+    assert_eq!(recorded["schema_version"], 6, "{recorded}");
     assert_eq!(
         node(&recorded, "service")["landing"],
         "landed",
