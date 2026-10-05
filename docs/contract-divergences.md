@@ -9025,7 +9025,9 @@ bar before the close, the session closed with its worktree gone, `result.json`,
 other two remote words;
 `a_close_refused_for_a_moment_is_asked_again_and_everything_the_session_made_is_kept`
 and `a_session_that_will_not_close_is_not_preserved` hold the close's refusal, a worker
-leaving a process in its worktree for a second and for a minute; `a_preserved_node_level_with_its_base_settles_empty_branch` and
+leaving a process in its worktree for a second and for a minute;
+`a_preserved_node_whose_base_already_carries_its_commit_settles_no_changes` holds the
+other reading of a level branch; `a_preserved_node_level_with_its_base_settles_empty_branch` and
 `a_refused_preservation_fails_the_node_and_leaves_the_work_on_the_local_branch` hold
 the two failures, the second reading the branch and its commit off the checkout after
 the session closed; `a_node_stating_land_publishes_exactly_as_one_stating_nothing`
