@@ -19,10 +19,12 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use crate::harness::{plan_of, World};
+use crate::draft_lifecycle::{rules, settled_run, team_repository, GREEN};
+use crate::harness::{agent, lifecycle, plan_of, World};
 
-/// How long each scripted agent turn of the landed journey takes, in ms.
-const TURN_MS: u64 = 2_500;
+/// How long each scripted agent turn of the landed journey takes, in ms: apart
+/// from the gate's one and two seconds, so the two cannot be mistaken.
+const TURN_MS: u64 = 1_500;
 
 /// A lifecycle node into the registered checkout, naming its own title so no
 /// drafting dispatch is spent.
@@ -393,10 +395,227 @@ fn a_run_with_no_gate_run_reads_its_gate_as_not_measured_and_counts_it_in_other(
         .out_has("gate not measured  publication not measured");
 }
 
-/// `--changes` is about one run, and `--json` is a form of `--changes`.
+/// The run's last record, in milliseconds.
+fn last_record(journal: &[Value]) -> i64 {
+    journal
+        .iter()
+        .filter_map(|event| event["ts"].as_str().map(ms))
+        .max()
+        .expect("the run recorded something")
+}
+
+/// The one record of `kind` under `node`.
+fn only<'a>(journal: &'a [Value], node: &str, kind: &str) -> &'a Value {
+    let found: Vec<&Value> = under(journal, &[node])
+        .into_iter()
+        .filter(|event| event["kind"] == kind)
+        .collect();
+    assert_eq!(found.len(), 1, "{kind} under {node}: {found:?}");
+    found[0]
+}
+
+/// A green change a team repository keeps as a draft for its user's review is
+/// waiting on that person from the moment it is kept, its required checks are a
+/// gate run of their own, and the node that depended on it is a change of its
+/// own — a direct one, listed after it because it was dispatched after it.
+#[test]
+fn a_change_kept_for_review_waits_on_review_and_its_dependent_is_its_own_change() {
+    let world = World::new("changes-review");
+    team_repository(&world);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.checks", GREEN);
+
+    let run = "kept";
+    settled_run(
+        &world,
+        run,
+        vec![lifecycle("service", &[]), agent("after", &["service"])],
+        &[],
+    )
+    .settled();
+
+    let document = changes(&world, run);
+    let entries = document["changes"].as_array().expect("a list of changes");
+    let nodes: Vec<&Value> = entries.iter().map(|change| &change["node"]).collect();
+    assert_eq!(nodes, [&json!("service"), &json!("after")], "{document}");
+    let (service, after) = (&entries[0], &entries[1]);
+    assert!(
+        ms(service["dispatched_at"].as_str().expect("a stamp"))
+            < ms(after["dispatched_at"].as_str().expect("a stamp")),
+        "{document}"
+    );
+
+    let journal = world.journal(run);
+    assert_eq!(service["outcome"], "change-review-draft", "{service}");
+    assert_eq!(
+        service["change_url"], "https://github.com/owner/service/pull/1",
+        "{service}"
+    );
+    assert_eq!(
+        service["branch"],
+        only(&journal, "service", "node-settled")["payload"]["branch"],
+        "{service}"
+    );
+    assert_eq!(service["landed_at"], Value::Null, "{service}");
+    assert_eq!(service["publication_attempts"], 1, "{service}");
+    // The required checks are a gate run of their own, read off the record.
+    let checks = only(&journal, "service", "gate-run");
+    assert_eq!(checks["payload"]["gate"], "required-checks");
+    assert_eq!(
+        service["gate_runs"][0]["gate"], "required-checks",
+        "{service}"
+    );
+    assert_eq!(service["gate_runs"][0]["verdict"], "passed", "{service}");
+    assert_eq!(
+        segment(service, "gate"),
+        millis(&checks["payload"]["seconds"]),
+        "{service}"
+    );
+    // Waiting on review from the moment its checks settled — which is what
+    // keeping it for review says — until the run's last record, and nothing
+    // left undecided.
+    assert_eq!(
+        only(&journal, "service", "draft-kept-for-review")["phase"],
+        "review"
+    );
+    let settled = ms(only(&journal, "service", "checks-settled")["ts"]
+        .as_str()
+        .expect("a stamp"));
+    let ended = ms(service["gate_runs"][0]["ended_at"]
+        .as_str()
+        .expect("a stamp"));
+    let last = last_record(&journal);
+    assert_eq!(
+        segment(service, "review_wait"),
+        last - settled.max(ended),
+        "{service}"
+    );
+    assert_eq!(segment(service, "other"), 0, "{service}");
+    assert_eq!(service["not_measured"], json!([]), "{service}");
+    assert_eq!(
+        total(service),
+        last - ms(service["dispatched_at"].as_str().expect("a stamp")),
+        "{:?}",
+        segments(service)
+    );
+
+    // The dependent never opened a session: a direct change, never published.
+    assert_eq!(after["repository"], Value::Null, "{after}");
+    assert_eq!(after["lineage"], json!(["after"]), "{after}");
+    assert_eq!(after["dispatches"], 1, "{after}");
+    assert_eq!(after["publication_attempts"], 0, "{after}");
+}
+
+/// A draft the plan asked for is held for a person to mark ready, so its wait
+/// from its settling on is a review wait. A held draft watches no checks, so
+/// this run recorded no gate run at all: its publication, which a gate could
+/// have run inside, is counted in `other` beside the unmeasured gate.
+#[test]
+fn a_draft_the_plan_held_waits_on_review() {
+    let world = World::new("changes-held");
+    world.repository("change-auto", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.checks", GREEN);
+    let mut node = lifecycle("service", &[]);
+    node["draft"] = json!(true);
+
+    let run = "held";
+    settled_run(&world, run, vec![node], &[]).settled();
+
+    let change = &changes(&world, run)["changes"][0];
+    assert_eq!(change["outcome"], "change-draft", "{change}");
+    let journal = world.journal(run);
+    assert_eq!(
+        only(&journal, "service", "change-drafted")["payload"]["kind"],
+        "held"
+    );
+    let settled = ms(only(&journal, "service", "node-settled")["ts"]
+        .as_str()
+        .expect("a stamp"));
+    let last = last_record(&journal);
+    assert!(last > settled, "{change}");
+    assert_eq!(segment(change, "review_wait"), last - settled, "{change}");
+    assert_eq!(segment(change, "release_wait"), 0, "{change}");
+    assert_eq!(change["gate_runs"], json!([]), "{change}");
+    assert_eq!(
+        change["not_measured"],
+        json!(["gate", "publication"]),
+        "{change}"
+    );
+    assert!(segment(change, "other") > 0, "{change}");
+    assert_eq!(
+        total(change),
+        last_record(&journal) - ms(change["dispatched_at"].as_str().expect("a stamp")),
+        "{:?}",
+        segments(change)
+    );
+}
+
+/// An open change request whose checks settled and which has not merged is
+/// waiting on a reviewer or on its host, and nothing it recorded says which: that
+/// time is `other`, and `review_wait` is named as not measured rather than
+/// guessed at. Its checks settled with one skipped, which the gate run says.
+#[test]
+fn an_open_change_awaiting_its_merge_names_review_wait_as_not_measured() {
+    let world = World::new("changes-open");
+    world.repository("change-open", &[]);
+    rules(&world, "change-open", "none", Some("{disabled: true}"));
+    world.script("service.work", "the worker wrote this\n");
+    world.script(
+        "gh.checks",
+        "lint completed skipped required\ntest completed success required",
+    );
+
+    let run = "open";
+    settled_run(&world, run, vec![lifecycle("service", &[])], &[]).settled();
+
+    let change = &changes(&world, run)["changes"][0];
+    assert_eq!(change["outcome"], "change-open", "{change}");
+    assert_eq!(change["cycle_seconds"], Value::Null, "{change}");
+    assert_eq!(
+        change["gate_runs"][0]["verdict"], "passed-with-skipped",
+        "{change}"
+    );
+    assert_eq!(change["not_measured"], json!(["review_wait"]), "{change}");
+    assert_eq!(segment(change, "review_wait"), 0, "{change}");
+
+    // `other` is the wait from the checks settling — or the gate run ending, if
+    // later — to the run's last record.
+    let journal = world.journal(run);
+    let settled = ms(only(&journal, "service", "checks-settled")["ts"]
+        .as_str()
+        .expect("a stamp"));
+    let ended = ms(change["gate_runs"][0]["ended_at"]
+        .as_str()
+        .expect("a stamp"));
+    let last = last_record(&journal);
+    assert!(last > settled.max(ended), "{change}");
+    assert_eq!(
+        segment(change, "other"),
+        last - settled.max(ended),
+        "{change}"
+    );
+    assert_eq!(
+        total(change),
+        last - ms(change["dispatched_at"].as_str().expect("a stamp")),
+        "{:?}",
+        segments(change)
+    );
+    world
+        .run(&["telemetry", run, "--changes"])
+        .exited(0)
+        .out_has("review_wait not measured");
+}
+
+/// `--changes` is about one run, `--json` is a form of `--changes`, and the
+/// per-change view is not the run breakdown.
 #[test]
 fn changes_names_one_run_and_json_needs_changes() {
     let world = World::new("changes-usage");
+    world
+        .run(&["telemetry", "a-run", "--changes", "--breakdown"])
+        .exited(2)
+        .err_has("cannot be used with");
     world
         .run(&["telemetry", "--changes"])
         .exited(2)

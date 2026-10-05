@@ -74,11 +74,16 @@ pub struct ChangeCycle {
     /// Where a person reads the change request it opened.
     pub change_url: Option<String>,
     /// The settling node's outcome word, or its status where it recorded none.
+    // llmlint: ignore[invalid_states_unrepresentable] the outcome vocabulary is open by
+    // contract: a settlement's word is this crate's, a publication's or a sibling's
+    // classification of a death, and every other document that carries one — `results`,
+    // the run reading's `EndedNode`, the summary — carries it as the producer's string,
+    // so a word a newer producer settles under reads rather than failing the view.
     pub outcome: String,
-    /// The lineage's first `node-dispatched`, RFC 3339.
-    pub dispatched_at: String,
+    /// The lineage's first `node-dispatched`.
+    pub dispatched_at: Stamp,
     /// When the base received it, from the `onevcs` landing record.
-    pub landed_at: Option<String>,
+    pub landed_at: Option<Stamp>,
     /// The commit it landed at, from the same record.
     pub landing: Option<String>,
     /// `landed_at - dispatched_at`; `null` where the change has not landed.
@@ -98,22 +103,110 @@ pub struct ChangeCycle {
     pub not_measured: Vec<Segment>,
 }
 
+/// An instant as every producer in this stack stamps one: RFC 3339, UTC, to the
+/// millisecond — `2026-10-05T03:00:00.000Z`.
+///
+/// Read only in that shape, so a document carrying anything else is refused
+/// where it is read rather than measured as though it were a time.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct Stamp(String);
+
+impl Stamp {
+    /// The stamp of `millis` since the epoch.
+    fn at(millis: u64) -> Self {
+        Self(crate::sys::rfc3339_from_millis(millis))
+    }
+
+    /// A stamp in the one shape this view reads, or `None`.
+    fn read(spelled: &str) -> Option<Self> {
+        projection::millis_of(spelled).map(|_| Self(spelled.to_owned()))
+    }
+
+    /// As it is spelled.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Milliseconds since the epoch.
+    pub fn millis(&self) -> u64 {
+        projection::millis_of(&self.0).unwrap_or(0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Stamp {
+    fn deserialize<D: serde::Deserializer<'de>>(reader: D) -> Result<Self, D::Error> {
+        let spelled = String::deserialize(reader)?;
+        Self::read(&spelled).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "{spelled:?} is not a UTC millisecond stamp, YYYY-MM-DDThh:mm:ss.sssZ"
+            ))
+        })
+    }
+}
+
 /// One completed gate run, as `onevcs` recorded it.
+///
+/// Read through the same checks wherever it is read — off a `gate-run` record,
+/// or back out of a document: an interval that ends before it starts, or a
+/// `seconds` that is not exactly its two stamps' difference, is refused.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "GateRunFields")]
 pub struct GateRun {
     /// Which gate ran.
     pub gate: GateName,
     /// The publication attempt it belongs to, numbered per session.
     pub attempt: u64,
-    /// When it started, RFC 3339.
-    pub started_at: String,
-    /// When it ended, RFC 3339.
-    pub ended_at: String,
-    /// How long it took.
+    /// When it started.
+    pub started_at: Stamp,
+    /// When it ended.
+    pub ended_at: Stamp,
+    /// How long it took: exactly `ended_at - started_at`.
     pub seconds: f64,
     /// How it ended.
     pub verdict: GateVerdict,
+}
+
+/// A [`GateRun`] as it arrives, before the checks that make it one.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateRunFields {
+    gate: GateName,
+    attempt: u64,
+    started_at: Stamp,
+    ended_at: Stamp,
+    seconds: f64,
+    verdict: GateVerdict,
+}
+
+impl TryFrom<GateRunFields> for GateRun {
+    type Error = String;
+
+    fn try_from(fields: GateRunFields) -> Result<Self, String> {
+        let (started, ended) = (fields.started_at.millis(), fields.ended_at.millis());
+        if ended < started {
+            return Err(format!(
+                "a gate run ending at {} before it started at {}",
+                fields.ended_at.as_str(),
+                fields.started_at.as_str()
+            ));
+        }
+        if !fields.seconds.is_finite() || millis(fields.seconds) != ended - started {
+            return Err(format!(
+                "a gate run of {} seconds between stamps {}ms apart",
+                fields.seconds,
+                ended - started
+            ));
+        }
+        Ok(Self {
+            gate: fields.gate,
+            attempt: fields.attempt,
+            started_at: fields.started_at,
+            ended_at: fields.ended_at,
+            seconds: fields.seconds,
+            verdict: fields.verdict,
+        })
+    }
 }
 
 /// Which gate a [`GateRun`] was: `onevcs`'s own two words.
@@ -157,13 +250,15 @@ pub struct Segments {
     /// The closeout and publication outside a gate: from the agent settling to
     /// the change request's checks settling or the landing.
     pub publication: f64,
-    /// A green change kept as a draft for its user's review.
+    /// Waiting on a person: a green change kept as a draft for its user's
+    /// review, from its checks settling, or a draft its plan held for a person
+    /// to mark ready.
     pub review_wait: f64,
     /// Waiting for its turn to land: from `merge-queued` — a host's queue, or a
     /// local landing's — to the landing.
     pub merge_queue: f64,
-    /// A change held for a release: waiting on releases, or left a draft
-    /// until one arrives.
+    /// A change held for a release: a node held waiting on releases, or a
+    /// draft opened to wait for a release it pins.
     pub release_wait: f64,
     /// Time the records do not decide: a change request waiting to merge with
     /// nothing recording whether on a reviewer or on its host, a publication in
@@ -335,9 +430,7 @@ pub(crate) fn changes(run: &str, state: &RunState, events: &[Envelope]) -> Chang
             cycle(state, lineage, records, last.unwrap_or(0), gates_recorded)
         })
         .collect();
-    changes.sort_by(|a, b| {
-        (a.dispatched_at.as_str(), a.node.as_str()).cmp(&(b.dispatched_at.as_str(), &b.node))
-    });
+    changes.sort_by(|a, b| (&a.dispatched_at, &a.node).cmp(&(&b.dispatched_at, &b.node)));
     ChangeTelemetry {
         schema_version: CHANGE_TELEMETRY_SCHEMA_VERSION,
         run_id: run.to_owned(),
@@ -401,9 +494,12 @@ fn cycle(
     let mut state_now: Option<State> = None;
     let mut open_members: BTreeSet<String> = BTreeSet::new();
     let mut opened_change = false;
+    // What a change request opened as a draft for a reason is waiting on: a
+    // person to mark it ready, or a release it pins.
+    let mut held_for: Option<State> = None;
     let mut gate_runs: Vec<(u64, GateRun)> = Vec::new();
     let mut gate_spans: Vec<(u64, u64)> = Vec::new();
-    let mut landed: Option<(Option<String>, Option<String>)> = None;
+    let mut landed: Option<(Option<Stamp>, Option<String>)> = None;
     let mut repository: Option<String> = None;
     let mut session_branch: Option<String> = None;
 
@@ -433,7 +529,12 @@ fn cycle(
                     let outcome = event.payload.get("outcome").and_then(Value::as_str);
                     to = Some(match outcome {
                         Some(crate::vcs::REVIEW_DRAFTED) => State::ReviewWait,
-                        Some(crate::vcs::DRAFTED) => State::ReleaseWait,
+                        Some(crate::vcs::DRAFTED) => held_for.unwrap_or(State::ReleaseWait),
+                        // llmlint: ignore[changed_behavior_has_e2e] `queued` is a host's merge
+                        // queue taking the change, which the `gh` double offers no queue for;
+                        // `a_requeue_and_a_release_wait_after_a_dispatch_are_each_their_own_wait`
+                        // drives the arm, and the queue a local landing records is driven end to
+                        // end through `merge-queued` in `tests/e2e/change_telemetry.rs`.
                         Some("queued") => State::MergeQueue,
                         Some("change-open") => State::AwaitingMerge,
                         // A failure waits on whoever decides whether to retry it.
@@ -447,13 +548,26 @@ fn cycle(
                         _ => State::Finished,
                     });
                 }
+                // llmlint: ignore-block[changed_behavior_has_e2e] each is a record of a
+                // node *after* its first dispatch: a requeue is an identity admitting no
+                // session to a re-dispatch, a hold one on a node whose lineage already ran,
+                // and a release wait a fast-adoption node's — none of which a journey can
+                // reach without a second repository's release, and every one of which the
+                // view reads the way it reads a dispatch. The arms are driven by
+                // `a_requeue_and_a_release_wait_after_a_dispatch_are_each_their_own_wait`.
                 Some(PipelineKind::NodeRequeued | PipelineKind::NodeHeld) => {
                     to = Some(State::Scheduling);
                 }
                 Some(PipelineKind::ReleaseWait) => to = Some(State::ReleaseWait),
+                // llmlint: ignore-end[changed_behavior_has_e2e]
                 _ => {}
             },
             Source::Agentgraph => match kind {
+                // llmlint: ignore[changed_behavior_has_e2e] a dispatch of more than one
+                // member is a real graph's paid turns; the double runs one member per
+                // dispatch, so the journeys drive one, and
+                // `a_dispatch_is_the_agents_until_every_member_it_started_has_settled` drives
+                // several.
                 "member-started" => {
                     if let Some(member) = &event.labels.member {
                         open_members.insert(member.clone());
@@ -496,8 +610,18 @@ fn cycle(
                 if OPENED.contains(&kind) {
                     opened_change = true;
                 }
+                // A lifecycle draft opened while the checks run is no reason to
+                // hold anything; the two kinds a draft is held for are.
+                if kind == "change-drafted" {
+                    match event.payload.get("kind").and_then(Value::as_str) {
+                        Some("held") => held_for = Some(State::ReviewWait),
+                        Some("awaiting-release") => held_for = Some(State::ReleaseWait),
+                        _ => {}
+                    }
+                }
                 if kind == "gate-run" {
-                    if let Some((span, run)) = gate_run(&event.payload) {
+                    if let Some(run) = gate_run(&event.payload) {
+                        let span = (run.started_at.millis(), run.ended_at.millis());
                         gate_spans.push(span);
                         gate_runs.push((span.0, run));
                     }
@@ -507,8 +631,12 @@ fn cycle(
                         .payload
                         .get("landed_at")
                         .and_then(Value::as_str)
-                        .filter(|at| projection::millis_of(at).is_some())
-                        .map(str::to_owned);
+                        .and_then(Stamp::read);
+                    // llmlint: ignore[changed_behavior_has_e2e] a landing with `sha` and no
+                    // `landing` is what an `onevcs` before 0.42.0 wrote, which no build this
+                    // crate links can produce; the unit test
+                    // `a_landing_an_older_onevcs_recorded_names_its_commit_and_no_time`
+                    // drives it, and the journeys drive the current shape.
                     let landing = event
                         .payload
                         .get("landing")
@@ -519,6 +647,7 @@ fn cycle(
                 }
                 if closing {
                     to = match kind {
+                        "checks-settled" if held_for.is_some() => held_for,
                         "checks-settled" if opened_change => Some(State::AwaitingMerge),
                         "draft-kept-for-review" => Some(State::ReviewWait),
                         "merge-queued" => Some(State::MergeQueue),
@@ -526,6 +655,16 @@ fn cycle(
                         | "sync-conflict" => Some(State::Publication),
                         _ => None,
                     };
+                }
+            }
+        }
+        // A draft kept for its user's review says what the change has been
+        // waiting on since its checks settled: the review, not an unexplained
+        // wait for its merge.
+        if kind == "draft-kept-for-review" {
+            if let Some(last) = transitions.last_mut() {
+                if last.1 == State::AwaitingMerge {
+                    last.1 = State::ReviewWait;
                 }
             }
         }
@@ -540,7 +679,7 @@ fn cycle(
 
     let start = dispatched_at?;
     let (landed_at, landing) = landed.unwrap_or((None, None));
-    let landed_ms = landed_at.as_deref().and_then(projection::millis_of);
+    let landed_ms = landed_at.as_ref().map(Stamp::millis);
     let end = landed_ms.unwrap_or(last).max(start);
 
     gate_runs.sort_by_key(|(at, _)| *at);
@@ -592,7 +731,7 @@ fn cycle(
         branch,
         change_url,
         outcome,
-        dispatched_at: crate::sys::rfc3339_from_millis(start),
+        dispatched_at: Stamp::at(start),
         cycle_seconds: landed_ms.map(|_| seconds(end - start)),
         landed_at,
         landing,
@@ -610,27 +749,34 @@ fn millis(seconds: f64) -> u64 {
     (seconds * 1_000.0).round().max(0.0) as u64
 }
 
-/// One `gate-run` payload and the milliseconds it spanned, where it reads.
+/// One `gate-run` payload, where it reads.
 ///
-/// A payload this build cannot read — a gate or a verdict a newer `onevcs`
-/// names — is passed over rather than failing the view.
-fn gate_run(payload: &serde_json::Map<String, Value>) -> Option<((u64, u64), GateRun)> {
-    let started_at = payload.get("started_at")?.as_str()?.to_owned();
-    let ended_at = payload.get("ended_at")?.as_str()?.to_owned();
-    let started = projection::millis_of(&started_at)?;
-    let ended = projection::millis_of(&ended_at)?;
-    let run = GateRun {
-        gate: serde_json::from_value(payload.get("gate")?.clone()).ok()?,
-        attempt: payload.get("attempt")?.as_u64()?,
-        started_at,
-        ended_at,
-        seconds: payload
-            .get("seconds")
-            .and_then(Value::as_f64)
-            .unwrap_or_else(|| seconds(ended.saturating_sub(started))),
-        verdict: serde_json::from_value(payload.get("verdict")?.clone()).ok()?,
-    };
-    Some(((started, ended.max(started)), run))
+/// Through [`GateRun`]'s own checks, over exactly the six fields the document
+/// carries — so a payload is held to what a document read back is held to. One
+/// this build cannot read — a gate or a verdict a newer `onevcs` names, or an
+/// interval that does not hold together — is passed over rather than failing
+/// the view.
+// llmlint: ignore[changed_behavior_has_e2e] the linked `onevcs` writes only gates and
+// verdicts this build names, and only intervals that hold together, so passing one over
+// is reachable from no journey. The unit tests
+// `a_gate_run_whose_interval_does_not_hold_together_is_passed_over` and
+// `a_gate_run_this_build_cannot_read_is_passed_over_rather_than_failing_the_view` drive
+// it, and the journeys drive `pre-push`, `required-checks`, `passed`, `failed` and
+// `passed-with-skipped` off real records. `no-verdict` is a watch's bound elapsing, which
+// re-dispatches until a budget is spent — a word this reads, not a branch it takes.
+fn gate_run(payload: &serde_json::Map<String, Value>) -> Option<GateRun> {
+    let fields: serde_json::Map<String, Value> = [
+        "gate",
+        "attempt",
+        "started_at",
+        "ended_at",
+        "seconds",
+        "verdict",
+    ]
+    .into_iter()
+    .filter_map(|name| Some((name.to_owned(), payload.get(name)?.clone())))
+    .collect();
+    serde_json::from_value(Value::Object(fields)).ok()
 }
 
 /// Divide `[start, end)` among the segments, exactly.
@@ -849,13 +995,13 @@ mod tests {
         ));
         let change = one(&events);
         let ms = ms_of(&change);
-        assert_eq!(ms[&Segment::ReviewWait], 18_000);
+        // Kept for review is what the change waited on from its checks settling
+        // at 20s, until the draft was lifted at 40s.
+        assert_eq!(ms[&Segment::ReviewWait], 20_000);
         assert_eq!(ms[&Segment::MergeQueue], 9_000);
-        // 20s → 22s awaited the merge before the draft was kept, and nothing
-        // said on whose account.
-        assert_eq!(ms[&Segment::Other], 2_000);
+        assert_eq!(ms[&Segment::Other], 0);
         assert_eq!(ms[&Segment::Publication], 3_000 + 1_000);
-        assert_eq!(change.not_measured, vec![Segment::ReviewWait]);
+        assert!(change.not_measured.is_empty(), "{:?}", change.not_measured);
         assert_eq!(sum(&change), 50_000);
     }
 
@@ -909,6 +1055,105 @@ mod tests {
         // The run recorded no gate run, and a direct node has no publication
         // for one to have hidden in.
         assert_eq!(change.not_measured, vec![Segment::Gate]);
+    }
+
+    #[test]
+    fn a_requeue_and_a_release_wait_after_a_dispatch_are_each_their_own_wait() {
+        let events = vec![
+            pipeline(0, "node-dispatched", json!({"attempt": 1})),
+            pipeline(2, "node-requeued", json!({"reason": "workspace-exhausted"})),
+            pipeline(5, "node-dispatched", json!({"attempt": 1})),
+            settled_agent(9),
+            pipeline(
+                10,
+                "node-settled",
+                json!({"status": "done", "outcome": "queued"}),
+            ),
+            pipeline(14, "release-wait", json!({})),
+            pipeline(20, "node-dispatched", json!({"attempt": 2})),
+            settled_agent(21),
+            pipeline(22, "node-settled", json!({"status": "done"})),
+        ];
+        let change = one(&events);
+        let ms = ms_of(&change);
+        // A direct node is in its dispatch until it settles.
+        assert_eq!(ms[&Segment::Agent], 2_000 + 5_000 + 2_000);
+        assert_eq!(ms[&Segment::Scheduling], 3_000);
+        assert_eq!(ms[&Segment::MergeQueue], 4_000);
+        assert_eq!(ms[&Segment::ReleaseWait], 6_000);
+        assert_eq!(change.dispatches, 3);
+        assert_eq!(sum(&change), 22_000);
+    }
+
+    #[test]
+    fn a_dispatch_is_the_agents_until_every_member_it_started_has_settled() {
+        let member = |seconds: u64, kind: &str, name: &str| {
+            let mut event = at(seconds, Source::Agentgraph, kind, json!({}));
+            event.labels.member = Some(name.into());
+            event
+        };
+        let events = vec![
+            pipeline(0, "node-dispatched", json!({"attempt": 1})),
+            member(1, "member-started", "worker"),
+            member(2, "member-started", "reviewer"),
+            member(6, crate::report::MEMBER_SETTLED, "worker"),
+            member(9, crate::report::MEMBER_SETTLED, "reviewer"),
+            vcs(10, "push", json!({"accepted": true})),
+            vcs(
+                11,
+                "merge-completed",
+                json!({"landing": "abc", "landed_at": stamp(11)}),
+            ),
+        ];
+        let change = one(&events);
+        let ms = ms_of(&change);
+        assert_eq!(ms[&Segment::Agent], 9_000);
+        assert_eq!(change.cycle_seconds, Some(11.0));
+    }
+
+    #[test]
+    fn a_draft_held_for_a_person_waits_on_review_and_one_awaiting_a_release_on_it() {
+        for (kind, waits) in [
+            ("held", Segment::ReviewWait),
+            ("awaiting-release", Segment::ReleaseWait),
+        ] {
+            let mut events = opened_and_checked();
+            events.insert(4, vcs(13, "change-drafted", json!({"kind": kind})));
+            events.push(pipeline(
+                21,
+                "node-settled",
+                json!({"status": "complete-but-draft", "outcome": crate::vcs::DRAFTED}),
+            ));
+            events.push(pipeline(40, "run-stopped", json!({})));
+            let change = one(&events);
+            let ms = ms_of(&change);
+            assert_eq!(ms[&waits], 20_000, "{kind}");
+            assert_eq!(ms[&Segment::Other], 0, "{kind}");
+            assert!(
+                !change.not_measured.contains(&Segment::ReviewWait),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gate_run_whose_interval_does_not_hold_together_is_passed_over() {
+        let mut events = opened_and_checked();
+        events.push(vcs(
+            30,
+            "gate-run",
+            json!({"gate": "pre-push", "attempt": 2, "started_at": stamp(29),
+                   "ended_at": stamp(25), "seconds": -4.0, "verdict": "passed"}),
+        ));
+        events.push(vcs(
+            31,
+            "gate-run",
+            json!({"gate": "pre-push", "attempt": 2, "started_at": stamp(25),
+                   "ended_at": stamp(29), "seconds": 9.5, "verdict": "passed"}),
+        ));
+        let change = one(&events);
+        assert_eq!(change.gate_runs.len(), 1);
+        assert_eq!(change.gate_seconds, 7.0);
     }
 
     #[test]

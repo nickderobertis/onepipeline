@@ -56,7 +56,7 @@ use onepipeline::report::{
 };
 use onepipeline::rules::{ExecutorKind, ExecutorRules, Predicate};
 use onepipeline::telemetry::{
-    ChangeTelemetry, GateName, GateVerdict, Segment, CHANGE_TELEMETRY_SCHEMA_VERSION,
+    ChangeTelemetry, GateName, GateVerdict, Segment, Stamp, CHANGE_TELEMETRY_SCHEMA_VERSION,
 };
 use onepipeline::verbs;
 use onepipeline::views::{
@@ -9821,7 +9821,23 @@ fn the_change_telemetry_document_in_the_contract_is_the_one_the_types_read_and_w
         let written = serde_json::to_value(segment).expect("a segment serialises");
         assert_eq!(written, json!(segment.as_str()));
     }
-    let mut later = block;
+    let mut later = block.clone();
     later["schema_version"] = json!(2);
     assert!(serde_json::from_value::<ChangeTelemetry>(later).is_err());
+
+    // Every time is a UTC millisecond stamp, and a document carrying another
+    // shape is refused where it is read.
+    assert_eq!(change.dispatched_at.as_str(), "2026-10-05T03:00:00.000Z");
+    assert!(serde_json::from_value::<Stamp>(json!("2026-10-05T03:00:00Z")).is_err());
+    let mut unstamped = block.clone();
+    unstamped["changes"][0]["landed_at"] = json!("yesterday");
+    assert!(serde_json::from_value::<ChangeTelemetry>(unstamped).is_err());
+    // A gate run holds together: it does not end before it starts, and its
+    // seconds are its stamps' difference.
+    let mut backwards = block.clone();
+    backwards["changes"][0]["gate_runs"][0]["ended_at"] = json!("2026-10-05T03:29:00.000Z");
+    assert!(serde_json::from_value::<ChangeTelemetry>(backwards).is_err());
+    let mut inconsistent = block;
+    inconsistent["changes"][0]["gate_runs"][0]["seconds"] = json!(1.0);
+    assert!(serde_json::from_value::<ChangeTelemetry>(inconsistent).is_err());
 }

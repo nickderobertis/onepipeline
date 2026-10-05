@@ -37,7 +37,7 @@ use crate::projection;
 /// consumer.
 pub use crate::changes::{
     changes_of_run, render_changes, ChangeCycle, ChangeTelemetry, GateName, GateRun, GateVerdict,
-    Segment, Segments, CHANGE_TELEMETRY_SCHEMA_VERSION,
+    Segment, Segments, Stamp, CHANGE_TELEMETRY_SCHEMA_VERSION,
 };
 
 /// The schema version of the telemetry document.

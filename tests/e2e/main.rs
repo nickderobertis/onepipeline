@@ -49,7 +49,14 @@ mod branch_template;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod bus_config;
 mod cancellation;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] seven journeys, about
+// 20s together, whose waits are the measurement under test — a scripted turn and a
+// `pre-push` hook of known lengths, against which the view's segments are checked. What
+// they exercise is the fold over a whole run's store — `changes`, `projection`, `engine`,
+// `lifecycle` and the linked `onevcs` together — so the narrowest edge they can honestly
+// sit behind is the crate itself, which is this target's; same grounds as `mod checkpoint`.
 mod change_telemetry;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod channel;
 mod compatibility;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] four journeys, about

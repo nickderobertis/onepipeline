@@ -26,7 +26,8 @@ use crate::run_end_hooks::{hook, invocations, records, HOOK_TIMEOUT, RECORD_ENV}
 use serde_json::{json, Value};
 
 /// Every required check the host reports, concluded green.
-const GREEN: &str = "lint completed success required\ntest (linux) completed success required";
+pub(crate) const GREEN: &str =
+    "lint completed success required\ntest (linux) completed success required";
 
 /// A required check the host reports red.
 const RED: &str = "lint completed failure required";
@@ -40,7 +41,7 @@ const SHORT_GRACE: &str = "0.2";
 
 /// Give the world's identity a rules file: `publication`, `approvals`, and a
 /// `drafts:` mapping where one is given.
-fn rules(world: &World, publication: &str, approvals: &str, drafts: Option<&str>) {
+pub(crate) fn rules(world: &World, publication: &str, approvals: &str, drafts: Option<&str>) {
     let drafts = drafts
         .map(|drafts| format!("  drafts: {drafts}\n"))
         .unwrap_or_default();
@@ -56,14 +57,14 @@ fn rules(world: &World, publication: &str, approvals: &str, drafts: Option<&str>
 
 /// A `change-open` identity whose approvals are required: a team repository that
 /// does not merge automatically.
-fn team_repository(world: &World) {
+pub(crate) fn team_repository(world: &World) {
     world.repository("change-open", &[]);
     rules(world, "change-open", "required", None);
 }
 
 /// Launch a plan of `nodes` attached, with any `extra` arguments, and wait for its
 /// result.
-fn settled_run(
+pub(crate) fn settled_run(
     world: &World,
     name: &str,
     nodes: Vec<Value>,
