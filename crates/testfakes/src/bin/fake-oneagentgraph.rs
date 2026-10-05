@@ -747,6 +747,15 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         write_work(args, &fake::segment(&key), &body);
     }
 
+    // A worker that leaves a process of its own working inside its worktree when
+    // its turn ends — a build watcher, a server it forgot — which is exactly what
+    // `onevcs` refuses to close a session over. Scripted `<key>.lingers` holding
+    // how many seconds the process lives; its pid is written to `<key>.lingering`
+    // beside the scripts, so the journey that asked for it can end it.
+    if let Some(seconds) = fake::node_script(dir, &key, "lingers") {
+        linger_in_the_worktree(args, dir, &key, &seconds);
+    }
+
     // A worker that concludes the merge its session opened with: every path git
     // left unmerged is written with the scripted body, staged, and the merge
     // committed — a merge commit on top of the branch whose second parent is the
@@ -1804,6 +1813,33 @@ const SCRATCH_MARKER: &str = "marker";
 /// here that touches a path outside its own scratch. The real `oneagentgraph`
 /// resolves a workspace before it prepares a member, so a value that is not one
 /// is a misconfigured test rather than a scenario.
+/// Start `sleep SECONDS` in the dispatch's `--dir`, in a process group of its own
+/// so that ending the dispatch does not end it, and record its pid.
+fn linger_in_the_worktree(args: &[String], dir: &std::path::Path, key: &str, seconds: &str) {
+    let Some(workspace) = fake::flag(args, "--dir") else {
+        fake::fail("lingering in a dispatch's worktree needs its --dir");
+    };
+    let mut sleep = std::process::Command::new("sleep");
+    sleep
+        .arg(seconds)
+        .current_dir(&workspace)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut sleep, 0);
+    match sleep.spawn() {
+        Ok(child) => {
+            if let Err(error) =
+                std::fs::write(dir.join(format!("{key}.lingering")), child.id().to_string())
+            {
+                fake::fail(&format!("cannot record the lingering pid: {error}"));
+            }
+        }
+        Err(error) => fake::fail(&format!("cannot linger in {workspace}: {error}")),
+    }
+}
+
 fn write_work(args: &[String], name: &str, body: &str) {
     let Some(workspace) = fake::flag(args, "--dir") else {
         fake::fail("writing a dispatch's work needs its --dir to write into");

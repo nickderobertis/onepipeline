@@ -760,6 +760,17 @@ struct Opened<'a> {
 /// sibling's own `branch-preserved` record reaches the run's journal with the
 /// rest of the session.
 ///
+/// **Nothing is preserved from a session that has not closed.** `onevcs` refuses
+/// a close while a process is still working inside the session, and a refusal
+/// that answers differently a moment later is the ordinary case — the dispatch
+/// that has just ended is reaped a moment after. So a refused close is asked
+/// again, for the grace the relay already gives one, and only a closed session's
+/// branch is pushed: pushed while the session was still open, it would miss
+/// whatever the close then commits, and the head the node settles on would not
+/// be the branch's tip. A session still refusing when the grace is spent settles
+/// `failed` under [`engine::INFRASTRUCTURE_FAILURE`], naming the refusal, with
+/// nothing pushed.
+///
 /// The node settles `done` under [`engine::PRESERVED`], naming the branch, the
 /// commit it stands at and what the push found to do. A preservation the sibling
 /// refuses settles `failed` under [`engine::INFRASTRUCTURE_FAILURE`] — the host,
@@ -798,19 +809,22 @@ fn preserve(
     // says which when it does.
     let committed = worktree.and_then(crate::vcs::worktree_head);
     let followed_through = stream.map(crate::vcs::Follower::finish).unwrap_or_default();
-    // llmlint: ignore[changed_behavior_has_e2e] the close succeeding is what every preserve
-    // journey drives, and its refusal is not new here: `onevcs` refuses a close only over a
-    // live process working inside the run root at that instant, which no plan can ask for,
-    // and what follows one — the relay asking again until the terminator lands — is
-    // `relay_session_events`' own loop, held by its own journey for every closeout.
-    let refused = close(Some(token));
-    let answered = match (&branch, node.repo.as_deref()) {
-        (Some(branch), Some(repo)) => crate::vcs::preserve_branch(repo, branch),
+    let mut refused = close(Some(token));
+    let deadline = Instant::now() + TERMINATOR_GRACE;
+    while refused.is_some() && Instant::now() < deadline {
+        std::thread::sleep(TERMINATOR_POLL);
+        refused = close(Some(token));
+    }
+    let answered = match (&refused, &branch, node.repo.as_deref()) {
+        (Some(why), _, _) => Err(format!(
+            "the session would not close ({why}), so nothing was pushed from it"
+        )),
+        (None, Some(branch), Some(repo)) => crate::vcs::preserve_branch(repo, branch),
         // llmlint: ignore[changed_behavior_has_e2e] every session `onevcs` opens names
         // its branch and every lifecycle node names its `repo`, so no invocation reaches
         // a kept branch with neither; it settles as the infrastructure failure it would
         // be rather than behind an unwrap.
-        _ => Err("the session named no branch to preserve".to_owned()),
+        (None, _, _) => Err("the session named no branch to preserve".to_owned()),
     };
     relay_session_events(tx, Some(token), whose, followed_through, filter, refused);
     match answered {

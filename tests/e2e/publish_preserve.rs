@@ -523,6 +523,91 @@ fn a_live_edit_adding_a_dependent_of_a_preserved_node_is_refused() {
     );
 }
 
+/// End the process a `<key>.lingers` worker left behind, by the pid it recorded.
+///
+/// The one process a journey here may signal: the fake started it for this
+/// journey and wrote down which one it is.
+#[cfg(unix)]
+fn end_the_lingering(world: &World, key: &str) {
+    if let Ok(pid) = std::fs::read_to_string(world.fakes.join(format!("{key}.lingering"))) {
+        let _ = std::process::Command::new("kill").arg(pid.trim()).status();
+    }
+}
+
+/// A close refused for a moment — the worker left a process in its worktree that
+/// ends a second or two later — is asked again before anything is pushed, so what
+/// is kept is everything the session made: the work the worker never committed is
+/// committed by the close and is on the origin at the head the node settles on.
+#[cfg(unix)]
+#[test]
+fn a_close_refused_for_a_moment_is_asked_again_and_everything_the_session_made_is_kept() {
+    let world = World::new("preserve-close-retried");
+    let repo = world.repository("local-direct", &[]);
+    world.script("spike.work", "what the spike measured\n");
+    world.script("spike.lingers", "2");
+    let path = world.plan("retried", &plan_of("retried", vec![kept("spike", &[])]));
+    world.run(&["start", &path, "--attach"]).settled();
+    end_the_lingering(&world, "spike");
+
+    let node = settled_node(&world, "retried");
+    assert_eq!(node["status"], "done", "{node}\n{}", world.dump());
+    assert_eq!(node["outcome"], "preserved", "{node}");
+    let branch = node["branch"].as_str().expect("a branch").to_owned();
+    let head = node["head"].as_str().expect("a head").to_owned();
+    assert_eq!(
+        origin_tip(&repo.origin, &branch).as_deref(),
+        Some(head.as_str()),
+        "the origin is not at the head the settlement names"
+    );
+    assert_eq!(
+        file_at(&world, &repo.origin, &head, "spike.md").trim(),
+        "what the spike measured",
+        "the kept branch is missing the work the close committed"
+    );
+    assert_eq!(
+        git(&world, &repo.checkout, &["rev-parse", &branch]).trim(),
+        head,
+        "the local branch moved past the head that was kept"
+    );
+}
+
+/// A session that will not close is not preserved at all: nothing is pushed from
+/// a session still open, and the node says why.
+#[cfg(unix)]
+#[test]
+fn a_session_that_will_not_close_is_not_preserved() {
+    let world = World::new("preserve-unclosed");
+    let repo = world.repository("local-direct", &[]);
+    world.script("spike.work", "what the spike measured\n");
+    world.script("spike.lingers", "60");
+    let path = world.plan("unclosed", &plan_of("unclosed", vec![kept("spike", &[])]));
+    world.run(&["start", &path, "--attach"]).settled();
+    end_the_lingering(&world, "spike");
+
+    let node = settled_node(&world, "unclosed");
+    assert_eq!(node["status"], "failed", "{node}\n{}", world.dump());
+    assert_eq!(node["outcome"], "infrastructure-failure", "{node}");
+    assert!(node.get("remote").is_none(), "{node}");
+    let branch = node["branch"].as_str().expect("a branch").to_owned();
+    let detail = world.events_of("unclosed", "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(detail.contains("would not close"), "{detail}");
+    assert!(detail.contains(&branch), "{detail}");
+    assert_eq!(
+        origin_tip(&repo.origin, &branch),
+        None,
+        "a session that never closed was pushed"
+    );
+    assert!(
+        !vcs_kinds(&world, "unclosed")
+            .iter()
+            .any(|kind| kind == "branch-preserved"),
+        "a session that never closed was preserved"
+    );
+}
+
 /// The loader accepts the field on a lifecycle node, stated either way.
 #[test]
 fn the_loader_accepts_publish_on_a_lifecycle_node() {

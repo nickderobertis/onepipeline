@@ -8962,7 +8962,11 @@ published. A branch level with its base settles `failed` as `empty-branch`, exac
 under a publication. Otherwise the session is closed — which commits whatever its
 worktree still holds and hands the branch back to the execution checkout, so what is
 kept is everything the session made — and `onevcs::preserve` then puts the branch on
-the identity's origin. The node settles `done` with outcome **`preserved`**, carrying
+the identity's origin. Nothing is pushed from a session that has not closed: a close
+`onevcs` refuses — it does while a process is still working inside the session — is
+asked again for the grace the session relay already gives one, and a session still
+refusing then settles `failed` under `infrastructure-failure` naming the refusal, with
+nothing pushed. The node settles `done` with outcome **`preserved`**, carrying
 `branch`, `head` and `remote`, the last `pushed`, `already-on-origin` or `no-remote`
 as `onevcs::Preserved` answered. A preservation the sibling refuses settles `failed`
 under `infrastructure-failure`, carrying the branch, the commit its work stands at and
@@ -9018,7 +9022,10 @@ bar before the close, the session closed with its worktree gone, `result.json`,
 `summary.json` and all four views;
 `a_preserved_node_whose_identity_has_no_origin_settles_no_remote` and
 `a_preserved_branch_the_origin_already_carries_settles_already_on_origin` hold the
-other two remote words; `a_preserved_node_level_with_its_base_settles_empty_branch` and
+other two remote words;
+`a_close_refused_for_a_moment_is_asked_again_and_everything_the_session_made_is_kept`
+and `a_session_that_will_not_close_is_not_preserved` hold the close's refusal, a worker
+leaving a process in its worktree for a second and for a minute; `a_preserved_node_level_with_its_base_settles_empty_branch` and
 `a_refused_preservation_fails_the_node_and_leaves_the_work_on_the_local_branch` hold
 the two failures, the second reading the branch and its commit off the checkout after
 the session closed; `a_node_stating_land_publishes_exactly_as_one_stating_nothing`
