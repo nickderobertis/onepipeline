@@ -59,8 +59,13 @@ fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::E
 }
 
 /// One change: a lineage of dispatches, from its first to its landing.
+///
+/// Read back only where it holds together: `cycle_seconds` is present exactly
+/// when `landed_at` is and is its difference from `dispatched_at`,
+/// `gate_seconds` is its gate runs' sum, and a landed change's segments sum to
+/// its cycle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "ChangeCycleFields")]
 pub struct ChangeCycle {
     /// The lineage's last member: the node that settles the change.
     pub node: String,
@@ -101,6 +106,96 @@ pub struct ChangeCycle {
     pub segments: Segments,
     /// Each segment the records could not decide. Its time is in `other`.
     pub not_measured: Vec<Segment>,
+}
+
+/// A [`ChangeCycle`] as it arrives, before the checks that make it one.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChangeCycleFields {
+    node: String,
+    lineage: Vec<String>,
+    repository: Option<String>,
+    branch: Option<String>,
+    change_url: Option<String>,
+    outcome: String,
+    dispatched_at: Stamp,
+    landed_at: Option<Stamp>,
+    landing: Option<String>,
+    cycle_seconds: Option<f64>,
+    dispatches: u64,
+    publication_attempts: u64,
+    gate_runs: Vec<GateRun>,
+    gate_seconds: f64,
+    segments: Segments,
+    not_measured: Vec<Segment>,
+}
+
+impl TryFrom<ChangeCycleFields> for ChangeCycle {
+    type Error = String;
+
+    fn try_from(fields: ChangeCycleFields) -> Result<Self, String> {
+        let cycle = match (&fields.landed_at, fields.cycle_seconds) {
+            (None, None) => None,
+            (Some(landed), Some(cycle)) => {
+                let measured = landed
+                    .millis()
+                    .saturating_sub(fields.dispatched_at.millis());
+                if cycle != seconds(measured) {
+                    return Err(format!(
+                        "{}: a cycle of {cycle} seconds between stamps {measured}ms apart",
+                        fields.node
+                    ));
+                }
+                Some(measured)
+            }
+            _ => {
+                return Err(format!(
+                    "{}: cycle_seconds is present exactly when landed_at is",
+                    fields.node
+                ))
+            }
+        };
+        let gates: u64 = fields
+            .gate_runs
+            .iter()
+            .map(|run| run.ended_at.millis() - run.started_at.millis())
+            .sum();
+        if fields.gate_seconds != seconds(gates) {
+            return Err(format!(
+                "{}: gate_seconds {} is not its gate runs' {}ms",
+                fields.node, fields.gate_seconds, gates
+            ));
+        }
+        let spent: u64 = Segment::ALL
+            .iter()
+            .map(|segment| millis(fields.segments.get(*segment)))
+            .sum();
+        if cycle.is_some_and(|cycle| cycle != spent) {
+            return Err(format!(
+                "{}: segments summing to {spent}ms divide a cycle of {}ms",
+                fields.node,
+                cycle.unwrap_or(0)
+            ));
+        }
+        Ok(Self {
+            node: fields.node,
+            lineage: fields.lineage,
+            repository: fields.repository,
+            branch: fields.branch,
+            change_url: fields.change_url,
+            outcome: fields.outcome,
+            dispatched_at: fields.dispatched_at,
+            landed_at: fields.landed_at,
+            landing: fields.landing,
+            cycle_seconds: fields.cycle_seconds,
+            dispatches: fields.dispatches,
+            publication_attempts: fields.publication_attempts,
+            gate_runs: fields.gate_runs,
+            gate_seconds: fields.gate_seconds,
+            segments: fields.segments,
+            not_measured: fields.not_measured,
+        })
+    }
 }
 
 /// An instant as every producer in this stack stamps one: RFC 3339, UTC, to the
@@ -236,37 +331,45 @@ pub enum GateVerdict {
 
 /// Where a change's interval went, in seconds.
 ///
-/// Each is a whole number of milliseconds, and the eight sum exactly to the
-/// interval in milliseconds.
+/// Each is a whole, non-negative number of milliseconds — refused on read
+/// otherwise — and the eight sum exactly to the interval in milliseconds.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Segments {
     /// A dispatch's own work: from its `node-dispatched` until its agent
     /// settled — or, for a node that publishes nothing, until the node settled,
     /// since nothing it does after its agent is anything but its dispatch.
+    #[serde(deserialize_with = "whole_milliseconds")]
     pub agent: f64,
     /// Waiting on a decision: after a settlement that did not finish the change
     /// — a failure, a requeue, a hold — until the lineage's next dispatch.
+    #[serde(deserialize_with = "whole_milliseconds")]
     pub scheduling: f64,
     /// A gate running, read off each `gate-run`'s own `started_at`/`ended_at`.
+    #[serde(deserialize_with = "whole_milliseconds")]
     pub gate: f64,
     /// The closeout and publication outside a gate: from the agent settling to
     /// the change request's checks settling or the landing.
+    #[serde(deserialize_with = "whole_milliseconds")]
     pub publication: f64,
     /// Waiting on a person: a green change kept as a draft for its user's
     /// review, from its checks settling, or a draft its plan held for a person
     /// to mark ready.
+    #[serde(deserialize_with = "whole_milliseconds")]
     pub review_wait: f64,
     /// Waiting for its turn to land: from `merge-queued` — a host's queue, or a
     /// local landing's — to the landing.
+    #[serde(deserialize_with = "whole_milliseconds")]
     pub merge_queue: f64,
     /// A change held for a release: a node held waiting on releases, or a
     /// draft opened to wait for a release it pins.
+    #[serde(deserialize_with = "whole_milliseconds")]
     pub release_wait: f64,
     /// Time the records do not decide: a change request waiting to merge with
     /// nothing recording whether on a reviewer or on its host, a publication in
     /// a run that recorded no gate run, and a change settled `done` without
     /// landing.
+    #[serde(deserialize_with = "whole_milliseconds")]
     pub other: f64,
 }
 
@@ -348,6 +451,18 @@ impl Segments {
             other: at(Segment::Other),
         }
     }
+}
+
+/// Read one segment, refusing a duration that is not a whole, non-negative
+/// number of milliseconds.
+fn whole_milliseconds<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<f64, D::Error> {
+    let found = f64::deserialize(reader)?;
+    if found.is_nan() || found < 0.0 || seconds(millis(found)) != found {
+        return Err(serde::de::Error::custom(format!(
+            "{found} seconds is not a whole, non-negative number of milliseconds"
+        )));
+    }
+    Ok(found)
 }
 
 fn seconds(ms: u64) -> f64 {

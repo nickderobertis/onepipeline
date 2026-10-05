@@ -10,6 +10,14 @@
 //! What each journey asserts the view against is the **store**, read
 //! independently: the view is an aggregate, so the only honest oracle is the
 //! records it aggregates.
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
+// assumed: the eight journeys here take about 20 seconds on the wall under the suite's
+// parallelism, and their waits — a scripted turn and a `pre-push` hook of known lengths —
+// are the measurement the view is checked against. What they exercise is `changes`,
+// `projection`, `engine`, `lifecycle` and the linked `onevcs` together, which any change
+// under `src/` can move, so a project edged narrower than the crate would drop them out of
+// `nx affected` for the very changes they exist to catch — the ground `branch_template.rs`
+// carries for its own.
 // llmlint: ignore-file[e2e_not_mocked] the sibling under test is *not* substituted here:
 // `onevcs` is the library this crate links, driving real git against a real origin and
 // a real hook. `oneagentgraph` is still the double, because a real agent turn is a paid

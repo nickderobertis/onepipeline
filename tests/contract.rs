@@ -9841,6 +9841,28 @@ fn the_change_telemetry_document_in_the_contract_is_the_one_the_types_read_and_w
     inconsistent["changes"][0]["gate_runs"][0]["seconds"] = json!(1.0);
     assert!(serde_json::from_value::<ChangeTelemetry>(inconsistent).is_err());
 
+    // A change holds together: its cycle is its landing's distance from its
+    // dispatch and present exactly when it landed, its gate seconds are its gate
+    // runs', its segments divide its cycle, and each is whole milliseconds.
+    for (path, value) in [
+        ("/changes/0/cycle_seconds", json!(9876.0)),
+        ("/changes/0/cycle_seconds", Value::Null),
+        ("/changes/0/landed_at", Value::Null),
+        ("/changes/0/gate_seconds", json!(2788.0)),
+        ("/changes/0/segments/other", json!(1.0)),
+        ("/changes/0/segments/scheduling", json!(-600.0)),
+        ("/changes/0/segments/agent", json!(5399.9995)),
+    ] {
+        let mut broken = block.clone();
+        *broken
+            .pointer_mut(path)
+            .expect("a field of the contract's document") = value;
+        assert!(
+            serde_json::from_value::<ChangeTelemetry>(broken).is_err(),
+            "{path} was read back although the change no longer holds together"
+        );
+    }
+
     // A field the contract does not name is refused at every level of the
     // document — a consumer's typo fails loudly instead of being dropped.
     for path in [
