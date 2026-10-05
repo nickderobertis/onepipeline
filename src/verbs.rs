@@ -51,7 +51,7 @@ use crate::event::Envelope;
 use crate::filter::EventFilter;
 use crate::journal::{self, Journal};
 use crate::ledger::{self, RunPaths};
-use crate::telemetry::RunTelemetry;
+use crate::telemetry::{ChangeTelemetry, RunTelemetry};
 use crate::templates::{
     self, ListedTemplate, ResolvedTemplate, TemplateCheck, TemplateChecked, TemplateList,
     TemplateOptions,
@@ -431,6 +431,40 @@ pub fn render_telemetry(measured: &[RunTelemetry], breakdown: bool) -> Result<St
             out.push('\n');
         }
     }
+    Ok(out)
+}
+
+/// `onepipeline telemetry RUN --changes`: each change the run made, with its
+/// cycle time and where that time went.
+///
+/// Through [`telemetry::changes_of_run`](crate::telemetry::changes_of_run)'s
+/// fold, over the run's own view.
+///
+/// # Errors
+///
+/// A run that is not under `root`, or one whose store cannot be read.
+pub fn change_telemetry(root: &Path, run: &str) -> Result<ChangeTelemetry> {
+    let view = RunView::open(&resolved(root, run)?)?;
+    Ok(crate::changes::changes(
+        &view.paths.run,
+        &view.state,
+        &view.events,
+    ))
+}
+
+/// The text `onepipeline telemetry RUN --changes [--json]` prints: one line per
+/// change, or the document as one JSON line.
+///
+/// # Errors
+///
+/// A document that cannot be serialised, which none this crate folds is.
+pub fn render_change_telemetry(changes: &ChangeTelemetry, json: bool) -> Result<String> {
+    if !json {
+        return Ok(crate::telemetry::render_changes(changes));
+    }
+    let mut out = serde_json::to_string(changes)
+        .map_err(|e| Error::Invalid(format!("change telemetry: {e}")))?;
+    out.push('\n');
     Ok(out)
 }
 

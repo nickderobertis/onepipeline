@@ -1425,6 +1425,12 @@ pub struct TelemetryArgs {
     /// The run id. Omitted, the view covers every run.
     pub run: Option<String>,
     /// Break the wall clock down into buckets that sum exactly.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "changes")]
     pub breakdown: bool,
+    /// One line per change the run made: its cycle time, and where it went.
+    #[arg(long, requires = "run")]
+    pub changes: bool,
+    /// Print `--changes` as its JSON document.
+    #[arg(long, requires = "changes")]
+    pub json: bool,
 }

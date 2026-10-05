@@ -707,6 +707,19 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         }
     }
 
+    // A turn that takes a known time, so a journey about *how long* a dispatch
+    // spent working has a duration to measure against. `<key>.takes` holds it in
+    // milliseconds; slept before the turn's records, so the turn's own stamps
+    // close after it as a real turn's do.
+    if let Some(takes) = fake::node_script(dir, &key, "takes") {
+        let Ok(millis) = takes.parse::<u64>() else {
+            fake::fail(&format!(
+                "{key}.takes holds {takes:?}, which is not a number of milliseconds"
+            ));
+        };
+        std::thread::sleep(std::time::Duration::from_millis(millis));
+    }
+
     // A line from a build whose envelope shape this one cannot read. It is
     // emitted *before* the good one, so a reader that stopped at it would lose
     // the turn that follows.

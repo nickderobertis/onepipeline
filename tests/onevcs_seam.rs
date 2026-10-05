@@ -405,6 +405,7 @@ fn check(name: &str, conclusion: &str, started_at: &str) -> Check {
         head: None,
         url: None,
         started_at: Some(started_at.to_owned()),
+        completed_at: None,
     }
 }
 

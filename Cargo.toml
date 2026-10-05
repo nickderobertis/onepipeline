@@ -624,6 +624,15 @@ resolver = "2"
 # admits no 0.40.x; `onevcs-testing` 0.12.2 requires exactly `=0.40.2`, so the pair
 # moves as one.
 #
+# `onevcs` 0.42.0 is the floor because it records the signals a change's cycle time is
+# aggregated from: a `gate-run` per completed gate — the push that ran a `pre-push`
+# hook, and the watch of a change request's required checks — and `landed_at` and
+# `landing` on every landing record. `telemetry RUN --changes` reads both off the
+# session streams a run follows, and `tests/e2e/change_telemetry.rs` drives it against
+# a real hook. It carries 0.41.0's discard mode too. A **requirement**, because `^0.40`
+# admits no 0.42.x; `onevcs-testing` 0.13.0 requires exactly `=0.42.0`, so the pair
+# moves as one.
+#
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
 # `reasoning` items as `turn-activity` under their own kind — the agent's words,
 # with no tool name — which `src/views.rs` and `src/projection.rs` render as what
@@ -657,7 +666,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.5"
-onevcs = "0.40.2"
+onevcs = "0.42.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -858,7 +867,7 @@ oneharness-core = "0.24.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.12.2"
+onevcs-testing = "0.13.0"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.

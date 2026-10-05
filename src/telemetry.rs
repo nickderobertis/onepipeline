@@ -30,6 +30,16 @@ use crate::journal;
 use crate::ledger::RunPaths;
 use crate::projection;
 
+/// Each change's cycle time, the `telemetry RUN --changes` document.
+///
+/// Declared beside the engine that folds it and published here, beside the run
+/// document it sits next to, so the telemetry views are one module to a
+/// consumer.
+pub use crate::changes::{
+    changes_of_run, render_changes, ChangeCycle, ChangeTelemetry, GateName, GateRun, GateVerdict,
+    Segment, Segments, Stamp, CHANGE_TELEMETRY_SCHEMA_VERSION,
+};
+
 /// The schema version of the telemetry document.
 ///
 /// `2` widened the four buckets this crate shipped to the eight the contract
