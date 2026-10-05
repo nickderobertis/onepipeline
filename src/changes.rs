@@ -241,7 +241,9 @@ pub enum GateVerdict {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Segments {
-    /// A dispatch's own work: from its `node-dispatched` until its agent settled.
+    /// A dispatch's own work: from its `node-dispatched` until its agent
+    /// settled — or, for a node that publishes nothing, until the node settled,
+    /// since nothing it does after its agent is anything but its dispatch.
     pub agent: f64,
     /// Waiting on a decision: after a settlement that did not finish the change
     /// — a failure, a requeue, a hold — until the lineage's next dispatch.
