@@ -11,7 +11,7 @@
 //! independently: the view is an aggregate, so the only honest oracle is the
 //! records it aggregates.
 // llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
-// assumed: the eight journeys here take about 20 seconds on the wall under the suite's
+// assumed: the nine journeys here take about 25 seconds on the wall under the suite's
 // parallelism, and their waits — a scripted turn and a `pre-push` hook of known lengths —
 // are the measurement the view is checked against. What they exercise is `changes`,
 // `projection`, `engine`, `lifecycle` and the linked `onevcs` together, which any change
@@ -658,6 +658,45 @@ fn an_open_change_awaiting_its_merge_names_review_wait_as_not_measured() {
         .run(&["telemetry", run, "--changes"])
         .exited(0)
         .out_has("review_wait not measured");
+}
+
+/// A change still in its dispatch is read the same way: it has settled nothing,
+/// so its outcome is its status, it has not landed, and everything from its
+/// dispatch to the run's last record is its agent's.
+#[test]
+fn a_change_still_in_flight_reads_its_status_and_its_agent_time() {
+    let world = World::new("changes-in-flight");
+    let repo = world.repository("local-direct", &[]);
+    world.script("service.turn-open", "");
+    world.script("service.wait", "hold");
+    world.script("service.work", "the worker wrote this\n");
+
+    let run = "inflight";
+    let path = world.plan(run, &plan_of(run, vec![node("service", &repo.checkout)]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the held node to be running", |world| {
+        world
+            .run(&["status", run])
+            .stdout
+            .contains("service: running")
+    });
+
+    let change = &changes(&world, run)["changes"][0];
+    assert_eq!(change["outcome"], "running", "{change}");
+    assert_eq!(change["landed_at"], Value::Null, "{change}");
+    assert_eq!(change["cycle_seconds"], Value::Null, "{change}");
+    assert_eq!(change["dispatches"], 1, "{change}");
+    assert_eq!(change["publication_attempts"], 0, "{change}");
+    let journal = world.journal(run);
+    let open = last_record(&journal) - ms(change["dispatched_at"].as_str().expect("a stamp"));
+    assert_eq!(segment(change, "agent"), open, "{change}");
+    assert_eq!(total(change), open, "{:?}", segments(change));
+
+    // Let the held turn finish, so the run ends inside this journey.
+    world.script("service.go", "");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
 }
 
 /// `--changes` is about one run, `--json` is a form of `--changes`, and the

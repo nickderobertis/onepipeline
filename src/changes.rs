@@ -826,6 +826,10 @@ fn cycle(
     // A landing time is read only beside the commit it names, and only where it
     // is after the change was first dispatched: a landing before the work began
     // is not this change's time, and is not estimated into one.
+    // llmlint: ignore[changed_behavior_has_e2e] the linked `onevcs` stamps every landing
+    // after the push it follows and always beside its commit, so no journey reaches
+    // this; `a_landing_time_before_the_dispatch_or_beside_no_commit_is_not_a_cycle`
+    // drives it, and `tests/contract.rs` holds the public reader to the same refusal.
     let landed_at = landed_at.filter(|at| landing.is_some() && at.millis() >= start);
     let landed_ms = landed_at.as_ref().map(Stamp::millis);
     let end = landed_ms.unwrap_or(last).max(start);
