@@ -9837,7 +9837,29 @@ fn the_change_telemetry_document_in_the_contract_is_the_one_the_types_read_and_w
     let mut backwards = block.clone();
     backwards["changes"][0]["gate_runs"][0]["ended_at"] = json!("2026-10-05T03:29:00.000Z");
     assert!(serde_json::from_value::<ChangeTelemetry>(backwards).is_err());
-    let mut inconsistent = block;
+    let mut inconsistent = block.clone();
     inconsistent["changes"][0]["gate_runs"][0]["seconds"] = json!(1.0);
     assert!(serde_json::from_value::<ChangeTelemetry>(inconsistent).is_err());
+
+    // A field the contract does not name is refused at every level of the
+    // document — a consumer's typo fails loudly instead of being dropped.
+    for path in [
+        "",
+        "/changes/0",
+        "/changes/0/gate_runs/0",
+        "/changes/0/segments",
+    ] {
+        let mut stray = block.clone();
+        stray
+            .pointer_mut(path)
+            .and_then(Value::as_object_mut)
+            .unwrap_or_else(|| panic!("{path} is an object in the contract's document"))
+            .insert("not_a_field".into(), json!(true));
+        let refused = serde_json::from_value::<ChangeTelemetry>(stray)
+            .expect_err("an unknown field is refused");
+        assert!(
+            refused.to_string().contains("not_a_field"),
+            "{path}: {refused}"
+        );
+    }
 }
