@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.61.0](https://github.com/nickderobertis/onepipeline/compare/v0.60.5...v0.61.0) - 2026-10-05
+
+### Added
+
+- *(telemetry)* aggregate each change's cycle time from its dispatches, gate runs and landing ([#757](https://github.com/nickderobertis/onepipeline/pull/757))
+- *(lifecycle)* keep a node's branch on its origin instead of landing it with publish: preserve ([#755](https://github.com/nickderobertis/onepipeline/pull/755))
+
 ## [0.60.5](https://github.com/nickderobertis/onepipeline/compare/v0.60.4...v0.60.5) - 2026-10-04
 
 ### Fixed
