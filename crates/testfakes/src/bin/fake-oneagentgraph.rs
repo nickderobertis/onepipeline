@@ -1807,12 +1807,6 @@ const ASKER_ENV: &str = "ONEPIPELINE_CHANNEL_ASKER";
 /// promise, rather than a file name the two sides would have to agree on.
 const SCRATCH_MARKER: &str = "marker";
 
-/// Write one document into the dispatch's workspace.
-///
-/// `--dir` is this process's external input, and these writes are the one thing
-/// here that touches a path outside its own scratch. The real `oneagentgraph`
-/// resolves a workspace before it prepares a member, so a value that is not one
-/// is a misconfigured test rather than a scenario.
 /// Start `sleep SECONDS` in the dispatch's `--dir`, in a process group of its own
 /// so that ending the dispatch does not end it, and record its pid.
 fn linger_in_the_worktree(args: &[String], dir: &std::path::Path, key: &str, seconds: &str) {
@@ -1840,6 +1834,12 @@ fn linger_in_the_worktree(args: &[String], dir: &std::path::Path, key: &str, sec
     }
 }
 
+/// Write one document into the dispatch's workspace.
+///
+/// `--dir` is this process's external input, and these writes are the one thing
+/// here that touches a path outside its own scratch. The real `oneagentgraph`
+/// resolves a workspace before it prepares a member, so a value that is not one
+/// is a misconfigured test rather than a scenario.
 fn write_work(args: &[String], name: &str, body: &str) {
     let Some(workspace) = fake::flag(args, "--dir") else {
         fake::fail("writing a dispatch's work needs its --dir to write into");

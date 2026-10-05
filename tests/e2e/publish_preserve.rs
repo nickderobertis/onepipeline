@@ -529,8 +529,17 @@ fn a_live_edit_adding_a_dependent_of_a_preserved_node_is_refused() {
 /// journey and wrote down which one it is.
 #[cfg(unix)]
 fn end_the_lingering(world: &World, key: &str) {
-    if let Ok(pid) = std::fs::read_to_string(world.fakes.join(format!("{key}.lingering"))) {
-        let _ = std::process::Command::new("kill").arg(pid.trim()).status();
+    // Only a pid the fake could have written: a positive number past `init`, so a
+    // file that held anything else signals nothing rather than a process group or
+    // every process this user owns.
+    let recorded = std::fs::read_to_string(world.fakes.join(format!("{key}.lingering")))
+        .ok()
+        .and_then(|pid| pid.trim().parse::<u32>().ok())
+        .filter(|pid| *pid > 1);
+    if let Some(pid) = recorded {
+        let _ = std::process::Command::new("kill")
+            .arg(pid.to_string())
+            .status();
     }
 }
 
