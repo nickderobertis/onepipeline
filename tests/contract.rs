@@ -7421,6 +7421,11 @@ const RULINGS: &[(&str, &str)] = &[
         "110.",
         "`\"preserve\"`, which keeps the node's work rather than landing it",
     ),
+    // ai-orchestrator#1508: a preserve node's session starts from a kept branch it depends on.
+    (
+        "111.",
+        "several select the candidate whose stacking chain contains every other candidate",
+    ),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
