@@ -221,7 +221,7 @@ impl Store {
         self.load(project)
     }
 
-    /// One task or one document, read by its qualified id.
+    /// One task, document or project, read by its qualified id.
     ///
     /// # Errors
     ///
@@ -239,20 +239,29 @@ impl Store {
             })?;
         let reader = Reader::over(built)?;
         let global = id.global();
-        if kind == StoredKind::Document {
-            let read = reader
-                .call(reader.engine.document(&global))
-                .map_err(|error| failed("document show", id.as_str(), &error))?;
-            let found = one(&global, "document show", read)?;
-            return Ok(StoredItem {
-                content: found.item.content.unwrap_or_default(),
-                metadata: found.item.metadata.into_iter().collect(),
-            });
-        }
-        let found = reader.show(&global)?;
+        let (content, metadata) = match kind {
+            StoredKind::Document => {
+                let read = reader
+                    .call(reader.engine.document(&global))
+                    .map_err(|error| failed("document show", id.as_str(), &error))?;
+                let found = one(&global, "document show", read)?;
+                (found.item.content, found.item.metadata)
+            }
+            StoredKind::Project => {
+                let read = reader
+                    .call(reader.engine.project(&global))
+                    .map_err(|error| failed("project show", id.as_str(), &error))?;
+                let found = one(&global, "project show", read)?;
+                (found.item.content, found.item.metadata)
+            }
+            StoredKind::Task => {
+                let found = reader.show(&global)?;
+                (found.item.content, found.item.metadata)
+            }
+        };
         Ok(StoredItem {
-            content: found.item.content.unwrap_or_default(),
-            metadata: found.item.metadata.into_iter().collect(),
+            content: content.unwrap_or_default(),
+            metadata: metadata.into_iter().collect(),
         })
     }
 
@@ -1023,6 +1032,7 @@ pub(crate) struct StoredTask {
 pub(crate) enum StoredKind {
     Task,
     Document,
+    Project,
 }
 
 pub(crate) struct StoredItem {

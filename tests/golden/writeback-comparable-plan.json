@@ -38,7 +38,7 @@
     }
   },
   "after": {
-    "engine": "this tree, linking onetaskgraph 0.3.1: every change to an existing item is one Engine::update_task naming only the fields that differ from the landed baseline; a member copy is made only to create the add-ed node; the write-back worker keeps one store for its lifetime and ends each attempt's command on it",
+    "engine": "this tree, linking onetaskgraph 0.3.2: every change to an existing item is one Engine::update_task naming only the fields that differ from the landed baseline; a member copy is made only to create the add-ed node; the write-back worker keeps one store for its lifetime and ends each attempt's command on it",
     "figures": {
       "launch_read": {
         "calls": {

@@ -126,7 +126,7 @@ struct World {
     states: Vec<Named>,
     statuses: Vec<Named>,
     project_name: String,
-    project_description: String,
+    project_content: String,
     project_status: String,
     issues: Vec<Issue>,
     log: Vec<Request>,
@@ -167,7 +167,7 @@ impl Linear {
             states: named("state", states),
             statuses: named("status", statuses),
             project_name: name.to_owned(),
-            project_description: description.to_owned(),
+            project_content: description.to_owned(),
             project_status: project_status.to_owned(),
             ..World::default()
         };
@@ -425,7 +425,7 @@ impl Linear {
             }}),
             Operation::Project => json!({"project": (id == PROJECT).then(|| world.project())}),
             Operation::ProjectRelations => json!({"project": (id == PROJECT).then(|| json!({
-                "description": world.project_description,
+                "content": world.project_content,
                 "relations": empty_page(),
                 "inverseRelations": empty_page(),
             }))}),
@@ -486,7 +486,7 @@ impl World {
         json!({
             "id": PROJECT,
             "name": self.project_name,
-            "description": self.project_description,
+            "content": self.project_content,
             "url": "https://linear.app/generic/project/project-1",
             "createdAt": "2026-10-01T00:00:00.000Z",
             "updatedAt": "2026-10-01T00:00:00.000Z",
