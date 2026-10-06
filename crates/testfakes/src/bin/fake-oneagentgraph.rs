@@ -756,6 +756,18 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         commit_on_a_branch_of_its_own(args, &branch);
     }
 
+    if let Some(file) = fake::node_script(dir, &key, "requires-file") {
+        let Some(workspace) = fake::flag(args, "--dir") else {
+            fake::fail("checking a dependency file requires --dir");
+        };
+        if !std::path::Path::new(&workspace).join(file.trim()).is_file() {
+            fake::fail(&format!(
+                "dependency file {} is missing before worker writes",
+                file.trim()
+            ));
+        }
+    }
+
     if let Some(body) = fake::node_script(dir, &key, "work") {
         write_work(args, &fake::segment(&key), &body);
     }

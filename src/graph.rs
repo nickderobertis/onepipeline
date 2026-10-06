@@ -769,10 +769,8 @@ pub(crate) fn check_edited(plan: &Plan) -> std::result::Result<(), Refusal> {
         }
     }
 
-    // The nodes whose work is kept rather than landed. Nothing built on one could
-    // reach a base, so a node depending on it is refused here — at the boundary
-    // every plan and every edited graph crosses, so an `add` cannot reintroduce
-    // what a launch refused.
+    // Landing work cannot depend on kept work. Every plan and live edit crosses
+    // this boundary; preserve dependents are checked for unambiguous placement below.
     let preserved: BTreeSet<&str> = plan
         .tasks
         .iter()
@@ -816,7 +814,7 @@ pub(crate) fn check_edited(plan: &Plan) -> std::result::Result<(), Refusal> {
                 )
                 .field("deps"));
             }
-            if preserved.contains(dep.as_str()) {
+            if preserved.contains(dep.as_str()) && node.publish != crate::plan::Publish::Preserve {
                 return Err(Refusal::about(
                     &node.id,
                     crate::plan::depends_on_preserved(&node.id, dep),
@@ -829,7 +827,120 @@ pub(crate) fn check_edited(plan: &Plan) -> std::result::Result<(), Refusal> {
     if let Some(cycle) = find_cycle(&plan.tasks) {
         return Err(Refusal::plain(format!("dependency cycle: {cycle}")).field("deps"));
     }
+    let nodes = plan
+        .tasks
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect();
+    stacking_bases(&nodes)?;
     Ok(())
+}
+
+/// Resolve placement along kept-branch chains, after ordinary graph validation.
+/// Repository identity comes from the same sibling read as release references.
+pub(crate) fn stacking_bases<'a>(
+    nodes: &BTreeMap<&'a str, &'a Node>,
+) -> std::result::Result<BTreeMap<&'a str, &'a str>, Refusal> {
+    let mut identities = BTreeMap::new();
+    for node in nodes
+        .values()
+        .filter(|node| node.publish == crate::plan::Publish::Preserve)
+    {
+        if let Some(repo) = &node.repo {
+            identities.entry(repo.as_str()).or_insert_with(|| {
+                onevcs::release_targets(repo)
+                    .map(|repository| repository.identity)
+                    .map_err(|failure| failure.to_string())
+            });
+        }
+    }
+    fn resolve<'a>(
+        node: &'a Node,
+        nodes: &BTreeMap<&'a str, &'a Node>,
+        identities: &BTreeMap<&str, std::result::Result<String, String>>,
+        bases: &mut BTreeMap<&'a str, &'a str>,
+        visited: &mut BTreeSet<&'a str>,
+    ) -> std::result::Result<(), Refusal> {
+        if !visited.insert(&node.id) || node.publish != crate::plan::Publish::Preserve {
+            return Ok(());
+        }
+        let mut candidates = Vec::new();
+        for dep in node
+            .deps
+            .iter()
+            .filter_map(|dep| nodes.get(dep.as_str()).copied())
+        {
+            if dep.publish != crate::plan::Publish::Preserve {
+                continue;
+            }
+            let (Some(mine), Some(other)) = (&node.repo, &dep.repo) else {
+                continue;
+            };
+            let same = if mine == other {
+                true
+            } else {
+                match (&identities[mine.as_str()], &identities[other.as_str()]) {
+                    (Ok(mine), Ok(other)) => mine == other,
+                    _ => return Err(Refusal::about(&node.id, format!(
+                        "node '{}' depends on preserve node '{}', but repository identities for '{mine}' and '{other}' cannot both be read; resolve both repository spellings before selecting a kept base",
+                        node.id, dep.id
+                    )).field("repo")),
+                }
+            };
+            if same {
+                candidates.push(dep);
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        if node.base_branch.is_some() {
+            return Err(
+                Refusal::about(&node.id, crate::plan::preserved_base_conflict(&node.id))
+                    .field("base_branch"),
+            );
+        }
+        for candidate in &candidates {
+            resolve(candidate, nodes, identities, bases, visited)?;
+        }
+        let base = candidates.iter().find(|candidate| {
+            candidates.iter().all(|other| {
+                let mut ancestor = Some(candidate.id.as_str());
+                while let Some(id) = ancestor {
+                    if id == other.id {
+                        return true;
+                    }
+                    ancestor = bases.get(id).copied();
+                }
+                false
+            })
+        });
+        match base {
+            Some(base) => {
+                bases.insert(&node.id, &base.id);
+            }
+            None => {
+                return Err(Refusal::about(
+                    &node.id,
+                    crate::plan::preserved_fan_in(
+                        &node.id,
+                        &candidates
+                            .iter()
+                            .map(|node| node.id.as_str())
+                            .collect::<Vec<_>>(),
+                    ),
+                )
+                .field("deps"))
+            }
+        }
+        Ok(())
+    }
+    let mut bases = BTreeMap::new();
+    let mut visited = BTreeSet::new();
+    for node in nodes.values() {
+        resolve(node, nodes, &identities, &mut bases, &mut visited)?;
+    }
+    Ok(bases)
 }
 
 /// What a plan naming the reserved drafting persona is told.

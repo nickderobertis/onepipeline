@@ -83,11 +83,11 @@ mod unix {
             ),
         );
         // The rest of what `_crate-bootstrap` provisions, already provisioned: a
-        // toolchain with every component and both dev tools on PATH. The cargo
+        // toolchain with every component and every dev tool on PATH. The cargo
         // double fetches nothing and installs nothing — the store is linked, so a
         // bootstrap that asked for a binary install is one it refuses.
         executable(&bin.join("rustup"), "#!/bin/sh\nexit 0\n");
-        for tool in ["cargo-nextest", "cargo-llvm-cov"] {
+        for tool in ["cargo-nextest", "cargo-llvm-cov", "onebudgetspec"] {
             executable(&bin.join(tool), "#!/bin/sh\nexit 0\n");
         }
         let cargo_home = root.join("cargo-home");
