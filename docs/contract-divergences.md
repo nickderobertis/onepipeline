@@ -9099,7 +9099,12 @@ and reads the re-gate off `status`, `results`, the edge records and a refused
 its dependent runs and the run completes.
 `an_envelope_attesting_an_approval_then_reparenting_it_is_refused_whole` has
 `reply` and the reconciler refuse that envelope with nothing of it applied, and the
-reconciler then accept a reparent of the approval while it still waits. In
+reconciler then accept a reparent of the approval while it still waits;
+`an_envelope_reparenting_an_approval_then_attesting_it_is_refused_whole` and
+`an_envelope_attesting_an_approval_twice_is_refused_whole` hold the frontier
+`reply` judges an envelope against to the reconciler's on both paths; and
+`a_waiting_approval_reparented_onto_work_that_fails_is_skipped` holds the skip
+behind a failed prerequisite, with no attestation offered or accepted. In
 `src/edits.rs`, `reparent_takes_a_waiting_unattested_approval_and_clears_its_wait`,
 `reparent_still_refuses_every_other_recorded_node` and
 `an_attest_then_a_reparent_of_the_same_approval_is_refused` hold the rule and the

@@ -701,16 +701,7 @@ fn awaits_approval(world: &World, run: &str) {
 fn a_waiting_approval_reparented_onto_unfinished_work_waits_for_it_again() {
     let world = World::new("reparent-approval");
     let run = "regate";
-    paused(
-        &world,
-        run,
-        vec![
-            agent("build", &[]),
-            human("approve", &["build"]),
-            agent("ship", &["approve"]),
-        ],
-        &[],
-    );
+    paused_at_approval(&world, run);
     awaits_approval(&world, run);
 
     world
@@ -809,48 +800,16 @@ fn a_waiting_approval_reparented_onto_unfinished_work_waits_for_it_again() {
 fn an_envelope_attesting_an_approval_then_reparenting_it_is_refused_whole() {
     let world = World::new("attest-then-reparent");
     let run = "attested";
-    paused(
+    paused_at_approval(&world, run);
+    refused_whole_on_both_paths(
         &world,
         run,
-        vec![
-            agent("build", &[]),
-            human("approve", &["build"]),
-            agent("ship", &["approve"]),
-        ],
-        &[],
+        &json!({"version": 3, "commands": [
+            {"op": "attest", "ref": "approve"},
+            {"op": "reparent", "id": "approve", "deps": ["build"]}
+        ]}),
+        "reparent: node 'approve' has already started",
     );
-    let envelope = json!({"version": 3, "commands": [
-        {"op": "attest", "ref": "approve"},
-        {"op": "reparent", "id": "approve", "deps": ["build"]}
-    ]});
-
-    world
-        .run_with_stdin(&["reply", run], &envelope.to_string())
-        .exited(REFUSED)
-        .err_has("reparent: node 'approve' has already started");
-    assert!(world.events_of(run, "edit-committed").is_empty());
-    assert!(world.events_of(run, "human-attested").is_empty());
-
-    sent_through_the_bus(&world, run, &envelope);
-    world
-        .run(&["adopt", run])
-        .exited(0)
-        .out_has("\"settlement\":\"awaiting-planner\"");
-    let outcomes = world.command_outcomes(run);
-    let [refused] = &outcomes[..] else {
-        panic!("the envelope was not answered once: {outcomes:?}");
-    };
-    assert_eq!(refused["applied"], json!(false), "{refused}");
-    assert!(
-        refused["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("reparent: node 'approve' has already started")),
-        "{refused}"
-    );
-    assert!(world.events_of(run, "edit-committed").is_empty());
-    assert!(world.events_of(run, "human-attested").is_empty());
-    assert_eq!(statuses(&world, run)["approve"], json!("waiting"));
-    assert_eq!(statuses(&world, run)["ship"], json!("blocked"));
 
     // Still waiting and unattested, so the reconciler reparents it.
     sent_through_the_bus(
@@ -875,4 +834,137 @@ fn an_envelope_attesting_an_approval_then_reparenting_it_is_refused_whole() {
     assert_eq!(read["docs"], json!("done"));
     assert_eq!(read["approve"], json!("waiting"));
     assert_eq!(read["ship"], json!("blocked"));
+}
+
+/// The plan every journey below pauses on: `ship` behind an approval that waits
+/// on `build`.
+fn paused_at_approval(world: &World, run: &str) {
+    paused(
+        world,
+        run,
+        vec![
+            agent("build", &[]),
+            human("approve", &["build"]),
+            agent("ship", &["approve"]),
+        ],
+        &[],
+    );
+}
+
+/// `envelope` is refused whole on both paths with `reason`: by `reply` before
+/// anything is queued, and by the reconciler when the bus queues it anyway. The
+/// approval still waits, unattested, with its dependent held.
+fn refused_whole_on_both_paths(world: &World, run: &str, envelope: &Value, reason: &str) {
+    world
+        .run_with_stdin(&["reply", run], &envelope.to_string())
+        .exited(REFUSED)
+        .err_has(reason);
+    assert!(world.events_of(run, "edit-committed").is_empty());
+    assert!(world.events_of(run, "human-attested").is_empty());
+
+    sent_through_the_bus(world, run, envelope);
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"awaiting-planner\"");
+    let outcomes = world.command_outcomes(run);
+    let [refused] = &outcomes[..] else {
+        panic!("the envelope was not answered once: {outcomes:?}");
+    };
+    assert_eq!(refused["applied"], json!(false), "{refused}");
+    assert!(
+        refused["reason"]
+            .as_str()
+            .is_some_and(|said| said.contains(reason)),
+        "{refused}"
+    );
+    assert!(world.events_of(run, "edit-committed").is_empty());
+    assert!(world.events_of(run, "human-attested").is_empty());
+    let read = statuses(world, run);
+    assert_eq!(read["approve"], json!("waiting"));
+    assert_eq!(read["ship"], json!("blocked"));
+    assert!(!read.contains_key("docs"), "{read:?}");
+    awaits_approval(world, run);
+}
+
+/// An envelope that reparents a waiting approval onto work that has not run and
+/// then attests it is refused whole on both paths: the reparent re-gates the
+/// approval, so the attestation that follows it in the same envelope finds no
+/// waiting human action — and the `add` ahead of both applies no more than they do.
+#[test]
+fn an_envelope_reparenting_an_approval_then_attesting_it_is_refused_whole() {
+    let world = World::new("reparent-then-attest");
+    let run = "regated";
+    paused_at_approval(&world, run);
+    refused_whole_on_both_paths(
+        &world,
+        run,
+        &json!({"version": 3, "commands": [
+            {"op": "add", "node": agent("docs", &[])},
+            {"op": "reparent", "id": "approve", "deps": ["build", "docs"]},
+            {"op": "attest", "ref": "approve"}
+        ]}),
+        "attest: 'approve' is not a ready, waiting human action",
+    );
+}
+
+/// An envelope that attests a waiting approval twice is refused whole on both
+/// paths: the first attestation is judged into the frontier the second is
+/// judged against, so the second is refused as already made, and the first
+/// applies no more than it does.
+#[test]
+fn an_envelope_attesting_an_approval_twice_is_refused_whole() {
+    let world = World::new("attest-twice");
+    let run = "twice";
+    paused_at_approval(&world, run);
+    refused_whole_on_both_paths(
+        &world,
+        run,
+        &json!({"version": 3, "commands": [
+            {"op": "attest", "ref": "approve"},
+            {"op": "attest", "ref": "approve"}
+        ]}),
+        "attest: 'approve' was already attested",
+    );
+}
+
+/// A waiting approval reparented onto work that then fails settles as any human
+/// action behind a failed dependency does: `skipped`, never offered for
+/// attestation, with its dependent skipped behind it.
+#[test]
+fn a_waiting_approval_reparented_onto_work_that_fails_is_skipped() {
+    let world = World::new("reparent-onto-failure");
+    let run = "failing";
+    world.script("docs.fail", "1");
+    paused_at_approval(&world, run);
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 3, "commands": [
+                {"op": "add", "node": agent("docs", &[])},
+                {"op": "reparent", "id": "approve", "deps": ["build", "docs"]}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.run(&["adopt", run]);
+
+    let read = statuses(&world, run);
+    assert_eq!(read["build"], json!("done"), "{read:?}");
+    assert_eq!(read["docs"], json!("failed"), "{read:?}");
+    assert_eq!(read["approve"], json!("skipped"), "{read:?}");
+    assert_eq!(read["ship"], json!("skipped"), "{read:?}");
+    assert!(world.events_of(run, "human-attested").is_empty());
+    world
+        .run(&["attest", run, "approve"])
+        .exited(REFUSED)
+        .err_has("attest: 'approve' is not a ready, waiting human action");
+    let read = world.run(&["status", run]);
+    read.exited(0);
+    assert!(
+        !read.stdout.contains("attest failing approve"),
+        "`status` still offers the attestation:\n{}",
+        read.stdout
+    );
 }
