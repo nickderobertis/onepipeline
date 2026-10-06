@@ -11,14 +11,14 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95 and 98 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98 and 111 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95 and 98 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98 and 111 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -9034,3 +9034,83 @@ the session closed; `a_node_stating_land_publishes_exactly_as_one_stating_nothin
 holds the default; three loader journeys hold every refusal through `plan check` and
 `start`; and `a_live_edit_adding_a_dependent_of_a_preserved_node_is_refused` holds the
 dependency rule against an edited graph.
+
+## 111. A waiting human approval could not be given new prerequisites — OPEN
+
+**Proposal (for the planner who owns the contract): the live-edit table
+`docs/contract.md` defers `reparent`'s validation to — ai-orchestrator's
+`docs/orchestration.md#live-graph-edits` — states the exception this build
+applies.**
+
+```diff
+-reparent: refused for any node with a recorded status
++reparent: refused for any node with a recorded status, except a `kind: human` node
++          that is waiting and has no attestation
+```
+
+**What this rests on.** The user accepted onepipeline#668 at high priority with
+this fix stated, and the plan that dispatched it ruled the rule above and the
+cleared wait below. `docs/contract.md` names no `reparent` rule of its own — its
+channel paragraph takes the edit table's validation semantics exactly — so the
+sentence to change is the table's, restated here until ai-orchestrator adopts the
+release carrying it.
+
+**What was wrong.** `reparent` was refused for any node the journal had recorded a
+status for, as "already started". A `kind: human` node is recorded `waiting` the
+moment its prerequisites are done, because `attest` is judged against what the
+journal recorded. So once an approval began waiting, a manager could not add or
+change a prerequisite it had to come after, and every other edit in the same
+envelope was refused with it. The approval's ordering then rested on the manager
+remembering not to attest it early.
+
+**What this build does.** A `kind: human` node recorded `waiting` and not attested
+is exempt from the refusal. Nothing was dispatched for it, so new prerequisites
+come after nothing it did. A lifecycle node waiting on a human *step* records the
+same `waiting` but has already run steps on a branch, and is still refused, as are
+an attested approval and running work. Every other op's rules are unchanged.
+
+Accepting the reparent **clears the approval's recorded wait**, in the fold and in
+the frontier `reply` judges a whole envelope against alike. A recorded `waiting`
+survives the derivation, so left standing it would keep the approval attestable
+ahead of its new prerequisites. Cleared, the approval re-derives from them. While
+any is unfinished it reads `pending` or `blocked`: `attest` refuses it, no view
+offers it as an action, and its dependents stay blocked. Behind a failed one it is
+`skipped`, as any human node behind a failed dependency is. Once every one is
+`done` it derives `waiting` again, the scheduler records it, and `attest` completes
+it. The `edge-removed` and `edge-added` records and the store write-back are those
+of any reparent.
+
+`reply`'s whole-envelope check now also folds an `attest` onto the frontier the
+next command is judged against, recording the node `done` as the reconciler's fold
+does. So an envelope that attests an approval and then reparents it is refused
+whole on both paths, rather than accepted by `reply` and refused by the
+reconciler.
+
+**Versions.** The envelope, the plan schema, the CLI's flags and every record's
+shape are unchanged. The fold checkpoint moves to schema 11: a version-10 fold of
+a journal holding such a reparent still carries the wait, and resumed from it would
+offer the approval for attestation ahead of its new prerequisites.
+
+**Where it is held.** `tests/e2e/malformed_envelopes.rs`'s
+`a_waiting_approval_reparented_onto_unfinished_work_waits_for_it_again` pauses a
+run at a waiting approval, reparents it through `reply` onto an added agent node,
+and reads the re-gate off `status`, `results`, the edge records and a refused
+`attest`; adopted, the new node runs, the approval waits again, and once attested
+its dependent runs and the run completes.
+`an_envelope_attesting_an_approval_then_reparenting_it_is_refused_whole` has
+`reply` and the reconciler refuse that envelope with nothing of it applied, and the
+reconciler then accept a reparent of the approval while it still waits;
+`an_envelope_reparenting_an_approval_then_attesting_it_is_refused_whole` and
+`an_envelope_attesting_an_approval_twice_is_refused_whole` hold the frontier
+`reply` judges an envelope against to the reconciler's on both paths; and
+`a_waiting_approval_reparented_onto_work_that_fails_is_skipped` holds the skip
+behind a failed prerequisite, with no attestation offered or accepted. In
+`src/edits.rs`, `reparent_takes_a_waiting_unattested_approval_and_clears_its_wait`,
+`reparent_still_refuses_every_other_recorded_node` and
+`an_attest_then_a_reparent_of_the_same_approval_is_refused` hold the rule and the
+frontier; `src/projection.rs`'s
+`a_reparented_approval_re_derives_its_wait_from_its_new_prerequisites` holds the
+fold, including the skip behind a failed prerequisite.
+
+This arrives with a **patch** version bump: it is a `fix` for a refusal nothing
+could work around, and it adds no interface: no op, field, flag or record shape.
