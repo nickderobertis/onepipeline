@@ -7,13 +7,15 @@
 //! journey writes being one the checker parses as a value, and the command refusing to report a
 //! measurement it did not take.
 
+#[cfg(unix)]
 #[path = "e2e/budget_result.rs"]
 mod budget_result;
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 
-use onebudgetspec_core::{Direction, Measure, Selection, Verdict};
+use onebudgetspec_core::{Direction, Measure};
+#[cfg(unix)]
+use onebudgetspec_core::{Selection, Verdict};
 
 const BUDGET: &str = "linear-requests-per-writeback-settlement";
 
@@ -23,6 +25,7 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+#[cfg(unix)]
 fn scratch(name: &str) -> PathBuf {
     let dir =
         std::env::temp_dir().join(format!("onepipeline-budgets-{name}-{}", std::process::id()));
@@ -88,7 +91,9 @@ fn the_linked_checker_is_the_release_the_justfile_installs() {
 }
 
 /// What the journey writes is a value to the checker: measured through the library's own
-/// `check`, over a budget whose command writes exactly the result the journey builds.
+/// `check`, over a budget whose command writes exactly the result the journey builds. That
+/// command is a POSIX shell line, as the budget's own is, so it runs where a shell does.
+#[cfg(unix)]
 #[test]
 fn the_result_the_journey_writes_is_a_value_the_checker_measures() {
     let dir = scratch("result");
@@ -122,21 +127,20 @@ fn the_result_the_journey_writes_is_a_value_the_checker_measures() {
 
 /// The command, run with `just` standing in for the journey it hands to: `behaviour` is the
 /// stand-in's shell body, and `result` the file the command is told to write to, if any.
-fn command(name: &str, behaviour: &str, result: Option<&Path>) -> std::process::Output {
+#[cfg(unix)]
+fn command(name: &str, behaviour: &str, result: Option<&std::path::Path>) -> std::process::Output {
+    use std::os::unix::fs::PermissionsExt;
+
     let dir = scratch(name);
     let just = dir.join("just");
     std::fs::write(&just, format!("#!/bin/sh\n{behaviour}\n")).expect("a stand-in just");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&just, std::fs::Permissions::from_mode(0o755))
-            .expect("the stand-in is executable");
-    }
+    std::fs::set_permissions(&just, std::fs::Permissions::from_mode(0o755))
+        .expect("the stand-in is executable");
     let path = std::env::join_paths(std::iter::once(dir.clone()).chain(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     )))
     .expect("a PATH");
-    let mut run = Command::new("bash");
+    let mut run = std::process::Command::new("bash");
     run.arg(root().join("scripts/linear-writeback-budget.sh"))
         .current_dir(root())
         .env("PATH", path)
