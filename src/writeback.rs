@@ -1939,8 +1939,7 @@ fn project(
             };
             // The engine holds a source it could not build as unavailable for as long as it
             // lives, so a store with one is rebuilt, which gives that source its next build:
-            // `store::a_reverted_edit_supersedes_the_refused_projection_before_store_recovery`
-            // builds one while a source's root is gone and recovers once it returns.
+            // `a_store_holding_a_source_it_could_not_build_is_rebuilt_once_the_source_returns`.
             let unbuilt = attempt
                 .engine
                 .listing()
@@ -5855,6 +5854,69 @@ mod tests {
         let current = read();
         assert_eq!(current.status.category, StatusCategory::Cancelled);
         assert_eq!(current.title, "Changed now");
+    }
+
+    /// A store built while its destination source's root is gone holds that source
+    /// unavailable for as long as it lives, so the worker discards it after the attempt, and
+    /// the attempt after the root returns builds the source again on a store it then keeps.
+    ///
+    /// A journey cannot pin this down: whether a run's first store is built before or after
+    /// a root goes depends on when the worker's first attempt runs.
+    #[test]
+    fn a_store_holding_a_source_it_could_not_build_is_rebuilt_once_the_source_returns() {
+        let fixture = Fixture::new("unbuilt-source");
+        let root = fixture.dir.join("board");
+        std::fs::write(
+            fixture.dir.join("onetaskgraph.yaml"),
+            format!(
+                "sources:\n  plans:\n    plugin: local-md\n    config:\n      root: {root:?}\n"
+            ),
+        )
+        .expect("the run's store configuration is written");
+        let store = crate::taskgraph::Store::at(fixture.dir.to_path_buf());
+        let mut baseline = super::Baseline::load(
+            &fixture.dir,
+            &fixture.snapshot.project,
+            &home(&fixture.snapshot),
+            Vec::new,
+        );
+        let mut retained = None;
+        let mut attempt = |retained: &mut Option<super::Attempt>| {
+            super::project(
+                &store,
+                retained,
+                DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
+                &fixture.snapshot,
+                &mut baseline,
+                super::Scope::Driven,
+            )
+            .result
+            .err()
+            .map(|failed| failed.reason)
+        };
+
+        let gone = attempt(&mut retained).expect("a store with no root to write to refused");
+        assert!(
+            gone.contains("source plans") && gone.contains("cannot canonicalize root"),
+            "the store was not built while the root was gone: {gone}"
+        );
+        assert!(
+            retained.is_none(),
+            "a store holding a source it could not build was kept for the next attempt"
+        );
+
+        std::fs::create_dir_all(&root).expect("the root returns");
+        let returned = attempt(&mut retained);
+        assert!(
+            !returned
+                .as_deref()
+                .is_some_and(|reason| reason.contains("cannot canonicalize root")),
+            "the source was not built again once its root returned: {returned:?}"
+        );
+        assert!(
+            retained.is_some(),
+            "a store whose sources all built was discarded: {returned:?}"
+        );
     }
 
     /// Why a fixture standing in for a store could not fail, or `None` when it

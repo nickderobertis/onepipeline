@@ -2717,10 +2717,11 @@ fn an_unwritable_shadow_store_is_reported_retried_and_recovered() {
 /// which leaves nothing to attempt. The next change to the graph — `spare` settling — is what
 /// projects the graph as it then stands.
 ///
-/// While the root is gone the write-back's store is built with that source unavailable, and
-/// the engine keeps a source it could not build unavailable for as long as it lives. The
-/// configuration never changes, so it is the worker discarding a store with an unavailable
-/// source that lets the attempt after the root returns build the source again and recover.
+/// The root goes only once the worker has made an attempt, so the store it keeps for the run
+/// was built while the root was there, and the outage is that store being asked about tasks
+/// whose files have gone. A store built while the root is gone is a separate case, which
+/// `writeback::tests::a_store_holding_a_source_it_could_not_build_is_rebuilt_once_the_source_returns`
+/// holds: which of the two a journey reaches depends on when the worker's first attempt runs.
 #[test]
 fn a_reverted_edit_supersedes_the_refused_projection_before_store_recovery() {
     let world = World::new("store-writeback-reverted-edit");
@@ -2751,6 +2752,11 @@ fn a_reverted_edit_supersedes_the_refused_projection_before_store_recovery() {
             })
     });
 
+    world.until("the write-back to have kept a store for the run", |world| {
+        world
+            .run_file("writeback-reverted-edit", "writeback-projections.jsonl")
+            .is_file()
+    });
     let unavailable = world.root.join("plan-store-reverted-edit-unavailable");
     renamed(
         &world.store(),
@@ -2785,10 +2791,6 @@ fn a_reverted_edit_supersedes_the_refused_projection_before_store_recovery() {
             .events_of("writeback-reverted-edit", "edit-committed")
             .len()
             == 2
-    });
-    world.until("a store built while the root was gone to refuse", |world| {
-        std::fs::read_to_string(world.run_file("writeback-reverted-edit", "driver.log"))
-            .is_ok_and(|log| log.contains("source plans could not be built"))
     });
 
     renamed(&unavailable, &world.store(), "the store recovers");
