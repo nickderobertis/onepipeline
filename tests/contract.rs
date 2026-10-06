@@ -9316,7 +9316,7 @@ fn the_task_templates_are_what_the_contract_names() {
     assert_eq!(registration["version"], json!(REGISTRATION_VERSION));
     assert_eq!(
         registration["roles"],
-        json!([Role::Task, Role::Document]),
+        json!([Role::Task, Role::Document, Role::Project]),
         "the roles the block names are the type's"
     );
     for (rung, flag, environment, key) in [
@@ -9539,7 +9539,8 @@ fn the_task_templates_are_what_the_contract_names() {
         [
             (BUILT_IN, Role::Task),
             ("design-doc", Role::Document),
-            ("follow-up", Role::Task)
+            ("follow-up", Role::Task),
+            ("plan-description", Role::Project)
         ]
     );
     let keys = |value: Value| -> Value {

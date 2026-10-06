@@ -60,7 +60,8 @@ pub const EXTENSION: &str = ".md.j2";
 pub const NAME_PATTERN: &str = "^[a-z][a-z0-9-]*$";
 
 /// The remedy every C7 refusal names, with `<name>` and `<qualified id>` filled in — and
-/// `task render` read as `document render` for a role-`document` item.
+/// `task render` read as `document render` for a role-`document` item, and as
+/// `project render` for a role-`project` one.
 pub const REMEDY: &str = "onepipeline template resolve <name> --json | onetaskgraph task render \
                           <qualified id> --template-loader -";
 
@@ -125,6 +126,8 @@ pub enum Role {
     Task,
     /// Any other document a host renders: held to nothing past compiling.
     Document,
+    /// A project's description: held to nothing past compiling, as a document is.
+    Project,
 }
 
 impl Role {
@@ -134,6 +137,7 @@ impl Role {
         match self {
             Self::Task => "task",
             Self::Document => "document",
+            Self::Project => "project",
         }
     }
 }
@@ -885,14 +889,14 @@ pub(crate) fn locate(name: &str, search: Search<'_>) -> Result<(Layer, Option<Pa
 }
 
 /// C6a over one resolved template, without rendering it: for role `task`, the chain
-/// extends [`BASE`] and declares [`CRITERIA_VARIABLE`] as a list of strings. Role
-/// `document` requires nothing past loading, which [`resolve`] has already done.
+/// extends [`BASE`] and declares [`CRITERIA_VARIABLE`] as a list of strings. Roles
+/// `document` and `project` require nothing past loading, which [`resolve`] has already done.
 ///
 /// # Errors
 ///
 /// The rule the template breaks, spelled as the contract spells it.
 pub(crate) fn validate(resolution: &Resolution) -> std::result::Result<(), &'static str> {
-    if resolution.stated.role == Role::Document {
+    if resolution.stated.role != Role::Task {
         return Ok(());
     }
     if let Some(path) = &resolution.stated.path {
@@ -1073,6 +1077,7 @@ pub(crate) fn check_rendered(
         let command = match role {
             Role::Task => command,
             Role::Document => command.replace(" task render ", " document render "),
+            Role::Project => command.replace(" task render ", " project render "),
         };
         format!(
             "; re-render it: {command}{}",

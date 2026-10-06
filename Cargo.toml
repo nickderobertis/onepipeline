@@ -886,12 +886,13 @@ onevcs-testing = "0.13.0"
 # that way. It also carries the Linear plugin's `status_mapping`, which a write-back to
 # a Linear source needs.
 #
-# 0.2.58 because a plan read from a GitHub Projects source runs its project and
-# document text queries through this release's board search; `justfile`'s
-# `onetaskgraph-version` moves with it.
-onetaskgraph-core = "=0.2.58"
-onetaskgraph-plugin-api = "=0.2.58"
-onetaskgraph-local-md = "=0.2.58"
+# 0.3.2 because it renders a project's description from a template and records its
+# provenance (`project create`/`project render`), which `template check --item` reads
+# for a role-`project` name. It carries 0.3.0's `status_mapping` scoped by item kind;
+# nothing here configures one. `justfile`'s `onetaskgraph-version` moves with it.
+onetaskgraph-core = "=0.3.2"
+onetaskgraph-plugin-api = "=0.3.2"
+onetaskgraph-local-md = "=0.3.2"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
