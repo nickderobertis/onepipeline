@@ -2189,7 +2189,39 @@ fn a_host_registered_project_template_is_listed_rendered_into_a_project_and_chec
         "the description is the host template's rendering: {content}"
     );
 
-    // Its rendering passes, with no criteria asked of it.
+    // Any text passes as its rendering, from a file or standard input: no criteria are
+    // asked of a project's description.
+    let rendering = world.root.join("description.md");
+    write(&rendering, content);
+    verb(
+        &world,
+        &dir,
+        &root,
+        &[
+            "check",
+            "plan-description",
+            "--rendering",
+            &text(&rendering),
+        ],
+    )
+    .exited(0)
+    .out_has("; rendering: ok");
+    let mut command = world.cmd(&[
+        "template",
+        "check",
+        "plan-description",
+        "--rendering",
+        "-",
+        "--template-root",
+        &text(&root),
+    ]);
+    command.current_dir(&dir);
+    world
+        .run_with_stdin_on(command, "# The plan\n\nNo criteria at all.\n")
+        .exited(0)
+        .out_has("; rendering: ok");
+
+    // Its stored rendering passes, with no criteria asked of it.
     verb(&world, &dir, &root, &["check", "plan-description"])
         .exited(0)
         .out_has("template plan-description [project]: ok");
@@ -2266,6 +2298,81 @@ fn a_host_registered_project_template_is_listed_rendered_into_a_project_and_chec
         "onepipeline template resolve plan-description --json | onetaskgraph project render \
              {bare} --template-loader - --answers FILE"
     ));
+
+    // A project rendered from a file this build never stated is foreign, and is told to be
+    // rendered from the name's loader document instead.
+    let foreign_template = world.root.join("elsewhere.md.j2");
+    write(&foreign_template, "# Rendered elsewhere\n");
+    let made = otg(
+        &world,
+        &[
+            "project",
+            "create",
+            crate::harness::STORE_SOURCE,
+            "--id",
+            "foreign",
+            "--title",
+            "A plan rendered elsewhere",
+            "--template",
+            &text(&foreign_template),
+            "--no-interactive",
+            "--json",
+        ],
+        None,
+    )
+    .whole();
+    let foreign = made["items"][0]["id"]
+        .as_str()
+        .expect("a created project has an id")
+        .to_owned();
+    let foreign_file = PathBuf::from(
+        made["items"][0]["item"]["location"]["path"]
+            .as_str()
+            .expect("a local-md project has a path"),
+    );
+    let foreign_remedy = format!(
+        "onepipeline template resolve plan-description --json | onetaskgraph project render \
+         {foreign} --template-loader - --answers FILE"
+    );
+    verb(
+        &world,
+        &dir,
+        &root,
+        &["check", "plan-description", "--item", &foreign],
+    )
+    .exited(REFUSED)
+    .err_has(&format!("{RULE_FOREIGN}: {}", text(&foreign_template)))
+    .err_has(&foreign_remedy);
+
+    // Provenance this build cannot read is refused as that, with the same remedy.
+    let held = std::fs::read_to_string(&foreign_file).expect("the project's file");
+    let unreadable: String = held
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("digest:"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    assert_ne!(unreadable, held, "the provenance's digest is dropped");
+    write(&foreign_file, &unreadable);
+    verb(
+        &world,
+        &dir,
+        &root,
+        &["check", "plan-description", "--item", &foreign],
+    )
+    .exited(REFUSED)
+    .err_has(&format!("{RULE_NO_PROVENANCE} this build can read"))
+    .err_has(&foreign_remedy);
+
+    // A project the store does not hold is refused naming it, and nothing is checked.
+    let absent = format!("{}:no-such-plan", crate::harness::STORE_SOURCE);
+    verb(
+        &world,
+        &dir,
+        &root,
+        &["check", "plan-description", "--item", &absent],
+    )
+    .exited(REFUSED)
+    .err_has("no-such-plan");
 }
 
 #[test]
