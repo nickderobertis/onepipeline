@@ -9106,3 +9106,6 @@ reconciler then accept a reparent of the approval while it still waits. In
 frontier; `src/projection.rs`'s
 `a_reparented_approval_re_derives_its_wait_from_its_new_prerequisites` holds the
 fold, including the skip behind a failed prerequisite.
+
+This arrives with a **patch** version bump: it is a `fix` for a refusal nothing
+could work around, and it adds no interface: no op, field, flag or record shape.
