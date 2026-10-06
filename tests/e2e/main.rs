@@ -168,6 +168,7 @@ mod multi_source;
 // out of a Linear project and write each settlement back to it through the linked Linear
 // plugin, exercising `taskgraph`, `writeback`, `edits` and `driver` together, so the crate is
 // the narrowest edge they can honestly sit behind; same grounds as `mod multi_source` above.
+mod budget_result;
 mod linear_loopback;
 mod linear_writeback;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

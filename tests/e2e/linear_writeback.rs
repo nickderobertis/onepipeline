@@ -429,17 +429,14 @@ fn consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_the
     }
     let highest = costs.iter().skip(1).copied().max().unwrap_or_default();
     if let Some(result) = std::env::var_os("ONEBUDGETSPEC_RESULT") {
+        let detail = format!(
+            "requests the loopback Linear served for each of {} consecutive settlements, each in \
+             its own attempt: {costs:?}; the first is not counted",
+            costs.len()
+        );
         std::fs::write(
             result,
-            json!({
-                "value": highest,
-                "detail": format!(
-                    "requests the loopback Linear served for each of {} consecutive settlements, \
-                     each in its own attempt: {costs:?}; the first is not counted",
-                    costs.len()
-                ),
-            })
-            .to_string(),
+            crate::budget_result::reported(highest, &detail).to_string(),
         )
         .expect("the budget's result is written");
     }

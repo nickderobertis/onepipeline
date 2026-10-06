@@ -1109,6 +1109,9 @@ onevcs-testing = { workspace = true }
 # allow-git list, and what it compares are pins — so both sides are parsed as the
 # TOML they are rather than scanned for a substring that might not be one.
 toml = "1"
+# `tests/budgets.rs` loads `budgets.yaml` and parses the result its command writes through the
+# checker's own library, at exactly the release `justfile`'s `onebudgetspec-version` installs.
+onebudgetspec-core = "=0.1.1"
 
 [[test]]
 name = "e2e"

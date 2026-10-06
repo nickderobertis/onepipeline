@@ -386,8 +386,13 @@ impl Linear {
                 "inverseRelations": empty_page(),
             }))}),
             Operation::IssueUpdate => {
-                let input = variables["input"].as_object().cloned().unwrap_or_default();
-                match world.update(&id, &input) {
+                let Some(input) = variables["input"]
+                    .as_object()
+                    .filter(|input| !input.is_empty())
+                else {
+                    return refusal("an issueUpdate carries a non-empty `input` object");
+                };
+                match world.update(&id, input) {
                     Ok(issue) => json!({"issueUpdate": {"success": true, "issue": issue}}),
                     Err(why) => return refusal(&why),
                 }
@@ -457,13 +462,16 @@ impl World {
             return Err("Entity not found: Issue".to_owned());
         };
         for (field, value) in input {
-            let text = value.as_str().map(str::to_owned);
-            match (field.as_str(), text) {
-                ("stateId", Some(state)) => issue.state = state,
-                ("description", Some(description)) => issue.description = description,
-                ("title", Some(title)) => issue.title = title,
-                ("priority", None) => {}
-                (other, _) => return Err(format!("the loopback writes no {other}")),
+            match (field.as_str(), value) {
+                ("stateId", Value::String(state)) => issue.state.clone_from(state),
+                ("description", Value::String(description)) => {
+                    issue.description.clone_from(description);
+                }
+                ("title", Value::String(title)) => issue.title.clone_from(title),
+                // Linear's own scale: 0 for none, then 1 (urgent) to 4 (low).
+                ("priority", Value::Number(priority))
+                    if priority.as_u64().is_some_and(|priority| priority <= 4) => {}
+                (other, value) => return Err(format!("the loopback writes no {other} of {value}")),
             }
         }
         let issue = issue.clone();
@@ -479,7 +487,12 @@ fn refusal(message: &str) -> Value {
     json!({"errors": [{"message": message, "extensions": {"code": "INVALID_INPUT"}}]})
 }
 
-/// One HTTP/1.1 request's body, or `None` once the connection has closed.
+/// The largest request body this endpoint reads: far past any document the plugin sends, and
+/// a bound on what a malformed `Content-Length` can make it allocate.
+const MAX_BODY: usize = 1 << 20;
+
+/// One HTTP/1.1 request's body, or `None` once the connection has closed or sent a request
+/// this endpoint will not read.
 fn read_request(reader: &mut BufReader<TcpStream>) -> Option<Vec<u8>> {
     let mut length = 0usize;
     let mut first = true;
@@ -498,7 +511,11 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Option<Vec<u8>> {
         first = false;
         if let Some((name, value)) = line.split_once(':') {
             if name.eq_ignore_ascii_case("content-length") {
-                length = value.trim().parse().ok()?;
+                length = value
+                    .trim()
+                    .parse()
+                    .ok()
+                    .filter(|length| *length <= MAX_BODY)?;
             }
         }
     }

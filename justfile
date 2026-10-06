@@ -409,11 +409,9 @@ smoke-real:
 release-compat:
     @RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(release_channel) and not test(/^harness::/)'
 
-# Each budget `budgets.yaml` registers, measured once and held to its threshold; the
-# `linear-requests-per-writeback-settlement` budget runs one e2e journey against a loopback
-# Linear endpoint, offline. Not yet part of `check`: until the write-back keeps one store for a
-# run, every Linear settlement attempt resolves the team's states again and costs three requests,
-# which the budget's threshold of two refuses.
+# Offline: the Linear budget's journey runs against a loopback endpoint. Not yet part of
+# `check`: until the write-back keeps one store for a run, every Linear settlement attempt
+# resolves the team's states again and costs three requests, which the threshold of two refuses.
 # Measure every budget in budgets.yaml against its threshold.
 budgets:
     @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
