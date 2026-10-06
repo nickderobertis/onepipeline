@@ -9034,3 +9034,44 @@ the session closed; `a_node_stating_land_publishes_exactly_as_one_stating_nothin
 holds the default; three loader journeys hold every refusal through `plan check` and
 `start`; and `a_live_edit_adding_a_dependent_of_a_preserved_node_is_refused` holds the
 dependency rule against an edited graph.
+
+
+## 111. Preserve dependents start from kept branches (amends 110) — RESOLVED
+
+A preserve node may depend on any number of preserve nodes; a landing node (`publish` omitted or `"land"`, including `draft: true`) depending on one is refused with `depends_on_preserved` at load and every live edit. Among its same-repository in-run preserve dependencies, none leaves placement unchanged, one is its base dependency, and several select the candidate whose stacking chain contains every other candidate. A stacking parent is the node's own base dependency: every link is a same-repository preserve dependency whose kept branch supplies the session base. Ordering-only paths through another repository, landing work or a non-lifecycle node never count as ancestry. Independent candidates are refused as a fan-in naming the node and candidates: a session starts from one kept branch and merging kept branches is not supported. A same-repository preserve dependency beside the node's own `base_branch` is refused as two answers to where its session starts. At dispatch, `SessionRequest.base` is the base dependency's settled kept `branch`, including a retry replacement's branch and when the dependent continues its own branch through retry or resume; the dependent's new branch still uses the branch template. A base dependency recorded `done` without a branch fails the dependent as `infrastructure-failure`, naming the dependency, before any dispatch, without falling back to the default base. Cross-repository preserve dependencies order only: the dependent starts from its own repository's base and refers to the other repository's work. Cross-DAG references are unchanged. Failed or skipped dependencies skip their dependents; retry re-points them to the replacement, whose kept branch supplies their base. Unequal repository spellings on a preserve edge must both resolve to readable identities or the edge is refused at load and live edit, naming both spellings; equal spellings still denote the same repository when identity lookup is unreadable. If dispatch-time identity resolution changes the accepted base decision, the dependent fails as `infrastructure-failure` before dispatch.
+
+This compatible relaxation follows engine v0.61.0: the first engine release containing this entry accepts these edges. Schema version remains 3 and no serialized shape changes. Released engines through v0.61.0 refuse preserve-on-preserve with the existing `depends_on_preserved` reason rather than silently losing placement.
+
+```json
+{
+  "amends": 110,
+  "schema_version": 3,
+  "accepted": {
+    "id": "A",
+    "repo": "service",
+    "persona": "engineer",
+    "title": "feat: measure A",
+    "publish": "preserve",
+    "deps": [
+      "H"
+    ]
+  },
+  "dependency": {
+    "id": "H",
+    "repo": "service",
+    "persona": "engineer",
+    "title": "feat: shared harness",
+    "publish": "preserve"
+  },
+  "landing_values": [
+    "land",
+    null
+  ],
+  "fan_in_candidates": [
+    "H",
+    "A"
+  ],
+  "fan_in_reason": "a session starts from one kept branch and merging kept branches is not supported",
+  "base_conflict_reason": "two answers to where its session starts"
+}
+```

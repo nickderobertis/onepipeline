@@ -1,0 +1,14 @@
+schema_version: 1
+budgets:
+  - id: stacked-spikes-stage-time
+    measure: reported
+    command: [node, scripts/stacked-spikes-budget.mjs]
+    unit: seconds
+    direction: max
+    threshold: 60
+    description: >-
+      One harness and four preserve dependents, at plan concurrency 4 and identity
+      capacity 4, from the run journal's first event to its last. The model turn
+      is doubled because the shared harness adds a dispatch in series before
+      the concurrent area spikes. The value is read from the existing test run,
+      never re-measured; the test uses a subprocess agent double, not paid model turns.
