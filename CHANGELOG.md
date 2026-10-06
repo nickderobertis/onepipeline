@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.61.1](https://github.com/nickderobertis/onepipeline/compare/v0.61.0...v0.61.1) - 2026-10-06
+
+### Fixed
+
+- *(edits)* let a waiting, unattested human approval be reparented ([#777](https://github.com/nickderobertis/onepipeline/pull/777))
+
 ## [0.61.0](https://github.com/nickderobertis/onepipeline/compare/v0.60.5...v0.61.0) - 2026-10-05
 
 ### Added
