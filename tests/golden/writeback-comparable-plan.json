@@ -38,7 +38,7 @@
     }
   },
   "after": {
-    "engine": "this tree, linking onetaskgraph 0.2.49: every change to an existing item is one Engine::update_task naming only the fields that differ from the landed baseline; a member copy is made only to create the add-ed node",
+    "engine": "this tree, linking onetaskgraph 0.3.1: every change to an existing item is one Engine::update_task naming only the fields that differ from the landed baseline; a member copy is made only to create the add-ed node; the write-back worker keeps one store for its lifetime and ends each attempt's command on it",
     "figures": {
       "launch_read": {
         "calls": {
@@ -54,15 +54,16 @@
       },
       "writeback": {
         "calls": {
+          "end_command": 20,
           "get_project": 2,
-          "initialize": 20,
+          "initialize": 3,
           "metering": 64,
           "project_dependencies": 1,
           "query_tasks": 1,
           "update_task": 33,
           "write_task": 1
         },
-        "calls_total": 122,
+        "calls_total": 125,
         "spent": {
           "requests": 34,
           "graphql_points": 34
@@ -75,5 +76,6 @@
   },
   "creation_lookup": "The one query_tasks in the write-back's calls on this branch is Engine::copy's own origin scan before it creates the add-ed node's item (onetaskgraph-core engine/copy.rs, target rule 2), which no CopyRequest field skips: one per item created, inside that attempt's project-copy. The planner ruled it stays (the onetaskgraph-side skip is their follow-up); the journey holds it to at most one per created item and to no attempt that creates nothing. The merge base's eleven come from its whole copies: each whole attempt's page of tasks, and the copies' own lookups.",
   "add_reads_the_project": "The two get_project and the one project_dependencies in the write-back's calls on this branch are the attempt that creates the add-ed node: its own project read, which lets the shadow project restate the destination so the member copy lands the project item unwritten (the planner's ruling: onetaskgraph 0.2.49's member copy always plans the project item), and the copy's own read of that project and its edges. No other attempt reads the project.",
-  "per_github_write": "What each store write sends to GitHub, from onetaskgraph v0.2.49's crates/onetaskgraph-github-projects/tests/fixtures/copy-cost.txt (loopback board): a targeted update of one task naming its status, three metadata keys set and one removed is 3 requests (one issue read, one updateIssue, one board-field write; node count 203), and 1 request when every value it names is already held; a member copy of one task whose status changed is 9 requests (3 issue reads, 3 dependency reads, one updateIssue, 2 board-field writes; node count 1209)."
+  "per_github_write": "What each store write sends to GitHub, from onetaskgraph v0.2.49's crates/onetaskgraph-github-projects/tests/fixtures/copy-cost.txt (loopback board): a targeted update of one task naming its status, three metadata keys set and one removed is 3 requests (one issue read, one updateIssue, one board-field write; node count 203), and 1 request when every value it names is already held; a member copy of one task whose status changed is 9 requests (3 issue reads, 3 dependency reads, one updateIssue, 2 board-field writes; node count 1209).",
+  "retained_store": "The three initialize calls in the write-back's are the three stores it built: the first driver's worker, the stop's own release of what was still owed, and the adopting driver's worker; no attempt in this plan was cancelled, so none was rebuilt. Each of the twenty attempts that called the store ended its command with one end_command, which a hosted source answers without a request, so the meter charges it nothing."
 }

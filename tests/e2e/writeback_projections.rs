@@ -83,14 +83,20 @@ fn native(id: &str) -> &str {
 /// no attempt is in flight and none failed.
 ///
 /// Each store command records `end_command` before the worker appends its result. Matching
-/// those boundaries to the records detects an in-flight command even when its source is reused.
+/// those boundaries to the records detects an in-flight command even when its source is reused,
+/// and the last call being a command's end detects one whose write has landed but whose command
+/// has not ended yet.
 fn every_attempt_landed(world: &World, run: &str) -> bool {
-    let ended = store_calls(world)
+    let calls = store_calls(world);
+    let ended = calls
         .iter()
         .filter(|call| is_call(call, "end_command"))
         .count();
     let records = records(world, run);
     called_the_store(&records) == ended
+        && calls
+            .last()
+            .is_some_and(|call| is_call(call, "end_command"))
         && records
             .iter()
             .all(|record| record["outcome"] == "projected")

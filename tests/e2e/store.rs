@@ -1219,8 +1219,8 @@ fn surfaces_raised(world: &World, run: &str) -> Vec<String> {
 /// so across this window it would have asked three more times.
 const REFUSAL_WINDOW: Duration = Duration::from_secs(8);
 
-/// Nothing asks the store again for `run` across `window`, read off the connection every
-/// attempt opens. `midway` runs halfway through, for a journey that puts the store right
+/// Nothing asks the store again for `run` across `window`, read off the command every
+/// attempt ends. `midway` runs halfway through, for a journey that puts the store right
 /// while it watches.
 ///
 /// Two halves, each watched for its whole span from where it began, with `midway` between
@@ -1230,19 +1230,19 @@ const REFUSAL_WINDOW: Duration = Duration::from_secs(8);
 /// four seconds on a loaded runner — and the journey went on to wait for a store that was
 /// never put right.
 fn asked_nothing_more(world: &World, run: &str, window: Duration, midway: impl FnOnce()) {
-    let asked = attempts_opened(world);
+    let asked = attempts_asked(world);
     unasked_across(world, run, asked, window / 2);
     midway();
     unasked_across(world, run, asked, window - window / 2);
 }
 
-/// The store has been opened `asked` times and no more, from now until `span` has passed —
+/// The store has been asked by `asked` attempts and no more, from now until `span` has passed —
 /// looked at once more after the span ends, so the last stretch of it is watched too.
 fn unasked_across(world: &World, run: &str, asked: usize, span: Duration) {
     let watched = Instant::now();
     loop {
         assert_eq!(
-            attempts_opened(world),
+            attempts_asked(world),
             asked,
             "the store was asked again {:?} after it refused {run}'s projection",
             watched.elapsed()
@@ -1931,7 +1931,7 @@ fn closeout_attempts_what_changed_after_a_refusal_and_never_a_refused_snapshot_a
     let run = "writeback-refused-to-the-end";
     let (world, _project) =
         a_run_whose_destination_can_start_refusing("store-writeback-refused-to-the-end", run);
-    let asked_before = attempts_opened(&world);
+    let asked_before = attempts_asked(&world);
     world.script("store.update_task.absent", "");
     noted(&world, run, "later", "refused until the run ends");
     world.until("the refusal to be reported", |world| {
@@ -1957,7 +1957,7 @@ fn closeout_attempts_what_changed_after_a_refusal_and_never_a_refused_snapshot_a
     // Every attempt since the store began refusing was a snapshot of its own, reported once:
     // one asked again — on a timer, or inside closeout, where the old schedule asked as fast as
     // the store refused — is an attempt with no line of its own.
-    let attempts = attempts_opened(&world) - asked_before;
+    let attempts = attempts_asked(&world) - asked_before;
     let reported = streaks_reported(&world, run);
     assert!(
         attempts <= reported,
@@ -2136,14 +2136,23 @@ fn a_run_whose_destination_can_start_refusing(world: &str, run: &str) -> (World,
                 && task["item"]["status"]["category"] == "in-progress"
         })
     });
+    // The write lands before the attempt that made it ends its command, so a journey that
+    // counts attempts from here waits for that end first.
+    world.until("the landing attempt to end its command", |world| {
+        world
+            .store_calls()
+            .last()
+            .is_some_and(|call| call[0] == "end_command")
+    });
     (world, project)
 }
 
-/// How many connections the store has been opened with: one per write-back attempt that asks it
-/// anything, and one for the launch's own plan read. Every journey here reads a difference taken
-/// after its launch, so what the difference counts is attempts.
-fn attempts_opened(world: &World) -> usize {
-    world.store_asked("initialize")
+/// How many write-back attempts have asked the store anything: the write-back keeps one store
+/// for the run and ends each such attempt's command on it, refused or not, so each is one
+/// `end_command`. The launch's own plan read ends none. Every journey here reads a difference
+/// taken after its launch, so what the difference counts is attempts.
+fn attempts_asked(world: &World) -> usize {
+    world.store_asked("end_command")
 }
 
 /// Which of the plan's nodes have run, in the order they first were dispatched.
@@ -2280,7 +2289,7 @@ fn failures_said(log: &str) -> Vec<&str> {
 /// Both ends of every interval are read off something the destination or its operator can
 /// see, rather than off the shape of the code: the streak's start is the moment the driver
 /// printed the line an operator reads, and each retry is the destination's own record of
-/// being asked again — the connection every attempt opens before it asks anything.
+/// being asked again — the command every attempt ends once it has asked what it asks.
 fn retry_intervals(
     world: &World,
     run: &str,
@@ -2300,7 +2309,7 @@ fn retry_intervals(
     at.push(Instant::now());
     // Seeded at the failure rather than before it, so whatever the attempt that failed had
     // already asked for is behind us and the next thing counted is the retry.
-    let mut asked = attempts_opened(world);
+    let mut asked = attempts_asked(world);
     while at.len() <= count {
         assert!(
             Instant::now() < deadline,
@@ -2309,7 +2318,7 @@ fn retry_intervals(
             at.len() - 1
         );
         std::thread::sleep(Duration::from_millis(10));
-        let now = attempts_opened(world);
+        let now = attempts_asked(world);
         if now > asked {
             assert_eq!(
                 now,
@@ -2592,12 +2601,12 @@ fn a_stop_during_a_long_retry_interval_is_not_made_to_wait_it_out() {
 
     // A worker woken out of a wait by the stop leaves rather than taking its turn at the
     // destination: the run that was asking is over, so nothing more is asked for it.
-    let asked_by_the_stopped_run = attempts_opened(&world);
+    let asked_by_the_stopped_run = attempts_asked(&world);
     let watched = Instant::now();
     while watched.elapsed() < Duration::from_secs(3) {
         std::thread::sleep(Duration::from_millis(20));
         assert_eq!(
-            attempts_opened(&world),
+            attempts_asked(&world),
             asked_by_the_stopped_run,
             "the destination was asked again {:?} after the run was stopped",
             watched.elapsed()
@@ -3913,8 +3922,10 @@ fn a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchange
     // The reason, on **one** line, carrying what the store said of the source that could not
     // answer: the whole message is five lines, one of them the reason, and the next the class
     // and kind the store gave it. A store's failure can run to several lines of its own, and
-    // they are closed up onto that one rather than read as this surface's own advice. A source
-    // whose root has gone is the store's `config` failure, which it classes `refused`.
+    // they are closed up onto that one rather than read as this surface's own advice. The
+    // write-back's store was built while the source's root was there and is kept for the run,
+    // so a root that goes after it holds no task the update names: the store's `no-such-item`
+    // failure, which it classes `refused`.
     let reason = message
         .lines()
         .find_map(|line| line.strip_prefix("reason: "))
@@ -3925,13 +3936,13 @@ fn a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchange
         "a multi-line refusal was carried onto the surface as it was spelled: {message}"
     );
     assert!(
-        reason.contains("task-update failed") && reason.contains("cannot canonicalize root"),
+        reason.contains("task-update failed") && reason.contains("no task with the id"),
         "the surface dropped what the store said rather than carrying it on one line: {reason}"
     );
     assert!(
         message
             .lines()
-            .any(|line| line == "class: refused, kind: config"),
+            .any(|line| line == "class: refused, kind: no-such-item"),
         "the surface does not carry the store's class and kind: {message}"
     );
     assert!(

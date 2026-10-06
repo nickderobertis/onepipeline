@@ -639,15 +639,15 @@ fn malformed_requests_are_refused_before_a_valid_graphql_read() {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("bounded response read");
         let body = body.to_string();
-        write!(
+        // The endpoint may refuse a request on its first line and close the connection while
+        // the rest is still being sent, so the send and its shutdown can find the connection
+        // gone: what is asserted is that nothing was answered.
+        let _ = write!(
             stream,
             "{request_line}\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
-        )
-        .expect("send the request");
-        stream
-            .shutdown(std::net::Shutdown::Write)
-            .expect("finish the request stream");
+        );
+        let _ = stream.shutdown(std::net::Shutdown::Write);
         let mut response = String::new();
         let _ = stream.read_to_string(&mut response);
         response
