@@ -94,7 +94,7 @@ use onetaskgraph_core::config::{Layer, Origin as SettingOrigin, Setting, Setting
 use onetaskgraph_core::{
     classify, ConfigError, CopyAction, CopyItems, CopyReport, CopyRequest, CopyScope, Delivered,
     DeliveryOutcome, Engine, EngineError, Failure, GlobalId, Qualified, QueryResponse,
-    SourceFailure,
+    SourceFailure, SourceState,
 };
 use onetaskgraph_plugin_api::{
     DependencyEdge, DependencyEndpoint, DependencyKind, ItemKind, MetadataKey, NativeId, Project,
@@ -1937,7 +1937,14 @@ fn project(
                         .await
                 })
             };
-            let rebuild = attempt.cancelled.get() || !matches!(ended, Ok(Ok(())));
+            // The engine holds a source it could not build as unavailable for as long as it
+            // lives, so a store with one is rebuilt, which gives that source its next build.
+            let unbuilt = attempt
+                .engine
+                .listing()
+                .iter()
+                .any(|source| matches!(source.state, SourceState::Unavailable { .. }));
+            let rebuild = attempt.cancelled.get() || unbuilt || !matches!(ended, Ok(Ok(())));
             let end_failure = match ended {
                 Ok(Ok(())) => None,
                 Ok(Err(error)) => Some(Failed::engine("end-command", &error)),
