@@ -1941,6 +1941,106 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The `status_mapping` an ai-orchestrator launch's tracked `onetaskgraph.yaml` carries for
+    /// its Linear source, indented as it sits under that source's `config`: a name per kind
+    /// where a Linear workspace's project statuses are a different vocabulary from its team's
+    /// issue states, and one bare name where both say the same.
+    const PER_KIND_MAPPING: &str = "      status_mapping:
+        backlog:     { task: Proposed,        project: Proposal }
+        draft:       { task: Backlog,         project: Idea }
+        todo:        { task: Todo,            project: Planned }
+        queued:      { task: Queued,          project: Accepted }
+        in-progress: In Progress
+        unknown:     { task: Needs Attention, project: Blocked }
+        done:        { task: Done,            project: Completed }
+        cancelled:   Canceled
+";
+
+    /// Each named source the configuration discovered from `dir` describes, built or refused —
+    /// or, where the configuration itself does not load, why not. Read through [`Store::engine`],
+    /// which is how a launch's plan read and every write-back attempt build the store.
+    fn sources(
+        dir: &std::path::Path,
+        environment: Environment,
+    ) -> std::result::Result<BTreeMap<String, std::result::Result<(), String>>, String> {
+        let store = Store {
+            dir: dir.to_path_buf(),
+            environment,
+        };
+        let built = store
+            .engine(&Layer::default())
+            .map_err(|error| error.to_string())?;
+        Ok(built
+            .engine
+            .listing()
+            .into_iter()
+            .map(|listing| {
+                let state = match listing.state {
+                    onetaskgraph_core::SourceState::Available { .. } => Ok(()),
+                    onetaskgraph_core::SourceState::Unavailable { error } => Err(error.to_string()),
+                };
+                (listing.source.as_str().to_owned(), state)
+            })
+            .collect())
+    }
+
+    /// One `status_mapping` grammar across both hosted plugins this crate links: a `linear`
+    /// source mapping each category to a name per item kind, or to one name for both, and a
+    /// `github-projects` source mapping each to one bare name, both build from the
+    /// `onetaskgraph.yaml` a launch discovers. A per-kind object naming a kind the grammar does
+    /// not have refuses the configuration, naming the source it was written under.
+    #[test]
+    fn a_status_mapping_scoped_by_item_kind_builds_and_an_unknown_kind_is_refused_by_source() {
+        const LINEAR_KEY: &str = "ONEPIPELINE_TASKGRAPH_TEST_LINEAR_KEY";
+        const BOARD_TOKEN: &str = "ONEPIPELINE_TASKGRAPH_TEST_BOARD_TOKEN";
+        let environment =
+            || Environment::from_pairs([(LINEAR_KEY, "a-linear-key"), (BOARD_TOKEN, "a-token")]);
+        let document = |linear_mapping: &str| {
+            format!(
+                "sources:\n  hellopatient:\n    plugin: linear\n    config:\n      \
+                 api_key_env: {LINEAR_KEY}\n      team: HP\n      \
+                 endpoint: http://127.0.0.1:9/graphql\n{linear_mapping}  board:\n    \
+                 plugin: github-projects\n    config:\n      owner: acme\n      \
+                 project_number: 1\n      token_env: {BOARD_TOKEN}\n      \
+                 endpoint: http://127.0.0.1:9/graphql\n      status_mapping:\n        \
+                 todo: Todo\n        queued: Queued\n        in-progress: In Progress\n        \
+                 unknown: Needs Attention\n        done: Done\n        cancelled: Canceled\n"
+            )
+        };
+        let mapped = configured("status-by-kind", &document(PER_KIND_MAPPING));
+        let built = sources(&mapped, environment()).expect("the configuration loads");
+        assert_eq!(
+            built.get("hellopatient"),
+            Some(&Ok(())),
+            "the per-kind Linear mapping did not build: {built:?}"
+        );
+        assert_eq!(
+            built.get("board"),
+            Some(&Ok(())),
+            "the bare-name GitHub Projects mapping did not build: {built:?}"
+        );
+
+        let misspelt = PER_KIND_MAPPING.replace(
+            "{ task: Todo,            project: Planned }",
+            "{ task: Todo,            projects: Planned }",
+        );
+        assert_ne!(
+            misspelt, PER_KIND_MAPPING,
+            "the fixture names the kind it misspells"
+        );
+        let refused = configured("status-by-kind-refused", &document(&misspelt));
+        // Refused as the configuration is read, before any source is built: the whole store is
+        // one an operator has to correct, and the message says where.
+        let why = sources(&refused, environment())
+            .expect_err("a per-kind object naming no item kind was accepted");
+        assert!(
+            why.contains("sources.hellopatient") && why.contains("\"projects\""),
+            "the refusal names neither the source nor the key it refused: {why}"
+        );
+        let _ = std::fs::remove_dir_all(&mapped);
+        let _ = std::fs::remove_dir_all(&refused);
+    }
+
     /// Each plan read builds its engine from the configuration as it stands, so a store
     /// reconfigured between two reads is read as it now is rather than as the first read
     /// found it.
