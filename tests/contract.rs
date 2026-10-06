@@ -7423,7 +7423,7 @@ const RULINGS: &[(&str, &str)] = &[
     ),
     // ai-orchestrator#1508: a preserve node's session starts from a kept branch it depends on.
     (
-        "111.",
+        "112.",
         "several select the candidate whose stacking chain contains every other candidate",
     ),
 ];
@@ -10042,7 +10042,7 @@ fn the_change_telemetry_document_in_the_contract_is_the_one_the_types_read_and_w
 
 #[test]
 fn preserve_stacking_amends_the_closeout_without_changing_its_schema() {
-    let block = divergence_block("111.");
+    let block = divergence_block("112.");
     assert_eq!(block["amends"], 110);
     assert_eq!(block["schema_version"], PLAN_SCHEMA_VERSION);
     let dependent: Node = serde_json::from_value(block["accepted"].clone()).unwrap();

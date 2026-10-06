@@ -1754,6 +1754,20 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
                 // author rather than on this one's.
                 state.parks.remove(node);
             }
+            // The one recorded node a reparent takes is a human approval
+            // still waiting for its attestation, and the wait was derived
+            // from the prerequisites it just replaced. Left standing, a
+            // recorded `waiting` survives the derivation and the approval
+            // stays attestable ahead of work it now comes after; cleared,
+            // it re-derives from the new ones, and the scheduler records
+            // the wait again once they are done.
+            Operation::Reparent { node, .. } => {
+                if state.recorded.get(node).map(|recorded| recorded.status())
+                    == Some(NodeStatus::Waiting)
+                {
+                    state.recorded.remove(node);
+                }
+            }
             // The record moving without the graph moving, which is the
             // whole of what a settlement from evidence does. Its own
             // `node-settled` says the same thing to a reader that does
@@ -4206,6 +4220,73 @@ mod tests {
         ]);
         assert!(!state.recorded.contains_key("sweep"));
         assert!(!state.graph.get("sweep").expect("sweep").parked);
+    }
+
+    /// A reparent of a waiting approval takes its recorded wait off, so it
+    /// re-derives from its new prerequisites: gated behind unfinished work, and
+    /// skipped behind a failed one, exactly as a human node that never waited.
+    #[test]
+    fn a_reparented_approval_re_derives_its_wait_from_its_new_prerequisites() {
+        let approval = Node {
+            id: "approve".into(),
+            kind: crate::plan::NodeKind::Human,
+            task: Some("approve it".into()),
+            deps: vec!["build".into()],
+            ..Node::default()
+        };
+        let plan = plan_of_nodes(vec![
+            agent("build", &[]),
+            agent("docs", &[]),
+            approval,
+            agent("ship", &["approve"]),
+        ]);
+        let settled = |seq: u64, node: &str, status: &str| {
+            pipeline(
+                journal::PipelineKind::NodeSettled,
+                seq,
+                Some(node),
+                &[("status", json!(status))],
+            )
+        };
+        let events = vec![
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            settled(1, "build", "done"),
+            settled(2, "approve", "waiting"),
+            pipeline(
+                journal::PipelineKind::EditCommitted,
+                3,
+                None,
+                &[(
+                    "operations",
+                    json!([Operation::Reparent {
+                        node: "approve".into(),
+                        from: vec!["build".into()],
+                        to: vec!["build".into(), "docs".into()],
+                    }]),
+                )],
+            ),
+        ];
+        let state = fold(&events);
+        assert!(!state.recorded.contains_key("approve"));
+        let statuses = state.statuses();
+        assert_eq!(statuses["approve"], NodeStatus::Pending);
+        assert_eq!(statuses["ship"], NodeStatus::Pending);
+        assert!(!state.frontier().recorded.contains_key("approve"));
+
+        let mut done = events.clone();
+        done.push(settled(4, "docs", "done"));
+        assert_eq!(fold(&done).statuses()["approve"], NodeStatus::Waiting);
+
+        let mut failed = events;
+        failed.push(settled(4, "docs", "failed"));
+        let statuses = fold(&failed).statuses();
+        assert_eq!(statuses["approve"], NodeStatus::Skipped);
+        assert_eq!(statuses["ship"], NodeStatus::Skipped);
     }
 
     /// A park's own account of itself reaches the frontier a later `requeue` is
