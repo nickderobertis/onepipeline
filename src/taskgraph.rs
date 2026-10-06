@@ -145,11 +145,9 @@ const DEPS_ARE_EDGES: &str =
 /// `onetaskgraph.yaml` is discovered from, and the environment its settings and
 /// credentials are read out of.
 ///
-/// Holding no engine is the point. A `github-projects` source keeps its whole-board
-/// read for as long as it lives, so an engine that outlived one logical command would
-/// answer the next from the board as it was — a later write-back attempt reading the
-/// snapshot an earlier one took. Each read therefore builds its [`Engine`] from
-/// configuration afresh, through [`Store::engine`], and drops it when it is done.
+/// This configuration handle holds no engine. Read commands build their [`Engine`]
+/// through [`Store::engine`] and drop it when done. The write-back worker retains its
+/// engine across attempts and releases each command's snapshots through `end_command`.
 #[derive(Debug, Clone)]
 pub struct Store {
     /// Where `onetaskgraph.yaml` is discovered from, exactly as the store's own CLI
@@ -194,7 +192,16 @@ impl Store {
         Ok(Built {
             engine: Engine::build(&config, &secrets),
             page: config.page_size(),
+            config,
         })
+    }
+
+    /// Resolve the configuration before deciding whether a write-back store can be reused.
+    pub(crate) fn validate(
+        &self,
+        flags: &Layer,
+    ) -> std::result::Result<onetaskgraph_core::Config, ConfigError> {
+        config::load(&self.dir, &self.environment, flags).map(|loaded| loaded.config)
     }
 
     /// Read one qualified project id as the plan it holds, keeping what a checker and the
@@ -268,6 +275,7 @@ impl Store {
 pub(crate) struct Built {
     pub engine: Engine,
     pub page: NonZeroU32,
+    pub config: onetaskgraph_core::Config,
 }
 
 /// The environment the store is handed: this process's own, less [`RETIRED_BINARY_ENV`].
@@ -283,10 +291,8 @@ pub(crate) fn environment() -> Environment {
 
 /// Run one logical command's store calls to completion on a runtime of its own.
 ///
-/// The store's plugin traits are async, so each command that calls it — a plan read, a
-/// write-back attempt — builds a current-thread runtime and drops it when it is done.
-/// Nothing outlives that: the engine holds no task of its own, so dropping the runtime
-/// leaves nothing of the command running.
+/// The store's plugin traits are async. Read commands own a current-thread runtime;
+/// the write-back worker retains one alongside its engine for the worker's lifetime.
 pub(crate) fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1312,6 +1318,7 @@ mod tests {
                 &onetaskgraph_core::Secrets::load(Environment::default()).expect("no secrets"),
             ),
             page: config.page_size(),
+            config,
         }
     }
 
@@ -1612,6 +1619,7 @@ mod tests {
                 &onetaskgraph_core::Secrets::load(Environment::default()).expect("no secrets"),
             ),
             page: config.page_size(),
+            config,
         }
     }
 
@@ -1789,6 +1797,7 @@ mod tests {
                 &onetaskgraph_core::Secrets::load(Environment::default()).expect("no secrets"),
             ),
             page: config.page_size(),
+            config,
         };
         match load(built) {
             Err(Load::Unreadable(error)) => {
@@ -1958,7 +1967,7 @@ mod tests {
 
     /// Each named source the configuration discovered from `dir` describes, built or refused —
     /// or, where the configuration itself does not load, why not. Read through [`Store::engine`],
-    /// which is how a launch's plan read and every write-back attempt build the store.
+    /// which builds a launch's plan-read store and the write-back worker's retained store.
     fn sources(
         dir: &std::path::Path,
         environment: Environment,
@@ -1997,8 +2006,8 @@ mod tests {
             || Environment::from_pairs([(LINEAR_KEY, "a-linear-key"), (BOARD_TOKEN, "a-token")]);
         let document = |linear_mapping: &str| {
             format!(
-                "sources:\n  hellopatient:\n    plugin: linear\n    config:\n      \
-                 api_key_env: {LINEAR_KEY}\n      team: HP\n      \
+                "sources:\n  tracker:\n    plugin: linear\n    config:\n      \
+                 api_key_env: {LINEAR_KEY}\n      team: TEAM\n      \
                  endpoint: http://127.0.0.1:9/graphql\n{linear_mapping}  board:\n    \
                  plugin: github-projects\n    config:\n      owner: acme\n      \
                  project_number: 1\n      token_env: {BOARD_TOKEN}\n      \
@@ -2010,7 +2019,7 @@ mod tests {
         let mapped = configured("status-by-kind", &document(PER_KIND_MAPPING));
         let built = sources(&mapped, environment()).expect("the configuration loads");
         assert_eq!(
-            built.get("hellopatient"),
+            built.get("tracker"),
             Some(&Ok(())),
             "the per-kind Linear mapping did not build: {built:?}"
         );
@@ -2034,7 +2043,7 @@ mod tests {
         let why = sources(&refused, environment())
             .expect_err("a per-kind object naming no item kind was accepted");
         assert!(
-            why.contains("sources.hellopatient") && why.contains("\"projects\""),
+            why.contains("sources.tracker") && why.contains("\"projects\""),
             "the refusal names neither the source nor the key it refused: {why}"
         );
         let _ = std::fs::remove_dir_all(&mapped);

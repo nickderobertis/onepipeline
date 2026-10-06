@@ -82,25 +82,22 @@ fn native(id: &str) -> &str {
 /// Whether every attempt the worker has made has been recorded and every record landed — so
 /// no attempt is in flight and none failed.
 ///
-/// Counted, not timed: each command that reaches the store opens a connection of its own to
-/// the scripted source, whose handshake is the first thing it records. One of those was the
-/// plan read the launch made; each of the rest is an attempt, which is in flight from its
-/// handshake until the worker appends its record. An attempt with nothing to carry opens no
-/// connection, and its record says it called nothing.
+/// Each store command records `end_command` before the worker appends its result. Matching
+/// those boundaries to the records detects an in-flight command even when its source is reused.
 fn every_attempt_landed(world: &World, run: &str) -> bool {
-    let opened = store_calls(world)
+    let ended = store_calls(world)
         .iter()
-        .filter(|call| is_call(call, "initialize"))
+        .filter(|call| is_call(call, "end_command"))
         .count();
     let records = records(world, run);
-    opened_the_store(&records) + 1 == opened
+    called_the_store(&records) == ended
         && records
             .iter()
             .all(|record| record["outcome"] == "projected")
 }
 
-/// How many recorded attempts opened the store: every one but those that called nothing.
-fn opened_the_store(records: &[Value]) -> usize {
+/// No-op attempts make no store call and therefore have no command boundary.
+fn called_the_store(records: &[Value]) -> usize {
     records
         .iter()
         .filter(|record| record["calls"] != json!({}))
@@ -134,7 +131,18 @@ fn a_run_projecting_through_a_recording_store(
     nodes: Vec<Value>,
     held: &[&str],
 ) -> (World, String) {
+    a_run_configured(world, run, nodes, held, |_| {})
+}
+
+fn a_run_configured(
+    world: &str,
+    run: &str,
+    nodes: Vec<Value>,
+    held: &[&str],
+    configure: impl FnOnce(&World),
+) -> (World, String) {
     let world = World::new(world);
+    configure(&world);
     for node in held {
         world.script(&format!("{node}.wait"), "hold");
     }
@@ -375,16 +383,22 @@ fn a_runs_first_projection_carries_its_claim_by_member_and_a_later_transition_th
 
     let later = records(&world, run)[recorded_before..].to_vec();
     assert!(!later.is_empty(), "the transition was never projected");
-    // Each attempt opened a store of its own — the source started afresh, handshake and all —
-    // so none of them answered from a read an earlier one made.
-    let opened = store_calls(&world)[asked_before..]
-        .iter()
-        .filter(|call| is_call(call, "initialize"))
-        .count();
-    assert!(
-        opened >= opened_the_store(&later),
-        "{} attempts were made over {opened} stores, so one answered from another's reads",
-        opened_the_store(&later)
+    let later_calls = &store_calls(&world)[asked_before..];
+    assert_eq!(
+        later_calls
+            .iter()
+            .filter(|call| is_call(call, "initialize"))
+            .count(),
+        0,
+        "successful settlements must reuse the source"
+    );
+    assert_eq!(
+        later_calls
+            .iter()
+            .filter(|call| is_call(call, "end_command"))
+            .count(),
+        called_the_store(&later),
+        "each recorded store attempt must end its command"
     );
     for record in &later {
         assert_eq!(record["scope"], "members", "{record}");
@@ -435,7 +449,7 @@ fn a_runs_first_projection_carries_its_claim_by_member_and_a_later_transition_th
     for call in member_calls {
         let named = call.get(1).map(String::as_str).unwrap_or_default();
         match call[0].as_str() {
-            "initialize" | "metering" | "health" => {}
+            "initialize" | "metering" | "health" | "end_command" => {}
             "update_task" => assert_eq!(
                 named,
                 native(&work_origin),
@@ -1172,11 +1186,21 @@ fn a_projection_after_a_failed_attempt_carries_what_had_not_landed() {
 #[test]
 fn the_record_carries_exactly_what_the_update_said_it_wrote_and_spent() {
     let run = "projections-report";
-    let (world, project) = a_run_projecting_through_a_recording_store(
+    let meter = "store.metering";
+    let (world, project) = a_run_configured(
         "writeback-projections-report",
         run,
         vec![agent("work", &[]), agent("later", &["work"])],
         &["work"],
+        |world| {
+            world.script(
+                meter,
+                &json!({"requests": 1, "budgets": [
+                    {"budget": "graphql", "unit": "points", "measured": 3, "modelled": 0}
+                ]})
+                .to_string(),
+            )
+        },
     );
     projected_until(
         &world,
@@ -1186,14 +1210,6 @@ fn the_record_carries_exactly_what_the_update_said_it_wrote_and_spent() {
         |tasks| board_word(tasks, "work").as_deref() == Some("in-progress"),
     );
 
-    let meter = "store.metering";
-    world.script(
-        meter,
-        &json!({"requests": 1, "budgets": [
-            {"budget": "graphql", "unit": "points", "measured": 3, "modelled": 0}
-        ]})
-        .to_string(),
-    );
     let mark = records(&world, run).len();
     let asked_before = store_calls(&world).len();
     noted(&world, run, "later", "counted");

@@ -17,7 +17,6 @@ use onebudgetspec_core::{Direction, Measure, Selection, Verdict};
 
 const BUDGET: &str = "linear-requests-per-writeback-settlement";
 
-/// The journey the budget's command runs, which writes the measurement.
 const JOURNEY: &str = "linear_writeback::consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_their_own_attempt";
 
 fn root() -> PathBuf {

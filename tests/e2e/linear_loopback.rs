@@ -3,8 +3,8 @@
 //! settlement back — and logs every request it was sent, which is what a journey counts a
 //! write-back's cost by.
 //!
-//! It holds one team (`HP`) with its workflow states, the workspace's project statuses, one
-//! project and its issues, in the vocabulary a Hello Patient workspace uses: an issue's states and
+//! It holds one team (`TEAM`) with its workflow states, the workspace's project statuses, one
+//! project and its issues, with a generic per-kind vocabulary: an issue's states and
 //! a project's statuses are two different sets of names, which is what the per-kind
 //! `status_mapping` exists for. What it answers is decided by the operation each request names —
 //! the plugin's own documents, recognised by their root field — and every request it cannot
@@ -29,10 +29,10 @@ use std::time::Duration;
 use serde_json::{json, Map, Value};
 
 /// The team key a source over this endpoint is configured with.
-pub const TEAM: &str = "HP";
+pub const TEAM: &str = "TEAM";
 
 /// The one project this endpoint holds, by the id Linear would give it.
-pub const PROJECT: &str = "proj-hp-1";
+pub const PROJECT: &str = "project-1";
 
 /// The operation one request named, by the root field of the document the plugin sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -118,6 +118,7 @@ struct Issue {
     title: String,
     description: String,
     state: String,
+    priority: u64,
 }
 
 #[derive(Default)]
@@ -209,6 +210,7 @@ impl Linear {
             title: title.to_owned(),
             description: description.to_owned(),
             state,
+            priority: 0,
         });
         id
     }
@@ -307,7 +309,33 @@ impl Linear {
             ) else {
                 return;
             };
+            let envelope = request
+                .as_object()
+                .expect("the named fields belong to an object");
+            if envelope
+                .keys()
+                .any(|key| !matches!(key.as_str(), "query" | "variables" | "operationName"))
+                || envelope
+                    .get("operationName")
+                    .is_some_and(|name| !name.is_null() && !name.is_string())
+                || query.trim().is_empty()
+            {
+                return;
+            }
             let operation = Operation::of(query);
+            if matches!(
+                operation,
+                Operation::Issue
+                    | Operation::IssueRelations
+                    | Operation::Project
+                    | Operation::ProjectRelations
+                    | Operation::IssueUpdate
+            ) && !variables["id"]
+                .as_str()
+                .is_some_and(|id| !id.trim().is_empty())
+            {
+                return;
+            }
             let fault = {
                 let mut world = self.lock();
                 world.log.push(Request {
@@ -354,10 +382,17 @@ impl Linear {
 
     fn answer(&self, operation: Operation, query: &str, variables: &Value) -> Value {
         let mut world = self.lock();
-        let id = variables["id"].as_str().unwrap_or_default().to_owned();
+        let id = match operation {
+            Operation::Issue
+            | Operation::IssueRelations
+            | Operation::Project
+            | Operation::ProjectRelations
+            | Operation::IssueUpdate => variables["id"].as_str().expect("validated request ID"),
+            _ => "",
+        };
         let data = match operation {
             Operation::Resolution => json!({
-                "teams": {"nodes": [{"id": "team-hp", "states": {
+                "teams": {"nodes": [{"id": "team-1", "states": {
                     "nodes": world.states.iter().map(|named| json!({
                         "id": named.id, "name": named.name, "type": named.kind,
                     })).collect::<Vec<_>>(),
@@ -371,7 +406,7 @@ impl Linear {
                     "pageInfo": {"hasNextPage": false},
                 },
             }),
-            Operation::Issue => json!({"issue": world.issue(&id)}),
+            Operation::Issue => json!({"issue": world.issue(id)}),
             Operation::IssueRelations => {
                 let description = world
                     .issues
@@ -401,7 +436,7 @@ impl Linear {
                 else {
                     return refusal("an issueUpdate carries a non-empty `input` object");
                 };
-                match world.update(&id, input) {
+                match world.update(id, input) {
                     Ok(issue) => json!({"issueUpdate": {"success": true, "issue": issue}}),
                     Err(why) => return refusal(&why),
                 }
@@ -424,12 +459,12 @@ impl World {
             "identifier": issue.identifier,
             "title": issue.title,
             "description": issue.description,
-            "url": format!("https://linear.app/hp/issue/{}", issue.identifier),
+            "url": format!("https://linear.app/generic/issue/{}", issue.identifier),
             "createdAt": "2026-10-01T00:00:00.000Z",
             "updatedAt": "2026-10-01T00:00:00.000Z",
             "archivedAt": null,
             "state": state,
-            "priority": 0,
+            "priority": issue.priority,
             "labels": {"nodes": []},
             "project": {"id": PROJECT},
         })
@@ -452,7 +487,7 @@ impl World {
             "id": PROJECT,
             "name": self.project_name,
             "description": self.project_description,
-            "url": "https://linear.app/hp/project/hp-1",
+            "url": "https://linear.app/generic/project/project-1",
             "createdAt": "2026-10-01T00:00:00.000Z",
             "updatedAt": "2026-10-01T00:00:00.000Z",
             "archivedAt": null,
@@ -494,6 +529,9 @@ impl World {
         if let Some(title) = text("title") {
             issue.title = title;
         }
+        if let Some(priority) = input.get("priority") {
+            issue.priority = priority.as_u64().expect("validated priority");
+        }
         let issue = issue.clone();
         Ok(self.render(&issue))
     }
@@ -514,31 +552,51 @@ const MAX_BODY: usize = 1 << 20;
 /// One HTTP/1.1 request's body, or `None` once the connection has closed or sent a request
 /// this endpoint will not read.
 fn read_request(reader: &mut BufReader<TcpStream>) -> Option<Vec<u8>> {
-    let mut length = 0usize;
-    let mut first = true;
-    loop {
+    let line = |reader: &mut BufReader<TcpStream>| -> Option<String> {
         let mut line = String::new();
-        if reader.read_line(&mut line).ok()? == 0 {
+        (&mut *reader).take(8193).read_line(&mut line).ok()?;
+        if line.len() > 8192 || !line.ends_with("\r\n") {
             return None;
         }
-        let line = line.trim_end();
-        if line.is_empty() {
-            if first {
-                continue;
-            }
+        Some(line)
+    };
+    if line(reader)?.trim_end() != "POST /graphql HTTP/1.1" {
+        return None;
+    }
+    let mut length = None;
+    let mut headers = 0usize;
+    loop {
+        let header = line(reader)?;
+        headers += header.len();
+        if headers > 65536 {
+            return None;
+        }
+        if header == "\r\n" {
             break;
         }
-        first = false;
-        if let Some((name, value)) = line.split_once(':') {
-            if name.eq_ignore_ascii_case("content-length") {
-                length = value
-                    .trim()
-                    .parse()
-                    .ok()
-                    .filter(|length| *length <= MAX_BODY)?;
+        let (name, value) = header.trim_end().split_once(':')?;
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            || name.eq_ignore_ascii_case("transfer-encoding")
+        {
+            return None;
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            if length.is_some() || !value.trim().bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
             }
+            length = Some(
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|length| *length > 0 && *length <= MAX_BODY)?,
+            );
         }
     }
+    let length = length?;
     let mut body = vec![0; length];
     reader.read_exact(&mut body).ok()?;
     Some(body)
@@ -562,3 +620,103 @@ pub fn metadata_of(description: &str) -> Map<String, Value> {
 
 /// How long a journey waits for this endpoint before it calls a wait lost.
 pub const PATIENCE: Duration = Duration::from_secs(120);
+
+/// Refused HTTP frames and GraphQL envelopes never reach the endpoint's operation log;
+/// the same endpoint still answers a valid request afterwards.
+#[test]
+fn malformed_requests_are_refused_before_a_valid_graphql_read() {
+    let linear = Linear::serve(
+        &[("Todo", "unstarted")],
+        &[("Planned", "planned")],
+        "generic",
+        "",
+        "Planned",
+    );
+    let send = |request_line: &str, body: &Value| {
+        let mut stream =
+            TcpStream::connect(("127.0.0.1", linear.port)).expect("connect to the loopback");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("bounded response read");
+        let body = body.to_string();
+        write!(
+            stream,
+            "{request_line}\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("send the request");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("finish the request stream");
+        let mut response = String::new();
+        let _ = stream.read_to_string(&mut response);
+        response
+    };
+    let valid = json!({"query":"query($id:ID!){project(id:$id){id}}", "variables":{"id":PROJECT}});
+    for first in [
+        "GET /graphql HTTP/1.1",
+        "POST /elsewhere HTTP/1.1",
+        "POST /graphql malformed",
+    ] {
+        assert!(send(first, &valid).is_empty());
+    }
+    for body in [
+        json!([]),
+        json!({"query":1, "variables":{}}),
+        json!({"query":"query {}", "variables":[]}),
+        json!({"query":"query {}", "variables":{}, "extra":true}),
+        json!({"query":"query {}", "variables":{}, "operationName":4}),
+    ] {
+        assert!(send("POST /graphql HTTP/1.1", &body).is_empty());
+    }
+    for query in [
+        "query($id:ID!){issue(id:$id){id}}",
+        "query($id:ID!){issue(id:$id){relations(first:10){nodes{id}}}}",
+        "query($id:ID!){project(id:$id){id}}",
+        "query($id:ID!){project(id:$id){relations(first:10){nodes{id}}}}",
+    ] {
+        for variables in [
+            json!({}),
+            json!({"id":null}),
+            json!({"id":4}),
+            json!({"id":""}),
+        ] {
+            assert!(
+                send(
+                    "POST /graphql HTTP/1.1",
+                    &json!({"query":query,"variables":variables})
+                )
+                .is_empty(),
+                "a read with an invalid ID was accepted"
+            );
+        }
+    }
+    assert!(
+        linear.log().is_empty(),
+        "invalid requests reached operation handling"
+    );
+    let issue = linear.file("work", "description", "Todo");
+    let update = json!({
+        "query":"mutation($id:ID!,$input:IssueUpdateInput!){issueUpdate(id:$id,input:$input){success}}",
+        "variables":{"id":issue,"input":{"priority":3}}
+    });
+    let updated = send("POST /graphql HTTP/1.1", &update);
+    let updated: Value =
+        serde_json::from_str(updated.split_once("\r\n\r\n").expect("mutation response").1)
+            .expect("mutation JSON");
+    assert_eq!(updated["data"]["issueUpdate"]["issue"]["priority"], 3);
+    let read = send(
+        "POST /graphql HTTP/1.1",
+        &json!({
+            "query":"query($id:ID!){issue(id:$id){priority}}", "variables":{"id":issue}
+        }),
+    );
+    let read: Value = serde_json::from_str(read.split_once("\r\n\r\n").expect("issue response").1)
+        .expect("issue JSON");
+    assert_eq!(read["data"]["issue"]["priority"], 3);
+    let response = send("POST /graphql HTTP/1.1", &valid);
+    let body = response.split_once("\r\n\r\n").expect("an HTTP response").1;
+    let answer: Value = serde_json::from_str(body).expect("the GraphQL response");
+    assert_eq!(answer["data"]["project"]["id"], PROJECT);
+    assert_eq!(linear.log().len(), 3);
+}

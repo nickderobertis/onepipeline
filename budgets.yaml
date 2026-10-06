@@ -7,14 +7,9 @@ schema_version: 1
 budgets:
   - id: linear-requests-per-writeback-settlement
     description: >-
-      Inner measure of headroom on a production Linear key, which every manager of a host shares
-      and which no check may reach: the requests one settlement write-back sends a `linear`
-      destination, counted at a loopback Linear GraphQL endpoint configured with the per-kind
-      `status_mapping`. The real write-back worker projects at least five consecutive
-      settlements, each changing a task's status and an `onepipeline.*` metadata value and each
-      in an attempt of its own, and the value is the most requests the endpoint served for one
-      attempt after the first: the read of the issue's description, which keeps a person's edits
-      to it, and the one `issueUpdate`.
+      Measures the highest loopback Linear request count per settlement attempt after the first
+      across at least five consecutive write-backs through the real worker. It protects a
+      production Linear key which no check may reach.
     labels: [linear]
     measure: reported
     command: ["bash", "scripts/linear-writeback-budget.sh"]

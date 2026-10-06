@@ -26,7 +26,7 @@ use crate::harness::{World, STORE_SOURCE};
 use crate::linear_loopback::{described, metadata_of, Fault, Linear, Operation, PATIENCE, PROJECT};
 
 /// The source the launch directory's `onetaskgraph.yaml` names the loopback Linear as.
-const SOURCE: &str = "hellopatient";
+const SOURCE: &str = "tracker";
 
 /// The variable that source reads its key from.
 const KEY_ENV: &str = "ONEPIPELINE_LOOPBACK_LINEAR_KEY";
@@ -101,11 +101,20 @@ fn configuration(linear: &Linear) -> String {
 /// `onetaskgraph.yaml` is the only store configuration any command of it reads, and wait for
 /// its first projection to come to rest: `anchor` in progress and `work` queued, each carrying
 /// the run's own metadata.
-fn launched(name: &str, extra: &[&str]) -> Scenario {
+fn launched_with_states(name: &str, extra: &[&str], states: &[(&str, &str)]) -> Scenario {
+    launched_configured(name, extra, states, false)
+}
+
+fn launched_configured(
+    name: &str,
+    extra: &[&str],
+    states: &[(&str, &str)],
+    boundary: bool,
+) -> Scenario {
     let world = World::new(name).with_env(KEY_ENV, "a-loopback-key");
     world.script("anchor.wait", "hold");
     let linear = Linear::serve(
-        STATES,
+        states,
         STATUSES,
         name,
         &described(
@@ -132,7 +141,18 @@ fn launched(name: &str, extra: &[&str]) -> Scenario {
     let work = issue("work");
     let launch = world.root.join("launch-directory");
     std::fs::create_dir_all(&launch).expect("a launch directory");
-    std::fs::write(launch.join("onetaskgraph.yaml"), configuration(&linear))
+    let mut config = configuration(&linear);
+    if boundary {
+        std::fs::create_dir_all(world.store()).expect("the boundary source's root");
+        let quote =
+            |path: &Path| serde_json::to_string(&path.to_string_lossy()).expect("a quoted path");
+        config.push_str(&format!(
+            "  boundary:\n    plugin: subprocess\n    config:\n      command: {}\n      deadline_ms: 120000\n      settings:\n        root: {}\n        script: {}\n        key: {}\n",
+            quote(&crate::harness::double("scripted-source")), quote(&world.store()),
+            quote(&world.fakes), crate::harness::SCRIPTED_KEY,
+        ));
+    }
+    std::fs::write(launch.join("onetaskgraph.yaml"), config)
         .expect("the launch directory's store configuration");
 
     let project = format!("{SOURCE}:{PROJECT}");
@@ -158,6 +178,16 @@ fn launched(name: &str, extra: &[&str]) -> Scenario {
         },
     );
     scenario.at_rest("the launch's projections");
+    assert_eq!(
+        scenario
+            .linear
+            .log()
+            .iter()
+            .filter(|request| request.operation.resolves())
+            .count(),
+        1,
+        "the first worker attempt must resolve exactly once"
+    );
     scenario
 }
 
@@ -165,6 +195,13 @@ fn launched(name: &str, extra: &[&str]) -> Scenario {
 /// every setting this world's commands carry for their own plans source is taken away.
 fn from_the_launch_directory(world: &World, dir: &Path, args: &[&str]) -> std::process::Command {
     let mut command = world.cmd(args);
+    // This journey's file is the only source configuration: inherited host settings
+    // must not introduce another source, endpoint or credential into the measurement.
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("ONETASKGRAPH_") {
+            command.env_remove(key);
+        }
+    }
     command
         .current_dir(dir)
         .env_remove("ONETASKGRAPH_DEFAULT_SOURCES")
@@ -335,8 +372,8 @@ fn mapped(outcome: &str) -> &'static str {
     }
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the two journeys below read a
-// plan out of a Linear project and write each settlement back through the linked Linear plugin,
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the journeys below read a
+// plan from a hosted source and write settlements through the linked hosted plugins,
 // exercising `taskgraph`, `writeback`, `edits` and `driver` together, so the crate is the
 // narrowest edge they can honestly sit behind — the grounds `mod multi_source` records in
 // `main.rs`. The second waits past the write-back's sixty-second floor by construction, as
@@ -346,24 +383,22 @@ fn mapped(outcome: &str) -> &'static str {
 /// carries that settlement's state and evidence, and the run's landed baseline says the same.
 /// Each attempt sends one read of the issue — the description its metadata is merged into, which
 /// keeps whatever a person wrote there — and one `issueUpdate`, and at most one resolution read.
-/// A state added to the team once the run is under way is found and written.
+/// Its vocabulary is present before launch; the failure journey separately adds a state
+/// after the cache fills and proves that one refresh finds it.
 ///
 /// What the most expensive of those attempts after the first cost is the
 /// `linear-requests-per-writeback-settlement` budget's measure, written to the file
 /// `ONEBUDGETSPEC_RESULT` names when the budget's command runs this journey.
 #[test]
 fn consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_their_own_attempt() {
-    let scenario = launched("linear-settlements", &[]);
+    let mut states = STATES.to_vec();
+    states.push(("Needs Attention", "started"));
+    let scenario = launched_with_states("linear-settlements", &[], &states);
     let mut costs = Vec::new();
     for (step, outcome) in ["done", "failed", "done", "failed", "done", "failed"]
         .into_iter()
         .enumerate()
     {
-        if step == 1 {
-            // Added after the run's first writes resolved the team's states, as a person adds a
-            // state in Linear's settings: the mapping names it, and the next write finds it.
-            scenario.linear.add_state("Needs Attention", "started");
-        }
         let evidence = format!("settlement {step}: the operator saw it {outcome}");
         let spent = scenario.replied(
             &format!("settlement {step} to reach Linear"),
@@ -431,6 +466,32 @@ fn consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_the
             "settlement {step} sent Linear more than one read of the issue, one write and at \
              most one resolution: {sent:?}"
         );
+        assert_eq!(
+            spent.resolutions(),
+            0,
+            "a reused store resolved again: {sent:?}"
+        );
+        let shadow = scenario
+            .world
+            .run_file(&scenario.run, "writeback")
+            .join("tasks")
+            .join(
+                format!("{SOURCE}:{PROJECT}")
+                    .bytes()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>(),
+            )
+            .join("776f726b.md");
+        let text = std::fs::read_to_string(&shadow)
+            .unwrap_or_else(|error| panic!("{}: {error}", shadow.display()));
+        assert!(
+            text.contains(&evidence),
+            "the shadow kept old metadata: {text}"
+        );
+        assert!(
+            text.contains(&format!("status: {outcome}")),
+            "the shadow kept old status: {text}"
+        );
         costs.push(spent.requests.len());
     }
     let highest = costs.iter().skip(1).copied().max().unwrap_or_default();
@@ -457,7 +518,13 @@ fn consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_the
 /// that failure, with the attempt after its repair landing.
 #[test]
 fn a_linear_destination_lands_current_values_after_each_way_a_call_fails() {
-    let scenario = launched("linear-failures", &["--writeback-item-budget", "1"]);
+    let scenario = launched_configured(
+        "linear-failures",
+        &["--writeback-item-budget", "1"],
+        STATES,
+        true,
+    );
+    let opened = scenario.world.store_asked("initialize");
     scenario.linear.add_state("Needs Attention", "started");
 
     // A connection closed mid-read: transient, so retried on the schedule, and the retry lands.
@@ -476,6 +543,11 @@ fn a_linear_destination_lands_current_values_after_each_way_a_call_fails() {
         spent.records
     );
     assert_eq!(scenario.linear.state_of(&scenario.work), "Done");
+    assert_eq!(
+        spent.resolutions(),
+        0,
+        "a network failure rebuilt the store"
+    );
 
     // A metadata-only write Linear refuses: not retried on a timer, attempted again with the
     // next change, which lands both.
@@ -512,6 +584,11 @@ fn a_linear_destination_lands_current_values_after_each_way_a_call_fails() {
     );
     assert_eq!(outcomes(&landed), ["projected"], "{:?}", landed.records);
     assert_eq!(scenario.linear.state_of(&scenario.work), "Needs Attention");
+    assert_eq!(
+        landed.resolutions(),
+        1,
+        "the newly added state needs one refresh"
+    );
 
     // A write carrying a state that Linear refuses: the next change lands the state and the
     // evidence the refused one carried, beside its own.
@@ -539,6 +616,97 @@ fn a_linear_destination_lands_current_values_after_each_way_a_call_fails() {
         },
     );
     assert_eq!(outcomes(&landed), ["projected"], "{:?}", landed.records);
+    assert_eq!(
+        landed.resolutions(),
+        1,
+        "a refused held vocabulary id needs one refresh"
+    );
+
+    // A network failure after a mutation carried a cached state id invalidates that
+    // vocabulary, while a metadata-only mutation failure leaves it reusable.
+    scenario
+        .linear
+        .fail_next(Operation::IssueUpdate, Fault::Drop);
+    let dropped_state = scenario.replied(
+        "a dropped status mutation to be retried",
+        &settle("failed", "after a dropped status mutation"),
+        |scenario| {
+            scenario.evidence_on(&scenario.work).as_deref()
+                == Some("after a dropped status mutation")
+        },
+    );
+    assert_eq!(outcomes(&dropped_state), ["failed", "projected"]);
+    assert_eq!(
+        dropped_state.resolutions(),
+        1,
+        "a failed cached state id needs one refresh"
+    );
+    scenario
+        .linear
+        .fail_next(Operation::IssueUpdate, Fault::Drop);
+    let dropped_metadata = scenario.replied(
+        "a dropped metadata mutation to be retried",
+        &note("after a dropped metadata mutation"),
+        |scenario| {
+            scenario
+                .linear
+                .description_of(&scenario.anchor)
+                .contains("after a dropped metadata mutation")
+        },
+    );
+    assert_eq!(outcomes(&dropped_metadata), ["failed", "projected"]);
+    assert_eq!(
+        dropped_metadata.resolutions(),
+        0,
+        "metadata failures keep the vocabulary"
+    );
+
+    // The shadow filesystem can fail independently of the destination. Record the failure
+    // and replace its old contents once the directory is writable again.
+    let tasks = scenario
+        .world
+        .run_file(&scenario.run, "writeback")
+        .join("tasks");
+    let saved = tasks.with_file_name("saved-tasks");
+    std::fs::rename(&tasks, &saved).expect("the old shadow is retained for recovery");
+    std::fs::write(&tasks, "a file prevents writing the shadow directory")
+        .expect("block the shadow");
+    let shadow_failed = scenario.replied(
+        "a shadow failure to be recorded",
+        &settle("done", "while the shadow was unwritable"),
+        |scenario| {
+            scenario.records().iter().any(|record| {
+                record["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("cannot refresh the shadow store"))
+            })
+        },
+    );
+    assert!(shadow_failed
+        .records
+        .iter()
+        .any(|record| record["outcome"] == "failed"));
+    std::fs::remove_file(&tasks).expect("remove the obstruction");
+    std::fs::rename(&saved, &tasks).expect("restore the shadow directory");
+    let shadow_repaired = scenario.replied(
+        "the shadow repair to carry current values",
+        &settle("failed", "after repairing the shadow"),
+        |scenario| {
+            scenario.evidence_on(&scenario.work).as_deref() == Some("after repairing the shadow")
+        },
+    );
+    assert_eq!(outcomes(&shadow_repaired), ["projected"]);
+    assert_eq!(
+        shadow_repaired.resolutions(),
+        0,
+        "a filesystem failure does not poison the engine"
+    );
+
+    assert_eq!(
+        scenario.world.store_asked("initialize"),
+        opened,
+        "refused writes, network errors and shadow failures must reuse every source"
+    );
 
     // A configuration that cannot be read: recorded as that failure, and the attempt after its
     // repair lands what changed meanwhile.
@@ -548,7 +716,7 @@ fn a_linear_destination_lands_current_values_after_each_way_a_call_fails() {
     std::fs::create_dir(&document).expect("a directory stands in its place");
     let unread = scenario.replied(
         "an attempt over an unreadable configuration to be recorded",
-        &settle("failed", "while the configuration could not be read"),
+        &settle("done", "while the configuration could not be read"),
         |scenario| {
             scenario.records().last().is_some_and(|record| {
                 record["outcome"] == "failed" && record["kind"] == "config-read"
@@ -567,10 +735,16 @@ fn a_linear_destination_lands_current_values_after_each_way_a_call_fails() {
         |scenario| {
             scenario.evidence_on(&scenario.work).as_deref()
                 == Some("while the configuration could not be read")
-                && scenario.linear.state_of(&scenario.work) == "Needs Attention"
+                && scenario.linear.state_of(&scenario.work) == "Done"
         },
     );
     assert_eq!(outcomes(&repaired), ["projected"], "{:?}", repaired.records);
+    assert_eq!(
+        repaired.resolutions(),
+        1,
+        "a repaired configuration needs a new store"
+    );
+    assert_eq!(scenario.world.store_asked("initialize"), opened + 1);
 
     // A write held past its deadline — the floor and one item's budget of a second — is
     // cancelled, and the attempt after it lands.
@@ -579,7 +753,7 @@ fn a_linear_destination_lands_current_values_after_each_way_a_call_fails() {
         .fail_next(Operation::IssueUpdate, Fault::Hold);
     let cancelled = scenario.replied(
         "a write held past its deadline to be cancelled and then landed",
-        &settle("done", "after a write held past its deadline"),
+        &settle("failed", "after a write held past its deadline"),
         |scenario| {
             scenario.evidence_on(&scenario.work).as_deref()
                 == Some("after a write held past its deadline")
@@ -598,11 +772,141 @@ fn a_linear_destination_lands_current_values_after_each_way_a_call_fails() {
         "the cancelled attempt does not name the call it cancelled: {:?}",
         cancelled.records
     );
-    assert_eq!(scenario.linear.state_of(&scenario.work), "Done");
+    assert_eq!(scenario.linear.state_of(&scenario.work), "Needs Attention");
+    assert_eq!(
+        cancelled.resolutions(),
+        1,
+        "the cancelled store must be rebuilt"
+    );
+    assert_eq!(scenario.world.store_asked("initialize"), opened + 2);
     scenario.finish();
 }
 
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+/// Valid configuration changes take effect on the next attempt. Rewriting the same
+/// resolved content, even with different comments, retains the rebuilt store.
+#[test]
+fn valid_configuration_edits_rebuild_only_when_resolved_content_changes() {
+    let mut states = STATES.to_vec();
+    states.push(("Needs Attention", "unstarted"));
+    states.push(("Finished", "completed"));
+    let scenario = launched_configured("configuration-content", &[], &states, true);
+    let opened = scenario.world.store_asked("initialize");
+    let document = scenario.launch.join("onetaskgraph.yaml");
+    let original = std::fs::read_to_string(&document).expect("the original mapping");
+    let changed = original.replace(
+        "{ task: Done,            project: Completed }",
+        "{ task: Finished,        project: Completed }",
+    );
+    assert_ne!(
+        changed, original,
+        "the mapping edit must change resolved content"
+    );
+    std::fs::write(&document, &changed).expect("a valid mapping edit");
+    let changed_attempt = scenario.replied(
+        "the edited mapping to take effect",
+        &settle("done", "under the edited mapping"),
+        |scenario| {
+            scenario.evidence_on(&scenario.work).as_deref() == Some("under the edited mapping")
+        },
+    );
+    assert_eq!(outcomes(&changed_attempt), ["projected"]);
+    assert_eq!(scenario.linear.state_of(&scenario.work), "Finished");
+    assert_eq!(changed_attempt.resolutions(), 1);
+    assert_eq!(scenario.world.store_asked("initialize"), opened + 1);
+    std::fs::write(
+        &document,
+        format!("# A comment changes the file, not its configuration.\n{changed}"),
+    )
+    .expect("rewrite the same resolved content");
+    let unchanged_attempt = scenario.replied(
+        "the unchanged configuration to reuse its store",
+        &settle("failed", "under unchanged resolved content"),
+        |scenario| {
+            scenario.evidence_on(&scenario.work).as_deref()
+                == Some("under unchanged resolved content")
+        },
+    );
+    assert_eq!(outcomes(&unchanged_attempt), ["projected"]);
+    assert_eq!(scenario.linear.state_of(&scenario.work), "Needs Attention");
+    assert_eq!(unchanged_attempt.resolutions(), 0);
+    assert_eq!(scenario.world.store_asked("initialize"), opened + 1);
+    scenario.finish();
+}
+
+/// A real filesystem read stalled at a FIFO cannot hold the retained worker past its
+/// configuration deadline. Its next attempt starts new sources and lands the current snapshot.
+#[cfg(unix)]
+#[test]
+fn a_retained_stores_blocked_configuration_read_is_bounded_and_rebuilt() {
+    let mut states = STATES.to_vec();
+    states.push(("Needs Attention", "unstarted"));
+    let scenario = launched_configured("configuration-read-deadline", &[], &states, true);
+    let opened = scenario.world.store_asked("initialize");
+    let document = scenario.launch.join("onetaskgraph.yaml");
+    let configured = std::fs::read_to_string(&document).expect("readable configuration");
+    std::fs::remove_file(&document).expect("replace configuration with a FIFO");
+    assert!(std::process::Command::new("mkfifo")
+        .arg(&document)
+        .status()
+        .expect("create the filesystem FIFO")
+        .success());
+    let sent = scenario.linear.log().len();
+    let recorded = scenario.records().len();
+    scenario.reply(&settle("done", "after a blocked configuration read"));
+    let (opened_fifo, received) = std::sync::mpsc::channel();
+    let fifo = document.clone();
+    let writer = std::thread::spawn(move || {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(fifo)
+            .expect("the configuration reader meets the FIFO writer");
+        let _ = opened_fifo.send(file);
+    });
+    let held = received
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the retained-store validation must open the FIFO");
+    writer.join().expect("the writer thread finished");
+    scenario.until("the configuration read deadline", |scenario| {
+        scenario.records()[recorded..].iter().any(|record| {
+            record["outcome"] == "failed"
+                && record["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("store-open exceeded 60 seconds"))
+        })
+    });
+    assert_eq!(
+        scenario.linear.log().len(),
+        sent,
+        "a blocked configuration reached Linear"
+    );
+    std::fs::remove_file(&document).expect("withdraw the FIFO");
+    std::fs::write(&document, configured).expect("restore the readable configuration");
+    drop(held);
+    let repaired = scenario.replied(
+        "the configuration deadline recovery",
+        &note("readable again"),
+        |scenario| {
+            scenario.evidence_on(&scenario.work).as_deref()
+                == Some("after a blocked configuration read")
+                && scenario.linear.state_of(&scenario.work) == "Done"
+        },
+    );
+    assert!(
+        !repaired.records.is_empty()
+            && outcomes(&repaired)
+                .iter()
+                .all(|outcome| *outcome == "projected"),
+        "every recovery snapshot must land: {:?}",
+        repaired.records
+    );
+    assert_eq!(
+        repaired.resolutions(),
+        1,
+        "the timed-out validation must discard the store"
+    );
+    assert_eq!(scenario.world.store_asked("initialize"), opened + 1);
+    scenario.finish();
+}
 
 fn outcomes(spent: &Spent) -> Vec<&str> {
     spent
@@ -611,3 +915,251 @@ fn outcomes(spent: &Spent) -> Vec<&str> {
         .filter_map(|record| record["outcome"].as_str())
         .collect()
 }
+
+/// A plugin-agnostic command-end failure or cancellation discards the store, including its
+/// Linear resolution cache. Every subsequent attempt lands its current values on a new source.
+#[test]
+fn command_end_refusal_and_timeout_rebuild_the_workers_store() {
+    let mut states = STATES.to_vec();
+    states.push(("Needs Attention", "started"));
+    let scenario = launched_configured("command-end-recovery", &[], &states, true);
+    let opened = || scenario.world.store_asked("initialize");
+    let before = opened();
+    scenario.world.store_refuses_once(
+        "end_command",
+        &json!({"kind":"refused", "message":"command snapshot refused"}),
+    );
+    let refused = scenario.replied(
+        "the command-end refusal to be reported",
+        &settle("done", "before command-end refusal"),
+        |scenario| {
+            std::fs::read_to_string(scenario.world.run_file(&scenario.run, "driver.log")).is_ok_and(
+                |log| {
+                    log.contains("end-command failed") && log.contains("command snapshot refused")
+                },
+            )
+        },
+    );
+    assert_eq!(outcomes(&refused), ["projected"]);
+    assert!(refused.records[0]["reason"].is_null());
+    assert!(refused.records[0]["class"].is_null());
+    let recovered = scenario.replied(
+        "the change after command-end refusal to land",
+        &settle("failed", "after command-end refusal"),
+        |scenario| {
+            scenario.evidence_on(&scenario.work).as_deref() == Some("after command-end refusal")
+        },
+    );
+    assert_eq!(outcomes(&recovered), ["projected"]);
+    assert_eq!(recovered.resolutions(), 1);
+    assert_eq!(
+        opened(),
+        before + 1,
+        "the boundary source must also be rebuilt"
+    );
+
+    scenario
+        .linear
+        .fail_next(Operation::IssueUpdate, Fault::Refuse);
+    scenario.world.store_refuses_once(
+        "end_command",
+        &json!({"kind":"unavailable", "message":"ending after a refused write"}),
+    );
+    let failed_write = scenario.replied(
+        "a failed write and command end to be reported independently",
+        &settle("done", "a refused write before failed command end"),
+        |scenario| {
+            std::fs::read_to_string(scenario.world.run_file(&scenario.run, "driver.log"))
+                .is_ok_and(|log| log.contains("ending after a refused write"))
+        },
+    );
+    assert_eq!(outcomes(&failed_write), ["failed"]);
+    assert_eq!(failed_write.records[0]["class"], "refused");
+    assert!(failed_write.records[0]["reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("task-update") && !reason.contains("end-command")));
+    let recovered = scenario.replied(
+        "the values after the failed write to reach a rebuilt store",
+        &note("after the write and command end both failed"),
+        |scenario| {
+            scenario.evidence_on(&scenario.work).as_deref()
+                == Some("a refused write before failed command end")
+        },
+    );
+    assert_eq!(outcomes(&recovered), ["projected"]);
+    assert_eq!(recovered.resolutions(), 1);
+    assert_eq!(opened(), before + 2);
+
+    let hold_name = format!("{}.end_command", crate::harness::SCRIPTED_KEY);
+    let meeting = scenario.world.rendezvous(&hold_name);
+    let recorded = scenario.records().len();
+    scenario.reply(&settle("failed", "before command-end deadline"));
+    let held = meeting.arrived();
+    scenario.until("the command-end deadline to be reported", |scenario| {
+        std::fs::read_to_string(scenario.world.run_file(&scenario.run, "driver.log"))
+            .is_ok_and(|log| log.contains("end-command exceeded"))
+            && scenario.records().len() > recorded
+    });
+    let cancelled = &scenario.records()[recorded..];
+    assert_eq!(cancelled.len(), 1);
+    assert_eq!(cancelled[0]["outcome"], "projected");
+    assert!(cancelled[0]["reason"].is_null());
+    scenario.world.unscript(&format!("{hold_name}.rendezvous"));
+    held.release();
+    scenario.at_rest("the command-end deadline");
+    let before = opened();
+    let recovered = scenario.replied(
+        "the change after command-end cancellation to land",
+        &settle("done", "after command-end deadline"),
+        |scenario| {
+            scenario.evidence_on(&scenario.work).as_deref() == Some("after command-end deadline")
+        },
+    );
+    assert_eq!(outcomes(&recovered), ["projected"]);
+    assert_eq!(recovered.resolutions(), 1);
+    assert_eq!(opened(), before + 1);
+    scenario.finish();
+}
+
+/// A reused GitHub Projects source must release its command snapshot: a metadata-only
+/// settlement keeps both a person's new body and a Status move made since the previous one.
+#[test]
+fn a_reused_github_store_keeps_body_edits_and_status_moves_between_settlements() {
+    struct Endpoint(std::process::Child);
+    impl Drop for Endpoint {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let world = World::new("github-command-boundary")
+        .with_env("ONEPIPELINE_LOOPBACK_BOARD_TOKEN", "loopback-token");
+    world.script("anchor.wait", "hold");
+    let endpoint_dir = world.root.join("github-endpoint");
+    std::fs::create_dir_all(&endpoint_dir).expect("endpoint directory");
+    let _endpoint = Endpoint(
+        std::process::Command::new("python3")
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/github_loopback.py"))
+            .arg(&endpoint_dir)
+            .spawn()
+            .expect("loopback endpoint starts"),
+    );
+    world.until("the GitHub endpoint to listen", |_| {
+        endpoint_dir.join("endpoint").is_file()
+    });
+    let endpoint = std::fs::read_to_string(endpoint_dir.join("endpoint")).expect("endpoint URL");
+    let rejected = std::process::Command::new("python3").args(["-c", r#"
+import json, sys, urllib.request, urllib.error
+base = sys.argv[1]
+invalid = [
+    ("/graphql", [], {}),
+    ("/graphql", {"query": 1, "variables": {}}, {}),
+    ("/graphql", {"query": "query {}", "variables": []}, {}),
+    ("/human", {"body": "edit", "status": "Queued", "extra": True}, {}),
+    ("/human", {"body": 1, "status": "Queued"}, {}),
+    ("/human", {"body": "edit", "status": "Missing"}, {}),
+    ("/graphql", {"query": "mutation {updateIssue(input:$input){issue{id}}}",
+                  "variables": {"input": {"id": "missing", "body": "wrong"}}}, {}),
+    ("/graphql", {"query": "mutation {updateProjectV2ItemFieldValue(input:$input){projectV2Item{id}}}",
+                  "variables": {"input": {"projectId": "BOARD", "itemId": "ITEM-work", "fieldId": "STATUS",
+                                           "value": {"singleSelectOptionId": "Missing"}}}}, {}),
+    ("/graphql", {}, {"Content-Length": "262145"}),
+]
+for path, body, headers in invalid:
+    request = urllib.request.Request(base + path, data=json.dumps(body).encode(), headers=headers)
+    try:
+        urllib.request.urlopen(request).read()
+    except urllib.error.HTTPError as error:
+        assert error.code == 400, error.code
+    else:
+        raise AssertionError("invalid input was accepted")
+def graphql(query, variables):
+    request = urllib.request.Request(base + "/graphql", data=json.dumps({"query":query,"variables":variables}).encode())
+    return json.loads(urllib.request.urlopen(request).read())["data"]
+mutation = "mutation {updateIssue(input:$input){issue{id}}}"
+graphql(mutation, {"input":{"id":"work","title":"edited title"}})
+assert graphql("query {node(id:$id){id}}", {"id":"work"})["node"]["title"] == "edited title"
+graphql(mutation, {"input":{"id":"work","title":"work"}})
+"#, &endpoint]).status().expect("invalid requests reach the loopback boundary");
+    assert!(
+        rejected.success(),
+        "the loopback must refuse malformed requests before a valid run"
+    );
+    let launch = world.root.join("github-launch");
+    std::fs::create_dir_all(&launch).expect("launch directory");
+    std::fs::write(launch.join("onetaskgraph.yaml"), format!(
+        "sources:\n  board:\n    plugin: github-projects\n    config:\n      owner: generic\n      project_number: 1\n      token_env: ONEPIPELINE_LOOPBACK_BOARD_TOKEN\n      endpoint: {endpoint}/graphql\n      status_mapping:\n        todo: Todo\n        queued: Queued\n        in-progress: In Progress\n        unknown: Needs Attention\n        done: Done\n        cancelled: Canceled\n"
+    )).expect("store configuration");
+    let started = from_the_launch_directory(&world, &launch, &["start", "board:plan", "--detach"]);
+    world.run_on(started, "start --detach").exited(0);
+    let run = "github-edits";
+    let read = || -> Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(endpoint_dir.join("state.json")).expect("endpoint state"),
+        )
+        .expect("endpoint JSON")
+    };
+    world.until("the launch projections", |_| {
+        read()["issues"]["anchor"]["status"] == "In Progress"
+    });
+    let reply = |commands: Vec<Value>, evidence| {
+        world
+            .run_with_stdin(
+                &["reply", run],
+                &json!({"version": 2, "commands": commands}).to_string(),
+            )
+            .exited(0);
+        world.until("the settlement metadata to land", |_| {
+            read()["issues"]["work"]["body"]
+                .as_str()
+                .is_some_and(|body| body.contains(evidence))
+        });
+        world.until("the projection record to land", |world| {
+            std::fs::read_to_string(
+                world.run_file(run, onepipeline::cli::WRITEBACK_PROJECTIONS_FILE),
+            )
+            .is_ok_and(|text| {
+                text.lines()
+                    .last()
+                    .is_some_and(|line| line.contains("projected"))
+            })
+        });
+        std::thread::sleep(Duration::from_millis(1500));
+    };
+    reply(
+        vec![settle("failed", "first board settlement")],
+        "first board settlement",
+    );
+    let body = read()["issues"]["work"]["body"]
+        .as_str()
+        .expect("body")
+        .to_owned();
+    let edited = format!("A person's edit above the task.\n{body}");
+    let human = std::process::Command::new("python3").args(["-c",
+        "import sys, urllib.request; urllib.request.urlopen(urllib.request.Request(sys.argv[1], data=sys.argv[2].encode(), headers={'Content-Type':'application/json'})).read()",
+        &format!("{endpoint}/human"), &json!({"body": edited, "status": "Queued"}).to_string()
+    ]).status().expect("person's edit reaches the endpoint");
+    assert!(human.success());
+    let mut second = settle("done", "second board settlement");
+    second["id"] = json!("other");
+    let mut work_note = note("a note beside the second board settlement");
+    work_note["id"] = json!("work");
+    reply(
+        vec![second, work_note],
+        "a note beside the second board settlement",
+    );
+    let current = read();
+    assert!(
+        current["issues"]["work"]["body"]
+            .as_str()
+            .is_some_and(|body| body.starts_with("A person's edit above the task.")),
+        "{current}"
+    );
+    assert_eq!(current["issues"]["work"]["status"], "Queued", "{current}");
+    world.release("anchor.go");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+}
+
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

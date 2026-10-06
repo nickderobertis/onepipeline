@@ -19,9 +19,8 @@ fi
 journey='linear_writeback::consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_their_own_attempt'
 # llmlint: ignore-block[changed_behavior_has_e2e] the real invocation — this line through `just` and
 # nextest to the journey's result file — is the budget check itself, `just budgets`, which errs
-# rather than reports when the filter selects nothing or the result never arrives; it joins
-# `check` together with the write-back's store reuse, by the planner's ruling, because until
-# then the measurement is over its threshold. A test running it inside the suite would run the
+# rather than reports when the filter selects nothing or the result never arrives; `gate`
+# checks its reported value against the budget. A test running it inside the suite would run the
 # whole journey a second time per gate. `tests/budgets.rs` holds everything around it: the exact
 # invocation, the journey it names, the refusals, and the checker parsing the journey's result.
 just test-e2e "test(=${journey})" >&2

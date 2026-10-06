@@ -98,7 +98,13 @@ fn a_run_whose_first_update_is_held(
         nodes.push(agent(&format!("later{behind}"), &["work"]));
     }
     let project = world.plan(run, &plan_of(run, nodes));
-    let meeting = world.store_holds(UPDATE);
+    // Single-item adoption journeys hold successive updates on the retained source;
+    // the many-item journey holds only its first write and then withdraws that hold.
+    let meeting = if items == 1 {
+        world.rendezvous(&format!("{SCRIPTED_KEY}.{UPDATE}"))
+    } else {
+        world.store_holds(UPDATE)
+    };
     let world = world
         .through_scripted_source()
         // The held node has to outlast the write this journey is measuring, and what
@@ -444,6 +450,24 @@ fn a_creating_copy_held_past_a_tiny_budget_is_cancelled_and_the_next_attempt_cre
     assert!(
         log.contains(&format!("write-back failed for '{project}': {expected}")),
         "the refusal is not the line an operator reads:\n{log}"
+    );
+
+    let record =
+        std::fs::read_to_string(world.run_file(run, onepipeline::cli::WRITEBACK_PROJECTIONS_FILE))
+            .expect("projection records")
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|record| {
+                record["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains(&expected))
+            })
+            .expect("the cancelled copy's record");
+    assert!(
+        record["duration_ms"]
+            .as_u64()
+            .is_some_and(|millis| millis < (floor + items + 5) * 1000),
+        "a cancelled copy spent another command deadline before being recorded: {record}"
     );
 
     // The write the cancelled copy was held at is let go, and nothing it carried lands.

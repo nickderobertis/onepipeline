@@ -32,7 +32,7 @@ set positional-arguments := true
 # release into this clone's own build directory, never onto `PATH`, and
 # `tests/linked_engines.rs` fails if this line ever names a release other than the one
 # the lock links.
-onetaskgraph-version := "0.3.0"
+onetaskgraph-version := "0.3.1"
 onetaskgraph-root := justfile_directory() / "target" / "tools" / ("onetaskgraph-" + onetaskgraph-version)
 
 # The budget checker `budgets.yaml` is measured with (`just budgets`), installed at this
@@ -176,7 +176,7 @@ check-cross: fmt-check lint test-quick
 # scoped to what this branch changed. `check` stays offline and credential-free;
 # this is where the non-deterministic tier joins it.
 # Full gate: `check` plus the diff-scoped llmlint tier.
-gate base="origin/main": check
+gate base="origin/main": check budgets
     @just lint-llm-diff "{{base}}"
     @echo "gate: ok"
 
@@ -460,9 +460,7 @@ deps-check:
 # llmlint: ignore-block[changed_behavior_has_e2e] driven by running it: its measurement runs a
 # whole e2e journey, which a test inside the suite would run a second time per gate, and
 # `tests/budgets.rs` holds the file, the result and the command it checks.
-# Offline: the Linear budget's journey runs against a loopback endpoint. Not yet part of
-# `check`: until the write-back keeps one store for a run, every Linear settlement attempt
-# resolves the team's states again and costs three requests, which the threshold of two refuses.
+# Offline: the Linear budget journey runs against a loopback endpoint in the gate.
 # Measure every budget in budgets.yaml against its threshold.
 budgets:
     @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
