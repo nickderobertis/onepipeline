@@ -1,5 +1,6 @@
 //! Every command envelope the reconciler claims is answered — applied, or refused
-//! by name — and a superseded human action has a recorded way out.
+//! by name — a superseded human action has a recorded way out, and a waiting one
+//! can be given prerequisites it must then wait for.
 //!
 //! `onepipeline reply` refuses a command this build cannot decode before anything
 //! is queued. The bus does not: the planner channel's layout reads only each
@@ -647,3 +648,231 @@ fn an_undecodable_envelope_arriving_while_the_driver_is_leaving_is_answered_befo
     );
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// Each node's status in a run's `result.json`, by id.
+fn statuses(world: &World, run: &str) -> std::collections::BTreeMap<String, Value> {
+    world.run_json(run, "result.json")["nodes"]
+        .as_array()
+        .expect("the result lists nodes")
+        .iter()
+        .map(|node| {
+            (
+                node["id"].as_str().expect("a node id").to_string(),
+                node["status"].clone(),
+            )
+        })
+        .collect()
+}
+
+/// The edges one `edit-committed` record moved, as `(kind, from, to)`.
+fn moved_edges(committed: &Value) -> Vec<(String, String, String)> {
+    committed["payload"]["operations"]
+        .as_array()
+        .expect("the operations it compiled to")
+        .iter()
+        .filter(|operation| {
+            operation["kind"] == "edge-added" || operation["kind"] == "edge-removed"
+        })
+        .map(|operation| {
+            let word = |field: &str| operation[field].as_str().unwrap_or_default().to_string();
+            (word("kind"), word("from"), word("to"))
+        })
+        .collect()
+}
+
+/// `status` reads the run paused on its approval, and `results`
+/// names the action to take.
+fn awaits_approval(world: &World, run: &str) {
+    world.run(&["status", run]).exited(0).out_has(&format!(
+        "complete the waiting human action approve with: onepipeline attest {run} approve"
+    ));
+    world
+        .run(&["results", run])
+        .exited(0)
+        .out_has("      action: Do approve, which only a person can do.\n");
+}
+
+/// A waiting approval is given a prerequisite it must now come after: `reply`
+/// reparents it onto work that has not run, and it stops being an attestation to
+/// make — `status` names no action for it, `attest` is refused, and its dependent
+/// stays held — until that work settles `done`, when it waits again, is attested,
+/// and releases its dependent.
+#[test]
+fn a_waiting_approval_reparented_onto_unfinished_work_waits_for_it_again() {
+    let world = World::new("reparent-approval");
+    let run = "regate";
+    paused(
+        &world,
+        run,
+        vec![
+            agent("build", &[]),
+            human("approve", &["build"]),
+            agent("ship", &["approve"]),
+        ],
+        &[],
+    );
+    awaits_approval(&world, run);
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 3, "commands": [
+                {"op": "add", "node": agent("docs", &[])},
+                {"op": "reparent", "id": "approve", "deps": ["build", "docs"]}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    let committed = world.events_of(run, "edit-committed");
+    let [_, committed] = &committed[..] else {
+        panic!("each command is its own edit committed: {committed:?}");
+    };
+    assert_eq!(
+        committed["payload"]["command"],
+        json!({"op": "reparent", "id": "approve", "deps": ["build", "docs"]})
+    );
+    let edge = |kind: &str, from: &str| (kind.to_string(), from.to_string(), "approve".to_string());
+    assert_eq!(
+        moved_edges(committed),
+        [
+            edge("edge-removed", "build"),
+            edge("edge-added", "build"),
+            edge("edge-added", "docs"),
+        ]
+    );
+
+    // Re-gated behind `docs`: no view offers the approval as an attestation.
+    for view in ["status", "results"] {
+        let read = world.run(&[view, run]);
+        read.exited(0);
+        assert!(
+            !read.stdout.contains("action:") && !read.stdout.contains("attest regate approve"),
+            "`{view}` still offers the attestation:\n{}",
+            read.stdout
+        );
+    }
+    world
+        .run(&["attest", run, "approve"])
+        .exited(REFUSED)
+        .err_has("attest: 'approve' is not a ready, waiting human action");
+    assert!(world.events_of(run, "human-attested").is_empty());
+
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"awaiting-planner\"");
+    let read = statuses(&world, run);
+    assert_eq!(read["docs"], json!("done"));
+    assert_eq!(read["approve"], json!("waiting"));
+    assert_eq!(read["ship"], json!("blocked"));
+    // Waiting again only once `docs` had settled, and never dispatched.
+    let settled: Vec<(String, String)> = world
+        .events_of(run, "node-settled")
+        .iter()
+        .map(|event| {
+            (
+                event["labels"]["node"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                event["payload"]["status"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+        .collect();
+    let at = |node: &str, status: &str| {
+        settled
+            .iter()
+            .rposition(|entry| *entry == (node.to_string(), status.to_string()))
+            .unwrap_or_else(|| panic!("{node} never settled {status}: {settled:?}"))
+    };
+    assert!(at("docs", "done") < at("approve", "waiting"), "{settled:?}");
+    awaits_approval(&world, run);
+
+    world.run(&["attest", run, "approve"]).exited(0);
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+    assert!(statuses(&world, run)
+        .values()
+        .all(|status| status == "done"));
+}
+
+/// An envelope that attests a waiting approval and then reparents it is refused
+/// whole — by `reply` before anything is queued, and by the reconciler when the
+/// bus queues it anyway — because the attestation makes it an approval that has
+/// happened. The reconciler takes a reparent of the approval while it still waits.
+#[test]
+fn an_envelope_attesting_an_approval_then_reparenting_it_is_refused_whole() {
+    let world = World::new("attest-then-reparent");
+    let run = "attested";
+    paused(
+        &world,
+        run,
+        vec![
+            agent("build", &[]),
+            human("approve", &["build"]),
+            agent("ship", &["approve"]),
+        ],
+        &[],
+    );
+    let envelope = json!({"version": 3, "commands": [
+        {"op": "attest", "ref": "approve"},
+        {"op": "reparent", "id": "approve", "deps": ["build"]}
+    ]});
+
+    world
+        .run_with_stdin(&["reply", run], &envelope.to_string())
+        .exited(REFUSED)
+        .err_has("reparent: node 'approve' has already started");
+    assert!(world.events_of(run, "edit-committed").is_empty());
+    assert!(world.events_of(run, "human-attested").is_empty());
+
+    sent_through_the_bus(&world, run, &envelope);
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"awaiting-planner\"");
+    let outcomes = world.command_outcomes(run);
+    let [refused] = &outcomes[..] else {
+        panic!("the envelope was not answered once: {outcomes:?}");
+    };
+    assert_eq!(refused["applied"], json!(false), "{refused}");
+    assert!(
+        refused["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("reparent: node 'approve' has already started")),
+        "{refused}"
+    );
+    assert!(world.events_of(run, "edit-committed").is_empty());
+    assert!(world.events_of(run, "human-attested").is_empty());
+    assert_eq!(statuses(&world, run)["approve"], json!("waiting"));
+    assert_eq!(statuses(&world, run)["ship"], json!("blocked"));
+
+    // Still waiting and unattested, so the reconciler reparents it.
+    sent_through_the_bus(
+        &world,
+        run,
+        &json!({"version": 3, "commands": [
+            {"op": "add", "node": agent("docs", &[])},
+            {"op": "reparent", "id": "approve", "deps": ["build", "docs"]}
+        ]}),
+    );
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"awaiting-planner\"");
+    let applied = world
+        .command_outcomes(run)
+        .last()
+        .cloned()
+        .expect("answered");
+    assert_eq!(applied["applied"], json!(true), "{applied}");
+    let read = statuses(&world, run);
+    assert_eq!(read["docs"], json!("done"));
+    assert_eq!(read["approve"], json!("waiting"));
+    assert_eq!(read["ship"], json!("blocked"));
+}
