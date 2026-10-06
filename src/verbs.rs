@@ -1564,6 +1564,7 @@ pub fn template_check(
                 match role {
                     templates::Role::Task => crate::taskgraph::StoredKind::Task,
                     templates::Role::Document => crate::taskgraph::StoredKind::Document,
+                    templates::Role::Project => crate::taskgraph::StoredKind::Project,
                 },
             )?;
             let refused = |why: &str| Error::Refused(format!("item {id}: {why}"));

@@ -2084,6 +2084,190 @@ fn a_stored_document_is_checked_against_its_host_registered_document_template() 
         ));
 }
 
+/// [`REGISTRATION`], and a role-`project` name beside its two.
+const PROJECT_REGISTRATION: &str = "  plan-description:\n    \
+role: project\n    \
+description: A plan's own description, with its plan-level answers.\n";
+
+fn project_template(marker: &str) -> String {
+    format!(
+        "---\nonetaskgraph_template: 1\nvariables:\n  budget:\n    description: The \
+         plan's budget.\n    type: text\n---\n# The plan\n\nBudget: {{{{ budget }}}}\n\n\
+         <!-- {marker} -->\n"
+    )
+}
+
+#[test]
+fn a_host_registered_project_template_is_listed_rendered_into_a_project_and_checked() {
+    let world = World::new("templates-project");
+    let dir = world.project.clone();
+    let root = world.root.join("host");
+    write(
+        &root.join("templates.yaml"),
+        &format!("{REGISTRATION}{PROJECT_REGISTRATION}"),
+    );
+    let hosted = root.join("plan-description.md.j2");
+    write(&hosted, &project_template("first"));
+
+    // Listed with its role beside the task and document names, which keep theirs.
+    let listed = verb(&world, &dir, &root, &["list", "--json"]).whole();
+    let roles: Vec<(&str, &str)> = listed["templates"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|entry| {
+            (
+                entry["name"].as_str().unwrap(),
+                entry["role"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        roles,
+        [
+            (BUILT_IN, "task"),
+            ("design-doc", "document"),
+            ("follow-up", "task"),
+            ("plan-description", "project"),
+        ]
+    );
+    verb(&world, &dir, &root, &["list"])
+        .exited(0)
+        .out_has("plan-description [project] host ");
+
+    // Resolved to the loader document the released renderer creates a project from.
+    let resolved = verb(
+        &world,
+        &dir,
+        &root,
+        &["resolve", "plan-description", "--json"],
+    );
+    resolved.exited(0);
+    let loader = resolved.stdout.clone();
+    let stated = resolved.whole();
+    assert_eq!(stated["role"], json!("project"));
+    assert_eq!(stated["reference"], json!("onepipeline:plan-description"));
+    // A plan the store holds already, written as it is rather than rendered.
+    let (bare, _) = project(&world, "unrendered");
+    let answers = world.root.join("budget.answers.yaml");
+    write(&answers, "budget: forty dispatch-hours\n");
+    let made = otg(
+        &world,
+        &[
+            "project",
+            "create",
+            crate::harness::STORE_SOURCE,
+            "--id",
+            "budgeted",
+            "--title",
+            "A budgeted plan",
+            "--template-loader",
+            "-",
+            "--answers",
+            &text(&answers),
+            "--no-interactive",
+            "--json",
+        ],
+        Some(&loader),
+    )
+    .whole();
+    let id = made["items"][0]["id"]
+        .as_str()
+        .expect("a created project has an id")
+        .to_owned();
+    let file = PathBuf::from(
+        made["items"][0]["item"]["location"]["path"]
+            .as_str()
+            .expect("a local-md project has a path"),
+    );
+    let shown = otg(&world, &["project", "show", &id, "--json"], None).whole();
+    let content = shown["items"][0]["item"]["content"]
+        .as_str()
+        .expect("the project has a description");
+    assert!(
+        content.contains("Budget: forty dispatch-hours") && content.contains("<!-- first -->"),
+        "the description is the host template's rendering: {content}"
+    );
+
+    // Its rendering passes, with no criteria asked of it.
+    verb(&world, &dir, &root, &["check", "plan-description"])
+        .exited(0)
+        .out_has("template plan-description [project]: ok");
+    verb(
+        &world,
+        &dir,
+        &root,
+        &["check", "plan-description", "--item", &id],
+    )
+    .exited(0)
+    .out_has(&format!("item {id}: ok"));
+    let remedy = format!(
+        "onepipeline template resolve plan-description --json | onetaskgraph project render \
+         {id} --template-loader -"
+    );
+
+    // Hand-edited, it is refused naming the project's own regenerate.
+    let held = std::fs::read_to_string(&file).expect("the project's file");
+    write(&file, &held.replace("Budget: forty", "Budget: ninety"));
+    verb(
+        &world,
+        &dir,
+        &root,
+        &["check", "plan-description", "--item", &id],
+    )
+    .exited(REFUSED)
+    .err_has(RULE_BODY_CHANGED)
+    .err_has(&remedy);
+
+    // The remedy it names is one the released renderer runs, and clears the refusal.
+    otg(
+        &world,
+        &[
+            "project",
+            "render",
+            &id,
+            "--template-loader",
+            "-",
+            "--no-interactive",
+        ],
+        Some(&loader),
+    );
+    verb(
+        &world,
+        &dir,
+        &root,
+        &["check", "plan-description", "--item", &id],
+    )
+    .exited(0)
+    .out_has(&format!("item {id}: ok"));
+
+    // A changed template is refused the same way, naming both digests' remedy.
+    write(&hosted, &project_template("second"));
+    verb(
+        &world,
+        &dir,
+        &root,
+        &["check", "plan-description", "--item", &id],
+    )
+    .exited(REFUSED)
+    .err_has(RULE_TEMPLATE_CHANGED)
+    .err_has(&remedy);
+
+    // A project nothing rendered carries no provenance, and is told to render one.
+    verb(
+        &world,
+        &dir,
+        &root,
+        &["check", "plan-description", "--item", &bare],
+    )
+    .exited(REFUSED)
+    .err_has(RULE_NO_PROVENANCE)
+    .err_has(&format!(
+        "onepipeline template resolve plan-description --json | onetaskgraph project render \
+             {bare} --template-loader - --answers FILE"
+    ));
+}
+
 #[test]
 fn nothing_in_this_repository_ships_a_template_but_the_plan_task_base() {
     // The tree, and what `cargo package` publishes from it — the crate every other
