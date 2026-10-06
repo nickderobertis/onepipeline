@@ -296,9 +296,17 @@ impl Linear {
             let Ok(request) = serde_json::from_slice::<Value>(&body) else {
                 return;
             };
-            let query = request["query"].as_str().unwrap_or_default();
+            // A GraphQL request is a document and an object of variables, and nothing else is
+            // one this endpoint answers.
+            let (Some(query), Some(variables)) = (
+                request["query"].as_str(),
+                request["variables"]
+                    .as_object()
+                    .map(|v| Value::Object(v.clone())),
+            ) else {
+                return;
+            };
             let operation = Operation::of(query);
-            let variables = request["variables"].clone();
             let fault = {
                 let mut world = self.lock();
                 world.log.push(Request {
@@ -458,21 +466,32 @@ impl World {
                 return Err(format!("no workflow state {state}"));
             }
         }
+        // Every field judged before any is written, so a refused input changes nothing.
+        for (field, value) in input {
+            let valid = match (field.as_str(), value) {
+                ("stateId" | "description" | "title", Value::String(_)) => true,
+                // Linear's own scale: 0 for none, then 1 (urgent) to 4 (low).
+                ("priority", Value::Number(priority)) => {
+                    priority.as_u64().is_some_and(|priority| priority <= 4)
+                }
+                _ => false,
+            };
+            if !valid {
+                return Err(format!("the loopback writes no {field} of {value}"));
+            }
+        }
         let Some(issue) = self.issues.iter_mut().find(|held| held.id == id) else {
             return Err("Entity not found: Issue".to_owned());
         };
-        for (field, value) in input {
-            match (field.as_str(), value) {
-                ("stateId", Value::String(state)) => issue.state.clone_from(state),
-                ("description", Value::String(description)) => {
-                    issue.description.clone_from(description);
-                }
-                ("title", Value::String(title)) => issue.title.clone_from(title),
-                // Linear's own scale: 0 for none, then 1 (urgent) to 4 (low).
-                ("priority", Value::Number(priority))
-                    if priority.as_u64().is_some_and(|priority| priority <= 4) => {}
-                (other, value) => return Err(format!("the loopback writes no {other} of {value}")),
-            }
+        let text = |field: &str| input.get(field).and_then(Value::as_str).map(str::to_owned);
+        if let Some(state) = text("stateId") {
+            issue.state = state;
+        }
+        if let Some(description) = text("description") {
+            issue.description = description;
+        }
+        if let Some(title) = text("title") {
+            issue.title = title;
         }
         let issue = issue.clone();
         Ok(self.render(&issue))

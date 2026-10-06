@@ -335,6 +335,12 @@ fn mapped(outcome: &str) -> &'static str {
     }
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the two journeys below read a
+// plan out of a Linear project and write each settlement back through the linked Linear plugin,
+// exercising `taskgraph`, `writeback`, `edits` and `driver` together, so the crate is the
+// narrowest edge they can honestly sit behind — the grounds `mod multi_source` records in
+// `main.rs`. The second waits past the write-back's sixty-second floor by construction, as
+// `writeback_budget.rs`'s journeys do: a write held past its deadline cannot be observed sooner.
 /// Six consecutive settlements, each projected in an attempt of its own, each landing its own
 /// status and settlement record and never an earlier one's: the mutation Linear recorded for it
 /// carries that settlement's state and evidence, and the run's landed baseline says the same.
@@ -595,6 +601,8 @@ fn a_linear_destination_lands_current_values_after_each_way_a_call_fails() {
     assert_eq!(scenario.linear.state_of(&scenario.work), "Done");
     scenario.finish();
 }
+
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 fn outcomes(spent: &Spent) -> Vec<&str> {
     spent
