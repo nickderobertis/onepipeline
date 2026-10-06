@@ -880,18 +880,16 @@ onevcs-testing = "0.13.0"
 # lock's whole family to this one release, and fails as well if anything this
 # repository installs as an `onetaskgraph` binary names another.
 #
-# Moved for a plan spanning sources: this release routes an item to another source by
-# its `repositories` (`routes`), places a routed task in its home's member project, and
-# reads a home with its members (`include_members`); `src/taskgraph.rs` reads a plan
-# that way. It also carries the Linear plugin's `status_mapping`, which a write-back to
-# a Linear source needs.
-#
-# 0.2.58 because a plan read from a GitHub Projects source runs its project and
-# document text queries through this release's board search; `justfile`'s
-# `onetaskgraph-version` moves with it.
-onetaskgraph-core = "=0.2.58"
-onetaskgraph-plugin-api = "=0.2.58"
-onetaskgraph-local-md = "=0.2.58"
+# 0.3.0 because its `status_mapping` is one grammar, scoped by item kind, in both the
+# `github-projects` and `linear` plugins: a category maps to one name, or to a name per
+# kind (`{ task: …, project: … }`), so a Linear project is written its own project status
+# rather than an issue state's name. It is breaking for a store this engine embeds: a status
+# a source gives no name for, for that kind, is refused rather than guessed, and Linear no
+# longer reads or writes by state type, so a `linear` source with no mapping writes back no
+# status at all. `justfile`'s `onetaskgraph-version` moves with it.
+onetaskgraph-core = "=0.3.0"
+onetaskgraph-plugin-api = "=0.3.0"
+onetaskgraph-local-md = "=0.3.0"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
