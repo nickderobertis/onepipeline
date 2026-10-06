@@ -16,15 +16,16 @@ if [ -z "${ONEBUDGETSPEC_RESULT:-}" ]; then
   exit 2
 fi
 
-# llmlint: ignore[changed_behavior_has_e2e] the real invocation — this line through `just` and
+journey='linear_writeback::consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_their_own_attempt'
+# llmlint: ignore-block[changed_behavior_has_e2e] the real invocation — this line through `just` and
 # nextest to the journey's result file — is the budget check itself, `just budgets`, which errs
 # rather than reports when the filter selects nothing or the result never arrives; it joins
 # `check` together with the write-back's store reuse, by the planner's ruling, because until
 # then the measurement is over its threshold. A test running it inside the suite would run the
 # whole journey a second time per gate. `tests/budgets.rs` holds everything around it: the exact
 # invocation, the journey it names, the refusals, and the checker parsing the journey's result.
-journey='linear_writeback::consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_their_own_attempt'
 just test-e2e "test(=${journey})" >&2
+# llmlint: ignore-end[changed_behavior_has_e2e]
 
 if [ ! -s "$ONEBUDGETSPEC_RESULT" ]; then
   echo "the journey ${journey} wrote no result to ${ONEBUDGETSPEC_RESULT}: it writes one only when that variable reaches it, so check that nothing between this script and the test binary drops it, then re-run 'just budgets'" >&2

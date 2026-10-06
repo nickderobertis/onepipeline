@@ -133,7 +133,8 @@ struct World {
     held: bool,
 }
 
-/// The loopback endpoint, served for as long as this value lives.
+/// The loopback endpoint. Its listener serves until the test process ends, so a driver a journey
+/// left behind still finds it there.
 #[derive(Clone)]
 pub struct Linear {
     world: Arc<(Mutex<World>, Condvar)>,

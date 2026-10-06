@@ -129,10 +129,14 @@ _onetaskgraph-preflight:
 
 # The released `onebudgetspec` `just budgets` runs. Network, so it is installed by
 # `bootstrap` and only asked for by that recipe.
+# llmlint: ignore-block[changed_behavior_has_e2e] installing from crates.io needs the network,
+# which the offline tier may not reach, and it is the shape `_ensure-onetaskgraph` above has; the
+# release it installs is held to the checker library `tests/budgets.rs` links.
 _ensure-onebudgetspec:
     @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
       || cargo install onebudgetspec --locked --quiet --version {{onebudgetspec-version}} --root "{{onebudgetspec-root}}" \
       || { echo "onebudgetspec {{onebudgetspec-version}} could not be installed into {{onebudgetspec-root}}; 'just budgets' refuses without it" >&2; exit 1; }
+# llmlint: ignore-end[changed_behavior_has_e2e]
 
 # These are test runners, not rules: their version cannot change the gate's
 # verdict, so both here and CI take the latest rather than keeping two pins that
@@ -409,15 +413,6 @@ smoke-real:
 release-compat:
     @RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(release_channel) and not test(/^harness::/)'
 
-# Offline: the Linear budget's journey runs against a loopback endpoint. Not yet part of
-# `check`: until the write-back keeps one store for a run, every Linear settlement attempt
-# resolves the team's states again and costs three requests, which the threshold of two refuses.
-# Measure every budget in budgets.yaml against its threshold.
-budgets:
-    @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
-      || { echo "onebudgetspec {{onebudgetspec-version}} is not installed: run 'just bootstrap' (or 'just _ensure-onebudgetspec'), then re-run" >&2; exit 1; }
-    @"{{onebudgetspec-root}}/bin/onebudgetspec" check budgets.yaml
-
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`),
 # narrowed to the journeys a nextest filter names when one is given.
@@ -461,6 +456,19 @@ deps-check:
 # is this repository's documented index of its command surface. Read as prose each
 # one restates the name below it, which is what a one-line help string does;
 # deleting them empties the index rather than tightening it.
+
+# llmlint: ignore-block[changed_behavior_has_e2e] driven by running it: its measurement runs a
+# whole e2e journey, which a test inside the suite would run a second time per gate, and
+# `tests/budgets.rs` holds the file, the result and the command it checks.
+# Offline: the Linear budget's journey runs against a loopback endpoint. Not yet part of
+# `check`: until the write-back keeps one store for a run, every Linear settlement attempt
+# resolves the team's states again and costs three requests, which the threshold of two refuses.
+# Measure every budget in budgets.yaml against its threshold.
+budgets:
+    @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
+      || { echo "onebudgetspec {{onebudgetspec-version}} is not installed: run 'just bootstrap' (or 'just _ensure-onebudgetspec'), then re-run" >&2; exit 1; }
+    @"{{onebudgetspec-root}}/bin/onebudgetspec" check budgets.yaml
+# llmlint: ignore-end[changed_behavior_has_e2e]
 
 # Both are outside `check` for the reason `deps-check` is: they read the
 # crates.io index, and the deterministic gate stays offline. The split half of
