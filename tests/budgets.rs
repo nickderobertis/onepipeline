@@ -17,6 +17,9 @@ use onebudgetspec_core::{Direction, Measure, Selection, Verdict};
 
 const BUDGET: &str = "linear-requests-per-writeback-settlement";
 
+/// The journey the budget's command runs, which writes the measurement.
+const JOURNEY: &str = "linear_writeback::consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_their_own_attempt";
+
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -180,13 +183,44 @@ fn the_budget_command_reports_only_a_measurement_its_journey_took() {
         stderr(&silent)
     );
 
+    // The stand-in writes a result only when it was asked for exactly the journey that measures
+    // this budget, through the recipe that runs e2e journeys, with the result file reaching it.
     let measured = dir.join("measured.json");
     std::fs::write(&measured, "").expect("a fresh, empty result file");
     let wrote = command(
         "wrote",
-        "printf '{\"value\": 2}' > \"$ONEBUDGETSPEC_RESULT\"",
+        &format!(
+            "[ \"$1\" = test-e2e ] && [ \"$2\" = 'test(={JOURNEY})' ] && [ $# -eq 2 ] \\\n  \
+             && printf '{{\"value\": 2}}' > \"$ONEBUDGETSPEC_RESULT\""
+        ),
         Some(&measured),
     );
     assert_eq!(wrote.status.code(), Some(0), "{}", stderr(&wrote));
+    assert_eq!(
+        std::fs::read_to_string(&measured).expect("the result reads"),
+        r#"{"value": 2}"#
+    );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The journey the command asks for is one the e2e binary has: a filter naming a test that is
+/// not there would select nothing.
+#[test]
+fn the_budget_command_names_a_journey_the_e2e_binary_holds() {
+    let journeys = std::fs::read_to_string(root().join("tests/e2e/linear_writeback.rs"))
+        .expect("the journeys read");
+    let (module, name) = JOURNEY
+        .split_once("::")
+        .expect("a module-qualified journey");
+    assert_eq!(module, "linear_writeback");
+    assert!(
+        journeys.contains(&format!("#[test]\nfn {name}()")),
+        "tests/e2e/linear_writeback.rs holds no journey {name}"
+    );
+    let script = std::fs::read_to_string(root().join("scripts/linear-writeback-budget.sh"))
+        .expect("the command reads");
+    assert!(
+        script.contains(&format!("journey='{JOURNEY}'")),
+        "the command runs another journey than {JOURNEY}"
+    );
 }
