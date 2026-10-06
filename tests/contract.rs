@@ -7421,6 +7421,11 @@ const RULINGS: &[(&str, &str)] = &[
         "110.",
         "`\"preserve\"`, which keeps the node's work rather than landing it",
     ),
+    // ai-orchestrator#1508: a preserve node's session starts from a kept branch it depends on.
+    (
+        "112.",
+        "several select the candidate whose stacking chain contains every other candidate",
+    ),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
@@ -10032,6 +10037,69 @@ fn the_change_telemetry_document_in_the_contract_is_the_one_the_types_read_and_w
         assert!(
             refused.to_string().contains("not_a_field"),
             "{path}: {refused}"
+        );
+    }
+}
+
+#[test]
+fn preserve_stacking_amends_the_closeout_without_changing_its_schema() {
+    let block = divergence_block("112.");
+    assert_eq!(block["amends"], 110);
+    assert_eq!(block["schema_version"], PLAN_SCHEMA_VERSION);
+    let dependent: Node = serde_json::from_value(block["accepted"].clone()).unwrap();
+    let dependency: Node = serde_json::from_value(block["dependency"].clone()).unwrap();
+    assert_eq!(dependent.publish, Publish::Preserve);
+    assert_eq!(dependency.publish, Publish::Preserve);
+    assert_eq!(dependent.deps, vec![dependency.id]);
+    assert_eq!(dependent.repo, dependency.repo);
+    for value in block["landing_values"].as_array().unwrap() {
+        let mut node = block["accepted"].clone();
+        if value.is_null() {
+            node.as_object_mut().unwrap().remove("publish");
+        } else {
+            node["publish"] = value.clone();
+        }
+        let node: Node = serde_json::from_value(node).unwrap();
+        assert_eq!(node.publish, Publish::Land);
+    }
+    assert_eq!(block["fan_in_candidates"], json!(["H", "A"]));
+    let source = include_str!("../src/plan.rs");
+    for field in ["fan_in_reason", "base_conflict_reason"] {
+        assert!(source.contains(block[field].as_str().unwrap()));
+    }
+}
+
+#[test]
+fn preserve_stacking_prose_is_the_contract_at_every_documented_surface() {
+    fn passage(source: &str) -> String {
+        let normalized = source
+            .lines()
+            .map(|line| line.trim().strip_prefix("///").unwrap_or(line).trim())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let start = normalized
+            .find("A preserve node may depend on any number of preserve nodes;")
+            .unwrap();
+        let ending = "the dependent fails as `infrastructure-failure` before dispatch.";
+        let end = start + normalized[start..].find(ending).unwrap() + ending.len();
+        normalized[start..end].to_owned()
+    }
+    let canonical = passage(include_str!("../docs/contract.md"));
+    for (name, source) in [
+        ("README", include_str!("../README.md")),
+        (
+            "divergence record",
+            include_str!("../docs/contract-divergences.md"),
+        ),
+        ("publish docs", include_str!("../src/plan.rs")),
+    ] {
+        assert_eq!(
+            passage(source),
+            canonical,
+            "{name} drifted from the approved contract"
         );
     }
 }

@@ -1204,6 +1204,7 @@ fn converge(
     // fresh driver reads rather than inherits, and `report_holds` diffs the
     // answer against what the record already says.
     let mut workspaces = crate::pool::Workspaces::new();
+    let mut stacking = StackingPlacement::of(&state.graph);
     // The pool-maintenance schedule the launch named, if it named one: what
     // this driver sweeps on an idle pass, paced in memory and decided on disk by
     // the sibling's own stamps. A launch naming none starts nothing, ever.
@@ -1433,6 +1434,7 @@ fn converge(
             &paused,
             &releases,
             &mut workspaces,
+            &mut stacking,
             &notes_in_flight,
         )?;
         if started_here {
@@ -4268,6 +4270,99 @@ fn cancelled_by(command: &Command) -> Vec<String> {
     }
 }
 
+// Branch and resume pins change at settlement, but do not change placement.
+// Keeping only these fields distinguishes a live placement edit from a registry
+// changing underneath an already accepted graph, without serializing another contract.
+#[derive(PartialEq, Eq)]
+struct PlacementShape {
+    repo: Option<String>,
+    deps: Vec<String>,
+    publish: crate::plan::Publish,
+    base: Option<String>,
+}
+
+struct StackingPlacement {
+    shape: BTreeMap<String, PlacementShape>,
+    bases: std::result::Result<BTreeMap<String, String>, String>,
+}
+
+impl StackingPlacement {
+    fn shape(graph: &Graph) -> BTreeMap<String, PlacementShape> {
+        graph
+            .iter()
+            .filter(|node| node.publish == crate::plan::Publish::Preserve)
+            .map(|node| {
+                (
+                    node.id.clone(),
+                    PlacementShape {
+                        repo: node.repo.clone(),
+                        deps: node.deps.clone(),
+                        publish: node.publish,
+                        base: node.base_branch.clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn bases(graph: &Graph) -> std::result::Result<BTreeMap<String, String>, String> {
+        let nodes = graph.iter().map(|node| (node.id.as_str(), node)).collect();
+        crate::graph::stacking_bases(&nodes)
+            .map(|bases| {
+                bases
+                    .into_iter()
+                    .map(|(node, base)| (node.to_owned(), base.to_owned()))
+                    .collect()
+            })
+            .map_err(|refusal| refusal.message)
+    }
+
+    fn of(graph: &Graph) -> Self {
+        Self {
+            shape: Self::shape(graph),
+            bases: Self::bases(graph),
+        }
+    }
+
+    fn base_for(
+        &mut self,
+        graph: &Graph,
+        node: &str,
+    ) -> std::result::Result<Option<String>, String> {
+        let shape = Self::shape(graph);
+        if shape != self.shape {
+            *self = Self::of(graph);
+        }
+        let expected = self
+            .bases
+            .as_ref()
+            .map_err(Clone::clone)?
+            .get(node)
+            .cloned();
+        // A runtime refusal in another subtree cannot fail this node's placement.
+        let mut pending = vec![node];
+        let mut dependencies = BTreeMap::new();
+        while let Some(id) = pending.pop() {
+            if let Some(ancestor) = graph.get(id) {
+                if dependencies
+                    .insert(ancestor.id.as_str(), ancestor)
+                    .is_none()
+                {
+                    pending.extend(ancestor.deps.iter().map(String::as_str));
+                }
+            }
+        }
+        let now = crate::graph::stacking_bases(&dependencies)
+            .map_err(|refusal| refusal.message)?
+            .get(node)
+            .map(|base| (*base).to_owned());
+        if expected != now {
+            return Err(format!("node '{node}' preserve base changed from {expected:?} to {now:?} after load; repository identities changed before dispatch"));
+        }
+        Ok(now)
+    }
+}
+
 /// Start every node whose dependencies have settled, bounded by `concurrency`.
 ///
 /// The moment they settle: a node reaches this the same pass its last dependency
@@ -4295,6 +4390,7 @@ fn start_ready(
     paused: &BTreeSet<String>,
     releases: &crate::release::Watch,
     workspaces: &mut crate::pool::Workspaces,
+    stacking: &mut StackingPlacement,
     notes_in_flight: &DeliveriesInFlight,
 ) -> Result<bool> {
     // Nothing new starts once this run's shutdown has begun. Asked here rather
@@ -4325,7 +4421,7 @@ fn start_ready(
         .collect();
 
     let mut settled_here = false;
-    for node in actionable {
+    for mut node in actionable {
         if node.kind != NodeKind::Human && in_flight.len() >= concurrency {
             break;
         }
@@ -4350,6 +4446,31 @@ fn start_ready(
             )?;
             settled_here = true;
             continue;
+        }
+
+        // Placement is selected from the current graph, including retry replacements.
+        if node.publish == crate::plan::Publish::Preserve {
+            let placement = stacking.base_for(&state.graph, &node.id).and_then(|dependency| {
+                dependency.map(|dependency| state.branches.get(&dependency).cloned()
+                    .ok_or_else(|| format!("preserve base dependency '{dependency}' is done with no kept branch")))
+                    .transpose()
+            });
+            match placement {
+                Ok(Some(branch)) => node.base_branch = Some(branch),
+                Ok(None) => {}
+                Err(detail) => {
+                    settle(
+                        paths,
+                        journal,
+                        &Settlement {
+                            detail: Some(detail),
+                            ..failed(&node.id, INFRASTRUCTURE_FAILURE)
+                        },
+                    )?;
+                    settled_here = true;
+                    continue;
+                }
+            }
         }
 
         // A lifecycle node is asked for only where its identity has room for

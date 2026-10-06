@@ -103,6 +103,16 @@ pub(crate) fn depends_on_preserved(node: &str, dep: &str) -> String {
     )
 }
 
+/// Why independent kept branches cannot supply one session base.
+pub(crate) fn preserved_fan_in(node: &str, candidates: &[&str]) -> String {
+    format!("node '{node}' has preserve dependencies [{}] on separate stacking chains: a session starts from one kept branch and merging kept branches is not supported", candidates.join(", "))
+}
+
+/// Why explicit placement and inherited kept work cannot both select a base.
+pub(crate) fn preserved_base_conflict(node: &str) -> String {
+    format!("node '{node}' states base_branch and has a same-repository preserve dependency: those are two answers to where its session starts")
+}
+
 /// Name a node field that this plan schema introduced, so an older document's
 /// request cannot be accepted and silently ignored.
 pub(crate) fn node_field_is_newer(field: &str, declared: u32) -> String {
@@ -1409,9 +1419,33 @@ pub struct Node {
     /// and the node settles `done` with outcome `preserved`, naming the branch,
     /// the commit it stands at, and what the push found to do. Refused at load on
     /// a node that publishes nothing to keep — a direct node, a `kind: human`
-    /// node, an `expects_no_diff` node — beside `draft: true`, and on any node
-    /// that depends on one, since nothing a dependent built on it would ever
-    /// reach a base. A schema-3 field, refused by name below that version.
+    /// node, an `expects_no_diff` node — and beside `draft: true`.
+    ///
+    /// A preserve node may depend on any number of preserve nodes; a landing node (`publish` omitted
+    /// or `"land"`, including `draft: true`) depending on one is refused with `depends_on_preserved`
+    /// at load and every live edit. Among its same-repository in-run preserve dependencies, none
+    /// leaves placement unchanged, one is its base dependency, and several select the candidate whose
+    /// stacking chain contains every other candidate. A stacking parent is the node's own base
+    /// dependency: every link is a same-repository preserve dependency whose kept branch supplies the
+    /// session base. Ordering-only paths through another repository, landing work or a non-lifecycle
+    /// node never count as ancestry. Independent candidates are refused as a fan-in naming the node
+    /// and candidates: a session starts from one kept branch and merging kept branches is not
+    /// supported. A same-repository preserve dependency beside the node's own `base_branch` is
+    /// refused as two answers to where its session starts. At dispatch, `SessionRequest.base` is the
+    /// base dependency's settled kept `branch`, including a retry replacement's branch and when the
+    /// dependent continues its own branch through retry or resume; the dependent's new branch still
+    /// uses the branch template. A base dependency recorded `done` without a branch fails the
+    /// dependent as `infrastructure-failure`, naming the dependency, before any dispatch, without
+    /// falling back to the default base. Cross-repository preserve dependencies order only: the
+    /// dependent starts from its own repository's base and refers to the other repository's work.
+    /// Cross-DAG references are unchanged. Failed or skipped dependencies skip their dependents;
+    /// retry re-points them to the replacement, whose kept branch supplies their base.
+    /// Unequal repository spellings on a preserve edge must both resolve to readable identities or
+    /// the edge is refused at load and live edit, naming both spellings; equal spellings still denote
+    /// the same repository when identity lookup is unreadable. If dispatch-time identity resolution
+    /// changes the accepted base decision, the dependent fails as `infrastructure-failure` before
+    /// dispatch.
+    /// A schema-3 field, refused by name below that version.
     #[serde(default, skip_serializing_if = "Publish::is_land")]
     pub publish: Publish,
     /// The registered checkout the per-run clone is cut from.

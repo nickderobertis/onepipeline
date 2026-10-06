@@ -176,7 +176,7 @@ check-cross: fmt-check lint test-quick
 # scoped to what this branch changed. `check` stays offline and credential-free;
 # this is where the non-deterministic tier joins it.
 # Full gate: `check` plus the diff-scoped llmlint tier.
-gate base="origin/main": check budgets
+gate base="origin/main": check
     @just lint-llm-diff "{{base}}"
     @echo "gate: ok"
 
@@ -460,7 +460,8 @@ deps-check:
 # llmlint: ignore-block[changed_behavior_has_e2e] driven by running it: its measurement runs a
 # whole e2e journey, which a test inside the suite would run a second time per gate, and
 # `tests/budgets.rs` holds the file, the result and the command it checks.
-# Offline: the Linear budget journey runs against a loopback endpoint in the gate. Its command
+# Offline: the Linear budget journey runs against a loopback endpoint. `check` reaches this recipe
+# through the crate's `budgets` Nx target, after the tier that writes the stacked-spikes record. Its command
 # builds the e2e binary through `test-e2e`, so warnings are denied here as every gate build denies them.
 # Measure every budget in budgets.yaml against its threshold.
 budgets:

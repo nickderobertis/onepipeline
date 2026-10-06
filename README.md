@@ -287,8 +287,32 @@ settles `done` with outcome `change-draft`; its dependents proceed. A node decla
 nothing is published, its branch is put on the identity's origin with `onevcs
 preserve`, its session closes, and it settles `done` with outcome `preserved`, naming
 the branch, the commit it stands at and whether the push went anywhere (`pushed`,
-`already-on-origin` or `no-remote`) — and no node may depend on it. It costs no
-visibility either: a drafting dispatch that was configured, attempted, and produced
+`already-on-origin` or `no-remote`).
+
+A preserve node may depend on any number of preserve nodes; a landing node (`publish`
+omitted or `"land"`, including `draft: true`) depending on one is refused with
+`depends_on_preserved` at load and every live edit. Among its same-repository in-run
+preserve dependencies, none leaves placement unchanged, one is its base dependency, and
+several select the candidate whose stacking chain contains every other candidate. A
+stacking parent is the node's own base dependency: every link is a same-repository
+preserve dependency whose kept branch supplies the session base. Ordering-only paths
+through another repository, landing work or a non-lifecycle node never count as ancestry.
+Independent candidates are refused as a fan-in naming the node and candidates: a session
+starts from one kept branch and merging kept branches is not supported. A same-repository
+preserve dependency beside the node's own `base_branch` is refused as two answers to where
+its session starts. At dispatch, `SessionRequest.base` is the base dependency's settled
+kept `branch`, including a retry replacement's branch and when the dependent continues its
+own branch through retry or resume; the dependent's new branch still uses the branch
+template. A base dependency recorded `done` without a branch fails the dependent as
+`infrastructure-failure`, naming the dependency, before any dispatch, without falling back
+to the default base. Cross-repository preserve dependencies order only: the dependent
+starts from its own repository's base and refers to the other repository's work. Cross-DAG
+references are unchanged. Failed or skipped dependencies skip their dependents; retry
+re-points them to the replacement, whose kept branch supplies their base.
+
+Unequal repository spellings on a preserve edge must both resolve to readable identities or the edge is refused at load and live edit, naming both spellings; equal spellings still denote the same repository when identity lookup is unreadable. If dispatch-time identity resolution changes the accepted base decision, the dependent fails as `infrastructure-failure` before dispatch.
+
+It costs no visibility either: a drafting dispatch that was configured, attempted, and produced
 no body is recorded against the node under one of three endings — `dispatch-failed`
 for one that could not be run or ran without succeeding, `schema-refused` for one
 whose every answer the schema rejected, and `no-body` for one that answered inside

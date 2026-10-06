@@ -766,3 +766,1048 @@ fn the_loader_refuses_publish_below_schema_3_by_name() {
         );
     }
 }
+
+/// Check ancestry on the actual origin, rather than inferring it from settlements.
+fn descends(world: &World, origin: &Path, ancestor: &str, branch: &str) {
+    git(
+        world,
+        origin,
+        &["merge-base", "--is-ancestor", ancestor, branch],
+    );
+}
+
+#[test]
+fn stacked_spikes_fan_out_from_one_kept_harness() {
+    let world = World::new("stacked-spikes-stage");
+    let repo = world.repository("change-open", &[]);
+    std::fs::write(world.onevcs_home().join("workspaces.yml"),
+        "version: 1\nrules:\n  - match: {host: github.com, owner: owner, name: service}\n    pool: 0\n    overflow: 4\n").unwrap();
+    world.script("H.work", "shared measurement harness\n");
+    let mut nodes = vec![kept("H", &[])];
+    for id in ["A", "B", "C", "D"] {
+        world.script(&format!("{id}.requires-file"), "H.md");
+        world.script(&format!("{id}.work"), "area measurement\n");
+        world.script(&format!("{id}.wait"), "hold");
+        nodes.push(kept(id, &["H"]));
+    }
+    let path = world.plan("stacked-stage", &plan_of("stacked-stage", nodes));
+    world.run(&["plan", "check", &path]).exited(0);
+    world
+        .run(&[
+            "start",
+            &path,
+            "--detach",
+            "--branch-template",
+            "spikes/{{ node.id }}",
+        ])
+        .exited(0);
+    world.until("all four dependents to dispatch concurrently", |world| {
+        world.events_of("stacked-stage", "node-dispatched").len() == 5
+    });
+    world.until("all four dependent sessions to be open together", |world| {
+        let opened = world.events_of("stacked-stage", "session-opened");
+        ["A", "B", "C", "D"]
+            .iter()
+            .all(|id| opened.iter().any(|event| event["labels"]["node"] == *id))
+    });
+    let events = world.journal("stacked-stage");
+    let harness_settled = events
+        .iter()
+        .position(|event| event["kind"] == "node-settled" && event["labels"]["node"] == "H")
+        .unwrap();
+    for (index, event) in events.iter().enumerate() {
+        if event["kind"] == "node-dispatched" && event["labels"]["node"] != "H" {
+            assert!(index > harness_settled, "{events:?}");
+        }
+    }
+    for id in ["A", "B", "C", "D"] {
+        world.release(&format!("{id}.go"));
+    }
+    world.until("the fan-out run to settle", |world| {
+        world.run_file("stacked-stage", "result.json").is_file()
+    });
+    let result = world.run_json("stacked-stage", "result.json");
+    assert_eq!(result["state"], "complete", "{result}\n{}", world.dump());
+    let nodes = result["nodes"].as_array().unwrap();
+    let harness = nodes.iter().find(|node| node["id"] == "H").unwrap();
+    for node in nodes {
+        assert_eq!(node["outcome"], "preserved", "{node}");
+        let id = node["id"].as_str().unwrap();
+        assert_eq!(node["branch"], format!("spikes/{id}"));
+        assert_eq!(
+            origin_tip(&repo.origin, node["branch"].as_str().unwrap()).as_deref(),
+            node["head"].as_str()
+        );
+        if id != "H" {
+            descends(
+                &world,
+                &repo.origin,
+                harness["head"].as_str().unwrap(),
+                node["branch"].as_str().unwrap(),
+            );
+        }
+    }
+    assert_eq!(
+        repo.base_commits(&world),
+        vec!["chore: seed the repository"]
+    );
+    assert!(world.changes_opened().is_empty());
+    let timing = world.run(&["telemetry", "stacked-stage"]);
+    timing.exited(0);
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/budget-records");
+    std::fs::create_dir_all(&directory).unwrap();
+    let telemetry: onepipeline::views::RunTelemetry = serde_json::from_str(&timing.stdout).unwrap();
+    std::fs::write(directory.join("stacked-spikes-stage.json"), &timing.stdout).unwrap();
+    let result_file = world.root.join("budget-result.json");
+    let reported = budget_report(Path::new(env!("CARGO_MANIFEST_DIR")), &result_file);
+    assert!(
+        reported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reported.stderr)
+    );
+    let result: Value = serde_json::from_slice(&std::fs::read(result_file).unwrap()).unwrap();
+    assert_eq!(result["value"], telemetry.wall_ms as f64 / 1000.0);
+    assert!(result["detail"]
+        .as_str()
+        .unwrap()
+        .contains(&telemetry.run_id));
+}
+
+#[test]
+fn a_stacking_chain_selects_the_descendant_and_an_empty_dependent_fails() {
+    let world = World::new("stacked-chain");
+    let repo = world.repository("local-direct", &[]);
+    for id in ["H", "A", "B"] {
+        world.script(&format!("{id}.work"), "measurement\n");
+    }
+    world.script("A.requires-file", "H.md");
+    world.script("B.requires-file", "A.md");
+    let path = world.plan(
+        "chain",
+        &plan_of(
+            "chain",
+            vec![
+                kept("H", &[]),
+                kept("A", &["H"]),
+                kept("B", &["H", "A"]),
+                kept("empty", &["B"]),
+            ],
+        ),
+    );
+    world.run(&["start", &path, "--attach"]).settled();
+    let result = world.run_json("chain", "result.json");
+    let nodes = result["nodes"].as_array().unwrap();
+    let node = |id| nodes.iter().find(|node| node["id"] == id).unwrap();
+    for id in ["H", "A"] {
+        descends(
+            &world,
+            &repo.origin,
+            node(id)["head"].as_str().unwrap(),
+            node("B")["branch"].as_str().unwrap(),
+        );
+    }
+    assert_eq!(node("empty")["status"], "failed", "{result}");
+    assert_eq!(node("empty")["outcome"], "empty-branch", "{result}");
+}
+
+#[test]
+fn separate_stacking_chains_and_an_explicit_base_are_refused() {
+    let world = World::new("stacked-refusals");
+    world.repository("local-direct", &[]);
+    world.extra_repository("other");
+    for mixed in [false, true] {
+        let mut nodes = vec![kept("H", &[])];
+        if mixed {
+            let mut x = kept("X", &["H"]);
+            x["repo"] = json!("other");
+            nodes.push(x);
+        }
+        nodes.push(kept("A", if mixed { &["X"] } else { &[] }));
+        nodes.push(kept("D", &["H", "A"]));
+        let refusal = refused_by_check(
+            &world,
+            if mixed { "mixed" } else { "independent" },
+            &plan_of("fan-in", nodes),
+        );
+        let reason = refusal["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("H")
+                && reason.contains("A")
+                && reason.contains("node 'D'")
+                && reason.contains("merging kept branches is not supported"),
+            "{reason}"
+        );
+    }
+    let mut dependent = kept("A", &["H"]);
+    dependent["base_branch"] = json!("main");
+    let refusal = refused_by_check(
+        &world,
+        "two-bases",
+        &plan_of("two-bases", vec![kept("H", &[]), dependent]),
+    );
+    assert!(
+        refusal["reason"].as_str().unwrap().contains("two answers"),
+        "{refusal}"
+    );
+}
+
+fn reply(world: &World, run: &str, commands: Value) -> crate::harness::Run {
+    world.run_with_stdin(
+        &["reply", run],
+        &json!({"version": 3, "commands": commands}).to_string(),
+    )
+}
+
+#[test]
+fn preserve_dependency_rules_hold_at_every_live_edit_boundary() {
+    let world = World::new("stacked-edits");
+    world.repository("local-direct", &[]);
+    world.extra_repository("other");
+    world.script("H.work", "harness\n");
+    world.script("H.wait", "hold");
+    let mut x = kept("X", &["H"]);
+    x["repo"] = json!("other");
+    let path = world.plan(
+        "edits",
+        &plan_of(
+            "edits",
+            vec![
+                kept("H", &[]),
+                x,
+                kept("A", &["X"]),
+                human("gate", &[]),
+                lifecycle("landing", &["gate"]),
+                kept("dependent", &["H"]),
+            ],
+        ),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("H to dispatch", |world| {
+        !world.events_of("edits", "node-dispatched").is_empty()
+    });
+    for publish in [None, Some("land")] {
+        let mut node = lifecycle("new", &["H"]);
+        if let Some(publish) = publish {
+            node["publish"] = json!(publish);
+        }
+        reply(&world, "edits", json!([{"op":"add","node":node}]))
+            .exited(REFUSED)
+            .err_has("node 'new' depends on 'H'");
+    }
+    let mut draft = lifecycle("drafted", &["H"]);
+    draft["draft"] = json!(true);
+    reply(&world, "edits", json!([{"op":"add","node":draft}]))
+        .exited(REFUSED)
+        .err_has("node 'drafted' depends on 'H'");
+    reply(
+        &world,
+        "edits",
+        json!([{"op":"reparent","id":"landing","deps":["H"]}]),
+    )
+    .exited(REFUSED)
+    .err_has("node 'landing' depends on 'H'");
+    reply(
+        &world,
+        "edits",
+        json!([{"op":"cancel","id":"dependent","reason":"amend placement"}]),
+    )
+    .exited(0);
+    reply(
+        &world,
+        "edits",
+        json!([{"op":"requeue","id":"dependent","amend":{"publish":"land"}}]),
+    )
+    .exited(REFUSED)
+    .err_has("node 'dependent' depends on 'H'");
+    reply(
+        &world,
+        "edits",
+        json!([{"op":"add","node":kept("D", &["H", "A"])}]),
+    )
+    .exited(REFUSED)
+    .err_has("H")
+    .err_has("A")
+    .err_has("merging kept branches is not supported");
+    reply(
+        &world,
+        "edits",
+        json!([{"op":"add","node":kept("independent", &[])}]),
+    )
+    .exited(0);
+    reply(
+        &world,
+        "edits",
+        json!([{"op":"add","node":kept("D", &["H", "independent"])}]),
+    )
+    .exited(REFUSED)
+    .err_has("H")
+    .err_has("independent")
+    .err_has("merging kept branches is not supported");
+    assert!(!world
+        .events_of("edits", "node-dispatched")
+        .iter()
+        .any(|event| event["labels"]["node"] == "D"));
+    world.release("H.go");
+    world.until("the edited run to settle", |world| {
+        world.run_file("edits", "result.json").is_file()
+    });
+}
+
+#[test]
+fn cross_repository_preserve_dependencies_only_order_sessions() {
+    let world = World::new("stacked-cross-repo");
+    let first = world.repository("local-direct", &[]);
+    let second = world.extra_repository("other");
+    world.script("H.work", "harness\n");
+    world.script("A.work", "different repository measurement\n");
+    let mut a = kept("A", &["H"]);
+    a["repo"] = json!("other");
+    let path = world.plan("cross", &plan_of("cross", vec![kept("H", &[]), a]));
+    world.run(&["start", &path, "--attach"]).settled();
+    let result = world.run_json("cross", "result.json");
+    assert_eq!(result["state"], "complete", "{result}\n{}", world.dump());
+    let nodes = result["nodes"].as_array().unwrap();
+    let a = nodes.iter().find(|node| node["id"] == "A").unwrap();
+    let head = a["head"].as_str().unwrap();
+    assert_eq!(
+        file_at(&world, &second.origin, head, "A.md").trim(),
+        "different repository measurement"
+    );
+    let absent = std::process::Command::new("git")
+        .args(["cat-file", "-e", &format!("{head}:H.md")])
+        .current_dir(&second.origin)
+        .output()
+        .unwrap();
+    assert!(
+        !absent.status.success(),
+        "the other repository inherited H's file"
+    );
+    descends(&world, &second.origin, "main", head);
+    assert_eq!(
+        first.base_commits(&world),
+        vec!["chore: seed the repository"]
+    );
+    let journal = world.journal("cross");
+    let h = journal
+        .iter()
+        .position(|e| e["kind"] == "node-settled" && e["labels"]["node"] == "H")
+        .unwrap();
+    let a = journal
+        .iter()
+        .position(|e| e["kind"] == "node-dispatched" && e["labels"]["node"] == "A")
+        .unwrap();
+    assert!(h < a);
+}
+
+#[test]
+fn retrying_the_failed_harness_repoints_and_places_its_skipped_dependents() {
+    let world = World::new("stacked-retry");
+    let repo = world.repository("local-direct", &[]);
+    world.script("H.fail", "1");
+    for id in ["replacement", "A", "B"] {
+        world.script(&format!("{id}.work"), "measurement\n");
+    }
+    for id in ["A", "B"] {
+        world.script(&format!("{id}.requires-file"), "replacement.md");
+    }
+    let path = world.plan(
+        "retry",
+        &plan_of(
+            "retry",
+            vec![kept("H", &[]), kept("A", &["H"]), kept("B", &["H"])],
+        ),
+    );
+    world.run(&["start", &path, "--attach"]).settled();
+    let result = world.run_json("retry", "result.json");
+    assert_eq!(result["state"], "failed", "{result}");
+    for node in result["nodes"].as_array().unwrap() {
+        assert_eq!(
+            node["status"],
+            if node["id"] == "H" {
+                "failed"
+            } else {
+                "skipped"
+            },
+            "{result}"
+        );
+    }
+    reply(
+        &world,
+        "retry",
+        json!([{"op":"retry","id":"H","node":kept("replacement", &[])}]),
+    )
+    .exited(0);
+    world.run(&["adopt", "retry"]).settled();
+    let result = world.run_json("retry", "result.json");
+    let nodes = result["nodes"].as_array().unwrap();
+    let replacement = nodes
+        .iter()
+        .find(|node| node["id"] == "replacement")
+        .unwrap();
+    for id in ["A", "B"] {
+        let node = nodes.iter().find(|node| node["id"] == id).unwrap();
+        assert_eq!(node["outcome"], "preserved", "{result}\n{}", world.dump());
+        descends(
+            &world,
+            &repo.origin,
+            replacement["head"].as_str().unwrap(),
+            node["branch"].as_str().unwrap(),
+        );
+    }
+}
+
+#[test]
+fn a_live_preserve_add_starts_from_the_already_settled_kept_branch() {
+    let world = World::new("stacked-live-add");
+    let repo = world.repository("local-direct", &[]);
+    world.script("H.work", "harness\n");
+    let path = world.plan("added", &plan_of("added", vec![kept("H", &[])]));
+    world.run(&["start", &path, "--attach"]).settled();
+    let h = settled_node(&world, "added");
+    world.script("A.requires-file", "H.md");
+    world.script("A.work", "area measurement\n");
+    reply(
+        &world,
+        "added",
+        json!([{"op":"add","node":kept("A", &["H"])}]),
+    )
+    .exited(0);
+    world.run(&["adopt", "added"]).settled();
+    let result = world.run_json("added", "result.json");
+    let a = result["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "A")
+        .unwrap();
+    assert_eq!(a["outcome"], "preserved", "{result}");
+    descends(
+        &world,
+        &repo.origin,
+        h["head"].as_str().unwrap(),
+        a["branch"].as_str().unwrap(),
+    );
+}
+
+#[test]
+fn retrying_a_preserve_dependent_keeps_its_base_and_refuses_landing_replacements() {
+    let world = World::new("stacked-dependent-retry");
+    let repo = world.repository("local-direct", &[]);
+    world.script("H.work", "harness\n");
+    let path = world.plan(
+        "dependent-retry",
+        &plan_of("dependent-retry", vec![kept("H", &[]), kept("A", &["H"])]),
+    );
+    world.run(&["start", &path, "--attach"]).settled();
+    let result = world.run_json("dependent-retry", "result.json");
+    let a = result["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "A")
+        .unwrap();
+    assert_eq!(a["outcome"], "empty-branch", "{result}");
+    let branch = a["branch"].clone();
+    reply(
+        &world,
+        "dependent-retry",
+        json!([{"op":"retry","id":"A","node":lifecycle("landing", &["H"])}]),
+    )
+    .exited(REFUSED)
+    .err_has("node 'landing' depends on 'H'");
+    let mut replacement = kept("A2", &["H"]);
+    replacement["branch"] = branch.clone();
+    reply(
+        &world,
+        "dependent-retry",
+        json!([{"op":"retry","id":"A","node":replacement}]),
+    )
+    .exited(0);
+    world.run(&["adopt", "dependent-retry"]).settled();
+    let result = world.run_json("dependent-retry", "result.json");
+    let a2 = result["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "A2")
+        .unwrap();
+    assert_eq!(a2["branch"], branch);
+    assert_eq!(
+        a2["outcome"], "empty-branch",
+        "a continued empty branch must compare with H, not main: {result}"
+    );
+    world.script("A3.requires-file", "H.md");
+    world.script("A3.work", "area measurement\n");
+    let mut replacement = kept("A3", &["H"]);
+    replacement["branch"] = branch.clone();
+    reply(
+        &world,
+        "dependent-retry",
+        json!([{"op":"retry","id":"A2","node":replacement}]),
+    )
+    .exited(0);
+    world.run(&["adopt", "dependent-retry"]).settled();
+    let result = world.run_json("dependent-retry", "result.json");
+    let nodes = result["nodes"].as_array().unwrap();
+    let h = nodes.iter().find(|node| node["id"] == "H").unwrap();
+    let a3 = nodes.iter().find(|node| node["id"] == "A3").unwrap();
+    assert_eq!(a3["branch"], branch);
+    assert_eq!(a3["outcome"], "preserved", "{result}");
+    descends(
+        &world,
+        &repo.origin,
+        h["head"].as_str().unwrap(),
+        branch.as_str().unwrap(),
+    );
+}
+
+/// An old or damaged settled record can name no branch; adoption must fail
+/// safely before giving a dependent an unrelated default base.
+#[test]
+fn a_done_base_dependency_without_a_branch_fails_before_dispatch() {
+    let world = World::new("stacked-missing-branch");
+    world.repository("local-direct", &[]);
+    world.script("H.work", "harness\n");
+    let path = world.plan("missing", &plan_of("missing", vec![kept("H", &[])]));
+    world.run(&["start", &path, "--attach"]).settled();
+    // llmlint: ignore-block[tests_mirror_real_usage] The required done-without-a-branch
+    // recovery state cannot be emitted by current preserve writers, which always
+    // carry a branch. This models an older or damaged durable record at the real
+    // adoption boundary; the compiled binary must refuse dispatch rather than
+    // silently use main. No engine, session, or repository operation is mocked.
+    let mut events = world.journal("missing");
+    for event in &mut events {
+        if event["labels"]["node"] == "H" {
+            if let Some(payload) = event["payload"].as_object_mut() {
+                payload.remove("branch");
+            }
+        }
+    }
+    let contents = events
+        .iter()
+        .map(|event| format!("{event}\n"))
+        .collect::<String>();
+    std::fs::write(world.run_file("missing", "events.jsonl"), contents).unwrap();
+    let checkpoint = world.run_file("missing", "checkpoint.json");
+    if checkpoint.exists() {
+        std::fs::remove_file(checkpoint).unwrap();
+    }
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    reply(
+        &world,
+        "missing",
+        json!([{"op":"add","node":kept("A", &["H"])}]),
+    )
+    .exited(0);
+    world.run(&["adopt", "missing"]).settled();
+    let result = world.run_json("missing", "result.json");
+    let a = result["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "A")
+        .unwrap();
+    assert_eq!(a["status"], "failed", "{result}");
+    assert_eq!(a["outcome"], "infrastructure-failure", "{result}");
+    let settled = world.events_of("missing", "node-settled");
+    let a = settled
+        .iter()
+        .find(|event| event["labels"]["node"] == "A")
+        .unwrap();
+    assert!(a["payload"]["detail"].as_str().unwrap().contains("'H'"));
+    assert!(!world
+        .events_of("missing", "node-dispatched")
+        .iter()
+        .any(|event| event["labels"]["node"] == "A"));
+    assert_eq!(
+        world.events_of("missing", "session-opened").len(),
+        2,
+        "only H's engine and sibling session records may exist"
+    );
+}
+
+#[test]
+fn all_landing_spellings_are_refused_but_preserve_edges_load() {
+    let world = World::new("stacked-load-boundaries");
+    world.repository("local-direct", &[]);
+    let accepted = world.plan(
+        "accepted-edges",
+        &plan_of("accepted-edges", vec![kept("H", &[]), kept("A", &["H"])]),
+    );
+    world.run(&["plan", "check", &accepted]).exited(0);
+    for (name, publish, draft) in [
+        ("omitted", None, false),
+        ("land", Some("land"), false),
+        ("draft", None, true),
+    ] {
+        let mut node = lifecycle("landing", &["H"]);
+        if let Some(publish) = publish {
+            node["publish"] = json!(publish);
+        }
+        if draft {
+            node["draft"] = json!(true);
+        }
+        let plan = plan_of(name, vec![kept("H", &[]), node]);
+        let refusal = refused_by_check(&world, name, &plan);
+        assert!(refusal["reason"]
+            .as_str()
+            .unwrap()
+            .contains("node 'landing' depends on 'H'"));
+        let path = world.plan(&format!("start-{name}"), &plan);
+        world
+            .run(&["start", &path, "--detach"])
+            .exited(REFUSED)
+            .err_has("node 'landing' depends on 'H'");
+    }
+    assert!(world.invocations().is_empty());
+}
+
+#[test]
+fn no_remote_kept_work_is_also_the_dependent_session_base() {
+    let world = World::new("stacked-no-remote");
+    let repo = world.repository("local-direct", &[]);
+    git(&world, &repo.checkout, &["remote", "remove", "origin"]);
+    world.script("H.work", "harness\n");
+    world.script("A.requires-file", "H.md");
+    world.script("A.work", "area measurement\n");
+    let path = world.plan(
+        "local-stack",
+        &plan_of("local-stack", vec![kept("H", &[]), kept("A", &["H"])]),
+    );
+    world.run(&["start", &path, "--attach"]).settled();
+    let result = world.run_json("local-stack", "result.json");
+    assert_eq!(result["state"], "complete", "{result}\n{}", world.dump());
+    let nodes = result["nodes"].as_array().unwrap();
+    let h = nodes.iter().find(|node| node["id"] == "H").unwrap();
+    let a = nodes.iter().find(|node| node["id"] == "A").unwrap();
+    assert_eq!(h["remote"], "no-remote");
+    assert_eq!(a["remote"], "no-remote");
+    descends(
+        &world,
+        &repo.checkout,
+        h["head"].as_str().unwrap(),
+        a["branch"].as_str().unwrap(),
+    );
+}
+
+fn budget_report(cwd: &Path, result: &Path) -> std::process::Output {
+    std::process::Command::new("node")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/stacked-spikes-budget.mjs"))
+        .current_dir(cwd)
+        .env("ONEBUDGETSPEC_RESULT", result)
+        .output()
+        .expect("the committed reporter runs")
+}
+
+#[test]
+fn the_budget_reporter_refuses_missing_and_malformed_records() {
+    let world = World::new("stacked-budget-errors");
+    let result = world.root.join("result.json");
+    let record = world
+        .root
+        .join("target/budget-records/stacked-spikes-stage.json");
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    for body in [
+        None,
+        Some("{"),
+        Some("{}"),
+        Some(r#"{"wall_ms":true,"run_id":"run"}"#),
+        Some(r#"{"wall_ms":-1,"run_id":"run"}"#),
+        Some(r#"{"wall_ms":"1000","run_id":"run"}"#),
+        Some(r#"{"wall_ms":1.5,"run_id":"run"}"#),
+        Some(r#"{"wall_ms":18446744073709551616,"run_id":"run"}"#),
+        Some(r#"{"wall_ms":9007199254740993,"run_id":"run"}"#),
+        Some(r#"{"wall_ms":1000}"#),
+        Some(r#"{"wall_ms":1000,"run_id":null}"#),
+        Some(r#"{"wall_ms":1000,"run_id":""}"#),
+        Some(r#"{"wall_ms":1000,"run_id":"   "}"#),
+    ] {
+        if let Some(body) = body {
+            std::fs::write(&record, body).unwrap();
+        }
+        let output = budget_report(&world.root, &result);
+        assert!(!output.status.success(), "{body:?} was accepted");
+        assert!(!result.exists(), "a failed measurement reported a value");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("target/budget-records/stacked-spikes-stage.json")
+                && stderr
+                    .contains("just test-e2e 'test(publish_preserve::stacked_spikes_fan_out)'"),
+            "{stderr}"
+        );
+    }
+    std::fs::write(&record, r#"{"wall_ms":1000,"run_id":"run"}"#).unwrap();
+    let missing_env = std::process::Command::new("node")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/stacked-spikes-budget.mjs"))
+        .current_dir(&world.root)
+        .env_remove("ONEBUDGETSPEC_RESULT")
+        .output()
+        .unwrap();
+    assert!(!missing_env.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_env.stderr).contains("ONEBUDGETSPEC_RESULT is missing")
+    );
+    let cannot_write = budget_report(&world.root, &world.root);
+    assert!(!cannot_write.status.success());
+    let error = String::from_utf8_lossy(&cannot_write.stderr);
+    assert!(
+        error.contains("target/budget-records/stacked-spikes-stage.json")
+            && error.contains("ONEBUDGETSPEC_RESULT names a writable file"),
+        "{error}"
+    );
+}
+
+#[test]
+fn repository_aliases_stack_and_unreadable_unequal_spellings_are_refused() {
+    let world = World::new("stacked-repo-aliases");
+    let repo = world.repository("local-direct", &[]);
+    world.script("H.work", "harness\n");
+    world.script("A.work", "area measurement\n");
+    world.script("A.requires-file", "H.md");
+    let mut a = kept("A", &["H"]);
+    a["repo"] = json!(repo.checkout.to_string_lossy());
+    let path = world.plan("aliases", &plan_of("aliases", vec![kept("H", &[]), a]));
+    world.run(&["start", &path, "--attach"]).settled();
+    let result = world.run_json("aliases", "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+    let nodes = result["nodes"].as_array().unwrap();
+    let h = nodes.iter().find(|node| node["id"] == "H").unwrap();
+    let a = nodes.iter().find(|node| node["id"] == "A").unwrap();
+    descends(
+        &world,
+        &repo.origin,
+        h["head"].as_str().unwrap(),
+        a["branch"].as_str().unwrap(),
+    );
+    let mut unknown = kept("unknown", &["H"]);
+    unknown["repo"] = json!("unregistered");
+    let refusal = refused_by_check(
+        &world,
+        "unreadable",
+        &plan_of("unreadable", vec![kept("H", &[]), unknown.clone()]),
+    );
+    let reason = refusal["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("service")
+            && reason.contains("unregistered")
+            && reason.contains("cannot both be read"),
+        "{reason}"
+    );
+    reply(&world, "aliases", json!([{"op":"add","node":unknown}]))
+        .exited(REFUSED)
+        .err_has("service")
+        .err_has("unregistered")
+        .err_has("cannot both be read");
+    let mut h = kept("H", &[]);
+    h["repo"] = json!("unregistered");
+    let mut a = kept("A", &["H"]);
+    a["repo"] = json!("unregistered");
+    let path = world.plan("same-unreadable", &plan_of("same-unreadable", vec![h, a]));
+    world.run(&["plan", "check", &path]).exited(0);
+    let mut conflicting = kept("A", &["H"]);
+    conflicting["repo"] = json!("unregistered");
+    conflicting["base_branch"] = json!("main");
+    let mut h = kept("H", &[]);
+    h["repo"] = json!("unregistered");
+    let refusal = refused_by_check(
+        &world,
+        "unreadable-conflict",
+        &plan_of("unreadable-conflict", vec![h, conflicting]),
+    );
+    assert!(
+        refusal["reason"].as_str().unwrap().contains("two answers"),
+        "{refusal}"
+    );
+}
+
+#[test]
+fn changed_repository_identities_fail_the_dependent_before_dispatch() {
+    let world = World::new("stacked-repo-changed");
+    world.repository("local-direct", &[]);
+    let other = world.extra_repository("other");
+    world.script("H.work", "harness\n");
+    world.script("H.wait", "hold");
+    let mut a = kept("A", &["H"]);
+    a["repo"] = json!("other");
+    let path = world.plan("changed", &plan_of("changed", vec![kept("H", &[]), a]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("H to hold its session", |world| {
+        !world.events_of("changed", "node-dispatched").is_empty()
+    });
+    world.register(
+        &other.checkout,
+        Some("https://github.com/owner/service.git"),
+    );
+    world.release("H.go");
+    world.until("the changed-identity run to settle", |world| {
+        world.run_file("changed", "result.json").is_file()
+    });
+    let result = world.run_json("changed", "result.json");
+    let a = result["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "A")
+        .unwrap();
+    assert_eq!(
+        a["outcome"],
+        "infrastructure-failure",
+        "{result}\n{}",
+        world.dump()
+    );
+    let settled = world.events_of("changed", "node-settled");
+    let a = settled
+        .iter()
+        .find(|event| event["labels"]["node"] == "A")
+        .unwrap();
+    assert!(
+        a["payload"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("base changed"),
+        "{a}"
+    );
+    assert!(!world
+        .events_of("changed", "node-dispatched")
+        .iter()
+        .any(|event| event["labels"]["node"] == "A"));
+}
+
+#[test]
+fn a_cancelled_and_requeued_preserve_dependent_continues_its_branch_from_the_kept_base() {
+    let world = World::new("stacked-requeue");
+    let repo = world.repository("local-direct", &[]);
+    world.script("H.work", "harness\n");
+    world.script("A.wait", "hold");
+    world.script("K.wait", "hold");
+    world.script("K.work", "keep the driver active\n");
+    let path = world.plan(
+        "continued",
+        &plan_of(
+            "continued",
+            vec![kept("H", &[]), kept("A", &["H"]), kept("K", &["H"])],
+        ),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("A and K to hold their sessions", |world| {
+        let opened = world.events_of("continued", "session-opened");
+        ["A", "K"]
+            .iter()
+            .all(|id| opened.iter().any(|event| event["labels"]["node"] == *id))
+    });
+    let opened = world.events_of("continued", "session-opened");
+    let a = opened
+        .iter()
+        .find(|event| event["labels"]["node"] == "A")
+        .unwrap();
+    let branch = a["payload"]["branch"].as_str().unwrap().to_owned();
+    let settlements = world.events_of("continued", "node-settled");
+    let h = &settlements
+        .iter()
+        .find(|event| event["labels"]["node"] == "H")
+        .unwrap()["payload"];
+    let base = h["branch"].as_str().unwrap().to_owned();
+    let head = h["head"].as_str().unwrap().to_owned();
+    reply(
+        &world,
+        "continued",
+        json!([{"op":"cancel","id":"A","reason":"continue this session branch later"}]),
+    )
+    .exited(0);
+    world.release("A.go");
+    world.until("A's cancellation to settle", |world| {
+        world
+            .events_of("continued", "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "A")
+    });
+    std::fs::remove_file(world.fakes.join("A.go")).unwrap();
+    reply(&world, "continued", json!([{"op":"requeue","id":"A"}])).exited(0);
+    world.until("A to reopen its own branch", |world| {
+        world
+            .events_of("continued", "session-opened")
+            .iter()
+            .filter(|event| event["labels"]["node"] == "A" && event["payload"]["base"].is_string())
+            .count()
+            >= 3
+    });
+    for event in world
+        .events_of("continued", "session-opened")
+        .iter()
+        .filter(|event| event["labels"]["node"] == "A")
+    {
+        assert_eq!(event["payload"]["branch"], branch, "{event}");
+        assert_eq!(event["payload"]["base"], base, "{event}");
+    }
+    world.release("A.go");
+    world.release("K.go");
+    world.until("the continuation run to settle", |world| {
+        world.run_file("continued", "result.json").is_file()
+    });
+    let result = world.run_json("continued", "result.json");
+    let a = result["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "A")
+        .unwrap();
+    assert_eq!(a["outcome"], "empty-branch", "{result}\n{}", world.dump());
+    assert_eq!(a["branch"], branch);
+    descends(&world, &repo.checkout, &head, &branch);
+}
+
+#[test]
+fn an_unreadable_preserve_edge_fails_only_its_subtree_before_dispatch() {
+    let world = World::new("stacked-unreadable-subtree")
+        .with_env("ONEPIPELINE_WORKSPACE_POLL_SECONDS", "1");
+    let repo = world.repository("local-direct", &[]);
+    world.extra_repository("other");
+    std::fs::write(world.onevcs_home().join("workspaces.yml"),
+        "version: 1\nrules:\n  - match: {host: github.com, owner: owner, name: other}\n    pool: 1\n    overflow: 0\n").unwrap();
+    world.script("K.wait", "hold");
+    world.script("K.work", "occupy the other repository\n");
+    world.script("H.work", "harness\n");
+    world.script("B.requires-file", "H.md");
+    world.script("B.work", "area measurement\n");
+    let mut k = kept("K", &[]);
+    k["repo"] = json!("other");
+    let mut a = kept("A", &["H"]);
+    a["repo"] = json!("other");
+    let path = world.plan(
+        "unreadable-subtree",
+        &plan_of(
+            "unreadable-subtree",
+            vec![
+                k,
+                kept("H", &[]),
+                a,
+                human("gate", &[]),
+                kept("B", &["H", "gate"]),
+            ],
+        ),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until(
+        "A to wait on workspace capacity after its release lookup",
+        |world| {
+            world
+                .events_of("unreadable-subtree", "node-held")
+                .iter()
+                .any(|event| {
+                    event["labels"]["node"] == "A"
+                        && event["payload"]["reasons"]
+                            .as_array()
+                            .is_some_and(|reasons| {
+                                reasons.iter().any(|reason| reason["kind"] == "workspace")
+                            })
+                })
+        },
+    );
+    world.releases("version: 999\n");
+    world
+        .run(&["attest", "unreadable-subtree", "gate"])
+        .exited(0);
+    world.until("A's refusal and B's preservation", |world| {
+        let settled = world.events_of("unreadable-subtree", "node-settled");
+        ["A", "B"]
+            .iter()
+            .all(|id| settled.iter().any(|event| event["labels"]["node"] == *id))
+    });
+    let settled = world.events_of("unreadable-subtree", "node-settled");
+    let a = &settled
+        .iter()
+        .find(|event| event["labels"]["node"] == "A")
+        .unwrap()["payload"];
+    let b = &settled
+        .iter()
+        .find(|event| event["labels"]["node"] == "B")
+        .unwrap()["payload"];
+    let h = &settled
+        .iter()
+        .find(|event| event["labels"]["node"] == "H")
+        .unwrap()["payload"];
+    assert_eq!(a["outcome"], "infrastructure-failure", "{a}");
+    assert!(
+        a["detail"]
+            .as_str()
+            .unwrap()
+            .contains("cannot both be read"),
+        "{a}"
+    );
+    assert_eq!(b["outcome"], "preserved", "{b}\n{}", world.dump());
+    descends(
+        &world,
+        &repo.origin,
+        h["head"].as_str().unwrap(),
+        b["branch"].as_str().unwrap(),
+    );
+    assert!(!world
+        .events_of("unreadable-subtree", "node-dispatched")
+        .iter()
+        .any(|event| event["labels"]["node"] == "A"));
+    std::fs::remove_file(world.onevcs_home().join("releases.yml")).unwrap();
+    world.release("K.go");
+    world.until("the unrelated worker to finish", |world| {
+        world
+            .run_file("unreadable-subtree", "result.json")
+            .is_file()
+    });
+}
+
+#[test]
+fn the_worker_file_check_refuses_a_missing_worktree_argument_without_panicking() {
+    let world = World::new("stacked-worker-bad-dir");
+    world.write_graphs();
+    world.script("A.requires-file", "H.md");
+    let repo = world.repository("local-direct", &[]);
+    world.script("A.work", "area measurement\n");
+    let run_worker = |workspace: Option<&Path>| {
+        let mut command = std::process::Command::new(crate::harness::double("fake-oneagentgraph"));
+        command.args([
+            "run",
+            world.graphs().join("node-scope.yaml").to_str().unwrap(),
+            "--task",
+            "measure",
+            "--output",
+            "json",
+            "--label",
+            "onepipeline.node=A",
+        ]);
+        if let Some(workspace) = workspace {
+            command.arg("--dir").arg(workspace);
+        }
+        command
+            .env("ONEPIPELINE_FAKE_DIR", &world.fakes)
+            .env("ONEPIPELINE_NODE_SCRATCH_DIR", &world.root)
+            .output()
+            .unwrap()
+    };
+    let output = run_worker(None);
+    assert_eq!(
+        output.status.code(),
+        Some(78),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("requires --dir") && !error.contains("panicked"),
+        "{error}"
+    );
+    let missing_file = run_worker(Some(&repo.checkout));
+    assert_eq!(missing_file.status.code(), Some(78));
+    assert!(String::from_utf8_lossy(&missing_file.stderr)
+        .contains("dependency file H.md is missing before worker writes"));
+    assert!(!repo.checkout.join("A.md").exists());
+    std::fs::write(repo.checkout.join("H.md"), "shared harness\n").unwrap();
+    let supplied_file = run_worker(Some(&repo.checkout));
+    assert!(
+        supplied_file.status.success(),
+        "{}",
+        String::from_utf8_lossy(&supplied_file.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.checkout.join("A.md")).unwrap(),
+        "area measurement"
+    );
+}

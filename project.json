@@ -42,6 +42,9 @@
       ],
       "dependsOn": [
         "coverage-clean"
+      ],
+      "outputs": [
+        "{workspaceRoot}/target/budget-records/stacked-spikes-stage.json"
       ]
     },
     "test": {
@@ -80,7 +83,20 @@
         "format-check",
         "lint",
         "test",
-        "doc"
+        "doc",
+        "budgets"
+      ]
+    },
+    "budgets": {
+      "command": "just budgets",
+      "dependsOn": [
+        "test-rest"
+      ],
+      "inputs": [
+        "crateSource",
+        "{workspaceRoot}/budgets.yaml",
+        "{workspaceRoot}/scripts/stacked-spikes-budget.mjs",
+        "{workspaceRoot}/scripts/linear-writeback-budget.sh"
       ]
     }
   },
