@@ -164,6 +164,13 @@ mod malformed_envelopes;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore[expensive_tests_stay_behind_their_own_edge] these journeys read a plan out of two sources, run it and write each settlement back where its task lives, exercising `taskgraph`, `writeback`, `edits` and `driver` together, so the crate is the narrowest edge they can honestly sit behind; same grounds as `mod delivers` above.
 mod multi_source;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys read a plan
+// out of a Linear project and write each settlement back to it through the linked Linear
+// plugin, exercising `taskgraph`, `writeback`, `edits` and `driver` together, so the crate is
+// the narrowest edge they can honestly sit behind; same grounds as `mod multi_source` above.
+mod linear_loopback;
+mod linear_writeback;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod node_validator;
 mod older_launch_record;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
