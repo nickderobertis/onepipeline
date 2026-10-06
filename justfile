@@ -460,12 +460,13 @@ deps-check:
 # llmlint: ignore-block[changed_behavior_has_e2e] driven by running it: its measurement runs a
 # whole e2e journey, which a test inside the suite would run a second time per gate, and
 # `tests/budgets.rs` holds the file, the result and the command it checks.
-# Offline: the Linear budget journey runs against a loopback endpoint in the gate.
+# Offline: the Linear budget journey runs against a loopback endpoint in the gate. Its command
+# builds the e2e binary through `test-e2e`, so warnings are denied here as every gate build denies them.
 # Measure every budget in budgets.yaml against its threshold.
 budgets:
     @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
       || { echo "onebudgetspec {{onebudgetspec-version}} is not installed: run 'just bootstrap' (or 'just _ensure-onebudgetspec'), then re-run" >&2; exit 1; }
-    @"{{onebudgetspec-root}}/bin/onebudgetspec" check budgets.yaml
+    @RUSTFLAGS="-D warnings" "{{onebudgetspec-root}}/bin/onebudgetspec" check budgets.yaml
 # llmlint: ignore-end[changed_behavior_has_e2e]
 
 # Both are outside `check` for the reason `deps-check` is: they read the

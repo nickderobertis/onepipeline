@@ -2716,6 +2716,11 @@ fn an_unwritable_shadow_store_is_reported_retried_and_recovered() {
 /// not queued to be asked about again, and the revert publishes the graph last projected,
 /// which leaves nothing to attempt. The next change to the graph — `spare` settling — is what
 /// projects the graph as it then stands.
+///
+/// While the root is gone the write-back's store is built with that source unavailable, and
+/// the engine keeps a source it could not build unavailable for as long as it lives. The
+/// configuration never changes, so it is the worker discarding a store with an unavailable
+/// source that lets the attempt after the root returns build the source again and recover.
 #[test]
 fn a_reverted_edit_supersedes_the_refused_projection_before_store_recovery() {
     let world = World::new("store-writeback-reverted-edit");
@@ -2780,6 +2785,10 @@ fn a_reverted_edit_supersedes_the_refused_projection_before_store_recovery() {
             .events_of("writeback-reverted-edit", "edit-committed")
             .len()
             == 2
+    });
+    world.until("a store built while the root was gone to refuse", |world| {
+        std::fs::read_to_string(world.run_file("writeback-reverted-edit", "driver.log"))
+            .is_ok_and(|log| log.contains("source plans could not be built"))
     });
 
     renamed(&unavailable, &world.store(), "the store recovers");

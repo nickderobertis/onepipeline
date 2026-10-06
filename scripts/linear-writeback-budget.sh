@@ -16,7 +16,7 @@ if [ -z "${ONEBUDGETSPEC_RESULT:-}" ]; then
   exit 2
 fi
 
-journey='linear_writeback::consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_their_own_attempt'
+journey='linear_writeback::the_costliest_linear_settlement_after_the_first_is_reported_as_measured'
 # llmlint: ignore-block[changed_behavior_has_e2e] the real invocation — this line through `just` and
 # nextest to the journey's result file — is the budget check itself, `just budgets`, which errs
 # rather than reports when the filter selects nothing or the result never arrives; `gate`

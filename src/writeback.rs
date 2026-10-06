@@ -1938,7 +1938,9 @@ fn project(
                 })
             };
             // The engine holds a source it could not build as unavailable for as long as it
-            // lives, so a store with one is rebuilt, which gives that source its next build.
+            // lives, so a store with one is rebuilt, which gives that source its next build:
+            // `store::a_reverted_edit_supersedes_the_refused_projection_before_store_recovery`
+            // builds one while a source's root is gone and recovers once it returns.
             let unbuilt = attempt
                 .engine
                 .listing()

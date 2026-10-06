@@ -372,28 +372,13 @@ fn mapped(outcome: &str) -> &'static str {
     }
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the journeys below read a
-// plan from a hosted source and write settlements through the linked hosted plugins,
-// exercising `taskgraph`, `writeback`, `edits` and `driver` together, so the crate is the
-// narrowest edge they can honestly sit behind — the grounds `mod multi_source` records in
-// `main.rs`. The second waits past the write-back's sixty-second floor by construction, as
-// `writeback_budget.rs`'s journeys do: a write held past its deadline cannot be observed sooner.
-/// Six consecutive settlements, each projected in an attempt of its own, each landing its own
-/// status and settlement record and never an earlier one's: the mutation Linear recorded for it
-/// carries that settlement's state and evidence, and the run's landed baseline says the same.
-/// Each attempt sends one read of the issue — the description its metadata is merged into, which
-/// keeps whatever a person wrote there — and one `issueUpdate`, and at most one resolution read.
-/// Its vocabulary is present before launch; the failure journey separately adds a state
-/// after the cache fills and proves that one refresh finds it.
-///
-/// What the most expensive of those attempts after the first cost is the
-/// `linear-requests-per-writeback-settlement` budget's measure, written to the file
-/// `ONEBUDGETSPEC_RESULT` names when the budget's command runs this journey.
-#[test]
-fn consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_their_own_attempt() {
-    let mut states = STATES.to_vec();
-    states.push(("Needs Attention", "started"));
-    let scenario = launched_with_states("linear-settlements", &[], &states);
+/// Six consecutive settlements of `work`, each projected in an attempt of its own, each landing
+/// its own status and settlement record and never an earlier one's: the mutation Linear recorded
+/// for it carries that settlement's state and evidence, the run's landed baseline says the same,
+/// and the shadow snapshot under the run's write-back root holds that settlement's values.
+/// `each` is handed every settlement's step and what its attempt sent, once all of that holds;
+/// what is answered is how many requests Linear was sent for each attempt.
+fn six_settlements(scenario: &Scenario, mut each: impl FnMut(usize, &Spent)) -> Vec<usize> {
     let mut costs = Vec::new();
     for (step, outcome) in ["done", "failed", "done", "failed", "done", "failed"]
         .into_iter()
@@ -453,24 +438,6 @@ fn consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_the
             (json!(outcome), json!(evidence)),
             "the landed baseline does not hold settlement {step}"
         );
-        let sent: Vec<Operation> = spent
-            .requests
-            .iter()
-            .map(|request| request.operation)
-            .collect();
-        assert!(
-            spent.of(Operation::Issue) == 1
-                && spent.of(Operation::IssueUpdate) == 1
-                && spent.resolutions() <= 1
-                && sent.len() == 2 + spent.resolutions(),
-            "settlement {step} sent Linear more than one read of the issue, one write and at \
-             most one resolution: {sent:?}"
-        );
-        assert_eq!(
-            spent.resolutions(),
-            0,
-            "a reused store resolved again: {sent:?}"
-        );
         let shadow = scenario
             .world
             .run_file(&scenario.run, "writeback")
@@ -492,22 +459,83 @@ fn consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_the
             text.contains(&format!("status: {outcome}")),
             "the shadow kept old status: {text}"
         );
+        each(step, &spent);
         costs.push(spent.requests.len());
     }
-    let highest = costs.iter().skip(1).copied().max().unwrap_or_default();
-    if let Some(result) = std::env::var_os("ONEBUDGETSPEC_RESULT") {
-        let detail = format!(
-            "requests the loopback Linear served for each of {} consecutive settlements, each in \
-             its own attempt: {costs:?}; the first is not counted",
-            costs.len()
+    costs
+}
+
+/// The team's states with `Needs Attention` among them, so every name the mapping writes is
+/// known from the run's first resolution read.
+fn every_mapped_state() -> Vec<(&'static str, &'static str)> {
+    let mut states = STATES.to_vec();
+    states.push(("Needs Attention", "started"));
+    states
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the journeys below read a
+// plan from a hosted source and write settlements through the linked hosted plugins,
+// exercising `taskgraph`, `writeback`, `edits` and `driver` together, so the crate is the
+// narrowest edge they can honestly sit behind — the grounds `mod multi_source` records in
+// `main.rs`. The third waits past the write-back's sixty-second floor by construction, as
+// `writeback_budget.rs`'s journeys do: a write held past its deadline cannot be observed sooner.
+/// Six consecutive settlements, each landing its own current values ([`six_settlements`]), on
+/// one store: each attempt sends one read of the issue — the description its metadata is merged
+/// into, which keeps whatever a person wrote there — and one `issueUpdate`, and no resolution
+/// read, because every name it writes was resolved by the run's first attempt. Its vocabulary
+/// is present before launch; the failure journey separately adds a state after the cache fills
+/// and proves that one refresh finds it.
+#[test]
+fn consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_their_own_attempt() {
+    let scenario = launched_with_states("linear-settlements", &[], &every_mapped_state());
+    six_settlements(&scenario, |step, spent| {
+        let sent: Vec<Operation> = spent
+            .requests
+            .iter()
+            .map(|request| request.operation)
+            .collect();
+        assert!(
+            spent.of(Operation::Issue) == 1
+                && spent.of(Operation::IssueUpdate) == 1
+                && spent.resolutions() <= 1
+                && sent.len() == 2 + spent.resolutions(),
+            "settlement {step} sent Linear more than one read of the issue, one write and at \
+             most one resolution: {sent:?}"
         );
+        assert_eq!(
+            spent.resolutions(),
+            0,
+            "a reused store resolved again: {sent:?}"
+        );
+    });
+    scenario.finish();
+}
+
+/// The `linear-requests-per-writeback-settlement` budget's measure: the same six settlements,
+/// each held to landing its own current values and nothing about what it cost, and the most
+/// requests Linear was sent for one attempt after the run's first, which also resolves the
+/// vocabulary. Written to the file `ONEBUDGETSPEC_RESULT` names when the budget's command runs
+/// this journey; whether that figure is within the budget is the checker's to say, never this
+/// journey's, so an attempt that cost more is reported rather than failed.
+#[test]
+fn the_costliest_linear_settlement_after_the_first_is_reported_as_measured() {
+    let scenario = launched_with_states("linear-settlement-budget", &[], &every_mapped_state());
+    let costs = six_settlements(&scenario, |_, _| {});
+    scenario.finish();
+    let highest = costs.iter().skip(1).copied().max().unwrap_or_default();
+    let detail = format!(
+        "the most requests the loopback Linear served for one attempt over {} consecutive \
+         settlements after the run's first, each in its own attempt: {:?}",
+        costs.len() - 1,
+        &costs[1..]
+    );
+    if let Some(result) = std::env::var_os("ONEBUDGETSPEC_RESULT") {
         std::fs::write(
             result,
             crate::budget_result::reported(highest, &detail).to_string(),
         )
         .expect("the budget's result is written");
     }
-    scenario.finish();
 }
 
 /// Each way a Linear call fails leaves the next attempt landing the values current when it is

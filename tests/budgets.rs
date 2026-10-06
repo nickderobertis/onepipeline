@@ -19,7 +19,8 @@ use onebudgetspec_core::{Selection, Verdict};
 
 const BUDGET: &str = "linear-requests-per-writeback-settlement";
 
-const JOURNEY: &str = "linear_writeback::consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_their_own_attempt";
+const JOURNEY: &str =
+    "linear_writeback::the_costliest_linear_settlement_after_the_first_is_reported_as_measured";
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
