@@ -35,6 +35,11 @@ set positional-arguments := true
 onetaskgraph-version := "0.3.0"
 onetaskgraph-root := justfile_directory() / "target" / "tools" / ("onetaskgraph-" + onetaskgraph-version)
 
+# The budget checker `budgets.yaml` is measured with (`just budgets`), installed at this
+# release into this clone's own build directory, never onto `PATH`, as `onetaskgraph` is above.
+onebudgetspec-version := "0.1.1"
+onebudgetspec-root := justfile_directory() / "target" / "tools" / ("onebudgetspec-" + onebudgetspec-version)
+
 # The renderer the visual-docs capture draws each scene with (`just screenshots`).
 # NOT part of `check`, `gate` or `bootstrap`: screenshots are informational, and
 # this is the only version of `freeze` a capture of this repository is ever taken
@@ -83,6 +88,7 @@ _crate-bootstrap:
     @just _ensure-tool cargo-llvm-cov
     @just _ensure-strace
     @just _ensure-onetaskgraph
+    @just _ensure-onebudgetspec
     @cargo fetch --locked --quiet
 
 # The tracer the Linux-only e2e journeys (`agents.rs`, `channel.rs`, `listing.rs`,
@@ -120,6 +126,13 @@ _ensure-onetaskgraph:
 _onetaskgraph-preflight:
     @[ -x "{{onetaskgraph-root}}/bin/onetaskgraph" ] || [ -x "{{onetaskgraph-root}}/bin/onetaskgraph.exe" ] \
       || { echo "onetaskgraph {{onetaskgraph-version}} is not installed — the template journeys in tests/e2e/templates.rs drive it and refuse without it: run 'just bootstrap' (or 'just _ensure-onetaskgraph'), then re-run" >&2; exit 1; }
+
+# The released `onebudgetspec` `just budgets` runs. Network, so it is installed by
+# `bootstrap` and only asked for by that recipe.
+_ensure-onebudgetspec:
+    @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
+      || cargo install onebudgetspec --locked --quiet --version {{onebudgetspec-version}} --root "{{onebudgetspec-root}}" \
+      || { echo "onebudgetspec {{onebudgetspec-version}} could not be installed into {{onebudgetspec-root}}; 'just budgets' refuses without it" >&2; exit 1; }
 
 # These are test runners, not rules: their version cannot change the gate's
 # verdict, so both here and CI take the latest rather than keeping two pins that
@@ -395,6 +408,17 @@ smoke-real:
 # The 0.28.2 channel journeys: this build's channel against the pinned wheel's.
 release-compat:
     @RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(release_channel) and not test(/^harness::/)'
+
+# Each budget `budgets.yaml` registers, measured once and held to its threshold; the
+# `linear-requests-per-writeback-settlement` budget runs one e2e journey against a loopback
+# Linear endpoint, offline. Not yet part of `check`: until the write-back keeps one store for a
+# run, every Linear settlement attempt resolves the team's states again and costs three requests,
+# which the budget's threshold of two refuses.
+# Measure every budget in budgets.yaml against its threshold.
+budgets:
+    @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
+      || { echo "onebudgetspec {{onebudgetspec-version}} is not installed: run 'just bootstrap' (or 'just _ensure-onebudgetspec'), then re-run" >&2; exit 1; }
+    @"{{onebudgetspec-root}}/bin/onebudgetspec" check budgets.yaml
 
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`),
