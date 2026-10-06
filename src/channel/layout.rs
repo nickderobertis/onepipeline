@@ -496,7 +496,8 @@ pub enum Op {
     Add,
     /// Remove a node.
     Drop,
-    /// Replace an unstarted node's dependencies.
+    /// Replace an unstarted node's dependencies — or those of a `kind: human`
+    /// node waiting for an attestation it has not had.
     Reparent,
     /// Supersede a node with a fresh lineage.
     Retry,

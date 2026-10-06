@@ -371,7 +371,9 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
-    /// Replace an unstarted node's dependencies.
+    /// Replace an unstarted node's dependencies — or those of a `kind: human`
+    /// node waiting for an attestation it has not had, whose wait is then
+    /// re-derived from the new ones.
     Reparent {
         /// The node to reparent.
         id: String,

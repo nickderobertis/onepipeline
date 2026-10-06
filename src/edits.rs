@@ -428,7 +428,9 @@ pub enum Delivery {
 #[derive(Debug, Clone, Default)]
 pub struct Frontier {
     /// The statuses the journal actually recorded. A node absent from this map
-    /// has not started, which is what `reparent` and `cancel` test for.
+    /// has not started, which is what `reparent` and `cancel` test for — except
+    /// that `reparent` also takes a `kind: human` node recorded `waiting` and not
+    /// attested, which has done nothing its new prerequisites could come after.
     pub recorded: BTreeMap<String, NodeStatus>,
     /// The human actions already attested.
     pub attestations: BTreeSet<String>,
@@ -796,6 +798,20 @@ pub fn advance(frontier: &mut Frontier, operations: &[Operation]) {
             Operation::NodeRequeued { node, .. } => {
                 frontier.parks.remove(node);
                 frontier.recorded.remove(node);
+            }
+            // The wait a reparent re-gates, as the fold reads it: see
+            // [`awaits_attestation`].
+            Operation::Reparent { node, .. } => {
+                if frontier.recorded.get(node) == Some(&NodeStatus::Waiting) {
+                    frontier.recorded.remove(node);
+                }
+            }
+            // An attestation folds the node to `done`, so a later command of the
+            // same envelope — a `reparent` of it above all — is judged against
+            // the approval it just became rather than the wait it was.
+            Operation::HumanAttested { node } => {
+                frontier.attestations.insert(node.clone());
+                frontier.recorded.insert(node.clone(), NodeStatus::Done);
             }
             Operation::SettledFromEvidence { node, outcome, .. } => {
                 frontier
@@ -1480,7 +1496,7 @@ fn compile_reparent(
     let Some(node) = graph.get(id) else {
         return Err(refuse(format!("reparent: no node '{id}'")));
     };
-    if frontier.recorded.contains_key(id) {
+    if frontier.recorded.contains_key(id) && !awaits_attestation(node, frontier) {
         return Err(refuse(format!("reparent: node '{id}' has already started")));
     }
     let previous = node.deps.clone();
@@ -1514,6 +1530,20 @@ fn compile_reparent(
             .retain(|dep, _| node.deps.iter().any(|d| d == dep));
     }
     Ok(operations)
+}
+
+/// Whether a node with a recorded status is a `kind: human` approval still
+/// waiting for its attestation — the one recorded node `reparent` takes.
+///
+/// Nothing was dispatched for it, so new prerequisites come after nothing it
+/// did, and the recorded wait is cleared when the reparent applies (see
+/// `projection::fold_operations` and [`advance`]) so it re-derives from them. A
+/// lifecycle node waiting on a human *step* records the same `waiting` but has
+/// run its earlier steps on a branch, so it is not one.
+fn awaits_attestation(node: &Node, frontier: &Frontier) -> bool {
+    node.kind == crate::plan::NodeKind::Human
+        && frontier.recorded.get(&node.id) == Some(&NodeStatus::Waiting)
+        && !frontier.attestations.contains(&node.id)
 }
 
 fn compile_drop(
@@ -2792,6 +2822,135 @@ mod tests {
         .unwrap_err()
         .to_string()
         .contains("no node"));
+    }
+
+    fn approval(id: &str, deps: &[&str]) -> Node {
+        Node {
+            id: id.into(),
+            kind: NodeKind::Human,
+            task: Some("approve it".into()),
+            deps: deps.iter().map(|d| (*d).to_string()).collect(),
+            ..Node::default()
+        }
+    }
+
+    #[test]
+    fn reparent_takes_a_waiting_unattested_approval_and_clears_its_wait() {
+        let mut graph = graph_of(vec![
+            agent("build", &[]),
+            agent("docs", &[]),
+            approval("approve", &["build"]),
+        ]);
+        let mut waiting = frontier(&[
+            ("build", NodeStatus::Done),
+            ("approve", NodeStatus::Waiting),
+        ]);
+        let operations = compile(
+            &mut graph,
+            &waiting,
+            &Command::Reparent {
+                id: "approve".into(),
+                deps: vec!["build".into(), "docs".into()],
+            },
+        )
+        .expect("a waiting, unattested approval reparents");
+        assert_eq!(
+            graph.get("approve").expect("approve").deps,
+            vec!["build".to_string(), "docs".to_string()]
+        );
+
+        // The wait was derived from the prerequisites it just replaced, so it
+        // comes off the frontier, and an attest later in the same envelope is
+        // refused rather than releasing the approval ahead of `docs`.
+        advance(&mut waiting, &operations);
+        assert!(!waiting.recorded.contains_key("approve"));
+        let refused = compile(
+            &mut graph,
+            &waiting,
+            &Command::Attest {
+                reference: "approve".into(),
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refused.contains("not a ready, waiting human action"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn reparent_still_refuses_every_other_recorded_node() {
+        let reparent = |id: &str| Command::Reparent {
+            id: id.into(),
+            deps: vec!["build".into()],
+        };
+        // A non-human node recorded `waiting` — a lifecycle node at a human
+        // step — has run steps on a branch; an attested approval is done; and
+        // an approval recorded anything other than `waiting` is not waiting.
+        let mut attested = frontier(&[("approve", NodeStatus::Waiting)]);
+        attested.attestations.insert("approve".into());
+        for (what, node, recorded) in [
+            (
+                "a lifecycle node waiting on a human step",
+                agent("work", &[]),
+                frontier(&[("work", NodeStatus::Waiting)]),
+            ),
+            (
+                "an attested approval",
+                approval("approve", &[]),
+                frontier(&[("approve", NodeStatus::Done)]),
+            ),
+            (
+                "an approval attested while its record still reads waiting",
+                approval("approve", &[]),
+                attested,
+            ),
+            (
+                "running work",
+                agent("work", &[]),
+                frontier(&[("work", NodeStatus::Running)]),
+            ),
+        ] {
+            let id = node.id.clone();
+            let mut graph = graph_of(vec![agent("build", &[]), node]);
+            let message = compile(&mut graph, &recorded, &reparent(&id))
+                .expect_err(what)
+                .to_string();
+            assert!(message.contains("already started"), "{what}: {message}");
+            assert!(graph.get(&id).expect("node").deps.is_empty(), "{what}");
+        }
+    }
+
+    /// `reply` judges an envelope through [`advance`] and the reconciler through
+    /// the fold, which records an attestation `done`: both must refuse a reparent
+    /// of the approval the same envelope has just attested.
+    #[test]
+    fn an_attest_then_a_reparent_of_the_same_approval_is_refused() {
+        let mut graph = graph_of(vec![agent("build", &[]), approval("approve", &[])]);
+        let mut checking = frontier(&[("approve", NodeStatus::Waiting)]);
+        let attested = compile(
+            &mut graph,
+            &checking,
+            &Command::Attest {
+                reference: "approve".into(),
+            },
+        )
+        .expect("a waiting approval attests");
+        advance(&mut checking, &attested);
+        assert!(checking.attestations.contains("approve"));
+        assert_eq!(checking.recorded.get("approve"), Some(&NodeStatus::Done));
+        let message = compile(
+            &mut graph,
+            &checking,
+            &Command::Reparent {
+                id: "approve".into(),
+                deps: vec!["build".into()],
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("already started"), "{message}");
     }
 
     #[test]
