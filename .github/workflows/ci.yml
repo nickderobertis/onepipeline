@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `ready_for_review` too: a draft's runs are not re-triggered when the draft
+    # is lifted under the default types, so a publisher waiting on a run against
+    # the lifted head would otherwise see none.
+    types: [opened, synchronize, reopened, ready_for_review]
 
 # Least privilege: most jobs only need to read the repo.
 permissions:
