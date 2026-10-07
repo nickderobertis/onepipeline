@@ -35,6 +35,11 @@ set positional-arguments := true
 onetaskgraph-version := "0.3.2"
 onetaskgraph-root := justfile_directory() / "target" / "tools" / ("onetaskgraph-" + onetaskgraph-version)
 
+# The budget checker `budgets.yaml` is measured with (`just budgets`), installed at this
+# release into this clone's own build directory, never onto `PATH`, as `onetaskgraph` is above.
+onebudgetspec-version := "0.1.1"
+onebudgetspec-root := justfile_directory() / "target" / "tools" / ("onebudgetspec-" + onebudgetspec-version)
+
 # The renderer the visual-docs capture draws each scene with (`just screenshots`).
 # NOT part of `check`, `gate` or `bootstrap`: screenshots are informational, and
 # this is the only version of `freeze` a capture of this repository is ever taken
@@ -81,9 +86,9 @@ _crate-bootstrap:
       || { echo "cannot add toolchain components — install rustup (https://rustup.rs/) and re-run" >&2; exit 1; }
     @just _ensure-tool cargo-nextest
     @just _ensure-tool cargo-llvm-cov
-    @just _ensure-tool onebudgetspec
     @just _ensure-strace
     @just _ensure-onetaskgraph
+    @just _ensure-onebudgetspec
     @cargo fetch --locked --quiet
 
 # The tracer the Linux-only e2e journeys (`agents.rs`, `channel.rs`, `listing.rs`,
@@ -121,6 +126,17 @@ _ensure-onetaskgraph:
 _onetaskgraph-preflight:
     @[ -x "{{onetaskgraph-root}}/bin/onetaskgraph" ] || [ -x "{{onetaskgraph-root}}/bin/onetaskgraph.exe" ] \
       || { echo "onetaskgraph {{onetaskgraph-version}} is not installed — the template journeys in tests/e2e/templates.rs drive it and refuse without it: run 'just bootstrap' (or 'just _ensure-onetaskgraph'), then re-run" >&2; exit 1; }
+
+# The released `onebudgetspec` `just budgets` runs. Network, so it is installed by
+# `bootstrap` and only asked for by that recipe.
+# llmlint: ignore-block[changed_behavior_has_e2e] installing from crates.io needs the network,
+# which the offline tier may not reach, and it is the shape `_ensure-onetaskgraph` above has; the
+# release it installs is held to the checker library `tests/budgets.rs` links.
+_ensure-onebudgetspec:
+    @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
+      || cargo install onebudgetspec --locked --quiet --version {{onebudgetspec-version}} --root "{{onebudgetspec-root}}" \
+      || { echo "onebudgetspec {{onebudgetspec-version}} could not be installed into {{onebudgetspec-root}}; 'just budgets' refuses without it" >&2; exit 1; }
+# llmlint: ignore-end[changed_behavior_has_e2e]
 
 # These are test runners, not rules: their version cannot change the gate's
 # verdict, so both here and CI take the latest rather than keeping two pins that
@@ -440,6 +456,19 @@ deps-check:
 # is this repository's documented index of its command surface. Read as prose each
 # one restates the name below it, which is what a one-line help string does;
 # deleting them empties the index rather than tightening it.
+
+# llmlint: ignore-block[changed_behavior_has_e2e] driven by running it: its measurement runs a
+# whole e2e journey, which a test inside the suite would run a second time per gate, and
+# `tests/budgets.rs` holds the file, the result and the command it checks.
+# Offline: the Linear budget journey runs against a loopback endpoint. `check` reaches this recipe
+# through the crate's `budgets` Nx target, after the tier that writes the stacked-spikes record. Its command
+# builds the e2e binary through `test-e2e`, so warnings are denied here as every gate build denies them.
+# Measure every budget in budgets.yaml against its threshold.
+budgets:
+    @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
+      || { echo "onebudgetspec {{onebudgetspec-version}} is not installed: run 'just bootstrap' (or 'just _ensure-onebudgetspec'), then re-run" >&2; exit 1; }
+    @RUSTFLAGS="-D warnings" "{{onebudgetspec-root}}/bin/onebudgetspec" check budgets.yaml
+# llmlint: ignore-end[changed_behavior_has_e2e]
 
 # Both are outside `check` for the reason `deps-check` is: they read the
 # crates.io index, and the deterministic gate stays offline. The split half of

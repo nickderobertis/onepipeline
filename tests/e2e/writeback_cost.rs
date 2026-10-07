@@ -36,6 +36,9 @@ const RUN: &str = "comparable-plan";
 
 const RECORD: &str = "tests/golden/writeback-comparable-plan.json";
 
+/// The call the write-back ends each attempt's command on its retained store with.
+const END: &str = "end_command";
+
 /// What every request the scripted source answers charges: one request, and one point of a
 /// `graphql` budget, as a hosted source reports a request it sent.
 fn meter() -> Value {
@@ -87,26 +90,27 @@ fn dispatched(world: &World, node: &str) -> usize {
         .count()
 }
 
-/// Wait until the write-back is at rest: every connection the store was handed but the
-/// launch's own read has its attempt recorded, the last attempt landed, and the store has
-/// been asked nothing for a while. Nothing here times a single attempt; a step waits for the
-/// graph it caused, and then for this.
+/// Wait until the write-back is at rest: every command the write-back's store was handed has
+/// ended and its attempt is recorded, the last attempt landed, and the store has been asked
+/// nothing for a while. Nothing here times a single attempt; a step waits for the graph it
+/// caused, and then for this.
 fn at_rest(world: &World, what: &str) {
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let asked = world.store_calls();
-        let opened = asked.iter().filter(|call| call[0] == "initialize").count();
+        let ended = asked.iter().filter(|call| call[0] == END).count();
         let recorded = records(world);
         let landed = recorded
             .last()
             .is_some_and(|record| record["outcome"] == "projected");
-        // An attempt with nothing to carry opens no connection and records that it called
-        // nothing; an older engine's line counts no calls at all, and opened one.
-        let opened_by_attempts = recorded
+        // An attempt with nothing to carry asks the store nothing and records that it called
+        // nothing; every other attempt ends its command before it is recorded.
+        let called_by_attempts = recorded
             .iter()
             .filter(|record| record["calls"] != json!({}))
             .count();
-        if landed && opened_by_attempts + 1 == opened {
+        let between_commands = asked.last().is_some_and(|call| call[0] == END);
+        if landed && between_commands && called_by_attempts == ended {
             std::thread::sleep(Duration::from_millis(1_500));
             if world.store_calls().len() == asked.len() && records(world).len() == recorded.len() {
                 return;
@@ -354,19 +358,25 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
             "whole_attempts": recorded.iter().filter(|record| record["scope"] == "whole").count(),
         },
     });
-    // Each attempt that opened the store, as the calls its own connection made: the
-    // write-back's connections in order, beside the records of the attempts that opened one.
-    let mut connections: Vec<Vec<Vec<String>>> = Vec::new();
+    // Each attempt that called the store, as the calls its own command made: the write-back's
+    // calls in order, each command closed by its end, beside the records of the attempts that
+    // called the store. A store built for an attempt opens its command with the handshake.
+    let mut commands: Vec<Vec<Vec<String>>> = vec![Vec::new()];
     for call in writeback {
-        if call[0] == "initialize" {
-            connections.push(Vec::new());
-        }
-        connections
+        commands
             .last_mut()
-            .expect("every write-back call follows its connection's handshake")
+            .expect("a command is always open")
             .push(call.clone());
+        if call[0] == END {
+            commands.push(Vec::new());
+        }
     }
-    (figures, recorded, connections)
+    assert_eq!(
+        commands.pop(),
+        Some(Vec::new()),
+        "the write-back's last command never ended"
+    );
+    (figures, recorded, commands)
 }
 
 /// The one landed attempt since `mark` that carried `root` alone, as a targeted update.
@@ -412,7 +422,7 @@ fn failures(world: &World) -> usize {
 /// looking for a counterpart before it creates one, which is the copy's own work.)
 #[test]
 fn the_comparable_plan_spends_what_the_committed_record_says() {
-    let (measured, recorded, connections) = the_comparable_plan();
+    let (measured, recorded, commands) = the_comparable_plan();
     let record: Value = serde_json::from_str(
         &std::fs::read_to_string(repo_file(RECORD)).expect("the comparable plan's record ships"),
     )
@@ -451,17 +461,17 @@ fn the_comparable_plan_spends_what_the_committed_record_says() {
     // creation lookup — its origin scan for an item it is about to create — so it appears only
     // in an attempt that created an item, at most once per item created, and inside that
     // attempt's copy: never in the reads the write-back makes itself.
-    let opened: Vec<&Value> = recorded
+    let called: Vec<&Value> = recorded
         .iter()
         .filter(|record| record["calls"] != json!({}))
         .collect();
     assert_eq!(
-        opened.len(),
-        connections.len(),
-        "an attempt and a connection do not pair"
+        called.len(),
+        commands.len(),
+        "an attempt and a command do not pair"
     );
     let mut lookups = 0;
-    for (record, calls) in opened.iter().zip(&connections) {
+    for (record, calls) in called.iter().zip(&commands) {
         let pages = calls.iter().filter(|call| call[0] == "query_tasks").count();
         let created = record["actions"]["created"].as_u64().unwrap_or(0);
         assert!(
@@ -489,8 +499,8 @@ fn the_comparable_plan_spends_what_the_committed_record_says() {
         Some(lookups as u64),
         "a page of tasks was read outside every attempt's copy"
     );
-    // An attempt with nothing left to carry asks the store nothing: it opens no connection, and
-    // its line names no items, no calls and no report.
+    // An attempt with nothing left to carry asks the store nothing, not even to end a command,
+    // and its line names no items, no calls and no report.
     let idle: Vec<&Value> = recorded
         .iter()
         .filter(|record| record["calls"] == json!({}))
@@ -505,9 +515,9 @@ fn the_comparable_plan_spends_what_the_committed_record_says() {
         assert_eq!(record["actions"], Value::Null, "{record}");
     }
     assert_eq!(
-        measured["writeback"]["calls"]["initialize"].as_u64(),
+        measured["writeback"]["calls"][END].as_u64(),
         Some((recorded.len() - idle.len()) as u64),
-        "an attempt that called nothing opened the store"
+        "an attempt that called nothing ended a command, or one that called the store did not"
     );
     for record in &recorded {
         assert_eq!(record["scope"], "members", "{record}");
