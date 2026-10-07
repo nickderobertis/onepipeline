@@ -599,17 +599,21 @@ fn an_adoption_with_no_baseline_reads_a_member_task_by_its_id_in_its_own_source(
     let mark = records(&world, name).len();
     world.run(&["adopt", name, "--detach"]).exited(0);
     // The record is appended after the attempt ends its store command, so the board can show
-    // the claim before the attempt's record exists: wait for both.
+    // the claim before the attempt's record exists: wait for both. The record is taken from the
+    // read that satisfied the wait, because `records` reads a file it cannot open as empty and a
+    // second read can lose a transient Windows sharing violation the first one did not.
+    let mut seen = Vec::new();
     world.until_store(
         "the adopted driver's claim to reach both sources, and its record",
         |world| {
             let board = words(world, &home);
+            seen = records(world, name);
             board.get("adopt").map(String::as_str) == Some("queued")
                 && board.get("ship").map(String::as_str) == Some("queued")
-                && records(world, name).len() > mark
+                && seen.len() > mark
         },
     );
-    let first = records(&world, name)
+    let first = seen
         .get(mark)
         .cloned()
         .expect("the adopted driver's first attempt");
