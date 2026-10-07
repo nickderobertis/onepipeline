@@ -697,6 +697,45 @@ esac
       "the replayed e2e tier did not restore the budget record `budgets` reads",
     );
   });
+
+  it("runs again after a change to the doubles or either configuration file", (t) => {
+    // The other half of the cache inputs above, asked of a warm cache rather
+    // than of `nx show`: each of these files changes what the tier's binary
+    // does, so a replay after it would report a run nobody made. A file outside
+    // the tier's inputs is the control — it replays, so the cases that run again
+    // are not running because nothing ever replays.
+    const repo = scratchRepository(t);
+    mkdirSync(join(repo.path, "bin"));
+    writeFileSync(join(repo.path, "bin", "just"), DOUBLE, { mode: 0o755 });
+    const calls = join(repo.path, "just.calls");
+    const tierRan = () => {
+      writeFileSync(calls, "");
+      const result = run(
+        ["scripts/nx.sh", "run", "onepipeline-contract:test"],
+        {
+          PATH: `${join(repo.path, "bin")}:${process.env.PATH}`,
+          JUST_CALLS: calls,
+          JUST_SAW: join(repo.path, "aggregate.saw"),
+        },
+        repo.path,
+      );
+      assert.equal(result.status, 0, result.stderr);
+      return readFileSync(calls, "utf8").split("\n").includes("_contract-test");
+    };
+
+    assert.ok(tierRan(), "a cold cache did not run the tier");
+    assert.ok(!tierRan(), "an unchanged tree did not replay the tier");
+    for (const file of [
+      "crates/testfakes/src/lib.rs",
+      ".cargo/config.toml",
+      ".config/nextest.toml",
+    ]) {
+      repo.change(file);
+      assert.ok(tierRan(), `a change to ${file} replayed the tier from the cache`);
+    }
+    repo.change("npm/test/workspace-nx.test.mjs");
+    assert.ok(!tierRan(), "a change outside the tier's inputs ran it again");
+  });
 });
 
 describe("the build targets", () => {
