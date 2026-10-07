@@ -32,6 +32,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit]
+  # this is the one sweep the release model places, over a tree no merge's job
+  # swept: the release PR batches every merge since the last tag, and each of
+  # those ran only its affected tier. The second sweep the rule sees is
+  # `release.yml`'s `test` job, which carries its own suppression saying why it
+  # stays — a Release made by hand from any tag can name a commit CI never gated.
   release-sweep:
     # release-plz names its release branches `release-plz-<timestamp>`, and the
     # PAT it opens them with is what makes this event fire at all.
@@ -66,3 +72,4 @@ jobs:
         run: just rerun-failed-coverage "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
       - name: Committed generated files are up to date
         run: git diff --exit-code -- Cargo.lock package-lock.json
+  # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit]

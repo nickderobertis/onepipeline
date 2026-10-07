@@ -621,6 +621,84 @@ describe("affected selection over real commits", () => {
   }
 });
 
+describe("a tier replayed from the cache", () => {
+  // The floor is one report over every tier's profiles, and `coverage-clean`
+  // empties the tree those profiles sit in before any tier runs. So a tier Nx
+  // replays has to put its profiles back, or the aggregate measures the suite
+  // without it. Driven through the real Nx and the committed project graph in a
+  // scratch repository; only `just` is a double, standing in for the
+  // instrumented runs: each tier recipe writes one profile under the name the
+  // real `_tier-test` gives it, and the aggregate lists what it would merge.
+  const DOUBLE = `#!/usr/bin/env bash
+echo "$1" >> "$JUST_CALLS"
+tree=target/llvm-cov-target
+case "$1" in
+  _crate-coverage-clean) rm -rf "$tree" ;;
+  _crate-test-archive) ;;
+  _crate-coverage) ls "$tree" > "$JUST_SAW" ;;
+  *)
+    tier="$(sed -n "s/^$1:.*(_tier-test \\"\\([a-z0-9_]*\\)\\".*/\\1/p" justfile)"
+    [ -n "$tier" ] || { echo "just double: '$1' runs no tier" >&2; exit 1; }
+    name="$(sed -n 's/.*LLVM_PROFILE_FILE_NAME="\\([^"]*\\)".*/\\1/p' justfile)"
+    name="\${name//\\$1/$tier}"; name="\${name//%p/$$}"; name="\${name//%14m/0}"
+    mkdir -p "$tree" && echo profile > "$tree/$name"
+    if [ "$tier" = e2e ]; then
+      mkdir -p target/budget-records && echo '{}' > target/budget-records/stacked-spikes-stage.json
+    fi
+    ;;
+esac
+`;
+  const TIER_RECIPES = ["_crate-test-rest", "_e2e-test", "_contract-test", "_note-test"];
+
+  it("restores its profiles for the aggregate to merge beside the tier that ran", (t) => {
+    const repo = scratchRepository(t);
+    mkdirSync(join(repo.path, "bin"));
+    writeFileSync(join(repo.path, "bin", "just"), DOUBLE, { mode: 0o755 });
+    const calls = join(repo.path, "just.calls");
+    const saw = join(repo.path, "aggregate.saw");
+    const aggregate = () => {
+      writeFileSync(calls, "");
+      const result = run(
+        ["scripts/nx.sh", "run", "onepipeline:test"],
+        {
+          PATH: `${join(repo.path, "bin")}:${process.env.PATH}`,
+          JUST_CALLS: calls,
+          JUST_SAW: saw,
+        },
+        repo.path,
+      );
+      assert.equal(result.status, 0, result.stderr);
+      return {
+        ran: readFileSync(calls, "utf8").split("\n").filter(Boolean),
+        merged: readFileSync(saw, "utf8").split("\n").filter(Boolean),
+      };
+    };
+    const tiersIn = (merged) =>
+      merged.map((profile) => profile.match(/^onepipeline-([a-z0-9_]+)-/)?.[1]).sort();
+
+    const cold = aggregate();
+    for (const recipe of TIER_RECIPES) assert.ok(cold.ran.includes(recipe), cold.ran.join(" "));
+    assert.deepEqual(tiersIn(cold.merged), ["contract", "e2e", "note", "rest"]);
+
+    // Only the note tier's inputs change; the budget record the e2e tier
+    // writes is gone, as it is on a fresh runner.
+    rmSync(join(repo.path, "target", "budget-records"), { recursive: true, force: true });
+    repo.change("tests/note/main.rs");
+    const warm = aggregate();
+    assert.deepEqual(
+      warm.ran.filter((recipe) => TIER_RECIPES.includes(recipe)),
+      ["_note-test"],
+      `only the changed tier runs: ${warm.ran.join(" ")}`,
+    );
+    assert.ok(warm.ran.includes("_crate-coverage-clean"), warm.ran.join(" "));
+    assert.deepEqual(tiersIn(warm.merged), ["contract", "e2e", "note", "rest"]);
+    assert.ok(
+      existsSync(join(repo.path, "target", "budget-records", "stacked-spikes-stage.json")),
+      "the replayed e2e tier did not restore the budget record `budgets` reads",
+    );
+  });
+});
+
 describe("the build targets", () => {
   it("compiles the crate's binary, library, and tests with warnings denied", () => {
     // The crate's own build command, run the way its Nx target runs it. A

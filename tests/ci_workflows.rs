@@ -50,6 +50,14 @@ fn workflows() -> BTreeMap<String, Value> {
 /// The contexts branch protection requires, as read at plan time. A change to
 /// this list is a governance change, applied by `setup_github_governance.py`
 /// and never by editing this test to match a renamed job.
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the source is
+// GitHub's branch protection, which no offline test can read, and its drift gate
+// is `setup_github_governance.py --verify`, run by governance rather than by this
+// suite. What this list holds is the other side of that contract — that the
+// committed workflows still report every one of these names on a pull request —
+// which only the tree can answer. The visual-docs context is listed because the
+// protection read at plan time requires it, whatever AGENTS.md calls advisory;
+// reconciling the two is that same governance verification's.
 const REQUIRED: &[&str] = &[
     "gate",
     "pr-title",
@@ -69,6 +77,7 @@ const REQUIRED: &[&str] = &[
     "release-compat",
     "visual-docs / report (x86_64, shots/current, shots/verify, Visual docs)",
 ];
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// The one context reported by a job of a reusable workflow defined in another
 /// repository, whose rendered name this tree cannot compute: the calling job

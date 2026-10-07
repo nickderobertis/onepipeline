@@ -1,11 +1,5 @@
-# Comment on every pull request with the lint and type-check suppressions it adds.
-#
-# A `# noqa`, an `#[allow(dead_code)]`, an `llmlint: ignore` — each costs one line
-# to add and scrolls past review unremarked, and in agent-written code silencing a
-# rule is often easier than fixing it. notignored posts one sticky comment listing
-# the suppressions *this change introduced*, each with its rule, its stated reason,
-# and a link to the line — so a human reviewing at a high level sees every bypass
-# without reading the diff line by line. It is drop-in: no config, no install.
+# Comment on every pull request with the lint and type-check suppressions it
+# adds, so a reviewer reading at a high level sees each one with its reason.
 #
 # Deliberately NOT a required status check. It skips fork pull requests (whose
 # read-only token cannot upsert a comment), and a required context that never
@@ -40,10 +34,6 @@ jobs:
           # The scan diffs against the base branch, which a shallow checkout omits.
           fetch-depth: 0
 
-      # `@v0` is a floating major tag: it follows every 0.x release and moves only
-      # once that release's artifacts have published, so it never resolves to
-      # unreleased work. Pin exactly (`@v0.1.11`) only where a reproducible build
-      # matters more than picking up fixes. Every input has a usable default —
-      # `diff-base` is the PR's base branch, `paths` the whole repo — so a repo
-      # that wants the default review artifact passes none.
+      # The floating major tag picks up fixes; the defaults (the PR's base branch,
+      # the whole repo) are the review this repository wants, so no inputs.
       - uses: nickderobertis/notignored@v0
