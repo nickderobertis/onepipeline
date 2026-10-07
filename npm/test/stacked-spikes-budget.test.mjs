@@ -20,7 +20,8 @@ const record = "target/budget-records/stacked-spikes-stage.json";
 let workspace;
 
 // The registration is the committed one, and `scripts` links back to the tree so
-// the command's import of the SDK resolves from this repository's lock.
+// the command's import of the SDK resolves from this repository's lock. The root
+// file registers other budgets too, so the check selects this one by its id.
 beforeEach(() => {
   workspace = mkdtempSync(join(tmpdir(), "stacked-spikes-budget-"));
   copyFileSync(join(root, "budgets.yaml"), join(workspace, "budgets.yaml"));
@@ -31,9 +32,14 @@ beforeEach(() => {
 afterEach(() => rmSync(workspace, { recursive: true, force: true }));
 
 function check() {
-  const output = spawnSync(binary, ["check", "--json", join(workspace, "budgets.yaml")], {
-    encoding: "utf8",
-  });
+  const args = [
+    "check",
+    "--json",
+    "--id",
+    "stacked-spikes-stage-time",
+    join(workspace, "budgets.yaml"),
+  ];
+  const output = spawnSync(binary, args, { encoding: "utf8" });
   const results = JSON.parse(output.stdout).results;
   assert.equal(results.length, 1, output.stdout);
   assert.equal(results[0].id, "stacked-spikes-stage-time");
