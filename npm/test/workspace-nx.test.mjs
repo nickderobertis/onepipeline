@@ -594,6 +594,69 @@ describe("affected selection over real commits", () => {
     assert.doesNotMatch(result.stderr, /not a usable branch name/);
   });
 
+  it("runs the targets of the affected projects only, and every project without a base", (t) => {
+    // The path `just check-affected` takes, through the real Nx: only `just` is
+    // a double, recording which recipe each project's `format-check` ran.
+    const repo = scratchRepository(t);
+    mkdirSync(join(repo.path, "bin"));
+    writeFileSync(
+      join(repo.path, "bin", "just"),
+      '#!/usr/bin/env bash\necho "$*" >> "$JUST_CALLS"\n',
+      {
+        mode: 0o755,
+      },
+    );
+    const calls = join(repo.path, "just.calls");
+    const before = repo.head();
+    repo.change("tests/e2e/adoption.rs");
+    const checked = (sha) => {
+      writeFileSync(calls, "");
+      const result = run(
+        [
+          "scripts/nx-affected.sh",
+          "-t",
+          "format-check",
+          "--exclude",
+          "onepipeline-npm",
+          "--skip-nx-cache",
+        ],
+        {
+          CI: "true",
+          GITHUB_BASE_REF: "",
+          ONEPIPELINE_NX_BASE_REF: undefined,
+          ONEPIPELINE_NX_BASE_SHA: sha,
+          PATH: `${join(repo.path, "bin")}:${process.env.PATH}`,
+          JUST_CALLS: calls,
+        },
+        repo.path,
+      );
+      assert.equal(result.status, 0, result.stderr);
+      return {
+        ran: readFileSync(calls, "utf8").split("\n").filter(Boolean),
+        stderr: result.stderr,
+      };
+    };
+
+    const scoped = checked(before);
+    assert.ok(scoped.ran.includes("_tier-fmt-check tests/e2e/main.rs"), scoped.ran.join(" | "));
+    assert.ok(!scoped.ran.includes("_tier-fmt-check tests/contract.rs"), scoped.ran.join(" | "));
+    assert.doesNotMatch(scoped.stderr, /running every project/);
+
+    for (const sha of ["0000000000000000000000000000000000000000", undefined]) {
+      const unscoped = checked(sha);
+      assert.ok(
+        unscoped.ran.includes("_tier-fmt-check tests/e2e/main.rs"),
+        unscoped.ran.join(" | "),
+      );
+      assert.ok(
+        unscoped.ran.includes("_tier-fmt-check tests/contract.rs"),
+        unscoped.ran.join(" | "),
+      );
+      assert.match(unscoped.stderr, /ONEPIPELINE_NX_BASE_SHA/);
+      assert.match(unscoped.stderr, /running every project instead of the affected ones/);
+    }
+  });
+
   for (const [why, sha] of [
     ["names no commit this checkout has", "0123456789abcdef0123456789abcdef01234567"],
     ["is not a commit SHA", "main; rm -rf /"],
