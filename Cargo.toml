@@ -880,7 +880,11 @@ onevcs-testing = "0.13.0"
 # lock's whole family to this one release, and fails as well if anything this
 # repository installs as an `onetaskgraph` binary names another.
 #
-# 0.3.2 supplies the plugin-agnostic end-of-command boundary for a reused store, and
+# 0.3.6 carries a reference's `#fragment` through a copy's rewrite, so a document linking to
+# a section of a copied task — `[budgets](<task>#budgets)` — lands on the destination's copy
+# of that task with the fragment kept (`multi_source::a_design_documents_fragment_link_*`);
+# 0.3.3 copies image assets with their records, adding five asset refusals that
+# `writeback::cause_of` classes. Before them, 0.3.2 supplies the plugin-agnostic end-of-command boundary for a reused store, and
 # one `status_mapping` grammar scoped by item kind in both `github-projects` and
 # `linear`: a category maps to one name, or to a name per kind (`{ task: …, project: … }`),
 # so a Linear project is written its own project status rather than an issue state's
@@ -892,9 +896,9 @@ onevcs-testing = "0.13.0"
 # on, and renders a project's description from a template (`project create`/`project
 # render`), which `template check --item` reads for a role-`project` name. `justfile`'s
 # `onetaskgraph-version` moves with it.
-onetaskgraph-core = "=0.3.2"
-onetaskgraph-plugin-api = "=0.3.2"
-onetaskgraph-local-md = "=0.3.2"
+onetaskgraph-core = "=0.3.6"
+onetaskgraph-plugin-api = "=0.3.6"
+onetaskgraph-local-md = "=0.3.6"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"

@@ -2666,7 +2666,7 @@ impl World {
     /// wrote it at, and a targeted update, which edits a document's metadata in
     /// place and refuses a one-line flow mapping it cannot edit so, finds the
     /// shape a real board has.
-    fn write_item(&self, path: &Path, front: &[(&str, Value)], body: &str) {
+    pub fn write_item(&self, path: &Path, front: &[(&str, Value)], body: &str) {
         std::fs::create_dir_all(path.parent().expect("a directory")).expect("a store directory");
         let mut document = String::from("---\n");
         for (key, value) in front {
