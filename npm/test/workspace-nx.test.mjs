@@ -483,7 +483,6 @@ function scratchRepository(t) {
   return {
     path: scratch,
     head: () => git("rev-parse", "HEAD"),
-    /** Commit one appended line to `file`, as a change to it. */
     change(file) {
       appendFileSync(join(scratch, file), "\n");
       git("commit", "-q", "-am", `change ${file}`);

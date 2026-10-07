@@ -33,7 +33,6 @@ fn workflow(file: &str) -> Value {
     serde_norway::from_str(&text).unwrap_or_else(|e| panic!("{file} does not parse: {e}"))
 }
 
-/// Every workflow file this tree commits, by file name.
 fn workflows() -> BTreeMap<String, Value> {
     fs::read_dir(repo_root().join(".github/workflows"))
         .expect("the workflows directory reads")
@@ -527,7 +526,6 @@ fn evaluate(expression: &str, github: &BTreeMap<&str, &str>) -> bool {
     truthy(&value)
 }
 
-/// Whether a job runs for an event: its `if:` evaluated, or `true` without one.
 fn selected(job: &Value, github: &BTreeMap<&str, &str>) -> bool {
     condition(job).is_none_or(|c| evaluate(&c, github))
 }
@@ -549,8 +547,6 @@ fn the_release_pull_request_runs_the_full_sweep_and_every_other_pull_request_the
             .filter_map(|step| step.get("run").and_then(Value::as_str))
             .any(|run| run.contains(step_run))
     };
-    // What each job is: the sweep runs `just check` — `run-many` over every
-    // gate-eligible project — and the gate `just check-affected`.
     assert!(
         runs(sweep, "just check 2>&1"),
         "the release sweep runs `just check`"

@@ -389,6 +389,11 @@ test-quick:
 # cross legs report a line per test as it finishes so that a leg cut short names
 # where it stopped, and `rerun-failed` reads nextest's status lines off the
 # start of each line.
+# llmlint: ignore-block[diagnostics_error_or_absent] the runs here and the archive
+# below have to build the same thing, so that each run finds the archived build
+# fresh and the archive is the build the step tested; neither sets RUSTFLAGS, as
+# the single `test-quick` recipe they were split out of did not. Warnings are
+# denied by `just lint`, which `check-cross` runs before `test-quick`.
 _tier-test-quick filter:
     @bash scripts/nextest-run.sh cargo nextest run --locked -E "$1"
 
@@ -402,11 +407,6 @@ _note-test-quick: (_tier-test-quick note-tier)
 
 # The uninstrumented build every project's `test-quick` runs, archived once,
 # ahead of them all (the `onepipeline:test-quick-archive` target).
-# llmlint: ignore-block[diagnostics_error_or_absent] the archive line has to build
-# exactly what the runs after it build, so that each run finds it fresh and the
-# archive is the build the step tested; the runs set no RUSTFLAGS, so neither
-# can the archive. Warnings are denied by `just lint`, which `check-cross` runs
-# before this.
 _crate-test-quick-archive:
     @[ -z "${ONEPIPELINE_TEST_ARCHIVE:-}" ] || cargo nextest archive --locked --archive-file "$ONEPIPELINE_TEST_ARCHIVE"
 # llmlint: ignore-end[diagnostics_error_or_absent]
