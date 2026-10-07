@@ -520,7 +520,6 @@ upgrade:
 deps-check:
     @bash scripts/nx.sh run onepipeline:deps-check
 
-# The `deps-check` target's body.
 _crate-deps-check:
     @command -v cargo-deny >/dev/null || { echo "cargo-deny not installed: cargo install cargo-deny --locked" >&2; exit 1; }
     @command -v cargo-machete >/dev/null || { echo "cargo-machete not installed: cargo install cargo-machete --locked" >&2; exit 1; }
@@ -576,7 +575,6 @@ wheel-linux target out="dist":
 msrv:
     @bash scripts/nx.sh run onepipeline:msrv
 
-# The `msrv` target's body.
 _crate-msrv:
     @RUSTFLAGS="-D warnings" cargo +{{msrv-version}} check --locked --all-targets --quiet \
       || { echo "the {{msrv-version}} floor no longer builds — install that toolchain, or raise rust-version in Cargo.toml (and clippy.toml)" >&2; exit 1; }

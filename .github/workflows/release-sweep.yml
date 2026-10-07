@@ -1,12 +1,7 @@
 # The broader tier: one `run-many` sweep of the deterministic gate over every
 # project, on the release-plz release pull request and nowhere else in CI.
-#
-# Where it runs follows from how this repository releases. release-plz batches
-# every merge since the last tag into one release PR, so the commit that ships is
-# not one any merge's job swept: the sweep belongs to that pull request, and a
-# merge to main runs the affected tier (`ci.yml`'s `gate`). AGENTS.md "Commits,
-# releases, and merging" records the model and why `release.yml`'s own re-sweep
-# of a published Release is not a duplicate of this one.
+# AGENTS.md "Commits, releases, and merging" records why it runs here, and why
+# `release.yml`'s re-sweep of a published Release is not a duplicate of it.
 #
 # Its own workflow and its own job, so that nothing in `ci.yml` — the required
 # set — depends on it, and its check name is not one branch protection requires:

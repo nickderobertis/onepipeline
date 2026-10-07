@@ -15,17 +15,9 @@
 
 # The test-tier projects
 
-Each binary below is its own Nx project, in the directory beside its sources;
+A test binary with a `project.json` beside its sources is its own Nx project;
 the crate's project (`onepipeline:test-rest`) runs the unit tests and every
 other binary here.
-
-| Project | Binary | Runs in |
-| --- | --- | --- |
-| `onepipeline-e2e` (`e2e/`) | `e2e` | `check`, instrumented |
-| `onepipeline-contract` (`contract/`) | `contract` (`contract.rs`) | `check`, instrumented |
-| `onepipeline-note-journeys` (`note/`) | `note` | `check`, instrumented |
-| `onepipeline-smoke` (`smoke/`) | `smoke` | `just smoke-real` only — live GitHub |
-| `onepipeline-release-compat` (`release_channel/`) | `release_channel` | `just release-compat` only — PyPI |
 
 - **The tiers partition the offline suite.** The justfile's `*-tier` filters
   decide which tests each project runs, and `rest-tier` is spelled as the

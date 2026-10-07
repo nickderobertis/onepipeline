@@ -80,9 +80,19 @@ const REQUIRED: &[&str] = &[
 // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// The one context reported by a job of a reusable workflow defined in another
-/// repository, whose rendered name this tree cannot compute: the calling job
-/// and its pinned workflow are what is held instead.
+/// repository. At the pinned release below its `report` job renders one leg per
+/// `screencomp.toml` arch as `(<arch>, shots/current, shots/verify,
+/// <gallery-title>)`, the last three from defaults of inputs the caller leaves
+/// unset; the test derives the name from those and compares.
 const VISUAL_DOCS: &str = "visual-docs / report (x86_64, shots/current, shots/verify, Visual docs)";
+
+/// The release whose `report` job was read to derive the rendering above. A pin
+/// bump fails here until the rendering is read again at the new tag.
+const VISUAL_DOCS_PIN: &str =
+    "nickderobertis/screencomp/.github/workflows/visual-docs-reusable.yml@v0.4.8";
+
+/// The reusable workflow's inputs that change its `report` legs' rendered names.
+const VISUAL_DOCS_LEG_INPUTS: &[&str] = &["arches", "projects", "gallery-title"];
 
 /// The conditions a required job may carry. Each one either always holds on a
 /// pull request or skips the job — and a skipped job reports its context as
@@ -269,11 +279,38 @@ fn every_required_context_is_reported_on_every_pull_request() {
     let visual = &all["visual-docs.yml"];
     assert!(runs_on_every_pull_request("visual-docs.yml", visual));
     let caller = &visual["jobs"]["visual-docs"];
-    assert!(
-        caller["uses"]
-            .as_str()
-            .is_some_and(|uses| uses.contains("visual-docs-reusable.yml@")),
-        "`{VISUAL_DOCS}` is reported by the reusable workflow `visual-docs.yml`'s `visual-docs` job calls"
+    assert_eq!(
+        caller["uses"].as_str(),
+        Some(VISUAL_DOCS_PIN),
+        "`{VISUAL_DOCS}` was read off {VISUAL_DOCS_PIN}'s `report` job; read it again at the new pin"
+    );
+    for input in VISUAL_DOCS_LEG_INPUTS {
+        assert!(
+            caller["with"].get(*input).is_none(),
+            "the visual-docs caller sets `{input}`, which renames the `report` legs"
+        );
+    }
+    let screencomp: toml::Value = toml::from_str(
+        &fs::read_to_string(repo_root().join("screencomp.toml"))
+            .expect("screencomp.toml is readable"),
+    )
+    .expect("screencomp.toml is TOML");
+    let arches: Vec<&str> = screencomp["capture"]["arches"]
+        .as_array()
+        .expect("screencomp.toml lists [capture].arches")
+        .iter()
+        .map(|arch| arch.as_str().expect("an arch is a string"))
+        .collect();
+    let derived: Vec<String> = arches
+        .iter()
+        .map(|arch| {
+            format!("visual-docs / report ({arch}, shots/current, shots/verify, Visual docs)")
+        })
+        .collect();
+    assert_eq!(
+        derived,
+        [VISUAL_DOCS],
+        "the visual-docs legs render differently from the required context"
     );
     assert_eq!(
         condition(caller),
