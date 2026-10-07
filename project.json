@@ -124,7 +124,8 @@
       "inputs": [
         "e2eSource",
         "{workspaceRoot}/budgets.yaml",
-        "{workspaceRoot}/scripts/stacked-spikes-budget.mjs"
+        "{workspaceRoot}/scripts/stacked-spikes-budget.mjs",
+        "{workspaceRoot}/package-lock.json"
       ]
     },
     "msrv": {
