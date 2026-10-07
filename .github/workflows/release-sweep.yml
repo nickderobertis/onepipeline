@@ -1,0 +1,68 @@
+# The broader tier: one `run-many` sweep of the deterministic gate over every
+# project, on the release-plz release pull request and nowhere else in CI.
+#
+# Where it runs follows from how this repository releases. release-plz batches
+# every merge since the last tag into one release PR, so the commit that ships is
+# not one any merge's job swept: the sweep belongs to that pull request, and a
+# merge to main runs the affected tier (`ci.yml`'s `gate`). AGENTS.md "Commits,
+# releases, and merging" records the model and why `release.yml`'s own re-sweep
+# of a published Release is not a duplicate of this one.
+#
+# Its own workflow and its own job, so that nothing in `ci.yml` — the required
+# set — depends on it, and its check name is not one branch protection requires:
+# on every other pull request the job is skipped. The live and network tiers
+# (`onepipeline-smoke`, `onepipeline-release-compat`) are not in it; they declare
+# no `check` that reaches their journeys and run as `ci.yml`'s `smoke` and
+# `release-compat` jobs.
+
+name: Release sweep
+
+on:
+  pull_request:
+
+# Least privilege: the sweep only reads the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-sweep-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-sweep:
+    # release-plz names its release branches `release-plz-<timestamp>`, and the
+    # PAT it opens them with is what makes this event fire at all.
+    if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-plz-')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,nextest,cargo-llvm-cov
+      # Also provisions `strace`, which the Linux-only e2e journeys refuse
+      # without (`_ensure-strace` in the justfile).
+      - name: Bootstrap
+        run: just bootstrap
+      # Teed for the re-run step below, under `shell: bash` for pipefail, so the
+      # tee cannot turn a failed sweep green; the archive is the instrumented
+      # test build, kept for that step to re-run.
+      - name: Quality gate (every project)
+        id: every
+        shell: bash
+        run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just check 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
+      # Reports only, exactly as `ci.yml`'s `gate` does: it cannot change the
+      # verdict, and 25 minutes is `just rerun-failed`'s bound.
+      - name: Does each failed test fail again on this build
+        if: failure() && steps.every.outcome == 'failure'
+        continue-on-error: true
+        timeout-minutes: 25
+        run: just rerun-failed-coverage "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
+      - name: Committed generated files are up to date
+        run: git diff --exit-code -- Cargo.lock package-lock.json

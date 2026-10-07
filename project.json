@@ -35,32 +35,56 @@
     "coverage-clean": {
       "command": "just _crate-coverage-clean"
     },
+    "test-archive": {
+      "command": "just _crate-test-archive",
+      "dependsOn": [
+        "coverage-clean"
+      ]
+    },
     "test-rest": {
       "command": "just _crate-test-rest",
       "inputs": [
-        "crateSource"
+        "crateTestSource"
       ],
       "dependsOn": [
-        "coverage-clean"
+        "test-archive"
       ],
       "outputs": [
-        "{workspaceRoot}/target/budget-records/stacked-spikes-stage.json"
+        "{workspaceRoot}/target/llvm-cov-target/onepipeline-rest-*.profraw"
       ]
     },
     "test": {
       "command": "just _crate-coverage",
       "inputs": [
-        "crateSource"
+        "crateTestSource",
+        "e2eSource",
+        "contractSource",
+        "noteJourneySource"
       ],
       "dependsOn": [
         "test-rest",
         {
           "projects": [
+            "onepipeline-e2e",
+            "onepipeline-contract",
             "onepipeline-note-journeys"
           ],
           "target": "test"
         }
       ]
+    },
+    "test-quick-archive": {
+      "command": "just _crate-test-quick-archive"
+    },
+    "test-quick": {
+      "command": "just _crate-test-quick",
+      "inputs": [
+        "crateTestSource"
+      ],
+      "dependsOn": [
+        "test-quick-archive"
+      ],
+      "parallelism": false
     },
     "doc": {
       "command": "just _crate-doc",
@@ -90,16 +114,38 @@
     "budgets": {
       "command": "onebudgetspec check budgets.yaml",
       "dependsOn": [
-        "test-rest"
+        {
+          "projects": [
+            "onepipeline-e2e"
+          ],
+          "target": "test"
+        }
       ],
       "inputs": [
-        "crateSource",
+        "e2eSource",
         "{workspaceRoot}/budgets.yaml",
         "{workspaceRoot}/scripts/stacked-spikes-budget.mjs"
+      ]
+    },
+    "msrv": {
+      "command": "just _crate-msrv",
+      "inputs": [
+        "crateSource"
+      ]
+    },
+    "deps-check": {
+      "command": "just _crate-deps-check",
+      "inputs": [
+        "rustBuild",
+        "{workspaceRoot}/deny.toml"
       ]
     }
   },
   "implicitDependencies": [
-    "onepipeline-note-journeys"
+    "onepipeline-note-journeys",
+    "onepipeline-e2e",
+    "onepipeline-contract",
+    "onepipeline-smoke",
+    "onepipeline-release-compat"
   ]
 }

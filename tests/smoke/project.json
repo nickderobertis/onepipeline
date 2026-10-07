@@ -1,0 +1,51 @@
+{
+  "name": "onepipeline-smoke",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/smoke",
+  "tags": [
+    "scope:tests",
+    "lang:rust",
+    "tier:live"
+  ],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "command": "just _tier-build smoke",
+      "inputs": [
+        "smokeSource"
+      ]
+    },
+    "format": {
+      "command": "just _tier-format tests/smoke/main.rs"
+    },
+    "format-check": {
+      "command": "just _tier-fmt-check tests/smoke/main.rs",
+      "inputs": [
+        "smokeSource"
+      ]
+    },
+    "lint": {
+      "command": "just _tier-lint smoke",
+      "inputs": [
+        "smokeSource"
+      ]
+    },
+    "smoke": {
+      "command": "just _smoke-run",
+      "inputs": [
+        "smokeSource"
+      ],
+      "cache": false
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": [
+        "format-check",
+        "lint"
+      ]
+    }
+  }
+}

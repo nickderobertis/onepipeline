@@ -17,14 +17,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Which projects this pull request's diff can reach, derived once so every
-  # Rust-artifact job below can skip on a packaging-only change instead of paying
-  # the full matrix. On a push to main it answers `true` for everything.
+  # Which projects this change can reach, derived once so every Rust-artifact
+  # job below can skip on a packaging-only change instead of paying the full
+  # matrix. A pull request is scoped against its merge base, and a push to main
+  # against the commit main pointed at before the push. The crate's project
+  # depends on every test-tier project, so a change to any of them answers
+  # `true` here too.
   #
-  # `nx-affected.sh` fails closed: with no derivable merge base — a shallow
-  # clone, a missing base branch — it says the crate is affected and the matrices
-  # run. Affected selection is a speed optimisation, and one that can silently
-  # skip a check is a correctness hole.
+  # `nx-affected.sh` fails closed: with no derivable base — a shallow clone, a
+  # missing base branch, a first push, a pre-push commit no fetch brought in — it
+  # says the crate is affected and the matrices run. Affected selection is a
+  # speed optimisation, and one that can silently skip a check is a correctness
+  # hole.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -40,13 +44,18 @@ jobs:
           node-version: "22"
       - name: Which projects the diff reaches
         id: affected
+        env:
+          ONEPIPELINE_NX_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: echo "crate=$(bash scripts/nx-affected.sh --affects onepipeline)" >> "$GITHUB_OUTPUT"
 
-  # The full gate on a clean checkout: bootstrap from scratch, then the
-  # deterministic gate (format, clippy, tests incl. the contract and binary e2e
-  # with the coverage threshold, docs) over every project. A pull request runs it
-  # over the affected projects only; main runs the whole graph, so nothing
-  # affected-detection or a stale cache could miss survives past the merge.
+  # The gate on a clean checkout: bootstrap from scratch, then the deterministic
+  # gate (format, clippy, tests incl. the contract and binary e2e with the
+  # coverage threshold, docs) over the projects the change can reach — the
+  # affected tier, on a pull request and on a push to main alike. This
+  # repository batches its releases through the release-plz release PR, so the
+  # broader tier — one sweep over every project — runs on that pull request
+  # (`release-sweep.yml`) rather than on every merge; AGENTS.md "Commits,
+  # releases, and merging" records why.
   #
   # Linux-only because coverage is measured here; macOS/Windows prove the
   # artifact via the `cross` job below.
@@ -67,26 +76,24 @@ jobs:
       # without (`_ensure-strace` in the justfile).
       - name: Bootstrap
         run: just bootstrap
-      # Each tees its output for the re-run step below, under `shell: bash` for
+      # Tees its output for the re-run step below, under `shell: bash` for
       # pipefail, so the tee cannot turn a failed gate green, and names the
       # archive its instrumented test build is kept in for that step to re-run.
+      # A push names the commit before it as the base; a pull request derives
+      # its merge base from GITHUB_BASE_REF.
       - name: Quality gate (affected projects)
         id: affected
-        if: github.event_name == 'pull_request'
         shell: bash
+        env:
+          ONEPIPELINE_NX_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just check-affected 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
-      - name: Quality gate (every project)
-        id: every
-        if: github.event_name != 'pull_request'
-        shell: bash
-        run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just check 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
       # Whether each test the gate failed fails again on the same instrumented
       # build, re-run from its archive so nothing can be compiled: a new flake or
       # a regression. It cannot change the verdict. The gate step has already
       # failed the job, and `continue-on-error` keeps this step's own exit out of
       # it. 25 minutes is `just rerun-failed`'s bound, and the justfile says why.
       - name: Does each failed test fail again on this build
-        if: failure() && (steps.affected.outcome == 'failure' || steps.every.outcome == 'failure')
+        if: failure() && steps.affected.outcome == 'failure'
         continue-on-error: true
         timeout-minutes: 25
         run: just rerun-failed-coverage "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
@@ -110,7 +117,8 @@ jobs:
   # minutes.
   #
   # `NEXTEST_PROFILE` is the line that selects the reporting: `just check-cross`
-  # reaches the suite through `just test-quick`, which names no profile, so the
+  # reaches the suite through `just test-quick` — every project's `test-quick`
+  # target, streamed — which names no profile, so the
   # environment is what picks one and `.config/nextest.toml`'s `ci` profile is
   # what reports a line per test. Whatever cuts the leg short, the last line then
   # names where it got to.
@@ -242,6 +250,11 @@ jobs:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@v2
       - uses: ./.github/actions/setup-just
+      # `just msrv` runs the crate's `msrv` Nx target, and the project graph
+      # needs Node.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       # `just msrv` reads the same `rust-version` field, so the recipe and the
       # job can never disagree about which floor was proven.
       - run: just msrv
@@ -253,8 +266,9 @@ jobs:
   # composition against the world.
   #
   # It calls `just smoke-real`, which is the same entry point a person runs
-  # locally: the journey is defined once, in the test binary, and never
-  # reimplemented as workflow steps. The credential is named rather than
+  # locally — the `onepipeline-smoke` project's uncached `smoke` target: the
+  # journey is defined once, in the test binary, and never reimplemented as
+  # workflow steps. The credential is named rather than
   # embedded, and the journey refuses loudly rather than skipping when it is
   # absent — a smoke that can pass without talking to GitHub proves nothing.
   smoke:
@@ -267,6 +281,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just,nextest
+      # `just smoke-real` runs the `onepipeline-smoke` project's Nx target.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       # The journey's own refusal names GH_TOKEN, the variable; a red job needs
       # the name of the secret to go set. Given a presence signal rather than the
       # PAT itself — nothing here needs the value.
@@ -326,6 +344,11 @@ jobs:
         with:
           tool: just,nextest
       - uses: astral-sh/setup-uv@v6
+      # `just release-compat` runs the `onepipeline-release-compat` project's Nx
+      # target.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: The 0.28.2 wheel against this build
         run: just release-compat
   # llmlint: ignore-end[live_tier_compiles_and_requires_credential]
@@ -341,6 +364,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just,cargo-deny,cargo-machete
+      # `just deps-check` runs the crate's `deps-check` Nx target.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - run: just deps-check
 
   # Prove the end-user install path on every platform: install the binary the
