@@ -133,8 +133,8 @@ esac
             "_strace-preflight",
             "_ensure-strace",
             "_crate-bootstrap",
-            "_crate-test-rest",
-            "test-quick",
+            "_e2e-test",
+            "_e2e-test-quick",
             "test-e2e",
         ] {
             refused_naming_the_command(name, &recipe(name, None));

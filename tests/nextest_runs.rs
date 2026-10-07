@@ -163,8 +163,8 @@ impl Fixture {
         (output, text)
     }
 
-    /// The suite's run, as `just test-quick` makes it: nextest, through the
-    /// wrapper that names its exit status.
+    /// The suite's run, as each project's `test-quick` target makes it:
+    /// nextest, through the wrapper that names its exit status.
     fn nextest_run(&self, args: &[&str]) -> (Output, String) {
         let mut argv = vec!["cargo", "nextest", "run"];
         argv.extend_from_slice(args);
@@ -205,7 +205,7 @@ impl Fixture {
 }
 
 /// Where a fixture's step archives its build, as `ONEPIPELINE_TEST_ARCHIVE`
-/// makes `just test-quick` do in CI.
+/// makes the `onepipeline:test-quick-archive` target do in CI.
 const ARCHIVE: &str = "suite.tar.zst";
 
 /// How many times the repository re-runs a failed test: the justfile's own
@@ -525,11 +525,11 @@ fn recipe_line(recipe: &str, containing: &str) -> String {
         .to_owned()
 }
 
-/// `test-quick`'s own archive line, run in the fixture as CI runs it, before
-/// the run: with `ONEPIPELINE_TEST_ARCHIVE` naming where. Without it the line
-/// archives nothing, which is how every run outside CI goes.
+/// The uninstrumented suite's own archive line, run in the fixture as CI runs
+/// it, before the run: with `ONEPIPELINE_TEST_ARCHIVE` naming where. Without it
+/// the line archives nothing, which is how every run outside CI goes.
 fn archive(fixture: &Fixture) {
-    let line = recipe_line("test-quick", "nextest archive");
+    let line = recipe_line("_crate-test-quick-archive", "nextest archive");
     let locked = fixture
         .command(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
         .args(["generate-lockfile", "--offline"])
@@ -1050,8 +1050,14 @@ fn the_scripts_refuse_what_they_cannot_run() {
 // proven on GitHub by the demonstration run recorded on this change request.
 #[test]
 fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
-    let workflow = fs::read_to_string(repo_root().join(".github/workflows/ci.yml"))
-        .expect("the workflow reads");
+    // `ci.yml` holds the gate and the cross legs; `release-sweep.yml` the full
+    // sweep on the release pull request, which re-runs its failures the same way.
+    let workflow = [
+        ".github/workflows/ci.yml",
+        ".github/workflows/release-sweep.yml",
+    ]
+    .map(|path| fs::read_to_string(repo_root().join(path)).expect("the workflow reads"))
+    .join("\n");
     let config: toml::Value = toml::from_str(&repository_config()).expect("the config parses");
     let slow = &config["profile"]["default"]["slow-timeout"];
     let period: u64 = slow["period"]
@@ -1077,14 +1083,18 @@ fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
         .count();
     assert_eq!(
         archived_runs, 3,
-        "both gate steps and the cross step archive their build"
+        "the gate step, the cross step and the release sweep archive their build"
     );
 
     let steps: Vec<&str> = workflow
         .split("      - name: ")
         .filter(|step| step.starts_with("Does each failed test fail again on this build"))
         .collect();
-    assert_eq!(steps.len(), 2, "one rerun step each in gate and cross");
+    assert_eq!(
+        steps.len(),
+        3,
+        "one rerun step each in gate, cross and the release sweep"
+    );
     for step in steps {
         let field = |key: &str| {
             step.lines()
@@ -1112,40 +1122,81 @@ fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
 } // llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// The gate's instrumented suite archives the build it is about to run, under
-/// the same flags, before running it, and only when CI names where.
+/// the same flags, before any tier runs it, and only when CI names where.
+///
+/// The suite runs as one Nx project per tier, so "before" is the project
+/// graph's to hold: every tier's instrumented `test` waits on the crate's
+/// `test-archive` target, and every uninstrumented `test-quick` on its
+/// `test-quick-archive`. A tier that did not would race the archive, and a test
+/// it failed could be missing from the build the re-run step extracts.
 // llmlint: ignore-block[changed_behavior_has_e2e] running this line needs
 // cargo-llvm-cov, which the cross legs that run every test do not install, so a
-// test executing it could only pass there by skipping. `test-quick`'s archive
-// line is executed above; this one is held to the same shape, and the gate job
-// runs it for real on every run.
+// test executing it could only pass there by skipping. The uninstrumented
+// archive line is executed above; this one is held to the same shape, and the
+// gate job runs it for real on every run.
 #[test]
 fn the_instrumented_suite_archives_the_build_it_runs_before_running_it() {
     let justfile = fs::read_to_string(repo_root().join("justfile")).expect("the justfile reads");
-    let body: Vec<&str> = justfile
-        .split("\n_crate-test-rest:\n")
-        .nth(1)
-        .expect("the justfile has `_crate-test-rest`")
-        .lines()
-        .take_while(|line| line.starts_with("    "))
-        .collect();
-    let at = |needle: &str| {
-        body.iter()
-            .position(|line| line.contains(needle))
-            .unwrap_or_else(|| panic!("`_crate-test-rest` runs {needle}:\n{body:#?}"))
+    let body = |recipe: &str| -> Vec<String> {
+        justfile
+            .lines()
+            .skip_while(|line| {
+                !line.starts_with(&format!("{recipe} ")) && *line != format!("{recipe}:")
+            })
+            .skip(1)
+            .take_while(|line| line.starts_with("    "))
+            .map(str::to_owned)
+            .collect()
     };
-    let archive = at("nextest-archive");
-    let run = at("llvm-cov --no-report nextest --locked -E");
-    assert!(
-        archive < run,
-        "the archive is made before the run:\n{body:#?}"
-    );
+    let archive = body("_crate-test-archive");
+    let run = body("_tier-test");
     let flags = "RUSTFLAGS=\"-D warnings\" cargo llvm-cov --no-report nextest";
-    assert!(body[run].contains(flags), "{}", body[run]);
     assert!(
-        body[archive].contains(&format!(
-            "{flags}-archive --locked --archive-file \"$ONEPIPELINE_TEST_ARCHIVE\""
-        )) && body[archive].contains("[ -z \"${ONEPIPELINE_TEST_ARCHIVE:-}\" ] ||"),
-        "the archive is built as the run builds, only when CI names where:\n{}",
-        body[archive]
+        run.iter()
+            .any(|line| line.contains(flags) && line.contains("--locked -E")),
+        "every tier runs the instrumented suite under the denied-warnings flags:\n{run:#?}"
     );
+    assert!(
+        archive
+            .iter()
+            .any(|line| line.contains(&format!(
+                "{flags}-archive --locked --archive-file \"$ONEPIPELINE_TEST_ARCHIVE\""
+            )) && line.contains("[ -z \"${ONEPIPELINE_TEST_ARCHIVE:-}\" ] ||")),
+        "the archive is built as the run builds, only when CI names where:\n{archive:#?}"
+    );
+
+    let projects = [
+        "project.json",
+        "tests/e2e/project.json",
+        "tests/contract/project.json",
+        "tests/note/project.json",
+    ];
+    for path in projects {
+        let declared: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(repo_root().join(path)).expect("the project reads"),
+        )
+        .expect("the project parses");
+        let name = declared["name"].as_str().expect("the project is named");
+        let tier = if name == "onepipeline" {
+            "test-rest"
+        } else {
+            "test"
+        };
+        for (target, archive) in [(tier, "test-archive"), ("test-quick", "test-quick-archive")] {
+            let needs = &declared["targets"][target]["dependsOn"];
+            let waits = needs.as_array().is_some_and(|needs| {
+                needs.iter().any(|need| {
+                    need.as_str() == Some(archive)
+                        || (need["target"] == archive
+                            && need["projects"].as_array().is_some_and(|projects| {
+                                projects.iter().any(|project| project == "onepipeline")
+                            }))
+                })
+            });
+            assert!(
+                waits,
+                "{name}:{target} does not wait on onepipeline:{archive}, so it can run before the build is archived: {needs}"
+            );
+        }
+    }
 } // llmlint: ignore-end[changed_behavior_has_e2e]

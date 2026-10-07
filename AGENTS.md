@@ -132,7 +132,9 @@ two third-party tools `just check` does not install, and a stale picture is a
 thing to refresh rather than a reason to hold a correct change out of `main`.
 What enforces it is local — `.githooks/pre-push`, which `just bootstrap`
 activates — and no screenshot step is reachable from `check`, from `gate`, or
-from `ci.yml`'s `gate` job. `notignored.yml` is not required either: it posts one
+from `ci.yml`'s `gate` job. `release-sweep.yml` is not required either: it
+runs only on the release PR, and is skipped on every other one. `notignored.yml`
+is not required either: it posts one
 sticky comment listing the suppressions a pull request adds, a review artifact
 rather than a gate, and it skips fork pull requests, so a required context there
 would never report for them.
@@ -152,6 +154,20 @@ because a tag from the default `GITHUB_TOKEN` triggers nothing — fires
 them. **Nothing else writes a version:** maturin reads it from `Cargo.toml` via
 `dynamic = ["version"]` and `scripts/npm-build.mjs` stamps it from the same
 place.
+
+**Where each tier runs follows from that release model.** Releases are batched:
+every merge since the last tag rides one release-plz release PR, so the commit
+that ships is that PR's, and no single merge's job swept it. The broader tier —
+one `run-many` sweep of `just check` over every project but the live and network
+tiers — therefore runs on the release PR (`release-sweep.yml`, selected by its
+`release-plz-` head branch, its own job and not a required context). Every other
+pull request runs the affected tier against its merge base, and a push to `main`
+the affected tier against the commit before the push (`ci.yml`'s `gate`,
+`ONEPIPELINE_NX_BASE_SHA`); with no derivable base, either falls back to the
+full sweep. `release.yml`'s `test` job re-sweeps a *published Release*, which is
+not a duplicate of the release-PR sweep: a Release made by hand from any tag —
+the documented fallback — can name a commit CI never gated, and that run is the
+only one that can refuse to publish the artifact.
 
 **What this repository publishes is declared once**, in `release-targets.toml`
 at the root, at the canonical release-target schema `onevcs`'s `docs/contract.md`

@@ -12,3 +12,33 @@
   (`World::rendezvous`, `fake::meet`), which holds and releases with no clock on
   either side — rather than asking a process listing. A wall-clock deadline is
   the backstop for the product's own asynchrony, never the signal.
+
+# The test-tier projects
+
+Each binary below is its own Nx project, in the directory beside its sources;
+the crate's project (`onepipeline:test-rest`) runs the unit tests and every
+other binary here.
+
+| Project | Binary | Runs in |
+| --- | --- | --- |
+| `onepipeline-e2e` (`e2e/`) | `e2e` | `check`, instrumented |
+| `onepipeline-contract` (`contract/`) | `contract` (`contract.rs`) | `check`, instrumented |
+| `onepipeline-note-journeys` (`note/`) | `note` | `check`, instrumented |
+| `onepipeline-smoke` (`smoke/`) | `smoke` | `just smoke-real` only — live GitHub |
+| `onepipeline-release-compat` (`release_channel/`) | `release_channel` | `just release-compat` only — PyPI |
+
+- **The tiers partition the offline suite.** The justfile's `*-tier` filters
+  decide which tests each project runs, and `rest-tier` is spelled as the
+  complement of the others, so a new binary lands in the crate's tier rather
+  than in none. A new tier project adds its filter there, its binary to
+  `rest-tier`'s exclusions, and its `test` to `onepipeline:test`'s `dependsOn`.
+- **A tier's inputs are what its tests read.** Its named input in `nx.json`
+  lists the sources it compiles *and* every file it opens at run time; one it
+  misses replays a cached green run over a change it would have failed on.
+- **One coverage floor.** An offline tier's `test` runs instrumented with
+  `--no-report`, names its profiles `onepipeline-<tier>-*.profraw`, and declares
+  exactly those as its `outputs`, so a replay restores what
+  `onepipeline:test`'s single report merges.
+- **The live tiers have no `test`.** Their journey is an uncached target of
+  its own that no `check` reaches, and refuses — never skips — without its
+  credential or network.

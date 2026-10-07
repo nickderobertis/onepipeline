@@ -9,9 +9,12 @@ on:
 permissions:
   contents: read
 
+# A pull request's newer push supersedes its older one. A push to main does not:
+# each one's gate is scoped to the commits that push brought, so cancelling it
+# would leave those commits gated by nothing on main.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
