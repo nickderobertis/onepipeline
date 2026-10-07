@@ -66,9 +66,16 @@ fn container_double(dir: &Path, fail_at: Option<&str>) {
              [[ \"$call\" != '{fail_at}'* ]] || exit 1\n"
         )
     };
-    for tool in ["yum", "sha256sum", "chmod", "rustup", "python3.12", "chown"] {
+    for tool in ["yum", "chmod", "rustup", "python3.12", "chown"] {
         executable(&dir.join("container-bin").join(tool), record(tool));
     }
+    // The script pipes the checksum line into `sha256sum -c -`, so this one reads
+    // its stdin as the real one does: exiting first would kill the `echo` feeding
+    // it with SIGPIPE whenever the double won that race, failing the build 141.
+    executable(
+        &dir.join("container-bin/sha256sum"),
+        format!("{}while read -r _; do :; done\n", record("sha256sum")),
+    );
     // What `curl -o` downloads is the installer the script then runs, so this
     // one also leaves a recording `rustup-init` where it was asked to write.
     let chmod = which("chmod");
