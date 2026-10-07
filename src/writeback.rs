@@ -630,6 +630,12 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::CreateCarried { .. } => decided("create-carried"),
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: its copy only creates lineages that have no item yet, so none has a counterpart to be misrouted from, and an item that exists is changed by a targeted update; `writeback::tests` holds the word.
         EngineError::Misrouted { .. } => decided("misrouted"),
+        EngineError::AssetNotReferenced { .. } => decided("asset-not-referenced"),
+        EngineError::AssetNotGiven { .. } => decided("asset-not-given"),
+        EngineError::AssetGivenTwice { .. } => decided("asset-given-twice"),
+        EngineError::AssetNotHeld { .. } => decided("asset-not-held"),
+        // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: the store raises it only for an asset its source hands over, and `write_shadow` writes a creation's Markdown alone, so a reference is refused `asset-not-held` first (`store::a_live_add_referencing_an_asset_its_task_does_not_hold_is_refused_as_asset_not_held`); `writeback::tests` holds the word.
+        EngineError::AssetsUnsupported { .. } => decided("assets-unsupported"),
         EngineError::DestinationUnavailable { error, .. }
         | EngineError::SourceRefused { error, .. }
         | EngineError::SourceUnavailable { error, .. }
@@ -5062,6 +5068,31 @@ mod tests {
                 item: id(),
                 counterpart: id(),
                 route: onetaskgraph_plugin_api::SourceName::new("linear").expect("a source name"),
+            },
+            // The asset failures 0.3.3 added: a copied record whose content references an
+            // asset it does not hold, or one bound for a plugin that stores none, and the
+            // three a create or render refuses, which a write-back never performs.
+            EngineError::AssetNotReferenced {
+                record: "task".into(),
+                asset: "diagram.png".into(),
+            },
+            EngineError::AssetNotGiven {
+                record: "task".into(),
+                asset: "diagram.png".into(),
+            },
+            EngineError::AssetGivenTwice {
+                record: "task".into(),
+                asset: "diagram.png".into(),
+            },
+            EngineError::AssetNotHeld {
+                record: "plans:a".into(),
+                asset: "diagram.png".into(),
+            },
+            EngineError::AssetsUnsupported {
+                name: "plans".into(),
+                kind: "linear".into(),
+                record: "plans:a".into(),
+                asset: "diagram.png".into(),
             },
             // A copy that could not be undone takes the class and kind of the failure it wraps.
             EngineError::CopyNotUndone {

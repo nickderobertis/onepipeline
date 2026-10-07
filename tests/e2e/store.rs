@@ -2100,6 +2100,83 @@ fn a_projection_the_real_store_refuses_is_not_asked_again_until_the_graph_change
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
+/// A node added live whose task references an image asset — `![…](./diagram.png)`, the
+/// store's convention for one a record holds — is refused by the real store when the
+/// write-back's copy creates it: the shadow store a creation is copied out of holds the task's
+/// Markdown and no asset, so the copy refuses it as `asset-not-held` rather than carrying a
+/// reference to nothing onto the board. The refusal is reported with the store's own class
+/// and kind, nothing is created on the board, and the run settles as it would have.
+#[test]
+fn a_live_add_referencing_an_asset_its_task_does_not_hold_is_refused_as_asset_not_held() {
+    let run = "writeback-asset-not-held";
+    let world = World::new("store-writeback-asset-not-held");
+    world.script("work.wait", "hold");
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until_store("the running state to reach the store", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "work"
+                && task["item"]["status"]["category"] == "in-progress"
+        })
+    });
+
+    let mut drawn = agent("drawn", &["work"]);
+    drawn["task"] = json!(
+        "## What\nShip the flow below.\n\n![the flow](./diagram.png)\n\n\
+         ## Why\nSo the run can settle.\n\n## Acceptance criteria\n- drawn is done."
+    );
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [{"op": "add", "node": drawn}]}).to_string(),
+        )
+        .exited(0);
+    world.until("the refusal to be reported", |world| {
+        streaks_reported(world, run) >= 1
+    });
+
+    let said = the_line_reported(&world, run);
+    for expected in [
+        project.as_str(),
+        "class: refused, kind: asset-not-held",
+        "the store refused it",
+    ] {
+        assert!(
+            said.contains(expected),
+            "the line an operator reads does not say `{expected}`: {said}"
+        );
+    }
+    world.until("the planner to be told", |world| {
+        !surfaces_raised(world, run).is_empty()
+    });
+    let raised = surfaces_raised(&world, run);
+    assert_eq!(raised.len(), 1, "{raised:?}");
+    assert!(
+        raised[0]
+            .lines()
+            .any(|line| line == "class: refused, kind: asset-not-held"),
+        "the surface does not carry the store's class and kind: {}",
+        raised[0]
+    );
+    assert!(
+        !world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.id"] == "drawn"),
+        "the refused task was created on the board anyway"
+    );
+
+    world.release("work.go");
+    world.until("the run to write its result", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(
+        world.run_json(run, "result.json")["state"],
+        "complete",
+        "the refusal changed how the run settled"
+    );
+}
+
 /// What a hosted destination says when it is refusing for a rate limit, and what this
 /// suite's scripted source is made to say. The words are GitHub's own: that limiter is the
 /// one the retry schedule below exists for, and the driver's line has to carry the

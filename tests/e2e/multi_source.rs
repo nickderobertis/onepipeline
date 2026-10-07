@@ -675,3 +675,101 @@ fn a_home_whose_member_list_breaks_the_stores_rule_is_not_launched() {
         );
     }
 }
+
+/// A plan's design document that links each detail out to the section of the task owning it
+/// — `[budgets](<task's file>#budgets)` — arrives on the board pointing at the board's own copy
+/// of that task with the fragment kept, once the plan's tasks are filed and the document is
+/// copied after them with the store's document copy, as an operator's tooling does. A path
+/// naming no record of the plan is left as it was written, and counted as nothing.
+#[test]
+fn a_design_documents_fragment_link_to_a_filed_task_lands_on_that_tasks_copy() {
+    let world = a_routed_world("multi-source-fragment-link");
+    let name = "linked";
+    let home = filed(
+        &world,
+        name,
+        &plan_of(
+            name,
+            vec![on(HOME, "core", &[]), on(HOME, "ship", &["core"])],
+        ),
+    );
+    let project = project_id(name);
+    let draft = std::fs::canonicalize(root_of(&world, DRAFT)).expect("the draft source exists");
+    let authored = draft.join("tasks").join(&project).join("000-core.md");
+    assert!(
+        authored.is_file(),
+        "the draft holds no {}",
+        authored.display()
+    );
+    let authored = authored.to_string_lossy().into_owned();
+    let gone = draft.join("tasks").join(&project).join("009-gone.md");
+    let gone = gone.to_string_lossy().into_owned();
+    world.write_item(
+        &draft.join("documents").join("design.md"),
+        &[("title", json!("Design")), ("project", json!(project))],
+        &format!(
+            "## Budgets\nSee [core's budgets]({authored}#budgets).\n\
+             Not filed: [gone]({gone}#budgets).\n"
+        ),
+    );
+
+    let design = global(&format!("{DRAFT}:design"));
+    let (report, landed) = world.store_call(|engine| async move {
+        let report = engine
+            .copy(&onetaskgraph_core::CopyRequest {
+                items: onetaskgraph_core::CopyItems::new(vec![design]).expect("one item"),
+                scope: onetaskgraph_core::CopyScope::Documents,
+                destination: onetaskgraph_plugin_api::SourceName::new(STORE_SOURCE)
+                    .expect("a source name"),
+                match_by: None,
+                recreate: false,
+                create: false,
+                dry_run: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("the document copy runs: {error}"));
+        let id = report
+            .items
+            .first()
+            .and_then(|item| item.action.destination())
+            .unwrap_or_else(|| panic!("the copy reports where the document landed: {report:?}"))
+            .clone();
+        let landed = engine
+            .document(&id)
+            .await
+            .unwrap_or_else(|error| panic!("the store reads the copied document {id}: {error}"));
+        (
+            report,
+            serde_json::to_value(&landed).expect("a document renders"),
+        )
+    });
+    assert_eq!(
+        (report.references_rewritten, report.references_unresolved),
+        (1, 0),
+        "{report:?}"
+    );
+
+    let board = plan_tasks(&world, &home);
+    let core = board["core"]["item"]["location"]["path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the filed task names no location: {}", board["core"]));
+    assert!(
+        core.starts_with(
+            &*std::fs::canonicalize(world.store())
+                .expect("the store")
+                .to_string_lossy()
+        ),
+        "the filed task is not on the board: {core}"
+    );
+    let content = landed["items"][0]["item"]["content"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the copied document holds no content: {landed}"));
+    assert_eq!(
+        content,
+        format!(
+            "## Budgets\nSee [core's budgets]({core}#budgets).\n\
+             Not filed: [gone]({gone}#budgets).\n"
+        ),
+        "the link did not land on the board's copy of the task with its fragment kept"
+    );
+}
