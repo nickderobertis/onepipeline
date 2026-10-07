@@ -35,12 +35,14 @@ export NX_DAEMON="${NX_DAEMON-false}"
 export NX_USE_LOCAL=true
 
 # The pinned `onemessagebus` CLI is the other shim the checks read — the
-# layout-document journey drives it — so a tree installed before it was pinned
-# is installed again rather than failing that journey.
+# layout-document journey drives it — and the pinned `@onebudgetspec/sdk` is the
+# `report` the stage budget's command imports, so a tree installed before either
+# was pinned is installed again rather than failing what reads it.
 if { [ ! -e node_modules/.bin/nx ] && [ ! -e node_modules/.bin/nx.cmd ]; } \
-  || { [ ! -e node_modules/.bin/onemessagebus ] && [ ! -e node_modules/.bin/onemessagebus.cmd ]; }; then
+  || { [ ! -e node_modules/.bin/onemessagebus ] && [ ! -e node_modules/.bin/onemessagebus.cmd ]; } \
+  || [ ! -e node_modules/@onebudgetspec/sdk/package.json ]; then
   if ! command -v npm >/dev/null 2>&1; then
-    echo "nx: npm not found; cannot install the pinned Nx the project graph needs, or the pinned onemessagebus CLI the checks drive" >&2
+    echo "nx: npm not found; cannot install the pinned Nx the project graph needs, the pinned onemessagebus CLI the checks drive, or the pinned onebudgetspec SDK the stage budget reports through" >&2
     echo "ACTION: install Node.js 20+ (https://nodejs.org/) and re-run 'just bootstrap'" >&2
     exit 1
   fi

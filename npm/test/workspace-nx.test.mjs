@@ -21,9 +21,19 @@
 
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -282,5 +292,85 @@ describe("the build targets", () => {
     // no journey covers.
     assert.match(crate.targets.build.command, /just _crate-build/);
     assert.match(packaging.targets.build.command, /scripts\/npm-build\.mjs launcher/);
+  });
+});
+
+describe("the locked install", () => {
+  // A tree installed before `@onebudgetspec/sdk` was pinned still has both
+  // shims, and the stage budget's command would fail importing the SDK. The
+  // wrapper runs from a scratch copy whose `npm` is a double that records the
+  // call, so the real tree's `node_modules` is never reinstalled under the suite.
+  const bash = execFileSync("bash", ["-c", "command -v bash"], { encoding: "utf8" }).trim();
+  const dirnameTool = execFileSync("bash", ["-c", "command -v dirname"], {
+    encoding: "utf8",
+  }).trim();
+  let scratch;
+
+  beforeEach(() => {
+    scratch = mkdtempSync(join(tmpdir(), "nx-locked-install-"));
+    mkdirSync(join(scratch, "scripts"));
+    copyFileSync(join(root, "scripts", "nx.sh"), join(scratch, "scripts", "nx.sh"));
+    mkdirSync(join(scratch, "node_modules", ".bin"), { recursive: true });
+    for (const shim of ["nx", "onemessagebus"]) {
+      writeFileSync(join(scratch, "node_modules", ".bin", shim), `#!/bin/sh\necho "${shim} $*"\n`, {
+        mode: 0o755,
+      });
+    }
+    mkdirSync(join(scratch, "bin"));
+    symlinkSync(dirnameTool, join(scratch, "bin", "dirname"));
+  });
+
+  afterEach(() => rmSync(scratch, { recursive: true, force: true }));
+
+  function withNpm(status) {
+    writeFileSync(
+      join(scratch, "bin", "npm"),
+      `#!${bash}\necho "$*" >> npm.calls\nmkdir -p node_modules/@onebudgetspec/sdk\necho '{}' > node_modules/@onebudgetspec/sdk/package.json\nexit ${status}\n`,
+      { mode: 0o755 },
+    );
+  }
+
+  function wrapper() {
+    return spawnSync(bash, [join(scratch, "scripts", "nx.sh"), "show", "projects"], {
+      encoding: "utf8",
+      env: { PATH: join(scratch, "bin"), ONEPIPELINE_NX_SHOW_OUTPUT: "1" },
+    });
+  }
+
+  const calls = () =>
+    existsSync(join(scratch, "npm.calls")) ? readFileSync(join(scratch, "npm.calls"), "utf8") : "";
+
+  it("reinstalls a tree that is missing only the onebudgetspec SDK", () => {
+    withNpm(0);
+    const result = wrapper();
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(calls(), /^ci /);
+    assert.equal(result.stdout, "nx show projects\n");
+  });
+
+  it("leaves a tree that already carries the SDK alone", () => {
+    withNpm(0);
+    mkdirSync(join(scratch, "node_modules", "@onebudgetspec", "sdk"), { recursive: true });
+    writeFileSync(join(scratch, "node_modules", "@onebudgetspec", "sdk", "package.json"), "{}");
+    const result = wrapper();
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(calls(), "");
+  });
+
+  it("fails naming the locked install when it cannot complete", () => {
+    withNpm(1);
+    const result = wrapper();
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /nx: 'npm ci' failed in /);
+    assert.equal(result.stdout, "");
+  });
+
+  it("names the SDK among what it cannot install without npm", () => {
+    const result = wrapper();
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /npm not found;.*the pinned onebudgetspec SDK the stage budget reports through/,
+    );
   });
 });

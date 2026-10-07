@@ -95,7 +95,8 @@
       "inputs": [
         "crateSource",
         "{workspaceRoot}/budgets.yaml",
-        "{workspaceRoot}/scripts/stacked-spikes-budget.mjs"
+        "{workspaceRoot}/scripts/stacked-spikes-budget.mjs",
+        "{workspaceRoot}/package-lock.json"
       ]
     }
   },
