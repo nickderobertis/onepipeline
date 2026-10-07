@@ -691,6 +691,11 @@ fn a_linear_destination_lands_current_values_after_each_way_a_call_fails() {
 
     // The shadow filesystem can fail independently of the destination. Record the failure
     // and replace its old contents once the directory is writable again.
+    // llmlint: ignore-block[tests_mirror_real_usage] a shadow write fails only when the
+    // filesystem under the run directory does (a full disk, a lost permission), and no command
+    // of the binary produces that. Obstructing the directory is that fault, injected at the
+    // filesystem; the binary is still driven only through `reply`, and what is asserted is its
+    // record and what reached Linear.
     let tasks = scenario
         .world
         .run_file(&scenario.run, "writeback")
@@ -716,6 +721,7 @@ fn a_linear_destination_lands_current_values_after_each_way_a_call_fails() {
         .any(|record| record["outcome"] == "failed"));
     std::fs::remove_file(&tasks).expect("remove the obstruction");
     std::fs::rename(&saved, &tasks).expect("restore the shadow directory");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let shadow_repaired = scenario.replied(
         "the shadow repair to carry current values",
         &settle("failed", "after repairing the shadow"),
