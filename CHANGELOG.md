@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.63.1](https://github.com/nickderobertis/onepipeline/compare/v0.63.0...v0.63.1) - 2026-10-07
+
+### Fixed
+
+- *(deps)* link the plan store that carries a reference's fragment through a copy ([#793](https://github.com/nickderobertis/onepipeline/pull/793))
+
 ## [0.63.0](https://github.com/nickderobertis/onepipeline/compare/v0.62.0...v0.63.0) - 2026-10-07
 
 ### Added
