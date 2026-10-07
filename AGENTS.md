@@ -132,7 +132,10 @@ two third-party tools `just check` does not install, and a stale picture is a
 thing to refresh rather than a reason to hold a correct change out of `main`.
 What enforces it is local — `.githooks/pre-push`, which `just bootstrap`
 activates — and no screenshot step is reachable from `check`, from `gate`, or
-from `ci.yml`'s `gate` job.
+from `ci.yml`'s `gate` job. `notignored.yml` is not required either: it posts one
+sticky comment listing the suppressions a pull request adds, a review artifact
+rather than a gate, and it skips fork pull requests, so a required context there
+would never report for them.
 
 **A job's assertions and the artifact it installs come from one revision.**
 `install-documented` installs the remote's default branch — README's `cargo
