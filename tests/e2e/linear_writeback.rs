@@ -861,6 +861,79 @@ fn valid_configuration_edits_rebuild_only_when_resolved_content_changes() {
     scenario.finish();
 }
 
+/// A store holding a source it could not build keeps that source unavailable for as long as it
+/// lives, so the worker discards it after the attempt, and the attempt after the source's root
+/// returns builds it again on a store it then keeps. The destination is unaffected throughout:
+/// every attempt lands on Linear.
+#[test]
+fn a_store_holding_a_source_it_could_not_build_is_rebuilt_once_the_source_returns() {
+    let mut states = STATES.to_vec();
+    states.push(("Needs Attention", "unstarted"));
+    let scenario = launched_configured("unbuilt-source", &[], &states, true);
+    let opened = scenario.world.store_asked("initialize");
+    let document = scenario.launch.join("onetaskgraph.yaml");
+    let root = scenario.world.root.join("spare-board");
+    let mut configured = std::fs::read_to_string(&document).expect("the launch's configuration");
+    configured.push_str(&format!(
+        "  spare:\n    plugin: local-md\n    config:\n      root: {}\n",
+        serde_json::to_string(&root.to_string_lossy()).expect("a quoted path")
+    ));
+    std::fs::write(&document, configured).expect("a source whose root is not there yet");
+
+    let gone = scenario.replied(
+        "a settlement while a source cannot be built",
+        &settle("done", "while the spare source was gone"),
+        |scenario| {
+            scenario.evidence_on(&scenario.work).as_deref()
+                == Some("while the spare source was gone")
+        },
+    );
+    assert_eq!(outcomes(&gone), ["projected"], "{:?}", gone.records);
+    assert_eq!(scenario.linear.state_of(&scenario.work), "Done");
+    assert_eq!(
+        gone.resolutions(),
+        1,
+        "an edited configuration needs a new store"
+    );
+    assert_eq!(scenario.world.store_asked("initialize"), opened + 1);
+
+    std::fs::create_dir_all(&root).expect("the spare source's root returns");
+    let returned = scenario.replied(
+        "a settlement once the source's root returned",
+        &settle("failed", "once the spare source returned"),
+        |scenario| {
+            scenario.evidence_on(&scenario.work).as_deref()
+                == Some("once the spare source returned")
+        },
+    );
+    assert_eq!(outcomes(&returned), ["projected"], "{:?}", returned.records);
+    assert_eq!(scenario.linear.state_of(&scenario.work), "Needs Attention");
+    assert_eq!(
+        returned.resolutions(),
+        1,
+        "a store holding a source it could not build was kept for the next attempt"
+    );
+    assert_eq!(scenario.world.store_asked("initialize"), opened + 2);
+
+    let kept = scenario.replied(
+        "a settlement on the store whose sources all built",
+        &settle("done", "on the store whose sources all built"),
+        |scenario| {
+            scenario.evidence_on(&scenario.work).as_deref()
+                == Some("on the store whose sources all built")
+        },
+    );
+    assert_eq!(outcomes(&kept), ["projected"], "{:?}", kept.records);
+    assert_eq!(scenario.linear.state_of(&scenario.work), "Done");
+    assert_eq!(
+        kept.resolutions(),
+        0,
+        "a store whose sources all built was discarded"
+    );
+    assert_eq!(scenario.world.store_asked("initialize"), opened + 2);
+    scenario.finish();
+}
+
 /// A real filesystem read stalled at a FIFO cannot hold the retained worker past its
 /// configuration deadline. Its next attempt starts new sources and lands the current snapshot.
 #[cfg(unix)]

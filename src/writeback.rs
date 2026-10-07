@@ -1939,7 +1939,7 @@ fn project(
             };
             // The engine holds a source it could not build as unavailable for as long as it
             // lives, so a store with one is rebuilt, which gives that source its next build:
-            // `a_store_holding_a_source_it_could_not_build_is_rebuilt_once_the_source_returns`.
+            // `linear_writeback::a_store_holding_a_source_it_could_not_build_is_rebuilt_once_the_source_returns`.
             let unbuilt = attempt
                 .engine
                 .listing()
@@ -5860,8 +5860,8 @@ mod tests {
     /// unavailable for as long as it lives, so the worker discards it after the attempt, and
     /// the attempt after the root returns builds the source again on a store it then keeps.
     ///
-    /// A journey cannot pin this down: whether a run's first store is built before or after
-    /// a root goes depends on when the worker's first attempt runs.
+    /// Here the unavailable source is the destination itself; the journey of the same name
+    /// in `linear_writeback` drives the worker through a run whose second source is the one.
     #[test]
     fn a_store_holding_a_source_it_could_not_build_is_rebuilt_once_the_source_returns() {
         let fixture = Fixture::new("unbuilt-source");
