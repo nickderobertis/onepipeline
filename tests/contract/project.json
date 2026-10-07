@@ -1,8 +1,8 @@
 {
-  "name": "onepipeline-note-journeys",
+  "name": "onepipeline-contract",
   "$schema": "../../node_modules/nx/schemas/project-schema.json",
   "projectType": "library",
-  "sourceRoot": "tests/note",
+  "sourceRoot": "tests/contract",
   "tags": [
     "scope:tests",
     "lang:rust"
@@ -12,30 +12,30 @@
       "executor": "nx:noop"
     },
     "build": {
-      "command": "just _tier-build note",
+      "command": "just _tier-build contract",
       "inputs": [
-        "noteJourneySource"
+        "contractSource"
       ]
     },
     "format": {
-      "command": "just _tier-format tests/note/main.rs"
+      "command": "just _tier-format tests/contract.rs"
     },
     "format-check": {
-      "command": "just _tier-fmt-check tests/note/main.rs",
+      "command": "just _tier-fmt-check tests/contract.rs",
       "inputs": [
-        "noteJourneySource"
+        "contractSource"
       ]
     },
     "lint": {
-      "command": "just _tier-lint note",
+      "command": "just _tier-lint contract",
       "inputs": [
-        "noteJourneySource"
+        "contractSource"
       ]
     },
     "test": {
-      "command": "just _note-test",
+      "command": "just _contract-test",
       "inputs": [
-        "noteJourneySource"
+        "contractSource"
       ],
       "dependsOn": [
         {
@@ -46,13 +46,13 @@
         }
       ],
       "outputs": [
-        "{workspaceRoot}/target/llvm-cov-target/onepipeline-note-*.profraw"
+        "{workspaceRoot}/target/llvm-cov-target/onepipeline-contract-*.profraw"
       ]
     },
     "test-quick": {
-      "command": "just _note-test-quick",
+      "command": "just _contract-test-quick",
       "inputs": [
-        "noteJourneySource"
+        "contractSource"
       ],
       "dependsOn": [
         {

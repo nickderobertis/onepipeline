@@ -1,0 +1,51 @@
+{
+  "name": "onepipeline-release-compat",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/release_channel",
+  "tags": [
+    "scope:tests",
+    "lang:rust",
+    "tier:live"
+  ],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "command": "just _tier-build release_channel",
+      "inputs": [
+        "releaseCompatSource"
+      ]
+    },
+    "format": {
+      "command": "just _tier-format tests/release_channel/main.rs"
+    },
+    "format-check": {
+      "command": "just _tier-fmt-check tests/release_channel/main.rs",
+      "inputs": [
+        "releaseCompatSource"
+      ]
+    },
+    "lint": {
+      "command": "just _tier-lint release_channel",
+      "inputs": [
+        "releaseCompatSource"
+      ]
+    },
+    "release-compat": {
+      "command": "just _release-compat-run",
+      "inputs": [
+        "releaseCompatSource"
+      ],
+      "cache": false
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": [
+        "format-check",
+        "lint"
+      ]
+    }
+  }
+}

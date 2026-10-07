@@ -1,8 +1,8 @@
 {
-  "name": "onepipeline-note-journeys",
+  "name": "onepipeline-e2e",
   "$schema": "../../node_modules/nx/schemas/project-schema.json",
   "projectType": "library",
-  "sourceRoot": "tests/note",
+  "sourceRoot": "tests/e2e",
   "tags": [
     "scope:tests",
     "lang:rust"
@@ -12,30 +12,30 @@
       "executor": "nx:noop"
     },
     "build": {
-      "command": "just _tier-build note",
+      "command": "just _tier-build e2e",
       "inputs": [
-        "noteJourneySource"
+        "e2eSource"
       ]
     },
     "format": {
-      "command": "just _tier-format tests/note/main.rs"
+      "command": "just _tier-format tests/e2e/main.rs"
     },
     "format-check": {
-      "command": "just _tier-fmt-check tests/note/main.rs",
+      "command": "just _tier-fmt-check tests/e2e/main.rs",
       "inputs": [
-        "noteJourneySource"
+        "e2eSource"
       ]
     },
     "lint": {
-      "command": "just _tier-lint note",
+      "command": "just _tier-lint e2e",
       "inputs": [
-        "noteJourneySource"
+        "e2eSource"
       ]
     },
     "test": {
-      "command": "just _note-test",
+      "command": "just _e2e-test",
       "inputs": [
-        "noteJourneySource"
+        "e2eSource"
       ],
       "dependsOn": [
         {
@@ -46,13 +46,15 @@
         }
       ],
       "outputs": [
-        "{workspaceRoot}/target/llvm-cov-target/onepipeline-note-*.profraw"
-      ]
+        "{workspaceRoot}/target/llvm-cov-target/onepipeline-e2e-*.profraw",
+        "{workspaceRoot}/target/budget-records/stacked-spikes-stage.json"
+      ],
+      "parallelism": false
     },
     "test-quick": {
-      "command": "just _note-test-quick",
+      "command": "just _e2e-test-quick",
       "inputs": [
-        "noteJourneySource"
+        "e2eSource"
       ],
       "dependsOn": [
         {

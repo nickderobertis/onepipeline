@@ -35,32 +35,58 @@
     "coverage-clean": {
       "command": "just _crate-coverage-clean"
     },
+    "test-archive": {
+      "command": "just _crate-test-archive",
+      "dependsOn": [
+        "coverage-clean"
+      ]
+    },
     "test-rest": {
       "command": "just _crate-test-rest",
       "inputs": [
-        "crateSource"
+        "crateTestSource"
       ],
       "dependsOn": [
-        "coverage-clean"
+        "test-archive"
       ],
       "outputs": [
-        "{workspaceRoot}/target/budget-records/stacked-spikes-stage.json"
+        "{workspaceRoot}/target/llvm-cov-target/onepipeline-rest-*.profraw"
       ]
     },
     "test": {
       "command": "just _crate-coverage",
       "inputs": [
-        "crateSource"
+        "crateTestSource",
+        "e2eSource",
+        "contractSource",
+        "noteJourneySource"
       ],
+      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the one 95% floor merges every tier's profiles, so this report depends on each tier's `test`. An unchanged tier replays only where the Nx cache is warm: a CI runner starts cold, so there a tier-only change re-runs every tier under this aggregate. That cost is accepted for now because selection stays per tier; restoring the Nx cache in CI is recorded as a follow-up.",
       "dependsOn": [
         "test-rest",
         {
           "projects": [
+            "onepipeline-e2e",
+            "onepipeline-contract",
             "onepipeline-note-journeys"
           ],
           "target": "test"
         }
-      ]
+      ],
+      "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]"
+    },
+    "test-quick-archive": {
+      "command": "just _crate-test-quick-archive"
+    },
+    "test-quick": {
+      "command": "just _crate-test-quick",
+      "inputs": [
+        "crateTestSource"
+      ],
+      "dependsOn": [
+        "test-quick-archive"
+      ],
+      "parallelism": false
     },
     "doc": {
       "command": "just _crate-doc",
@@ -89,19 +115,44 @@
     },
     "budgets": {
       "command": "just budgets",
+      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the stacked-spikes budget reads the record the e2e tier writes, so it runs after that tier, as it ran after `test-rest` when that target held the e2e binary. The edge is narrower than before the split, and the same warm-cache replay and cold-CI cost apply as for `test` above.",
       "dependsOn": [
-        "test-rest"
+        {
+          "projects": [
+            "onepipeline-e2e"
+          ],
+          "target": "test"
+        }
       ],
+      "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]",
       "inputs": [
-        "crateSource",
+        "e2eSource",
         "{workspaceRoot}/budgets.yaml",
         "{workspaceRoot}/scripts/stacked-spikes-budget.mjs",
         "{workspaceRoot}/package-lock.json",
         "{workspaceRoot}/scripts/linear-writeback-budget.sh"
       ]
+    },
+    "msrv": {
+      "command": "just _crate-msrv",
+      "inputs": [
+        "crateSource"
+      ]
+    },
+    "deps-check": {
+      "command": "just _crate-deps-check",
+      "inputs": [
+        "rustBuild",
+        "{workspaceRoot}/deny.toml"
+      ]
     }
   },
+  "//": "llmlint: ignore[expensive_tests_stay_behind_their_own_edge] project selection stays per tier — a change only one tier reads selects that tier and this crate, never a sibling tier (npm/test/workspace-nx.test.mjs drives it). This edge is what makes ci.yml's `changes` answer `true` for a tier-only change, so `cross`, `msrv`, `deny`, `install` and `wheel` still run on it.",
   "implicitDependencies": [
-    "onepipeline-note-journeys"
+    "onepipeline-note-journeys",
+    "onepipeline-e2e",
+    "onepipeline-contract",
+    "onepipeline-smoke",
+    "onepipeline-release-compat"
   ]
 }

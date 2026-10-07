@@ -5,11 +5,19 @@
 #   scripts/nx-affected.sh -t check        run a target over the affected projects
 #   scripts/nx-affected.sh --affects NAME  print `true`/`false` for one project
 #
-# Both **fail closed**: when the merge base cannot be derived — a shallow clone,
-# a missing base branch, a detached build — this runs everything and says so on
-# stderr rather than reporting a scoped pass as a full one. Affected selection is
-# a speed optimisation, and a speed optimisation that can silently skip a check
-# is a correctness hole.
+# The base is, in order:
+#   ONEPIPELINE_NX_BASE_SHA  a commit, used as given — what a push build passes
+#                            (the commit before the push), and what wins over
+#                            the branch below when both are set
+#   ONEPIPELINE_NX_BASE_REF  a branch, or GITHUB_BASE_REF on a pull request,
+#                            whose merge base with HEAD is the base
+#   main                     outside CI only
+#
+# Both **fail closed**: when the base cannot be derived — a commit that does not
+# resolve, a shallow clone, a missing base branch, a CI build that names neither
+# — this runs everything and says so on stderr rather than reporting a scoped
+# pass as a full one. Affected selection is a speed optimisation, and a speed
+# optimisation that can silently skip a check is a correctness hole.
 #
 # llmlint: ignore-file[tool_output_is_signal] the fallback notices below are the whole
 # point of failing closed: a run that silently widened its scope, or answered `true` for
@@ -33,12 +41,14 @@ cd "$ROOT" || {
 #
 # In CI its absence is meaningful rather than missing: a push build is *on* the
 # base branch, so scoping against it would find nothing changed and skip every
-# check. There is no base there, and no base means run everything.
+# check. A push build's base is the commit before the push, passed as
+# ONEPIPELINE_NX_BASE_SHA; with neither, there is no base, and no base means run
+# everything.
 base_branch() {
   local ref="${ONEPIPELINE_NX_BASE_REF:-${GITHUB_BASE_REF:-}}"
   if [ -z "$ref" ]; then
     if [ -n "${CI:-}" ]; then
-      echo "nx-affected: no base branch — this is not a pull-request build" >&2
+      echo "nx-affected: no base branch — this is not a pull-request build, and ONEPIPELINE_NX_BASE_SHA names no base commit" >&2
       return 1
     fi
     printf 'main'
@@ -51,8 +61,30 @@ base_branch() {
   printf '%s' "$ref"
 }
 
-# The merge base this branch forked from, or nothing when it cannot be derived.
+# An explicit base commit, which has to name one this checkout has.
+#
+# A push build's base is the commit the branch pointed at before the push. GitHub
+# reports it as forty zeros for a branch's first push, and a force-push can name a
+# commit no fetch brought in; neither resolves here, so neither is guessed past.
+# The value reaches git as an argument, so its shape is checked first.
+base_commit() {
+  local sha="$1"
+  if ! printf '%s' "$sha" | grep -Eq '^[0-9a-fA-F]{7,64}$'; then
+    echo "nx-affected: ONEPIPELINE_NX_BASE_SHA='$sha' is not a commit SHA" >&2
+    return 1
+  fi
+  if ! git rev-parse --quiet --verify "$sha^{commit}" 2>/dev/null; then
+    echo "nx-affected: ONEPIPELINE_NX_BASE_SHA='$sha' does not resolve to a commit in this checkout" >&2
+    return 1
+  fi
+}
+
+# The commit to diff against, or nothing when it cannot be derived.
 resolve_base() {
+  if [ -n "${ONEPIPELINE_NX_BASE_SHA:-}" ]; then
+    base_commit "$ONEPIPELINE_NX_BASE_SHA"
+    return
+  fi
   local branch
   branch="$(base_branch)" || return 1
   # A PR runner's checkout has the base branch only as a remote-tracking ref if
@@ -73,7 +105,7 @@ case "${1:-}" in
     exit 2
   }
   if ! base="$(resolve_base)"; then
-    echo "nx-affected: no merge base — treating '$project' as affected" >&2
+    echo "nx-affected: no base — treating '$project' as affected" >&2
     printf 'true\n'
     exit 0
   fi
@@ -98,7 +130,7 @@ case "${1:-}" in
     exit 2
   }
   if ! base="$(resolve_base)"; then
-    echo "nx-affected: no merge base — running every project instead of the affected ones" >&2
+    echo "nx-affected: no base — running every project instead of the affected ones" >&2
     exec bash scripts/nx.sh run-many "$@"
   fi
   exec bash scripts/nx.sh affected --base="$base" --head=HEAD "$@"

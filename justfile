@@ -21,7 +21,7 @@ set positional-arguments := true
 # clippy, rustdoc, or cargo-deny inherit those tools' diagnostics, which already
 # name the exact problem and its fix; a wrapper message would bury them. The
 # recipes whose failure needs project-level context (_crate-fmt-check,
-# _crate-coverage-clean, _crate-coverage, msrv) add one explicitly.
+# _crate-coverage-clean, _crate-coverage, _crate-msrv) add one explicitly.
 
 # The store every plan is read out of is linked into this crate (`onetaskgraph-core`
 # in `[workspace.dependencies]`), so cargo builds it with everything else and the
@@ -164,8 +164,9 @@ check-affected:
 
 # What the macOS and Windows legs run: the same tiers as `check`, minus the two
 # that are Linux-only. `test` enforces the coverage floor off instrumentation
-# that is measured on Linux alone, so the suite runs through `test-quick`
-# instead, and `doc` is a link check no second platform can answer differently.
+# that is measured on Linux alone, so the suite runs through every project's
+# `test-quick` instead, and `doc` is a link check no second platform can answer
+# differently.
 # Named here rather than spelled out as workflow steps, so the cross-platform
 # legs cannot drift away from what the gate means.
 # Deterministic quality gate for the cross-platform legs, without the coverage floor.
@@ -236,35 +237,50 @@ _crate-lint:
 # `NEXTEST_PROFILE` is no protection. `smoke-real` states its own because
 # `--no-capture` and `all` are what that journey *is*; `all` mutes nothing.
 
-# The offline tier, in the two halves its two projects run — the crate and
-# `onepipeline-note-journeys`. `smoke` is in neither: it needs a GitHub credential and a scratch repository and is run by
-# `just smoke-real` alone, excluded by name rather than by `#[ignore]` so the
-# journey is never a skipped test.
+# The offline tier, in the four parts its four projects run: the crate's unit
+# tests and remaining integration binaries (`onepipeline`), the `e2e` binary
+# (`onepipeline-e2e`), the `contract` binary (`onepipeline-contract`), and the
+# `note` binary (`onepipeline-note-journeys`). `smoke` and `release_channel` are
+# in none: they reach GitHub and PyPI, and each is run by its own project's
+# uncached target (`just smoke-real`, `just release-compat`) alone, excluded by
+# name rather than by `#[ignore]` so neither journey is ever a skipped test.
+#
+# `rest-tier` is spelled as the complement of every other binary, so a test
+# binary added later lands in the crate's tier rather than in none.
 #
 # `note-tier` drops `harness::`. The note binary shares `tests/e2e/harness.rs`
 # through `#[path]`, exactly as the smoke binary does, so the harness's own
 # twelve self-tests compile into it too — and they belong to the binary that
-# owns the file. Selecting them here would run one set of tests twice in one
-# tier for 4.8s and print every name twice.
-rest-tier := "not binary(smoke) and not binary(note) and not binary(release_channel)"
+# owns the file, which `e2e-tier` runs. Selecting them here would run one set of
+# tests twice for 4.8s and print every name twice.
+#
+# `adoption` stays inside `e2e-tier` although it is that binary's most expensive
+# module: a tier of its own would compile the same binary from the same inputs,
+# so no change could ever select one without the other, and running the two as
+# separate nextest processes would put eight process trees on the machine where
+# `.config/nextest.toml`'s one group allows four.
+rest-tier := "not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract)"
+e2e-tier := "binary(e2e)"
+contract-tier := "binary(contract)"
 note-tier := "binary(note) and not test(/^harness::/)"
 
-# Their union, and the whole offline tier: what a runner that wants all of it
-# asks for, spelled once from the two halves so it cannot drift from them.
-offline-tiers := "(" + rest-tier + ") or (" + note-tier + ")"
+# Their union, and the whole offline tier, spelled once from the four parts so it
+# cannot drift from them: what a check that the tiers partition the suite lists
+# against (`cargo nextest list -E "$(just --evaluate offline-tiers)"`).
+offline-tiers := "(" + rest-tier + ") or (" + e2e-tier + ") or (" + contract-tier + ") or (" + note-tier + ")"
 
 # 95% line coverage is the gate; lower it only with a documented reason in
-# AGENTS.md. It is measured over the **whole** offline tier, which is why the two
-# runs below report nothing and one merge reports both: the note journeys are
-# their own Nx project, and splitting the run must not split the floor.
+# AGENTS.md. It is measured over the **whole** offline tier, which is why the four
+# tier runs below report nothing and one merge reports them all: each tier is its
+# own Nx project, and splitting the run must not split the floor.
 
 # cargo-llvm-cov's instrumented tree; `tests/coverage.rs` holds this path against
 # `LLVM_PROFILE_FILE`, so a drift fails there rather than cleaning the wrong tree.
 llvm-cov-target-dir := justfile_directory() / "target" / "llvm-cov-target"
 export ONEPIPELINE_COVERAGE_ROOT := justfile_directory()
 
-# Remove the tree before either test tier: a stale binary retains a coverage
-# map and would count as uncovered in the later report.
+# Remove the tree before any test tier: a stale binary retains a coverage map
+# and would count as uncovered in the later report.
 #
 # Resolve existing arguments before removal so symlinks cannot reach outside
 # this clone's build directory. A missing tree is normal on the first run, even
@@ -297,12 +313,25 @@ _crate-coverage-clean dir=llvm-cov-target-dir:
       rm -rf -- "$reached" || { echo "could not remove instrumented tree '$reached'" >&2; exit 1; }
 # llmlint: ignore-end[cli_output_contract]
 
-# The crate's own half of the offline suite, instrumented, reporting nothing.
-_crate-test-rest:
-    @just _strace-preflight
-    @just _onetaskgraph-preflight
+# One tier of the offline suite, instrumented, reporting nothing. Each tier names
+# its profiles after itself, and its Nx `test` target declares exactly those
+# files as its outputs: a tier replayed from the cache then restores the profiles
+# the merge below reads, and only its own, beside whatever the tiers that ran
+# wrote. `cargo llvm-cov report` merges every `*.profraw` in the tree, so the
+# name changes nothing about what is counted.
+_tier-test tier filter:
+    @LLVM_PROFILE_FILE_NAME="onepipeline-$1-%p-%14m.profraw" RUSTFLAGS="-D warnings" cargo llvm-cov --no-report nextest --locked -E "$2" --final-status-level fail
+
+# The instrumented build every tier runs, archived once, ahead of them all, when
+# CI names where (the `onepipeline:test-archive` target every tier's `test`
+# depends on). Built under the same flags the tiers build with, so each finds
+# it fresh and the archive is the build the step tested.
+_crate-test-archive:
     @[ -z "${ONEPIPELINE_TEST_ARCHIVE:-}" ] || RUSTFLAGS="-D warnings" cargo llvm-cov --no-report nextest-archive --locked --archive-file "$ONEPIPELINE_TEST_ARCHIVE"
-    @RUSTFLAGS="-D warnings" cargo llvm-cov --no-report nextest --locked -E '{{rest-tier}}' --final-status-level fail
+
+# The crate's own tier: its unit tests and the integration binaries no other
+# project owns.
+_crate-test-rest: (_tier-test "rest" rest-tier)
 
 # `--failure-mode all` is load-bearing, and belongs here rather than on either
 # instrumented run: the merge is what this step does. The cancellation journeys
@@ -315,53 +344,81 @@ _crate-coverage:
     @cargo llvm-cov report --failure-mode all --fail-under-lines 95 \
       || { echo "coverage fell below 95% — cover the lines the table above counts as missed" >&2; exit 1; }
 
-# The `onepipeline-note-journeys` project's own targets, each scoped to the one
-# test binary it owns. They are not the crate's targets narrowed for show: a
-# project that declared the uniform set and ran nothing of its own would drop out
-# of every repo-wide verb while appearing to be covered by it.
+# The test-tier projects' own targets (`onepipeline-e2e`, `onepipeline-contract`,
+# `onepipeline-note-journeys`, `onepipeline-smoke`, `onepipeline-release-compat`),
+# each scoped to the one test binary it owns. They are not the crate's targets
+# narrowed for show: a project that declared the uniform set and ran nothing of
+# its own would drop out of every repo-wide verb while appearing to be covered by
+# it.
 #
-# `rustfmt` and `clippy` reach `tests/e2e/harness.rs` through this binary's
-# `#[path]` include, which is right — it is part of what this binary compiles —
-# and both are idempotent with the crate's own workspace-wide pass.
-_note-build:
-    @RUSTFLAGS="-D warnings" cargo build --locked --test note --quiet
+# `rustfmt` and `clippy` reach `tests/e2e/harness.rs` through the `#[path]`
+# include in the note, smoke and release_channel binaries, which is right — it
+# is part of what each compiles — and both are idempotent with the crate's own
+# workspace-wide pass.
+_tier-build bin:
+    @RUSTFLAGS="-D warnings" cargo build --locked --test "$1" --quiet
 
-_note-format:
-    @rustfmt tests/note/main.rs
+_tier-format path:
+    @rustfmt "$1"
 
-_note-fmt-check:
-    @rustfmt --check tests/note/main.rs \
+_tier-fmt-check path:
+    @rustfmt --check "$1" \
       || { echo "formatting drift above — run 'just format'" >&2; exit 1; }
 
-_note-lint:
-    @cargo clippy --locked --quiet --test note -- -D warnings
+_tier-lint bin:
+    @cargo clippy --locked --quiet --test "$1" -- -D warnings
 
-# Instrumented and reporting nothing, so `_crate-coverage` counts these journeys
-# in the same floor as the rest of the suite.
-_note-test:
-    @RUSTFLAGS="-D warnings" cargo llvm-cov --no-report nextest --locked -E '{{note-tier}}' --final-status-level fail
+# Each tier's instrumented run, counted by `_crate-coverage` in the one floor.
+# The e2e journeys are the ones that run the binary under `strace` and drive the
+# released `onetaskgraph`, so that tier asks for both up front.
+_e2e-test: _strace-preflight _onetaskgraph-preflight (_tier-test "e2e" e2e-tier)
+
+_contract-test: (_tier-test "contract" contract-tier)
+
+_note-test: (_tier-test "note" note-tier)
 
 # Coverage instrumentation is measured on Linux only, so the cross-platform CI
-# legs run the same suite through this instead of `test`.
+# legs run the same suite through every project's `test-quick` target instead of
+# `test`, one project at a time (each declares `parallelism: false`), which is the
+# one nextest process at a time the suite ran as before it was split.
 # The offline suite without coverage instrumentation.
-# llmlint: ignore-block[diagnostics_error_or_absent] the archive line has to build
-# exactly what the run line after it builds, so that the run finds it fresh and
-# the archive is the build the step tested; the run sets no RUSTFLAGS, so neither
-# can the archive. Warnings are denied by `just lint`, which `check-cross` runs
-# before this.
 test-quick:
-    @just _strace-preflight
-    @just _onetaskgraph-preflight
+    @ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts/nx.sh run-many -t test-quick --outputStyle=stream-without-prefixes
+
+# Streamed rather than summarised, and without Nx's per-line project prefix: the
+# cross legs report a line per test as it finishes so that a leg cut short names
+# where it stopped, and `rerun-failed` reads nextest's status lines off the
+# start of each line.
+# llmlint: ignore-block[diagnostics_error_or_absent] the runs here and the archive
+# below have to build the same thing, so that each run finds the archived build
+# fresh and the archive is the build the step tested; neither sets RUSTFLAGS, as
+# the single `test-quick` recipe they were split out of did not. Warnings are
+# denied by `just lint`, which `check-cross` runs before `test-quick`.
+_tier-test-quick filter:
+    @bash scripts/nextest-run.sh cargo nextest run --locked -E "$1"
+
+_crate-test-quick: (_tier-test-quick rest-tier)
+
+_e2e-test-quick: _strace-preflight _onetaskgraph-preflight (_tier-test-quick e2e-tier)
+
+_contract-test-quick: (_tier-test-quick contract-tier)
+
+_note-test-quick: (_tier-test-quick note-tier)
+
+# The uninstrumented build every project's `test-quick` runs, archived once,
+# ahead of them all (the `onepipeline:test-quick-archive` target).
+_crate-test-quick-archive:
     @[ -z "${ONEPIPELINE_TEST_ARCHIVE:-}" ] || cargo nextest archive --locked --archive-file "$ONEPIPELINE_TEST_ARCHIVE"
-    @bash scripts/nextest-run.sh cargo nextest run --locked -E '{{offline-tiers}}'
 # llmlint: ignore-end[diagnostics_error_or_absent]
 
-# `ONEPIPELINE_TEST_ARCHIVE` (CI sets it; nothing local does) makes `test-quick`
-# and `_crate-test-rest` archive the build they are about to run, with nextest's
-# own archive command, before running it. The run then finds that build fresh,
-# so the archive is the build the step tested. `rerun-failed` re-runs from that
-# archive and nothing else: nextest refuses cargo's build options beside
-# `--archive-file`, so a re-run cannot compile.
+# `ONEPIPELINE_TEST_ARCHIVE` (CI sets it; nothing local does) makes the
+# `test-archive` and `test-quick-archive` targets archive the build the tiers are
+# about to run, with nextest's own archive command, before any of them runs.
+# Each run then finds that build fresh, so the archive is the build the step
+# tested, and it holds every tier's binaries, so a test any tier failed can be
+# re-run from it. `rerun-failed` re-runs from that archive and nothing else:
+# nextest refuses cargo's build options beside `--archive-file`, so a re-run
+# cannot compile.
 
 # How many times `rerun-failed` re-runs each test a failed CI test step failed.
 # Three tells "fails every time" from "fails some of the time" and stays bounded.
@@ -378,7 +435,7 @@ rerun-times := "3"
 rerun-failed log archive:
     @bash scripts/rerun-failed.sh --log "$1" --archive "$2" --times {{rerun-times}} --known-flakes scripts/known-flakes.txt -- cargo nextest run
 
-# The same for the gate's instrumented suite, whose archive `_crate-test-rest`
+# The same for the gate's instrumented suite, whose archive `_crate-test-archive`
 # makes with cargo-llvm-cov so the re-runs run under its coverage environment.
 # cargo-llvm-cov extracts an archive into its own target directory every time,
 # so each re-run after the first overwrites the one before.
@@ -401,17 +458,32 @@ rerun-failed-coverage log archive:
 # It needs `gh` and a credential (`gh auth login`, or GH_TOKEN). With neither it
 # fails and names what is missing; it never skips and never falls back to a fake.
 # Set ONEPIPELINE_SMOKE_REPO to publish somewhere other than the default scratch
-# repository. `--no-capture`, because its whole value is the evidence it prints.
+# repository. `--no-capture`, because its whole value is the evidence it prints,
+# and streamed through Nx for the same reason. It runs the `onepipeline-smoke`
+# project's uncached `smoke` target, which no `check` reaches.
 # Real everything: onevcs, git, and the GitHub API, over one whole lifecycle.
 smoke-real:
-    @cargo nextest run --locked -E 'binary(smoke)' --no-capture --status-level all
+    @ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts/nx.sh run onepipeline-smoke:smoke --outputStyle=stream-without-prefixes
+
+# The `smoke` target's body. Arguments are passed through to nextest, so the
+# target's wiring can be shown without the credential: `just nx run
+# onepipeline-smoke:smoke --no-run` builds the binary and runs nothing.
+_smoke-run *args:
+    @cargo nextest run --locked -E 'binary(smoke)' --no-capture --status-level all "$@"
 
 # Outside `check` and `gate` because uv fetches the wheel from a package
 # registry; CI's `release-compat` job calls this, and without uv it fails naming
-# it. `harness::` is the shared harness's own self-tests, which `test` already runs.
+# it. It runs the `onepipeline-release-compat` project's uncached target, which
+# no `check` reaches.
 # The 0.28.2 channel journeys: this build's channel against the pinned wheel's.
 release-compat:
-    @RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(release_channel) and not test(/^harness::/)'
+    @bash scripts/nx.sh run onepipeline-release-compat:release-compat
+
+# The `release-compat` target's body. `harness::` is the shared harness's own
+# self-tests, which the e2e tier already runs. Arguments are passed through to
+# nextest, as `_smoke-run`'s are.
+_release-compat-run *args:
+    @RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(release_channel) and not test(/^harness::/)' "$@"
 
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`),
@@ -419,7 +491,7 @@ release-compat:
 test-e2e filter="":
     @just _strace-preflight
     @just _onetaskgraph-preflight
-    @cargo nextest run --locked -E 'binary(e2e){{ if filter == "" { "" } else { " and (" + filter + ")" } }}'
+    @cargo nextest run --locked -E '{{e2e-tier}}{{ if filter == "" { "" } else { " and (" + filter + ")" } }}'
 
 # Each journey starts a real two-party conversation and holds one side's turn
 # open, which is what makes them their own binary and their own Nx project.
@@ -441,9 +513,14 @@ upgrade:
     @npm update --silent --no-audit --no-fund
     @just check
 
-# Separate from `check`: `cargo deny` needs a network-fetched advisory DB.
+# Separate from `check`: `cargo deny` needs a network-fetched advisory DB. A
+# repo-level target of the crate's project (`onepipeline:deps-check`), uncached,
+# because what it reads is the advisory database as of now.
 # Advisory + license audit and unused-dependency check.
 deps-check:
+    @bash scripts/nx.sh run onepipeline:deps-check
+
+_crate-deps-check:
     @command -v cargo-deny >/dev/null || { echo "cargo-deny not installed: cargo install cargo-deny --locked" >&2; exit 1; }
     @command -v cargo-machete >/dev/null || { echo "cargo-machete not installed: cargo install cargo-machete --locked" >&2; exit 1; }
     @cargo deny --log-level error check
@@ -492,8 +569,13 @@ wheel-linux target out="dist":
 
 # Reads the floor from Cargo.toml's `rust-version`; that toolchain must be
 # installed (`rustup toolchain install <version>`). Warnings are errors here too.
+# A repo-level target of the crate's project (`onepipeline:msrv`), uncached,
+# because its answer is the installed toolchain's as much as the tree's.
 # Build under the declared MSRV.
 msrv:
+    @bash scripts/nx.sh run onepipeline:msrv
+
+_crate-msrv:
     @RUSTFLAGS="-D warnings" cargo +{{msrv-version}} check --locked --all-targets --quiet \
       || { echo "the {{msrv-version}} floor no longer builds — install that toolchain, or raise rust-version in Cargo.toml (and clippy.toml)" >&2; exit 1; }
 

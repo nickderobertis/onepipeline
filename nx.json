@@ -16,49 +16,128 @@
     "wholeWorkspace": [
       "{workspaceRoot}/**/*"
     ],
-    "crateSource": [
+    "rustBuild": [
       "{workspaceRoot}/src/**/*",
-      "{workspaceRoot}/tests/**/*",
-      "{workspaceRoot}/docs/contract.md",
+      "{workspaceRoot}/crates/**/*",
       "{workspaceRoot}/schemas/**/*",
-      "{workspaceRoot}/release-targets.toml",
       "{workspaceRoot}/Cargo.toml",
       "{workspaceRoot}/Cargo.lock",
       "{workspaceRoot}/rust-toolchain.toml",
-      "{workspaceRoot}/clippy.toml",
-      "{workspaceRoot}/rustfmt.toml",
-      "{workspaceRoot}/docs/contract-divergences.md",
-      "{workspaceRoot}/personas/**/*",
-      "{workspaceRoot}/graphs/**/*",
-      "{workspaceRoot}/examples/**/*",
-      "{workspaceRoot}/scripts/record-channel-answers.sh",
-      "{workspaceRoot}/scripts/linked-engines.sh",
-      "{workspaceRoot}/scripts/smoke-published.sh",
-      "{workspaceRoot}/scripts/build-linux-wheel.sh",
-      "{workspaceRoot}/pyproject.toml",
-      "{workspaceRoot}/README.md",
-      "{workspaceRoot}/.github/workflows/ci.yml",
-      "{workspaceRoot}/.github/workflows/release.yml",
+      "{workspaceRoot}/.cargo/config.toml",
+      "{workspaceRoot}/.config/nextest.toml",
       "sharedGlobals"
     ],
+    "crateSource": [
+      "rustBuild",
+      "{workspaceRoot}/tests/**/*",
+      "{workspaceRoot}/clippy.toml",
+      "{workspaceRoot}/rustfmt.toml",
+      "{workspaceRoot}/docs/contract.md",
+      "{workspaceRoot}/docs/contract-divergences.md",
+      "{workspaceRoot}/README.md",
+      "{workspaceRoot}/.github/workflows/visual-docs.yml"
+    ],
+    "crateTestSource": [
+      "rustBuild",
+      "{workspaceRoot}/clippy.toml",
+      "{workspaceRoot}/rustfmt.toml",
+      "{workspaceRoot}/README.md",
+      "{workspaceRoot}/.editorconfig",
+      "{workspaceRoot}/.gitattributes",
+      "{workspaceRoot}/.gitignore",
+      "{workspaceRoot}/tests/*.rs",
+      "{workspaceRoot}/tests/golden/**/*",
+      "{workspaceRoot}/tests/recorded/**/*",
+      "{workspaceRoot}/tests/e2e/adoption.rs",
+      "{workspaceRoot}/tests/smoke/repo.rs",
+      "{workspaceRoot}/docs/**/*",
+      "{workspaceRoot}/examples/**/*",
+      "{workspaceRoot}/graphs/**/*",
+      "{workspaceRoot}/personas/**/*",
+      "{workspaceRoot}/scripts/**/*",
+      "{workspaceRoot}/screenshots/**/*",
+      "{workspaceRoot}/.github/**/*",
+      "{workspaceRoot}/.githooks/**/*",
+      "{workspaceRoot}/AGENTS.md",
+      "{workspaceRoot}/CODEOWNERS",
+      "{workspaceRoot}/biome.json",
+      "{workspaceRoot}/budgets.yaml",
+      "{workspaceRoot}/deny.toml",
+      "{workspaceRoot}/gh-secrets.json",
+      "{workspaceRoot}/llmlint.yml",
+      "{workspaceRoot}/oneharness.toml",
+      "{workspaceRoot}/project.json",
+      "{workspaceRoot}/pyproject.toml",
+      "{workspaceRoot}/release-plz.toml",
+      "{workspaceRoot}/release-targets.toml",
+      "{workspaceRoot}/screencomp.toml"
+    ],
+    "e2eSource": [
+      "rustBuild",
+      "{workspaceRoot}/tests/e2e/**/*",
+      "{workspaceRoot}/tests/golden/**/*",
+      "{workspaceRoot}/tests/recorded/**/*",
+      "{workspaceRoot}/docs/**/*",
+      "{workspaceRoot}/examples/**/*",
+      "{workspaceRoot}/graphs/**/*",
+      "{workspaceRoot}/personas/**/*",
+      "{workspaceRoot}/scripts/stacked-spikes-budget.mjs",
+      "{workspaceRoot}/scripts/record-channel-answers.sh",
+      "{workspaceRoot}/oneharness.toml",
+      "{workspaceRoot}/clippy.toml",
+      "{workspaceRoot}/rustfmt.toml"
+    ],
+    "contractSource": [
+      "rustBuild",
+      "{workspaceRoot}/tests/contract.rs",
+      "{workspaceRoot}/tests/contract/**/*",
+      "{workspaceRoot}/tests/golden/**/*",
+      "{workspaceRoot}/tests/recorded/**/*",
+      "{workspaceRoot}/tests/e2e/channel.rs",
+      "{workspaceRoot}/docs/**/*",
+      "{workspaceRoot}/README.md",
+      "{workspaceRoot}/examples/**/*",
+      "{workspaceRoot}/graphs/**/*",
+      "{workspaceRoot}/personas/**/*",
+      "{workspaceRoot}/scripts/check-node.sh",
+      "{workspaceRoot}/scripts/review-envelope.sh",
+      "{workspaceRoot}/scripts/smoke-published.sh",
+      "{workspaceRoot}/clippy.toml",
+      "{workspaceRoot}/rustfmt.toml"
+    ],
     "noteJourneySource": [
-      "{workspaceRoot}/src/**/*",
-      "{workspaceRoot}/crates/**/*",
+      "rustBuild",
       "{workspaceRoot}/tests/note/**/*",
       "{workspaceRoot}/tests/e2e/harness.rs",
       "{workspaceRoot}/personas/**/*",
       "{workspaceRoot}/graphs/**/*",
-      "{workspaceRoot}/Cargo.toml",
-      "{workspaceRoot}/Cargo.lock",
-      "{workspaceRoot}/rust-toolchain.toml",
       "{workspaceRoot}/clippy.toml",
-      "{workspaceRoot}/rustfmt.toml",
-      "{workspaceRoot}/.config/nextest.toml",
-      "sharedGlobals"
+      "{workspaceRoot}/rustfmt.toml"
+    ],
+    "smokeSource": [
+      "rustBuild",
+      "{workspaceRoot}/tests/smoke/**/*",
+      "{workspaceRoot}/tests/e2e/harness.rs",
+      "{workspaceRoot}/personas/**/*",
+      "{workspaceRoot}/graphs/**/*",
+      "{workspaceRoot}/scripts/release-probe.sh",
+      "{workspaceRoot}/clippy.toml",
+      "{workspaceRoot}/rustfmt.toml"
+    ],
+    "releaseCompatSource": [
+      "rustBuild",
+      "{workspaceRoot}/tests/release_channel/**/*",
+      "{workspaceRoot}/tests/e2e/harness.rs",
+      "{workspaceRoot}/tests/e2e/recorded_support.rs",
+      "{workspaceRoot}/tests/recorded/**/*",
+      "{workspaceRoot}/personas/**/*",
+      "{workspaceRoot}/graphs/**/*",
+      "{workspaceRoot}/clippy.toml",
+      "{workspaceRoot}/rustfmt.toml"
     ],
     "visualDocsSource": [
       "{workspaceRoot}/src/**/*",
-      "{workspaceRoot}/crates/testfakes/**/*",
+      "{workspaceRoot}/crates/**/*",
       "{workspaceRoot}/examples/**/*",
       "{workspaceRoot}/graphs/**/*",
       "{workspaceRoot}/tests/recorded/run-root/**/*",
@@ -68,6 +147,8 @@
       "{workspaceRoot}/Cargo.toml",
       "{workspaceRoot}/Cargo.lock",
       "{workspaceRoot}/rust-toolchain.toml",
+      "{workspaceRoot}/.cargo/config.toml",
+      "{workspaceRoot}/.config/nextest.toml",
       "sharedGlobals"
     ]
   },
@@ -99,6 +180,12 @@
     "coverage-clean": {
       "cache": false
     },
+    "test-archive": {
+      "cache": false
+    },
+    "test-quick-archive": {
+      "cache": false
+    },
     "test-rest": {
       "cache": true,
       "inputs": [
@@ -111,11 +198,29 @@
         "default"
       ]
     },
+    "test-quick": {
+      "cache": true,
+      "inputs": [
+        "default"
+      ]
+    },
     "doc": {
       "cache": true,
       "inputs": [
         "default"
       ]
+    },
+    "msrv": {
+      "cache": false
+    },
+    "deps-check": {
+      "cache": false
+    },
+    "smoke": {
+      "cache": false
+    },
+    "release-compat": {
+      "cache": false
     },
     "lint-llm-diff": {
       "cache": true,
