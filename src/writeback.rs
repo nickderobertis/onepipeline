@@ -634,6 +634,7 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::AssetNotGiven { .. } => decided("asset-not-given"),
         EngineError::AssetGivenTwice { .. } => decided("asset-given-twice"),
         EngineError::AssetNotHeld { .. } => decided("asset-not-held"),
+        // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: the store raises it only for an asset its source hands over, and `write_shadow` writes a creation's Markdown alone, so a reference is refused `asset-not-held` first (`store::a_live_add_referencing_an_asset_its_task_does_not_hold_is_refused_as_asset_not_held`); `writeback::tests` holds the word.
         EngineError::AssetsUnsupported { .. } => decided("assets-unsupported"),
         EngineError::DestinationUnavailable { error, .. }
         | EngineError::SourceRefused { error, .. }
