@@ -598,12 +598,15 @@ fn an_adoption_with_no_baseline_reads_a_member_task_by_its_id_in_its_own_source(
     std::fs::remove_file(world.run_file(name, "writeback-landed.json")).expect("a seeded baseline");
     let mark = records(&world, name).len();
     world.run(&["adopt", name, "--detach"]).exited(0);
+    // The record is appended after the attempt ends its store command, so the board can show
+    // the claim before the attempt's record exists: wait for both.
     world.until_store(
-        "the adopted driver's claim to reach both sources",
+        "the adopted driver's claim to reach both sources, and its record",
         |world| {
             let board = words(world, &home);
             board.get("adopt").map(String::as_str) == Some("queued")
                 && board.get("ship").map(String::as_str) == Some("queued")
+                && records(world, name).len() > mark
         },
     );
     let first = records(&world, name)
