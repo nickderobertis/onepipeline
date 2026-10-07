@@ -143,7 +143,7 @@
       ]
     }
   },
-  "//": "llmlint: ignore[expensive_tests_stay_behind_their_own_edge] project selection stays per tier — a change only one tier reads selects that tier and this crate, never a sibling tier (npm/test/workspace-nx.test.mjs drives it). This edge is what makes ci.yml's `changes` answer `true` for a tier-only change, so `cross`, `msrv`, `deny`, `install` and `wheel` still run on it; and the one 95% floor merges every tier's profiles, so `test` here depends on each tier's `test`, which replays from the cache wherever its inputs did not change.",
+  "//": "llmlint: ignore[expensive_tests_stay_behind_their_own_edge] project selection stays per tier — a change only one tier reads selects that tier and this crate, never a sibling tier (npm/test/workspace-nx.test.mjs drives it). This edge is what makes ci.yml's `changes` answer `true` for a tier-only change, so `cross`, `msrv`, `deny`, `install` and `wheel` still run on it; and the one 95% floor merges every tier's profiles, so `test` here depends on each tier's `test`. That replays an unchanged tier only where the Nx cache is warm: a CI runner starts cold, so there a tier-only change re-runs every tier under this aggregate. That cost is accepted for now because the selection criterion above holds; restoring the Nx cache in CI is recorded as a follow-up.",
   "implicitDependencies": [
     "onepipeline-note-journeys",
     "onepipeline-e2e",
