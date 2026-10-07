@@ -32,8 +32,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit]
-  # this is the one sweep the release model places, over a tree no merge's job
+  # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit] this
+  # is the one sweep the release model places, over a tree no merge's job
   # swept: the release PR batches every merge since the last tag, and each of
   # those ran only its affected tier. The second sweep the rule sees is
   # `release.yml`'s `test` job, which carries its own suppression saying why it
