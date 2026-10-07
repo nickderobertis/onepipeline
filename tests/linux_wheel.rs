@@ -518,8 +518,10 @@ fn an_absolute_out_directory_is_refused() {
 }
 
 /// ci.yml's `wheel` legs run only when `changes` reports the crate affected,
-/// which is `nx.json`'s `crateSource`; a wheel-build input missing from it is a
-/// pull request that changes the build and never runs it.
+/// and the crate's `test-rest` target — whose tests, this binary among them,
+/// read the wheel build — is what a change to one of its inputs re-runs. A
+/// wheel-build input missing from that target's inputs is a pull request that
+/// changes the build and replays a cached pass from before it.
 #[test]
 fn the_wheel_check_is_gated_on_inputs_carrying_what_its_build_reads() {
     let block = job_block("ci.yml", "wheel");
@@ -527,13 +529,35 @@ fn the_wheel_check_is_gated_on_inputs_carrying_what_its_build_reads() {
         block.contains("if: needs.changes.outputs.crate == 'true'"),
         "ci.yml's wheel legs are gated on the crate being affected"
     );
-    let nx: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(repo_root().join("nx.json")).expect("nx.json is readable"),
-    )
-    .expect("nx.json is JSON");
-    let inputs = nx["namedInputs"]["crateSource"]
+    let read_json = |path: &str| -> serde_json::Value {
+        serde_json::from_str(
+            &fs::read_to_string(repo_root().join(path)).expect("the file is readable"),
+        )
+        .expect("the file is JSON")
+    };
+    let nx = read_json("nx.json");
+    let project = read_json("project.json");
+    // The target's inputs with every named input expanded, as Nx resolves them.
+    let mut pending: Vec<serde_json::Value> = project["targets"]["test-rest"]["inputs"]
         .as_array()
-        .expect("nx.json names crateSource");
+        .expect("onepipeline:test-rest declares its inputs")
+        .clone();
+    let mut globs = Vec::new();
+    while let Some(entry) = pending.pop() {
+        let Some(entry) = entry.as_str() else {
+            continue;
+        };
+        match nx["namedInputs"][entry].as_array() {
+            Some(named) => pending.extend(named.iter().cloned()),
+            None => globs.push(entry.trim_start_matches("{workspaceRoot}/").to_owned()),
+        }
+    }
+    let covers = |path: &str| {
+        globs.iter().any(|glob| match glob.strip_suffix("/**/*") {
+            Some(dir) => path.starts_with(&format!("{dir}/")),
+            None => glob == path,
+        })
+    };
     for read in [
         "scripts/build-linux-wheel.sh",
         "pyproject.toml",
@@ -543,14 +567,11 @@ fn the_wheel_check_is_gated_on_inputs_carrying_what_its_build_reads() {
         "rust-toolchain.toml",
         "Cargo.toml",
         "Cargo.lock",
-        "src/**/*",
+        "src/lib.rs",
     ] {
-        let input = format!("{{workspaceRoot}}/{read}");
         assert!(
-            inputs
-                .iter()
-                .any(|entry| entry.as_str() == Some(input.as_str())),
-            "crateSource carries {input}"
+            covers(read),
+            "onepipeline:test-rest's inputs carry {read}: {globs:?}"
         );
     }
 }
