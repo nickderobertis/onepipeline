@@ -1,3 +1,8 @@
+# The budgets this repository holds itself to, checked by `onebudgetspec check budgets.yaml`
+# (`just budgets`).
+#
+# The engine is this repository's root Nx project, so the file sits at the root and its budgets
+# are the whole repository's.
 schema_version: 1
 budgets:
   - id: stacked-spikes-stage-time
@@ -12,3 +17,15 @@ budgets:
       is doubled because the shared harness adds a dispatch in series before
       the concurrent area spikes. The value is read from the existing test run,
       never re-measured; the test uses a subprocess agent double, not paid model turns.
+  - id: linear-requests-per-writeback-settlement
+    description: >-
+      Measures the highest loopback Linear request count per settlement attempt after the first
+      across at least five consecutive write-backs through the real worker. It protects a
+      production Linear key which no check may reach.
+    labels: [linear]
+    measure: reported
+    command: ["bash", "scripts/linear-writeback-budget.sh"]
+    unit: requests
+    direction: max
+    threshold: 2
+    timeout_seconds: 1800

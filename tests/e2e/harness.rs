@@ -6389,7 +6389,12 @@ fn parked_reading(world: &World, run: &str, after: &str) -> Value {
 /// - `status --json` reads it driven, with neither an ending nor a pause;
 /// - `adopt` refuses it, naming the live driver, and leaves that driver holding it.
 ///
-/// Asked of a run [`until_parked`] has already seen parked.
+/// Asked of a run [`until_parked`] has already seen parked. Parked is not a state
+/// the run stays in between two reads: the driver re-surfaces an unchanged hold on
+/// its own cadence, and the record that journals reads `ACTIVE` until the journal
+/// is quiet again. So each reader is asked until it reads the run `PARKED` — a
+/// slow runner was seen to land a `runs` read on that record — and what it says
+/// then is what is asserted.
 pub fn a_parked_run_is_read_as_driven(world: &World, run: &str) {
     let pid = world.run_json(run, "launch.json")["pid"]
         .as_u64()
@@ -6401,8 +6406,11 @@ pub fn a_parked_run_is_read_as_driven(world: &World, run: &str) {
         world.run_on(command, &args.join(" "))
     };
 
-    let reading = parked_reading(world, run, "1");
-    assert_eq!(reading["liveness"], "PARKED", "{reading}");
+    let mut reading = Value::Null;
+    world.until("`status --json` to read the run parked", |world| {
+        reading = parked_reading(world, run, "1");
+        reading["liveness"] == "PARKED"
+    });
     assert_eq!(reading["word"], "PARKED", "{reading}");
     assert_eq!(reading["driven"], json!(true), "{reading}");
     assert_eq!(reading["ending"], Value::Null, "{reading}");
@@ -6410,7 +6418,18 @@ pub fn a_parked_run_is_read_as_driven(world: &World, run: &str) {
 
     // `onepipeline adopt` rather than `adopt`: a held node's own line may well
     // say `adoption`, which is a node's release policy and not this advice.
-    for rendered in [with_parked(&["status", run]), with_parked(&["runs"])] {
+    for args in [&["status", run][..], &["runs"][..]] {
+        let mut rendered = None;
+        world.until(
+            &format!("`{}` to read the run parked", args.join(" ")),
+            |_| {
+                let read = with_parked(args);
+                let parked = read.code != 0 || read.stdout.contains("PARKED");
+                rendered = Some(read);
+                parked
+            },
+        );
+        let rendered = rendered.expect("the wait read the run");
         rendered
             .exited(0)
             .out_has("PARKED")
@@ -6425,9 +6444,18 @@ pub fn a_parked_run_is_read_as_driven(world: &World, run: &str) {
     }
 
     // Detached, so an adoption this build wrongly accepted returns rather than
-    // driving the run to its end inside the journey.
-    let adopt = with_parked(&["adopt", run, "--detach"]);
+    // driving the run to its end inside the journey. A refusal on a re-surfacing
+    // record names the run `ACTIVE`, which is no adoption either, so only that one
+    // is asked again.
+    let mut adopt = None;
+    world.until("`adopt` to be refused on the run parked", |_| {
+        let read = with_parked(&["adopt", run, "--detach"]);
+        let settled = read.code != REFUSED || !read.stderr.contains("(ACTIVE)");
+        adopt = Some(read);
+        settled
+    });
     adopt
+        .expect("the wait asked for the adoption")
         .exited(REFUSED)
         .err_has(&format!("still being driven by driver pid {pid} (PARKED)"))
         .err_has(&format!("onepipeline stop {run}"));

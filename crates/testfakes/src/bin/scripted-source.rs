@@ -33,8 +33,8 @@
 //!   several refused and the rest written.
 //! * `<key>.<method>.refuse.once` — the next call only, and the file is taken away.
 //! * `<key>.<method>.refuse.after-first` — every call of that method but the **first** this
-//!   source is handed, which the real store answers. The engine starts a source for each
-//!   command, so under a page size of one this is a read whose first page answered and
+//!   source is handed in a command, which the real store answers; `end_command` starts the
+//!   next command. So under a page size of one this is a read whose first page answered and
 //!   whose next page failed: one answer beside one failure.
 //! * `<key>.get_project.absent`, `<key>.get_task.absent` and `<key>.update_task.absent` — the
 //!   read or the targeted update answers that the store holds no such item, with no failure
@@ -46,16 +46,16 @@
 //! * `<key>.initialize.rendezvous` — the handshake of every connection, held before it is
 //!   answered: a source slow to start.
 //! * `<key>.<method>.first.rendezvous` — the same, for the **first** call of that method this
-//!   source is handed and no later one. The engine starts a source for each command it runs —
-//!   each plan read, each write-back attempt — so this holds one call per attempt: the first
-//!   task a copy writes, say, which is how a journey holds a copy without holding each of its
-//!   writes in turn.
+//!   source is handed in a command and no later one; `end_command` starts the next command.
+//!   Each plan read is a command, and so is each write-back attempt on the store the worker
+//!   keeps, so this holds one call per attempt: the first task a copy writes, say, which is
+//!   how a journey holds a copy without holding each of its writes in turn.
 //! * `<key>.task.key` — the short handle every task this source answers `query_tasks` and
 //!   `get_task` with carries, read verbatim, for as long as the file is there: what a hosted
 //!   source with a handle of its own answers with, and the one field `local-md` never
 //!   carries.
 //! * `<key>.metering` — a `Metering` in the store's own shape that every request this source
-//!   serves adds to its running total, which is what it answers `metering` with: a source
+//!   serves but `end_command` adds to its running total, which is what it answers `metering` with: a source
 //!   that meters its own requests, as a hosted one does, so a copy's `spent` is the store's
 //!   own figure rather than one a journey wrote into a report. Read when the source starts,
 //!   because a source says in its handshake whether it meters. Every request it charges is
@@ -277,7 +277,7 @@ struct Scripted {
     key: Key,
     /// What the requests served so far have spent, where the scenario meters them.
     spent: Metering,
-    /// The methods this source has been handed at least once, answered or not.
+    /// The methods this source has been handed at least once in this command, answered or not.
     handed: std::collections::BTreeSet<Method>,
 }
 
@@ -306,6 +306,11 @@ impl Scripted {
             );
             let answer = self.answer(host, &request)?;
             println!("{answer}");
+            // A command's end starts the next command's firsts: a store kept across commands
+            // is asked each method's first call again in every command it runs.
+            if request.method.0 == "end_command" {
+                self.handed.clear();
+            }
         }
         Ok(())
     }
@@ -369,7 +374,9 @@ impl Scripted {
         if let Some(key) = handle(&self.scenario("task.key"))? {
             keyed(method, &mut answered, &key);
         }
-        if answered.contains_key("result") {
+        // Ending a command clears what the source held for it and sends nothing to a hosted
+        // destination, so, like `metering`, it is never charged.
+        if answered.contains_key("result") && method != "end_command" {
             if let Some(each) = metering(&metered)? {
                 self.spend(&each);
                 let charged = json!({"method": method, "spent": each}).to_string();

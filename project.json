@@ -112,7 +112,7 @@
       ]
     },
     "budgets": {
-      "command": "onebudgetspec check budgets.yaml",
+      "command": "just budgets",
       "dependsOn": [
         {
           "projects": [
@@ -125,7 +125,8 @@
         "e2eSource",
         "{workspaceRoot}/budgets.yaml",
         "{workspaceRoot}/scripts/stacked-spikes-budget.mjs",
-        "{workspaceRoot}/package-lock.json"
+        "{workspaceRoot}/package-lock.json",
+        "{workspaceRoot}/scripts/linear-writeback-budget.sh"
       ]
     },
     "msrv": {

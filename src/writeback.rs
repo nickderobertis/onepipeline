@@ -75,16 +75,13 @@
 //! attempt carries what has still not landed and nothing more. Every attempt is appended to the
 //! run's projection record; see [`ProjectionRecord`].
 //!
-//! # The store is linked, and built afresh for every attempt
+//! # One store for the worker's lifetime
 //!
-//! Every read and write goes through `onetaskgraph-core`'s own [`Engine`], in process, and
-//! every answer is that library's own value — a `TaskUpdated`, a [`CopyReport`], a
-//! [`SourceFailure`], an [`EngineError`] — so what a failure *is* is matched on its type and
-//! never read off a message or an exit status. Each attempt builds its engine from the
-//! configuration the launch record's directory discovers, with the shadow source a creation
-//! copies from declared beside it, and drops it when the attempt ends: a hosted source keeps
-//! its whole-board read for as long as it lives, so an engine that outlived one attempt would
-//! answer the next from the board as it was.
+//! Every read and write goes through the linked [`Engine`]. The worker retains its sources
+//! across attempts and ends each command through the engine's plugin-agnostic boundary, so
+//! command snapshots are cleared while resolution caches survive. Cancelled calls and
+//! unreadable configuration discard the store before the next attempt; valid configuration
+//! changes rebuild it before writing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -97,7 +94,7 @@ use onetaskgraph_core::config::{Layer, Origin as SettingOrigin, Setting, Setting
 use onetaskgraph_core::{
     classify, ConfigError, CopyAction, CopyItems, CopyReport, CopyRequest, CopyScope, Delivered,
     DeliveryOutcome, Engine, EngineError, Failure, GlobalId, Qualified, QueryResponse,
-    SourceFailure,
+    SourceFailure, SourceState,
 };
 use onetaskgraph_plugin_api::{
     DependencyEdge, DependencyEndpoint, DependencyKind, ItemKind, MetadataKey, NativeId, Project,
@@ -856,7 +853,7 @@ impl Writeback {
     ///
     /// Its store is the one the launch record's directory configures — discovered there,
     /// exactly as the launch's own plan read discovered it from the directory it ran in —
-    /// and it is built afresh for every attempt, so nothing here reads the store yet.
+    /// and it is built lazily on the first attempt, so nothing here reads the store yet.
     pub fn start(paths: &RunPaths, launch: &LaunchRecord) -> Option<Self> {
         let pending = Arc::new((Mutex::new(Pending::default()), Condvar::new()));
         let worker_pending = Arc::clone(&pending);
@@ -1214,6 +1211,7 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     // those three do not already reach.
     let attempted = project(
         &store,
+        &mut None,
         per_item_budget(launch),
         &snapshot,
         &mut baseline,
@@ -1258,6 +1256,7 @@ fn worker(
     pending: Arc<(Mutex<Pending>, Condvar)>,
 ) {
     let mut standing = Standing::Landing;
+    let mut retained = None;
     // What this run has already put on the board, which every attempt carries the difference
     // from — read once, off the file the launch seeded or the driver before this one left.
     let mut baseline: Option<Baseline> = None;
@@ -1323,7 +1322,14 @@ fn worker(
         });
         let at = crate::sys::now_rfc3339();
         let started = Instant::now();
-        let attempted = project(&store, per_item, &snapshot, baseline, Scope::Driven);
+        let attempted = project(
+            &store,
+            &mut retained,
+            per_item,
+            &snapshot,
+            baseline,
+            Scope::Driven,
+        );
         append_record(
             &run_dir,
             &ProjectionRecord::of(at, &snapshot.project, started.elapsed(), &attempted),
@@ -1655,13 +1661,13 @@ struct Attempted {
     result: Result<Landed, Failed>,
 }
 
-/// One attempt's store: the engine its configuration describes, with the shadow source
-/// declared beside the operator's own, the runtime its calls are driven on, the count of the
-/// calls made through it, and the fields its targeted updates wrote. Built for the attempt and
-/// dropped with it.
+/// The worker's store and runtime, with counters reset for each attempt.
 struct Attempt {
     runtime: tokio::runtime::Runtime,
     engine: Engine,
+    config: onetaskgraph_core::Config,
+    flags: Layer,
+    cancelled: std::cell::Cell<bool>,
     calls: std::cell::RefCell<BTreeMap<StoreCall, u64>>,
     written: std::cell::RefCell<BTreeMap<UpdatedField, u64>>,
 }
@@ -1701,7 +1707,7 @@ impl Attempt {
         // reads it as a folder that is not there.
         std::fs::create_dir_all(&snapshot.dir)
             .map_err(|error| format!("cannot create the shadow store: {error}"))?;
-        let built = opened_within(store, flags, Deadline::Floor)?.map_err(|error| {
+        let built = opened_within(store, flags.clone(), Deadline::Floor)?.map_err(|error| {
             Failed::classed(
                 format!("the store's configuration cannot be read: {error}"),
                 Classified::of_config(&error),
@@ -1711,6 +1717,9 @@ impl Attempt {
             runtime: crate::taskgraph::runtime()
                 .map_err(|error| format!("the store cannot be called: {error}"))?,
             engine: built.engine,
+            config: built.config,
+            flags,
+            cancelled: std::cell::Cell::new(false),
             calls: std::cell::RefCell::default(),
             written: std::cell::RefCell::default(),
         })
@@ -1718,8 +1727,8 @@ impl Attempt {
 
     /// Drive one store call to its end, or cancel it at its deadline.
     ///
-    /// Cancelled, the call's future is dropped where it waits; the engine that drove it goes
-    /// when the attempt does, before the attempt is recorded.
+    /// Cancellation drops the future where it waits and marks the store for rebuilding
+    /// before the next attempt. The cancelled engine is dropped before this attempt is recorded.
     fn call<T>(
         &self,
         call: StoreCall,
@@ -1729,7 +1738,10 @@ impl Attempt {
         *self.calls.borrow_mut().entry(call).or_default() += 1;
         self.runtime
             .block_on(async { tokio::time::timeout(deadline.within(), future).await })
-            .map_err(|_| Failed::from(deadline.refusal(call.as_str())))
+            .map_err(|_| {
+                self.cancelled.set(true);
+                Failed::from(deadline.refusal(call.as_str()))
+            })
     }
 
     /// Count the fields one targeted update says it wrote, one item apiece.
@@ -1773,6 +1785,25 @@ fn opened_within(
     opened_by(&arrived, deadline)
 }
 
+/// Re-read configuration within the same bound as opening the store, without rebuilding sources.
+fn validated_within(
+    store: &Store,
+    flags: &Layer,
+) -> Result<Result<onetaskgraph_core::Config, ConfigError>, Failed> {
+    let (sent, arrived) = std::sync::mpsc::channel();
+    let store = store.clone();
+    let flags = flags.clone();
+    std::thread::Builder::new()
+        .name("writeback-config".to_owned())
+        .spawn(move || {
+            let _ = sent.send(store.validate(&flags));
+        })
+        // llmlint: ignore[changed_behavior_has_e2e] forcing this OS thread-creation failure requires exhausting the host's threads, which also prevents launching the driver and its real plugins. The error reaches the same `prepared` failure arm as unreadable configuration; the Linear configuration-repair journey proves that arm discards the retained store and rebuilds it.
+        .map_err(|error| format!("the store configuration cannot be checked: {error}"))?;
+    // llmlint: ignore[changed_behavior_has_e2e] the FIFO configuration journey proves this wait's deadline and rebuild end to end. Disconnection requires a panic in the linked configuration loader, which has no input-triggered panic seam; `a_store_build_that_ends_without_an_answer_is_not_a_timeout` drives this exact channel wait with a real panicking thread, proving immediate failure rather than timeout. The configuration-repair journey proves the shared failure arm discards the store.
+    opened_by(&arrived, Deadline::Floor)
+}
+
 /// What the thread building an attempt's store sent, or why nothing arrived: the deadline
 /// passed, or the thread ended without an answer, which only a panic in the build does and
 /// which is not the store being slow.
@@ -1807,6 +1838,7 @@ enum Scope {
 /// attempt creating an item, and by no other: see [`carry_the_difference`].
 fn project(
     store: &Store,
+    retained: &mut Option<Attempt>,
     per_item: NonZeroU64,
     snapshot: &Snapshot,
     baseline: &mut Baseline,
@@ -1850,18 +1882,89 @@ fn project(
             .cloned()
             .collect::<BTreeSet<_>>(),
     );
-    let (result, calls, written) = match Attempt::open(store, snapshot) {
-        Err(failed) => (Err(failed), BTreeMap::new(), BTreeMap::new()),
-        Ok(attempt) => {
-            let result = carry_the_difference(
-                &attempt,
-                per_item,
-                snapshot,
-                (&renderings, decided),
-                baseline,
-                &mut items,
-            );
-            (result, attempt.calls.take(), attempt.written.take())
+    let checked = if let Some(attempt) = retained.as_ref() {
+        validated_within(store, &attempt.flags)
+            .map(|loaded| loaded.map(|config| config == attempt.config))
+    } else {
+        Ok(Ok(true))
+    };
+    let prepared = checked
+        .and_then(|result| {
+            result.map_err(|error| {
+                Failed::classed(
+                    format!("the store's configuration cannot be read: {error}"),
+                    Classified::of_config(&error),
+                )
+            })
+        })
+        .and_then(|unchanged| {
+            if !unchanged {
+                *retained = None;
+            }
+            if retained.is_none() {
+                *retained = Some(Attempt::open(store, snapshot)?);
+            }
+            Ok(())
+        });
+    let (result, calls, written) = match prepared {
+        Err(failed) => {
+            *retained = None;
+            (Err(failed), BTreeMap::new(), BTreeMap::new())
+        }
+        Ok(()) => {
+            let attempt = retained.as_ref().expect("the store was prepared");
+            // Persist the current shadow before writing, so a filesystem failure cannot
+            // turn an already landed destination write into a failed projection record.
+            let result = refresh_shadow(snapshot, baseline)
+                .map_err(|error| Failed::from(format!("cannot refresh the shadow store: {error}")))
+                .and_then(|()| {
+                    carry_the_difference(
+                        attempt,
+                        per_item,
+                        snapshot,
+                        (&renderings, decided),
+                        baseline,
+                        &mut items,
+                    )
+                });
+            // A cancelled call leaves an unknown store with an outstanding RPC. Destroy
+            // it immediately: awaiting command-end would spend another deadline on it.
+            let ended = if attempt.cancelled.get() {
+                Ok(Ok(()))
+            } else {
+                attempt.runtime.block_on(async {
+                    tokio::time::timeout(Deadline::Floor.within(), attempt.engine.end_command())
+                        .await
+                })
+            };
+            // The engine holds a source it could not build as unavailable for as long as it
+            // lives, so a store with one is rebuilt, which gives that source its next build:
+            // `linear_writeback::a_store_holding_a_source_it_could_not_build_is_rebuilt_once_the_source_returns`.
+            let unbuilt = attempt
+                .engine
+                .listing()
+                .iter()
+                .any(|source| matches!(source.state, SourceState::Unavailable { .. }));
+            let rebuild = attempt.cancelled.get() || unbuilt || !matches!(ended, Ok(Ok(())));
+            let end_failure = match ended {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(Failed::engine("end-command", &error)),
+                Err(_) => Some(Failed::from(Deadline::Floor.refusal("end-command"))),
+            };
+            if let Some(failed) = end_failure {
+                eprintln!(
+                    "onetaskgraph write-back failed for '{}': {}; the store will be rebuilt \
+                     before the next projection",
+                    snapshot.project,
+                    failed.said()
+                );
+            }
+            let calls = attempt.calls.take();
+            let written = attempt.written.take();
+            if rebuild {
+                *retained = None;
+            }
+            (result, calls, written)
         }
     };
     Attempted {
@@ -3124,6 +3227,36 @@ fn write_shadow(
         if !written.contains(&path) {
             std::fs::remove_file(&path).map_err(|e| e.to_string())?;
         }
+    }
+    Ok(())
+}
+
+/// Targeted updates bypass the copy, so they must also replace the shadow's old documents.
+fn refresh_shadow(snapshot: &Snapshot, baseline: &Baseline) -> Result<(), String> {
+    let tasks = snapshot
+        .dir
+        .join("tasks")
+        .join(project_file(&snapshot.project));
+    std::fs::create_dir_all(&tasks).map_err(|error| error.to_string())?;
+    let ends = baseline
+        .landed
+        .items
+        .iter()
+        .filter_map(|(root, item)| {
+            item.destination
+                .parse::<GlobalId>()
+                .ok()
+                .map(|id| (root.clone(), id))
+        })
+        .collect();
+    let lineages = snapshot.lineages();
+    for root in lineages.roots() {
+        let (front, content) = task_document(snapshot, &lineages, root, &ends)?;
+        document(
+            &tasks.join(format!("{}.md", task_file(root))),
+            &front,
+            &content,
+        )?;
     }
     Ok(())
 }
@@ -5684,6 +5817,108 @@ mod tests {
         }
     }
 
+    /// The same engine reads the stable local shadow again after each command ends.
+    #[test]
+    fn a_retained_engine_reads_each_shadow_snapshot_fresh() {
+        let mut fixture = Fixture::new("fresh-shadow");
+        fixture.project();
+        let store = crate::taskgraph::Store::at(fixture.dir.to_path_buf());
+        let attempt = super::Attempt::open(&store, &fixture.snapshot)
+            .unwrap_or_else(|failed| panic!("{}", failed.reason));
+        let id = super::member_id(&fixture.snapshot, "design");
+        let read = || {
+            let answer = attempt
+                .runtime
+                .block_on(attempt.engine.task(&id))
+                .expect("the shadow source answers");
+            super::shown(super::TASK_SHOW, &id, answer)
+                .unwrap_or_else(|failed| panic!("{}", failed.reason))
+                .item
+        };
+        assert_eq!(read().status.category, StatusCategory::Done);
+        attempt
+            .runtime
+            .block_on(attempt.engine.end_command())
+            .expect("the command ends");
+        fixture
+            .snapshot
+            .statuses
+            .insert("design".to_owned(), NodeStatus::Cancelled);
+        fixture
+            .snapshot
+            .nodes
+            .get_mut("design")
+            .expect("design exists")
+            .title = Some("Changed now".to_owned());
+        fixture.project();
+        let current = read();
+        assert_eq!(current.status.category, StatusCategory::Cancelled);
+        assert_eq!(current.title, "Changed now");
+    }
+
+    /// A store built while its destination source's root is gone holds that source
+    /// unavailable for as long as it lives, so the worker discards it after the attempt, and
+    /// the attempt after the root returns builds the source again on a store it then keeps.
+    ///
+    /// Here the unavailable source is the destination itself; the journey of the same name
+    /// in `linear_writeback` drives the worker through a run whose second source is the one.
+    #[test]
+    fn a_store_holding_a_source_it_could_not_build_is_rebuilt_once_the_source_returns() {
+        let fixture = Fixture::new("unbuilt-source");
+        let root = fixture.dir.join("board");
+        std::fs::write(
+            fixture.dir.join("onetaskgraph.yaml"),
+            format!(
+                "sources:\n  plans:\n    plugin: local-md\n    config:\n      root: {root:?}\n"
+            ),
+        )
+        .expect("the run's store configuration is written");
+        let store = crate::taskgraph::Store::at(fixture.dir.to_path_buf());
+        let mut baseline = super::Baseline::load(
+            &fixture.dir,
+            &fixture.snapshot.project,
+            &home(&fixture.snapshot),
+            Vec::new,
+        );
+        let mut retained = None;
+        let mut attempt = |retained: &mut Option<super::Attempt>| {
+            super::project(
+                &store,
+                retained,
+                DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
+                &fixture.snapshot,
+                &mut baseline,
+                super::Scope::Driven,
+            )
+            .result
+            .err()
+            .map(|failed| failed.reason)
+        };
+
+        let gone = attempt(&mut retained).expect("a store with no root to write to refused");
+        assert!(
+            gone.contains("source plans") && gone.contains("cannot canonicalize root"),
+            "the store was not built while the root was gone: {gone}"
+        );
+        assert!(
+            retained.is_none(),
+            "a store holding a source it could not build was kept for the next attempt"
+        );
+
+        std::fs::create_dir_all(&root).expect("the root returns");
+        let returned = attempt(&mut retained);
+        assert!(
+            !returned
+                .as_deref()
+                .is_some_and(|reason| reason.contains("cannot canonicalize root")),
+            "the source was not built again once its root returned: {returned:?}"
+        );
+        assert!(
+            retained.is_some(),
+            "a store whose sources all built was discarded: {returned:?}"
+        );
+    }
+
     /// Why a fixture standing in for a store could not fail, or `None` when it
     /// can.
     ///
@@ -7167,6 +7402,7 @@ mod tests {
             super::Baseline::load(&fixture.dir, &snapshot.project, &home(&snapshot), Vec::new);
         let attempted = super::project(
             &store,
+            &mut None,
             DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
             &snapshot,
             &mut baseline,
