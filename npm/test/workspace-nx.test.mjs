@@ -401,11 +401,22 @@ describe("the streaming switch", () => {
 
 describe("the affected-selection base override", () => {
   const AFFECTS = ["scripts/nx-affected.sh", "--affects", "onepipeline"];
+  // Every case here names the base it is about, so none may inherit one from
+  // the shell running the suite — least of all a base *commit*, which wins over
+  // every branch and which CI's push build exports to the very gate running
+  // this file. Inherited, it answered for the branch cases below, which then
+  // failed closed on nothing and said so to an empty stderr.
+  const affects = (env) =>
+    run(AFFECTS, {
+      ONEPIPELINE_NX_BASE_SHA: undefined,
+      ONEPIPELINE_NX_BASE_REF: undefined,
+      ...env,
+    });
 
   it("takes precedence over GITHUB_BASE_REF", () => {
     // The fallback is given a value that cannot survive validation, so the run
     // can only produce a real answer if the override is what was read.
-    const result = run(AFFECTS, {
+    const result = affects({
       ONEPIPELINE_NX_BASE_REF: "main",
       GITHUB_BASE_REF: "also bad!",
     });
@@ -420,19 +431,19 @@ describe("the affected-selection base override", () => {
     // a local run defaults to `main`, and a CI run with no base fails closed
     // instead (covered below). Comparing across that boundary would compare two
     // different documented behaviours.
-    const overridden = run(AFFECTS, {
+    const overridden = affects({
       CI: "",
       GITHUB_BASE_REF: "",
       ONEPIPELINE_NX_BASE_REF: "main",
     });
-    const defaulted = run(AFFECTS, { CI: "", GITHUB_BASE_REF: "" });
+    const defaulted = affects({ CI: "", GITHUB_BASE_REF: "" });
     assert.equal(overridden.status, 0, overridden.stderr);
     assert.equal(defaulted.status, 0, defaulted.stderr);
     assert.equal(overridden.stdout.trim(), defaulted.stdout.trim());
   });
 
   it("fails closed on a value that is not a branch name", () => {
-    const result = run(AFFECTS, { ONEPIPELINE_NX_BASE_REF: "not a branch!" });
+    const result = affects({ ONEPIPELINE_NX_BASE_REF: "not a branch!" });
     // Fails *closed*: the caller is told the project is affected, so the gate
     // widens rather than skipping a check it could not scope.
     assert.equal(result.status, 0, result.stderr);
@@ -446,7 +457,7 @@ describe("the affected-selection base override", () => {
     // against. Defaulting to `main` there would find nothing changed and skip
     // every check, which is why this branch refuses the default rather than
     // taking it.
-    const result = run(AFFECTS, { CI: "true", GITHUB_BASE_REF: "" });
+    const result = affects({ CI: "true", GITHUB_BASE_REF: "" });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.trim(), "true");
     assert.match(result.stderr, /this is not a pull-request build/);
