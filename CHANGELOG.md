@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.63.3](https://github.com/nickderobertis/onepipeline/compare/v0.63.2...v0.63.3) - 2026-10-08
+
+### Fixed
+
+- *(tests)* make five intermittently failing tests deterministic ([#810](https://github.com/nickderobertis/onepipeline/pull/810))
+
 ## [0.63.2](https://github.com/nickderobertis/onepipeline/compare/v0.63.1...v0.63.2) - 2026-10-08
 
 ### Added
