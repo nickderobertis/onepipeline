@@ -1328,6 +1328,88 @@ fn the_seam_holds_for_plan_task_rendered_by_the_released_onetaskgraph() {
 }
 
 #[test]
+fn a_rendered_task_with_an_image_asset_loads_and_dispatches() {
+    let world = World::new("templates-assets");
+    let root = host(&world);
+    write(&root.join("plan-task.md.j2"), &task_template("assets"));
+    let (plan, native) = project(&world, "asset-plan");
+    let loader = verb(
+        &world,
+        &world.project,
+        &root,
+        &["resolve", BUILT_IN, "--json"],
+    )
+    .stdout;
+    let image = world.root.join("screen.gif");
+    let bytes = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff\x21\xf9\x04\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b";
+    std::fs::write(&image, bytes).expect("the input image");
+    let reference = "![the screen](./screen.gif)";
+    let (_, file) = created(
+        &world,
+        &native,
+        "build",
+        &loader,
+        &answers(reference, &["The screen ships."]),
+        &["--asset", &text(&image)],
+    );
+    let held = file.with_extension("assets").join("screen.gif");
+    assert_eq!(std::fs::read(&held).expect("the stored asset"), bytes);
+    world
+        .run(&[
+            "plan",
+            "check",
+            &plan,
+            "--require-rendered",
+            "true",
+            "--template-root",
+            &text(&root),
+        ])
+        .exited(0);
+    world
+        .run(&[
+            "start",
+            &plan,
+            "--attach",
+            "--require-rendered",
+            "true",
+            "--template-root",
+            &text(&root),
+        ])
+        .exited(0)
+        .settled();
+    assert_eq!(world.events_of("asset-plan", "node-dispatched").len(), 1);
+    let tasks = world.store_tasks(&plan);
+    assert!(tasks[0]["item"]["content"]
+        .as_str()
+        .expect("the task body")
+        .contains(reference));
+    assert!(tasks[0]["item"]["metadata"]["onetaskgraph.template"].is_object());
+    assert_eq!(
+        std::fs::read(&held).expect("the asset after settlement"),
+        bytes
+    );
+
+    // A hand edit still invalidates provenance for a task that holds an image.
+    let body = std::fs::read_to_string(&file).expect("the task file");
+    write(
+        &file,
+        &body.replace(reference, "![an edited screen](./screen.gif)"),
+    );
+    world
+        .run(&[
+            "plan",
+            "check",
+            &plan,
+            "--require-rendered",
+            "true",
+            "--template-root",
+            &text(&root),
+        ])
+        .exited(HAS_REFUSALS)
+        .out_has(RULE_BODY_CHANGED);
+}
+
+#[test]
 fn the_seam_holds_for_a_host_registered_task_name() {
     let world = World::new("templates-seam-host");
     host(&world);
