@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.63.2](https://github.com/nickderobertis/onepipeline/compare/v0.63.1...v0.63.2) - 2026-10-08
+
+### Added
+
+- *(deps)* link the onetaskgraph release that carries image assets ([#806](https://github.com/nickderobertis/onepipeline/pull/806))
+
 ## [0.63.1](https://github.com/nickderobertis/onepipeline/compare/v0.63.0...v0.63.1) - 2026-10-07
 
 ### Fixed
