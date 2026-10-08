@@ -478,6 +478,14 @@ function scratchRepository(t) {
       },
     ).trim();
   git("init", "-q", "-b", "main");
+  // No background writer may outlive the command that started it, or the
+  // teardown above meets it: git 2.47+ answers a commit with a *detached*
+  // auto-maintenance, which on this many loose objects repacks into `.git` for
+  // seconds after `commit` returns, and `rmSync` failed `ENOTEMPTY` on the
+  // `.git` it was still writing. Set in the repository, so the scripts' own git
+  // calls read it too.
+  git("config", "maintenance.auto", "false");
+  git("config", "gc.auto", "0");
   git("add", "-A");
   git("commit", "-q", "-m", "base");
   return {
