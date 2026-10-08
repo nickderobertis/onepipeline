@@ -4234,11 +4234,15 @@ mod tests {
     #[test]
     fn a_silence_with_the_graph_still_running_ends_nothing() {
         let (holder, held_open) = mpsc::channel::<()>();
+        // Taken before the releasing thread exists, so the pipe is held for at
+        // least the three polls measured from here. Taken after, a test thread
+        // descheduled between the spawn and this line started the clock late and
+        // measured less than the stream had in fact waited.
+        let started = Instant::now();
         let releasing = std::thread::spawn(move || {
             std::thread::sleep(RELAY_POLL * 3);
             drop(holder);
         });
-        let started = Instant::now();
         let lines = lines_relayed_from(
             ScriptedPipe {
                 held: Duration::ZERO,

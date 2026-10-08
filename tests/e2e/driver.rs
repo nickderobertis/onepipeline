@@ -4385,6 +4385,13 @@ fn stopping_a_run_reaches_a_dispatch_whose_driver_and_lock_holder_are_dead() {
         !dispatches(driver).is_empty()
     });
     let dispatch = dispatches(driver);
+    // Recorded, and not only running: the driver writes the entry once the launch
+    // has returned, so a driver ended before then leaves a dispatch the registry
+    // never named — which no stop can reach, and a stop that answered
+    // `nothing-to-stop` for it was this journey ending the driver too soon.
+    world.until("the dispatch to be recorded in the registry", |world| {
+        dispatch.iter().all(|pid| world.registered(&run, *pid))
+    });
 
     // The driver goes the way a host ends a process it has run out of memory
     // for, and what it started does not go with it.
