@@ -1340,10 +1340,10 @@ fn a_rendered_task_with_an_image_asset_loads_and_dispatches() {
         &["resolve", BUILT_IN, "--json"],
     )
     .stdout;
-    let image = world.root.join("screen.gif");
-    let bytes = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff\x21\xf9\x04\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b";
+    let image = world.root.join("screen.png");
+    let bytes = b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0d\x49\x44\x41\x54\x78\x9c\x63\x60\x60\x60\xf8\x0f\x00\x01\x04\x01\x00\x5f\xe5\xc3\x4b\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
     std::fs::write(&image, bytes).expect("the input image");
-    let reference = "![the screen](./screen.gif)";
+    let reference = "![the screen](./screen.png)";
     let (_, file) = created(
         &world,
         &native,
@@ -1352,7 +1352,7 @@ fn a_rendered_task_with_an_image_asset_loads_and_dispatches() {
         &answers(reference, &["The screen ships."]),
         &["--asset", &text(&image)],
     );
-    let held = file.with_extension("assets").join("screen.gif");
+    let held = file.with_extension("assets").join("screen.png");
     assert_eq!(std::fs::read(&held).expect("the stored asset"), bytes);
     world
         .run(&[
@@ -1393,7 +1393,7 @@ fn a_rendered_task_with_an_image_asset_loads_and_dispatches() {
     let body = std::fs::read_to_string(&file).expect("the task file");
     write(
         &file,
-        &body.replace(reference, "![an edited screen](./screen.gif)"),
+        &body.replace(reference, "![an edited screen](./screen.png)"),
     );
     world
         .run(&[
