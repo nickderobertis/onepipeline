@@ -607,6 +607,20 @@ fn the_host_and_token_targets_list_what_they_name() {
     world
         .run(&["unpublished", "--token", &mine, "--token", "s-000000000000"])
         .exited(REFUSED);
+    // A named session whose record is there and cannot be read is refused as well,
+    // naming the record onevcs could not read.
+    std::fs::write(
+        world
+            .onevcs_home()
+            .join("sessions")
+            .join(format!("{mine}.json")),
+        "not a record",
+    )
+    .expect("written");
+    world
+        .run(&["unpublished", "--token", &mine])
+        .exited(REFUSED)
+        .err_has(&format!("{mine}.json"));
 }
 
 /// Allocated bytes of a fresh file of `size` bytes, as the filesystem reports them.
@@ -864,6 +878,45 @@ fn acknowledge_refuses_before_writing_and_answers_as_the_session_listing() {
         ])
         .exited(NOTHING_COUNTED)
         .out_has(&format!("acknowledged work/twice [{identity}]"));
+    // A registered alias names the identity too; a repository nothing registers is
+    // refused, the file untouched.
+    world
+        .run(&[
+            "unpublished",
+            "--acknowledge",
+            "work/twice",
+            "--reason",
+            "the engine copy, seen",
+            "--repo",
+            "engine",
+            "--session",
+            MANAGER,
+        ])
+        .exited(NOTHING_COUNTED)
+        .out_has("acknowledged work/twice [github.com/owner/engine]");
+    let before = bytes_of(&file);
+    world
+        .run(&[
+            "unpublished",
+            "--acknowledge",
+            "work/twice",
+            "--reason",
+            "r",
+            "--repo",
+            "no-such-repo",
+            "--session",
+            MANAGER,
+        ])
+        .exited(REFUSED)
+        .err_has("--repo no-such-repo");
+    assert_eq!(bytes_of(&file), before);
+
+    // The host's preserved branches cannot be read at all: nothing is acknowledged.
+    std::fs::write(world.onevcs_home().join("registry.json"), "not json").expect("written");
+    acknowledge(&world, "work/a", "kept")
+        .exited(REFUSED)
+        .err_has("could not be read, so nothing was acknowledged");
+    assert_eq!(bytes_of(&file), before);
 }
 
 /// An acknowledgement file ai-orchestrator wrote — its version-1 format, its

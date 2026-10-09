@@ -106,6 +106,13 @@ const refusals = [
   ],
   ["a missing invocation", (dir) => rmSync(join(dir, schema["x-invocation"])), /is missing/],
   [
+    "an invocation with a field it does not state",
+    (_dir, _doc, inv) => {
+      inv.extra = 1;
+    },
+    /states fields/,
+  ],
+  [
     "an incomplete invocation",
     (dir) =>
       writeFileSync(
@@ -316,4 +323,56 @@ test("a producer that succeeds hands it the invocation identity it marked starte
   assert.equal(manifest.run_id, seen);
   assert.equal(manifest.state, "started", "only the journey itself completes the invocation");
   rmSync(dir, { recursive: true });
+});
+
+test("the budget command refuses arguments it does not take, and a result it cannot report", () => {
+  const dir = directory();
+  for (const [args, env, said] of [
+    [
+      ["--warm"],
+      { ONEBUDGETSPEC_RESULT: join(dir, "r.json") },
+      /expected no arguments, --cold, --scale 10, or --journey-time/,
+    ],
+    [["--scale", "2"], { ONEBUDGETSPEC_RESULT: join(dir, "r.json") }, /expected no arguments/],
+    [[], {}, /ONEBUDGETSPEC_RESULT is missing/],
+  ]) {
+    const environment = { ...process.env, ONEPIPELINE_BUDGET_RECORDS: dir, ...env };
+    if (!("ONEBUDGETSPEC_RESULT" in env)) delete environment.ONEBUDGETSPEC_RESULT;
+    const ran = spawnSync(process.execPath, [command, ...args], {
+      env: environment,
+      encoding: "utf8",
+    });
+    assert.equal(ran.status, 1, ran.stderr);
+    assert.match(ran.stderr, said);
+    assert.match(ran.stderr, /next: run 'just stop-verdict-journeys'/);
+  }
+  rmSync(dir, { recursive: true });
+});
+
+test("an invocation that cannot reset or mark its records says so, naming the journey", () => {
+  // A records directory that is a file: nothing can be reset under it.
+  const scratch = mkdtempSync(join(tmpdir(), "stop-verdict-reset-"));
+  const blocked = join(scratch, "not-a-directory");
+  writeFileSync(blocked, "a file");
+  const reset = invoke(blocked, process.execPath, "-e", "process.exit(0)");
+  assert.equal(reset.status, 1, reset.stderr);
+  assert.match(reset.stderr, /could not reset the records/);
+  assert.match(reset.stderr, /next: run 'just stop-verdict-journeys'/);
+  // A producer that fails and leaves the manifest unwritable: the marking fails too,
+  // and the operator is told to remove what is there.
+  const dir = directory();
+  const manifest = join(dir, schema["x-invocation"]);
+  const locking = invoke(
+    dir,
+    process.execPath,
+    "-e",
+    "require('node:fs').chmodSync(process.argv[1], 0o444); process.exit(4)",
+    manifest,
+  );
+  spawnSync("chmod", ["644", manifest]);
+  assert.equal(locking.status, 4, locking.stderr);
+  assert.match(locking.stderr, /could not mark .* failed/);
+  assert.match(locking.stderr, /remove it before reading budgets/);
+  rmSync(dir, { recursive: true });
+  rmSync(scratch, { recursive: true });
 });

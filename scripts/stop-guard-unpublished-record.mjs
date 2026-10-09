@@ -93,8 +93,15 @@ export function readRecord(directory = recordDirectory, sourceRoot = repositoryR
     }
   };
   const invocation = read(schema["x-invocation"]);
-  if (invocation.state !== "complete" || !digest(invocation.run_id)) {
+  if (invocation?.state !== "complete" || !digest(invocation.run_id)) {
     throw new Error("the producing invocation is missing or incomplete");
+  }
+  // Closed, as the record is: a completed invocation states exactly these fields.
+  const stated = Object.keys(invocation).sort().join(",");
+  if (stated !== "binary,binary_sha256,run_id,source_sha256,state") {
+    throw new Error(
+      `the producing invocation states fields ${stated}, not a completed invocation's`,
+    );
   }
   const record = read(schema["x-record"]);
   try {
@@ -178,7 +185,7 @@ export function readRecord(directory = recordDirectory, sourceRoot = repositoryR
   return record;
 }
 
-/** The slowest scenario's maximum of one mode at one scale, in seconds. */
+/** The slowest scenario of one mode at one scale, and its maximum in microseconds. */
 export function slowest(record, scale, mode) {
   const workload = record.workloads.find((row) => row.scale === scale);
   let worst = null;
