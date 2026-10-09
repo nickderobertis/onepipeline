@@ -131,11 +131,21 @@ const LIVE_TARGETS = {
 const declaresUniform = (declared, target) =>
   target !== "test" || !declared.tags?.includes("tier:live");
 
+// The budget tiers (`tier:budget`: `onepipeline-stop-verdict`) produce the telemetry
+// `onepipeline:budgets` reads. They time an uninstrumented release binary over full
+// workloads, so they write no coverage profiles and have no cross-platform
+// `test-quick`: their journeys are Unix-only and run on the merge path, through the
+// `budgets` edge, rather than on the macOS and Windows legs.
+const BUDGET = projects.filter((declared) => declared.tags?.includes("tier:budget"));
+
 // The Rust projects that run a share of the offline suite, each declaring
 // `test-quick` so `just check-cross` reaches all of it on the macOS and Windows
 // legs: the crate and every offline test tier.
 const OFFLINE_RUST = projects.filter(
-  (declared) => declared.tags?.includes("lang:rust") && !declared.tags?.includes("tier:live"),
+  (declared) =>
+    declared.tags?.includes("lang:rust") &&
+    !declared.tags?.includes("tier:live") &&
+    !declared.tags?.includes("tier:budget"),
 );
 
 describe("the uniform target set", () => {
@@ -279,12 +289,32 @@ describe("the offline tier split", () => {
     }
   });
 
+  it("runs each budget tier's journeys before the budgets that read them", () => {
+    assert.deepEqual(
+      BUDGET.map((declared) => declared.name),
+      ["onepipeline-stop-verdict"],
+    );
+    const budgets = project("onepipeline").targets.budgets;
+    const waitedOn = budgets.dependsOn.flatMap((need) =>
+      typeof need === "string" ? [] : need.projects.map((name) => `${name}:${need.target}`),
+    );
+    for (const declared of BUDGET) {
+      assert.ok(waitedOn.includes(`${declared.name}:test`), JSON.stringify(waitedOn));
+      const outputs = declared.targets.test.outputs ?? [];
+      assert.ok(
+        outputs.length > 0 &&
+          outputs.every((output) => output.startsWith("{workspaceRoot}/target/budget-records/")),
+        `${declared.name}:test declares no telemetry as outputs: ${JSON.stringify(outputs)}`,
+      );
+    }
+  });
+
   it("keeps the e2e and contract binaries out of the crate's own tier", () => {
     const evaluate = (name) =>
       execFileSync("just", ["--evaluate", name], { cwd: root, encoding: "utf8" });
     assert.match(project("onepipeline").targets["test-rest"].command, /just _crate-test-rest/);
     const rest = evaluate("rest-tier");
-    for (const binary of ["e2e", "contract", "note", "smoke", "release_channel"]) {
+    for (const binary of ["e2e", "contract", "note", "smoke", "release_channel", "stop_verdict"]) {
       assert.ok(
         rest.includes(`not binary(${binary})`),
         `rest-tier runs the ${binary} binary: ${rest}`,

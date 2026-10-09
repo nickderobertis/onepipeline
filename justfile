@@ -244,6 +244,9 @@ _crate-lint:
 # in none: they reach GitHub and PyPI, and each is run by its own project's
 # uncached target (`just smoke-real`, `just release-compat`) alone, excluded by
 # name rather than by `#[ignore]` so neither journey is ever a skipped test.
+# `stop_verdict` is offline but in none of the four either: it times the release
+# binary rather than the instrumented one, so its project
+# (`onepipeline-stop-verdict`) runs it through `just stop-verdict-journeys`.
 #
 # `rest-tier` is spelled as the complement of every other binary, so a test
 # binary added later lands in the crate's tier rather than in none.
@@ -259,7 +262,7 @@ _crate-lint:
 # so no change could ever select one without the other, and running the two as
 # separate nextest processes would put eight process trees on the machine where
 # `.config/nextest.toml`'s one group allows four.
-rest-tier := "not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract)"
+rest-tier := "not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict)"
 e2e-tier := "binary(e2e)"
 contract-tier := "binary(contract)"
 note-tier := "binary(note) and not test(/^harness::/)"
@@ -484,6 +487,18 @@ release-compat:
 # nextest, as `_smoke-run`'s are.
 _release-compat-run *args:
     @RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(release_channel) and not test(/^harness::/)' "$@"
+
+# The stop-verdict budget journeys alone: build the release binary (compilation
+# precedes the producing tier), then run both full workloads once, under an
+# invocation identity that marks earlier records stale before anything starts.
+# Writes `target/budget-records/stop-guard-unpublished*`, which `just budgets` reads.
+stop-verdict-journeys:
+    @node scripts/stop-guard-unpublished-invocation.mjs just _stop-verdict-run
+
+_stop-verdict-run:
+    @RUSTFLAGS="-D warnings" cargo build --release --locked --quiet --bin onepipeline
+    @ONEPIPELINE_BUDGET_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(stop_verdict)' --no-tests=fail
+    @node --test scripts/stop-guard-unpublished-budget.test.mjs
 
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`),

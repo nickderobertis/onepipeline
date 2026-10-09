@@ -115,11 +115,12 @@
     },
     "budgets": {
       "command": "just budgets",
-      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the stacked-spikes budget reads the record the e2e tier writes, so it runs after that tier, as it ran after `test-rest` when that target held the e2e binary. The edge is narrower than before the split, and the same warm-cache replay and cold-CI cost apply as for `test` above.",
+      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the stacked-spikes budget reads the record the e2e tier writes, so it runs after that tier, as it ran after `test-rest` when that target held the e2e binary. The edge is narrower than before the split, and the same warm-cache replay and cold-CI cost apply as for `test` above. The stop-verdict budgets read the records `onepipeline-stop-verdict:test` writes, so they follow that producing tier the same way; Nx restores its records, invocation manifest and producing binary together, and the reader refuses any that disagree.",
       "dependsOn": [
         {
           "projects": [
-            "onepipeline-e2e"
+            "onepipeline-e2e",
+            "onepipeline-stop-verdict"
           ],
           "target": "test"
         }
@@ -130,7 +131,16 @@
         "{workspaceRoot}/budgets.yaml",
         "{workspaceRoot}/scripts/stacked-spikes-budget.mjs",
         "{workspaceRoot}/package-lock.json",
-        "{workspaceRoot}/scripts/linear-writeback-budget.sh"
+        "{workspaceRoot}/scripts/linear-writeback-budget.sh",
+        "{workspaceRoot}/scripts/stop-guard-unpublished-*",
+        "{workspaceRoot}/tests/stop_verdict/**/*",
+        "{workspaceRoot}/tests/golden/**/*",
+        "{workspaceRoot}/tests/recorded/registry/**/*",
+        "{workspaceRoot}/tests/recorded/run-root/onemessagebus-repair-2/**/*",
+        {
+          "dependentTasksOutputFiles": "target/budget-records/**/*",
+          "transitive": false
+        }
       ]
     },
     "msrv": {
@@ -153,6 +163,7 @@
     "onepipeline-e2e",
     "onepipeline-contract",
     "onepipeline-smoke",
-    "onepipeline-release-compat"
+    "onepipeline-release-compat",
+    "onepipeline-stop-verdict"
   ]
 }

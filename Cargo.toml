@@ -643,6 +643,13 @@ resolver = "2"
 # requirement moves so the floor says the fix is in, and `onevcs-testing` 0.13.2
 # requires exactly `=0.42.2`, so the pair moves as one.
 #
+# `onevcs` 0.43.1 is the floor because it reads recovery rows at `Detail::Decision`
+# and reuses its proofs across calls: `src/unpublished.rs` decides whether a manager
+# session owes a preserved branch through `recoverable_matching` in process, inside
+# the Stop hook's budget. A **requirement**, because `^0.42` admits no 0.43.x;
+# `onevcs-testing` 0.13.4 requires exactly `=0.43.1` and carries the full-size
+# recovery fixture `tests/stop_verdict/` builds, so the pair moves as one.
+#
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
 # `reasoning` items as `turn-activity` under their own kind — the agent's words,
 # with no tool name — which `src/views.rs` and `src/projection.rs` render as what
@@ -676,7 +683,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.5"
-onevcs = "0.42.2"
+onevcs = "0.43.1"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -877,7 +884,7 @@ oneharness-core = "0.24.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.13.2"
+onevcs-testing = "0.13.4"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -1150,6 +1157,18 @@ path = "tests/smoke/main.rs"
 [[test]]
 name = "release_channel"
 path = "tests/release_channel/main.rs"
+
+# llmlint: ignore[new_command_or_client_gets_its_own_project] a budget-journey test binary of
+# the existing `onepipeline` binary, not a command or client: `unpublished` is a verb of that
+# binary beside `unwatched` and `stop-guard`, suppressed with them in `src/cli.rs`.
+# The stop-verdict budget journeys: both full host-shaped workloads, built once per
+# gate, timing the release binary's native Stop hook and writing the telemetry the
+# read-only budget commands validate. Their own binary and their own Nx project
+# (`tests/stop_verdict/project.json`), so an ordinary e2e edit never rebuilds them
+# and `just stop-verdict-journeys` regenerates the records alone.
+[[test]]
+name = "stop_verdict"
+path = "tests/stop_verdict/main.rs"
 
 # A CLI binary: optimize for a small, fast-starting artifact.
 [profile.release]

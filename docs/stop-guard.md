@@ -13,7 +13,7 @@ let the turn end.
 ## The contract
 
 ```
-onepipeline stop-guard [--session <ID>] [--continuation] [--format <FORMAT>] [--source <COMMAND>]... [--source-timeout <SECONDS>] [--wake-budget <SECONDS>]
+onepipeline stop-guard [--session <ID>] [--continuation] [--format <FORMAT>] [--source <COMMAND>]... [--source-timeout <SECONDS>] [--wake-budget <SECONDS>] [--unpublished] [--unpublished-acknowledgements <DIR>] [--unpublished-pr-author-graph <PATH>]
 ```
 
 **Input** — the session whose stop this is, and whether the stop continues a
@@ -142,6 +142,71 @@ unfinished'`. With none declared the verb is exactly the contract above.
   unchanged failure refuses one stop, and its continuation ends the turn, so a
   broken source cannot hold a session in a loop. Keep `--source-timeout` inside
   the hook's own `timeout`, or the harness kills the whole hook first.
+
+## Unpublished branches
+
+`--unpublished` adds a second question to every stop: does this session still owe a
+preserved branch — one its runs left on a branch that never reached its base? It is
+answered in the guard's own process, concurrently with `unwatched`, by the same
+decision `onepipeline unpublished` makes, reading the rows through the linked
+`onevcs` (no shell, no Python, no helper process; only the `git` that library runs).
+For example `onepipeline stop-guard --format claude-code --unpublished`.
+
+- **`owed`** blocks, its reason the text listing: each preserved branch, then each
+  counted one with the command that lands it and the one that acknowledges it.
+- **`none`** adds nothing.
+- **`unanswered`** — the recovery read failed, a row could not be read whole, or a
+  row came back without this session's `launcher` label — **blocks** naming why.
+  Never a warning and never silence: "nothing is owed" is a claim, and an
+  unanswered read did not establish it.
+- **Block once per condition.** Its memory is its own file beside the guard's,
+  `<sha256(session)>.unpublished`, under the guard's rule: a continuation over an
+  unchanged reason is `none`, and a `none` removes it. A memory that cannot be
+  read or written never lets an unanswered decision through: it still blocks,
+  naming the memory fault as well. An `owed` listing whose memory fails is a
+  `warn` naming it, as the guard's own memory is.
+- `--unpublished-acknowledgements <DIR>` is where the session's acknowledgements
+  are read (default `$XDG_STATE_HOME/onepipeline/unpublished/acknowledged`), and
+  `--unpublished-pr-author-graph <PATH>` the drafting graph each printed landing
+  command names; without one each prints `--no-draft`.
+
+Without `--unpublished` the guard is exactly the contract above.
+
+### `onepipeline unpublished`
+
+```
+onepipeline unpublished [--session <ID> | --host | --token <S-TOKEN>...] [--format text|json] [--disk] [--acknowledgements <DIR>] [--pr-author-graph <PATH>]
+onepipeline unpublished --acknowledge <BRANCH> --reason <TEXT> [--repo <IDENTITY>] [--session <ID>] [--acknowledgements <DIR>]
+```
+
+`--session` (default `ONEPIPELINE_LAUNCHER_SESSION`; blank is refused) lists the
+branches of every session that manager session's runs opened, by their `launcher`
+label. `--host` lists every registered identity's, and `--token` the ones the named
+onevcs sessions hold or held — a token no record names is refused. A row is
+**counted** when nothing holds it (a held row is *in flight*), its landing is `no`,
+`unknown` or `in-part`, and no acknowledgement stands for it at its current tip.
+Exit `0` nothing counted, `7` at least one counted, `1` unanswered, `2` refused.
+
+`--format json` writes one object, `{"target": …, "verdict": "none" | "owed" |
+"unanswered", "rows": [<row>…], "unresolved": [<string>…]}`, with `target` one of
+`{"kind": "session", "session": <ID>}`, `{"kind": "host"}` and `{"kind": "tokens",
+"tokens": […]}`. Each `<row>` is `{identity, branch, base, provenance, tip, landed, change_url, stopped_because, session, run, node, manager_session, recover_command, land_command, retirement, in_flight, counted, acknowledgement, disk}`;
+`disk` is `{run_root, run_root_bytes, build_output}` with `--disk` and `null`
+otherwise. `--format text` (the default) writes the listing, and unresolved lines on
+standard error.
+
+A printed landing command runs this host's drafter: with `--pr-author-graph`, a
+`publish-branch` row prints `onepipeline publish-branch … --pr-author-graph <PATH>`
+and a `recover` row `onepipeline repo-recover … --pr-author-graph <PATH>`, the path
+made absolute; without it both print `--no-draft`. `integrate` and `reclaim` stay
+onevcs's own lines.
+
+`--acknowledge` records that the session has seen and deliberately left the branch,
+at its current tip, in
+`<DIR>/<sha256(session)>.json` — `{"version": 1, "acknowledged": [{"branch",
+"identity", "tip", "reason", "at"}]}`, ai-orchestrator's version-1 format — and then
+answers as the session listing does. A branch that moves past the recorded tip
+counts again.
 
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the two harness
 sections below restate contracts owned by Claude Code and Codex, neither of which publishes

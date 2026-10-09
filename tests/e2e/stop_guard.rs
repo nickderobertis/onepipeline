@@ -46,7 +46,7 @@ fn guarded(owner: &World) -> World {
 }
 
 /// A run with a dispatch held open — unsettled and watched by nothing.
-fn held(world: &World, name: &str) -> String {
+pub(crate) fn held(world: &World, name: &str) -> String {
     let path = world.plan(name, &plan_of(name, vec![agent("build", &[])]));
     world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the run to dispatch something", |world| {
