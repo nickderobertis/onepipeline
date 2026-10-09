@@ -163,8 +163,16 @@ jobs:
   # inside: over the same three runs 25m24s-31m04s step, 28m45s-34m06s job.
   #
   # The job is 105 + 25 = 130 since the step that re-runs a failed test was added
-  # after the gate: its 25 minutes come on top of a step that can take all 90, and
-  # the 15-minute gap between step and job is kept as it was.
+  # after the gate: its 25 minutes come on top of a step that could take all 90,
+  # and the 15-minute gap between step and job was kept as it was.
+  #
+  # The step is 120 since 90 started cutting green legs. By 2026-10-09 the Windows
+  # tiers ran 79-85 minutes on `main`, and the step then sat on after `check-cross:
+  # ok` until something still holding its `tee` pipe let go: 8 minutes in run
+  # 37862937526, and long enough in 37885197847 that 90 cut a leg whose every test
+  # had passed. That pipe is the defect, and this bound only stops it failing a
+  # correct change. The job is left at 130, so a step that took all 120 leaves the
+  # re-run step only what remains of the job.
   #
   # Splitting the suite across more jobs is the only thing that would make the leg
   # itself shorter, and it is not available: branch protection requires `cross
@@ -201,7 +209,7 @@ jobs:
       # for that step to re-run without compiling.
       - name: Quality gate (cross-platform legs)
         id: gate
-        timeout-minutes: 90
+        timeout-minutes: 120
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just check-cross 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
       # A leg that stops without a verdict stops holding something — a test
       # process, or a child of one that outlived it — and on Windows there are no
