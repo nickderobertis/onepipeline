@@ -8942,11 +8942,18 @@ held and answered as any envelope naming X is:
    stays held behind Y, and once released it is validated against X's cancelled state —
    applied or refused on its merits — and answered either way. Envelopes claimed after
    the cancel still wait behind it, as they would have.
+
+   **Its second instance**, ruled by the manager under correlation
+   `c-5c26b236ce422980982aa3a1ed425a11`: an envelope already *outstanding* that names X
+   while its delivery waits on another node Y's conversation — `[note Y, amend X]` — is
+   overtaken too, so a cancel of X never waits on Y's worker. Its delivery thread offers
+   no live note into X it has not offered yet, and refuses each as preempted, naming the
+   cancelling envelope. Once Y answers, every command of it but its notes is validated
+   again against X's cancelled state, so an `amend` of X commits after the cancel or is
+   refused on its merits, and the envelope gets exactly one answer with the existing
+   verdicts — `delivered` for the note Y read, should another command refuse.
 5. **Everything else keeps the ordering above**: envelopes claimed after the cancel, and
-   every envelope that cancels nothing. An envelope already outstanding that names X but
-   whose delivery is waiting on another node's conversation was validated before it was
-   handed and cannot be judged again, so a cancel of X still waits for that answer — and
-   preempts it once the delivery reaches a note into X.
+   every envelope that cancels nothing.
 
 No `CommandVerdict` and no journal kind is added: a preempted note is `refused`, and its
 reason is what tells it from any other refusal.
@@ -8972,8 +8979,14 @@ read while another node's held turn keeps the run driven, records nothing a seco
 cancel is applied while `lint`'s note still waits, a held live note to `build` that also
 names `lint` is preempted at once rather than overtaken, and the envelope naming both
 nodes is judged after the cancel once `lint`'s note is answered.
-`a_cancel_waits_on_an_envelope_naming_its_node_and_delivering_elsewhere` is point 5's
-last sentence. `src/engine.rs`'s
+`a_cancel_overtakes_an_envelope_naming_its_node_and_delivering_elsewhere` is point 4's
+second instance, `[note lint, amend build]` waiting on `lint`: the cancel of `build` is
+applied within thirty seconds with `lint`'s turn still held, and once it is released the
+envelope is answered once, its note and its amend each recorded once, the amend after
+the cancel. `an_overtaken_delivery_offers_no_note_into_the_cancelled_node` holds
+`[note lint, note build]` the same way: the note to `build` is never offered, and is
+answered `refused` naming the cancel beside the note `lint` read, `delivered`.
+`src/engine.rs`'s
 `a_cancel_preempts_its_nodes_note_and_overtakes_only_what_waits_elsewhere` drives the
 real reconciler with deliveries outstanding — one of them past a note another
 conversation already read, which is answered `delivered` — and answers them one at a

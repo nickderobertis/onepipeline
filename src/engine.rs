@@ -1850,13 +1850,17 @@ fn converge(
                     // A delivery a `cancel` preempted is already answered and
                     // journalled as refused, so what its thread says now is
                     // dropped rather than recorded a second time.
-                    if let Some((witnessed, _recording)) = answered {
+                    if let Some((witnessed, _recording, overtaken)) = answered {
+                        let mut answer = *answer;
+                        if overtaken {
+                            rejudge_overtaken(paths, state, launch, &in_flight, &mut answer);
+                        }
                         if record_delivered(
                             paths,
                             journal,
                             state,
                             &channel,
-                            *answer,
+                            answer,
                             &mut in_flight,
                             &witnessed,
                         )? {
@@ -2711,9 +2715,12 @@ fn any_node_can_still_move(statuses: &BTreeMap<String, NodeStatus>) -> bool {
 /// in the cancelled set were held: what that releases is judged ahead of the
 /// cancel, a live note into a cancelled node among them is refused the same way
 /// rather than delivered, and one still waiting on another node's note stays
-/// held — the one envelope the cancel overtakes, judged against the cancelled
-/// node once that note is answered. An envelope claimed after the cancel waits
-/// behind what the cancel overtook, as it would have. `docs/contract-divergences.md`
+/// held — an envelope the cancel overtakes, judged against the cancelled node
+/// once that note is answered. An outstanding delivery naming a cancelled node
+/// while waiting on another node's conversation is overtaken the same way: the
+/// cancel does not wait for it, and it is judged again before it is recorded —
+/// see [`rejudge_overtaken`]. An envelope claimed after the cancel waits behind
+/// what the cancel overtook, as it would have. `docs/contract-divergences.md`
 /// entry 108 carries the rule as a proposal.
 fn reconcile_edits(
     paths: &RunPaths,
@@ -2769,7 +2776,7 @@ fn reconcile_edits(
             // waits behind.
             let mut overtaken = BTreeSet::new();
             if preempts {
-                for (preempted, finished) in deliveries.preempt(&cancelled) {
+                for (preempted, finished) in deliveries.preempt(&cancelled, envelope.id) {
                     refuse_preempted(
                         paths,
                         journal,
@@ -2827,7 +2834,15 @@ fn reconcile_edits(
                 }
             }
             let names = names_of(&envelope.commands);
-            let waits = deliveries.holds(&names) || !held_names.is_disjoint(&names);
+            // A valid cancel waits on no delivery for the nodes it cancels: one
+            // waiting on their conversations was preempted above, and one
+            // waiting on another node's is overtaken.
+            let holding: BTreeSet<String> = if preempts {
+                names.difference(&cancelled).cloned().collect()
+            } else {
+                names.clone()
+            };
+            let waits = deliveries.holds(&holding) || !held_names.is_disjoint(&names);
             held_names.extend(overtaken);
             if waits {
                 held_names.extend(names);
@@ -2954,6 +2969,53 @@ fn offers_a_live_note_into(commands: &[Command], nodes: &BTreeSet<String>) -> bo
         .any(|command| is_a_live_note_into(command, nodes))
 }
 
+/// The refusal a live note into node `id` is answered with when envelope `by`
+/// cancels that node before the note is delivered.
+fn preempted_note(id: &str, by: u64) -> Error {
+    Error::Refused(format!(
+        "preempted by envelope {by}, which cancels node '{id}': this live note was still \
+         waiting on that node's turn, and is not delivered"
+    ))
+}
+
+/// Judge again, against the record as it stands, every command but the notes
+/// of an envelope a `cancel` overtook while its delivery was outstanding.
+///
+/// It was validated before the cancel, and a command of it naming the cancelled
+/// node — an `amend` of it, say — commits after the cancel, so it is judged
+/// against the node as cancelled rather than as it was. Its notes are not judged
+/// again: each was offered, or refused as preempted, and what its conversation
+/// said is its answer. A command that now refuses refuses the envelope, which
+/// is answered once, with the verdicts any refused envelope gets.
+fn rejudge_overtaken(
+    paths: &RunPaths,
+    state: &Projected,
+    launch: &LaunchRecord,
+    in_flight: &BTreeMap<String, Dispatch>,
+    answer: &mut NoteAnswer,
+) {
+    let rejudged = validate_envelope(
+        paths,
+        state,
+        answer.envelope.author.clone(),
+        &answer.envelope.commands,
+        launch,
+        in_flight,
+    );
+    let delivered = std::mem::take(&mut answer.delivered);
+    answer.delivered = answer
+        .envelope
+        .commands
+        .iter()
+        .zip(delivered)
+        .zip(rejudged)
+        .map(|((command, delivered), rejudged)| match command {
+            Command::Note { .. } => delivered,
+            _ => rejudged.map(|step| Delivery::Committed(step.staged().to_vec())),
+        })
+        .collect();
+}
+
 /// How far a preempted envelope got before a `cancel` answered it.
 enum Preempted {
     /// Held, and never offered: its own validation, one ruling per command.
@@ -2982,14 +3044,10 @@ fn refuse_preempted(
     cancelled: &BTreeSet<String>,
     by: u64,
 ) -> Result<()> {
-    let refusal = |id: &str| {
-        Error::Refused(format!(
-            "preempted by envelope {by}, which cancels node '{id}': this live note was still \
-             waiting on that node's turn, and is not delivered"
-        ))
-    };
     let preempting = |command: &Command| match command {
-        Command::Note { id, .. } if is_a_live_note_into(command, cancelled) => Some(refusal(id)),
+        Command::Note { id, .. } if is_a_live_note_into(command, cancelled) => {
+            Some(preempted_note(id, by))
+        }
         _ => None,
     };
     let author = preempted.author.clone();
@@ -3391,10 +3449,17 @@ fn deliver_envelope(
         // `a_cancel_preempts_its_nodes_note_and_overtakes_only_what_waits_elsewhere`
         // hold it against the real reconciler.
         if let (Some(progress), Staged::Note(note)) = (progress, &step) {
-            progress
+            let mut now = progress
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .offering = Some(note.node.clone());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Decided under the same lock a cancel reads `offering` under, so a
+            // note into a cancelled node is either preempted there or never
+            // offered here.
+            if let Some(by) = now.cancelled.get(&note.node) {
+                delivered.push(Err(preempted_note(&note.node, *by)));
+                continue;
+            }
+            now.offering = Some(note.node.clone());
         }
         let committed = commits_of(step);
         if let Some(progress) = progress {
@@ -3426,6 +3491,11 @@ pub(crate) struct Progress {
     /// The node whose conversation the thread is waiting on now, if it is
     /// waiting on one.
     offering: Option<String>,
+    /// Each node a `cancel` parked while the thread was waiting on another
+    /// node's conversation, with the cancelling envelope's id: the thread
+    /// offers no note into one of them, and the envelope is judged again before
+    /// it is recorded — see [`rejudge_overtaken`].
+    cancelled: BTreeMap<String, u64>,
 }
 
 /// The word a `release-adopted` record names a release note's delivery with.
@@ -3751,10 +3821,19 @@ impl NoteDeliveries {
     /// `None` where `id` is not outstanding — a delivery a `cancel` preempted,
     /// whose envelope is already answered and journalled — so a late answer
     /// from its thread records nothing a second time.
-    fn answered(&mut self, id: u64) -> Option<(Vec<Envelope>, PendingDelivery)> {
-        self.outstanding
-            .remove(&id)
-            .map(|outstanding| (outstanding.witnessed, outstanding.pending))
+    ///
+    /// The `bool` says whether a `cancel` overtook it while it was outstanding,
+    /// which is what makes its commands judged again before it is recorded.
+    fn answered(&mut self, id: u64) -> Option<(Vec<Envelope>, PendingDelivery, bool)> {
+        self.outstanding.remove(&id).map(|outstanding| {
+            let overtaken = !outstanding
+                .progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cancelled
+                .is_empty();
+            (outstanding.witnessed, outstanding.pending, overtaken)
+        })
     }
 
     /// Stop waiting on every outstanding delivery whose thread is waiting on a
@@ -3769,24 +3848,34 @@ impl NoteDeliveries {
     /// thread answers later finds nothing to record — see
     /// [`answered`](Self::answered). A thread waiting on another node's
     /// conversation is left to it, as any envelope naming that node is.
+    ///
+    /// A delivery naming a cancelled node and waiting on another node's
+    /// conversation is **overtaken** instead: the cancel does not wait for it,
+    /// its thread offers no note into a cancelled node, and it is judged again
+    /// against the cancelled node once it is answered — see [`Progress`].
     fn preempt(
         &mut self,
         cancelled: &BTreeSet<String>,
+        by: u64,
     ) -> Vec<(crate::channel::QueuedCommands, Vec<Vec<edits::Operation>>)> {
-        let preempted: Vec<u64> = self
-            .outstanding
-            .iter()
-            .filter(|(_, outstanding)| {
-                outstanding
-                    .progress
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .offering
-                    .as_ref()
-                    .is_some_and(|node| cancelled.contains(node))
-            })
-            .map(|(id, _)| *id)
-            .collect();
+        let mut preempted: Vec<u64> = Vec::new();
+        for (id, outstanding) in &self.outstanding {
+            let mut progress = outstanding
+                .progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if progress
+                .offering
+                .as_ref()
+                .is_some_and(|node| cancelled.contains(node))
+            {
+                preempted.push(*id);
+                continue;
+            }
+            for node in outstanding.named.intersection(cancelled) {
+                progress.cancelled.entry(node.clone()).or_insert(by);
+            }
+        }
         preempted
             .into_iter()
             .filter_map(|id| self.outstanding.remove(&id))
@@ -10616,7 +10705,7 @@ mod tests {
         // is when it lets go of what `answered` handed it.
         let in_flight = DeliveriesInFlight::default();
         let mut deliveries = held(&in_flight);
-        let (_, recording) = deliveries.answered(1).expect("the delivery is outstanding");
+        let (_, recording, _) = deliveries.answered(1).expect("the delivery is outstanding");
         assert!(
             in_flight.outstanding_since("build").is_some(),
             "the delivery stopped being outstanding before its answer was recorded"
@@ -10652,6 +10741,7 @@ mod tests {
             progress: std::sync::Arc::new(std::sync::Mutex::new(Progress {
                 finished: Vec::new(),
                 offering: Some(node.to_owned()),
+                cancelled: BTreeMap::new(),
             })),
             envelope: crate::channel::QueuedCommands {
                 id,

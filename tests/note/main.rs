@@ -1218,9 +1218,15 @@ fn claimed_with_no_outcome(world: &World, run: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Assert envelope `id` was answered, once, `refused` as preempted by the
-/// cancel queued as `cancel`, and that its refusal is journalled once.
+/// Assert envelope `id` was answered, once, with its first command `refused` as
+/// preempted by the cancel queued as `cancel`, and that its refusal is journalled
+/// once — [`assert_preempted_at`], for a note that is its envelope's first.
 fn assert_preempted(world: &World, run: &str, id: u64, cancel: u64, text: &str) {
+    assert_preempted_at(world, run, id, 0, cancel, text);
+}
+
+/// [`assert_preempted`], for the note at `index` in its envelope.
+fn assert_preempted_at(world: &World, run: &str, id: u64, index: usize, cancel: u64, text: &str) {
     let outcomes: Vec<Value> = world
         .command_outcomes(run)
         .into_iter()
@@ -1233,7 +1239,7 @@ fn assert_preempted(world: &World, run: &str, id: u64, cancel: u64, text: &str) 
         );
     };
     assert_eq!(outcome["applied"], json!(false), "{outcome}");
-    let result = &outcome["results"][0];
+    let result = &outcome["results"][index];
     assert_eq!(result["outcome"], json!("refused"), "{outcome}");
     assert!(
         result["reason"]
@@ -1653,17 +1659,35 @@ fn a_cancel_overtakes_an_envelope_also_waiting_on_another_nodes_note() {
     );
 }
 
-/// A cancel still waits on an envelope already delivering a note to another node
-/// that names the cancelled one.
+/// Every record the journal holds of a command whose `text` or `message` reads
+/// `text`, by kind.
+fn records_of(world: &World, run: &str, text: &str) -> Vec<(usize, String)> {
+    world
+        .journal(run)
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            let command = &event["payload"]["command"];
+            command["text"] == text || command["message"] == text
+        })
+        .map(|(at, event)| (at, event["kind"].as_str().unwrap_or_default().to_string()))
+        .collect()
+}
+
+/// A cancel overtakes an envelope that names its node while its delivery waits
+/// on another node's conversation, and that envelope is answered once, against
+/// the cancelled node, when the other conversation answers.
 ///
-/// That envelope was validated before its note was offered, and is journalled
-/// as validated once its conversation answers — it cannot be judged again — so
-/// a cancel of a node it names waits for it, as any envelope naming that node
-/// does. What a cancel preempts is a note into its own node, and only that.
+/// The envelope `[note lint, amend build]` was validated before it was handed,
+/// and its delivery waits on `lint`'s held turn. A cancel of `build` used to wait
+/// for it — so a cancel could wait on a worker that was not the one it named.
+/// It is applied within thirty seconds without `lint` answering; once `lint`
+/// does, the envelope's receipt resolves, its note and its amend are each
+/// recorded once, and the amend is judged after the cancel.
 #[test]
-fn a_cancel_waits_on_an_envelope_naming_its_node_and_delivering_elsewhere() {
-    let world = World::new("note-cancel-waits");
-    let run = "waits";
+fn a_cancel_overtakes_an_envelope_naming_its_node_and_delivering_elsewhere() {
+    let world = World::new("note-cancel-overtakes-delivery");
+    let run = "overtakesdelivery";
     held_cancellable_conversation(&world, run, vec![agent("build", &[]), agent("lint", &[])]);
     let queue = world.run_file(run, "channel/commands.jsonl");
     let queued = |text: &str| {
@@ -1672,7 +1696,7 @@ fn a_cancel_waits_on_an_envelope_naming_its_node_and_delivering_elsewhere() {
         move |_: &World| std::fs::read_to_string(&queue).is_ok_and(|held| held.contains(&text))
     };
 
-    let to_lint = submitted(
+    let mut to_lint = submitted(
         &world,
         run,
         &json!({"version": 2, "commands": [
@@ -1684,44 +1708,156 @@ fn a_cancel_waits_on_an_envelope_naming_its_node_and_delivering_elsewhere() {
     world.until("the note to wait in lint's inbox", |world| {
         awaiting_an_answer(world) == 1
     });
-    let mut cancel = submitted(
+    let overtaken = queued_id_of(&world, run, BUILD_RULING);
+    let cancel = submitted(
         &world,
         run,
         &envelope(json!({"op": "cancel", "id": "build", "reason": "wedged in a tool call"})),
     );
     world.until("the cancel to be queued", queued("wedged in a tool call"));
     let cancel_id = queued_id_of(&world, run, "wedged in a tool call");
-    // The reconciler's own pass, which has nothing durable to watch for.
-    std::thread::sleep(Duration::from_secs(3));
+
+    world.until_within(CANCEL_PATIENCE, "the cancel to be applied", |world| {
+        outcome_of(world, run, cancel_id).is_some()
+    });
     assert!(
-        outcome_of(&world, run, cancel_id).is_none()
-            && cancel.try_wait().expect("the reply is readable").is_none(),
-        "the cancel overtook an envelope naming its node that was delivering elsewhere"
+        answered(cancel).contains("\"state\":\"applied\""),
+        "the cancel was not applied"
+    );
+    assert!(
+        awaiting_an_answer(&world) == 1
+            && outcome_of(&world, run, overtaken).is_none()
+            && to_lint.try_wait().expect("the reply is readable").is_none(),
+        "lint answered, so nothing showed the cancel applied without waiting for it"
+    );
+    world.until("build to idle as cancelled", |world| {
+        world.events_of(run, "node-settled").iter().any(|event| {
+            event["labels"]["node"] == "build" && event["payload"]["status"] == "cancelled"
+        })
+    });
+
+    // lint's turn ends and its note is answered; the overtaken envelope is
+    // judged against the cancelled build and answered once.
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    let _ = to_lint.wait();
+    world.until("the overtaken envelope to be answered", |world| {
+        outcome_of(world, run, overtaken).is_some()
+    });
+    world.until("lint to settle", |world| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "lint")
+    });
+    let answers = world
+        .command_outcomes(run)
+        .into_iter()
+        .filter(|outcome| outcome["id"] == overtaken)
+        .count();
+    assert_eq!(answers, 1, "the overtaken envelope was not answered once");
+    let cancelled = committed_at(&world.journal(run), "cancel", "id", "build")
+        .expect("the cancel of build is journalled");
+    let amended = records_of(&world, run, BUILD_RULING);
+    let [(at, _)] = &amended[..] else {
+        panic!("the amend of build was not recorded once: {amended:?}");
+    };
+    assert!(
+        cancelled < *at,
+        "the overtaken amend was recorded ahead of the cancel that overtook it"
+    );
+    let noted = records_of(&world, run, PLANNER_CONTEXT);
+    assert_eq!(
+        noted.len(),
+        1,
+        "the note to lint was not recorded once: {noted:?}"
+    );
+    assert_eq!(
+        claimed_with_no_outcome(&world, run),
+        None,
+        "an envelope was left claimed with no outcome"
+    );
+}
+
+/// An overtaken delivery offers no note into the node the cancel parked: that
+/// note is refused as preempted, naming the cancel, and its envelope is answered
+/// once when the conversation it was waiting on answers.
+#[test]
+fn an_overtaken_delivery_offers_no_note_into_the_cancelled_node() {
+    let world = World::new("note-cancel-overtaken-note");
+    let run = "overtakennote";
+    held_cancellable_conversation(&world, run, vec![agent("build", &[]), agent("lint", &[])]);
+    let queue = world.run_file(run, "channel/commands.jsonl");
+    let queued = |text: &str| {
+        let text = text.to_string();
+        let queue = queue.clone();
+        move |_: &World| std::fs::read_to_string(&queue).is_ok_and(|held| held.contains(&text))
+    };
+
+    let to_both = submitted(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            note_op("lint", "worker", LINT_NOTE, None),
+            note_op("build", "worker", PREEMPTED_NOTE, None),
+        ]})
+        .to_string(),
+    );
+    world.until("the note to wait in lint's inbox", |world| {
+        awaiting_an_answer(world) == 1
+    });
+    let overtaken = queued_id_of(&world, run, LINT_NOTE);
+    let cancel = submitted(
+        &world,
+        run,
+        &envelope(json!({"op": "cancel", "id": "build", "reason": "wedged in a tool call"})),
+    );
+    world.until("the cancel to be queued", queued("wedged in a tool call"));
+    let cancel_id = queued_id_of(&world, run, "wedged in a tool call");
+    world.until_within(CANCEL_PATIENCE, "the cancel to be applied", |world| {
+        outcome_of(world, run, cancel_id).is_some()
+    });
+    assert!(
+        answered(cancel).contains("\"state\":\"applied\""),
+        "the cancel was not applied"
+    );
+    assert!(
+        outcome_of(&world, run, overtaken).is_none(),
+        "the overtaken envelope was answered before lint's note was"
     );
 
     release(&world.fakes, "turn.go");
     release(&world.fakes, "turn.settle");
-    assert!(
-        answered(to_lint).contains("\"state\":\"applied\""),
-        "the note to lint's envelope was not applied"
-    );
-    let _ = cancel.wait();
-    world.until("the cancel to be answered", |world| {
-        outcome_of(world, run, cancel_id).is_some()
+    let output = to_both.wait_with_output().expect("the binary runs");
+    assert_eq!(output.status.code(), Some(REFUSED));
+    world.until("lint to settle", |world| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "lint")
     });
-    let journal = world.journal(run);
-    let amended = committed_at(&journal, "amend", "text", BUILD_RULING)
-        .expect("the amend of build is journalled");
-    let judged = journal
-        .iter()
-        .position(|event| {
-            (event["kind"] == "edit-committed" || event["kind"] == "edit-rejected")
-                && event["payload"]["command"]["op"] == "cancel"
-        })
-        .expect("the cancel is journalled, applied or refused");
+    assert_preempted_at(&world, run, overtaken, 1, cancel_id, PREEMPTED_NOTE);
+    let outcome = outcome_of(&world, run, overtaken).expect("answered");
+    assert_eq!(
+        outcome["results"][0]["outcome"],
+        json!("delivered"),
+        "the note lint read was not reported delivered: {outcome}"
+    );
+    assert_eq!(
+        outcome["results"][1]["outcome"],
+        json!("refused"),
+        "{outcome}"
+    );
     assert!(
-        amended < judged,
-        "the cancel was judged ahead of the envelope it waited behind"
+        worked(&world)
+            .iter()
+            .all(|prompt| !prompt.contains(PREEMPTED_NOTE)),
+        "the note into the cancelled node was offered to a worker"
+    );
+    assert_eq!(
+        claimed_with_no_outcome(&world, run),
+        None,
+        "an envelope was left claimed with no outcome"
     );
 }
 
