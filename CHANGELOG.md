@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.63.5](https://github.com/nickderobertis/onepipeline/compare/v0.63.4...v0.63.5) - 2026-10-09
+
+### Fixed
+
+- *(channel)* let a cancel preempt the live note its node has not answered ([#819](https://github.com/nickderobertis/onepipeline/pull/819))
+
 ## [0.63.4](https://github.com/nickderobertis/onepipeline/compare/v0.63.3...v0.63.4) - 2026-10-09
 
 ### Fixed
