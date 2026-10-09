@@ -1040,6 +1040,10 @@ pub fn acknowledge(request: &AcknowledgeRequest, graph: Option<PathBuf>) -> Resu
             )));
         }
     };
+    // llmlint: ignore[changed_behavior_has_e2e] onevcs answers a `null` tip only for a ref
+    // it enumerated and then could not read, and a present one is a validated full object
+    // name, so no journey over real git can stage this without the row itself
+    // disappearing; the refusal keeps an acknowledgement from being keyed on nothing.
     let tip = row.tip.clone().filter(|tip| is_tip(tip)).ok_or_else(|| {
         Error::Invalid(format!(
             "onevcs could not read the tip of {} [{}], and an acknowledgement is keyed on it",
