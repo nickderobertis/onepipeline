@@ -29,3 +29,44 @@ budgets:
     direction: max
     threshold: 2
     timeout_seconds: 1800
+  - id: stop-guard-unpublished-latency
+    measure: reported
+    command: [node, scripts/stop-guard-unpublished-budget.mjs]
+    unit: seconds
+    direction: max
+    threshold: 0.2
+    description: >-
+      Warm native Stop verdict: the slowest none, owed or unreadable scenario's maximum
+      of ten current-binary `stop-guard --format claude-code --unpublished` calls with
+      Claude Code's stdin, after one priming call. Read from the full-workload journey's
+      validated telemetry; this command times nothing.
+  - id: stop-guard-unpublished-latency-cold
+    measure: reported
+    command: [node, scripts/stop-guard-unpublished-budget.mjs, --cold]
+    unit: seconds
+    direction: max
+    threshold: 0.5
+    description: >-
+      Cold native Stop verdict: the same ten calls per scenario with every proof and
+      index cache cleared before each, the slowest scenario's maximum. Read from the
+      journey's telemetry.
+  - id: stop-guard-unpublished-latency-10x
+    measure: reported
+    command: [node, scripts/stop-guard-unpublished-budget.mjs, --scale, '10']
+    unit: seconds
+    direction: max
+    threshold: 0.5
+    description: >-
+      Warm native Stop verdict at ten times the host-shaped workload: the slowest
+      scenario's maximum of ten calls after one priming call. Read from the journey's
+      telemetry.
+  - id: stop-guard-unpublished-journey-time
+    measure: reported
+    command: [node, scripts/stop-guard-unpublished-budget.mjs, --journey-time]
+    unit: seconds
+    direction: max
+    threshold: 180
+    description: >-
+      The full-workload stop-verdict journey's elapsed time, from empty fixture roots
+      through both workloads' preparation, validation, every timed and separate counting
+      call, priming, cache clears and cleanup. Read from the journey's telemetry.

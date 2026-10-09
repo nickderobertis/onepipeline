@@ -124,6 +124,14 @@
       "{workspaceRoot}/clippy.toml",
       "{workspaceRoot}/rustfmt.toml"
     ],
+    "stopVerdictSource": [
+      "rustBuild",
+      "{workspaceRoot}/tests/stop_verdict/**/*",
+      "{workspaceRoot}/tests/recorded/run-root/**/*",
+      "{workspaceRoot}/scripts/stop-guard-unpublished-*",
+      "{workspaceRoot}/clippy.toml",
+      "{workspaceRoot}/rustfmt.toml"
+    ],
     "releaseCompatSource": [
       "rustBuild",
       "{workspaceRoot}/tests/release_channel/**/*",

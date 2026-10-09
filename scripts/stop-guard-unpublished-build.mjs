@@ -1,0 +1,39 @@
+// The producer and the reader hash one checked input manifest, without git or a build.
+import { createHash } from "node:crypto";
+import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+export const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
+const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
+export function inputFiles(root = repositoryRoot) {
+  const manifest = JSON.parse(
+    readFileSync(`${root}/scripts/stop-guard-unpublished-build-inputs.json`, "utf8"),
+  );
+  if (manifest?.version !== 1) throw new Error("unsupported build-input manifest version");
+  const files = new Set(manifest.files);
+  const walk = (path) => {
+    const stat = lstatSync(`${root}/${path}`);
+    if (stat.isDirectory()) {
+      for (const entry of readdirSync(`${root}/${path}`)) walk(`${path}/${entry}`);
+    } else if (stat.isFile()) {
+      files.add(path);
+    } else {
+      throw new Error(`unsupported build input ${path}`);
+    }
+  };
+  for (const directory of manifest.directories) walk(directory);
+  for (const { directory, prefix } of manifest.prefixes) {
+    for (const name of readdirSync(`${root}/${directory}`)) {
+      if (name.startsWith(prefix)) walk(`${directory}/${name}`);
+    }
+  }
+  // Sorted by UTF-8 bytes, as the producer's ordered set sorts them.
+  return [...files].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
+}
+
+export function sourceFingerprint(root = repositoryRoot) {
+  return sha(
+    JSON.stringify(inputFiles(root).map((path) => [path, sha(readFileSync(`${root}/${path}`))])),
+  );
+}

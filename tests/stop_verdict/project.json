@@ -1,0 +1,56 @@
+{
+  "name": "onepipeline-stop-verdict",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/stop_verdict",
+  "tags": [
+    "scope:tests",
+    "lang:rust"
+  ],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "command": "just _tier-build stop_verdict",
+      "inputs": [
+        "stopVerdictSource"
+      ]
+    },
+    "format": {
+      "command": "just _tier-format tests/stop_verdict/main.rs"
+    },
+    "format-check": {
+      "command": "just _tier-fmt-check tests/stop_verdict/main.rs",
+      "inputs": [
+        "stopVerdictSource"
+      ]
+    },
+    "lint": {
+      "command": "just _tier-lint stop_verdict",
+      "inputs": [
+        "stopVerdictSource"
+      ]
+    },
+    "test": {
+      "command": "just stop-verdict-journeys",
+      "inputs": [
+        "stopVerdictSource"
+      ],
+      "outputs": [
+        "{workspaceRoot}/target/budget-records/stop-guard-unpublished.json",
+        "{workspaceRoot}/target/budget-records/stop-guard-unpublished-invocation.json",
+        "{workspaceRoot}/target/budget-records/stop-guard-unpublished-onepipeline"
+      ],
+      "parallelism": false
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": [
+        "format-check",
+        "lint",
+        "test"
+      ]
+    }
+  }
+}

@@ -643,6 +643,13 @@ resolver = "2"
 # requirement moves so the floor says the fix is in, and `onevcs-testing` 0.13.2
 # requires exactly `=0.42.2`, so the pair moves as one.
 #
+# `onevcs` 0.43.1 is the floor because it reads recovery rows at `Detail::Decision`
+# and reuses its proofs across calls: `src/unpublished.rs` decides whether a manager
+# session owes a preserved branch through `recoverable_matching` in process, inside
+# the Stop hook's budget. A **requirement**, because `^0.42` admits no 0.43.x;
+# `onevcs-testing` 0.13.4 requires exactly `=0.43.1` and carries the full-size
+# recovery fixture `tests/stop_verdict/` builds, so the pair moves as one.
+#
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
 # `reasoning` items as `turn-activity` under their own kind — the agent's words,
 # with no tool name — which `src/views.rs` and `src/projection.rs` render as what
@@ -1150,6 +1157,15 @@ path = "tests/smoke/main.rs"
 [[test]]
 name = "release_channel"
 path = "tests/release_channel/main.rs"
+
+# The stop-verdict budget journeys: both full host-shaped workloads, built once per
+# gate, timing the release binary's native Stop hook and writing the telemetry the
+# read-only budget commands validate. Their own binary and their own Nx project
+# (`tests/stop_verdict/project.json`), so an ordinary e2e edit never rebuilds them
+# and `just stop-verdict-journeys` regenerates the records alone.
+[[test]]
+name = "stop_verdict"
+path = "tests/stop_verdict/main.rs"
 
 # A CLI binary: optimize for a small, fast-starting artifact.
 [profile.release]

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "files": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "justfile"
+  ],
+  "directories": [
+    "src",
+    "tests/stop_verdict"
+  ],
+  "prefixes": [
+    {
+      "directory": "scripts",
+      "prefix": "stop-guard-unpublished"
+    }
+  ]
+}
