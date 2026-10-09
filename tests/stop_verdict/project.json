@@ -5,7 +5,8 @@
   "sourceRoot": "tests/stop_verdict",
   "tags": [
     "scope:tests",
-    "lang:rust"
+    "lang:rust",
+    "tier:budget"
   ],
   "targets": {
     "bootstrap": {
