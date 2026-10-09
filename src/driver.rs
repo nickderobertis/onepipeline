@@ -319,12 +319,34 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 print!("{}", crate::stopguard::Verdict::None.render(args.format));
                 return Ok(EXIT_SUCCESS);
             };
+            // Read here, as every arm reads its environment. A graph that is not a
+            // readable file, or a state root nothing names, is carried in as the
+            // reason the decision cannot be made — which blocks, as an unanswered
+            // decision does — because this verb exits `0` on every ending.
+            let unpublishing = args.unpublished.then(|| {
+                let graph = args
+                    .unpublished_pr_author_graph
+                    .as_deref()
+                    .map(verbs::unpublished_pr_author_graph)
+                    .transpose()
+                    .map_err(|error| error.to_string())?;
+                let acknowledgements = match &args.unpublished_acknowledgements {
+                    Some(directory) => directory.clone(),
+                    None => verbs::default_unpublished_acknowledgements()
+                        .map_err(|error| error.to_string())?,
+                };
+                Ok(crate::stopguard::Unpublishing {
+                    acknowledgements,
+                    graph,
+                })
+            });
             let (verdict, unresolved) = crate::stopguard::guard(
                 &ledger::runs_root(),
                 &asked,
                 verbs::WakeBudget::resolved(args.wake_budget).map_err(|error| error.to_string()),
                 &args.sources,
                 std::time::Duration::from_secs(args.source_timeout),
+                unpublishing.as_ref(),
             );
             // Standard error carries what the ordinary `unwatched` writes there for
             // the same question, and nothing else: the verdict is the whole of
@@ -334,6 +356,90 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
         // llmlint: ignore-end[cli_output_contract]
+        Verb::Unpublished(args) => {
+            // The environment is read here and passed in: the manager session the
+            // listing defaults to, and the state root the acknowledgements default under.
+            let graph = args
+                .pr_author_graph
+                .as_deref()
+                .map(verbs::unpublished_pr_author_graph)
+                .transpose()?;
+            let acknowledgements = match &args.acknowledgements {
+                Some(directory) => directory.clone(),
+                None => verbs::default_unpublished_acknowledgements()?,
+            };
+            let environment = std::env::var(sys::LAUNCHER_SESSION_ENV)
+                .ok()
+                .filter(|session| !session.trim().is_empty());
+            // llmlint: ignore-block[cli_output_contract] the unresolved lines are named on
+            // standard error where they change no exit status, as `unwatched`'s are: the
+            // listing on standard output is what a caller reads, and the verdict is its status.
+            if let Some(branch) = &args.acknowledge {
+                let session = args.session.clone().or(environment).unwrap_or_default();
+                let acknowledged = verbs::acknowledge_unpublished(
+                    &verbs::AcknowledgeRequest {
+                        branch: branch.clone(),
+                        reason: args.reason.clone().unwrap_or_default(),
+                        repo: args.repo.clone(),
+                        session,
+                        acknowledgements,
+                    },
+                    graph,
+                )?;
+                eprint!(
+                    "{}",
+                    acknowledged
+                        .listing
+                        .unresolved
+                        .iter()
+                        .map(|line| format!("unpublished: {line}\n"))
+                        .collect::<String>()
+                );
+                print!("{}", verbs::render_unpublished_acknowledged(&acknowledged));
+                return Ok(acknowledged.listing.exit_code());
+            }
+            let (target, acknowledging) = if args.host {
+                (verbs::UnpublishedTarget::Host, environment)
+            } else if !args.token.is_empty() {
+                (
+                    verbs::UnpublishedTarget::Tokens {
+                        tokens: args.token.clone(),
+                    },
+                    environment,
+                )
+            } else {
+                let session = args.session.clone().or(environment).unwrap_or_default();
+                (
+                    verbs::UnpublishedTarget::Session {
+                        session: session.clone(),
+                    },
+                    Some(session),
+                )
+            };
+            let listing = verbs::unpublished(&verbs::UnpublishedRequest {
+                target,
+                acknowledging,
+                acknowledgements,
+                disk: args.disk,
+                pr_author_graph: graph,
+            })?;
+            match args.format {
+                crate::cli::UnpublishedFormat::Json => println!("{}", listing.json()),
+                crate::cli::UnpublishedFormat::Text => {
+                    eprint!(
+                        "{}",
+                        listing
+                            .unresolved
+                            .iter()
+                            .map(|line| format!("unpublished: {line}\n"))
+                            .collect::<String>()
+                    );
+                    print!("{}", verbs::render_unpublished(&listing));
+                }
+            }
+            // llmlint: ignore-end[cli_output_contract]
+            Ok(listing.exit_code())
+        }
         Verb::Ask(args) => {
             // Everything read from the environment is read here, and every
             // refusal is made before anything is raised: the question, the run,

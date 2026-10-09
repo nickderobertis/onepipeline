@@ -7020,10 +7020,12 @@ the SDK call, and `agents::tests` holds the merge rule and the reader against th
 
 **Proposal (for the planner who owns the contract): add `onepipeline stop-guard
 [--session <ID>] [--continuation] [--format neutral|claude-code|codex]
-[--source <COMMAND>]... [--source-timeout <SECONDS>] [--wake-budget <SECONDS>]`
+[--source <COMMAND>]... [--source-timeout <SECONDS>] [--wake-budget <SECONDS>]
+[--unpublished] [--unpublished-acknowledgements <DIR>] [--unpublished-pr-author-graph <PATH>]`
 to the Views line beside `unwatched`, as a verb whose contract is one verdict
 object and exit `0` always.** `--wake-budget` is entry 98's, and so is the
-`warn` it answers for a run whose watch it cannot judge.
+`warn` it answers for a run whose watch it cannot judge. The three
+`--unpublished` flags are entry 113's.
 
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] a register entry states
 the surface it proposes so the planner who owns `docs/contract.md` can rule on it — that is
@@ -9159,3 +9161,127 @@ This compatible relaxation follows engine v0.61.0: the first engine release cont
   "base_conflict_reason": "two answers to where its session starts"
 }
 ```
+
+## 113. Whether a manager session owes a preserved branch was decided by a consumer's Python over a spawned `onevcs` — OPEN
+
+**Proposal (for the planner who owns the contract): add `onepipeline unpublished
+[--session <ID> | --host | --token <S-TOKEN>...] [--format text|json] [--disk]
+[--acknowledgements <DIR>] [--pr-author-graph <PATH>]` and `onepipeline unpublished
+--acknowledge <BRANCH> --reason <TEXT> [--repo <IDENTITY>] [--session <ID>]
+[--acknowledgements <DIR>]` to the Views line beside `unwatched`, with
+`verbs::unpublished`, `verbs::render_unpublished` and
+`verbs::acknowledge_unpublished` as its SDK calls; and amend entry 85's
+`stop-guard` with `--unpublished [--unpublished-acknowledgements <DIR>]
+[--unpublished-pr-author-graph <PATH>]`.**
+
+<!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] a register entry states
+the surface it proposes so the planner who owns `docs/contract.md` can rule on it, and it is
+not a second source of the build. The JSON block below is held field by field, in order, to
+the types `src/unpublished.rs` serializes by that module's
+`the_documented_shapes_are_the_ones_this_build_writes`; the synopsis is held to `--help` by
+`tests/e2e/unpublished.rs`; and the same row is held to `docs/stop-guard.md`'s statement of it
+by the same unit test. -->
+A harness's Stop hook asks whether the manager session still owes a preserved
+branch — one its runs left on a branch that never reached its base. That question
+lived in ai-orchestrator's `orchestrator/unpublished.py`, run as a `stop-guard
+--source`: Python start-up, then `onevcs recoverable --json --label launcher=<id>`
+as a process. On a busy host that cost 2–50 s against a hook given 20, so stops were
+refused with nothing owed and a manager was interrupted mid-closeout to run it by
+hand. The engine stamps the `launcher` label on every session it opens and already
+answers the hook, so it owns the decision. This build ports that module's **rules**
+— not its code — and reads the rows in process through the linked `onevcs`
+(`recoverable_matching(Scope::All, …)` at `Detail::Decision`), so the only process a
+decision starts is the `git` that library runs.
+
+**The decision.** For the session target the selection is the `launcher=<session>`
+label; a returned row whose `labels["launcher"]` is not that session makes the
+whole read **unanswered** (a filter that did not filter). A row is **counted** when
+all three hold: `held_by` is absent (a held row is *in flight*: shown, never
+counted, whatever its `holding`); `landed.state` is `no`, `unknown` or `in-part`;
+and no acknowledgement stands for it. An acknowledgement **stands** only when its
+`identity` and `branch` match the row and its `tip` equals the row's `tip`; a row
+whose `tip` is `null` has none standing and counts, said on an unresolved line. The
+verdict is `none` (nothing counted), `owed` (at least one counted) or `unanswered`
+(the read failed, a row could not be read whole, or the filter did not filter).
+**`unanswered` is never `none`.**
+
+**Targets.** `--session` defaults to `ONEPIPELINE_LAUNCHER_SESSION`, as
+`unwatched`'s does, and blank is refused. `--host` is an empty selection: every
+registered identity. `--token` is `Selection.sessions`; a token no record names is
+refused as onevcs refuses it. The session target applies that session's
+acknowledgements; the other two apply `ONEPIPELINE_LAUNCHER_SESSION`'s where one is
+set.
+
+**Exit statuses:** `0` nothing counted, `7` at least one counted, `1` unanswered,
+`2` refused. `7` is `watch`'s run-changed return too; a code above `3` belongs to
+one verb's protocol by the reading entries 58 and 68 rule on, so no caller meets
+both, and `7` is what ai-orchestrator's `scripts/plan.sh` already branches on.
+
+**The JSON document** (`--format json`, one object on standard output) is
+`{"target", "verdict", "rows", "unresolved"}`: `target` is `{"kind": "session",
+"session"}`, `{"kind": "host"}` or `{"kind": "tokens", "tokens"}`. A row's fields
+are those listed below, in order: `landed`, `retirement` and `recover_command` are
+onevcs's own values whole; `land_command` is the argv the listing prints (`[]` where
+`recover_command` is); `run`, `node` and `manager_session` are the session labels
+`run`, `node` and `launcher`, or `null`; `acknowledgement` is the standing entry or
+`null`; `disk` is `null` without `--disk`. `--format text` lists every row, then
+each counted row with its `land_command` and the `--acknowledge` line that
+acknowledges it — a `superseded-with-changes` row with its evidence and the `onevcs
+reclaim` line first — and a summary line; unresolved lines go to standard error.
+
+**Landing commands run this host's drafter.** A raw `onevcs publish-branch` reaches
+below the drafter and opens a change request with an empty description. With
+`--pr-author-graph <PATH>` (on `stop-guard`, `--unpublished-pr-author-graph`), a
+row whose verb is onevcs's `publish-branch` prints `onepipeline publish-branch
+<the same arguments> --pr-author-graph <PATH made absolute>` and one whose verb is
+`recover` prints `onepipeline repo-recover … --pr-author-graph <PATH>`;
+`integrate` and `reclaim` stay onevcs's verbs, since neither opens a change request.
+Without a graph those two print `--no-draft` and the listing says no drafter is
+configured. A graph that is not a readable file is refused (exit `2`) before
+anything is read.
+
+**`--disk`** reads the run root — the parent of a worktree at
+`<…>/<s-token>/worktree` — in allocated bytes, never following a symbolic link,
+and each of the build-output directories below under the worktree by name. It is
+off by default and `stop-guard` never runs it.
+
+**The acknowledgement** is ai-orchestrator's version-1 format, adopted verbatim so
+files already written keep working: `<DIR>/<sha256 hex of the session id's UTF-8
+bytes>.json`, `<DIR>` defaulting to `$XDG_STATE_HOME` (absolute only, else
+`~/.local/state`) joined with the directory below. `tip` is 40–64 lowercase hex,
+`at` is UTC `%Y-%m-%dT%H:%M:%SZ`, and `reason` is one line with something visible in
+it. A write replaces the file whole through a temporary file and a rename, keeping
+the session's other entries and replacing any for the same identity and branch.
+On read, an entry failing any rule is left out with an unresolved line; a duplicate
+identity-and-branch pair applies neither entry; and a file that is not version 1,
+or cannot be read, applies none, so every row counts, with an unresolved line.
+`--acknowledge` refuses — before writing, the file left byte-for-byte as it was — a
+blank or multi-line reason, a session nothing identifies, a branch no `--host` row
+names, one several identities name without `--repo`, and an existing file it
+cannot read whole. After recording it answers as the session listing does: `0`
+when nothing else counts, `7` when another branch still does.
+
+**The stop guard.** `stop-guard … --unpublished` runs the session target's decision
+in its own process, concurrently with its own `unwatched` check, and combines it
+strongest-wins: `owed` blocks, its reason the text listing; `none` adds nothing;
+`unanswered` **blocks** naming why — never a warning and never silence, the turn
+declared sources take. Its continuation memory is its own file beside the guard's,
+`<sha256(session)>.unpublished`, under the guard's rule: a continuation over an
+unchanged reason answers `none`. Without `--unpublished` the guard is exactly what
+entry 85 states.
+
+```json
+{
+  "document_fields": ["target", "verdict", "rows", "unresolved"],
+  "row_fields": ["identity", "branch", "base", "provenance", "tip", "landed", "change_url", "stopped_because", "session", "run", "node", "manager_session", "recover_command", "land_command", "retirement", "in_flight", "counted", "acknowledgement", "disk"],
+  "disk_fields": ["run_root", "run_root_bytes", "build_output"],
+  "build_output": ["target", "node_modules", ".venv", ".nx", "dist"],
+  "acknowledgement_file_fields": ["version", "acknowledged"],
+  "acknowledgement_fields": ["branch", "identity", "tip", "reason", "at"],
+  "acknowledgement_version": 1,
+  "acknowledgements_under": "onepipeline/unpublished/acknowledged",
+  "exit": {"none": 0, "owed": 7, "unanswered": 1, "refused": 2}
+}
+```
+
+<!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->

@@ -226,6 +226,7 @@ pub(crate) fn guard(
     budget: std::result::Result<Option<WakeBudget>, String>,
     sources: &[String],
     timeout: Duration,
+    unpublishing: Option<&std::result::Result<Unpublishing, String>>,
 ) -> (Verdict, Vec<String>) {
     let mut declared: Vec<&str> = Vec::new();
     for command in sources {
@@ -233,11 +234,16 @@ pub(crate) fn guard(
             declared.push(command);
         }
     }
-    let ((own, unresolved), answered) = std::thread::scope(|scope| {
+    let ((own, unresolved), answered, unpublished) = std::thread::scope(|scope| {
         let consulting: Vec<_> = declared
             .iter()
             .map(|&command| scope.spawn(move || consult(command, asked, timeout)))
             .collect();
+        // In this process, on a thread of its own: the read is the linked
+        // `onevcs`'s, so the only processes it starts are the `git` that library
+        // runs, and it overlaps `unwatched` rather than following it.
+        let deciding =
+            unpublishing.map(|unpublishing| scope.spawn(move || owed(asked, unpublishing)));
         let own = own(root, asked, budget);
         let answered: Vec<Result<Answer, String>> = consulting
             .into_iter()
@@ -247,9 +253,20 @@ pub(crate) fn guard(
                     .unwrap_or_else(|_| Err("the guard's own consultation of it failed".to_owned()))
             })
             .collect();
-        (own, answered)
+        let unpublished = deciding.map(|deciding| {
+            deciding.join().unwrap_or_else(|_| {
+                Verdict::Block(format!(
+                    "stop-guard: whether this session owes a preserved branch could not be \
+                     answered (the decision failed), so this stop is refused; ask it by hand \
+                     with `onepipeline unpublished --session {}`.\n",
+                    asked.session.as_str()
+                ))
+            })
+        });
+        (own, answered, unpublished)
     });
     let mut verdicts = vec![own];
+    verdicts.extend(unpublished);
     verdicts.extend(
         declared
             .iter()
@@ -356,6 +373,107 @@ fn own(
         );
     }
     (Verdict::Block(report), unresolved)
+}
+
+/// What the stop guard's unpublished decision reads beside the session: the
+/// acknowledgements directory and the drafting graph its landing commands name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Unpublishing {
+    pub acknowledgements: PathBuf,
+    pub graph: Option<PathBuf>,
+}
+
+/// The unpublished half of one stop: the session target's decision, held to
+/// its own memory beside the guard's.
+///
+/// `owed` blocks with the text listing; `none` stands aside and forgets; and an
+/// answer that could not be read **blocks** naming why — the same turn the
+/// declared sources take, because a branch owed and unshown is the condition
+/// the host asked to have enforced. A continuation over an unchanged reason
+/// answers `none`, as every block of this guard does.
+fn owed(asked: &Asked, unpublishing: &std::result::Result<Unpublishing, String>) -> Verdict {
+    use crate::unpublished::{Target, UnpublishedRequest, Verdict as Decided};
+    let session = asked.session.as_str();
+    let name = unpublished_memory(session);
+    let by_hand = format!("onepipeline unpublished --session {session}");
+    let decided = unpublishing
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|unpublishing| {
+            crate::unpublished::unpublished(&UnpublishedRequest {
+                target: Target::Session {
+                    session: session.to_owned(),
+                },
+                acknowledging: Some(session.to_owned()),
+                acknowledgements: unpublishing.acknowledgements.clone(),
+                disk: false,
+                pr_author_graph: unpublishing.graph.clone(),
+            })
+            .map_err(|error| error.to_string())
+        });
+    let unresolved = |listing: &crate::unpublished::Unpublished| -> String {
+        listing
+            .unresolved
+            .iter()
+            .map(|line| format!("unpublished: {line}\n"))
+            .collect()
+    };
+    let report = match decided {
+        Err(error) => format!(
+            "stop-guard: whether this session owes a preserved branch could not be answered, so \
+             this stop is refused rather than let through: {error}. Ask it by hand with \
+             `{by_hand}`.\n"
+        ),
+        Ok(listing) => match listing.verdict {
+            Decided::None => {
+                return match forget(&name) {
+                    Ok(()) => Verdict::None,
+                    Err(why) => Verdict::Warn(format!(
+                        "stop-guard: this session owes no preserved branch, but the guard could \
+                         not remove what it last blocked on for it ({why}), so a later \
+                         continuation over that same listing would be let through unrefused; \
+                         remove it by hand."
+                    )),
+                }
+            }
+            Decided::Owed => format!(
+                "{}{}",
+                crate::unpublished::render(&listing),
+                unresolved(&listing)
+            ),
+            Decided::Unanswered => format!(
+                "stop-guard: whether this session owes a preserved branch is unanswered, so this \
+                 stop is refused rather than let through; ask it by hand with `{by_hand}`:\n{}{}",
+                unresolved(&listing),
+                crate::unpublished::render(&listing)
+            ),
+        },
+    };
+    let digest = hex(&Sha256::digest(report.as_bytes()));
+    let aside = |because: String| {
+        Verdict::Warn(format!(
+            "stop-guard: this session owes a preserved branch and this stop was not refused, \
+             because the guard {because}; what it would have refused on:\n{}",
+            report.trim_end()
+        ))
+    };
+    if asked.stop == Stop::Continuation {
+        match remembered(&name) {
+            Err(why) => return aside(format!("could not read what it last blocked on ({why})")),
+            Ok(Some(last)) if last == digest => return Verdict::None,
+            Ok(_) => {}
+        }
+    }
+    match remember(&name, &digest) {
+        Ok(()) => Verdict::Block(report),
+        Err(why) => aside(format!("could not record what it would block on ({why})")),
+    }
+}
+
+/// The file name the unpublished decision's memory for `session` is kept
+/// under, beside the guard's own.
+fn unpublished_memory(session: &str) -> String {
+    format!("{}.unpublished", own_memory(session))
 }
 
 /// A declared source's answer once it has been read and checked: kept apart
@@ -788,19 +906,25 @@ fn source_memory(session: &str, command: &str) -> String {
 /// directory the harness happened to run this in, and the runs root is a
 /// relative default of exactly that shape.
 fn memory_named(name: &str) -> Result<PathBuf, String> {
+    Ok(state_root()?.join(MEMORY_DIR).join(name))
+}
+
+/// The state root: `XDG_STATE_HOME` when it is absolute, else `~/.local/state`.
+/// [`memory_named`] says why a relative one is ignored; the unpublished
+/// acknowledgements live under the same root for the same reason.
+pub(crate) fn state_root() -> Result<PathBuf, String> {
     let state = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute());
-    let root = match state {
-        Some(state) => state,
-        None => home()
+    match state {
+        Some(state) => Ok(state),
+        None => Ok(home()
             .ok_or_else(|| {
                 "neither XDG_STATE_HOME nor a home directory names a state root".to_owned()
             })?
             .join(".local")
-            .join("state"),
-    };
-    Ok(root.join(MEMORY_DIR).join(name))
+            .join("state")),
+    }
 }
 
 /// The home directory the state root is derived from when nothing names one.

@@ -65,6 +65,16 @@ pub use crate::shutdown::{
     BranchPreserved, DispatchEnding, DispatchStopped, Preserved, RunShutdown, Shutdown,
     ShutdownRequest, ShutdownScope,
 };
+pub use crate::unpublished::{
+    acknowledgement_file as unpublished_acknowledgement_file,
+    default_acknowledgements as default_unpublished_acknowledgements,
+    pr_author_graph as unpublished_pr_author_graph, AcknowledgeRequest,
+    Acknowledged as UnpublishedAcknowledged, AcknowledgedBranch, AcknowledgementFile,
+    Disk as UnpublishedDisk, Row as UnpublishedRow, Target as UnpublishedTarget, Unpublished,
+    UnpublishedRequest, Verdict as UnpublishedVerdict, ACKNOWLEDGEMENTS_UNDER,
+    ACKNOWLEDGEMENT_FILE_VERSION, BUILD_OUTPUT_DIRECTORIES, EXIT_COUNTED, EXIT_NOTHING_COUNTED,
+    EXIT_UNANSWERED,
+};
 pub use crate::unwatched::{
     Acknowledgement, Unwatched, UnwatchedRun, WakeBudget, ACKNOWLEDGEMENT_SCHEMA_VERSION,
 };
@@ -540,6 +550,48 @@ pub fn render_unwatched(unwatched: &Unwatched) -> String {
         .map(UnwatchedRun::line)
         .collect::<Vec<_>>()
         .concat()
+}
+
+/// `onepipeline unpublished`: the target's preserved branches, read in process
+/// through the linked `onevcs`, and whether any is owed.
+///
+/// # Errors
+///
+/// A refusal made before anything is read: a blank session, an unknown session
+/// token. A read that fails is [`UnpublishedVerdict::Unanswered`], not an error.
+pub fn unpublished(request: &UnpublishedRequest) -> Result<Unpublished> {
+    crate::unpublished::unpublished(request)
+}
+
+/// The text `onepipeline unpublished` prints on standard output. What could not
+/// be resolved is [`Unpublished::unresolved`], which the binary prints on
+/// standard error; `--format json` prints [`Unpublished::json`] instead.
+pub fn render_unpublished(listing: &Unpublished) -> String {
+    crate::unpublished::render(listing)
+}
+
+/// `onepipeline unpublished --acknowledge BRANCH --reason TEXT`: record it, and
+/// answer with the session listing read after it. `graph` is the drafting graph
+/// that listing's landing commands name.
+///
+/// # Errors
+///
+/// Every refusal the verb makes before writing, each leaving the file as it was.
+pub fn acknowledge_unpublished(
+    request: &AcknowledgeRequest,
+    graph: Option<PathBuf>,
+) -> Result<UnpublishedAcknowledged> {
+    crate::unpublished::acknowledge(request, graph)
+}
+
+/// The text `onepipeline unpublished --acknowledge` prints on standard output:
+/// the receipt, then the session listing.
+pub fn render_unpublished_acknowledged(acknowledged: &UnpublishedAcknowledged) -> String {
+    format!(
+        "{}{}",
+        acknowledged.line(),
+        crate::unpublished::render(&acknowledged.listing)
+    )
 }
 
 /// What `onepipeline next` answered.

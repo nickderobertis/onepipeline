@@ -217,6 +217,9 @@ pub enum Command {
     /// Whether a session's turn may end: one verdict over `unwatched` and every
     /// declared `--source`, for a harness's stop hook.
     StopGuard(StopGuardArgs),
+    /// Which preserved branches a manager session still owes: listed, decided,
+    /// and acknowledged.
+    Unpublished(UnpublishedArgs),
     /// Ask the manager a blocking question over the run's planner channel, and
     /// answer with theirs.
     Ask(AskArgs),
@@ -1114,6 +1117,77 @@ pub struct StopGuardArgs {
     /// watch counts.
     #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
     pub wake_budget: Option<u64>,
+    /// Also ask whether the session owes a preserved branch, in this process and
+    /// alongside `unwatched`: `owed` blocks with the listing, and an answer that
+    /// could not be read blocks naming why — never a warning, never silence.
+    #[arg(long)]
+    pub unpublished: bool,
+    /// The acknowledgements directory the unpublished decision reads. Omitted,
+    /// `$XDG_STATE_HOME/onepipeline/unpublished/acknowledged`.
+    #[arg(long, value_name = "DIR", requires = "unpublished")]
+    pub unpublished_acknowledgements: Option<PathBuf>,
+    /// The pr-author graph each printed landing command drafts with. Omitted,
+    /// each prints `--no-draft`.
+    #[arg(long, value_name = "PATH", requires = "unpublished")]
+    pub unpublished_pr_author_graph: Option<PathBuf>,
+}
+
+/// `onepipeline unpublished`.
+///
+/// The listing — one target of three — or, with `--acknowledge`, the record that
+/// the session has seen and deliberately left one branch. What it promises is
+/// entry 113 of `docs/contract-divergences.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct UnpublishedArgs {
+    /// The manager session: list the branches of every session its runs opened,
+    /// by their `launcher` label, and apply its acknowledgements. Omitted,
+    /// `ONEPIPELINE_LAUNCHER_SESSION`; blank is refused.
+    #[arg(long, value_name = "ID", conflicts_with_all = ["host", "token"])]
+    pub session: Option<String>,
+    /// List every registered identity's preserved branches.
+    #[arg(long, conflicts_with_all = ["token", "acknowledge"])]
+    pub host: bool,
+    /// List the branches the named onevcs session holds or held; repeatable. A
+    /// token no record names is refused.
+    #[arg(long, value_name = "S-TOKEN", conflicts_with = "acknowledge")]
+    pub token: Vec<String>,
+    /// How the listing is written.
+    #[arg(long, value_enum, default_value_t = UnpublishedFormat::Text, conflicts_with = "acknowledge")]
+    pub format: UnpublishedFormat,
+    /// Add each row's disk reading: its run root's allocated bytes and each build
+    /// output under its worktree. Never followed through a symbolic link.
+    #[arg(long, conflicts_with = "acknowledge")]
+    pub disk: bool,
+    /// The acknowledgements directory. Omitted,
+    /// `$XDG_STATE_HOME/onepipeline/unpublished/acknowledged`.
+    #[arg(long, value_name = "DIR")]
+    pub acknowledgements: Option<PathBuf>,
+    /// The pr-author graph each printed landing command drafts with; refused
+    /// unless it is a readable file. Omitted, each prints `--no-draft`.
+    #[arg(long, value_name = "PATH")]
+    pub pr_author_graph: Option<PathBuf>,
+    /// Record that the session has seen and deliberately left BRANCH at the tip
+    /// it stands at now, then answer as the session listing does.
+    #[arg(long, value_name = "BRANCH", requires = "reason")]
+    pub acknowledge: Option<String>,
+    /// Why BRANCH is deliberately left: one line with something visible in it.
+    #[arg(long, value_name = "TEXT", requires = "acknowledge")]
+    pub reason: Option<String>,
+    /// The identity BRANCH belongs to, where several name it.
+    #[arg(long, value_name = "IDENTITY", requires = "acknowledge")]
+    pub repo: Option<String>,
+}
+
+/// How `unpublished` writes its listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum UnpublishedFormat {
+    /// Each row, each counted row's landing and acknowledging commands, and a
+    /// summary line; unresolved lines on standard error.
+    #[default]
+    Text,
+    /// One JSON object: `target`, `verdict`, `rows` and `unresolved`.
+    Json,
 }
 
 /// How long a `stop-guard --source` has to answer: a third of the 30-second
