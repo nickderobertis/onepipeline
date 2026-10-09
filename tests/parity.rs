@@ -1361,6 +1361,13 @@ fn unpublished_lists_decides_refuses_and_acknowledges_as_the_sdk_does() {
         tokens: vec!["s-000000000000".to_owned()],
     }))
     .expect_err("an unknown token is refused");
+    // An empty token list names no session, which only the SDK can be handed.
+    assert!(matches!(
+        verbs::unpublished(&request(verbs::UnpublishedTarget::Tokens {
+            tokens: Vec::new()
+        })),
+        Err(onepipeline::Error::Invalid(_))
+    ));
     refused(
         "unpublished, unknown token",
         &binary(&["unpublished", "--token", "s-000000000000"]),

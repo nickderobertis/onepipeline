@@ -195,6 +195,11 @@ pub struct Unpublished {
     pub rows: Vec<Row>,
     /// Everything that could not be resolved, one line each.
     pub unresolved: Vec<String>,
+    /// The acknowledgements directory the listing read, which every printed
+    /// acknowledging command names so it writes where the next listing reads.
+    /// Not part of the JSON document.
+    #[serde(skip)]
+    pub acknowledgements: PathBuf,
 }
 
 impl Unpublished {
@@ -410,6 +415,7 @@ fn listing(
                 verdict: Verdict::Unanswered,
                 rows: Vec::new(),
                 unresolved,
+                acknowledgements: request.acknowledgements.clone(),
             });
         }
     };
@@ -476,6 +482,7 @@ fn listing(
         verdict,
         rows,
         unresolved,
+        acknowledgements: request.acknowledgements.clone(),
     })
 }
 
@@ -727,34 +734,63 @@ fn allocated_bytes(meta: &std::fs::Metadata) -> u64 {
 /// What is wrong with `reason` as a recorded reason, or nothing.
 ///
 /// One line of text a person reads: something visible in it, and no character
-/// that is not printable — a newline among them.
+/// that is not visible text on one line — a newline among them.
 pub(crate) fn reason_fault(reason: &str) -> Option<String> {
     // Only surrounding spaces are forgiven: a newline or a tab at either end is the
     // second line or the control character this rule refuses anywhere else.
     let trimmed = reason.trim_matches(' ');
-    if !trimmed.chars().any(|c| printable(c) && c != ' ') {
+    if !trimmed.chars().any(|c| visible_in_one_line(c) && c != ' ') {
         return Some(format!(
             "the reason {reason:?} carries no visible character, so it says nothing"
         ));
     }
-    let unprintable: BTreeSet<char> = trimmed.chars().filter(|&c| !printable(c)).collect();
-    if !unprintable.is_empty() {
+    let invisible: BTreeSet<char> = trimmed
+        .chars()
+        .filter(|&c| !visible_in_one_line(c))
+        .collect();
+    if !invisible.is_empty() {
         return Some(format!(
-            "the reason {reason:?} carries the unprintable character(s) {unprintable:?}, and a \
+            "the reason {reason:?} carries the character(s) {invisible:?}, which are not visible text \
+             on one line, and a \
              reason is one line of text"
         ));
     }
     None
 }
 
-/// Printable as one line of text: a space, or a character that is neither a
-/// control, other whitespace, nor an invisible format character.
-fn printable(c: char) -> bool {
+/// Whether `c` may stand in a one-line reason: a space, or a character that is
+/// not a control, other whitespace, a format character (the Unicode `Cf`
+/// characters, bidirectional isolates and marks among them) or private use.
+fn visible_in_one_line(c: char) -> bool {
     c == ' '
         || !(c.is_control()
             || c.is_whitespace()
-            || matches!(c, '\u{ad}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
-                | '\u{2060}'..='\u{2064}' | '\u{feff}'))
+            || matches!(
+                c,
+                '\u{ad}'
+                    | '\u{600}'..='\u{605}'
+                    | '\u{61c}'
+                    | '\u{6dd}'
+                    | '\u{70f}'
+                    | '\u{890}'..='\u{891}'
+                    | '\u{8e2}'
+                    | '\u{180e}'
+                    | '\u{200b}'..='\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2060}'..='\u{2064}'
+                    | '\u{2066}'..='\u{206f}'
+                    | '\u{feff}'
+                    | '\u{fff9}'..='\u{fffb}'
+                    | '\u{110bd}'
+                    | '\u{110cd}'
+                    | '\u{13430}'..='\u{1343f}'
+                    | '\u{1bca0}'..='\u{1bca3}'
+                    | '\u{1d173}'..='\u{1d17a}'
+                    | '\u{e0001}'
+                    | '\u{e0020}'..='\u{e007f}'
+                    | '\u{e000}'..='\u{f8ff}'
+                    | '\u{f0000}'..='\u{10ffff}'
+            ))
 }
 
 /// Whether `tip` is a full commit object name: 40 to 64 lowercase hex.
@@ -1057,6 +1093,10 @@ fn write_file(path: &Path, document: &AcknowledgementFile) -> Result<()> {
     let mut text = serde_json::to_string_pretty(document)
         .map_err(|error| Error::Invalid(error.to_string()))?;
     text.push('\n');
+    // llmlint: ignore[changed_behavior_has_e2e] a rename inside a directory the write just
+    // succeeded in fails only onto a target that is a directory, which the read before it
+    // already refuses, so no journey reaches the rename failing after the write; the arm
+    // removes the temporary file whichever step failed.
     if let Err(error) =
         std::fs::write(&pending, text).and_then(|()| std::fs::rename(&pending, path))
     {
@@ -1205,6 +1245,10 @@ pub fn render(listing: &Unpublished) -> String {
         if let Some(session) = acknowledger {
             acknowledge.extend(["--session".to_owned(), session.to_owned()]);
         }
+        acknowledge.extend([
+            "--acknowledgements".to_owned(),
+            listing.acknowledgements.display().to_string(),
+        ]);
         out.push_str(&format!(
             "    or acknowledge:  {} --reason \"<why it is deliberately left>\"\n",
             shell_line(&acknowledge)
@@ -1299,6 +1343,8 @@ mod tests {
             "two\nlines",
             "tab\there",
             "\u{200b}",
+            "\u{2066}",
+            "\u{e000}",
             "trailing\n",
             "\tleading",
         ] {
@@ -1406,6 +1452,7 @@ mod tests {
             verdict: Verdict::Owed,
             rows: vec![row],
             unresolved: Vec::new(),
+            acknowledgements: PathBuf::from("/acknowledged"),
         };
         let document = serde_json::to_value(&listing).expect("serializes");
         assert_eq!(keys(&document), named(&block, "document_fields"));

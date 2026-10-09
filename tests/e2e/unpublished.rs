@@ -754,7 +754,7 @@ fn acknowledge_refuses_before_writing_and_answers_as_the_session_listing() {
                     "--session",
                     MANAGER,
                 ],
-                "unprintable",
+                "not visible text on one line",
             ),
             (
                 vec![
@@ -1182,6 +1182,33 @@ fn the_stop_hook_blocks_on_owed_and_unanswered_and_is_silent_on_none() {
     let again = stop(&guard, &["--unpublished"], MANAGER, true);
     again.exited(0);
     assert_eq!(again.stdout, "");
+
+    // A continuation whose listing moved blocks again, on the new listing, and the
+    // memory now holds that one.
+    let remembered = std::fs::read_to_string(&memory).expect("the memory");
+    worked(
+        &world,
+        "work/second",
+        MANAGER,
+        "s.txt",
+        "s\n",
+        "feat: second",
+    );
+    let moved = blocked(
+        &stop(&guard, &["--unpublished"], MANAGER, true)
+            .exited(0)
+            .clone_run(),
+    )
+    .expect("a moved listing blocks again");
+    assert!(
+        moved.contains("work/owed") && moved.contains("work/second"),
+        "{moved}"
+    );
+    assert_ne!(
+        std::fs::read_to_string(&memory).expect("the memory"),
+        remembered
+    );
+    acknowledge(&world, "work/second", "kept too").exited(COUNTED);
 
     // Without `--unpublished`, the guard is what it always was: nothing this
     // session owns is unwatched, so it is silent — byte for byte the empty output
@@ -2098,4 +2125,49 @@ fn a_guard_that_cannot_configure_its_decision_says_why() {
         said.contains("neither XDG_STATE_HOME nor a home directory names a state root"),
         "{said}"
     );
+}
+
+/// The acknowledging command a listing prints, run exactly as printed with its
+/// reason filled in, records where that listing reads — a custom directory
+/// included — and the next listing stops counting the branch.
+#[test]
+fn a_printed_acknowledging_command_records_where_its_listing_reads() {
+    let (world, _repository) = host("unpub-ack-printed");
+    worked(&world, "work/left", MANAGER, "l.txt", "l\n", "feat: left");
+    let custom = world.root.join("custom-acknowledgements");
+    let custom_flag = custom.display().to_string();
+    let listing = world.run(&[
+        "unpublished",
+        "--session",
+        MANAGER,
+        "--acknowledgements",
+        &custom_flag,
+    ]);
+    listing.exited(COUNTED);
+    let line = listing
+        .stdout
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix("or acknowledge:"))
+        .expect("an acknowledging command");
+    let filled = line
+        .trim()
+        .replace("\"<why it is deliberately left>\"", "'left on purpose'");
+    let words = shell_words(&filled);
+    assert_eq!(&words[..3], ["onepipeline", "unpublished", "--acknowledge"]);
+    world
+        .run(&words[1..].iter().map(String::as_str).collect::<Vec<_>>())
+        .exited(NOTHING_COUNTED);
+    let (run, after) = listed(
+        &world,
+        &["--session", MANAGER, "--acknowledgements", &custom_flag],
+    );
+    run.exited(NOTHING_COUNTED);
+    assert_eq!(
+        row(&after, "work/left")["acknowledgement"]["reason"],
+        "left on purpose"
+    );
+    // The default directory was never written: there the branch still counts.
+    let (run, default) = listed(&world, &["--session", MANAGER]);
+    run.exited(COUNTED);
+    assert_eq!(row(&default, "work/left")["counted"], true);
 }
