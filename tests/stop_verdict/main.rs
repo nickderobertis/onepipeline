@@ -443,11 +443,14 @@ impl Load {
     fn start(workers: u32) -> Self {
         let children = (0..workers)
             .map(|_| {
+                use std::os::unix::process::CommandExt;
                 Command::new("sh")
                     .args([
                         "-c",
                         "while :; do head -c 4000000 /dev/urandom | gzip -c > /dev/null; done",
                     ])
+                    // Its own group, so the pipeline it is running ends with it.
+                    .process_group(0)
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn()
@@ -461,7 +464,13 @@ impl Load {
 impl Drop for Load {
     fn drop(&mut self) {
         for child in &mut self.0 {
-            let _ = child.kill();
+            if let Ok(group) = i32::try_from(child.id()) {
+                // SAFETY: `kill` takes no pointers; the negative pid names the group
+                // this worker leads, which `start` created for it alone.
+                unsafe {
+                    libc::kill(-group, libc::SIGKILL);
+                }
+            }
             let _ = child.wait();
         }
     }
