@@ -12,7 +12,7 @@
 //! from the journal where a record already names the envelope.
 
 // llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
-// assumed: the fifteen journeys here take about 25 seconds on the wall under nextest's
+// assumed: the seventeen journeys here take about 25 seconds on the wall under nextest's
 // parallelism, each driving a real detached or attached driver to its ending. What they
 // exercise is how a driver lets go of a run — `engine`, `driver`, `channel`, `projection`,
 // `views` and `hooks` together — which any change under `src/` can move, so a project edged
@@ -660,7 +660,6 @@ fn receipt(reply: std::process::Child) -> (Option<i32>, String) {
     )
 }
 
-/// Every `edit-committed` naming command envelope `id`.
 fn committed_from(world: &World, run: &str, id: u64) -> Vec<Value> {
     world
         .events_of(run, "edit-committed")
@@ -1065,6 +1064,70 @@ fn an_envelope_journalled_and_never_answered_is_answered_from_the_journal_and_no
         .map(|event| event["payload"]["envelope"].clone())
         .collect();
     assert_eq!(older, [Value::Null, json!(4)]);
+    assert_eq!(unanswered_line(&world, run), None);
+}
+
+/// **A record that does not read as its kind is no evidence.** A driver applies
+/// an edit and dies before answering it, and the record of that edit is left
+/// naming its envelope but missing the command it committed. The adopter does
+/// not take that as proof the envelope applied: it judges the envelope, commits
+/// it under its id, and answers it.
+#[cfg(unix)]
+#[test]
+fn a_journalled_record_that_does_not_read_as_its_payload_is_no_proof_an_envelope_applied() {
+    let world = hooked_world("exit-malformed-evidence");
+    let run = "malformedevidence";
+    world.script("build.wait", "hold");
+    let pid = start_detached(&world, run, vec![agent("build", &[])], &[]);
+    world.until("the held node to be dispatched", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+    an_applied_edit(&world, run, "malformed-evidence");
+    end_process(pid);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] a record damaged on disk after a
+    // driver died between journalling an edit and answering it: no verb writes a payload
+    // missing its command, and editing the store is the one way to put one in front of the
+    // adopter through the compiled binary.
+    std::fs::write(world.run_file(run, "channel/command-outcomes.jsonl"), "")
+        .expect("the outcome log is emptied");
+    let journal = world.run_file(run, "events.jsonl");
+    let damaged: String = std::fs::read_to_string(&journal)
+        .expect("the journal reads")
+        .lines()
+        .map(|line| {
+            let mut record: Value = serde_json::from_str(line).expect("a journal record");
+            if record["kind"] == "edit-committed" && record["payload"]["envelope"] == json!(0) {
+                record["payload"]
+                    .as_object_mut()
+                    .expect("a payload")
+                    .remove("command");
+            }
+            format!("{record}\n")
+        })
+        .collect();
+    std::fs::write(&journal, damaged).expect("the journal is rewritten");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let adopted = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            world.until("the adopter to re-dispatch the held node", |world| {
+                world.events_of(run, "node-dispatched").len() >= 2
+            });
+            world.release("build.go");
+        });
+        world.run(&["adopt", run])
+    });
+    adopted.exited(0);
+
+    let outcomes = world.command_outcomes(run);
+    assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+    assert_eq!(outcomes[0]["id"], json!(0));
+    assert_eq!(outcomes[0]["applied"], json!(true));
+    let named = committed_from(&world, run, 0);
+    assert_eq!(named.len(), 2, "{named:?}");
+    assert!(named[0]["payload"].get("command").is_none());
+    assert_eq!(named[1]["payload"]["command"]["op"], "set-run-node-sets");
     assert_eq!(unanswered_line(&world, run), None);
 }
 

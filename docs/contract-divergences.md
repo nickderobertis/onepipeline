@@ -9301,8 +9301,9 @@ by hand against its own receipt's *never send it again*.
    every other `validated`; neither is applied, judged, or offered to a
    conversation again, so a note already delivered or shown is never delivered
    twice. Only an envelope with no such record is judged, which is its first
-   judgment. A record that cannot be read for its envelope is a record of no
-   envelope's, and a record written before the field existed names none.
+   judgment. Only a record of this engine's that decodes as its kind's payload
+   is evidence: one missing a field or carrying one of the wrong kind is a record
+   of no envelope's, and a record written before the field existed names none.
 3. **A note `cancel` preempted is not recovered**: its `refused` answer is already
    its outcome line (entry 108).
 4. **Nothing else moves.** No command, no reply-envelope field and no journal kind
@@ -9370,6 +9371,9 @@ and the second, judged after it, is refused. `tests/note/main.rs`'s
 `a_note_waiting_on_a_held_turn_leaves_the_run_journalling_its_dispatch` reads the
 envelope id off a live note's `edit-committed`, its `note-delivered` operation and
 its `note-shown`.
+`a_journalled_record_that_does_not_read_as_its_payload_is_no_proof_an_envelope_applied`
+damages the record of an applied edit so it names its envelope and no command: the
+adopter judges the envelope again and commits it under its id.
 `a_run_journalled_before_records_named_their_envelope_reads_the_same` reads a run
 through `status`, `results`, `runs` and `watch` with every `envelope` key and with
 none, and `src/payload.rs`'s

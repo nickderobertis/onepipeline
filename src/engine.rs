@@ -2792,6 +2792,13 @@ fn reconcile_edits(
             let cancelled = cancelled_in(&envelope.commands);
             // One the journal shows already applied or refused is answered from
             // that, and preempts nothing a second time.
+            // llmlint: ignore[changed_behavior_has_e2e] a recovered cancel with journal
+            // evidence meets an outstanding delivery to its node only if its dead driver
+            // applied the cancel while a note to that node, claimed before it, was still
+            // unanswered — and applying a cancel answers that note first, writing its
+            // refusal, which makes the note evidence too rather than a delivery. No
+            // sequence of verbs and deaths leaves the two side by side; this keeps the
+            // answer right in a store edited into that state.
             let preempts = !deliveries.recovered.contains_key(&envelope.id)
                 && !cancelled.is_empty()
                 && validate_envelope(
@@ -2826,11 +2833,17 @@ fn reconcile_edits(
                 held_names.clear();
                 for earlier in std::mem::take(&mut held) {
                     let names = names_of(&earlier.commands);
+                    // llmlint: ignore-block[changed_behavior_has_e2e] an envelope with journal
+                    // evidence is held here only behind an earlier unanswered one naming the
+                    // same node, and its dead driver would have held it there too rather than
+                    // apply it — so no sequence of verbs and deaths reaches this. Without it an
+                    // envelope a store edited into that state would be judged a second time.
                     if let Some(effect) = deliveries.evidence_of(earlier.id) {
                         changed |=
                             answer_recovered(paths, journal, state, channel, &earlier, effect)?;
                         continue;
                     }
+                    // llmlint: ignore-end[changed_behavior_has_e2e]
                     if offers_a_live_note_into(&earlier.commands, &cancelled) {
                         let staged = validate_envelope(
                             paths,
@@ -3609,7 +3622,6 @@ fn resume_committing(
     Ok(())
 }
 
-/// What an envelope every command of which applied is answered.
 fn applied_envelope(id: u64, commands: &[Command]) -> CommandOutcome {
     CommandOutcome {
         id,
