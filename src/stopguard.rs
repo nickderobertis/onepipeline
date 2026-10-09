@@ -423,12 +423,19 @@ fn owed(asked: &Asked, unpublishing: &std::result::Result<Unpublishing, String>)
             .map(|line| format!("unpublished: {line}\n"))
             .collect()
     };
+    // An answer that could not be established never stands aside: the memory only
+    // bounds how often a known condition is repeated, so where the memory itself
+    // fails, an unanswered decision still blocks, naming that too.
+    let mut answered = true;
     let report = match decided {
-        Err(error) => format!(
+        Err(error) => {
+            answered = false;
+            format!(
             "stop-guard: whether this session owes a preserved branch could not be answered, so \
              this stop is refused rather than let through: {error}. Ask it by hand with \
              `{by_hand}`.\n"
-        ),
+            )
+        }
         Ok(listing) => match listing.verdict {
             Decided::None => {
                 return match forget(&name) {
@@ -446,16 +453,22 @@ fn owed(asked: &Asked, unpublishing: &std::result::Result<Unpublishing, String>)
                 crate::unpublished::render(&listing),
                 unresolved(&listing)
             ),
-            Decided::Unanswered => format!(
+            Decided::Unanswered => {
+                answered = false;
+                format!(
                 "stop-guard: whether this session owes a preserved branch is unanswered, so this \
                  stop is refused rather than let through; ask it by hand with `{by_hand}`:\n{}{}",
                 unresolved(&listing),
                 crate::unpublished::render(&listing)
-            ),
+                )
+            }
         },
     };
     let digest = hex(&Sha256::digest(report.as_bytes()));
     let aside = |because: String| {
+        if !answered {
+            return Verdict::Block(format!("{}stop-guard: the guard also {because}.\n", report));
+        }
         Verdict::Warn(format!(
             "stop-guard: this session owes a preserved branch and this stop was not refused, \
              because the guard {because}; what it would have refused on:\n{}",

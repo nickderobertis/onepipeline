@@ -2150,18 +2150,91 @@ fn a_guard_that_cannot_configure_its_decision_says_why() {
     );
 
     // No absolute state root at all: nothing to read acknowledgements under, and
-    // nowhere to keep a memory — a warning naming it, never silence.
+    // nowhere to keep a memory. The decision is unanswered, so it blocks naming why —
+    // on the first stop and on its continuation alike, because no memory says the
+    // reason is unchanged.
     let rootless = guard_world(&world)
         .with_env("XDG_STATE_HOME", "relative/state")
         .with_env("HOME", "relative-home")
         .with_env("USERPROFILE", "relative-home");
-    let run = stop(&rootless, &["--unpublished"], MANAGER, false)
+    for continuation in [false, true] {
+        let reason = blocked(
+            &stop(&rootless, &["--unpublished"], MANAGER, continuation)
+                .exited(0)
+                .clone_run(),
+        )
+        .unwrap_or_else(|| panic!("no state root blocks (continuation {continuation})"));
+        assert!(
+            reason.contains("could not be answered")
+                && reason
+                    .contains("neither XDG_STATE_HOME nor a home directory names a state root"),
+            "{reason}"
+        );
+    }
+}
+
+/// An unanswered decision blocks however the guard's memory fares: a block it
+/// cannot record, and a continuation whose memory it cannot read, still refuse the
+/// stop naming why — while a continuation over an unchanged unanswered reason it
+/// did read stands aside.
+#[test]
+fn an_unanswered_decision_blocks_even_when_its_memory_cannot_be_kept() {
+    let (world, _repository) = host("unpub-unanswered-memory");
+    worked(&world, "work/owed", MANAGER, "o.txt", "o\n", "feat: o");
+    std::fs::write(world.onevcs_home().join("registry.json"), "not json").expect("unreadable");
+    let digest = hex(&Sha256::digest(MANAGER.as_bytes()));
+
+    // The memory's directory is a file: nothing can be recorded under it.
+    let blocked_state = world.root.join("state-file");
+    std::fs::create_dir_all(blocked_state.join("onepipeline")).expect("a state root");
+    std::fs::write(blocked_state.join("onepipeline/stop-guard"), "a file").expect("a file");
+    let guard =
+        guard_world(&world).with_env("XDG_STATE_HOME", &blocked_state.display().to_string());
+    let reason = blocked(
+        &stop(&guard, &["--unpublished"], MANAGER, false)
+            .exited(0)
+            .clone_run(),
+    )
+    .expect("an unanswered decision blocks though its block cannot be recorded");
+    assert!(
+        reason.contains("is unanswered") && reason.contains("could not record"),
+        "{reason}"
+    );
+
+    // The memory is a directory: a continuation cannot read what was last blocked on.
+    let state = world.root.join("state-dir");
+    let memory = state
+        .join("onepipeline/stop-guard")
+        .join(format!("{digest}.unpublished"));
+    std::fs::create_dir_all(memory.join("in-the-way")).expect("a directory in the way");
+    let guard = guard_world(&world).with_env("XDG_STATE_HOME", &state.display().to_string());
+    let reason = blocked(
+        &stop(&guard, &["--unpublished"], MANAGER, true)
+            .exited(0)
+            .clone_run(),
+    )
+    .expect("an unanswered continuation blocks though its memory cannot be read");
+    assert!(
+        reason.contains("is unanswered")
+            && reason.contains("could not read what it last blocked on"),
+        "{reason}"
+    );
+
+    // With a memory it can keep, the unchanged unanswered reason it read stands aside.
+    let kept = world.root.join("state-kept");
+    let guard = guard_world(&world).with_env("XDG_STATE_HOME", &kept.display().to_string());
+    assert!(blocked(
+        &stop(&guard, &["--unpublished"], MANAGER, false)
+            .exited(0)
+            .clone_run()
+    )
+    .is_some());
+    let continued = stop(&guard, &["--unpublished"], MANAGER, true)
         .exited(0)
         .clone_run();
-    let said = warned(&run);
-    assert!(
-        said.contains("neither XDG_STATE_HOME nor a home directory names a state root"),
-        "{said}"
+    assert_eq!(
+        continued.stdout, "",
+        "an unchanged unanswered reason it read stands aside"
     );
 }
 

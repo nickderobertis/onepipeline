@@ -161,7 +161,10 @@ For example `onepipeline stop-guard --format claude-code --unpublished`.
   unanswered read did not establish it.
 - **Block once per condition.** Its memory is its own file beside the guard's,
   `<sha256(session)>.unpublished`, under the guard's rule: a continuation over an
-  unchanged reason is `none`, and a `none` removes it.
+  unchanged reason is `none`, and a `none` removes it. A memory that cannot be
+  read or written never lets an unanswered decision through: it still blocks,
+  naming the memory fault as well. An `owed` listing whose memory fails is a
+  `warn` naming it, as the guard's own memory is.
 - `--unpublished-acknowledgements <DIR>` is where the session's acknowledgements
   are read (default `$XDG_STATE_HOME/onepipeline/unpublished/acknowledged`), and
   `--unpublished-pr-author-graph <PATH>` the drafting graph each printed landing

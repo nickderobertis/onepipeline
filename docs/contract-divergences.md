@@ -9269,7 +9269,9 @@ strongest-wins: `owed` blocks, its reason the text listing; `none` adds nothing;
 `unanswered` **blocks** naming why — never a warning and never silence, the turn
 declared sources take. Its continuation memory is its own file beside the guard's,
 `<sha256(session)>.unpublished`, under the guard's rule: a continuation over an
-unchanged reason answers `none`. Without `--unpublished` the guard is exactly what
+unchanged reason answers `none`. A memory that cannot be read or written never
+turns an unanswered decision — a missing state root included — into anything but a
+block; an `owed` listing over a failed memory warns, as the guard's own memory does. Without `--unpublished` the guard is exactly what
 entry 85 states.
 
 **Its latency is budgeted** in `budgets.yaml` — 0.5 s warm, 2.5 s cold and 3.0 s
