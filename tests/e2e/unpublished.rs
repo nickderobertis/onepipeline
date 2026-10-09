@@ -1622,20 +1622,30 @@ fn the_two_halves_run_concurrently() {
     );
 }
 
-/// Split a line a shell would read into its words: bare words, and words in
-/// single quotes with `'\''` for a quote — the two forms the listing prints.
+/// Split a line a shell would read into its words: bare words, words in single
+/// quotes, and a backslash-escaped character — the forms the listing prints, a
+/// quote inside a quoted word being `'\''`.
 fn shell_words(line: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut quoted = false;
     let mut started = false;
+    let mut escaped = false;
     for c in line.chars() {
+        if escaped {
+            word.push(c);
+            escaped = false;
+            continue;
+        }
         match (quoted, c) {
             (false, '\'') | (true, '\'') => {
                 quoted = !quoted;
                 started = true;
             }
-            (false, '\\') => {}
+            (false, '\\') => {
+                escaped = true;
+                started = true;
+            }
             (false, ' ') => {
                 if started {
                     words.push(std::mem::take(&mut word));
@@ -2162,7 +2172,9 @@ fn a_guard_that_cannot_configure_its_decision_says_why() {
 fn a_printed_acknowledging_command_records_where_its_listing_reads() {
     let (world, _repository) = host("unpub-ack-printed");
     worked(&world, "work/left", MANAGER, "l.txt", "l\n", "feat: left");
-    let custom = world.root.join("custom-acknowledgements");
+    // A directory a shell would split or end a quote at, unless the printed command
+    // quotes it.
+    let custom = world.root.join("custom acknowledgements (it's here)");
     let custom_flag = custom.display().to_string();
     let listing = world.run(&[
         "unpublished",
@@ -2182,9 +2194,39 @@ fn a_printed_acknowledging_command_records_where_its_listing_reads() {
         .replace("\"<why it is deliberately left>\"", "'left on purpose'");
     let words = shell_words(&filled);
     assert_eq!(&words[..3], ["onepipeline", "unpublished", "--acknowledge"]);
-    world
-        .run(&words[1..].iter().map(String::as_str).collect::<Vec<_>>())
-        .exited(NOTHING_COUNTED);
+    assert!(words.contains(&custom_flag), "{filled}");
+    // Run by a real shell, exactly as a person pastes it: `onepipeline` on its PATH
+    // is the build under test, and the world's environment is the command's.
+    let bin = world.root.join("bin");
+    std::fs::create_dir_all(&bin).expect("a bin directory");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(crate::harness::binary(), bin.join("onepipeline"))
+        .expect("the binary on PATH");
+    let inner = world.cmd(&[]);
+    let mut shell = std::process::Command::new("sh");
+    shell.arg("-c").arg(&filled);
+    for (key, value) in inner.get_envs() {
+        match value {
+            Some(value) => shell.env(key, value),
+            None => shell.env_remove(key),
+        };
+    }
+    let path = inner
+        .get_envs()
+        .find(|(key, _)| *key == "PATH")
+        .and_then(|(_, value)| value)
+        .map(std::ffi::OsStr::to_owned)
+        .unwrap_or_default();
+    let mut joined = std::ffi::OsString::from(&bin);
+    joined.push(":");
+    joined.push(path);
+    let ran = shell.env("PATH", joined).output().expect("sh runs");
+    assert_eq!(
+        ran.status.code(),
+        Some(NOTHING_COUNTED),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
     let (run, after) = listed(
         &world,
         &["--session", MANAGER, "--acknowledgements", &custom_flag],
@@ -2198,4 +2240,85 @@ fn a_printed_acknowledging_command_records_where_its_listing_reads() {
     let (run, default) = listed(&world, &["--session", MANAGER]);
     run.exited(COUNTED);
     assert_eq!(row(&default, "work/left")["counted"], true);
+}
+
+/// Every combination the verbs' flags do not mean together is refused as a usage
+/// error naming the flag, before anything is read or written.
+#[test]
+fn flags_that_mean_nothing_together_are_refused() {
+    let world = World::new("unpub-usage");
+    let file = acknowledgement_file(&world, MANAGER);
+    for (args, named) in [
+        (
+            vec!["stop-guard", "--unpublished-acknowledgements", "/d"],
+            "--unpublished",
+        ),
+        (
+            vec!["stop-guard", "--unpublished-pr-author-graph", "/g"],
+            "--unpublished",
+        ),
+        (vec!["unpublished", "--session", "m", "--host"], "--host"),
+        (
+            vec!["unpublished", "--session", "m", "--token", "s-1"],
+            "--token",
+        ),
+        (vec!["unpublished", "--host", "--token", "s-1"], "--token"),
+        (
+            vec![
+                "unpublished",
+                "--host",
+                "--acknowledge",
+                "b",
+                "--reason",
+                "r",
+            ],
+            "--acknowledge",
+        ),
+        (
+            vec![
+                "unpublished",
+                "--token",
+                "s-1",
+                "--acknowledge",
+                "b",
+                "--reason",
+                "r",
+            ],
+            "--acknowledge",
+        ),
+        (
+            vec![
+                "unpublished",
+                "--format",
+                "json",
+                "--acknowledge",
+                "b",
+                "--reason",
+                "r",
+            ],
+            "--format",
+        ),
+        (
+            vec![
+                "unpublished",
+                "--disk",
+                "--acknowledge",
+                "b",
+                "--reason",
+                "r",
+            ],
+            "--disk",
+        ),
+        (
+            vec!["unpublished", "--acknowledge", "b", "--session", MANAGER],
+            "--reason",
+        ),
+        (vec!["unpublished", "--reason", "r"], "--acknowledge"),
+        (vec!["unpublished", "--repo", "service"], "--acknowledge"),
+    ] {
+        let refused = world.run(&args);
+        refused.exited(crate::harness::USAGE_ERROR).err_has(named);
+        assert_eq!(refused.stdout, "", "{args:?}");
+        assert!(!file.exists(), "{args:?} wrote an acknowledgement");
+    }
 }
