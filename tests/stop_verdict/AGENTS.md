@@ -6,3 +6,5 @@
   rebuild them.
 - Write telemetry only after every verdict assertion has passed, and never time a
   call with the git-counting shim or a tracer attached.
+- `scripts/stop-guard-unpublished-build-inputs.json` and `nx.json`'s
+  `stopVerdictSource` name the same files; change them together.

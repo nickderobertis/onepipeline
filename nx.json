@@ -124,14 +124,18 @@
       "{workspaceRoot}/clippy.toml",
       "{workspaceRoot}/rustfmt.toml"
     ],
+    "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the budget tier times the release binary, so its inputs are what that binary is built from and nothing narrower: the budget reader refuses a record whose build fingerprint (scripts/stop-guard-unpublished-build-inputs.json, the same set) differs from the tree, so an input left out here would replay a record the reader then refuses as stale, and a module left out of both would let a changed binary be judged by an old one's timings.",
     "stopVerdictSource": [
       "rustBuild",
       "{workspaceRoot}/tests/stop_verdict/**/*",
       "{workspaceRoot}/tests/recorded/run-root/onemessagebus-repair-2/**/*",
       "{workspaceRoot}/scripts/stop-guard-unpublished-*",
+      "{workspaceRoot}/tests/golden/**/*",
+      "{workspaceRoot}/tests/recorded/registry/**/*",
       "{workspaceRoot}/clippy.toml",
       "{workspaceRoot}/rustfmt.toml"
     ],
+    "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]",
     "releaseCompatSource": [
       "rustBuild",
       "{workspaceRoot}/tests/release_channel/**/*",
