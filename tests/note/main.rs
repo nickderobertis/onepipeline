@@ -38,8 +38,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use oneagentgraph::event::{Origin, TurnMessage, TurnStarted};
-use onemessagebus::{Config, Layouts, TransportKinds};
-use onepipeline::channel::layout::{PlannerChannel, PLANNER_CHANNEL, REPLIES};
+use onemessagebus::{Config, Layouts, LocalTransport, Transport, TransportKinds};
+use onepipeline::channel::layout::{PlannerChannel, COMMANDS, PLANNER_CHANNEL, REPLIES};
 use onepipeline::channel::Command;
 use onepipeline::channel::Deliver;
 use onepipeline::note::{deliver, deliver_with, Addressee, Delivered, Note, Reached};
@@ -859,6 +859,26 @@ fn sent_through_the_bus(world: &World, run: &str, envelope: &Value) {
         .unwrap_or_else(|error| panic!("the bus refused {envelope}: {error}"));
 }
 
+/// Append one record to the run's command queue as the channel's transport does,
+/// beneath the layout that would refuse it.
+// llmlint: ignore-block[tests_mirror_real_usage] deliberately beneath every layout: a
+// record from an author the run never declared is one the planner channel's bus turns
+// away, and the reconciler's answer to it — the last place that refusal still means
+// something, since the queue is durable and a host or an older build may have written
+// it — is the behaviour under test. The local transport's append is the real boundary,
+// as `tests/e2e/malformed_envelopes.rs` says of the same call.
+fn appended_beneath_the_layout(world: &World, run: &str, record: &Value) {
+    let transport =
+        LocalTransport::open(world.run_file(run, "channel")).expect("the run's channel opens");
+    Transport::append(
+        &transport,
+        &COMMANDS.parse().expect("a queue name"),
+        record.to_string().as_bytes(),
+    )
+    .expect("the record is appended");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// The queue id of the one queued envelope whose record mentions `text`.
 fn queued_id_of(world: &World, run: &str, text: &str) -> u64 {
     std::fs::read_to_string(world.run_file(run, "channel/commands.jsonl"))
@@ -1152,6 +1172,9 @@ const LINT_NOTE: &str = "lint: the fixture moved to fixtures/v2";
 /// A ruling on a node the graph does not hold, which refuses on its own merits.
 const NOWHERE_RULING: &str = "a ruling on a node nobody added";
 
+/// The reason a cancel from an author the run never declared carries.
+const UNAUTHORIZED_CANCEL: &str = "cancelled by an author nobody declared";
+
 /// The reason a cancel in an envelope the run refuses carries.
 const REFUSED_CANCEL: &str = "cancelled in an envelope that refuses";
 
@@ -1324,11 +1347,31 @@ fn a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it() 
     );
     world.until("the refused cancel to be queued", queued(REFUSED_CANCEL));
     let refused_cancel = queued_id_of(&world, run, REFUSED_CANCEL);
+    // And one from an author the run never declared, which no grant covers —
+    // which the bus refuses, so it is the queue's own append that carries it.
+    let next = std::fs::read_to_string(&queue)
+        .expect("the command queue is there")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    appended_beneath_the_layout(
+        &world,
+        run,
+        &json!({"id": next, "author": "observer", "commands": [
+            {"op": "cancel", "id": "build", "reason": UNAUTHORIZED_CANCEL},
+        ]}),
+    );
+    world.until(
+        "the unauthorized cancel to be queued",
+        queued(UNAUTHORIZED_CANCEL),
+    );
+    let unauthorized = queued_id_of(&world, run, UNAUTHORIZED_CANCEL);
     // The reconciler's own pass, which has nothing durable to watch for.
     std::thread::sleep(Duration::from_secs(3));
     assert!(
         outcome_of(&world, run, note_id).is_none()
             && outcome_of(&world, run, refused_cancel).is_none()
+            && outcome_of(&world, run, unauthorized).is_none()
             && awaiting_an_answer(&world) == 1,
         "a cancel its own envelope refuses preempted the note, or was answered ahead of it"
     );
@@ -1428,6 +1471,17 @@ fn a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it() 
         "{refusal}"
     );
     assert!(
+        answered_at(unauthorized) < answered_at(cancel_id),
+        "the unauthorized cancel claimed ahead of the cancel was not answered ahead of it"
+    );
+    let refusal = &outcomes[answered_at(unauthorized)];
+    assert_eq!(refusal["applied"], json!(false), "{refusal}");
+    assert_eq!(
+        refusal["results"][0]["outcome"],
+        json!("refused"),
+        "{refusal}"
+    );
+    assert!(
         worked(&world)
             .iter()
             .all(|prompt| !prompt.contains(PREEMPTED_NOTE) && !prompt.contains(LINT_NOTE)),
@@ -1475,7 +1529,9 @@ fn a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it() 
 /// The one reordering the preemption makes. The overtaken envelope cannot be
 /// applied in part, so it neither holds the cancel back nor is dropped: it waits
 /// on `lint`'s note as it would have, and its receipt resolves once that turn
-/// ends — applied or refused against a `build` that is now parked.
+/// ends — applied or refused against a `build` that is now parked. A held live
+/// note to `build` that also names `lint` is not overtaken but preempted, at
+/// once, since it would never be delivered.
 #[test]
 fn a_cancel_overtakes_an_envelope_also_waiting_on_another_nodes_note() {
     let world = World::new("note-cancel-overtakes");
@@ -1513,6 +1569,22 @@ fn a_cancel_overtakes_an_envelope_also_waiting_on_another_nodes_note() {
     );
     world.until("the envelope naming both to be queued", queued(LINT_RULING));
     let both_id = queued_id_of(&world, run, LINT_RULING);
+    // A held live note to `build` that also names `lint`: preempted by the
+    // cancel at once, whatever `lint`'s note is still waiting on.
+    let held_note = submitted(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            note_op("build", "worker", PREEMPTED_NOTE, None),
+            {"op": "finding", "id": "lint", "message": FINDING},
+        ]})
+        .to_string(),
+    );
+    world.until(
+        "the held note to build to be queued",
+        queued(PREEMPTED_NOTE),
+    );
+    let held_note_id = queued_id_of(&world, run, PREEMPTED_NOTE);
     let cancel = submitted(
         &world,
         run,
@@ -1528,9 +1600,16 @@ fn a_cancel_overtakes_an_envelope_also_waiting_on_another_nodes_note() {
         answered(cancel).contains("\"state\":\"applied\""),
         "the cancel was not applied"
     );
-    let output = to_build.wait_with_output().expect("the binary runs");
-    assert_eq!(output.status.code(), Some(REFUSED));
+    for reply in [to_build, held_note] {
+        let output = reply.wait_with_output().expect("the binary runs");
+        assert_eq!(output.status.code(), Some(REFUSED));
+    }
     assert_preempted(&world, run, note_id, cancel_id, NOTE);
+    assert_preempted(&world, run, held_note_id, cancel_id, PREEMPTED_NOTE);
+    assert!(
+        awaiting_an_answer(&world) >= 1,
+        "lint's note was answered, so nothing showed the held note preempted ahead of it"
+    );
     assert!(
         outcome_of(&world, run, both_id).is_none()
             && both.try_wait().expect("the reply is readable").is_none(),

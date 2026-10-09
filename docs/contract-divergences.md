@@ -8958,10 +8958,10 @@ these five points state it.
 `a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it` holds
 `build`'s turn for the whole journey with a note to it unanswered — in an envelope also
 carrying a note to `lint` and an amend of it — and an `amend` of `build`, a second note
-to it beside a command that refuses on its own, and a cancel of it in an envelope that
-refuses queued behind, and then cancels `build`: the refused cancel preempts nothing;
-within thirty seconds of the valid one the amend is applied ahead of it and the refused
-cancel refused ahead of it, both notes are answered `refused` naming the cancel and
+to it beside a command that refuses on its own, a cancel of it in an envelope that
+refuses and one from an author the run never declared queued behind, and then cancels
+`build`: neither refused cancel preempts anything; within thirty seconds of the valid
+one the amend is applied ahead of it and both refused cancels refused ahead of it, both notes are answered `refused` naming the cancel and
 journalled once each, the first envelope's other commands are reported `validated` and
 never applied, the second's own refusal is kept and journalled, neither the second note
 nor the note to `lint` reaches a worker, the cancel is applied, `build` settles
@@ -8969,8 +8969,9 @@ cancelled and `status`
 names no envelope claimed with no outcome — and the preempted delivery's late answer,
 read while another node's held turn keeps the run driven, records nothing a second time.
 `a_cancel_overtakes_an_envelope_also_waiting_on_another_nodes_note` is point 4: the
-cancel is applied while `lint`'s note still waits, and the envelope naming both nodes is
-judged after it once that note is answered.
+cancel is applied while `lint`'s note still waits, a held live note to `build` that also
+names `lint` is preempted at once rather than overtaken, and the envelope naming both
+nodes is judged after the cancel once `lint`'s note is answered.
 `a_cancel_waits_on_an_envelope_naming_its_node_and_delivering_elsewhere` is point 5's
 last sentence. `src/engine.rs`'s
 `a_cancel_preempts_its_nodes_note_and_overtakes_only_what_waits_elsewhere` drives the

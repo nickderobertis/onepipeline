@@ -3380,6 +3380,16 @@ fn deliver_envelope(
             delivered.push(Ok(Delivery::NotAttempted));
             continue;
         }
+        // llmlint: ignore-block[changed_behavior_has_e2e] the half of this record a CLI
+        // journey can reach — which conversation the thread waits on — is what lets
+        // `tests/note`'s `a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it`
+        // preempt at all, through the binary. The other half, a note one conversation
+        // took before the thread blocked on another, needs two conversations answering
+        // one at a time, which the doubled turn's single pair of gates cannot arrange —
+        // `an_envelope_naming_two_outstanding_notes_waits_for_both_answers` declines it
+        // for that reason; `a_delivery_thread_records_each_command_it_finishes` and
+        // `a_cancel_preempts_its_nodes_note_and_overtakes_only_what_waits_elsewhere`
+        // hold it against the real reconciler.
         if let (Some(progress), Staged::Note(note)) = (progress, &step) {
             progress
                 .lock()
@@ -3396,6 +3406,7 @@ fn deliver_envelope(
                 now.finished.push(operations.clone());
             }
         }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         delivered.push(committed.map(Delivery::Committed));
     }
     delivered
@@ -10656,6 +10667,32 @@ mod tests {
             witnessed: Vec::new(),
             pending: in_flight.begin(&nodes),
         }
+    }
+
+    /// A delivery thread's record says what each command it finished committed,
+    /// in order, and that it is waiting on no conversation once it is through.
+    #[test]
+    fn a_delivery_thread_records_each_command_it_finishes() {
+        let note: Command = serde_json::from_value(json!({
+            "op": "note", "id": "docs", "addressee": "worker", "text": "keep it short",
+        }))
+        .expect("a note command");
+        let Command::Note {
+            addressee, text, ..
+        } = note
+        else {
+            unreachable!("a note command");
+        };
+        let read = note_record("docs", addressee, &text, None, crate::note::Reached::Worker);
+        let progress = std::sync::Mutex::new(Progress::default());
+        let delivered = deliver_envelope(
+            vec![Staged::Compiled(read.clone()), Staged::Compiled(Vec::new())],
+            Some(&progress),
+        );
+        assert!(delivered.iter().all(std::result::Result::is_ok));
+        let progress = progress.into_inner().expect("the progress is readable");
+        assert_eq!(progress.finished, [read, Vec::new()]);
+        assert_eq!(progress.offering, None);
     }
 
     /// A launch record naming nothing a reconciler pass reaches beyond the run's
