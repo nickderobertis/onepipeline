@@ -11,7 +11,6 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// The record's own version.
 pub(super) const VERSION: u32 = 1;
 
 /// The record the journey writes, under `target/budget-records/`.
@@ -94,7 +93,6 @@ pub(super) struct Workload {
     pub scenarios: Vec<Scenario>,
 }
 
-/// The whole record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Record {
@@ -112,7 +110,6 @@ pub(super) struct Record {
     pub load1: f64,
 }
 
-/// SHA-256 as lowercase hex.
 pub(super) fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }

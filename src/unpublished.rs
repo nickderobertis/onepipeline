@@ -1163,7 +1163,6 @@ pub fn shell_line(argv: &[String]) -> String {
         .join(" ")
 }
 
-/// The state word a row's `landed` carries.
 fn landed_word(landed: &Landed) -> &'static str {
     match landed {
         Landed::Yes { .. } => "yes",

@@ -50,10 +50,8 @@ const NO_PROCESS: u32 = 2_147_483_647;
 const OWN_RUNS: usize = 8;
 const OTHER_RUNS: usize = 32;
 
-/// Timed calls per mode.
 const CALLS: usize = 10;
 
-/// The command that regenerates the records.
 const JOURNEY_COMMAND: &str = "just stop-verdict-journeys";
 
 fn root() -> PathBuf {
@@ -110,7 +108,6 @@ struct Host {
     counted: PathBuf,
 }
 
-/// The `PATH` every call runs with.
 fn path() -> std::ffi::OsString {
     std::env::var_os("PATH").unwrap_or_default()
 }
