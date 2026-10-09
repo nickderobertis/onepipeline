@@ -9265,8 +9265,9 @@ This compatible relaxation follows engine v0.61.0: the first engine release cont
 [--acknowledgements <DIR>] [--pr-author-graph <PATH>]` and `onepipeline unpublished
 --acknowledge <BRANCH> --reason <TEXT> [--repo <IDENTITY>] [--session <ID>]
 [--acknowledgements <DIR>]` to the Views line beside `unwatched`, with
-`verbs::unpublished`, `verbs::render_unpublished` and
-`verbs::acknowledge_unpublished` as its SDK calls; and amend entry 85's
+`verbs::unpublished`, `verbs::render_unpublished`,
+`verbs::acknowledge_unpublished` and `verbs::render_unpublished_acknowledged` as its
+SDK calls; and amend entry 85's
 `stop-guard` with `--unpublished [--unpublished-acknowledgements <DIR>]
 [--unpublished-pr-author-graph <PATH>]`.**
 
@@ -9369,6 +9370,11 @@ unchanged reason answers `none`. A memory that cannot be read or written never
 turns an unanswered decision — a missing state root included — into anything but a
 block; an `owed` listing over a failed memory warns, as the guard's own memory does. Without `--unpublished` the guard is exactly what
 entry 85 states.
+
+**The SDK calls are already named** in `docs/contract.md`'s verbs paragraph, by the
+planner's ruling of 2026-10-09 (c-3c26234902e71ed808cd4ae732f261f4): that paragraph
+must name every function `src/verbs.rs` publishes, and `tests/contract.rs` holds the
+four signatures to it. The CLI and the `stop-guard` flags remain this proposal.
 
 **Its latency is budgeted** in `budgets.yaml` — 0.5 s warm, 2.5 s cold and 3.0 s
 warm at ten times the host-shaped workload, plus a 180 s journey time — read from
