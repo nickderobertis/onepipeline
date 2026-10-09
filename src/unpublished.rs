@@ -648,13 +648,27 @@ fn disk(row: &Recoverable, unresolved: &mut Vec<String>) -> Disk {
     }
     let worktree = root.join("worktree");
     let mut build_output = BTreeMap::new();
-    for name in BUILD_OUTPUT_DIRECTORIES {
+    // The worktree itself is held to the rule its children are: a link in its place
+    // is not followed, and is said, so a reading never reaches outside the run root.
+    let linked = std::fs::symlink_metadata(&worktree)
+        .ok()
+        .is_some_and(|meta| meta.file_type().is_symlink());
+    if linked {
+        unresolved.push(format!(
+            "{} [{}]: its worktree {} is a symbolic link, so its build output was not \
+             measured",
+            row.branch.branch,
+            row.identity,
+            worktree.display()
+        ));
+    }
+    for name in BUILD_OUTPUT_DIRECTORIES.iter().filter(|_| !linked) {
         let candidate = worktree.join(name);
         let real = std::fs::symlink_metadata(&candidate)
             .ok()
             .is_some_and(|meta| meta.is_dir() && !meta.file_type().is_symlink());
         if real {
-            build_output.insert(name.to_owned(), allocated(&candidate, unresolved));
+            build_output.insert((*name).to_owned(), allocated(&candidate, unresolved));
         }
     }
     Disk {
@@ -1463,5 +1477,38 @@ mod tests {
             .expect("the page states the row");
         let stated: Vec<String> = stated.split(", ").map(str::to_owned).collect();
         assert_eq!(stated, named(&block, "row_fields"));
+        // The disk object and the acknowledgement file it states, field for field.
+        let disk: Vec<String> = page
+            .split("`disk` is `{")
+            .nth(1)
+            .and_then(|rest| rest.split("}`").next())
+            .expect("the page states the disk object")
+            .split(", ")
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(disk, named(&block, "disk_fields"));
+        let format = page
+            .split("`<DIR>/<sha256(session)>.json` — `")
+            .nth(1)
+            .and_then(|rest| rest.split('`').next())
+            .expect("the page states the acknowledgement file");
+        let stated_file: Vec<String> = format
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect();
+        let mut expected = named(&block, "acknowledgement_file_fields");
+        expected.extend(named(&block, "acknowledgement_fields"));
+        assert_eq!(stated_file, expected, "{format}");
+        assert!(
+            format.contains(&format!("\"version\": {ACKNOWLEDGEMENT_FILE_VERSION}")),
+            "{format}"
+        );
+        let file = acknowledgement_file(Path::new("/dir"), "m");
+        assert_eq!(
+            file,
+            Path::new("/dir").join(format!("{}.json", hex(&Sha256::digest(b"m"))))
+        );
     }
 }

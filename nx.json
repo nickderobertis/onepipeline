@@ -127,7 +127,7 @@
     "stopVerdictSource": [
       "rustBuild",
       "{workspaceRoot}/tests/stop_verdict/**/*",
-      "{workspaceRoot}/tests/recorded/run-root/**/*",
+      "{workspaceRoot}/tests/recorded/run-root/onemessagebus-repair-2/**/*",
       "{workspaceRoot}/scripts/stop-guard-unpublished-*",
       "{workspaceRoot}/clippy.toml",
       "{workspaceRoot}/rustfmt.toml"

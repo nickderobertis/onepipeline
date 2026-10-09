@@ -927,6 +927,11 @@ fn a_malformed_entry_a_duplicate_and_another_version_apply_nothing_and_say_so() 
             "is not an acknowledgement",
         ),
         (
+            json!({"version": 1, "acknowledged": [{"branch": "", "identity": identity,
+                "tip": tip, "reason": "ok", "at": "2026-09-30T08:15:00Z"}]}),
+            "it names no branch or no identity",
+        ),
+        (
             json!({"version": 1, "acknowledged": [
                 entry("one", "2026-09-30T08:15:00Z", &tip),
                 entry("two", "2026-09-30T08:16:00Z", &tip)]}),
@@ -1890,6 +1895,15 @@ fn disk_says_what_it_could_not_measure() {
     let (gone, _) = worked(&world, "work/gone", MANAGER, "g.txt", "g\n", "feat: gone");
     let (_, worktree) = open(&world, "work/locked", MANAGER);
     commit(&world, &worktree, "l.txt", "l\n", "feat: locked");
+    // A worktree replaced by a link to a tree outside its run root, which holds
+    // build output of its own: none of it is measured.
+    let (_, swapped) = open(&world, "work/swapped", MANAGER);
+    commit(&world, &swapped, "w.txt", "w\n", "feat: swapped");
+    let outside = world.root.join("outside-worktree");
+    std::fs::create_dir_all(outside.join("target")).expect("outside build output");
+    std::fs::write(outside.join("target/big"), vec![3_u8; 1_000_000]).expect("a build");
+    std::fs::remove_dir_all(&swapped).expect("the worktree is moved away");
+    std::os::unix::fs::symlink(&outside, &swapped).expect("a link in its place");
     let (_, document) = listed(&world, &["--session", MANAGER, "--disk"]);
     let removed = PathBuf::from(
         row(&document, "work/gone")["disk"]["run_root"]
@@ -1919,6 +1933,16 @@ fn disk_says_what_it_could_not_measure() {
         "{said}"
     );
     assert!(row(&document, "work/locked")["disk"]["run_root_bytes"].is_u64());
+    let linked = &row(&document, "work/swapped")["disk"];
+    assert_eq!(linked["build_output"], json!({}), "{linked}");
+    assert!(
+        linked["run_root_bytes"].as_u64().expect("a reading") < 1_000_000,
+        "the reading followed the worktree link: {linked}"
+    );
+    assert!(
+        said.contains("is a symbolic link, so its build output was not measured"),
+        "{said}"
+    );
 }
 
 /// An existing acknowledgement file this build cannot read whole, and a directory
@@ -1934,6 +1958,12 @@ fn acknowledge_refuses_a_file_it_cannot_read_whole_or_a_directory_it_cannot_writ
         (
             json!({"version": 1, "acknowledged": [{"branch": "work/a"}]}).to_string(),
             "an entry cannot be read",
+        ),
+        (
+            json!({"version": 1, "acknowledged": [{"branch": "work/a", "identity": "x",
+                "tip": "not-a-tip", "reason": "ok", "at": "2026-09-30T08:15:00Z"}]})
+            .to_string(),
+            "is not an acknowledgement",
         ),
     ] {
         std::fs::write(&file, &written).expect("written");
